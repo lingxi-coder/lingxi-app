@@ -131,6 +131,9 @@ impl ToolInvoker for RegistryToolInvoker {
             subagent_registry: Some(self.registry.clone()),
             cancel: None,
             fork_parent_system_prompt: None,
+            // Per-agent cwd (worktree isolation / explicit cwd): the dispatched
+            // tools operate here instead of the shared session workspace.
+            cwd: ctx.cwd,
         };
 
         // Drop the progress receiver immediately — production tools tolerate
@@ -482,6 +485,7 @@ mod tests {
                     team_name: Some("alpha".to_string()),
                     is_async: false,
                     can_show_permission_prompts: true,
+                    cwd: None,
                 },
             )
             .await
@@ -524,6 +528,7 @@ mod tests {
             team_name: None,
             is_async: false,
             can_show_permission_prompts: false,
+            cwd: None,
         }
     }
 
@@ -608,6 +613,7 @@ mod tests {
             team_name: Some("alpha".to_string()),
             is_async: true,
             can_show_permission_prompts: can_show,
+            cwd: None,
         }
     }
 

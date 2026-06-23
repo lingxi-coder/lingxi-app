@@ -182,7 +182,8 @@ pub struct PoolSubagentSpawner {
 /// Renders the subagent `<env>` block for a resolved model id (claude-code
 /// `tIm`). The static environment is captured by the closure at the composition
 /// root; only the resolved model id varies per spawn.
-pub type SubagentEnvRenderer = Arc<dyn Fn(&str) -> String + Send + Sync>;
+pub type SubagentEnvRenderer =
+    Arc<dyn Fn(&str, Option<&std::path::Path>) -> String + Send + Sync>;
 
 impl PoolSubagentSpawner {
     /// Construct an adapter wrapping `pool` with no API client (legacy stub
@@ -621,6 +622,8 @@ impl PoolSubagentSpawner {
             fork_context_messages,
             allowed_tools: vec![],
             worktree_handle: None,
+            // Set by `build_subagent_context` from the resolved isolation/cwd.
+            cwd: None,
             is_async: false,
             persistent: false,
             can_show_permission_prompts: false,
@@ -734,7 +737,11 @@ impl PoolSubagentSpawner {
                 ctx.rendered_system_prompt.as_ref(),
             ) {
                 let model_id = crate::runner::resolve_model(&ctx);
-                let env = render(&model_id);
+                // Per-agent cwd (worktree isolation / explicit `cwd`) → the env
+                // block's `Working directory` + the "git worktree" notice, so the
+                // isolated agent forms absolute paths under it.
+                let cwd_override = request.cwd.as_deref().map(std::path::Path::new);
+                let env = render(&model_id, cwd_override);
                 ctx.rendered_system_prompt = Some(Arc::from(format!("{body}\n\n{env}")));
             }
         }
@@ -758,6 +765,12 @@ impl PoolSubagentSpawner {
         ctx.tool_schemas = tool_schemas;
         ctx.allowed_tools = allowed_tools;
         ctx.schema = request.schema.clone();
+        // Per-agent working directory (claude-code `me = cwd ?? worktreePath`):
+        // the AgentTool resolves `isolation:"worktree"` to a freshly-created
+        // worktree path (or honours an explicit `cwd`) and threads it via
+        // `request.cwd`. Set it on the context so the runner threads it into every
+        // dispatched tool's `cwd`. `None` ⇒ the shared session workspace (legacy).
+        ctx.cwd = request.cwd.as_ref().map(std::path::PathBuf::from);
         // A persistent (background/resumable) agent parks after each turn-set;
         // `is_async` marks background scheduling (vs the foreground one-shot).
         ctx.persistent = persistent;
@@ -2038,8 +2051,11 @@ mod tests {
         // A renderer that echoes the resolved model id into a sentinel block.
         let spawner = PoolSubagentSpawner::new(pool)
             .with_default_model("claude-opus-4-8[1m]")
-            .with_subagent_env_renderer(Arc::new(|model_id: &str| {
-                format!("<env>\nMODEL: {model_id}\n</env>")
+            .with_subagent_env_renderer(Arc::new(|model_id: &str, cwd: Option<&std::path::Path>| {
+                format!(
+                    "<env>\nMODEL: {model_id}\nCWD: {}\n</env>",
+                    cwd.map_or("<none>".to_string(), |p| p.display().to_string())
+                )
             }));
         let mk_inherit = || SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
@@ -2068,11 +2084,27 @@ mod tests {
         let ctx = spawner.build_subagent_context(&req, mk_inherit(), false).await;
         let sys = ctx.rendered_system_prompt.as_deref().unwrap();
         assert!(
-            sys.ends_with("\n\n<env>\nMODEL: claude-opus-4-8[1m]\n</env>"),
-            "env block must be appended with the resolved model; got:\n{sys}"
+            sys.ends_with("\n\n<env>\nMODEL: claude-opus-4-8[1m]\nCWD: <none>\n</env>"),
+            "env block must be appended with the resolved model + no cwd override; got:\n{sys}"
         );
         // The Notes trailer still precedes it.
         assert!(sys.contains("not files you create.\n\n<env>"));
+
+        // A worktree-isolated spawn (request.cwd Some) threads the cwd into the
+        // env renderer so the agent's env block reflects the worktree.
+        let mut wt_req = req.clone();
+        wt_req.cwd = Some("/repo/.claude/worktrees/agent-x".to_string());
+        let wt_ctx = spawner.build_subagent_context(&wt_req, mk_inherit(), false).await;
+        let wt_sys = wt_ctx.rendered_system_prompt.as_deref().unwrap();
+        assert!(
+            wt_sys.contains("CWD: /repo/.claude/worktrees/agent-x"),
+            "worktree cwd must reach the env renderer; got:\n{wt_sys}"
+        );
+        assert_eq!(
+            wt_ctx.cwd.as_deref(),
+            Some(std::path::Path::new("/repo/.claude/worktrees/agent-x")),
+            "SubagentContext.cwd is set from request.cwd"
+        );
 
         // Fork path: the parent's rendered prompt is replayed verbatim — NO env.
         req.fork_parent_system_prompt = Some("PARENT VERBATIM".to_string());

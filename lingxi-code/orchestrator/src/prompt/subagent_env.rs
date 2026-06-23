@@ -71,21 +71,37 @@ fn detect_shell() -> String {
 /// own env probes ([`crate::prompt::git_status::probe`] /
 /// [`crate::prompt::env_meta::os_version_string`]) so the bytes match the main
 /// prompt's environment values.
+/// Build a boot-time renderer closure for the subagent `<env>` block: probe the
+/// (boot-stable) environment ONCE — git-repo-ness, node platform, shell, OS
+/// version — and return a `Fn(model_id, cwd_override) -> String` that the
+/// subagent spawner invokes per spawn with the spawn's RESOLVED model id and an
+/// optional per-agent cwd. `cwd_override = Some(p)` (a worktree-isolated or
+/// explicit-`cwd` agent) renders `Working directory: <p>` + the "This is a git
+/// worktree …" notice so the agent forms absolute paths under `p`; `None` uses
+/// the boot cwd. Reuses the orchestrator's own env probes so the bytes match the
+/// main prompt's environment values.
 #[must_use]
-pub fn boot_renderer(cwd: PathBuf) -> impl Fn(&str) -> String + Send + Sync + 'static {
+pub fn boot_renderer(
+    cwd: PathBuf,
+) -> impl Fn(&str, Option<&Path>) -> String + Send + Sync + 'static {
     let is_git_repo = crate::prompt::git_status::probe(&cwd).is_some();
     let platform = node_platform_name(std::env::consts::OS).to_string();
     let shell = detect_shell();
     let os_version = crate::prompt::env_meta::os_version_string();
-    move |model_id: &str| {
+    move |model_id: &str, cwd_override: Option<&Path>| {
+        let (effective_cwd, in_worktree) = match cwd_override {
+            Some(p) => (p, true),
+            None => (cwd.as_path(), false),
+        };
         subagent_env_block(
             model_id,
-            &cwd,
+            effective_cwd,
             is_git_repo,
             &platform,
             &shell,
             &os_version,
             &[],
+            in_worktree,
         )
     }
 }
@@ -106,10 +122,20 @@ pub fn subagent_env_block(
     shell: &str,
     os_version: &str,
     additional_dirs: &[String],
+    in_worktree: bool,
 ) -> String {
     let mut s = String::with_capacity(512);
     s.push_str("Here is useful information about the environment you are running in:\n<env>\n");
     write!(&mut s, "Working directory: {}\n", cwd.display()).unwrap();
+    // claude-code worktree notice (`nIm`, emitted when in a git worktree): tells
+    // the isolated agent to run everything from the worktree and never `cd` back
+    // to the original checkout. The em-dash is U+2014.
+    if in_worktree {
+        s.push_str(
+            "This is a git worktree \u{2014} an isolated copy of the repository. \
+Run all commands from this directory. Do NOT `cd` to the original repository root.\n",
+        );
+    }
     write!(
         &mut s,
         "Is directory a git repo: {}\n",
@@ -162,6 +188,7 @@ mod tests {
             "zsh",
             "Darwin 24.6.0",
             &[],
+            false,
         );
         assert_eq!(
             out,
@@ -188,6 +215,7 @@ Assistant knowledge cutoff is January 2026."
             "bash",
             "Linux 6.6",
             &[],
+            false,
         );
         assert_eq!(
             out,
@@ -215,7 +243,40 @@ You are powered by the model some-unknown-model."
             "zsh",
             "Darwin 24.6.0",
             &["/a".to_string(), "/b".to_string()],
+            false,
         );
         assert!(out.contains("Additional working directories: /a, /b\nPlatform: darwin\n"));
+    }
+
+    #[test]
+    fn worktree_agent_shows_worktree_cwd_and_notice() {
+        let out = subagent_env_block(
+            "claude-opus-4-8[1m]",
+            &PathBuf::from("/repo/.claude/worktrees/agent-x"),
+            true,
+            "darwin",
+            "zsh",
+            "Darwin 24.6.0",
+            &[],
+            true,
+        );
+        assert!(out.contains("Working directory: /repo/.claude/worktrees/agent-x\n"));
+        // The worktree notice follows the working-directory line (em-dash U+2014).
+        assert!(out.contains(
+            "This is a git worktree \u{2014} an isolated copy of the repository. \
+Run all commands from this directory. Do NOT `cd` to the original repository root.\n"
+        ));
+        // A non-worktree agent does NOT get the notice.
+        let plain = subagent_env_block(
+            "claude-opus-4-8[1m]",
+            &PathBuf::from("/x"),
+            true,
+            "darwin",
+            "zsh",
+            "Darwin 24.6.0",
+            &[],
+            false,
+        );
+        assert!(!plain.contains("This is a git worktree"));
     }
 }

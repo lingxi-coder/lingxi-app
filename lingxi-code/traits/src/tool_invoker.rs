@@ -50,6 +50,13 @@ pub struct SubagentInvocationContext {
     /// the dispatch invoker to decide whether to attach a
     /// [`crate::permission_gate::PromptWorker`] to the gate check.
     pub can_show_permission_prompts: bool,
+    /// Per-agent working directory OVERRIDE — `Some` when the dispatching
+    /// subagent is isolated in a git worktree (`isolation:"worktree"`) or was
+    /// given an explicit `cwd`. The invoker maps it into `ToolUseContext.cwd` so
+    /// the agent's filesystem + shell tools operate in that directory instead of
+    /// the shared session workspace (claude-code's per-agent `agentWorktree`/cwd
+    /// `AsyncLocalStorage`). `None` for the main thread / a non-isolated agent.
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 /// Failure modes for [`ToolInvoker::invoke`].

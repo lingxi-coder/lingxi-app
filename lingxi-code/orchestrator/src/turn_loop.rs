@@ -1923,6 +1923,9 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // byte-identical cache prefix. `None` until the first successful turn
             // / a turn with no system prompt; no non-fork tool reads it.
             fork_parent_system_prompt: fork_parent_system_prompt.clone(),
+            // Main turn loop uses the shared session workspace (no per-agent
+            // cwd override); only an isolated subagent sets this.
+            cwd: None,
         };
 
         // validate_input gate (claude-code `toolExecution.ts:683-723`): a

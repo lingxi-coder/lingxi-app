@@ -454,6 +454,8 @@ impl InProcessTeammateHandler {
             fork_context_messages: None,
             allowed_tools,
             worktree_handle: None,
+            // Teammates run in the shared session (no per-agent worktree).
+            cwd: None,
             is_async: false,
             // The defining trait of a teammate: park between turn-sets and
             // resume on the next injected UserMessage.

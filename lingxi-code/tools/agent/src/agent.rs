@@ -249,6 +249,7 @@ fn render_completed_model_content(
     total_tokens: u64,
     total_tool_use_count: u64,
     total_duration_ms: u64,
+    worktree_info: Option<(&str, &str)>,
 ) -> String {
     // contentOrMarker (AgentTool.tsx:1347-1350).
     let content_or_marker: Vec<String> = if content_texts.is_empty() {
@@ -258,8 +259,16 @@ fn render_completed_model_content(
     };
 
     // One-shot built-ins skip the trailer when there is no worktree info
-    // (AgentTool.tsx:1356). Worktree fields are not wired in LingXi → always "".
-    let worktree_info_text = String::new();
+    // (AgentTool.tsx:1356). A KEPT worktree (the agent made changes) appends its
+    // path + branch (byte-exact `\nworktreePath: …\nworktreeBranch: …`,
+    // AgentTool.tsx:1368-1370) right before the `<usage>` block; `None` (no
+    // worktree, or a clean one that was removed) keeps the trailer empty.
+    let worktree_info_text = match worktree_info {
+        Some((path, branch)) => {
+            format!("\nworktreePath: {path}\nworktreeBranch: {branch}")
+        }
+        None => String::new(),
+    };
     let is_one_shot = ONE_SHOT_BUILTIN_AGENT_TYPES.contains(&agent_type);
     if is_one_shot && worktree_info_text.is_empty() {
         return content_or_marker.join("\n");
@@ -1310,6 +1319,40 @@ Use /mcp to configure and authenticate the required MCP servers.",
         } else {
             None
         };
+
+        // Worktree / cwd isolation (claude `z = a ?? L.isolation`; `me = cwd ??
+        // worktreePath`). When the caller requests `isolation:"worktree"` (non-fork)
+        // create a git worktree (slug `agent-<id>` → branch `worktree-agent-<id>`
+        // under `.claude/worktrees/`, matching claude's scheme) and run the agent
+        // in it; an explicit `cwd` is honoured directly. `remote` is deferred (run
+        // local). The handle is held for the post-completion keep/cleanup below.
+        // (`def.isolation` frontmatter as a secondary source is not threaded to the
+        // tool layer yet — the model-facing `isolation` arg is the supported path.)
+        let mut agent_worktree: Option<traits::worktree::WorktreeHandle> = None;
+        let mut resolved_cwd: Option<String> =
+            if is_fork { None } else { parsed.cwd.clone() };
+        if !is_fork && parsed.isolation.as_deref() == Some("worktree") {
+            let slug = format!("agent-{invocation_id}");
+            match self.ctx.worktree.create_worktree(&slug, None, &[]).await {
+                Ok(handle) => {
+                    resolved_cwd = Some(handle.path.to_string_lossy().into_owned());
+                    agent_worktree = Some(handle);
+                }
+                Err(e) => {
+                    Self::emit_failed(
+                        &bus,
+                        &invocation_id,
+                        "worktree_create_failed",
+                        started.elapsed().as_millis() as u64,
+                    )
+                    .await;
+                    return Err(ToolError::Internal(format!(
+                        "Cannot create agent worktree: {e}"
+                    )));
+                }
+            }
+        }
+
         let request = SubagentSpawnRequest {
             // Propagate the RESOLVED effective type (fork → `fork`; omitted →
             // general-purpose; explicit-validated otherwise), not the raw input.
@@ -1332,7 +1375,10 @@ Use /mcp to configure and authenticate the required MCP servers.",
             team_name: if is_fork { None } else { parsed.team_name.clone() },
             mode: if is_fork { None } else { parsed.mode.clone() },
             isolation: if is_fork { None } else { parsed.isolation.clone() },
-            cwd: if is_fork { None } else { parsed.cwd.clone() },
+            // The RESOLVED cwd (worktree path for `isolation:"worktree"`, or the
+            // explicit `cwd` override) — the spawner sets `SubagentContext.cwd`
+            // from this so the agent's tools operate there.
+            cwd: resolved_cwd.clone(),
             // Fork-subagent carriers (codex #5): the byte-exact forked prefix the
             // spawner replays as the cache prefix, and the parent's already-
             // rendered system prompt bytes (TS `forkContextMessages` /
@@ -1353,6 +1399,37 @@ Use /mcp to configure and authenticate the required MCP servers.",
 
         let outcome = spawner.spawn(request, inherit).await;
         let duration_ms = started.elapsed().as_millis() as u64;
+
+        // Worktree lifecycle (claude `fe()`): once the agent finished, KEEP the
+        // worktree (return its path + branch) if it left changes, else REMOVE it
+        // (auto-clean). `worktree_change_summary().is_dirty()` = `git status
+        // --porcelain` non-empty. (LingXi's handle carries no base commit, so the
+        // `commitsAhead>0` half of claude's keep test is not evaluated — the
+        // dirty-working-tree signal is the dominant case; a clean tree with only
+        // commits would be removed here, a documented minor divergence.) Runs for
+        // ANY outcome so a worktree never leaks on a failed/killed agent.
+        let worktree_result: Option<(String, String)> = match &agent_worktree {
+            Some(handle) => {
+                let dirty = self
+                    .ctx
+                    .worktree
+                    .worktree_change_summary(handle)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|s| s.is_dirty());
+                if dirty {
+                    Some((
+                        handle.path.to_string_lossy().into_owned(),
+                        handle.branch_name.clone(),
+                    ))
+                } else {
+                    let _ = self.ctx.worktree.remove_worktree(handle).await;
+                    None
+                }
+            }
+            None => None,
+        };
 
         match outcome {
             Ok(SubagentResult::Completed {
@@ -1412,6 +1489,9 @@ Use /mcp to configure and authenticate the required MCP servers.",
                     total_tokens,
                     total_tool_use_count,
                     total_duration_ms,
+                    worktree_result
+                        .as_ref()
+                        .map(|(p, b)| (p.as_str(), b.as_str())),
                 );
 
                 // claude completed return shape (AgentTool.tsx:1253-1260 +
@@ -1426,8 +1506,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 // web-fetch request counts, service tier, 1h/5m cache split)
                 // is DEFERRED pending the deeper `llm_client::Usage` extension
                 // (see SubagentUsage doc); the key SHAPE matches now.
-                Ok(ToolCallResult {
-                    data: json!({
+                let mut data = json!({
                         "status": "completed",
                         "prompt": parsed.prompt,
                         "agentId": agent_id_str,
@@ -1459,7 +1538,17 @@ Use /mcp to configure and authenticate the required MCP servers.",
                         // the model (it reads `model_content`) and never written
                         // to JSONL — same category as `model_content` itself.
                         "subagentHooksFired": true,
-                    }),
+                    });
+                // claude spreads `worktreePath`/`worktreeBranch` into `data` ONLY
+                // when the worktree was KEPT (the agent left changes).
+                if let Some((path, branch)) = &worktree_result {
+                    if let Some(obj) = data.as_object_mut() {
+                        obj.insert("worktreePath".into(), json!(path));
+                        obj.insert("worktreeBranch".into(), json!(branch));
+                    }
+                }
+                Ok(ToolCallResult {
+                    data,
                     new_messages: vec![],
                     context_modifier: None,
                     mcp_meta: None,
@@ -1488,6 +1577,36 @@ mod tests {
         arc_mock_budget, arc_mock_mailbox, arc_mock_spawner, arc_mock_task_registry,
         MockBudgetEnforcerHandle, MockSubagentSpawner,
     };
+
+    // A KEPT worktree appends byte-exact `worktreePath:`/`worktreeBranch:` lines
+    // to the result trailer, right before the `<usage>` block (claude-code
+    // AgentTool.tsx:1368-1370); no worktree → no lines.
+    #[test]
+    fn completed_trailer_includes_worktree_info_when_kept() {
+        let with_wt = render_completed_model_content(
+            &["did stuff".to_string()],
+            "agent-1",
+            "general-purpose",
+            10,
+            2,
+            500,
+            Some(("/repo/.claude/worktrees/agent-1", "worktree-agent-1")),
+        );
+        assert!(with_wt.contains(
+            "to continue this agent)\nworktreePath: /repo/.claude/worktrees/agent-1\nworktreeBranch: worktree-agent-1\n<usage>"
+        ));
+        let without = render_completed_model_content(
+            &["did stuff".to_string()],
+            "agent-1",
+            "general-purpose",
+            10,
+            2,
+            500,
+            None,
+        );
+        assert!(!without.contains("worktreePath"));
+        assert!(without.contains("to continue this agent)\n<usage>"));
+    }
     use std::path::PathBuf;
     use telemetry::AnalyticsBus;
     use tool_api::context::{ToolUseContext, ToolUseOptions};
@@ -1544,6 +1663,7 @@ mod tests {
             subagent_registry: Some(registry),
             cancel: None,
             fork_parent_system_prompt: None,
+            cwd: None,
         }
     }
 
@@ -2186,9 +2306,13 @@ mod tests {
             "name": "scout",
             "team_name": "alpha",
             "mode": "plan",
-            "isolation": "worktree",
             "cwd": "/work"
         });
+        // NOTE: `isolation:"worktree"` is intentionally NOT set here — it now has
+        // real behavior (creates a git worktree, which needs a real repo). An
+        // explicit `cwd` (no worktree) threads straight to the RESOLVED `req.cwd`.
+        // Worktree isolation behavior is covered by the env-block worktree test +
+        // the result-trailer test.
         tool.call(input, ctx, fresh_tx()).await.unwrap();
         let req = &spawner.invocations()[0].request;
         assert_eq!(req.description.as_deref(), Some("desc here"));
@@ -2196,7 +2320,7 @@ mod tests {
         assert_eq!(req.name.as_deref(), Some("scout"));
         assert_eq!(req.team_name.as_deref(), Some("alpha"));
         assert_eq!(req.mode.as_deref(), Some("plan"));
-        assert_eq!(req.isolation.as_deref(), Some("worktree"));
+        // The explicit `cwd` override threads through as the resolved cwd.
         assert_eq!(req.cwd.as_deref(), Some("/work"));
     }
 

@@ -115,6 +115,7 @@ pub fn fresh_ctx() -> ToolUseContext {
         subagent_registry: None,
         cancel: None,
         fork_parent_system_prompt: None,
+        cwd: None,
     }
 }
 

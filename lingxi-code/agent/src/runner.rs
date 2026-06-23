@@ -969,6 +969,9 @@ async fn run_subagent_loop(
                     // user — drives the worker attribution on the prompt dialog
                     // (claude-code's worker permission badge).
                     can_show_permission_prompts: ctx.can_show_permission_prompts,
+                    // Per-agent cwd (worktree isolation / explicit cwd) → the
+                    // dispatched tools' working directory.
+                    cwd: ctx.cwd.clone(),
                 };
                 match invoker.invoke(name, input.clone(), inv_ctx).await {
                     Ok(value) => {
@@ -1669,6 +1672,7 @@ mod tests {
             fork_context_messages: None,
             allowed_tools: vec![],
             worktree_handle: None,
+            cwd: None,
             is_async: false,
             persistent: false,
             can_show_permission_prompts: true,

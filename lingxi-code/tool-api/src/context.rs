@@ -65,6 +65,15 @@ pub struct ToolUseContext {
     /// yet wired (`AgentTool` then runs the fork child with `FORK_AGENT`'s empty
     /// system prompt — functional, not byte-identical).
     pub fork_parent_system_prompt: Option<String>,
+    /// Per-agent working directory OVERRIDE (claude-code's `agentWorktree` /
+    /// `cwd`, threaded into the agent's `AsyncLocalStorage` cwd that every tool
+    /// reads via `Mt()`). `Some` ONLY for a subagent isolated in a git worktree
+    /// (`isolation:"worktree"`) or given an explicit `cwd` — the dispatch invoker
+    /// populates it from [`crate::SubagentInvocationContext::cwd`]. Filesystem and
+    /// shell tools resolve their base directory from this when present, else from
+    /// the shared session [`crate::BuiltinToolContext::workspace`]. `None` for the
+    /// main thread and every non-isolated call (byte-identical to before).
+    pub cwd: Option<std::path::PathBuf>,
     // File state cache wired in Plan 10.
 }
 
@@ -100,6 +109,7 @@ impl ToolUseContext {
             subagent_registry: None,
             cancel: None,
             fork_parent_system_prompt: None,
+            cwd: None,
         }
     }
 }

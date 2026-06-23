@@ -1150,8 +1150,17 @@ impl Tool for BashTool {
         }
 
         // ===== Foreground: BASH.4 persistent cwd =====
-        // Read the live shell cwd (claude-code `STATE.cwd` via `pwd()`).
-        let cwd = self.shell_cwd.lock().unwrap().clone();
+        // A subagent isolated in a worktree (`isolation:"worktree"`) or given an
+        // explicit `cwd` runs EACH command in that directory, reset per call
+        // (claude-code's "Agent threads always have their cwd reset between bash
+        // calls"), WITHOUT touching the shared persistent shell cwd (which the
+        // main loop owns). The main loop (`ctx.cwd` None) reads the live
+        // persistent shell cwd as before.
+        let agent_cwd = ctx.cwd.clone();
+        let cwd = match &agent_cwd {
+            Some(c) => c.clone(),
+            None => self.shell_cwd.lock().unwrap().clone(),
+        };
         // Deleted-cwd recovery (Shell.ts:220-238): if the live cwd no longer
         // exists on disk (e.g. a prior command deleted its own dir), fall back
         // to the tool workspace (TS `getOriginalCwd`); if that is also gone,
@@ -1161,7 +1170,11 @@ impl Tool for BashTool {
         } else {
             let workspace = self.ctx.workspace.clone();
             if std::fs::canonicalize(&workspace).is_ok() {
-                self.shell_cwd.lock().unwrap().clone_from(&workspace);
+                // Only the main loop persists the recovered cwd to the shared
+                // shell; a subagent's cwd is per-call.
+                if agent_cwd.is_none() {
+                    self.shell_cwd.lock().unwrap().clone_from(&workspace);
+                }
                 workspace
             } else {
                 return Err(ToolError::Internal(format!(
@@ -1291,7 +1304,9 @@ impl Tool for BashTool {
                                         // reset it to the workspace (TS `x_(n)`).
                                         // Do NOT fire `CwdChanged` — the cwd did not
                                         // really move from the model's view.
-                                        {
+                                        // A subagent's cwd is per-call (no shared
+                                        // persistent shell) — never mutate it.
+                                        if agent_cwd.is_none() {
                                             (*self.shell_cwd.lock().unwrap())
                                                 .clone_from(&self.ctx.workspace);
                                         }
@@ -1317,7 +1332,9 @@ impl Tool for BashTool {
                                         // best-effort hook fire (no mutex held
                                         // across an `.await`). `clone_from` keeps
                                         // `canon` owned for the fire below.
-                                        {
+                                        // A subagent's cwd is per-call — do not
+                                        // advance the shared persistent shell.
+                                        if agent_cwd.is_none() {
                                             (*self.shell_cwd.lock().unwrap()).clone_from(&canon);
                                         }
                                         // BASH.4 `onCwdChangedForHooks(cwd, newCwd)`

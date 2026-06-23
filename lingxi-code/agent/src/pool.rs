@@ -197,6 +197,7 @@ mod tests {
             fork_context_messages: None,
             allowed_tools: vec![],
             worktree_handle: None,
+            cwd: None,
             is_async: false,
             persistent: false,
             can_show_permission_prompts: true,

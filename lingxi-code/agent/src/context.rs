@@ -68,6 +68,15 @@ pub struct SubagentContext {
     pub allowed_tools: Vec<String>,
     /// Optional worktree the agent runs inside.
     pub worktree_handle: Option<WorktreeHandle>,
+    /// Per-agent working directory the agent's tools operate in — the worktree
+    /// path (`isolation:"worktree"`) or an explicit `cwd` override. Threaded by
+    /// the runner into every dispatched tool's
+    /// [`traits::tool_invoker::SubagentInvocationContext::cwd`] →
+    /// `ToolUseContext.cwd`, so the agent's filesystem + shell tools run there
+    /// instead of the shared session workspace (claude-code's per-agent
+    /// `agentWorktree`/cwd). `None` for a non-isolated agent (tools use the shared
+    /// workspace, byte-identical to before).
+    pub cwd: Option<std::path::PathBuf>,
     /// `true` when the agent runs asynchronously (e.g. background scan).
     pub is_async: bool,
     /// `true` for a long-lived, message-driven teammate: after a turn-set ends

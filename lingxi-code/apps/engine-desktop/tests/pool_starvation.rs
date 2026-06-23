@@ -159,6 +159,7 @@ fn parked_teammate_ctx() -> SubagentContext {
         fork_context_messages: None,
         allowed_tools: vec![],
         worktree_handle: None,
+        cwd: None,
         is_async: false,
         // Marked persistent for fidelity; the stub runner parks regardless.
         persistent: true,

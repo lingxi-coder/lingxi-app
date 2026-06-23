@@ -197,4 +197,40 @@ pub trait PermissionGate: Send + Sync {
     async fn tool_wide_deny_names(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// If `Agent(<agent_type>)` is DENIED by a permission rule, the rule's source
+    /// identifier (claude-code `SettingSource` raw string — e.g. `localSettings`,
+    /// `projectSettings`, `cliArg`), else `None`.
+    ///
+    /// 1:1 with claude-code `getDenyRuleForAgent` (`o5e(ctx, "Agent", type)`):
+    /// finds a DENY rule whose `toolName === "Agent"` and whose `ruleContent`
+    /// equals the agent type exactly. The Agent tool uses this to reject a model
+    /// selection of a denied subagent type with the byte-exact message
+    /// `Agent type '<t>' has been denied by permission rule 'Agent(<t>)' from
+    /// <source>.` (`AgentTypeError`). The deny rule keys on the `"Agent"` tool
+    /// name even when invoked via the legacy `Task` alias.
+    ///
+    /// The default returns `None` — a gate with no rule layer denies no agent
+    /// type. Only `PolicyPermissionGate` OVERRIDES it. Additive DEFAULTED
+    /// (frozen-trait safe).
+    async fn agent_type_deny(&self, agent_type: &str) -> Option<String> {
+        let _ = agent_type;
+        None
+    }
+
+    /// The set of agent-type names that are denied by a CONTENT-ful `Agent(<x>)`
+    /// deny rule — the listing-filter set.
+    ///
+    /// 1:1 with claude-code `Pxe(list, ctx, "Agent")`: collects every DENY rule
+    /// whose `toolName === "Agent"` and that carries a (non-undefined)
+    /// `ruleContent`, so the advertised agent catalog and the `Available agents:`
+    /// error lists exclude denied types — the 2.1.186 Agent(type)-restriction
+    /// change that filters the prompt/list the model sees.
+    ///
+    /// The default returns `Vec::new()` — no agent types filtered. Only
+    /// `PolicyPermissionGate` OVERRIDES it. Additive DEFAULTED (frozen-trait
+    /// safe).
+    async fn agent_deny_content_types(&self) -> Vec<String> {
+        Vec::new()
+    }
 }

@@ -205,6 +205,25 @@ impl PermissionGate for PolicyPermissionGate {
     async fn tool_wide_deny_names(&self) -> Vec<String> {
         self.policy.tool_wide_deny_names()
     }
+
+    /// Surface the source of a matching `Agent(<type>)` deny rule so the Agent
+    /// tool can reject a denied subagent type with the byte-exact
+    /// `AgentTypeError` message (claude-code `getDenyRuleForAgent`). The source is
+    /// rendered as the raw `SettingSource` identifier
+    /// ([`PermissionRuleSource::claude_settings_source`]), matching the binary's
+    /// `… from ${rule.source}.`.
+    async fn agent_type_deny(&self, agent_type: &str) -> Option<String> {
+        self.policy
+            .agent_type_deny_source(agent_type)
+            .map(|s| s.claude_settings_source().to_string())
+    }
+
+    /// Surface the wrapped policy's CONTENT-ful `Agent(<x>)` deny set so the
+    /// advertised agent catalog and `Available agents:` lists exclude denied
+    /// types (claude-code `Pxe`).
+    async fn agent_deny_content_types(&self) -> Vec<String> {
+        self.policy.agent_deny_content_types()
+    }
 }
 
 /// Render a [`PermissionDecisionReason`] to the model-facing deny string for

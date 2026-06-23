@@ -81,10 +81,14 @@ impl TuiPermissionGate {
 #[async_trait]
 impl PermissionGate for TuiPermissionGate {
     async fn check(&self, name: &str, input: &serde_json::Value) -> PermissionDecision {
-        // Step 1: consult session rules.
+        // Step 1: consult session rules (content-aware: a narrowed AllowAlways
+        // rule only short-circuits a matching command/path/domain).
         {
             let rules = self.session_allow_rules.lock().await;
-            if rules.iter().any(|r| r.matches_tool(name)) {
+            if rules
+                .iter()
+                .any(|r| permission::call_matches_rule(r, name, input))
+            {
                 return PermissionDecision::Allow;
             }
         }
@@ -115,9 +119,11 @@ impl PermissionGate for TuiPermissionGate {
             };
         };
 
-        // Step 4: persist if AllowAlways.
+        // Step 4: persist if AllowAlways. The rule is NARROWED to the specific
+        // command / path / domain the call used (claude-code `ruleSuggestions`),
+        // not a bare tool-wide allow — so "always allow" scopes the grant.
         if matches!(response, PermissionResponse::AllowAlways) {
-            let rule = PermissionRule::allow_tool_session(name);
+            let rule = permission::allow_suggestion(name, input);
             self.session_allow_rules.lock().await.push(rule.clone());
             // (3c) Durably record the choice when a persist target is wired.
             // Best-effort: a write failure must not fail the check. Skip a

@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod allow_suggestion;
 pub mod auto_edit_safety;
 pub mod bash_security;
 #[cfg(feature = "bash-ast")]
@@ -84,6 +85,7 @@ pub use result::{
     ClassifierKind, PermissionDecisionReason, PermissionResult, PermissionUpdateDestination,
     SandboxOverrideReason,
 };
+pub use allow_suggestion::{allow_suggestion, call_matches_rule};
 pub use rule::{PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue};
 pub use sed_validation::{
     sed_auto_allow_verdict, sed_constraint_verdict, SedVerdict, SED_ASK_MESSAGE, SED_ASK_REASON,

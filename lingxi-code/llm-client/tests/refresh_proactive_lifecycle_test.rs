@@ -2,8 +2,8 @@
 //! remaining/2 (not at a fixed 5 min lead). Handle is owned by `AuthState` and
 //! cancellable via `AuthState::shutdown` (Task 6).
 
-use anthropic_oauth::refresh::{AuthState, RefreshDriver};
-use anthropic_oauth::ClaudeAiOAuthConfig;
+use llm_client::oauth::anthropic::refresh::{AuthState, RefreshDriver};
+use llm_client::oauth::anthropic::ClaudeAiOAuthConfig;
 use async_trait::async_trait;
 use protocol::{HttpRequest, HttpResponse, Secret};
 use std::future::Future;
@@ -249,7 +249,7 @@ async fn proactive_then_reactive_collapses_to_one_refresh() {
         .expect("spawn ok");
 
     // Fire a reactive refresh BEFORE the proactive timer's 30s wake.
-    let driver = anthropic_oauth::refresh::RefreshDriver::new(state.clone());
+    let driver = llm_client::oauth::anthropic::refresh::RefreshDriver::new(state.clone());
     let prev = state.token.read().await.token_hash();
     let r = driver.refresh(prev).await;
     assert!(r.is_ok(), "reactive refresh ok: {r:?}");

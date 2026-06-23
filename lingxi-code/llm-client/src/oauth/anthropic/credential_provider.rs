@@ -1,4 +1,4 @@
-//! `llm_client::CredentialProvider` over the OAuth refresh machinery.
+//! `crate::CredentialProvider` over the OAuth refresh machinery.
 //!
 //! [`OAuthCredentialProvider`] serves the current OAuth access token,
 //! refreshing in place (single-flight via the underlying `refresh_lock`)
@@ -19,9 +19,9 @@
 use std::fmt;
 use std::sync::Arc;
 
-use llm_client::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
+use crate::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
 
-use crate::refresh::RefreshDriver;
+use crate::oauth::anthropic::refresh::RefreshDriver;
 
 /// Serves the current OAuth access token, refreshing in place when expired
 /// (single-flight via the underlying refresh lock).

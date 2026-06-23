@@ -9,7 +9,7 @@
 use crate::context::MigrationEnv;
 use crate::global_config;
 use crate::settings_update::{read_settings_map, settings_path, update_settings, SettingsSource};
-use anthropic_oauth::limits::SubscriptionType;
+use llm_client::oauth::anthropic::limits::SubscriptionType;
 use serde_json::{json, Value};
 use telemetry::sink::AnalyticsValue;
 
@@ -87,7 +87,7 @@ mod tests {
     use super::*;
     use crate::settings_update::{read_settings_map, settings_path, SettingsSource};
     use crate::test_support::temp_config;
-    use anthropic_oauth::limits::SubscriptionType;
+    use llm_client::oauth::anthropic::limits::SubscriptionType;
 
     fn test_env(t: &crate::test_support::TempConfig) -> crate::context::MigrationEnv {
         crate::context::MigrationEnv {

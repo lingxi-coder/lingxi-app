@@ -4,9 +4,9 @@
 //! authorize URL builder; browser-open + token exchange land with the
 //! cli-demo in Plan 16.
 
-use crate::config::ClaudeAiOAuthConfig;
-use crate::pkce::{generate_pkce, generate_state_token};
-use crate::refresh::{AuthState, RefreshDriver};
+use crate::oauth::anthropic::config::ClaudeAiOAuthConfig;
+use crate::oauth::anthropic::pkce::{generate_pkce, generate_state_token};
+use crate::oauth::anthropic::refresh::{AuthState, RefreshDriver};
 use protocol::{HttpMethod, HttpRequest, Secret};
 use secret::CredentialManager;
 use serde::{Deserialize, Serialize};
@@ -360,7 +360,7 @@ pub async fn init_refresh_driver(
 #[cfg(test)]
 mod exchange_tests {
     use super::*;
-    use crate::testsupport::{mem_credential_manager, Canned, MemStorage, MockHttp, TestClock};
+    use crate::oauth::anthropic::testsupport::{mem_credential_manager, Canned, MemStorage, MockHttp, TestClock};
 
     fn client_with(http: Arc<MockHttp>, clock_secs: u64) -> ClaudeAiOAuthClient {
         let clock = TestClock::new(clock_secs);

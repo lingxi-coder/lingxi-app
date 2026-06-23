@@ -18,8 +18,8 @@
 // inherent `refresh` + `spawn_proactive`. Allow until then.
 #![allow(dead_code)]
 
-use crate::client::OAuthError;
-use crate::config::ClaudeAiOAuthConfig;
+use crate::oauth::anthropic::client::OAuthError;
+use crate::oauth::anthropic::config::ClaudeAiOAuthConfig;
 use async_trait::async_trait;
 use protocol::{HttpMethod, HttpRequest, Secret};
 use thiserror::Error;
@@ -241,7 +241,7 @@ impl AuthState {
         // the grant and defeat scope expansion.
         let scope = self.config.scopes.join(" ");
         let payload = RefreshRequest {
-            grant_type: crate::config::REFRESH_GRANT_TYPE,
+            grant_type: crate::oauth::anthropic::config::REFRESH_GRANT_TYPE,
             refresh_token: refresh_token.expose_secret(),
             client_id: &self.config.client_id,
             scope: &scope,
@@ -683,7 +683,7 @@ async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn traits::RuntimeS
 #[cfg(test)]
 mod wire_and_persist_tests {
     use super::*;
-    use crate::testsupport::{mem_credential_manager, Canned, MemStorage, MockHttp, TestClock};
+    use crate::oauth::anthropic::testsupport::{mem_credential_manager, Canned, MemStorage, MockHttp, TestClock};
 
     /// Reactive refresh must send a JSON body carrying the `scope` param and
     /// persist the rotated tokens to the attached `CredentialManager`.
@@ -765,7 +765,7 @@ mod wire_and_persist_tests {
     /// rather than spinning).
     #[tokio::test]
     async fn proactive_loop_fires_then_exits_on_401() {
-        use crate::testsupport::InstantSpawner;
+        use crate::oauth::anthropic::testsupport::InstantSpawner;
 
         let http = MockHttp::new(vec![(
             "oauth/token",

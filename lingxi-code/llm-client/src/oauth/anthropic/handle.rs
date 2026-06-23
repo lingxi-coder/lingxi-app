@@ -3,7 +3,7 @@
 //! Drives the full interactive PKCE Authorization-Code flow:
 //!   1. [`ClaudeAiOAuthClient::build_authorize_url_with_redirect`]
 //!   2. open the browser (via an injectable opener — no-op in tests)
-//!   3. [`crate::callback::CallbackListener::accept`] on the loopback listener
+//!   3. [`crate::oauth::anthropic::callback::CallbackListener::accept`] on the loopback listener
 //!   4. [`ClaudeAiOAuthClient::exchange_code_with_redirect`]
 //!   5. resolve `email` + `org_id` from the exchange response (`account` /
 //!      `organization`) or, failing that, the profile endpoint — there is no
@@ -14,8 +14,8 @@
 //! The whole flow runs under a 60-second deadline (the trait contract);
 //! exceeding it yields [`AuthError::Timeout`].
 
-use crate::callback::{CallbackError, CallbackListener};
-use crate::client::ClaudeAiOAuthClient;
+use crate::oauth::anthropic::callback::{CallbackError, CallbackListener};
+use crate::oauth::anthropic::client::ClaudeAiOAuthClient;
 use async_trait::async_trait;
 use protocol::{HttpMethod, HttpRequest};
 use serde::Deserialize;
@@ -251,8 +251,8 @@ fn real_browser_open(url: &str) -> Result<(), AuthError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ClaudeAiOAuthConfig;
-    use crate::testsupport::{mem_credential_manager, Canned, MemStorage, MockHttp, TestClock};
+    use crate::oauth::anthropic::config::ClaudeAiOAuthConfig;
+    use crate::oauth::anthropic::testsupport::{mem_credential_manager, Canned, MemStorage, MockHttp, TestClock};
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;

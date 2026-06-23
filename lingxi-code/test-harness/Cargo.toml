@@ -68,7 +68,6 @@ filetime = "0.2"
 # Used by the M3-04 Phase 10 parity driver (oauth_pkce_refresh) to exercise
 # `ClaudeAiOAuthConfig::default_with_port` + `OAuthError` Display strings +
 # `proactive_lead` formula against locked wire identifiers. Dev-only.
-anthropic-oauth = { path = "../anthropic-oauth" }
 # M8-P7-final: the `tools` monolith is dissolved; parity drivers now assert
 # fixture constants directly against the per-category tool crates + tool-api.
 # `test-support` enables `tool_api::test_support::shell_test_ctx`, used by the

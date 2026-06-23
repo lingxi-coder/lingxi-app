@@ -5,8 +5,8 @@
 //!   2. Expired token triggers single-flight refresh; refreshed token returned.
 //!   3. Refresh failure maps to `LlmError::Authentication` (no secret material leaked).
 
-use anthropic_oauth::{refresh::AuthState, refresh::RefreshDriver, ClaudeAiOAuthConfig};
-use anthropic_oauth::OAuthCredentialProvider;
+use llm_client::oauth::anthropic::{refresh::AuthState, refresh::RefreshDriver, ClaudeAiOAuthConfig};
+use llm_client::oauth::anthropic::OAuthCredentialProvider;
 use async_trait::async_trait;
 use llm_client::{Credential, CredentialProvider, CredentialScope, LlmError, ProviderId};
 use protocol::{HttpRequest, HttpResponse, Secret};

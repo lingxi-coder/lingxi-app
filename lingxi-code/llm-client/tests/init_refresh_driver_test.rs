@@ -1,7 +1,7 @@
 //! End-to-end smoke: `init_refresh_driver` registers the hook + spawns proactive.
 
-use anthropic_oauth::client::init_refresh_driver;
-use anthropic_oauth::ClaudeAiOAuthConfig;
+use llm_client::oauth::anthropic::client::init_refresh_driver;
+use llm_client::oauth::anthropic::ClaudeAiOAuthConfig;
 use async_trait::async_trait;
 use protocol::{HttpRequest, HttpResponse, Secret};
 use std::future::Future;

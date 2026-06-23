@@ -16,7 +16,7 @@
 //! discriminant that drives subscription-type resolution
 //! (`services/oauth/client.ts:366-387`). Unknown fields are ignored.
 
-use crate::limits::SubscriptionType;
+use crate::oauth::anthropic::limits::SubscriptionType;
 use protocol::{HttpMethod, HttpRequest};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -230,7 +230,7 @@ pub async fn fetch_user_roles(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testsupport::{Canned, MockHttp};
+    use crate::oauth::anthropic::testsupport::{Canned, MockHttp};
 
     fn transport(status: u16, body: &str) -> Arc<dyn HttpTransport> {
         MockHttp::new(vec![("anthropic.com", Canned { status, body: body.into() })])

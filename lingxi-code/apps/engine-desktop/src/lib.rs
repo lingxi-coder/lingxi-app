@@ -33,10 +33,10 @@ pub mod file_changed_watch;
 pub mod settings_watch;
 mod skill_loader;
 
-use anthropic_oauth::client::ClaudeAiOAuthClient;
-use anthropic_oauth::config::ClaudeAiOAuthConfig;
-use anthropic_oauth::handle::OAuthHandle;
-use anthropic_oauth::{OAuthCredentialProvider, RefreshDriver};
+use llm_client::oauth::anthropic::client::ClaudeAiOAuthClient;
+use llm_client::oauth::anthropic::config::ClaudeAiOAuthConfig;
+use llm_client::oauth::anthropic::handle::OAuthHandle;
+use llm_client::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
 use tool_api::AnthropicRequestBuilder;
 use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
 use llm_client::{DefaultLlmClient, Transport};
@@ -1275,14 +1275,14 @@ pub enum BuildError {
 ///
 /// `isClaudeAISubscriber()` is `isAnthropicAuthEnabled() && shouldUseClaudeAIAuth(scopes)`.
 /// `isAnthropicAuthEnabled()` is `false` whenever a non-OAuth source OUTRANKS
-/// stored OAuth in the auth resolver (`anthropic_oauth::resolver`). The two such
+/// stored OAuth in the auth resolver (`llm_client::oauth::anthropic::resolver`). The two such
 /// sources surfaced into the desktop build are the env `ANTHROPIC_API_KEY`
 /// (`api_key_present`) and `ANTHROPIC_AUTH_TOKEN` (`auth_token_present`); when
 /// either is set the effective auth is that key/bearer, not Claude.ai OAuth.
 /// Bedrock / api-key-helper / settings keys rank BELOW stored OAuth, so OAuth
 /// wins over them — no exclusion needed. With neither override present, the token
 /// is the effective auth and `shouldUseClaudeAIAuth(scopes)` (== presence of the
-/// `user:inference` scope, via `anthropic_oauth::subscription_from_scopes`)
+/// `user:inference` scope, via `llm_client::oauth::anthropic::subscription_from_scopes`)
 /// decides.
 ///
 /// PARITY-GAP: FD-inherited keys + managed-context OAuth forcing are not surfaced
@@ -1292,7 +1292,7 @@ fn oauth_subscriber_flag(
     auth_token_present: bool,
     scopes: &[String],
 ) -> bool {
-    !api_key_present && !auth_token_present && anthropic_oauth::subscription_from_scopes(scopes)
+    !api_key_present && !auth_token_present && llm_client::oauth::anthropic::subscription_from_scopes(scopes)
 }
 
 /// Fold the profile + roles responses into the shared snapshot. Pure —
@@ -1303,13 +1303,13 @@ fn oauth_subscriber_flag(
 /// that arm is purely defensive).
 fn subscription_snapshot_from(
     is_subscriber: bool,
-    profile: Option<&anthropic_oauth::OAuthProfileResponse>,
-    roles: Option<&anthropic_oauth::UserRolesResponse>,
+    profile: Option<&llm_client::oauth::anthropic::OAuthProfileResponse>,
+    roles: Option<&llm_client::oauth::anthropic::UserRolesResponse>,
 ) -> traits::subscription::SubscriptionSnapshot {
-    use anthropic_oauth::SubscriptionType;
+    use llm_client::oauth::anthropic::SubscriptionType;
     let org = profile.and_then(|p| p.organization.as_ref());
     let subscription_type = profile
-        .and_then(anthropic_oauth::OAuthProfileResponse::subscription_type)
+        .and_then(llm_client::oauth::anthropic::OAuthProfileResponse::subscription_type)
         .and_then(|t| match t {
             SubscriptionType::Pro => Some("pro"),
             SubscriptionType::Max => Some("max"),
@@ -1706,7 +1706,7 @@ pub async fn build(
     // resolved OAuth `AuthState` (`Some` only for an OAuth-effective subscriber
     // session) that step (2) bridges into the assembled client's credential
     // seam as an `oauth_delegate`.
-    let mut oauth_auth_state: Option<Arc<anthropic_oauth::refresh::AuthState>> = None;
+    let mut oauth_auth_state: Option<Arc<llm_client::oauth::anthropic::refresh::AuthState>> = None;
     let mut openai_oauth_state: Option<Arc<openai_oauth::AuthState>> = None;
     // WebSearch builds Anthropic `POST /v1/messages` requests via its own
     // provider (server-side web search is Anthropic-only in v1).
@@ -1770,7 +1770,7 @@ pub async fn build(
             }
             let profile_token =
                 protocol::Secret::new(tokens.access_token.expose_secret().clone());
-            match anthropic_oauth::client::init_refresh_driver(
+            match llm_client::oauth::anthropic::client::init_refresh_driver(
                 oauth_cfg,
                 tokens.access_token,
                 tokens.refresh_token,
@@ -1817,12 +1817,12 @@ pub async fn build(
                             let token = profile_token;
                             tokio::spawn(async move {
                                 let token = token.expose_secret();
-                                let profile = anthropic_oauth::fetch_profile_from_oauth_token(
+                                let profile = llm_client::oauth::anthropic::fetch_profile_from_oauth_token(
                                     token, &transport,
                                 )
                                 .await;
                                 let roles =
-                                    anthropic_oauth::fetch_user_roles(token, &transport).await;
+                                    llm_client::oauth::anthropic::fetch_user_roles(token, &transport).await;
                                 let snap = subscription_snapshot_from(
                                     true,
                                     profile.as_ref(),
@@ -6276,8 +6276,8 @@ mod tests {
 
     #[test]
     fn subscription_snapshot_maps_profile_and_roles() {
-        let profile = anthropic_oauth::OAuthProfileResponse {
-            organization: Some(anthropic_oauth::OAuthOrganization {
+        let profile = llm_client::oauth::anthropic::OAuthProfileResponse {
+            organization: Some(llm_client::oauth::anthropic::OAuthOrganization {
                 organization_type: Some("claude_team".to_string()),
                 rate_limit_tier: Some("default_claude_max_5x".to_string()),
                 billing_type: Some("stripe_subscription".to_string()),
@@ -6286,7 +6286,7 @@ mod tests {
             }),
             account: None,
         };
-        let roles = anthropic_oauth::UserRolesResponse {
+        let roles = llm_client::oauth::anthropic::UserRolesResponse {
             organization_role: Some("admin".to_string()),
             ..Default::default()
         };
@@ -6322,8 +6322,8 @@ mod tests {
         // is unreachable from real profile parsing (purely defensive). This
         // test pins the observable contract: a non-paid/unknown org type folds
         // to `subscription_type: None` in the snapshot.
-        let profile = anthropic_oauth::OAuthProfileResponse {
-            organization: Some(anthropic_oauth::OAuthOrganization {
+        let profile = llm_client::oauth::anthropic::OAuthProfileResponse {
+            organization: Some(llm_client::oauth::anthropic::OAuthOrganization {
                 organization_type: Some("claude_free".to_string()),
                 ..Default::default()
             }),
@@ -6340,8 +6340,8 @@ mod tests {
         // reports `has_extra_usage_enabled: Some(false)` must fold to `false`
         // in the snapshot (same as the absent-`None` case, distinct from
         // `Some(true)`).
-        let profile = anthropic_oauth::OAuthProfileResponse {
-            organization: Some(anthropic_oauth::OAuthOrganization {
+        let profile = llm_client::oauth::anthropic::OAuthProfileResponse {
+            organization: Some(llm_client::oauth::anthropic::OAuthOrganization {
                 has_extra_usage_enabled: Some(false),
                 ..Default::default()
             }),

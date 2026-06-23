@@ -18,6 +18,7 @@ tokio = { workspace = true, features = ["sync", "time", "net", "io-util", "macro
 traits = { path = "../traits" }
 protocol = { path = "../protocol" }
 async-trait = { workspace = true }
+futures = { workspace = true }
 futures-util = { workspace = true }
 telemetry = { path = "../telemetry" }
 secret = { path = "../secret" }

@@ -314,6 +314,7 @@ impl Task for DreamHandler {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            effort: None,
         };
 
         // 4. Bundle the inheritance. Cloning the Arcs preserves pointer

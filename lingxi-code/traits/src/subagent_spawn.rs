@@ -105,6 +105,12 @@ pub struct SubagentSpawnRequest {
     /// — validation happens at the tool-call layer). `None` ⇒ free-form text.
     #[serde(default)]
     pub schema: Option<String>,
+    /// Per-spawn thinking-effort override (claude-code workflow `agent({effort})`
+    /// — `me={...ie,effort:ae}`): a level string (`"low"`..`"max"`) or an integer
+    /// budget. When set, the spawner overrides the resolved agent definition's
+    /// `effort`. `None` ⇒ the definition's own effort (frontmatter) stands.
+    #[serde(default)]
+    pub effort: Option<serde_json::Value>,
 }
 
 /// Token-usage rollup returned at the end of a successful spawn.

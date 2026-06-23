@@ -710,6 +710,14 @@ impl PoolSubagentSpawner {
                 None => requested,
             };
         }
+        // Per-spawn effort override (claude-code workflow `agent({effort})` →
+        // `me={...ie,effort:ae}`): a level/integer opt overrides the resolved
+        // definition's effort frontmatter. Ignored when unparseable.
+        if let Some(effort) = &request.effort {
+            if let Some(parsed) = crate::definition::AgentEffort::from_json(effort) {
+                def.effort = Some(parsed);
+            }
+        }
         // Fork carriers (codex #5): on the fork path `fork_context_messages`
         // carries the byte-exact forked prefix and `fork_parent_system_prompt`
         // the parent's rendered system prompt; both `None` for a normal spawn.
@@ -1894,6 +1902,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            effort: None,
         };
         // Drive resolve_definition + the override branch directly by replicating
         // the spawn-path logic (spawn() would require a live runner).
@@ -1990,6 +1999,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            effort: None,
         };
         let mk_inherit = || SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
@@ -2094,6 +2104,7 @@ mod tests {
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
+            effort: None,
         };
         let err = spawner
             .spawn_async(req, SubagentInheritance { tool_invoker: invoker, budget })

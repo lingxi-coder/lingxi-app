@@ -198,6 +198,18 @@ impl AgentEffort {
             AgentEffort::Numeric(n) => serde_json::Value::Number((*n).into()),
         }
     }
+
+    /// Parse a JSON effort opt (claude-code workflow `agent({effort})`): a level
+    /// string (validated against [`EFFORT_LEVELS`], `med`→`medium`) or an
+    /// integer. `None` for anything else.
+    #[must_use]
+    pub fn from_json(value: &serde_json::Value) -> Option<AgentEffort> {
+        match value {
+            serde_json::Value::String(s) => parse_effort_from_string(s),
+            serde_json::Value::Number(n) => n.as_i64().map(AgentEffort::Numeric),
+            _ => None,
+        }
+    }
 }
 
 /// Valid named effort levels (claude `EFFORT_LEVELS` / `nP =

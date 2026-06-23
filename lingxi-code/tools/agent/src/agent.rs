@@ -721,6 +721,7 @@ Usage notes:\n\
             fork_parent_system_prompt: None,
             // The Agent (Task) tool has no structured-output schema param.
             schema: None,
+            effort: None,
         };
 
         match spawner.spawn_async(request, inherit).await {
@@ -1277,6 +1278,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 None
             },
             schema: None,
+            effort: None,
         };
 
         let outcome = spawner.spawn(request, inherit).await;

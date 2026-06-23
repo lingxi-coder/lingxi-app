@@ -283,6 +283,10 @@ fn make_request(default_subagent_type: &str, prompt: &str, opts_json: &str) -> S
             .get("schema")
             .filter(|v| !v.is_null())
             .map(std::string::ToString::to_string),
+        // `agent(prompt, { effort })` → override the subagent's thinking effort
+        // (claude-code `me={...ie,effort:ae}`). A level string or integer, carried
+        // raw for the spawner to apply onto the resolved agent definition.
+        effort: opts.get("effort").filter(|v| !v.is_null()).cloned(),
     }
 }
 
@@ -1290,6 +1294,20 @@ mod tests {
         let mut seen = spawner.seen.lock().unwrap().clone();
         seen.sort();
         assert_eq!(seen, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn make_request_maps_effort_opt() {
+        // `agent({effort})` — a level string or an integer — is carried raw.
+        assert_eq!(
+            make_request("general-purpose", "p", r#"{"effort":"high"}"#).effort,
+            Some(serde_json::json!("high"))
+        );
+        assert_eq!(
+            make_request("general-purpose", "p", r#"{"effort":8000}"#).effort,
+            Some(serde_json::json!(8000))
+        );
+        assert!(make_request("general-purpose", "p", "{}").effort.is_none());
     }
 
     #[tokio::test]

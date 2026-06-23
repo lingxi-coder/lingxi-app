@@ -992,6 +992,9 @@ mod tests {
                     resume_from_run_id: None,
                     args: None,
                     run_id: None,
+                    invocation_mode: None,
+                    workflow_source: None,
+                    launched_from_subagent: false,
                 },
                 make_ctx(fs),
             )

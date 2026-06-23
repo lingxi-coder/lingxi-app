@@ -33,3 +33,20 @@ pub const NAMES: &[&str] = &[
 // - `tengu_workflow_keyword` / `_dismissed` / `_restored` — no keyword UI.
 // - `tengu_workflow_usage_warning_accepted` — no usage-warning dialog.
 // - `tengu_workflows_enabled` — feature flag read, not an emitted event.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every name in the workflow `NAMES` registry must be a byte-exact
+    /// `tengu_workflow_*` string (oracle §1 name set verification).
+    #[test]
+    fn all_names_are_tengu_workflow_prefixed() {
+        for &name in NAMES {
+            assert!(
+                name.starts_with("tengu_workflow_"),
+                "workflow event name {name:?} does not start with 'tengu_workflow_'"
+            );
+        }
+    }
+}

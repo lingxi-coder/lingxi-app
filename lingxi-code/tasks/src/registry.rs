@@ -826,6 +826,9 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             resume_from_run_id,
             args,
             run_id: _,
+            invocation_mode: _,
+            workflow_source: _,
+            launched_from_subagent: _,
         } => TaskState::LocalWorkflow(crate::state::LocalWorkflowTaskState {
             base,
             workflow_id: workflow_id.clone(),

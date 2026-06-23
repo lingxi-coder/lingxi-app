@@ -811,6 +811,15 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                 .to_str()
                 .map(str::to_string)
         };
+        // Derive telemetry fields for tengu_workflow_launched (oracle §7).
+        let (invocation_mode, workflow_source) =
+            if let Some(p) = spec.script_path.as_deref().filter(|s| !s.is_empty()) {
+                ("scriptPath".to_string(), p.to_string())
+            } else if let Some(n) = spec.name.as_deref().filter(|s| !s.is_empty()) {
+                ("named".to_string(), n.to_string())
+            } else {
+                ("inline".to_string(), "inline".to_string())
+            };
         let task_id = self
             .registry
             .spawn(
@@ -825,6 +834,13 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                         .as_ref()
                         .map(|v| serde_json::to_string(v).unwrap_or_default()),
                     run_id: Some(run_id.clone()),
+                    invocation_mode: Some(invocation_mode),
+                    workflow_source: Some(workflow_source),
+                    // `t.agentId != null` in claude-code: the Workflow tool is called
+                    // from a subagent when a sub-session invokes it. LingXi does not
+                    // thread the calling agent id to the launcher at this time; treat
+                    // as false (top-level launch) — this field is best-effort.
+                    launched_from_subagent: false,
                 },
                 "Workflow".to_string(),
             )

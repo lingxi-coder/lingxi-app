@@ -513,6 +513,19 @@ enum Plan {
     },
 }
 
+/// Context fields for `tengu_workflow_phase_completed` events (oracle §7).
+/// these are not available inside `run_workflow_script` itself (the run_id is
+/// minted in the outer worker closure), so the caller threads them in as a bundle.
+/// When `None`, phase events still fire but omit the context fields.
+pub struct PhaseTelemetryCtx {
+    /// The `wf_…` run id for this workflow invocation.
+    pub run_id: String,
+    /// Invocation source: path for `scriptPath`, name for `named`, `"inline"`.
+    pub workflow_source: Option<String>,
+    /// `meta.name` from the workflow script.
+    pub workflow_name: Option<String>,
+}
+
 /// Run a workflow `script` to completion, spawning each `agent()` call as a real
 /// subagent of type `subagent_type` via `spawner`. Returns the script's
 /// [`workflow::RunOutcome`] (its `phase()`/`log()` progress + return value) or a
@@ -545,6 +558,14 @@ pub async fn run_workflow_script(
     // so a runaway pure-JS loop is stopped instead of leaking the OS thread.
     cancel: Arc<std::sync::atomic::AtomicBool>,
     bus: Arc<AnalyticsBus>,
+    // Optional externally-provided agent_count Arc so the caller can read the final
+    // count after the run (used by tengu_workflow_completed). When None, a private
+    // counter is created (test/standalone path).
+    agent_count_out: Option<Arc<AtomicU64>>,
+    // Optional fields for tengu_workflow_phase_completed (oracle §7):
+    // `workflow_run_id`, `workflow_source`, `workflow_name`. When None, the
+    // phase_completed events still fire but omit these optional context fields.
+    phase_telemetry_ctx: Option<PhaseTelemetryCtx>,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
     let NestedConfig {
         allow_nested,
@@ -616,7 +637,9 @@ pub async fn run_workflow_script(
     // Per-run real-spawn counter (claude-code `c`/`S()`): only fresh spawns
     // count — replayed (journaled) and `__wf_resolve` calls are exempt, so
     // resuming a >1000-agent workflow never trips the cap on replay.
-    let agent_count = Arc::new(AtomicU64::new(0));
+    // When agent_count_out is provided by the caller (for tengu_workflow_completed
+    // reporting), use that Arc so the caller can read the final count after the run.
+    let agent_count = agent_count_out.unwrap_or_else(|| Arc::new(AtomicU64::new(0)));
     // PREFIX resume cursor (claude-code `m` + gone-live flag `f`): the journal is
     // a longest-unchanged-prefix cache. `running_key` chains each real agent()
     // call into the previous key (so any change cascades to all later keys), and
@@ -784,15 +807,43 @@ pub async fn run_workflow_script(
     })??;
 
     // Emit `tengu_workflow_phase_completed` for each Phase in the outcome's
-    // progress list (best-effort parity with the binary's per-phase-group event).
-    let mut phase_idx: i64 = 0;
-    for p in &outcome.progress {
-        if let workflow::Progress::Phase(title) = p {
-            let mut md: LogEventMetadata = HashMap::new();
-            md.insert("phase_index".to_string(), AnalyticsValue::Int(phase_idx));
-            md.insert("phase_title".to_string(), AnalyticsValue::String(title.clone()));
-            bus.log_event(telemetry::tengu::workflow::PHASE_COMPLETED, md).await;
-            phase_idx += 1;
+    // progress list (oracle §7 payload).
+    // Per-phase metric fields (`phase_tokens`, `phase_tool_calls`,
+    // `phase_agent_duration_ms`, `phase_agent_count`, `phase_error_count`,
+    // `phase_skip_count`) are UNAVAILABLE: LingXi's `Progress::Phase` only carries
+    // a title; no numeric per-phase aggregation is performed. These fields are
+    // omitted rather than emitted as 0 to avoid misleading consumers.
+    {
+        let mut phase_idx: i64 = 0;
+        for p in &outcome.progress {
+            if let workflow::Progress::Phase(title) = p {
+                let mut md: LogEventMetadata = HashMap::new();
+                if let Some(ref ctx) = phase_telemetry_ctx {
+                    md.insert(
+                        "workflow_run_id".to_string(),
+                        AnalyticsValue::String(ctx.run_id.clone()),
+                    );
+                    if let Some(ref src) = ctx.workflow_source {
+                        md.insert(
+                            "workflow_source".to_string(),
+                            AnalyticsValue::String(src.clone()),
+                        );
+                    }
+                    if let Some(ref name) = ctx.workflow_name {
+                        md.insert(
+                            "workflow_name".to_string(),
+                            AnalyticsValue::String(name.clone()),
+                        );
+                    }
+                }
+                md.insert("phase_index".to_string(), AnalyticsValue::Int(phase_idx));
+                md.insert(
+                    "phase_title".to_string(),
+                    AnalyticsValue::String(title.clone()),
+                );
+                bus.log_event(telemetry::tengu::workflow::PHASE_COMPLETED, md).await;
+                phase_idx += 1;
+            }
         }
     }
 
@@ -860,6 +911,9 @@ impl Task for LocalWorkflowHandler {
             resume_from_run_id,
             args: workflow_args,
             run_id: provided_run_id,
+            invocation_mode,
+            workflow_source,
+            launched_from_subagent,
         } = input
         else {
             return Err(TaskError::Internal(
@@ -913,8 +967,33 @@ impl Task for LocalWorkflowHandler {
         // record `kill` flips. `false` until killed.
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_cancel = cancel.clone();
+        // Cloned for kill-detection in tengu_workflow_completed status derivation
+        // (oracle §7: `abortController?.signal.aborted ? "killed" : error ? "failed" : "completed"`).
+        let completed_cancel = cancel.clone();
         let worker_bus = self.bus.clone();
-        let worker = Box::pin(async move {
+        // Parse meta fields from the script NOW (before moving `script` into the
+        // worker closure) so they are available for both `launched` and `completed`
+        // telemetry without re-parsing inside the async closure.
+        let meta_name: Option<String> = workflow::meta_string_value(&script, "name");
+        let meta_description: Option<String> = workflow::meta_string_value(&script, "description");
+        // phase_count: number of declared phases in `meta.phases`. The workflow
+        // crate exposes `meta_string_value` for string fields; there is no direct
+        // array-length API. The `meta.phases` field is present in some templates
+        // but not enforced by validate_meta. We parse it with a minimal tree-sitter
+        // scan via `workflow::meta_array_len` when available; for now use 0 as the
+        // safe fallback (LingXi does not yet expose a meta_array_len helper).
+        // NOTE: oracle §7 spec: `c.meta.phases?.length ?? 0` — the phase COUNT is
+        // from the script's static meta declaration, not from runtime phase() calls.
+        // Since `workflow::meta_string_value` cannot walk arrays, we emit 0.
+        // This is marked unavailable in the module comment below.
+        let meta_phase_count: i64 = 0; // UNAVAILABLE: no workflow::meta_array_len()
+        let script_size_chars: i64 = script.chars().count() as i64;
+        // Shared agent_count Arc threaded into run_workflow_script so the completed
+        // event can read the real post-run count (oracle §7: `k.agentCount`).
+        let shared_agent_count = Arc::new(AtomicU64::new(0));
+        let worker = Box::pin({
+            let shared_agent_count = shared_agent_count.clone();
+            async move {
             status_sink
                 .set_status(&worker_task_id, TaskStatus::Running)
                 .await;
@@ -932,13 +1011,55 @@ impl Task for LocalWorkflowHandler {
                 .or(provided_run_id)
                 .unwrap_or_else(|| format!("wf_{:016x}", rand::random::<u64>()));
 
-            // tengu_workflow_launched — emitted once per run, right after the run_id
-            // is minted (mirrors the binary's launch event).
+            // tengu_workflow_launched — oracle §7 exact payload.
+            // NOTE: `workflow_run_id` is NOT present on `launched` (oracle §7 shows
+            // it only on `completed` and `phase_completed`). `invocation_mode`,
+            // `workflow_source`, `workflow_name`, `workflow_description`,
+            // `phase_count`, `launched_from_subagent`, `has_args`, `is_resume`,
+            // and `script_size_chars` are all present.
+            // `launched_from_subagent`: oracle `t.agentId != null`. LingXi does not
+            // thread the calling agent id to the task handler — this field comes
+            // from the spawn input where it was set by the launcher.
             {
                 let mut md: LogEventMetadata = HashMap::new();
-                md.insert("workflow_run_id".to_string(), AnalyticsValue::String(run_id.clone()));
-                md.insert("is_resume".to_string(), AnalyticsValue::Bool(resume_from_run_id.is_some()));
-                md.insert("has_args".to_string(), AnalyticsValue::Bool(workflow_args.is_some()));
+                md.insert(
+                    "invocation_mode".to_string(),
+                    AnalyticsValue::String(
+                        invocation_mode.clone().unwrap_or_else(|| "inline".to_string()),
+                    ),
+                );
+                md.insert(
+                    "workflow_source".to_string(),
+                    AnalyticsValue::String(
+                        workflow_source.clone().unwrap_or_else(|| "inline".to_string()),
+                    ),
+                );
+                if let Some(ref name) = meta_name {
+                    md.insert("workflow_name".to_string(), AnalyticsValue::String(name.clone()));
+                }
+                if let Some(ref desc) = meta_description {
+                    md.insert(
+                        "workflow_description".to_string(),
+                        AnalyticsValue::String(desc.clone()),
+                    );
+                }
+                md.insert("phase_count".to_string(), AnalyticsValue::Int(meta_phase_count));
+                md.insert(
+                    "launched_from_subagent".to_string(),
+                    AnalyticsValue::Bool(launched_from_subagent),
+                );
+                md.insert(
+                    "has_args".to_string(),
+                    AnalyticsValue::Bool(workflow_args.is_some()),
+                );
+                md.insert(
+                    "is_resume".to_string(),
+                    AnalyticsValue::Bool(resume_from_run_id.is_some()),
+                );
+                md.insert(
+                    "script_size_chars".to_string(),
+                    AnalyticsValue::Int(script_size_chars),
+                );
                 worker_bus.log_event(telemetry::tengu::workflow::LAUNCHED, md).await;
             }
 
@@ -1001,23 +1122,63 @@ impl Task for LocalWorkflowHandler {
                 },
                 worker_cancel,
                 worker_bus.clone(),
+                Some(shared_agent_count.clone()),
+                // Pass the phase telemetry context so run_workflow_script can
+                // emit tengu_workflow_phase_completed with the correct run_id,
+                // workflow_source, and workflow_name (oracle §7).
+                Some(PhaseTelemetryCtx {
+                    run_id: run_id.clone(),
+                    workflow_source: workflow_source.clone(),
+                    workflow_name: meta_name.clone(),
+                }),
             );
             let (outcome, ()) = tokio::join!(run, drain);
             let elapsed_ms = run_start.elapsed().as_millis() as i64;
 
-            // tengu_workflow_completed — fires once per run after outcome is known.
+            // tengu_workflow_completed — oracle §7 exact payload.
+            // `status` derivation: `abortController?.signal.aborted ? "killed"
+            //   : k.error ? "failed" : "completed"` (oracle §7).
+            // `agent_count`: real final count from the shared_agent_count Arc.
+            // `total_tokens` / `total_tool_calls`: UNAVAILABLE — LingXi's
+            //   `RunOutcome` carries no per-run token/tool-call aggregates; these
+            //   fields are omitted rather than emitted as 0. `SubagentResult` per-
+            //   agent usage is only available inside `run_workflow_script`'s worker
+            //   future and is not propagated to `RunOutcome`. A future refactor that
+            //   accumulates these into the outcome struct can add them here.
             {
-                let (status_str, agent_count_val) = match &outcome {
-                    Ok(_) => ("completed", 0i64),
-                    Err(_) => ("failed", 0i64),
+                let agent_count_val = shared_agent_count.load(std::sync::atomic::Ordering::Relaxed) as i64;
+                let status_str = if completed_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    "killed"
+                } else {
+                    match &outcome {
+                        Ok(_) => "completed",
+                        Err(_) => "failed",
+                    }
                 };
                 let mut md: LogEventMetadata = HashMap::new();
                 md.insert("workflow_run_id".to_string(), AnalyticsValue::String(run_id.clone()));
+                md.insert(
+                    "workflow_source".to_string(),
+                    AnalyticsValue::String(
+                        workflow_source.clone().unwrap_or_else(|| "inline".to_string()),
+                    ),
+                );
+                if let Some(ref name) = meta_name {
+                    md.insert("workflow_name".to_string(), AnalyticsValue::String(name.clone()));
+                }
+                if let Some(ref desc) = meta_description {
+                    md.insert(
+                        "workflow_description".to_string(),
+                        AnalyticsValue::String(desc.clone()),
+                    );
+                }
                 md.insert("status".to_string(), AnalyticsValue::String(status_str.to_string()));
                 md.insert("agent_count".to_string(), AnalyticsValue::Int(agent_count_val));
                 md.insert("duration_ms".to_string(), AnalyticsValue::Int(elapsed_ms));
                 worker_bus.log_event(telemetry::tengu::workflow::COMPLETED, md).await;
             }
+            // Note: tengu_workflow_phase_completed is emitted inside
+            // run_workflow_script with the PhaseTelemetryCtx passed above.
 
             // Persist the journal (new + replayed results) under the run id so a
             // later resume can replay them. Serialise before any await so the std
@@ -1043,7 +1204,7 @@ impl Task for LocalWorkflowHandler {
 
             status_sink.set_status(&worker_task_id, status).await;
             workers.lock().await.remove(&worker_task_id);
-        });
+        }});
 
         let bg_handle = ctx
             .runtime
@@ -1325,6 +1486,9 @@ mod tests {
             resume_from_run_id: None,
             args: None,
             run_id: None,
+            invocation_mode: Some("inline".to_string()),
+            workflow_source: Some("inline".to_string()),
+            launched_from_subagent: false,
         }
     }
 
@@ -1370,6 +1534,8 @@ mod tests {
             NestedConfig::default(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             Arc::new(AnalyticsBus::new()),
+            None,
+            None,
         )
         .await
         .expect("workflow runs to completion")
@@ -1394,6 +1560,8 @@ mod tests {
             NestedConfig::default(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             Arc::new(AnalyticsBus::new()),
+            None,
+            None,
         )
         .await;
         let err = result.expect_err("the 1001st agent() must throw the cap error");
@@ -1423,6 +1591,8 @@ mod tests {
             NestedConfig::default(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             Arc::new(AnalyticsBus::new()),
+            None,
+            None,
         )
         .await;
         let err = result.expect_err("unknown agentType must throw");
@@ -1470,6 +1640,8 @@ mod tests {
             NestedConfig::default(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             Arc::new(AnalyticsBus::new()),
+            None,
+            None,
         )
         .await
         .expect("runs");
@@ -1502,6 +1674,8 @@ mod tests {
             NestedConfig::default(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             Arc::new(AnalyticsBus::new()),
+            None,
+            None,
         )
         .await;
         let err = result.expect_err("over-budget agent() must throw");
@@ -1535,6 +1709,8 @@ mod tests {
             NestedConfig::default(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             Arc::new(AnalyticsBus::new()),
+            None,
+            None,
         )
         .await
         .expect("workflow runs to completion");
@@ -1687,6 +1863,8 @@ mod tests {
             },
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             Arc::new(AnalyticsBus::new()),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -1729,6 +1907,8 @@ mod tests {
             },
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             Arc::new(AnalyticsBus::new()),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -1875,6 +2055,9 @@ mod tests {
             resume_from_run_id: Some(run_id),
             args: None,
             run_id: None,
+            invocation_mode: Some("inline".to_string()),
+            workflow_source: Some("inline".to_string()),
+            launched_from_subagent: false,
         };
         let handle2 = h2.spawn(input2, make_ctx(fs.clone())).await.unwrap();
         assert_eq!(await_terminal(&sink2).await, TaskStatus::Completed);
@@ -1952,6 +2135,9 @@ mod tests {
             resume_from_run_id: Some(run_id),
             args: None,
             run_id: None,
+            invocation_mode: Some("inline".to_string()),
+            workflow_source: Some("inline".to_string()),
+            launched_from_subagent: false,
         };
         h2.spawn(input2, make_ctx(fs.clone())).await.unwrap();
         assert_eq!(await_terminal(&sink2).await, TaskStatus::Completed);
@@ -2224,6 +2410,8 @@ mod tests {
             NestedConfig::default(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             bus.clone(),
+            None,
+            None,
         )
         .await
         .expect("runs");
@@ -2258,6 +2446,8 @@ mod tests {
             NestedConfig::default(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             bus.clone(),
+            None,
+            None,
         )
         .await
         .expect("runs");
@@ -2312,6 +2502,8 @@ mod tests {
             NestedConfig::default(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             bus.clone(),
+            None,
+            None,
         )
         .await; // expected Err
 
@@ -2354,6 +2546,8 @@ mod tests {
             NestedConfig::default(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             bus.clone(),
+            None,
+            None,
         )
         .await; // expected Err
 

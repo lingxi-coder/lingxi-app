@@ -103,6 +103,15 @@ pub enum TaskSpawnInput {
         /// `None` ⇒ the worker mints one. Ignored when `resume_from_run_id` is
         /// set (the resume id wins).
         run_id: Option<String>,
+        // ── Telemetry fields (oracle §7 `tengu_workflow_launched` payload) ──
+        /// How the workflow was invoked: `"scriptPath"` | `"named"` | `"inline"`.
+        /// Derived from the original `WorkflowLaunchSpec` by the launcher.
+        invocation_mode: Option<String>,
+        /// The workflow source: path for `scriptPath`, name for `named`, or
+        /// `"inline"` for an inline script.
+        workflow_source: Option<String>,
+        /// `true` when launched from a subagent context (`t.agentId != null`).
+        launched_from_subagent: bool,
     },
     /// Spawn an MCP monitor.
     MonitorMcp {

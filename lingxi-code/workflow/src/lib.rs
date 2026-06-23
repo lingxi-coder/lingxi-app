@@ -84,8 +84,9 @@ globalThis.__wf_pump = () => {
 // parallel(): start EVERY thunk first (so their agents queue together → one
 // concurrent batch), then collect; a throwing thunk / rejected promise → null.
 globalThis.parallel = async (thunks) => {
-  if (!Array.isArray(thunks)) throw new Error("parallel() expects an array of thunks");
+  if (!Array.isArray(thunks)) throw new TypeError("parallel() expects an array of functions");
   if (thunks.length > 4096) throw new Error("array length " + thunks.length + " exceeds the maximum of 4096 supported across the workflow VM boundary");
+  for (let t of thunks) if (typeof t !== "function") throw new TypeError("parallel() expects an array of functions, not promises. Wrap each call: () => agent(...)");
   const ps = thunks.map((t) => { try { return Promise.resolve(t()); } catch (e) { return Promise.resolve(null); } });
   const out = [];
   for (const p of ps) { try { out.push(await p); } catch (e) { out.push(null); } }
@@ -114,7 +115,7 @@ globalThis.pipeline = async (items, ...stages) => {
 // one-level nesting limit is reached.
 if (!('budget' in globalThis)) globalThis.budget = { total: null, spent: () => 0, remaining: () => Infinity };
 if (!('args' in globalThis)) globalThis.args = undefined;
-if (!('workflow' in globalThis)) globalThis.workflow = async () => { throw new Error("workflow(): nested workflows are not supported (workflow() inside a child)"); };
+if (!('workflow' in globalThis)) globalThis.workflow = async () => { throw new Error("workflow() cannot be called from within a child workflow — nesting is limited to one level. Inline the inner script or call its agents directly."); };
 "#;
 
 /// The NULL-sentinel result slot: when a batch runner returns this exact string
@@ -896,7 +897,7 @@ where
         // call time, so defining this before the prelude is fine.)
         if allow_nested {
             ctx.eval::<(), _>(
-                b"globalThis.__wf_depth = 0; globalThis.workflow = async (nameOrRef, a) => { if (globalThis.__wf_depth >= 1) throw new Error(\"workflow(): nested workflows are not supported (workflow() inside a child)\"); const spec = (typeof nameOrRef === 'string') ? { name: nameOrRef } : nameOrRef; const src = await agent('', { __wf_resolve: JSON.stringify(spec) }); if (src === '') throw new Error(\"workflow(): could not resolve the nested workflow\"); globalThis.__wf_depth += 1; const savedArgs = globalThis.args; globalThis.args = a; try { return await (new Function('return (async () => {\\n' + src + '\\n})();'))(); } finally { globalThis.__wf_depth -= 1; globalThis.args = savedArgs; } };" as &[u8],
+                "globalThis.__wf_depth = 0; globalThis.workflow = async (nameOrRef, a) => { if (globalThis.__wf_depth >= 1) throw new Error(\"workflow() cannot be called from within a child workflow \u{2014} nesting is limited to one level. Inline the inner script or call its agents directly.\"); const spec = (typeof nameOrRef === 'string') ? { name: nameOrRef } : nameOrRef; const src = await agent('', { __wf_resolve: JSON.stringify(spec) }); if (src === '') throw new Error(\"workflow(): could not resolve the nested workflow\"); globalThis.__wf_depth += 1; const savedArgs = globalThis.args; globalThis.args = a; try { return await (new Function('return (async () => {\\n' + src + '\\n})();'))(); } finally { globalThis.__wf_depth -= 1; globalThis.args = savedArgs; } };".as_bytes(),
             )
             .map_err(|e| WorkflowError::Engine(e.to_string()))?;
         }
@@ -1500,8 +1501,41 @@ log('wf=' + (typeof workflow))
         let err = run("await workflow('child')", no_agents).unwrap_err();
         match err {
             WorkflowError::Script(s) => {
-                assert!(s.contains("nested workflows are not supported"), "got: {s}");
+                assert!(
+                    s.contains("workflow() cannot be called from within a child workflow"),
+                    "got: {s}"
+                );
+                assert!(s.contains("nesting is limited to one level"), "got: {s}");
             }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parallel_rejects_non_array() {
+        let err = run("await parallel('notanarray')", no_agents).unwrap_err();
+        match err {
+            WorkflowError::Script(s) => assert!(
+                s.contains("parallel() expects an array of functions"),
+                "got: {s}"
+            ),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parallel_rejects_non_function_items() {
+        // Passing a promise (a non-function) in the array should trigger throw 2.
+        let err = run(
+            "await parallel([Promise.resolve('x')])",
+            no_agents,
+        )
+        .unwrap_err();
+        match err {
+            WorkflowError::Script(s) => assert!(
+                s.contains("parallel() expects an array of functions, not promises"),
+                "got: {s}"
+            ),
             other => panic!("got {other:?}"),
         }
     }

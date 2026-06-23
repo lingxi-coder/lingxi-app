@@ -234,8 +234,7 @@ impl Tool for WorkflowTool {
         !is_env_truthy(std::env::var("CLAUDE_CODE_DISABLE_WORKFLOWS").ok().as_deref())
     }
     fn max_result_size_chars(&self) -> usize {
-        // The result is a tiny `{status, taskId, taskType}` object.
-        16384
+        100000
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         // A workflow fans out many side-effecting agents.
@@ -545,6 +544,11 @@ mod tests {
     #[test]
     fn name_is_workflow() {
         assert_eq!(tool(None).name(), "Workflow");
+    }
+
+    #[test]
+    fn max_result_size_is_100000() {
+        assert_eq!(tool(None).max_result_size_chars(), 100000);
     }
 
     #[test]

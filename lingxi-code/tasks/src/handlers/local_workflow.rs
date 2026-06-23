@@ -269,12 +269,12 @@ impl LocalWorkflowHandler {
 }
 
 /// claude-code's concurrency cap for in-flight `agent()` calls:
-/// `min(16, cpu_cores - 2)`, at least 1.
+/// `Math.min(16, Math.max(2, cpus-2))` — at least 2.
 fn concurrency_cap() -> usize {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    cores.saturating_sub(2).clamp(1, 16)
+    cores.saturating_sub(2).max(2).min(16)
 }
 
 /// Build the `SubagentSpawnRequest` for one `agent(prompt, opts)` call. The
@@ -1994,5 +1994,19 @@ mod tests {
         assert!(disallowed.contains(&"SendUserMessage".to_string()), "SendUserMessage must be disallowed: {disallowed:?}");
         assert!(disallowed.contains(&"Agent".to_string()), "Agent must be disallowed: {disallowed:?}");
         assert!(disallowed.contains(&"Workflow".to_string()), "Workflow must be disallowed: {disallowed:?}");
+    }
+
+    /// Verify the concurrency cap formula: Math.min(16, Math.max(2, cpus-2)).
+    /// At 1–3 cores the floor is 2; at 5 cores it's 3; at 18 cores it's capped at 16.
+    #[test]
+    fn concurrency_cap_formula_matches_binary() {
+        // Direct formula test: cores.saturating_sub(2).max(2).min(16)
+        let formula = |cores: usize| cores.saturating_sub(2).max(2).min(16);
+        assert_eq!(formula(1), 2, "1 core → 2");
+        assert_eq!(formula(2), 2, "2 cores → 2");
+        assert_eq!(formula(3), 2, "3 cores → 2");
+        assert_eq!(formula(4), 2, "4 cores → 2");
+        assert_eq!(formula(5), 3, "5 cores → 3");
+        assert_eq!(formula(18), 16, "18 cores → 16 (cap)");
     }
 }

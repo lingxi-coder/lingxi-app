@@ -23,6 +23,9 @@ pub mod session;
 pub mod settings;
 pub mod tool;
 pub mod tui;
+/// Workflow telemetry event names (NOT in `ALL_EVENT_NAMES` — separate from
+/// the count-locked event set; kept here for string-lock testing only).
+pub mod workflow;
 
 /// Flat list of every `tengu_*` event name in registration order:
 /// api → agent → session → tool → cost → oauth → memory → settings →

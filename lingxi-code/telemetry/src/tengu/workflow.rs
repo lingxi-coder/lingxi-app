@@ -1,0 +1,35 @@
+//! `tengu_workflow_*` event name constants.
+//!
+//! These are NOT added to the count-locked `ALL_EVENT_NAMES` / `tengu_events.json`
+//! fixture (that snapshot is from an OLDER claude event set; adding these would
+//! break the 347-entry byte-parity lock). They live here for string-lock testing,
+//! mirroring how `agent::AGENT_TOOL_NAMES` is kept apart.
+
+/// `tengu_workflow_launched` — workflow invoked.
+pub const LAUNCHED: &str = "tengu_workflow_launched";
+/// `tengu_workflow_completed` — workflow run finished.
+pub const COMPLETED: &str = "tengu_workflow_completed";
+/// `tengu_workflow_phase_completed` — a phase group finished.
+pub const PHASE_COMPLETED: &str = "tengu_workflow_phase_completed";
+/// `tengu_workflow_agent_cap_exceeded` — 1000-agent lifetime cap hit.
+pub const AGENT_CAP_EXCEEDED: &str = "tengu_workflow_agent_cap_exceeded";
+/// `tengu_workflow_budget_cap_exceeded` — token budget ceiling hit.
+pub const BUDGET_CAP_EXCEEDED: &str = "tengu_workflow_budget_cap_exceeded";
+/// `tengu_workflow_journal_started_hit_respawn` — journal resume re-started a prior agent.
+pub const JOURNAL_STARTED_HIT_RESPAWN: &str = "tengu_workflow_journal_started_hit_respawn";
+
+/// All 6 reachable workflow telemetry event names (string-lock only, NOT in ALL_EVENT_NAMES).
+pub const NAMES: &[&str] = &[
+    LAUNCHED,
+    COMPLETED,
+    PHASE_COMPLETED,
+    AGENT_CAP_EXCEEDED,
+    BUDGET_CAP_EXCEEDED,
+    JOURNAL_STARTED_HIT_RESPAWN,
+];
+
+// Unreachable events (no LingXi trigger):
+// - `tengu_workflow_saved` — no `/workflow save` command in LingXi.
+// - `tengu_workflow_keyword` / `_dismissed` / `_restored` — no keyword UI.
+// - `tengu_workflow_usage_warning_accepted` — no usage-warning dialog.
+// - `tengu_workflows_enabled` — feature flag read, not an emitted event.

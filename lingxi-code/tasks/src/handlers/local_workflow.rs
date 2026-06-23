@@ -48,6 +48,8 @@ use crate::id::TaskType;
 use crate::output_manager::TaskOutputManager;
 use crate::state::TaskStatus;
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::AnalyticsBus;
 
 // Reuse the status-sink seam defined once in the bash handler (single impl wired
 // across handlers), exactly as `local_agent` does.
@@ -210,6 +212,8 @@ pub struct LocalWorkflowHandler {
     /// `task_id` → record queued for teardown by the synchronous
     /// [`TaskHandle::cleanup`] closure; drained by [`Self::drain_pending_kills`].
     pending_kill: Arc<Mutex<HashMap<String, WorkerCancel>>>,
+    /// Analytics bus for emitting `tengu_workflow_*` telemetry events.
+    bus: Arc<AnalyticsBus>,
     /// The turn's token target (`cfg.token_budget`) backing the script's
     /// `budget.total`. `None` ⇒ no target (FLEET defaults, budget loops skip).
     /// Set by the root via [`Self::with_token_budget`].
@@ -250,6 +254,7 @@ impl LocalWorkflowHandler {
             status_sink: Arc::new(NoopStatusSink),
             workers: Arc::new(Mutex::new(HashMap::new())),
             pending_kill: Arc::new(Mutex::new(HashMap::new())),
+            bus: Arc::new(AnalyticsBus::new()),
             token_budget_total: None,
             output_pool_cell: None,
             turn_baseline_cell: None,
@@ -260,6 +265,14 @@ impl LocalWorkflowHandler {
     #[must_use]
     pub fn with_status_sink(mut self, sink: Arc<dyn TaskStatusSink>) -> Self {
         self.status_sink = sink;
+        self
+    }
+
+    /// Attach an [`AnalyticsBus`] so `tengu_workflow_*` events are emitted.
+    /// Without this, a no-op bus is used (default).
+    #[must_use]
+    pub fn with_bus(mut self, bus: Arc<AnalyticsBus>) -> Self {
+        self.bus = bus;
         self
     }
 
@@ -531,6 +544,7 @@ pub async fn run_workflow_script(
     // it; the embedded engine's interrupt handler then aborts the script thread,
     // so a runaway pure-JS loop is stopped instead of leaking the OS thread.
     cancel: Arc<std::sync::atomic::AtomicBool>,
+    bus: Arc<AnalyticsBus>,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
     let NestedConfig {
         allow_nested,
@@ -667,6 +681,7 @@ pub async fn run_workflow_script(
             let nested_fs = nested_fs.clone();
             let budget_total = token_budget_total;
             let baseline = turn_start_baseline;
+            let bus_call = bus.clone();
             async move {
                 let (key, prompt, opts_json) = match plan {
                     // `workflow()` resolution: read + strip the nested source; `""`
@@ -693,6 +708,11 @@ pub async fn run_workflow_script(
                 if let Some(total) = budget_total.filter(|&t| t > 0) {
                     let turn_spent = spent.load(Ordering::Relaxed).saturating_sub(baseline);
                     if turn_spent >= total {
+                        let mut md: LogEventMetadata = HashMap::new();
+                        md.insert("spent".to_string(), AnalyticsValue::Int(turn_spent as i64));
+                        md.insert("budget".to_string(), AnalyticsValue::Int(total as i64));
+                        md.insert("agentCount".to_string(), AnalyticsValue::Int(agent_count.load(Ordering::Relaxed) as i64));
+                        bus_call.log_event(telemetry::tengu::workflow::BUDGET_CAP_EXCEEDED, md).await;
                         return wf_throw(&workflow_budget_exceeded_message(turn_spent, total));
                     }
                 }
@@ -701,6 +721,9 @@ pub async fn run_workflow_script(
                 // `fetch_add` returns the prior count → spawns 0..999 proceed, the
                 // 1001st throws WorkflowAgentCapError.
                 if agent_count.fetch_add(1, Ordering::SeqCst) >= WORKFLOW_AGENT_CAP {
+                    let mut md: LogEventMetadata = HashMap::new();
+                    md.insert("agentCount".to_string(), AnalyticsValue::Int(WORKFLOW_AGENT_CAP as i64));
+                    bus_call.log_event(telemetry::tengu::workflow::AGENT_CAP_EXCEEDED, md).await;
                     return wf_throw(WORKFLOW_AGENT_CAP_MESSAGE);
                 }
                 // agentType validation (binary `F` @202933121): an explicit
@@ -754,11 +777,26 @@ pub async fn run_workflow_script(
         let _ = reply.send(results);
     }
 
-    outcome_rx.await.map_err(|_| {
+    let outcome = outcome_rx.await.map_err(|_| {
         workflow::WorkflowError::Engine(
             "workflow script thread terminated without an outcome".into(),
         )
-    })?
+    })??;
+
+    // Emit `tengu_workflow_phase_completed` for each Phase in the outcome's
+    // progress list (best-effort parity with the binary's per-phase-group event).
+    let mut phase_idx: i64 = 0;
+    for p in &outcome.progress {
+        if let workflow::Progress::Phase(title) = p {
+            let mut md: LogEventMetadata = HashMap::new();
+            md.insert("phase_index".to_string(), AnalyticsValue::Int(phase_idx));
+            md.insert("phase_title".to_string(), AnalyticsValue::String(title.clone()));
+            bus.log_event(telemetry::tengu::workflow::PHASE_COMPLETED, md).await;
+            phase_idx += 1;
+        }
+    }
+
+    Ok(outcome)
 }
 
 /// Resolve a `workflow()` reference (`{ name }` or `{ scriptPath }`) to a script
@@ -875,6 +913,7 @@ impl Task for LocalWorkflowHandler {
         // record `kill` flips. `false` until killed.
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_cancel = cancel.clone();
+        let worker_bus = self.bus.clone();
         let worker = Box::pin(async move {
             status_sink
                 .set_status(&worker_task_id, TaskStatus::Running)
@@ -892,6 +931,17 @@ impl Task for LocalWorkflowHandler {
                 .clone()
                 .or(provided_run_id)
                 .unwrap_or_else(|| format!("wf_{:016x}", rand::random::<u64>()));
+
+            // tengu_workflow_launched — emitted once per run, right after the run_id
+            // is minted (mirrors the binary's launch event).
+            {
+                let mut md: LogEventMetadata = HashMap::new();
+                md.insert("workflow_run_id".to_string(), AnalyticsValue::String(run_id.clone()));
+                md.insert("is_resume".to_string(), AnalyticsValue::Bool(resume_from_run_id.is_some()));
+                md.insert("has_args".to_string(), AnalyticsValue::Bool(workflow_args.is_some()));
+                worker_bus.log_event(telemetry::tengu::workflow::LAUNCHED, md).await;
+            }
+
             let journal_path = worker_spool_path
                 .parent()
                 .map(|d| d.join(format!("workflow-{run_id}.json")));
@@ -905,6 +955,13 @@ impl Task for LocalWorkflowHandler {
                             cache = loaded;
                         }
                     }
+                }
+                // tengu_workflow_journal_started_hit_respawn — resume loaded a
+                // non-empty journal: previously-started agents will be replayed.
+                if !cache.is_empty() {
+                    let mut md: LogEventMetadata = HashMap::new();
+                    md.insert("attempts".to_string(), AnalyticsValue::Int(cache.len() as i64));
+                    worker_bus.log_event(telemetry::tengu::workflow::JOURNAL_STARTED_HIT_RESPAWN, md).await;
                 }
             }
             let journal = Arc::new(std::sync::Mutex::new(cache));
@@ -925,6 +982,7 @@ impl Task for LocalWorkflowHandler {
                     let _ = prog_output.append(&prog_spool, &format!("{line}\n")).await;
                 }
             };
+            let run_start = std::time::Instant::now();
             let run = run_workflow_script(
                 &script,
                 DEFAULT_WORKFLOW_SUBAGENT,
@@ -942,8 +1000,24 @@ impl Task for LocalWorkflowHandler {
                     fs: Some(fs.clone()),
                 },
                 worker_cancel,
+                worker_bus.clone(),
             );
             let (outcome, ()) = tokio::join!(run, drain);
+            let elapsed_ms = run_start.elapsed().as_millis() as i64;
+
+            // tengu_workflow_completed — fires once per run after outcome is known.
+            {
+                let (status_str, agent_count_val) = match &outcome {
+                    Ok(_) => ("completed", 0i64),
+                    Err(_) => ("failed", 0i64),
+                };
+                let mut md: LogEventMetadata = HashMap::new();
+                md.insert("workflow_run_id".to_string(), AnalyticsValue::String(run_id.clone()));
+                md.insert("status".to_string(), AnalyticsValue::String(status_str.to_string()));
+                md.insert("agent_count".to_string(), AnalyticsValue::Int(agent_count_val));
+                md.insert("duration_ms".to_string(), AnalyticsValue::Int(elapsed_ms));
+                worker_bus.log_event(telemetry::tengu::workflow::COMPLETED, md).await;
+            }
 
             // Persist the journal (new + replayed results) under the run id so a
             // later resume can replay them. Serialise before any await so the std
@@ -1295,6 +1369,7 @@ mod tests {
             0,
             NestedConfig::default(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(AnalyticsBus::new()),
         )
         .await
         .expect("workflow runs to completion")
@@ -1318,6 +1393,7 @@ mod tests {
             0,
             NestedConfig::default(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(AnalyticsBus::new()),
         )
         .await;
         let err = result.expect_err("the 1001st agent() must throw the cap error");
@@ -1346,6 +1422,7 @@ mod tests {
             0,
             NestedConfig::default(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(AnalyticsBus::new()),
         )
         .await;
         let err = result.expect_err("unknown agentType must throw");
@@ -1392,6 +1469,7 @@ mod tests {
             500,
             NestedConfig::default(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(AnalyticsBus::new()),
         )
         .await
         .expect("runs");
@@ -1423,6 +1501,7 @@ mod tests {
             0,
             NestedConfig::default(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(AnalyticsBus::new()),
         )
         .await;
         let err = result.expect_err("over-budget agent() must throw");
@@ -1455,6 +1534,7 @@ mod tests {
             0,
             NestedConfig::default(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(AnalyticsBus::new()),
         )
         .await
         .expect("workflow runs to completion");
@@ -1606,6 +1686,7 @@ mod tests {
                 fs: None,
             },
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(AnalyticsBus::new()),
         )
         .await
         .unwrap();
@@ -1647,6 +1728,7 @@ mod tests {
                 fs: Some(fs),
             },
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(AnalyticsBus::new()),
         )
         .await
         .unwrap();
@@ -2113,5 +2195,177 @@ mod tests {
         assert_eq!(formula(4), 2, "4 cores → 2");
         assert_eq!(formula(5), 3, "5 cores → 3");
         assert_eq!(formula(18), 16, "18 cores → 16 (cap)");
+    }
+
+    // ==== Telemetry tests ====================================================
+
+    /// `tengu_workflow_phase_completed` does NOT fire when the script has no
+    /// `phase()` calls (bridge-level — verifies the post-run emit loop is a no-op
+    /// when `outcome.progress` has no Phase entries).
+    #[tokio::test]
+    async fn telemetry_no_phase_events_without_phase_calls() {
+        use telemetry::InMemorySink;
+        let sink = Arc::new(InMemorySink::default());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+
+        let spawner = Arc::new(EchoSpawner::default());
+        run_workflow_script(
+            "return 'ok';",
+            DEFAULT_WORKFLOW_SUBAGENT,
+            spawner,
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            None,
+            None,
+            None,
+            None,
+            0,
+            NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bus.clone(),
+        )
+        .await
+        .expect("runs");
+
+        let events = sink.events().await;
+        assert!(
+            !events.iter().any(|e| e.name == telemetry::tengu::workflow::PHASE_COMPLETED),
+            "no phase_completed for a script with no phase() calls; events: {events:?}"
+        );
+    }
+
+    /// `tengu_workflow_phase_completed` fires once per `phase()` call.
+    #[tokio::test]
+    async fn telemetry_phase_completed_fires_per_phase() {
+        use telemetry::InMemorySink;
+        let sink = Arc::new(InMemorySink::default());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+
+        let spawner = Arc::new(EchoSpawner::default());
+        run_workflow_script(
+            "phase('Step 1'); phase('Step 2'); return 'done';",
+            DEFAULT_WORKFLOW_SUBAGENT,
+            spawner,
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            None,
+            None,
+            None,
+            None,
+            0,
+            NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bus.clone(),
+        )
+        .await
+        .expect("runs");
+
+        let events: Vec<_> = sink.events().await;
+        let phase_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.name == telemetry::tengu::workflow::PHASE_COMPLETED)
+            .collect();
+        assert_eq!(phase_events.len(), 2, "one event per phase(); got {phase_events:?}");
+        assert!(
+            matches!(phase_events[0].metadata.get("phase_title"), Some(AnalyticsValue::String(s)) if s == "Step 1"),
+            "first phase title"
+        );
+        assert!(
+            matches!(phase_events[0].metadata.get("phase_index"), Some(AnalyticsValue::Int(0))),
+            "first phase index"
+        );
+        assert!(
+            matches!(phase_events[1].metadata.get("phase_title"), Some(AnalyticsValue::String(s)) if s == "Step 2"),
+            "second phase title"
+        );
+        assert!(
+            matches!(phase_events[1].metadata.get("phase_index"), Some(AnalyticsValue::Int(1))),
+            "second phase index"
+        );
+    }
+
+    /// `tengu_workflow_budget_cap_exceeded` fires when the budget ceiling is hit.
+    #[tokio::test]
+    async fn telemetry_budget_cap_fires() {
+        use std::sync::atomic::AtomicU64;
+        use telemetry::InMemorySink;
+        let sink = Arc::new(InMemorySink::default());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+
+        // total=100; pool already at 150 this turn (baseline 0) → 150 >= 100.
+        let pool = Arc::new(AtomicU64::new(150));
+        let spawner = Arc::new(EchoSpawner::default());
+        let _ = run_workflow_script(
+            "await agent('a'); return 'done';",
+            DEFAULT_WORKFLOW_SUBAGENT,
+            spawner,
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            None,
+            None,
+            Some(100),
+            Some(pool),
+            0,
+            NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bus.clone(),
+        )
+        .await; // expected Err
+
+        let events: Vec<_> = sink.events().await;
+        let cap_event = events
+            .iter()
+            .find(|e| e.name == telemetry::tengu::workflow::BUDGET_CAP_EXCEEDED);
+        assert!(cap_event.is_some(), "tengu_workflow_budget_cap_exceeded must fire; events: {events:?}");
+        let md = &cap_event.unwrap().metadata;
+        assert!(
+            matches!(md.get("spent"), Some(AnalyticsValue::Int(150))),
+            "spent field must be 150"
+        );
+        assert!(
+            matches!(md.get("budget"), Some(AnalyticsValue::Int(100))),
+            "budget field must be 100"
+        );
+    }
+
+    /// `tengu_workflow_agent_cap_exceeded` fires when the 1000-agent cap is hit.
+    #[tokio::test]
+    async fn telemetry_agent_cap_fires() {
+        use telemetry::InMemorySink;
+        let sink = Arc::new(InMemorySink::default());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+
+        let spawner = Arc::new(EchoSpawner::default());
+        let _ = run_workflow_script(
+            "for (let i = 0; i < 1001; i++) { await agent('x'); } return 'done';",
+            DEFAULT_WORKFLOW_SUBAGENT,
+            spawner,
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            None,
+            None,
+            None,
+            None,
+            0,
+            NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bus.clone(),
+        )
+        .await; // expected Err
+
+        let events: Vec<_> = sink.events().await;
+        let cap_event = events
+            .iter()
+            .find(|e| e.name == telemetry::tengu::workflow::AGENT_CAP_EXCEEDED);
+        assert!(cap_event.is_some(), "tengu_workflow_agent_cap_exceeded must fire; events: {events:?}");
+        let md = &cap_event.unwrap().metadata;
+        assert!(
+            matches!(md.get("agentCount"), Some(AnalyticsValue::Int(1000))),
+            "agentCount field must be 1000"
+        );
     }
 }

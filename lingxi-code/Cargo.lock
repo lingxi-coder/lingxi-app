@@ -4592,6 +4592,7 @@ dependencies = [
  "rand 0.9.4",
  "serde",
  "serde_json",
+ "telemetry",
  "tempfile",
  "test-harness",
  "thiserror 2.0.18",

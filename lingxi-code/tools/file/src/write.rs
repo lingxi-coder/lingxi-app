@@ -784,7 +784,9 @@ mod tests {
             .await
             .unwrap_err();
         match err {
-            ToolError::InvalidInput(m) => assert_eq!(m, crate::FILE_UNEXPECTEDLY_MODIFIED_ERROR),
+            // Fix #3: stale-changed-content now returns Vbn (the richer linter
+            // message) instead of FILE_UNEXPECTEDLY_MODIFIED_ERROR.
+            ToolError::InvalidInput(m) => assert_eq!(m, crate::FILE_CONTENT_CHANGED_LINTER_MESSAGE),
             other => panic!("expected InvalidInput, got {other:?}"),
         }
         // Write refused → file left as the external content.

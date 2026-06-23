@@ -735,12 +735,29 @@ fn claude_config_home_dir() -> PathBuf {
 // The former `CYBER_RISK_MITIGATION_REMINDER` const, `MITIGATION_EXEMPT_MODELS`,
 // and `should_include_file_read_mitigation` were deleted accordingly.
 
-/// Model-facing stub for the Read dedup (`file_unchanged`) case — byte-locked to
-/// claude-code (`FileReadTool/prompt.ts:7-8`). The dedup decision itself (compare
-/// the prior read's mtime + range from the read-file-state registry and
-/// short-circuit) is a later batch; this constant locks the string the model
-/// will see when that lands.
+/// Model-facing stub for the Read dedup (`file_unchanged`) long form — byte-locked
+/// to claude-code `tld` (`FileReadTool/prompt.ts:7`, binary offset ~196574xxx).
+/// Used when the model's prior Read result already contains the current content
+/// and the file hasn't changed on disk. The dedup gate (`Jbn`) checks for
+/// EITHER this long form (`tld`) or the short form (`jbi` = `FILE_UNCHANGED_SHORT`).
 pub const FILE_UNCHANGED_STUB: &str = "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading.";
+
+/// Short-form Read dedup message — byte-locked to claude-code `jbi`
+/// (binary offset ~196575xxx, returned by `Ybi(){return jbi}`).
+/// The dedup detector `Jbn(e)` checks `e.startsWith(tld)||e.startsWith(jbi)`,
+/// so the model must emit `jbi` when this short form is selected. The em-dash is
+/// U+2014, matching the binary literal exactly.
+pub const FILE_UNCHANGED_SHORT: &str =
+    "Wasted call \u{2014} file unchanged since your last Read. Refer to that earlier tool_result instead.";
+
+/// `Jbn(e)` — byte-locked dedup detector: returns `true` when `e` starts with
+/// either the long form ([`FILE_UNCHANGED_STUB`] / `tld`) or the short form
+/// ([`FILE_UNCHANGED_SHORT`] / `jbi`). Used to detect a dedup response in
+/// tool-result filtering / context compaction that must not re-expand.
+#[must_use]
+pub fn is_dedup_result(s: &str) -> bool {
+    s.starts_with(FILE_UNCHANGED_STUB) || s.starts_with(FILE_UNCHANGED_SHORT)
+}
 
 /// Model-facing warning when a read targets an existing but empty file —
 /// byte-locked to claude-code (`FileReadTool.ts:705-706`).
@@ -1954,6 +1971,54 @@ mod tests {
     #[test]
     fn tool_name_is_read() {
         assert_eq!(TOOL_NAME, "Read");
+    }
+
+    // ── Fix #2: short dedup string (jbi) ──────────────────────────────────────
+
+    #[test]
+    fn file_unchanged_stub_is_byte_locked() {
+        // `tld` — long dedup form (FileReadTool/prompt.ts:7, binary ~196574xxx).
+        // The em-dash is U+2014.
+        assert_eq!(
+            FILE_UNCHANGED_STUB,
+            "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current \u{2014} refer to that instead of re-reading."
+        );
+    }
+
+    #[test]
+    fn file_unchanged_short_is_byte_locked() {
+        // `jbi` — short dedup form (binary `Ybi(){return jbi}`, ~196575xxx).
+        // The em-dash is U+2014 (Unicode character, not ASCII hyphen).
+        assert_eq!(
+            FILE_UNCHANGED_SHORT,
+            "Wasted call \u{2014} file unchanged since your last Read. Refer to that earlier tool_result instead."
+        );
+        // Confirm the em-dash is present (guards against ASCII hyphen-dash).
+        assert!(FILE_UNCHANGED_SHORT.contains('\u{2014}'));
+        // Confirm it starts with "Wasted call" (matches `Ybi()` return value).
+        assert!(FILE_UNCHANGED_SHORT.starts_with("Wasted call"));
+    }
+
+    #[test]
+    fn is_dedup_result_detects_both_forms() {
+        // `Jbn(e)` — checks startsWith(tld) || startsWith(jbi). The function
+        // uses the FULL constant as the prefix — a string must start with the
+        // full `FILE_UNCHANGED_STUB` or `FILE_UNCHANGED_SHORT` text to match.
+        assert!(is_dedup_result(FILE_UNCHANGED_STUB));
+        assert!(is_dedup_result(FILE_UNCHANGED_SHORT));
+        // A string that starts with the full long-form constant (e.g. with
+        // trailing whitespace added by some wrapper).
+        let long_with_suffix = format!("{FILE_UNCHANGED_STUB} extra");
+        assert!(is_dedup_result(&long_with_suffix));
+        // A string that starts with the full short-form constant.
+        let short_with_suffix = format!("{FILE_UNCHANGED_SHORT} extra");
+        assert!(is_dedup_result(&short_with_suffix));
+        // Non-dedup strings do NOT match.
+        assert!(!is_dedup_result(""));
+        assert!(!is_dedup_result("File unchanged since")); // truncated prefix only
+        assert!(!is_dedup_result("File has been modified since read"));
+        assert!(!is_dedup_result("File does not exist."));
+        assert!(!is_dedup_result("Wasted call")); // too short to match jbi
     }
 
     #[test]

@@ -37,6 +37,7 @@ pub mod glob;
 pub mod grep;
 #[cfg(feature = "image-read")]
 pub mod image_read;
+pub mod multi_edit;
 pub mod notebook_edit;
 pub mod notebook_read;
 #[cfg(feature = "pdf-read")]
@@ -51,6 +52,7 @@ pub mod write;
 pub use edit::FileEditTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
+pub use multi_edit::MultiEditTool;
 pub use notebook_edit::NotebookEditTool;
 pub use read::FileReadTool;
 pub use write::FileWriteTool;
@@ -96,6 +98,24 @@ pub const FILE_UNEXPECTEDLY_MODIFIED_ERROR: &str =
 /// before writing to it."`.
 pub const FILE_NOT_READ_ERROR: &str =
     "File has not been read yet. Read it first before writing to it.";
+
+/// Richer stale-file message for the call-time re-check — byte-locked to
+/// claude-code `Vbn` (binary offset confirmed via grep: "This commonly happens
+/// when a linter or formatter run via Bash rewrites the file"). This is the
+/// message from `m5p()` (the call-time stale detector in `FileEditTool.ts`),
+/// distinct from the validate-phase [`FILE_UNEXPECTEDLY_MODIFIED_ERROR`].
+/// `m5p` throws a `FileStateError(Vbn)` on the stale path when the edit can
+/// potentially apply (`hnl(lTo(...)) === true`) but the file was modified; the
+/// error propagates to `validateInput`'s caller. LingXi uses a unified `call`
+/// path (no separate validate vs call phase), so `Vbn` belongs at the same
+/// `stale_read` site as `FILE_UNEXPECTEDLY_MODIFIED_ERROR`, distinguishable by
+/// whether a partial-apply is feasible (binary: `hnl(lTo(...))` true). For
+/// simplicity, LingXi emits `Vbn` as the primary staleness message whenever
+/// the `check_read_before_write` guard detects a changed mtime with different
+/// content, bringing the model-facing text into parity with the binary's most
+/// common stale-path.
+pub const FILE_CONTENT_CHANGED_LINTER_MESSAGE: &str =
+    "File content has changed since it was last read. This commonly happens when a linter or formatter run via Bash rewrites the file. Call Read on this file to refresh, then retry the edit.";
 
 /// Read-state staleness guard shared by Edit / Write / NotebookEdit (Batch F).
 ///
@@ -158,20 +178,31 @@ pub fn check_read_before_write(
         if current_full_content == entry.content {
             return Ok(());
         }
+        // Use `Vbn` (the richer, linter-context message) as the primary
+        // stale-content error — byte-locked to claude-code's `m5p()` /
+        // `FileStateError(Vbn)` call-time throw path. This is the message
+        // most often seen by the model when a formatter/linter rewrites the
+        // file between the model's Read and its Edit.
         return Err(ToolError::InvalidInput(
-            FILE_UNEXPECTEDLY_MODIFIED_ERROR.into(),
+            FILE_CONTENT_CHANGED_LINTER_MESSAGE.into(),
         ));
     }
 
     Ok(())
 }
 
-/// Register all six file/search tools against `reg`.
+/// Register all seven file/search tools against `reg`.
+///
+/// The binary's built-in-tool-names array (offset 188243808) includes
+/// `MultiEdit` after `Edit`: `Read,Write,Edit,MultiEdit,Bash,Glob,Grep,…`.
+/// `MultiEditTool` is name-routed into Edit dispatch (claude-code parity) and
+/// registered here alongside the other built-ins.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
     use std::sync::Arc;
     reg.register_builtin(Arc::new(FileReadTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(FileWriteTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(FileEditTool::new(ctx.clone())));
+    reg.register_builtin(Arc::new(MultiEditTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(NotebookEditTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(GlobTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(GrepTool::new(ctx)));
@@ -205,6 +236,48 @@ mod staleness_guard_tests {
             FILE_UNEXPECTEDLY_MODIFIED_ERROR,
             "File has been modified since read, either by the user or by a linter. Read it again before attempting to write it."
         );
+    }
+
+    // ── Fix #3: Vbn stale-file message (linter/formatter context) ─────────────
+
+    #[test]
+    fn file_content_changed_linter_message_is_byte_locked() {
+        // Binary `Vbn` literal (confirmed via grep -cF "This commonly happens when
+        // a linter or formatter" = 2 hits in the oracle binary). Byte-exact to
+        // claude-code's `Vbn` constant from the call-time stale-check `m5p()`.
+        assert_eq!(
+            FILE_CONTENT_CHANGED_LINTER_MESSAGE,
+            "File content has changed since it was last read. This commonly happens when a linter or formatter run via Bash rewrites the file. Call Read on this file to refresh, then retry the edit."
+        );
+        // Confirm the linter/formatter context text is present.
+        assert!(FILE_CONTENT_CHANGED_LINTER_MESSAGE.contains("linter or formatter"));
+        assert!(FILE_CONTENT_CHANGED_LINTER_MESSAGE.contains("Call Read on this file"));
+    }
+
+    #[test]
+    fn vbn_variant_emitted_on_stale_changed_content() {
+        // When mtime advanced AND content differs, the staleness guard emits
+        // FILE_CONTENT_CHANGED_LINTER_MESSAGE (Vbn), NOT FILE_UNEXPECTEDLY_MODIFIED_ERROR.
+        let map = new_read_file_state_map();
+        let p = PathBuf::from("/x");
+        set(
+            &map,
+            p.clone(),
+            ReadFileEntry {
+                content: "old content".into(),
+                mtime_ms: 100,
+                offset: None,
+                limit: None,
+                from_read: true,
+            },
+        );
+        let r = check_read_before_write(&map, &p, 200, "new content");
+        match r.unwrap_err() {
+            tool_api::tool_trait::ToolError::InvalidInput(m) => {
+                assert_eq!(m, FILE_CONTENT_CHANGED_LINTER_MESSAGE);
+            }
+            other => panic!("expected InvalidInput with Vbn, got {other:?}"),
+        }
     }
 
     /// Assert the guard returned an `InvalidInput` error carrying exactly
@@ -309,9 +382,11 @@ mod staleness_guard_tests {
                 from_read: true,
             },
         );
+        // Now returns the richer Vbn message (linter/formatter context) — parity
+        // with the binary's `m5p()` / `FileStateError(Vbn)` call-time path.
         assert_err_msg(
             check_read_before_write(&map, &p, 200, "new"),
-            FILE_UNEXPECTEDLY_MODIFIED_ERROR,
+            FILE_CONTENT_CHANGED_LINTER_MESSAGE,
         );
     }
 }

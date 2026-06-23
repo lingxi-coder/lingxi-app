@@ -86,10 +86,11 @@ fn build_input_schema() -> Value {
         "properties": {
             "to": {
                 "type": "string",
-                "description": "Recipient: teammate name, or \"*\" for broadcast to all teammates"
+                "description": "Recipient: teammate name"
             },
             "summary": {
                 "type": "string",
+                "maxLength": 200,
                 "description": "A 5-10 word summary shown as a preview in the UI (required when message is a string)"
             },
             "message": {
@@ -598,6 +599,13 @@ impl Tool for SendMessageTool {
         if to.trim().is_empty() {
             return Err(ValidationError("to must not be empty".into()));
         }
+        // Binary v2.1.186: broadcast is unconditionally rejected for ALL message
+        // types, not just structured — the check comes before string/object branch.
+        if to == "*" {
+            return Err(ValidationError(
+                "broadcast (to: \"*\") is no longer supported \u{2014} send a message per recipient".into(),
+            ));
+        }
         if to.contains('@') {
             return Err(ValidationError(
                 "to must be a bare teammate name or \"*\" — there is only one team per session"
@@ -605,8 +613,23 @@ impl Tool for SendMessageTool {
             ));
         }
 
-        // Plain-string message: a non-empty `summary` is required.
-        if let Some(Value::String(_)) = input.get("message") {
+        // Plain-string message: guard against protocol frames embedded in text,
+        // then require a non-empty `summary`.
+        if let Some(Value::String(msg_str)) = input.get("message") {
+            // Plaintext protocol-frame guard: a JSON string that parses to an
+            // object with a `type` field that looks like a protocol message type
+            // must not be sent as a plain-string message.
+            if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(msg_str.trim()) {
+                let mtype = obj.get("type").and_then(Value::as_str).unwrap_or("");
+                if matches!(
+                    mtype,
+                    "shutdown_request" | "shutdown_response" | "plan_approval_response"
+                ) {
+                    return Err(ValidationError(
+                        "message text must not be a teammate protocol frame — use the structured message object form instead".into(),
+                    ));
+                }
+            }
             let summary = input.get("summary").and_then(Value::as_str);
             if summary.is_none_or(|s| s.trim().is_empty()) {
                 return Err(ValidationError(
@@ -617,11 +640,15 @@ impl Tool for SendMessageTool {
         }
 
         // Structured message from here on.
-        if to == "*" {
-            return Err(ValidationError(
-                "structured messages cannot be broadcast (to: \"*\")".into(),
-            ));
-        }
+        // Agent-teams enablement gate: structured team-protocol messages require
+        // agent teams to be enabled (binary: `if(!qa())return{...}`).
+        // PARITY-GAP: the TS `qa()` = `isAgentSwarmsEnabled()` is a runtime
+        // toggle in the TS process. In Rust there is no equivalent runtime
+        // toggle; the swarm surface is always live when the mailbox seam is
+        // wired at construction. `validate_input` does not have `&self` mutable
+        // access to the seam, so we pass the gate here and let `call()` surface
+        // a delivery error if the router is not wired. The gate still sits at the
+        // correct structural position in the validation flow for future use.
 
         if let Some(Value::Object(obj)) = input.get("message") {
             let mtype = obj.get("type").and_then(Value::as_str).unwrap_or("");
@@ -635,7 +662,14 @@ impl Tool for SendMessageTool {
                     .get("approve")
                     .and_then(Self::semantic_bool)
                     .unwrap_or(false);
+                // Reason-on-approval guard: `reason` is only delivered on
+                // rejections; providing it on an approval is invalid.
                 let reason = obj.get("reason").and_then(Value::as_str);
+                if approve && reason.is_some() {
+                    return Err(ValidationError(
+                        "reason is only delivered on rejections (approve: false) — remove it from an approval response".into(),
+                    ));
+                }
                 if !approve && reason.is_none_or(|r| r.trim().is_empty()) {
                     return Err(ValidationError(
                         "reason is required when rejecting a shutdown request".into(),
@@ -1064,16 +1098,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_structured_cannot_broadcast() {
+    async fn validate_broadcast_rejected_unconditionally() {
         let tool = SendMessageTool::new(shell_test_ctx(dummy_out()));
-        let err = tool
+        // Binary v2.1.186: `to: "*"` is rejected before the string/structured
+        // branch — the new top-level check fires for both plain and structured.
+        let err_structured = tool
             .validate_input(
                 &json!({ "to": "*", "message": { "type": "shutdown_request" } }),
                 &fresh_ctx(),
             )
             .await
             .expect_err("structured broadcast must reject");
-        assert_eq!(err.0, "structured messages cannot be broadcast (to: \"*\")");
+        assert!(err_structured.0.contains("no longer supported"), "structured: {}", err_structured.0);
+
+        let err_string = tool
+            .validate_input(
+                &json!({ "to": "*", "summary": "all hands", "message": "standup in 5" }),
+                &fresh_ctx(),
+            )
+            .await
+            .expect_err("string broadcast must also reject");
+        assert!(err_string.0.contains("no longer supported"), "string: {}", err_string.0);
     }
 
     #[tokio::test]

@@ -421,7 +421,7 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
         "properties": {
             "skill": {
                 "type": "string",
-                "description": "The skill name. E.g., \"commit\", \"review-pr\", or \"pdf\""
+                "description": "The name of a skill from the available-skills list. Do not guess names."
             },
             "args": {
                 "type": "string",

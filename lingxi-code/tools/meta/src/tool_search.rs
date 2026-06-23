@@ -126,11 +126,10 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
         "properties": {
             "query": {
                 "type": "string",
-                "minLength": 1,
                 "description": "Query to find deferred tools. Use \"select:<tool_name>\" for direct selection, or keywords to search."
             },
             "max_results": {
-                "type": "integer",
+                "type": "number",
                 "minimum": 1,
                 "default": 5,
                 "description": "Maximum number of results to return (default: 5)"
@@ -968,9 +967,10 @@ mod tests {
             schema["properties"]["max_results"]["default"],
             json!(5)
         );
+        // Binary uses A.number() → JSON schema type "number" (not "integer").
         assert_eq!(
             schema["properties"]["max_results"]["type"],
-            json!("integer")
+            json!("number")
         );
         assert_eq!(
             schema["properties"]["max_results"]["minimum"],

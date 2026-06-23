@@ -387,7 +387,6 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
                         },
                         "header": {
                             "type": "string",
-                            "maxLength": MAX_ASK_HEADER_LEN,
                             "description": "Very short label displayed as a chip/tag (max 12 chars). Examples: \"Auth method\", \"Library\", \"Approach\"."
                         },
                         "options": {
@@ -941,7 +940,9 @@ mod tests {
         let item = &s["properties"]["questions"]["items"];
         assert_eq!(item["properties"]["options"]["minItems"], json!(2));
         assert_eq!(item["properties"]["options"]["maxItems"], json!(4));
-        assert_eq!(item["properties"]["header"]["maxLength"], json!(12));
+        // Binary does NOT emit maxLength on header — the 12-char limit is
+        // enforced at runtime in parse_question, not via JSON schema constraint.
+        assert!(item["properties"]["header"].get("maxLength").is_none());
         assert_eq!(item["properties"]["multiSelect"]["default"], json!(false));
         assert_eq!(item["required"], json!(["question", "header", "options"]));
     }

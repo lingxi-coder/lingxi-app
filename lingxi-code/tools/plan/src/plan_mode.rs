@@ -129,7 +129,7 @@ const EXIT_PLAN_APPROVED_PREFIX: &str =
 /// Locked rejection string for calling `ExitPlanMode` outside plan mode —
 /// byte-faithful to `validateInput` (`ExitPlanModeV2Tool.ts:212-216`).
 const EXIT_PLAN_MODE_NOT_IN_PLAN_MODE_MSG: &str =
-    "You are not in plan mode. This tool is only for exiting plan mode after writing a plan. If your plan was already approved, continue with implementation.";
+    "You are not in plan mode. To enter plan mode, call the EnterPlanMode tool first. If your plan was already approved, continue with implementation.";
 
 /// Canonical tool name in the registry for `EnterPlanModeTool`.
 pub const ENTER_TOOL_NAME: &str = "EnterPlanMode";
@@ -723,7 +723,7 @@ mod tests {
         );
         assert_eq!(
             format!("{err}"),
-            "invalid input: You are not in plan mode. This tool is only for exiting plan mode after writing a plan. If your plan was already approved, continue with implementation."
+            "invalid input: You are not in plan mode. To enter plan mode, call the EnterPlanMode tool first. If your plan was already approved, continue with implementation."
         );
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&EXIT_PLAN_MODE_FAILED.to_string()));

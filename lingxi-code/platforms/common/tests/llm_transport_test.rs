@@ -1,7 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use platform_common::{LlmTransportBridge, ReqwestHttp};
+use http_client::ReqwestHttp;
+use llm_client::LlmTransportBridge;
 use protocol::{HttpRequest, HttpResponse, SseEvent};
 use traits::http::{
     RawByteStream, RawByteStreamWithMeta, SseStream, WebSocketMessageStreamWithMeta,

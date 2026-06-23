@@ -35,7 +35,7 @@ use llm_client::{
     LlmRequest, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
     StaticCredentialProvider, SystemBlock,
 };
-use platform_common::llm_transport::LlmTransportBridge;
+use llm_client::LlmTransportBridge;
 use protocol::{HttpRequest, HttpResponse};
 use std::sync::Arc;
 use traits::http::{RawByteStream, SseStream};

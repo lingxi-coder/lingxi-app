@@ -29,6 +29,7 @@ pub mod route;
 pub mod sigv4;
 pub mod sse;
 pub mod transport;
+pub mod transport_bridge;
 pub mod types;
 
 pub use anthropic::normalize_anthropic_usage;
@@ -77,4 +78,5 @@ pub use sse::SseFrameSplitter;
 pub use transport::{
     BoxFuture, FrameStream, ResponsesWebSocketTransportSession, StreamingResponse, Transport,
 };
+pub use transport_bridge::{from_http, LlmTransportBridge};
 pub use types::{CostEstimate, PricingModelRef, ProviderId, ServerToolUsage, TokenUsage, Usage};

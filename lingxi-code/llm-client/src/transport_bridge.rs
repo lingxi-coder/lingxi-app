@@ -4,9 +4,10 @@
 //! (`ReqwestHttp` on desktop, native transports on mobile).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
-use llm_client::{
+use crate::{
     BoxFuture, FrameStream, LlmError, ProviderRequest, ProviderResponse, ProviderStreamTransport,
     RawStreamFrame, StreamFraming, StreamingResponse,
 };
@@ -237,7 +238,7 @@ async fn open_responses_websocket_stream<T: HttpTransport>(
     }
 }
 
-impl<T: HttpTransport> llm_client::Transport for LlmTransportBridge<T> {
+impl<T: HttpTransport> crate::Transport for LlmTransportBridge<T> {
     fn execute<'a>(
         &'a self,
         request: &'a ProviderRequest,
@@ -271,7 +272,7 @@ impl<T: HttpTransport> llm_client::Transport for LlmTransportBridge<T> {
     fn open_responses_websocket_session<'a>(
         &'a self,
         request: &'a ProviderRequest,
-    ) -> BoxFuture<'a, Result<Box<dyn llm_client::ResponsesWebSocketTransportSession>, LlmError>>
+    ) -> BoxFuture<'a, Result<Box<dyn crate::ResponsesWebSocketTransportSession>, LlmError>>
     {
         Box::pin(async move {
             let ws_request = to_responses_websocket_handshake_request(request)?;
@@ -283,7 +284,7 @@ impl<T: HttpTransport> llm_client::Transport for LlmTransportBridge<T> {
                 Ok(connection) => Ok(Box::new(BridgeResponsesWebSocketSession {
                     connection: connection.connection,
                 })
-                    as Box<dyn llm_client::ResponsesWebSocketTransportSession>),
+                    as Box<dyn crate::ResponsesWebSocketTransportSession>),
                 Err(error) => Err(map_http_error(&error)),
             }
         })
@@ -294,7 +295,7 @@ struct BridgeResponsesWebSocketSession {
     connection: Box<dyn WebSocketConnection>,
 }
 
-impl llm_client::ResponsesWebSocketTransportSession for BridgeResponsesWebSocketSession {
+impl crate::ResponsesWebSocketTransportSession for BridgeResponsesWebSocketSession {
     fn send<'a>(
         &'a mut self,
         request: &'a ProviderRequest,
@@ -392,4 +393,10 @@ impl FrameStream for BodyFrame {
         let body = self.body.take();
         Box::pin(async move { Ok(body.map(RawStreamFrame::new)) })
     }
+}
+
+/// Wrap any host [`traits::HttpTransport`] as an [`crate::Transport`].
+#[must_use]
+pub fn from_http<T: traits::HttpTransport + 'static>(http: T) -> Arc<dyn crate::Transport> {
+    Arc::new(LlmTransportBridge::new(http))
 }

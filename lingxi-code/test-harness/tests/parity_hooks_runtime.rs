@@ -204,6 +204,7 @@ async fn http_arm_pretooluse_with_mock_transport_succeeds() {
             url: "http://mock-server.test/hook".into(),
             method: "POST".into(),
             headers: HashMap::new(),
+            allowed_env_vars: Vec::new(),
             timeout: std::time::Duration::from_secs(5),
         },
         source: HookSource::User,
@@ -260,6 +261,7 @@ async fn http_arm_ssrf_guard_blocks_loopback_url() {
             url: "http://127.0.0.1:8080/hook".into(),
             method: "POST".into(),
             headers: HashMap::new(),
+            allowed_env_vars: Vec::new(),
             timeout: std::time::Duration::from_secs(5),
         },
         source: HookSource::User,
@@ -354,6 +356,7 @@ async fn agent_arm_without_spawner_returns_error() {
         executor: HookExecutor::Agent {
             agent_type: "general-purpose".into(),
             prompt: "check the user's action".into(),
+            model: None,
         },
         source: HookSource::User,
         blocking: true,

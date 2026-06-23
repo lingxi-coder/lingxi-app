@@ -70,6 +70,7 @@ impl AgentExecutor {
         payload_json: &str,
         expected_event: &'static str,
         inherit: Option<SubagentInheritance>,
+        model: Option<&str>,
     ) -> AgentExecutionOutcome {
         let Some(spawner) = self.spawner.clone() else {
             return AgentExecutionOutcome {
@@ -103,10 +104,11 @@ impl AgentExecutor {
             subagent_type: agent_type.to_string(),
             prompt: format!("{prompt_template}\n\n{payload_json}"),
             context_paths: Vec::new(),
-            // AgentTool spawn-surface parity params — the hook executor path
-            // sets no model/teammate/isolation/cwd override.
+            // AgentTool spawn-surface parity params — the hook executor sets no
+            // teammate/isolation/cwd override, but threads the agent hook's
+            // optional `model` (claude-code `schemas/hooks.ts` agent `model`).
             description: None,
-            model: None,
+            model: model.map(str::to_string),
             // Hook-driven agents run synchronously inside the hook timeout.
             run_in_background: false,
             name: None,
@@ -245,6 +247,7 @@ mod tests {
             executor: DefHookExecutor::Agent {
                 agent_type: "general-purpose".into(),
                 prompt: "vet this".into(),
+                model: None,
             },
             source: HookSource::User,
             blocking: true,
@@ -306,6 +309,7 @@ mod tests {
                 "{}",
                 "PreToolUse",
                 Some(dummy_inherit()),
+                None,
             )
             .await;
 
@@ -328,6 +332,7 @@ mod tests {
                 "{}",
                 "PreToolUse",
                 Some(dummy_inherit()),
+                None,
             )
             .await;
 
@@ -354,6 +359,7 @@ mod tests {
                 "{}",
                 "PreToolUse",
                 Some(dummy_inherit()),
+                None,
             )
             .await;
 

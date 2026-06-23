@@ -910,7 +910,11 @@ impl Dispatcher {
                 }
                 result
             }
-            HookExecutor::Agent { agent_type, prompt } => {
+            HookExecutor::Agent {
+                agent_type,
+                prompt,
+                model,
+            } => {
                 let Some((expected_event, body)) = build_envelope_body(event, ctx) else {
                     return HookResult {
                         outcome: HookOutcome::Error,
@@ -938,6 +942,7 @@ impl Dispatcher {
                         &body,
                         expected_event,
                         ctx.inherit.clone(),
+                        model.as_deref(),
                     )
                     .await;
                 emit_agent_signal(hook, &outcome.signal, effective_timeout);
@@ -4772,6 +4777,7 @@ mod http_agent_dispatch_tests {
                 url: url.into(),
                 method: "POST".into(),
                 headers: HashMap::new(),
+                allowed_env_vars: Vec::new(),
                 timeout: Duration::from_secs(5),
             },
             source: HookSource::Project,
@@ -4898,6 +4904,7 @@ mod http_agent_dispatch_tests {
             executor: DefHookExecutor::Agent {
                 agent_type: "general-purpose".into(),
                 prompt: "vet this".into(),
+                model: None,
             },
             source: HookSource::Project,
             blocking: true,

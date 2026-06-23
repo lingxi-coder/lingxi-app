@@ -41,20 +41,25 @@
 //! and the `statusMessage` spinner display — are executor / TUI work and are
 //! NOT wired here.
 //!
-//! ### `http` / `agent` field-level deferrals
+//! ### `http` / `agent` field-level mapping
 //!
 //! The claude-code `http` schema (`schemas/hooks.ts:97-126`) carries `headers`
-//! env-var interpolation gated by an `allowedEnvVars` allowlist; the Rust
-//! [`HookExecutor::Http`] variant has no `allowed_env_vars` field, so headers
-//! are carried verbatim and `allowedEnvVars` is dropped (interpolation deferred
-//! — would need a frozen-side field). The `agent` schema
-//! (`schemas/hooks.ts:128-163`) carries NO `agent_type` (claude-code's agent
-//! hook runs an inline verifier `query()`, not a named subagent); the Rust
-//! [`HookExecutor::Agent`] variant requires a non-optional `agent_type`, so it
-//! is filled with the crate's canonical default `"general-purpose"` (matching
-//! the agent-hook fixtures in `parity_hooks_runtime.rs` and the default in
-//! `agent_executor.rs`). The `model` field both schemas allow is dropped: no
-//! Rust variant carries it.
+//! env-var interpolation gated by an `allowedEnvVars` allowlist; both are now
+//! parsed onto [`HookExecutor::Http`] (`headers` + `allowed_env_vars`) and the
+//! executor interpolates `$VAR`/`${VAR}` references in header VALUES gated on the
+//! allowlist (the `cHm` port — names absent from the list resolve to `""`). The
+//! `agent` schema (`schemas/hooks.ts:128-163`) carries NO `agent_type`
+//! (claude-code's agent hook runs an inline verifier `query()`, not a named
+//! subagent); the Rust [`HookExecutor::Agent`] variant requires a non-optional
+//! `agent_type`, so it is filled with the crate's canonical default
+//! `"general-purpose"` (matching the agent-hook fixtures in
+//! `parity_hooks_runtime.rs` and the default in `agent_executor.rs`). The `model`
+//! override both schemas allow is now carried: `prompt` onto
+//! [`HookExecutor::Prompt::model`] and `agent` onto [`HookExecutor::Agent::model`]
+//! (threaded to the spawner). The remaining `agent`-hook residual is the
+//! inline-verifier-vs-named-subagent semantic (claude-code runs an in-process
+//! `query()`; LingXi spawns a named subagent), which is an architectural
+//! difference, not a dropped field.
 
 use crate::definition::{HookCondition, HookDefinition, HookExecutor, HookSource};
 use crate::events::HookEventType;
@@ -220,11 +225,16 @@ struct HookEntry {
     /// `http` hook endpoint URL (`schemas/hooks.ts:99`). Always sent via POST.
     #[serde(default)]
     url: Option<String>,
-    /// `http` hook request headers (`schemas/hooks.ts:106-111`). Carried
-    /// verbatim; `allowedEnvVars` env-var interpolation is deferred (no Rust
-    /// field for the allowlist).
+    /// `http` hook request headers (`schemas/hooks.ts:106-111`). Values may
+    /// reference env vars via `$VAR`/`${VAR}`, interpolated by the executor
+    /// gated on [`Self::allowed_env_vars`] (claude-code `cHm`).
     #[serde(default)]
     headers: Option<HashMap<String, String>>,
+    /// `http` hook `allowedEnvVars` (`schemas/hooks.ts`): env-var names header
+    /// values may interpolate. Names absent here resolve to `""`. Required for
+    /// any interpolation to occur.
+    #[serde(default, rename = "allowedEnvVars")]
+    allowed_env_vars: Option<Vec<String>>,
     /// `agent` / `prompt` hook prompt text (`schemas/hooks.ts:138-142` /
     /// `67-73`). For an `agent` hook it is the verifier prompt; for a `prompt`
     /// hook it is the inline-LLM evaluation prompt (with `$ARGUMENTS`).
@@ -396,6 +406,7 @@ fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)> {
                 // (`utils/hooks/execHttpHook.ts`; `schemas/hooks.ts:99`).
                 method: "POST".to_string(),
                 headers: entry.headers.clone().unwrap_or_default(),
+                allowed_env_vars: entry.allowed_env_vars.clone().unwrap_or_default(),
                 // A `timeout: 0` (or omitted) defers to the executor's HTTP
                 // default; the parsed seconds value is the per-hook override.
                 timeout: entry
@@ -409,6 +420,9 @@ fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)> {
             let executor = HookExecutor::Agent {
                 agent_type: DEFAULT_AGENT_TYPE.to_string(),
                 prompt,
+                // claude-code's agent hook carries an optional `model` override
+                // for the inline verifier; thread it to the spawner.
+                model: entry.model.clone(),
             };
             // The hook name mirrors the command-hook convention of naming the
             // hook after its primary user-supplied field — here the agent type.
@@ -721,6 +735,7 @@ mod tests {
             url,
             method,
             headers,
+            allowed_env_vars: _,
             timeout,
         } = &hooks[0].executor
         else {
@@ -740,6 +755,44 @@ mod tests {
             hooks[0].if_condition.as_ref().map(|c| c.pattern.as_str()),
             Some("Write|Edit"),
         );
+    }
+
+    #[test]
+    fn http_hook_parses_allowed_env_vars() {
+        let raw = r#"{
+          "hooks": {
+            "PreToolUse": [{ "hooks": [
+              { "type": "http",
+                "url": "https://h.test/post",
+                "headers": { "Authorization": "Bearer $MY_TOKEN" },
+                "allowedEnvVars": ["MY_TOKEN", "OTHER"] }
+            ]}]
+          }
+        }"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::Project).unwrap();
+        let HookExecutor::Http {
+            allowed_env_vars, ..
+        } = &hooks[0].executor
+        else {
+            panic!("expected Http executor");
+        };
+        assert_eq!(allowed_env_vars, &vec!["MY_TOKEN".to_string(), "OTHER".to_string()]);
+    }
+
+    #[test]
+    fn agent_hook_parses_model_override() {
+        let raw = r#"{
+          "hooks": {
+            "PreToolUse": [{ "hooks": [
+              { "type": "agent", "prompt": "vet", "model": "claude-haiku-4-5" }
+            ]}]
+          }
+        }"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::Project).unwrap();
+        let HookExecutor::Agent { model, .. } = &hooks[0].executor else {
+            panic!("expected Agent executor");
+        };
+        assert_eq!(model.as_deref(), Some("claude-haiku-4-5"));
     }
 
     #[test]
@@ -798,7 +851,12 @@ mod tests {
         assert_eq!(hooks[0].events, vec![HookEventType::Stop]);
         assert_eq!(hooks[0].source, HookSource::Local);
         assert_eq!(hooks[0].timeout, Some(Duration::from_secs(90)));
-        let HookExecutor::Agent { agent_type, prompt } = &hooks[0].executor else {
+        let HookExecutor::Agent {
+            agent_type,
+            prompt,
+            model: _,
+        } = &hooks[0].executor
+        else {
             panic!("expected Agent executor, got {:?}", hooks[0].executor);
         };
         assert_eq!(prompt, "Verify that unit tests ran and passed.");

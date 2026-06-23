@@ -315,6 +315,19 @@ impl MockOutputStream {
             })
             .collect()
     }
+
+    /// Convenience: terminal-sequence events in capture order (#6).
+    pub async fn terminal_sequences(&self) -> Vec<String> {
+        self.events
+            .lock()
+            .await
+            .iter()
+            .filter_map(|e| match e {
+                OutputEvent::TerminalSequence { seq } => Some(seq.clone()),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 impl Default for MockOutputStream {
@@ -329,6 +342,14 @@ impl OutputStream for MockOutputStream {
         self.events.lock().await.push(OutputEvent::Text {
             text: text.to_string(),
         });
+    }
+    async fn emit_terminal_sequence(&self, seq: &str) {
+        self.events
+            .lock()
+            .await
+            .push(OutputEvent::TerminalSequence {
+                seq: seq.to_string(),
+            });
     }
     async fn emit_tool_call(
         &self,

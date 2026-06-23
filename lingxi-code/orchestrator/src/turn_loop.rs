@@ -128,16 +128,17 @@ fn normalize_lexically(path: &Path) -> PathBuf {
 /// ([`hooks::terminal_seq::validate_terminal_sequence`], the `NEo` port):
 /// - REJECT → warn with claude-code's byte-faithful message (the observable
 ///   half).
-/// - ACCEPT → the validated string would be written to the active terminal
-///   (`BEo`). The orchestrator holds no TTY handle (the TUI owns the terminal in
-///   a separate process; the `OutputStream` has no raw-escape emit), so the
-///   terminal WRITE is a documented RESIDUAL — surfaced here via a `debug!` log
-///   carrying the accepted sequence so a future `OutputStream` terminal-write
-///   seam (or a TUI-process applier reading the aggregate) can emit it.
+/// - ACCEPT → write the validated string to the active terminal (`BEo`). The
+///   orchestrator process holds no TTY handle (the TUI owns the terminal in a
+///   separate process), so it forwards the validated bytes through the
+///   [`OutputStream::emit_terminal_sequence`] seam (#6 main-loop parity); the
+///   interactive host (TUI) writes them to its stdout. Non-interactive hosts
+///   (print mode, CLI sink, tests) keep the default no-op, so the terminal
+///   write only happens where a controlling terminal exists.
 ///
 /// Strict no-op when `seq` is `None` (no hook returned a `terminalSequence`).
-fn apply_terminal_sequence(
-    _orch: &ConversationOrchestrator,
+async fn apply_terminal_sequence(
+    orch: &ConversationOrchestrator,
     hook_name: &str,
     seq: Option<&str>,
 ) {
@@ -145,19 +146,84 @@ fn apply_terminal_sequence(
         return;
     };
     match hooks::terminal_seq::validate_terminal_sequence(seq) {
-        Some(_validated) => {
-            // RESIDUAL: write `_validated` to the active terminal. No TTY here —
-            // log it so a terminal-write seam can pick it up.
-            tracing::debug!(
-                hook_name = %hook_name,
-                "Hook returned an allowlisted terminalSequence (terminal-write deferred — no orchestrator TTY)"
-            );
+        Some(validated) => {
+            // Forward the validated, BEL-normalized sequence to the host's
+            // terminal-write seam (claude-code `BEo`). Default no-op off the TUI.
+            orch.output.emit_terminal_sequence(&validated).await;
         }
         None => {
             tracing::warn!(
                 "Hook {hook_name} returned a terminalSequence that was rejected by the allowlist (only OSC 0/1/2/9/99/777 and BEL are permitted)"
             );
         }
+    }
+}
+
+// ============================================================================
+// #6 (main-loop parity): a hook's allowlisted `terminalSequence` is FORWARDED
+// to the host's terminal-write seam (`OutputStream::emit_terminal_sequence`),
+// not merely debug-logged. A rejected sequence is dropped (warned only).
+// ============================================================================
+#[cfg(test)]
+mod terminal_sequence_tests {
+    use super::apply_terminal_sequence;
+    use crate::conversation::ConversationOrchestrator;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tool_api::registry::ToolRegistry;
+
+    fn orch_with_output(output: Arc<MockOutputStream>) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output,
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    /// An ACCEPTED OSC sequence (here OSC 9 desktop-notification) is forwarded
+    /// to the terminal-write seam verbatim (BEL-normalized).
+    #[tokio::test]
+    async fn accepted_sequence_is_forwarded_to_terminal_seam() {
+        let output = Arc::new(MockOutputStream::new());
+        let orch = orch_with_output(output.clone());
+        apply_terminal_sequence(&orch, "Notification", Some("\u{001B}]9;hello\u{0007}")).await;
+        assert_eq!(
+            output.terminal_sequences().await,
+            vec!["\u{001B}]9;hello\u{0007}".to_string()],
+            "an allowlisted terminalSequence must reach emit_terminal_sequence"
+        );
+    }
+
+    /// A REJECTED sequence (OSC 8 hyperlink is not in the allowlist) is dropped:
+    /// nothing reaches the terminal-write seam.
+    #[tokio::test]
+    async fn rejected_sequence_is_not_forwarded() {
+        let output = Arc::new(MockOutputStream::new());
+        let orch = orch_with_output(output.clone());
+        apply_terminal_sequence(&orch, "Notification", Some("\u{001B}]8;;http://x\u{0007}")).await;
+        assert!(
+            output.terminal_sequences().await.is_empty(),
+            "a rejected terminalSequence must NOT be forwarded"
+        );
+    }
+
+    /// `None` (no hook returned a sequence) is a strict no-op.
+    #[tokio::test]
+    async fn none_is_a_noop() {
+        let output = Arc::new(MockOutputStream::new());
+        let orch = orch_with_output(output.clone());
+        apply_terminal_sequence(&orch, "Notification", None).await;
+        assert!(output.terminal_sequences().await.is_empty());
     }
 }
 
@@ -1936,7 +2002,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // process and the `OutputStream` has no raw-escape emit), so the
         // terminal-WRITE is a documented residual — the parse / merge / allowlist
         // validation all land here and are observable. No-op when no hook set it.
-        apply_terminal_sequence(orch, &name, pre_agg.terminal_sequence.as_deref());
+        apply_terminal_sequence(orch, &name, pre_agg.terminal_sequence.as_deref()).await;
         // HOOK.1: a PreToolUse hook's `hookSpecificOutput.additionalContext`
         // ONLY (the executor merge folds `additionalContext` into
         // `additional_contexts`, distinct from `system_messages`). claude-code
@@ -2515,7 +2581,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // `szn` runs per hook result, all event types). Same as the PreToolUse
         // side: validate + warn-on-reject (observable); the terminal-WRITE is a
         // documented residual.
-        apply_terminal_sequence(orch, &name, post_agg.terminal_sequence.as_deref());
+        apply_terminal_sequence(orch, &name, post_agg.terminal_sequence.as_deref()).await;
 
         // HOOK.1 (additionalContext, PostToolUse twin): a PostToolUse hook's
         // `additionalContext` is ALSO a separate `hook_additional_context`

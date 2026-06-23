@@ -895,6 +895,14 @@ pub struct AppState {
     /// are best-effort, exactly as claude-code's OSC-52 path is). Mirrors
     /// `pending_save_color` (no handle needed).
     pub pending_copy_clipboard: Option<String>,
+    /// (#6 main-loop parity) An allowlisted terminal escape sequence a hook
+    /// returned, staged by `apply_event` from `TurnEvent::TerminalSequence`. The
+    /// async pump in `root.rs` (`pump_terminal_sequence`, on the ticker
+    /// `use_future`) writes the bytes to stdout OUTSIDE the `AppState` lock, then
+    /// clears the flag — the TUI owns the controlling terminal the orchestrator
+    /// lacks (claude-code `BEo`). Already validated + BEL-normalized by the
+    /// orchestrator. Mirrors `pending_copy_clipboard`.
+    pub pending_terminal_sequence: Option<String>,
     /// (A6) Resolved custom status-line text — `Some(text)` when the user
     /// configured `statusLine: {type:'command'}` in settings AND the command
     /// ran successfully (already passed through
@@ -1024,6 +1032,7 @@ impl AppState {
             session_agent_color: None,
             pending_save_color: None,
             pending_copy_clipboard: None,
+            pending_terminal_sequence: None,
             status_line_text: None,
             status_line_config: None,
             status_line_dirty: false,

@@ -17,6 +17,25 @@ use async_trait::async_trait;
 use protocol::ContentBlock;
 use serde_json::Value;
 
+/// Identity of the SUBAGENT / in-process-teammate worker a permission prompt is
+/// being raised on behalf of, so the prompt UI can ATTRIBUTE it.
+///
+/// claude-code 2.1.186 surfaces a background worker's permission prompt in the
+/// main session attributed to the asking agent (`${agent_id} needs permission
+/// for ${tool_name}` + the `● @name` worker badge). Threaded from
+/// [`crate::tool_invoker::SubagentInvocationContext`] through the dispatch
+/// invoker into the prompt-building gate. `None` for a main-thread / leader
+/// tool call (the turn loop's own [`PermissionGate::check`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptWorker {
+    /// Worker DISPLAY name (claude-code `getAgentName()` — e.g. `"researcher"`).
+    pub name: String,
+    /// Team the worker belongs to (claude-code `getTeammateContext()?.teamName`).
+    pub team: Option<String>,
+    /// Whether the worker runs ASYNC (backgrounded).
+    pub is_async: bool,
+}
+
 /// Outcome of a [`PermissionGate::check`] call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionDecision {
@@ -102,6 +121,29 @@ pub trait PermissionGate: Send + Sync {
     /// [`PermissionDecision::Deny`] — the caller never has to handle an
     /// error tier.
     async fn check(&self, name: &str, input: &Value) -> PermissionDecision;
+
+    /// Like [`Self::check`], but carrying the identity of the SUBAGENT/teammate
+    /// worker the call originates from so a prompt-building gate can ATTRIBUTE
+    /// the prompt to that worker — claude-code 2.1.186 surfaces a background
+    /// worker's permission prompt in the main session with a `● @name` badge
+    /// (`${agent_id} needs permission for ${tool_name}`). The subagent dispatch
+    /// invoker ([`crate::tool_invoker::ToolInvoker`]) calls this; the main turn
+    /// loop uses [`Self::check`] (no worker).
+    ///
+    /// Additive DEFAULTED (frozen-trait safe): the default IGNORES `worker` and
+    /// delegates to [`Self::check`], so every existing impl is unchanged. Only
+    /// the prompt-building gates (`TuiPermissionGate` / `AdapterPermissionGate`)
+    /// and the wrapping `PolicyPermissionGate` (which forwards it to its inner
+    /// transport) OVERRIDE it.
+    async fn check_with_worker(
+        &self,
+        name: &str,
+        input: &Value,
+        worker: Option<PromptWorker>,
+    ) -> PermissionDecision {
+        let _ = worker;
+        self.check(name, input).await
+    }
 
     /// Resolve permission when a `PreToolUse` / `PermissionRequest` hook has
     /// already returned `allow` (`HookDecision::Approve`).

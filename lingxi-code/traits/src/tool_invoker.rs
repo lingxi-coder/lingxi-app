@@ -41,6 +41,15 @@ pub struct SubagentInvocationContext {
     /// async agent (else it inherits the parent's flag, default `false`) —
     /// `runAgent.ts:668-672`. Mapped into `ToolUseContext.is_non_interactive_session`.
     pub is_async: bool,
+    /// Whether the dispatching subagent may SURFACE permission prompts to the
+    /// user (claude-code's permission-prompt eligibility). Threaded from
+    /// `SubagentContext.can_show_permission_prompts`. When `true` (a named
+    /// in-process teammate), a tool call that needs permission surfaces in the
+    /// main session ATTRIBUTED to this worker (the `● @name` badge); when `false`
+    /// the worker is not presented as a permission-prompt origin. Consulted by
+    /// the dispatch invoker to decide whether to attach a
+    /// [`crate::permission_gate::PromptWorker`] to the gate check.
+    pub can_show_permission_prompts: bool,
 }
 
 /// Failure modes for [`ToolInvoker::invoke`].

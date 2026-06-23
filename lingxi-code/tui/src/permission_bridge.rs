@@ -17,7 +17,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use permission::gate::{PermissionDecision, PermissionGate, PermissionRequest, PermissionResponse};
+use permission::gate::{
+    PermissionDecision, PermissionGate, PermissionRequest, PermissionResponse, PromptWorker,
+};
 use permission::{
     persist_permission_update, PermissionPaths, PermissionRule, PermissionUpdate,
     PermissionUpdateDestination,
@@ -36,6 +38,11 @@ pub struct PermissionExchange {
     pub request: PermissionRequest,
     /// One-shot reply channel — TUI sends back when the user resolves.
     pub resp_tx: oneshot::Sender<PermissionResponse>,
+    /// Worker identity when the call originates from a subagent/teammate
+    /// (claude-code 2.1.186 worker permission attribution). `None` for a
+    /// main-thread tool call. Populated into `PendingPermission.worker` so the
+    /// dialog renders the `● @name` badge.
+    pub worker: Option<crate::components::permissions::worker::WorkerPermissionInfo>,
 }
 
 /// Orchestrator-side permission gate that forwards each `check` call to
@@ -81,6 +88,16 @@ impl TuiPermissionGate {
 #[async_trait]
 impl PermissionGate for TuiPermissionGate {
     async fn check(&self, name: &str, input: &serde_json::Value) -> PermissionDecision {
+        // Main-thread call — no worker attribution.
+        self.check_with_worker(name, input, None).await
+    }
+
+    async fn check_with_worker(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        worker: Option<PromptWorker>,
+    ) -> PermissionDecision {
         // Step 1: consult session rules (content-aware: a narrowed AllowAlways
         // rule only short-circuits a matching command/path/domain).
         {
@@ -101,11 +118,22 @@ impl PermissionGate for TuiPermissionGate {
             default_decision,
         };
 
-        // Step 3: send + await.
+        // Step 3: send + await. A worker-originated request carries the worker
+        // identity so the dialog attributes it (claude-code's `● @name` badge).
+        // `color` seeds the multiagent color (`agent_color_from_name`); the
+        // wired ToolUseConfirm badge renders only the name.
+        let worker_info = worker.map(|w| {
+            crate::components::permissions::worker::WorkerPermissionInfo {
+                color: w.name.clone(),
+                name: w.name,
+                team: w.team,
+            }
+        });
         let (tx, rx) = oneshot::channel();
         let exchange = PermissionExchange {
             request,
             resp_tx: tx,
+            worker: worker_info,
         };
         if self.event_tx.send(exchange).await.is_err() {
             // TUI is gone — fail closed.
@@ -181,6 +209,35 @@ mod tests {
 
         // No rule should be persisted on AllowOnce.
         assert!(rules.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tui_gate_attributes_worker_on_the_exchange() {
+        // A worker-originated check carries the worker identity onto the
+        // PermissionExchange, so the dialog renders the `● @name` badge.
+        let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(4);
+        let rules = Arc::new(Mutex::new(Vec::new()));
+        let gate = TuiPermissionGate::new(event_tx, rules);
+        let tui_task = tokio::spawn(async move {
+            let ex = event_rx.recv().await.unwrap();
+            let w = ex.worker.clone().expect("worker attributed");
+            assert_eq!(w.name, "researcher");
+            assert_eq!(w.team.as_deref(), Some("alpha"));
+            let _ = ex.resp_tx.send(PermissionResponse::AllowOnce);
+        });
+        let decision = gate
+            .check_with_worker(
+                "Bash",
+                &json!({"command": "ls"}),
+                Some(PromptWorker {
+                    name: "researcher".to_string(),
+                    team: Some("alpha".to_string()),
+                    is_async: true,
+                }),
+            )
+            .await;
+        assert_eq!(decision, PermissionDecision::Allow);
+        tui_task.await.unwrap();
     }
 
     #[tokio::test]

@@ -965,6 +965,10 @@ async fn run_subagent_loop(
                     // R1: an async (backgrounded) subagent runs its tools with
                     // is_non_interactive_session=true (claude-code runAgent.ts:668-672).
                     is_async: ctx.is_async,
+                    // Whether this worker may surface a permission prompt to the
+                    // user — drives the worker attribution on the prompt dialog
+                    // (claude-code's worker permission badge).
+                    can_show_permission_prompts: ctx.can_show_permission_prompts,
                 };
                 match invoker.invoke(name, input.clone(), inv_ctx).await {
                     Ok(value) => {

@@ -80,6 +80,21 @@ impl PolicyPermissionGate {
         name: &str,
         input: &Value,
     ) -> PermissionDecision {
+        // No worker attribution (main turn loop / plan-mode path).
+        self.decide_with_worker(result, name, input, None).await
+    }
+
+    /// Like [`Self::decide`], but forwards the originating-worker identity to the
+    /// inner prompt transport on the Ask-delegate path so the prompt is
+    /// attributed (claude-code's worker permission badge). `None` → identical to
+    /// [`Self::decide`].
+    async fn decide_with_worker(
+        &self,
+        result: PermissionResult,
+        name: &str,
+        input: &Value,
+        worker: Option<crate::gate::PromptWorker>,
+    ) -> PermissionDecision {
         match result {
             PermissionResult::Allow { .. } => PermissionDecision::Allow,
             PermissionResult::Deny {
@@ -98,8 +113,9 @@ impl PolicyPermissionGate {
                     // here — it falls through to the prompt transport below.
                     PermissionDecision::Allow
                 } else {
-                    // Surface the prompt through the host's transport.
-                    self.inner.check(name, input).await
+                    // Surface the prompt through the host's transport, carrying
+                    // the worker identity so it is attributed in the dialog.
+                    self.inner.check_with_worker(name, input, worker).await
                 }
             }
         }
@@ -165,6 +181,20 @@ impl PermissionGate for PolicyPermissionGate {
         // Authorize under the policy's boot mode, then map the 3-valued result
         // (an `Ask` auto-allows read-only tools or delegates to the prompt).
         self.decide(self.policy.authorize(name, input), name, input)
+            .await
+    }
+
+    /// As [`Self::check`], but forwards the originating subagent/teammate
+    /// worker identity to the inner prompt transport when an `Ask` is delegated,
+    /// so the dialog attributes the request to that worker. The rule/mode
+    /// decision is unchanged — only the prompt presentation gains attribution.
+    async fn check_with_worker(
+        &self,
+        name: &str,
+        input: &Value,
+        worker: Option<crate::gate::PromptWorker>,
+    ) -> PermissionDecision {
+        self.decide_with_worker(self.policy.authorize(name, input), name, input, worker)
             .await
     }
 
@@ -431,6 +461,55 @@ mod tests {
             PermissionResolution::Ask,
             "a content ask rule surfaces as Ask, not an auto-allow"
         );
+    }
+
+    /// Inner gate that records the worker handed to `check_with_worker`.
+    struct WorkerRecordingInner {
+        worker: std::sync::Mutex<Option<Option<crate::gate::PromptWorker>>>,
+    }
+    #[async_trait]
+    impl PermissionGate for WorkerRecordingInner {
+        async fn check(&self, _name: &str, _input: &Value) -> PermissionDecision {
+            *self.worker.lock().unwrap() = Some(None);
+            PermissionDecision::Allow
+        }
+        async fn check_with_worker(
+            &self,
+            _name: &str,
+            _input: &Value,
+            worker: Option<crate::gate::PromptWorker>,
+        ) -> PermissionDecision {
+            *self.worker.lock().unwrap() = Some(worker);
+            PermissionDecision::Allow
+        }
+    }
+
+    #[tokio::test]
+    async fn check_with_worker_forwards_attribution_to_inner_on_ask() {
+        // No rule for Bash → Default mode asks; Bash is DenyByDefault → delegate.
+        // The worker identity must reach the inner prompt transport so the dialog
+        // is attributed (claude-code worker permission badge).
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let inner = Arc::new(WorkerRecordingInner {
+            worker: std::sync::Mutex::new(None),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        let decision = gate
+            .check_with_worker(
+                "Bash",
+                &serde_json::json!({}),
+                Some(crate::gate::PromptWorker {
+                    name: "researcher".into(),
+                    team: Some("alpha".into()),
+                    is_async: true,
+                }),
+            )
+            .await;
+        assert_eq!(decision, PermissionDecision::Allow);
+        let seen = inner.worker.lock().unwrap().clone().expect("inner consulted");
+        let w = seen.expect("worker forwarded to inner transport");
+        assert_eq!(w.name, "researcher");
+        assert_eq!(w.team.as_deref(), Some("alpha"));
     }
 
     #[tokio::test]

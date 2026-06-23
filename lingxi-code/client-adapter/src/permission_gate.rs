@@ -47,8 +47,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use client_protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
+    WorkerInfoDto,
 };
-use permission::gate::{PermissionDecision, PermissionGate, PermissionResponse};
+use permission::gate::{PermissionDecision, PermissionGate, PermissionResponse, PromptWorker};
 use permission::{
     persist_permission_update, PermissionPaths, PermissionRule, PermissionUpdate,
     PermissionUpdateDestination,
@@ -252,6 +253,16 @@ impl Drop for AdapterPermissionGate {
 #[async_trait]
 impl PermissionGate for AdapterPermissionGate {
     async fn check(&self, name: &str, input: &serde_json::Value) -> PermissionDecision {
+        // Main-thread call — no worker attribution on the wire.
+        self.check_with_worker(name, input, None).await
+    }
+
+    async fn check_with_worker(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        worker: Option<PromptWorker>,
+    ) -> PermissionDecision {
         // Step 1: consult session rules (identical to the TUI gate; content-aware
         // so a narrowed AllowAlways rule only short-circuits a matching call).
         {
@@ -288,8 +299,15 @@ impl PermissionGate for AdapterPermissionGate {
         let request = PermissionRequestDto {
             request_id,
             kind,
-            // No wire worker identity in the foundation (decision §0.6).
-            worker: None,
+            // Worker attribution (claude-code 2.1.186): a subagent/teammate's
+            // permission prompt carries the asking worker so the remote client
+            // renders the `● @name` badge. `color` seeds the multiagent color
+            // (the worker's display name); `None` for a main-thread call.
+            worker: worker.map(|w| WorkerInfoDto {
+                color: w.name.clone(),
+                name: w.name,
+                team: w.team,
+            }),
         };
         self.sink.emit_request(request).await;
 

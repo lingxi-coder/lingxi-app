@@ -7,7 +7,7 @@ off `ac46d0c3`.
 
 Codex flagged 7 gaps. **All 7 verified TRUE against the 2.1.186 binary** (each
 was backed by an explicit `// deferred`/`NOTE:` comment in the code AND
-confirmed by binary string/JS extraction). Five are landed; two are
+confirmed by binary string/JS extraction). Six are landed; one is
 architectural and specced below.
 
 ## Landed this branch (byte-exact, tested, green)
@@ -19,6 +19,7 @@ architectural and specced below.
 | P2 | workflow `agent({schema})` StructuredOutput validation + retry/nudge | `3a09b659` |
 | P1 | in-process teammate full team-worker parity | `57ab7fda` |
 | P1 | background subagent permission-prompt attribution | `e4c27dc7` |
+| P2 | required-MCP-servers 30s pending-wait | `7933140d` |
 
 Key binary facts captured during the work:
 - **Agent deny**: `o5e(ctx,"Agent",type)` = getDenyRuleForAgent (exact
@@ -89,18 +90,19 @@ single-process scope (like remote/CCR). The `AdapterPermissionGate`
 request/response seam already exists for bridge/mobile and now carries the
 `worker` DTO.
 
-### P2 — Required MCP servers: no 30s pending-wait
-`tools/agent/src/agent.rs` (~:1047) checks required-MCP tool availability
-immediately. claude waits up to 30s (500ms poll) for any required server still
-in the `pending` (connecting/awaiting-OAuth) state. LingXi's `McpStatus`
-collapses Connecting/AwaitingOAuth/Reconnecting → `Disconnected`
-(registry.rs `project_status`), so a `pending` server is indistinguishable from
-a failed/absent one — the poll-wait is not reproducible.
-
-Plan: surface a distinct `Pending` (connecting/awaiting-OAuth) status on
-`McpRegistry` (don't collapse it into `Disconnected`), then add the bounded
-poll-wait in the AgentTool required-MCP gate. Architectural (status-model change
-in the mcp crate), hence deferred.
+### P2 — Required-MCP-servers 30s pending-wait ✅ LANDED `7933140d`
+(Was: the gate checked tool availability immediately, spuriously failing an agent
+whose required MCP server was still connecting/authenticating.) The feared
+blocker — `McpStatus` collapsing Connecting/AwaitingOAuth/Reconnecting →
+`Disconnected` — was only the UI projection; the INTERNAL `McpConnectionState`
+already keeps those states distinct, so NO status-model change was needed.
+Extracted exact binary logic (`requiredMcpServers` gate @203107817): if any
+required server is `pending`, `while now<deadline(+30000ms){ sleep(500); break if
+required failed; break if none required pending }`. Fixed:
+- `McpRegistry::servers_pending()` (Connecting|AwaitingOAuth|Reconnecting) +
+  `servers_failed()` (Failed), reading the internal `connections` state map.
+- `tools/agent` gate runs the 30s/500ms poll-wait (case-insensitive substring
+  match `name.includes(pattern)`) before the existing servers-with-tools check.
 
 ### P2 — isolation / cwd / worktree / remote: schema-exposed, behavior deferred
 The Agent prompt advertises `isolation: "worktree"` (agent.rs:435) and the spawn

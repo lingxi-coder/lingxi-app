@@ -55,7 +55,7 @@ use orchestrator::{
 };
 use permission::gate::PermissionGate;
 use permission::PermissionMode;
-use platform_common::LlmTransportBridge;
+use llm_client::LlmTransportBridge;
 use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
 use secret::CredentialManager;
 use tokio::sync::{Mutex, RwLock};

@@ -42,7 +42,7 @@ use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
 use llm_client::{DefaultLlmClient, Transport};
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
-use platform_common::LlmTransportBridge;
+use llm_client::LlmTransportBridge;
 use command_api::{CommandRegistry, RegistrySlashDispatcher};
 use command_core::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,

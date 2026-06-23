@@ -3,7 +3,7 @@
 //! [`AndroidPlatform`] implements the [`traits::Platform`] aggregate. The core
 //! OS handles (filesystem/clock/process/sandbox/worktree) are currently reused
 //! from `platform-posix-minimal` (portable Rust, valid on Android). The `http`
-//! handle is the shared real client ([`platform_common::http::ReqwestHttp`],
+//! handle is the shared real client ([`http_client::ReqwestHttp`],
 //! `reqwest` + `rustls-tls`), so a keyed conversation streams against the real
 //! provider rather than the posix-minimal stub. The Android-specific device
 //! capabilities (camera, voice, share) are injected as `Arc<dyn …>` trait

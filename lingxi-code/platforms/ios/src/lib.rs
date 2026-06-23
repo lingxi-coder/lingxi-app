@@ -5,7 +5,7 @@
 //! from `platform-posix-minimal` — those impls are portable Rust (`std::fs`
 //! over the App-Sandbox root, `std::time`, and `Unsupported` stubs) and valid
 //! on iOS. The `http` handle is the shared real client
-//! ([`platform_common::http::ReqwestHttp`], `reqwest` + `rustls-tls`), so a
+//! ([`http_client::ReqwestHttp`], `reqwest` + `rustls-tls`), so a
 //! keyed conversation streams against the real provider rather than the
 //! posix-minimal stub. The iOS-specific device capabilities (camera, voice,
 //! share) are injected as `Arc<dyn …>` trait objects implemented natively in

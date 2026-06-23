@@ -864,7 +864,17 @@ impl ProviderApiAdapter {
             .get("speed")
             .and_then(serde_json::Value::as_str)
             == Some("fast");
-        BetaContext::for_model(model).with_fast_mode(fast_mode)
+        // The `effort-2025-11-24` beta gates on the body carrying
+        // `output_config.effort`.
+        let has_effort = prepared
+            .provider_request
+            .body_json
+            .get("output_config")
+            .and_then(|oc| oc.get("effort"))
+            .is_some();
+        BetaContext::for_model(model)
+            .with_fast_mode(fast_mode)
+            .with_effort(has_effort)
     }
 
     fn inject_headers(&self, prepared: &mut llm_client::PreparedLlmCall, request_id: &str) {
@@ -2085,10 +2095,15 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
+        effort: Option<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         // Subagent calls don't carry a provider profile; pass None so
-        // llm-client resolves unscoped (default behaviour).
-        StreamingApiClient::stream(self, model, None, system, messages, tools).await
+        // llm-client resolves unscoped (default behaviour). Build inline (not via
+        // `StreamingApiClient::stream`) so the subagent's `effort` →
+        // `output_config.effort` reaches the request.
+        let mut req = self.build_request(model, None, system, messages, tools, true, None)?;
+        req.effort = effort;
+        self.drive_stream(req).await
     }
 
     async fn messages_create_stream_forced(
@@ -2098,10 +2113,12 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
+        effort: Option<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         // Structured-output path: build the request and force `tool_choice` to
         // the named tool so the model must emit a matching structured call.
         let mut req = self.build_request(model, None, system, messages, tools, true, None)?;
+        req.effort = effort;
         if let Some(name) = forced_tool {
             req.tool_choice = Some(llm_client::ToolChoice::Tool {
                 name: name.to_string(),

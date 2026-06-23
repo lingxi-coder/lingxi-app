@@ -188,6 +188,18 @@ pub enum AgentEffort {
     Numeric(i64),
 }
 
+impl AgentEffort {
+    /// The wire value for `output_config.effort`: a level string or an integer
+    /// budget (claude-code `SF`'s normalized output).
+    #[must_use]
+    pub fn to_wire(&self) -> serde_json::Value {
+        match self {
+            AgentEffort::Level(s) => serde_json::Value::String(s.clone()),
+            AgentEffort::Numeric(n) => serde_json::Value::Number((*n).into()),
+        }
+    }
+}
+
 /// Valid named effort levels (claude `EFFORT_LEVELS` / `nP =
 /// ["low","medium","high","xhigh","max"]`, v2.1.183).
 pub const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];

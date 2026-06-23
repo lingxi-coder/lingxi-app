@@ -684,6 +684,14 @@ async fn run_subagent_loop(
         // wraps `messages_create` losslessly, so a non-streaming client behaves
         // identically). Dropping this future on the termination arm cancels the
         // in-flight stream, exactly as dropping a non-streaming call would.
+        // Per-request thinking-effort (claude-code `me.effort`): the subagent's
+        // resolved effort (its definition's, possibly overridden by a workflow
+        // `agent({effort})` opt at spawn) → `output_config.effort`.
+        let effort_wire = ctx
+            .agent_definition
+            .effort
+            .as_ref()
+            .map(crate::definition::AgentEffort::to_wire);
         let response = loop {
             let api_call = async {
                 let stream = if let Some(forced) = force_structured_tool {
@@ -694,6 +702,7 @@ async fn run_subagent_loop(
                             history.clone(),
                             tool_schemas.clone(),
                             Some(forced),
+                            effort_wire.clone(),
                         )
                         .await?
                 } else {
@@ -703,6 +712,7 @@ async fn run_subagent_loop(
                             system.as_deref(),
                             history.clone(),
                             tool_schemas.clone(),
+                            effort_wire.clone(),
                         )
                         .await?
                 };
@@ -1235,6 +1245,7 @@ mod tests {
             _system: Option<&str>,
             _messages: Vec<ConversationMessage>,
             tools: Vec<serde_json::Value>,
+            _effort: Option<serde_json::Value>,
         ) -> Result<
             futures::stream::BoxStream<
                 'static,

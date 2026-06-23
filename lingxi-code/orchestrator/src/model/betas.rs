@@ -150,6 +150,9 @@ pub struct BetaContext {
     /// The request body sets `speed: "fast"`. Gates `fast-mode`. Defaults
     /// to `false`.
     pub fast_mode: bool,
+    /// The request body sets `output_config.effort`. Gates the [`EFFORT`] beta.
+    /// Defaults to `false`.
+    pub effort: bool,
 }
 
 impl BetaContext {
@@ -162,6 +165,7 @@ impl BetaContext {
             interactive: true,
             show_thinking_summaries: false,
             fast_mode: false,
+            effort: false,
         }
     }
 
@@ -183,6 +187,13 @@ impl BetaContext {
     #[must_use]
     pub fn with_fast_mode(mut self, on: bool) -> Self {
         self.fast_mode = on;
+        self
+    }
+
+    /// Builder: set `effort` (request body `output_config.effort`).
+    #[must_use]
+    pub fn with_effort(mut self, on: bool) -> Self {
+        self.effort = on;
         self
     }
 
@@ -302,6 +313,10 @@ fn first_party_betas(ctx: &BetaContext) -> Vec<&'static str> {
     // Per-feature: fast-mode when the request sets speed:"fast".
     if ctx.fast_mode {
         betas.push(FAST_MODE);
+    }
+    // Per-feature: effort when the request sets output_config.effort.
+    if ctx.effort {
+        betas.push(EFFORT);
     }
     betas
 }

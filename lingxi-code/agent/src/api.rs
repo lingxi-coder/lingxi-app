@@ -53,13 +53,20 @@ pub trait SubagentApiClient: Send + Sync {
     /// non-streaming round-trip still satisfies this seam (the round-trip
     /// reproduces the response exactly). The production orchestrator adapter
     /// overrides this to delegate to its real `StreamingApiClient::stream`.
+    /// `effort` is the per-request thinking-effort hint (claude-code
+    /// `output_config.effort`): a level string or integer budget, or `None`.
+    /// The default (synthetic, non-streaming) path ignores it — only the
+    /// production provider adapter threads it onto the request + emits the
+    /// `effort-2025-11-24` beta.
     async fn messages_create_stream(
         &self,
         model: &str,
         system: Option<&str>,
         messages: Vec<protocol::ConversationMessage>,
         tools: Vec<serde_json::Value>,
+        effort: Option<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        let _ = effort;
         let resp = self.messages_create(model, system, messages, tools).await?;
         let events = crate::accumulator::response_to_stream_events(resp);
         Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
@@ -78,9 +85,10 @@ pub trait SubagentApiClient: Send + Sync {
         messages: Vec<protocol::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
+        effort: Option<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         let _ = forced_tool;
-        self.messages_create_stream(model, system, messages, tools)
+        self.messages_create_stream(model, system, messages, tools, effort)
             .await
     }
 }

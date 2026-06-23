@@ -89,6 +89,13 @@ pub struct WorkflowLaunched {
     /// `meta.name` from the script (claude-code `workflowName`). `None` if not
     /// extracted.
     pub workflow_name: Option<String>,
+    /// `meta.description` from the script (claude-code `summary = p`). `None`
+    /// if the workflow has no description in its meta block.
+    pub summary: Option<String>,
+    /// Directory where subagent transcripts are written (claude-code
+    /// `transcriptDir = Nte(runId)` → `<sessionProjectDir>/<sessionId>/subagents/workflows/<runId>`).
+    /// `None` if the session dir is not available to the launcher.
+    pub transcript_dir: Option<String>,
 }
 
 /// Error launching a workflow.
@@ -421,24 +428,67 @@ impl Tool for WorkflowTool {
             .await
             .map_err(|e| ToolError::Internal(e.to_string()))?;
         // claude-code result shape (output schema `sUp`, local path): status,
-        // taskId, taskType, plus the optional workflowName / runId / scriptPath.
-        // (The "remote_launched"/"remote_agent" + sessionUrl variants are the
-        // CCR/remote path, out of scope for the single-process build.) The
-        // optional fields are omitted when the host did not supply them.
+        // taskId, taskType, plus the optional workflowName / runId / scriptPath /
+        // summary / transcriptDir. The "remote_launched"/"remote_agent" + sessionUrl
+        // variants are the CCR/remote path, out of scope for the single-process
+        // build. Optional fields are omitted when the host did not supply them.
+        //
+        // The model-facing launch text mirrors `mapToolResultToToolResultBlockParam`
+        // (binary §1 verbatim, async_launched case):
+        //   "Workflow launched in background. Task ID: {taskId}"
+        //   + optional "\nSummary: {summary}"
+        //   + optional "\nTranscript dir: {transcriptDir}"
+        //   + optional "\nScript file: …\n(Edit …)"
+        //   + optional "\nRun ID: …\nTo resume …"
+        //   + "\n\nYou will be notified when it completes. Use /workflows to watch live progress."
+        let task_id = launched.task_id.clone();
+        let summary    = launched.summary.as_deref();
+        let transcript = launched.transcript_dir.as_deref();
+        let script_p   = launched.script_path.as_deref();
+        let run_id_str = launched.run_id.as_deref();
+
+        let n = summary.map_or_else(String::new, |s| format!("\nSummary: {s}"));
+        let r = transcript.map_or_else(String::new, |t| format!("\nTranscript dir: {t}"));
+        let o = script_p.map_or_else(String::new, |p| {
+            format!(
+                "\nScript file: {p}\n(Edit this file with Write/Edit and re-invoke Workflow with \
+                 {{scriptPath: \"{p}\"}} to iterate without resending the script.)"
+            )
+        });
+        let s = match (script_p, run_id_str) {
+            (Some(p), Some(rid)) => format!(
+                "\nRun ID: {rid}\nTo resume after editing the script: \
+                 Workflow({{scriptPath: \"{p}\", resumeFromRunId: \"{rid}\"}}) \
+                 — completed agents return cached results."
+            ),
+            _ => String::new(),
+        };
+        let model_content = format!(
+            "Workflow launched in background. Task ID: {task_id}{n}{r}{o}{s}\
+             \n\nYou will be notified when it completes. Use /workflows to watch live progress."
+        );
+
         let mut data = json!({
             "status": "async_launched",
-            "taskId": launched.task_id,
+            "taskId": task_id,
             "taskType": "local_workflow",
+            "model_content": model_content,
         });
         let obj = data.as_object_mut().expect("json object");
         if let Some(name) = launched.workflow_name {
             obj.insert("workflowName".into(), Value::String(name));
         }
-        if let Some(run_id) = launched.run_id {
-            obj.insert("runId".into(), Value::String(run_id));
+        if let Some(rid) = launched.run_id {
+            obj.insert("runId".into(), Value::String(rid));
         }
         if let Some(path) = launched.script_path {
             obj.insert("scriptPath".into(), Value::String(path));
+        }
+        if let Some(sum) = launched.summary {
+            obj.insert("summary".into(), Value::String(sum));
+        }
+        if let Some(td) = launched.transcript_dir {
+            obj.insert("transcriptDir".into(), Value::String(td));
         }
         Ok(ToolCallResult {
             data,
@@ -754,6 +804,170 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::Internal(_)));
+    }
+
+    // ── Task 5: summary + transcriptDir + byte-exact launch text ─────────────
+
+    /// A launcher that returns a full `WorkflowLaunched` with all optional
+    /// fields set, for testing the result JSON shape and model_content text.
+    struct RichMockLauncher {
+        launched: WorkflowLaunched,
+    }
+    #[async_trait]
+    impl WorkflowLauncher for RichMockLauncher {
+        async fn launch(
+            &self,
+            _spec: WorkflowLaunchSpec,
+        ) -> Result<WorkflowLaunched, WorkflowLaunchError> {
+            Ok(self.launched.clone())
+        }
+    }
+
+    /// call() with summary + transcriptDir → result JSON has both fields and the
+    /// model-facing text contains the `Summary:` and `Transcript dir:` lines.
+    #[tokio::test]
+    async fn call_with_summary_and_transcript_dir_in_result() {
+        let launcher = Arc::new(RichMockLauncher {
+            launched: WorkflowLaunched {
+                task_id: "w_t1".into(),
+                run_id: Some("wf_abc123def456".into()),
+                script_path: Some("/tmp/wf_abc123def456.js".into()),
+                workflow_name: Some("my-wf".into()),
+                summary: Some("A test workflow".into()),
+                transcript_dir: Some(
+                    "/home/.claude/projects/-Users-me-proj/sess123/subagents/workflows/wf_abc123def456".into()
+                ),
+            },
+        });
+        let t = tool(Some(launcher));
+        let res = t
+            .call(
+                json!({ "script": "return 1;" }),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .expect("call ok");
+
+        // JSON data shape
+        assert_eq!(res.data["status"], "async_launched");
+        assert_eq!(res.data["taskId"], "w_t1");
+        assert_eq!(res.data["taskType"], "local_workflow");
+        assert_eq!(res.data["summary"], "A test workflow");
+        assert_eq!(
+            res.data["transcriptDir"],
+            "/home/.claude/projects/-Users-me-proj/sess123/subagents/workflows/wf_abc123def456"
+        );
+        assert_eq!(res.data["runId"], "wf_abc123def456");
+        assert_eq!(res.data["scriptPath"], "/tmp/wf_abc123def456.js");
+        assert_eq!(res.data["workflowName"], "my-wf");
+
+        // model_content text — byte-exact per oracle §1 async_launched template
+        let mc = res.data["model_content"].as_str().expect("model_content string");
+        assert!(
+            mc.starts_with("Workflow launched in background. Task ID: w_t1"),
+            "must start with task id header: {mc}"
+        );
+        assert!(mc.contains("\nSummary: A test workflow"), "must have Summary line: {mc}");
+        assert!(
+            mc.contains("\nTranscript dir: /home/.claude/projects/-Users-me-proj/sess123/subagents/workflows/wf_abc123def456"),
+            "must have Transcript dir line: {mc}"
+        );
+        assert!(
+            mc.contains("\nScript file: /tmp/wf_abc123def456.js\n(Edit this file with Write/Edit"),
+            "must have Script file line: {mc}"
+        );
+        assert!(
+            mc.contains("\nRun ID: wf_abc123def456\nTo resume after editing the script:"),
+            "must have Run ID line: {mc}"
+        );
+        assert!(
+            mc.ends_with("\n\nYou will be notified when it completes. Use /workflows to watch live progress."),
+            "must end with footer: {mc}"
+        );
+    }
+
+    /// call() with no summary/transcriptDir → those fields are absent from JSON and
+    /// the model_content text has no `Summary:` or `Transcript dir:` lines.
+    #[tokio::test]
+    async fn call_without_optional_fields_omitted_from_result() {
+        let launcher = Arc::new(RichMockLauncher {
+            launched: WorkflowLaunched {
+                task_id: "w_t2".into(),
+                run_id: None,
+                script_path: None,
+                workflow_name: None,
+                summary: None,
+                transcript_dir: None,
+            },
+        });
+        let t = tool(Some(launcher));
+        let res = t
+            .call(
+                json!({ "script": "return 1;" }),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .expect("call ok");
+
+        // Optional fields absent from JSON
+        assert!(res.data.get("summary").is_none(), "summary must be absent");
+        assert!(res.data.get("transcriptDir").is_none(), "transcriptDir must be absent");
+        assert!(res.data.get("runId").is_none(), "runId must be absent when None");
+        assert!(res.data.get("scriptPath").is_none(), "scriptPath must be absent when None");
+
+        // model_content has no conditional lines
+        let mc = res.data["model_content"].as_str().expect("model_content string");
+        assert!(!mc.contains("Summary:"), "no Summary line when absent: {mc}");
+        assert!(!mc.contains("Transcript dir:"), "no Transcript dir line when absent: {mc}");
+        assert!(!mc.contains("Script file:"), "no Script file line when absent: {mc}");
+        assert!(!mc.contains("Run ID:"), "no Run ID line when absent: {mc}");
+        // Footer always present
+        assert!(
+            mc.ends_with("\n\nYou will be notified when it completes. Use /workflows to watch live progress."),
+            "footer always present: {mc}"
+        );
+    }
+
+    /// Byte-exact full launch text — verifies the entire model_content string
+    /// against the §1 oracle template with all conditional lines present.
+    #[tokio::test]
+    async fn launch_text_byte_exact_full_template() {
+        let launcher = Arc::new(RichMockLauncher {
+            launched: WorkflowLaunched {
+                task_id: "w_TASKID".into(),
+                run_id: Some("wf_RUNID".into()),
+                script_path: Some("/path/to/script.js".into()),
+                workflow_name: Some("wf-name".into()),
+                summary: Some("My workflow summary".into()),
+                transcript_dir: Some("/tmp/transcripts/subagents/workflows/wf_RUNID".into()),
+            },
+        });
+        let t = tool(Some(launcher));
+        let res = t
+            .call(
+                json!({ "script": "return 1;" }),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .expect("call ok");
+
+        let mc = res.data["model_content"].as_str().expect("model_content string");
+
+        // Verify the EXACT string per §1 oracle template
+        let expected = concat!(
+            "Workflow launched in background. Task ID: w_TASKID",
+            "\nSummary: My workflow summary",
+            "\nTranscript dir: /tmp/transcripts/subagents/workflows/wf_RUNID",
+            "\nScript file: /path/to/script.js",
+            "\n(Edit this file with Write/Edit and re-invoke Workflow with {scriptPath: \"/path/to/script.js\"} to iterate without resending the script.)",
+            "\nRun ID: wf_RUNID",
+            "\nTo resume after editing the script: Workflow({scriptPath: \"/path/to/script.js\", resumeFromRunId: \"wf_RUNID\"}) — completed agents return cached results.",
+            "\n\nYou will be notified when it completes. Use /workflows to watch live progress.",
+        );
+        assert_eq!(mc, expected, "launch text must be byte-exact per §1 oracle");
     }
 
     // is_enabled gate tests — port of `fbn()` / `pA()` local-deterministic subset.

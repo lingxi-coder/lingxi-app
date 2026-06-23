@@ -718,6 +718,13 @@ pub fn desktop_tool_registry(
 struct TaskRegistryWorkflowLauncher {
     registry: Arc<tasks::registry::TaskRegistry>,
     cwd: std::path::PathBuf,
+    /// The claude home directory (e.g. `~/.claude`), used to derive
+    /// `transcriptDir = <sessionProjectDir>/<sessionId>/subagents/workflows/<runId>`.
+    claude_home: std::path::PathBuf,
+    /// The main session UUID (bare uuid string, no `sess:` prefix), threaded
+    /// from the composition root's `main_session_uuid` so the transcript dir
+    /// anchors on the correct session.
+    session_uuid: String,
 }
 
 #[async_trait::async_trait]
@@ -785,6 +792,25 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
         };
         // `meta.name` → `workflowName` in the result.
         let workflow_name = workflow::meta_string_value(&script, "name");
+        // `meta.description` → `summary` in the result (claude-code `p = c.meta.description`).
+        let summary = workflow::meta_string_value(&script, "description");
+        // `transcriptDir` = `<sessionProjectDir>/<sessionId>/subagents/workflows/<runId>`
+        // (claude-code `Nte(runId)` → `path.join(CU() ?? _g(gr()), xt(), "subagents",
+        // "workflows", e)`). We derive via `orchestrator::transcript_paths::subagents_dir`
+        // which computes `<claude_home>/projects/<sanitize(cwd)>/<session_uuid>/subagents`,
+        // then append `workflows/<runId>`.
+        let transcript_dir = {
+            let subagents = orchestrator::transcript_paths::subagents_dir(
+                &self.claude_home,
+                &self.cwd.to_string_lossy(),
+                &self.session_uuid,
+            );
+            subagents
+                .join("workflows")
+                .join(&run_id)
+                .to_str()
+                .map(str::to_string)
+        };
         let task_id = self
             .registry
             .spawn(
@@ -809,6 +835,8 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
             run_id: Some(run_id),
             script_path,
             workflow_name,
+            summary,
+            transcript_dir,
         })
     }
 }
@@ -3657,6 +3685,8 @@ pub async fn build(
             Arc::new(TaskRegistryWorkflowLauncher {
                 registry: task_registry.clone(),
                 cwd: cwd.clone(),
+                claude_home: cfg.claude_home.clone(),
+                session_uuid: main_session_uuid.clone(),
             });
         tools_inner.register_builtin(Arc::new(tool_workflow::WorkflowTool::new(Some(
             workflow_launcher,

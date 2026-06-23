@@ -304,6 +304,76 @@ Use the literal string `VERDICT: ` followed by exactly one of `PASS`, `FAIL`, `P
 - **FAIL**: include what failed, exact error output, reproduction steps.
 - **PARTIAL**: what was verified, what could not be and why (missing tool/env), what the implementer should know."#;
 
+// ── Workflow-subagent prompts (byte-identical to kBp / xBp in v2.1.186) ──
+
+/// kBp — `workflow-subagent` system prompt (no schema / default path).
+///
+/// Byte offset 202947087 in the v2.1.186 binary. The em-dashes are U+2014;
+/// the quotes around "Done." and "Sent." are straight ASCII `"`.
+/// Returned by `Oho.getSystemPrompt`.
+pub const WORKFLOW_SUBAGENT_PROMPT: &str = "You are a subagent spawned by a workflow orchestration script. Use the tools available to complete the task.\n\nCRITICAL: Your final text response is returned **verbatim** as a string to the calling script \u{2014} it is your return value, not a message to a human.\n- Output the literal result (data, JSON, text). Do NOT output confirmations like \"Done.\" or \"Sent.\"\n- If asked for JSON, return ONLY the raw JSON \u{2014} no code fences, no prose, no markdown.\n- Do NOT use SendUserMessage to deliver your answer. Put your answer in your final text response.\n- Be concise. The script will parse your output.";
+
+/// xBp — `workflow-subagent` system prompt when a `schema` IS provided.
+///
+/// Byte offset 202949377 in the v2.1.186 binary. The `${Lp}` placeholder is
+/// the StructuredOutput tool name — bind it at construction time to
+/// [`orchestrator::STRUCTURED_OUTPUT_TOOL_NAME`] (`"StructuredOutput"`).
+/// Returned by `DBp.getSystemPrompt`.
+pub const WORKFLOW_SUBAGENT_SCHEMA_PROMPT_TEMPLATE: &str = "You are a subagent spawned by a workflow orchestration script. Use the tools available to complete the task.\n\nCRITICAL: You MUST call the ${Lp} tool exactly once to return your final answer. The tool's input schema defines the required shape.\n- Do your work (Read files, run commands, etc.), then call ${Lp} with your answer.\n- Do NOT put your answer in a text response. The script reads ONLY the ${Lp} tool call.\n- If the schema validation fails, read the error and call ${Lp} again with a corrected shape.\n- After calling ${Lp} successfully, end your turn. No acknowledgment needed.";
+
+/// The resolved xBp — `${Lp}` replaced with the actual StructuredOutput tool
+/// name (`"StructuredOutput"`). Use this const directly; it is the literal
+/// string the model sees.
+pub const WORKFLOW_SUBAGENT_SCHEMA_PROMPT: &str = "You are a subagent spawned by a workflow orchestration script. Use the tools available to complete the task.\n\nCRITICAL: You MUST call the StructuredOutput tool exactly once to return your final answer. The tool's input schema defines the required shape.\n- Do your work (Read files, run commands, etc.), then call StructuredOutput with your answer.\n- Do NOT put your answer in a text response. The script reads ONLY the StructuredOutput tool call.\n- If the schema validation fails, read the error and call StructuredOutput again with a corrected shape.\n- After calling StructuredOutput successfully, end your turn. No acknowledgment needed.";
+
+/// Tools disallowed for the workflow-subagent (Oho.disallowedTools, v2.1.186).
+///
+/// Resolves: `i1` → `"SendUserMessage"`, `ns` → `"Agent"`, `SI` → `"Workflow"`.
+pub fn workflow_subagent_disallowed() -> Vec<String> {
+    ["SendUserMessage", "Agent", "Workflow"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+/// Build the `workflow-subagent` builtin agentdef (`Oho` from v2.1.186).
+///
+/// `tools: ["*"]` (All policy, use_exact_tools: false), disallowed =
+/// `[SendUserMessage, Agent, Workflow]`, system prompt = kBp.
+///
+/// The schema-variant (`DBp`) is the same struct with `system_prompt = xBp`;
+/// it is constructed by the workflow runtime at spawn time.
+#[must_use]
+pub fn workflow_subagent_definition() -> AgentDefinition {
+    AgentDefinition {
+        agent_type: "workflow-subagent".to_string(),
+        when_to_use: "Internal subagent for workflow script orchestration.".to_string(),
+        tools: AgentToolPolicy::All {
+            use_exact_tools: false,
+        },
+        max_turns: BUILTIN_AGENT_MAX_TURNS,
+        model: AgentModel::Inherit,
+        permission_mode: AgentPermissionMode::Bubble,
+        source: AgentSource::BuiltIn,
+        base_dir: "built-in".into(),
+        system_prompt: Some(WORKFLOW_SUBAGENT_PROMPT.to_string()),
+        mcp_servers: vec![],
+        frontmatter_hooks: vec![],
+        icon: None,
+        allowed_tools: vec![],
+        worktree_requirement: None,
+        disallowed_tools: workflow_subagent_disallowed(),
+        skills: vec![],
+        required_mcp_servers: vec![],
+        background: false,
+        isolation: None,
+        memory: None,
+        effort: None,
+        initial_prompt: None,
+        color: None,
+    }
+}
+
 // ── Placeholder prompts for the 2 dynamic agents (verbatim port deferred) ──
 
 /// PLACEHOLDER for `claude-code-guide`. claude-code builds this prompt
@@ -362,12 +432,12 @@ fn def(
     }
 }
 
-/// The 6 built-in subagent definitions, byte-aligned with
+/// The 7 built-in subagent definitions, byte-aligned with
 /// `claude-code/src/tools/AgentTool/built-in/*.ts` (3P/non-ant defaults).
 ///
 /// Returned in the upstream registration order (general-purpose,
-/// statusline-setup, Explore, Plan, claude-code-guide, verification). The
-/// caller indexes by `agent_type`, so order is cosmetic.
+/// statusline-setup, Explore, Plan, claude-code-guide, verification,
+/// workflow-subagent). The caller indexes by `agent_type`, so order is cosmetic.
 #[must_use]
 pub fn builtin_agent_definitions() -> Vec<AgentDefinition> {
     vec![
@@ -421,6 +491,10 @@ pub fn builtin_agent_definitions() -> Vec<AgentDefinition> {
             AgentModel::Inherit,
             VERIFICATION_PROMPT,
         ),
+        // workflow-subagent has disallowed_tools, which the `def` helper doesn't
+        // support (it always sets disallowed_tools: vec![]). Use the dedicated
+        // constructor instead.
+        workflow_subagent_definition(),
     ]
 }
 
@@ -486,9 +560,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn has_six_builtins_with_unique_types() {
+    fn has_seven_builtins_with_unique_types() {
         let defs = builtin_agent_definitions();
-        assert_eq!(defs.len(), 6);
+        assert_eq!(defs.len(), 7);
         let mut names: Vec<&str> = defs.iter().map(|d| d.agent_type.as_str()).collect();
         names.sort_unstable();
         assert_eq!(
@@ -500,6 +574,7 @@ mod tests {
                 "general-purpose",
                 "statusline-setup",
                 "verification",
+                "workflow-subagent",
             ]
         );
     }
@@ -583,12 +658,12 @@ mod tests {
     }
 
     #[test]
-    fn fork_agent_not_in_six_builtins() {
+    fn fork_agent_not_in_seven_builtins() {
         // FORK_AGENT is NOT registered in builtInAgents (claude
-        // forkSubagent.ts:45) — the 6-element vec must not contain it.
+        // forkSubagent.ts:45) — the 7-element vec must not contain it.
         let defs = builtin_agent_definitions();
         assert!(!defs.iter().any(|d| d.agent_type == "fork"));
-        assert_eq!(defs.len(), 6);
+        assert_eq!(defs.len(), 7);
     }
 
     #[test]
@@ -604,5 +679,83 @@ mod tests {
             let p = find(&defs, ty).system_prompt.as_deref().unwrap();
             assert!(p.contains("[NOTE: This is a placeholder"), "{ty} should be a placeholder");
         }
+    }
+
+    // ── workflow-subagent tests (Task 1, oracle: agentdef-and-validation.md) ──
+
+    #[test]
+    fn workflow_subagent_exists_with_correct_when_to_use() {
+        let defs = builtin_agent_definitions();
+        let d = find(&defs, "workflow-subagent");
+        assert_eq!(
+            d.when_to_use,
+            "Internal subagent for workflow script orchestration."
+        );
+    }
+
+    #[test]
+    fn workflow_subagent_disallowed_tools_exact() {
+        let defs = builtin_agent_definitions();
+        let d = find(&defs, "workflow-subagent");
+        let mut got = d.disallowed_tools.clone();
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            vec!["Agent".to_string(), "SendUserMessage".to_string(), "Workflow".to_string()],
+            "disallowedTools must be [SendUserMessage, Agent, Workflow] (sorted: Agent, SendUserMessage, Workflow)"
+        );
+    }
+
+    #[test]
+    fn workflow_subagent_tools_policy_is_all() {
+        let defs = builtin_agent_definitions();
+        let d = find(&defs, "workflow-subagent");
+        assert!(
+            matches!(d.tools, AgentToolPolicy::All { use_exact_tools: false }),
+            "tools must be All (use_exact_tools: false), got {:?}",
+            d.tools
+        );
+    }
+
+    #[test]
+    fn workflow_subagent_system_prompt_equals_kbp() {
+        // kBp verbatim from oracle §1 (agentdef-and-validation.md).
+        // Em-dashes are U+2014; quotes around Done./Sent. are straight ASCII ".
+        let expected = "You are a subagent spawned by a workflow orchestration script. Use the tools available to complete the task.\n\nCRITICAL: Your final text response is returned **verbatim** as a string to the calling script \u{2014} it is your return value, not a message to a human.\n- Output the literal result (data, JSON, text). Do NOT output confirmations like \"Done.\" or \"Sent.\"\n- If asked for JSON, return ONLY the raw JSON \u{2014} no code fences, no prose, no markdown.\n- Do NOT use SendUserMessage to deliver your answer. Put your answer in your final text response.\n- Be concise. The script will parse your output.";
+        let defs = builtin_agent_definitions();
+        let d = find(&defs, "workflow-subagent");
+        let got = d.system_prompt.as_deref().expect("system_prompt must be Some");
+        assert_eq!(
+            got, expected,
+            "workflow-subagent system prompt must equal kBp verbatim"
+        );
+    }
+
+    #[test]
+    fn workflow_subagent_source_is_builtin() {
+        let defs = builtin_agent_definitions();
+        let d = find(&defs, "workflow-subagent");
+        assert!(matches!(d.source, AgentSource::BuiltIn));
+        assert_eq!(d.base_dir.as_os_str(), "built-in");
+    }
+
+    #[test]
+    fn workflow_subagent_schema_prompt_binds_structured_output_name() {
+        // xBp with ${Lp} resolved to "StructuredOutput".
+        assert!(
+            WORKFLOW_SUBAGENT_SCHEMA_PROMPT.contains("StructuredOutput"),
+            "xBp must reference the StructuredOutput tool name"
+        );
+        assert!(
+            !WORKFLOW_SUBAGENT_SCHEMA_PROMPT.contains("${Lp}"),
+            "xBp must have the Lp placeholder resolved"
+        );
+    }
+
+    #[test]
+    fn workflow_subagent_model_is_inherit() {
+        let defs = builtin_agent_definitions();
+        let d = find(&defs, "workflow-subagent");
+        assert!(matches!(d.model, AgentModel::Inherit));
     }
 }

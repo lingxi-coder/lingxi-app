@@ -1826,8 +1826,8 @@ mod tests {
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
         let spawner = PoolSubagentSpawner::new(pool);
         let entries = spawner.agent_listing().await;
-        // All 6 built-ins, sorted by type.
-        assert_eq!(entries.len(), 6);
+        // All 7 built-ins, sorted by type.
+        assert_eq!(entries.len(), 7);
         let by: std::collections::HashMap<&str, &SubagentListingEntry> =
             entries.iter().map(|e| (e.agent_type.as_str(), e)).collect();
         // general-purpose: All { .. } → "All tools".
@@ -1859,8 +1859,8 @@ mod tests {
         // The catalog entry (Explicit[Read] → "Read") wins over the built-in.
         assert_eq!(explore.when_to_use, "CUSTOM EXPLORE");
         assert_eq!(explore.tools_description, "Read");
-        // Still 6 (override, not addition).
-        assert_eq!(entries.len(), 6);
+        // Still 7 (override, not addition).
+        assert_eq!(entries.len(), 7);
     }
 
     #[test]

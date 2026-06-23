@@ -25,9 +25,33 @@ pub fn is_transcript_message_type(ty: &str) -> bool {
 /// Two-phase tolerant load of a session JSONL — the structural equivalent of
 /// `claude-code`'s `loadTranscriptFile` (`sessionStorage.ts:3472`): chain
 /// participants are parsed into [`JsonlMessage`] and indexed by uuid; Tier-1
-/// metadata (summary / custom-title / ai-title) is stashed into side-maps keyed
-/// by the uuid the reader cares about; everything else (Tier-2 + unknown +
-/// malformed) is skipped without error.
+/// metadata (summary / custom-title / ai-title / last-prompt + feature side-maps)
+/// is stashed into side-maps keyed by the uuid the reader cares about; everything
+/// else (Tier-2 + unknown + malformed) is skipped without error.
+///
+/// **Side-map inventory vs binary `Yle` function:**
+///
+/// | Map | Status | Binary type string |
+/// |-----|--------|--------------------|
+/// | `summaries` | ✅ implemented | `"summary"` |
+/// | `custom_titles` | ✅ implemented | `"custom-title"` |
+/// | `ai_titles` | ✅ implemented | `"ai-title"` |
+/// | `last_prompt` | ✅ implemented (gap #1 fix) | `"last-prompt"` |
+/// | `tags` | ✅ implemented (gap #5) | `"tag"` |
+/// | `agent_names` | ✅ implemented (gap #5) | `"agent-name"` |
+/// | `agent_settings` | ✅ implemented (gap #5) | `"agent-setting"` |
+/// | `modes` | ✅ implemented (gap #5) | `"mode"` |
+/// | `permission_modes` | ✅ implemented (gap #5) | `"permission-mode"` |
+/// | `worktree_states` | ✅ implemented (gap #5) | `"worktree-state"` |
+/// | `prNumbers/prUrls/prRepositories` | ⏭ deferred — PR subsystem absent in LingXi | `"pr-link"` |
+/// | `bridgeSessionIds/bridgeLastSeqs/bridgeDialogKindsBySession` | ⏭ deferred — bridge subsystem absent | `"bridge-session"` |
+/// | `contextCollapseCommits/contextCollapseSnapshot` | ⏭ deferred — context-collapse is REFUTED/inert (prior audit) | `"marble-origami-*"` |
+/// | `attributionSnapshots` | ⏭ deferred — attribution subsystem absent | `"attribution-snapshot"` |
+/// | `forkContextRefs` | ⏭ deferred — fork-context subsystem absent | `"fork-context-ref"` |
+/// | `contentReplacements/agentContentReplacements` | ⏭ deferred — context-collapse-tied | `"content-replacement"` |
+/// | `isolationLatches` | ⏭ deferred — isolation/worktree out-of-process-scope | `"isolation-latch"` |
+/// | `fileHistorySnapshots` | ⏭ deferred — file-history-snapshot subsystem absent | `"file-history-snapshot"` |
+/// | `agentColors` | ⏭ already handled by `agent_color.rs` (confirmed correct C6) | `"agent-color"` |
 #[derive(Debug, Clone, Default)]
 pub struct LoadedTranscript {
     /// Chain-participant lines (`user`/`assistant`/`attachment`/`system`) in
@@ -49,6 +73,40 @@ pub struct LoadedTranscript {
     /// `{type:"ai-title", sessionId, aiTitle}`; readers prefer `custom-title`
     /// over `ai-title`, `sessionStorage.ts:2644-2646`).
     pub ai_titles: HashMap<String, String>,
+
+    // ── Gap #1 fix: last-prompt resume tip ──────────────────────────────────
+    /// The last `last-prompt` entry whose `explicit===true` flag is set.
+    /// Binary `Yle` routing: `else if(N.type==="last-prompt"){if(N.leafUuid)
+    /// L=N.explicit===true||L&&N.leafUuid===O, O=N.leafUuid}` where `O` ends up
+    /// as the forced resume tip uuid and `L` (explicit) gates whether we force.
+    /// We store the raw last-seen `leafUuid` and the cumulative `explicit` flag
+    /// so `find_tip` can replicate the TS logic precisely.
+    ///
+    /// `None` when no `last-prompt` entry with a `leafUuid` was encountered.
+    pub last_prompt_leaf_uuid: Option<String>,
+    /// Whether the last-prompt entry (or any prior one with the same leafUuid)
+    /// had `explicit===true`. Mirrors the TS `L` accumulation variable.
+    pub last_prompt_explicit: bool,
+
+    // ── Gap #5 fix: feature side-maps present in LingXi ─────────────────────
+    /// `tag` entries: keyed by `sessionId`, accumulated as a `Vec<String>`.
+    /// Binary `Yle`: `tags.set(N.sessionId, [...(tags.get(N.sessionId)??[]), N.tag])`.
+    pub tags: HashMap<String, Vec<String>>,
+    /// `agent-name` entries: keyed by `agentId` → agent display name.
+    /// Binary `Yle`: `agentNames.set(N.agentId, N.agentName)`.
+    pub agent_names: HashMap<String, String>,
+    /// `agent-setting` entries: keyed by `agentId` → raw JSON value of the setting.
+    /// Binary `Yle`: `agentSettings.set(N.agentId, N)`.
+    pub agent_settings: HashMap<String, Value>,
+    /// `mode` entries: keyed by `sessionId` → mode string, last-write-wins.
+    /// Binary `Yle`: `modes.set(N.sessionId, N.mode)`.
+    pub modes: HashMap<String, String>,
+    /// `permission-mode` entries: keyed by `sessionId` → permission-mode string,
+    /// last-write-wins. Binary `Yle`: `permissionModes.set(N.sessionId, N.permissionMode)`.
+    pub permission_modes: HashMap<String, String>,
+    /// `worktree-state` entries: keyed by `agentId` → raw JSON value.
+    /// Binary `Yle`: `worktreeStates.set(N.agentId, N)`.
+    pub worktree_states: HashMap<String, Value>,
 }
 
 /// Failure modes for [`JsonlReader`].
@@ -180,9 +238,9 @@ impl JsonlReader {
 ///      deserialize (e.g. a non-string `uuid`) is skipped, not errored — pure
 ///      metadata lines are routed out FIRST by `type`, so a transcript-typed
 ///      line that still won't parse is genuinely corrupt and dropped.
-///    - Tier-1 metadata (`summary`/`custom-title`/`ai-title`) → side-maps.
-///    - Tier-2 + unknown (`file-history-snapshot`, `queue-operation`,
-///      `permission-mode`, `mode`, `last-prompt`, …) → ignored.
+///    - Tier-1 metadata (`summary`/`custom-title`/`ai-title`/`last-prompt` +
+///      feature side-maps) → side-maps on [`LoadedTranscript`].
+///    - Tier-2 + unknown (`file-history-snapshot`, `queue-operation`, …) → ignored.
 #[must_use]
 pub fn route_lines(content: &str) -> LoadedTranscript {
     let mut out = LoadedTranscript::default();
@@ -230,8 +288,81 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
             ) {
                 out.ai_titles.insert(sid.to_string(), title.to_string());
             }
+
+        // ── Gap #1 fix: last-prompt → explicit resume tip ────────────────────
+        } else if ty == "last-prompt" {
+            // Binary `Yle` (@ 206473264):
+            //   `else if(N.type==="last-prompt"){if(N.leafUuid)
+            //      L=N.explicit===true||L&&N.leafUuid===O, O=N.leafUuid}`
+            // L = explicit flag, O = forced tip uuid.
+            // We replicate: on each last-prompt entry that has a leafUuid:
+            //   - new_explicit = entry.explicit===true
+            //                    || (prior_explicit && leafUuid == prior_tip)
+            //   - update last_prompt_leaf_uuid to the new leafUuid
+            //   - update last_prompt_explicit to new_explicit
+            if let Some(leaf_uuid) = value.get("leafUuid").and_then(Value::as_str) {
+                let entry_explicit = value
+                    .get("explicit")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let prev_explicit = out.last_prompt_explicit;
+                let prev_uuid = out.last_prompt_leaf_uuid.as_deref().unwrap_or("");
+                // TS: L = N.explicit===true || L && N.leafUuid===O
+                let new_explicit =
+                    entry_explicit || (prev_explicit && leaf_uuid == prev_uuid);
+                out.last_prompt_leaf_uuid = Some(leaf_uuid.to_string());
+                out.last_prompt_explicit = new_explicit;
+            }
+
+        // ── Gap #5 fix: feature side-maps present in LingXi ─────────────────
+        } else if ty == "tag" {
+            // Binary `Yle`: `tags.set(N.sessionId, [...(tags.get(N.sessionId)??[]), N.tag])`.
+            if let (Some(sid), Some(tag)) = (
+                value.get("sessionId").and_then(Value::as_str),
+                value.get("tag").and_then(Value::as_str),
+            ) {
+                out.tags
+                    .entry(sid.to_string())
+                    .or_default()
+                    .push(tag.to_string());
+            }
+        } else if ty == "agent-name" {
+            // Binary `Yle`: `agentNames.set(N.agentId, N.agentName)`.
+            if let (Some(agent_id), Some(agent_name)) = (
+                value.get("agentId").and_then(Value::as_str),
+                value.get("agentName").and_then(Value::as_str),
+            ) {
+                out.agent_names
+                    .insert(agent_id.to_string(), agent_name.to_string());
+            }
+        } else if ty == "agent-setting" {
+            // Binary `Yle`: `agentSettings.set(N.agentId, N)`.
+            if let Some(agent_id) = value.get("agentId").and_then(Value::as_str) {
+                out.agent_settings.insert(agent_id.to_string(), value);
+            }
+        } else if ty == "mode" {
+            // Binary `Yle`: `modes.set(N.sessionId, N.mode)`.
+            if let (Some(sid), Some(mode)) = (
+                value.get("sessionId").and_then(Value::as_str),
+                value.get("mode").and_then(Value::as_str),
+            ) {
+                out.modes.insert(sid.to_string(), mode.to_string());
+            }
+        } else if ty == "permission-mode" {
+            // Binary `Yle`: `permissionModes.set(N.sessionId, N.permissionMode)`.
+            if let (Some(sid), Some(pm)) = (
+                value.get("sessionId").and_then(Value::as_str),
+                value.get("permissionMode").and_then(Value::as_str),
+            ) {
+                out.permission_modes.insert(sid.to_string(), pm.to_string());
+            }
+        } else if ty == "worktree-state" {
+            // Binary `Yle`: `worktreeStates.set(N.agentId, N)`.
+            if let Some(agent_id) = value.get("agentId").and_then(Value::as_str) {
+                out.worktree_states.insert(agent_id.to_string(), value);
+            }
         }
-        // else: Tier-2 / unknown → ignored (no error).
+        // else: Tier-2 / unknown / deferred subsystem → ignored (no error).
     }
     out
 }

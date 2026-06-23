@@ -322,6 +322,57 @@ async fn collect_dir(
             if first.is_sidechain || has_team_name {
                 continue;
             }
+
+            // Gap #2 fix — SESSION.2: filter `sessionKind` daemon sessions.
+            // Binary `vkm` (@ 206492423):
+            //   `if(i.sessionKind==="daemon"||i.sessionKind==="daemon-worker") return C(...),null`
+            // Binary log: `"$ filtered from /resume: sessionKind="` @ 113414433.
+            // `sessionKind` is carried in `extra` (outer field, not a named struct field).
+            let session_kind = first.extra.get("sessionKind").and_then(|v| v.as_str()).unwrap_or("");
+            if session_kind == "daemon" || session_kind == "daemon-worker" {
+                continue;
+            }
+
+            // Gap #3 fix — SESSION.3: filter SDK-entrypoint sessions.
+            // Binary `vkm`: `k9l=new Set(["sdk-cli","sdk-ts","sdk-py"])`;
+            //   `if(!a && k9l.has(n.entrypoint??"")) return C(...),null`
+            // Binary log: `"# filtered from /resume: entrypoint="` @ 113414513.
+            // The `!a` guard means this only applies when the session is NOT already
+            // flagged (i.e., passes the daemon check above). The entrypoint field IS
+            // a named struct field on JsonlMessage.
+            let entrypoint = first.entrypoint.as_deref().unwrap_or("");
+            if matches!(entrypoint, "sdk-cli" | "sdk-ts" | "sdk-py") {
+                continue;
+            }
+        }
+
+        // Gap #4 fix — SESSION.4: filter `/loop` sessions.
+        // Binary `vkm`: `m=r.includes("<command-name>/loop</command-name>")` (where
+        // `r` is the first line raw string), then
+        //   `if(!a&&n.isLoopSession) return C(...),null`
+        // Binary log: `"% filtered from /resume: /loop session"` @ 113414577.
+        // Confirmed string: `"<command-name>/loop</command-name>"` @ 113388700.
+        // The binary sets `isLoopSession` by scanning the FIRST LINE (the raw
+        // string) for the `/loop` command-name tag — we scan the first message's
+        // content text for the same tag. We do this OUTSIDE the `if let Some(first)`
+        // block so we don't shadow the first-check path; the session is only reachable
+        // here when it has at least one message (the block above `continue`d otherwise).
+        {
+            let raw_first_line = {
+                // Reconstruct the first raw JSONL line from messages_in_order[0] to
+                // check for the /loop tag. Because route_lines drops raw text after
+                // parse, we must re-serialize the message back to JSON and scan it.
+                // This is cheap (one message) and correct — the tag appears verbatim
+                // in the user message content.
+                loaded
+                    .messages_in_order
+                    .first()
+                    .and_then(|m| serde_json::to_string(m).ok())
+                    .unwrap_or_default()
+            };
+            if raw_first_line.contains("<command-name>/loop</command-name>") {
+                continue;
+            }
         }
 
         // Title precedence — 1:1 with claude-code's resolution, which composes
@@ -694,15 +745,27 @@ fn timestamp_millis(ts: &str) -> i64 {
 /// leaf selection, as composed by `loadMessagesFromJsonlPath`
 /// (`conversationRecovery.ts:416`).
 ///
-/// This is steps (1)–(4) of [`build_conversation_chain`], factored out so the
-/// resume picker can resolve a session's stored `summary` (keyed by the tip's
-/// `leafUuid`, `sessionStorage.ts:3009`) WITHOUT re-walking the whole chain. The
-/// returned `tip.uuid` is the `leafUuid` to look up in
-/// [`LoadedTranscript::summaries`]; the tip also supplies the session id (forked
-/// sessions copy `chain[0]` from the source transcript, so the tip — not the
-/// file's first row — is authoritative).
+/// **Gap #1 fix — `last-prompt` explicit tip override:**
+/// Before running the normal timestamp-based leaf selection, we check whether
+/// the transcript carries an *explicit* `last-prompt` entry (written by
+/// claude-code on every prompt submit with `policy:"always"`). Binary `Yle`
+/// (@ 206473264):
+/// ```text
+/// else if(N.type==="last-prompt"){if(N.leafUuid)
+///   L=N.explicit===true||L&&N.leafUuid===O, O=N.leafUuid}
+/// …
+/// V = L&&O&&n.has(O)&&!n.get(O)?.isSidechain
+/// ```
+/// where `L` = explicit flag and `O` = forced tip uuid. When `V` is true the
+/// binary sets the tip directly to the `last-prompt` `leafUuid`, bypassing the
+/// timestamp race. We mirror that: if `loaded.last_prompt_explicit` is `true`,
+/// `loaded.last_prompt_leaf_uuid` names a real non-sidechain participant, and
+/// that participant is a `user`/`assistant` message → return it immediately,
+/// skipping steps (1)–(4). This guarantees the correct branch is resumed even
+/// when two branches share the same newest timestamp.
 ///
 /// Algorithm:
+///  0. (NEW) Explicit `last-prompt` override check — return early when applicable.
 ///  1. `parent_uuids` = every `parentUuid` present among the chain participants.
 ///  2. `terminals` = participants whose `uuid` is NOT in `parent_uuids` (no
 ///     children) — these are the graph tips, including sidechain/orphan tips.
@@ -719,6 +782,27 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
     let by_uuid = &loaded.by_uuid;
     if by_uuid.is_empty() {
         return None;
+    }
+
+    // (0) Gap #1 fix: explicit last-prompt override.
+    // Binary: `V = L&&O&&n.has(O)&&!n.get(O)?.isSidechain`
+    // where L = explicit and O = leafUuid. Mirror: if explicit is set AND the
+    // leafUuid is present as a non-sidechain user/assistant participant → force.
+    if loaded.last_prompt_explicit {
+        if let Some(lp_uuid) = &loaded.last_prompt_leaf_uuid {
+            if let Some(lp_msg) = by_uuid.get(lp_uuid.as_str()) {
+                if !lp_msg.is_sidechain
+                    && (lp_msg.message_type == "user" || lp_msg.message_type == "assistant")
+                {
+                    tracing::debug!(
+                        session = arg,
+                        tip = %lp_uuid,
+                        "last-prompt explicit override: forcing resume tip",
+                    );
+                    return Some(lp_msg);
+                }
+            }
+        }
     }
 
     // (1) Every parentUuid that is actually referenced.

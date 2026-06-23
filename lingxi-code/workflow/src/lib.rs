@@ -34,12 +34,13 @@ const WORKFLOW_PRELUDE: &str = r#"
 // before the first await (parallel's fan-out) run concurrently, while a
 // sequential `await agent()` chain dispatches one at a time.
 globalThis.__wf_queue = [];
-// Sentinel + message for the 1000-agent lifetime cap (claude-code `k6a`/`c0p`).
-// The host returns the sentinel in a result slot when the cap is exceeded; the
-// pump then REJECTS that agent()'s promise with the byte-exact message so a
-// runaway loop throws rather than silently nulling.
-globalThis.__WF_AGENT_CAP_SENTINEL = String.fromCharCode(1) + "__wf_agent_cap__" + String.fromCharCode(1);
-globalThis.__WF_AGENT_CAP_MESSAGE = "Workflow agent() call cap reached (1000). This usually means a loop using budget.remaining() never terminates because no token budget was set — remaining() returns Infinity when budget.total is null. Add a hard iteration cap to the loop, or pass a token budget.";
+// Generalized "throw this agent()" channel: when the host refuses a spawn
+// (agent-cap `k6a`/`c0p`, or budget ceiling `I6a`), it returns the result slot
+// as `THROW_PREFIX + message`; the pump then REJECTS that agent()'s promise with
+// `new Error(message)` so a runaway/over-budget loop throws (in parallel/pipeline
+// the throw is caught → null, as claude-code does). The prefix is NUL-free
+// (the eval path uses a C string) and collision-proof via U+0001 framing.
+globalThis.__WF_THROW_PREFIX = String.fromCharCode(1) + "__wf_throw__" + String.fromCharCode(1);
 globalThis.agent = (prompt, opts) => new Promise((res, rej) => { globalThis.__wf_queue.push({ prompt: String(prompt), opts: opts || {}, res, rej }); });
 globalThis.__wf_pump = () => {
   const q = globalThis.__wf_queue;
@@ -50,8 +51,12 @@ globalThis.__wf_pump = () => {
   // runner maps the spawn-affecting opts onto each subagent request.
   const results = globalThis.__wf_dispatch_batch(q.map((x) => x.prompt), q.map((x) => JSON.stringify(x.opts || {})));
   for (let i = 0; i < q.length; i++) {
-    if (results[i] === globalThis.__WF_AGENT_CAP_SENTINEL) q[i].rej(new Error(globalThis.__WF_AGENT_CAP_MESSAGE));
-    else q[i].res(results[i]);
+    const r = results[i];
+    if (typeof r === "string" && r.startsWith(globalThis.__WF_THROW_PREFIX)) {
+      q[i].rej(new Error(r.slice(globalThis.__WF_THROW_PREFIX.length)));
+    } else {
+      q[i].res(r);
+    }
   }
   return true;
 };

@@ -57,17 +57,49 @@ pub use crate::handlers::local_bash::{NoopStatusSink, TaskStatusSink};
 const HANDLER_NAME: &str = "local_workflow";
 
 /// claude-code `k6a` — the per-run lifetime cap on real `agent()` spawns. The
-/// 1001st spawn is refused with [`WF_AGENT_CAP_SENTINEL`] so the prelude rejects
-/// the `agent()` promise with `WorkflowAgentCapError` (a runaway-loop backstop).
+/// 1001st spawn is refused via the throw channel so the prelude rejects the
+/// `agent()` promise with `WorkflowAgentCapError` (a runaway-loop backstop).
 const WORKFLOW_AGENT_CAP: u64 = 1000;
 
-/// Sentinel the worker returns in place of a result when the agent cap is hit;
-/// the JS prelude recognizes it and throws the byte-exact cap message. The U+0001
-/// framing makes a collision with a real subagent result impossible while
-/// staying NUL-free (the prelude eval path uses a C string, which rejects
-/// NUL). MUST stay byte-identical to the preludes
-/// `__WF_AGENT_CAP_SENTINEL` (`String.fromCharCode(1)+"__wf_agent_cap__"+...`).
-const WF_AGENT_CAP_SENTINEL: &str = "\u{1}__wf_agent_cap__\u{1}";
+/// The `WorkflowAgentCapError` message (binary `c0p` @201953488), `${k6a}`=1000.
+const WORKFLOW_AGENT_CAP_MESSAGE: &str = "Workflow agent() call cap reached (1000). This usually means a loop using budget.remaining() never terminates because no token budget was set \u{2014} remaining() returns Infinity when budget.total is null. Add a hard iteration cap to the loop, or pass a token budget.";
+
+/// Prefix the worker prepends to a result slot to make the prelude THROW that
+/// `agent()` with the rest of the string as the Error message (agent-cap or
+/// budget-ceiling). U+0001-framed: collision-proof and NUL-free (the prelude
+/// eval path uses a C string). MUST stay byte-identical to the prelude's
+/// `__WF_THROW_PREFIX` (`String.fromCharCode(1)+"__wf_throw__"+...`).
+const WF_THROW_PREFIX: &str = "\u{1}__wf_throw__\u{1}";
+
+/// Build a throw-channel result slot carrying `message`.
+fn wf_throw(message: &str) -> String {
+    format!("{WF_THROW_PREFIX}{message}")
+}
+
+/// `WorkflowBudgetExceededError` message (binary `I6a` @201953813), with
+/// thousands-separated counts (`toLocaleString`).
+fn workflow_budget_exceeded_message(spent: u64, total: u64) -> String {
+    format!(
+        "Workflow token budget exceeded ({} / {} output tokens). Stopping further agent() calls. In-flight agents will complete; their results are preserved.",
+        group_en_us(spent),
+        group_en_us(total),
+    )
+}
+
+/// `Number.prototype.toLocaleString()` for en-US: group integer digits in 3s
+/// with commas.
+fn group_en_us(n: u64) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    out
+}
 
 /// The subagent type spawned for a bare `agent(prompt)` call — claude-code's
 /// default workflow subagent.
@@ -119,6 +151,12 @@ pub struct LocalWorkflowHandler {
     /// that the main loop also feeds, so `spent()` reads main loop + all
     /// workflows. When unset (tests), a run falls back to its own private pool.
     output_pool_cell: Option<Arc<OnceLock<Arc<AtomicU64>>>>,
+    /// Late-bound turn-start output baseline (claude-code `xtr`): the cumulative
+    /// output at the start of the CURRENT turn. The composition root publishes
+    /// the orchestrator's `turn_start_output_baseline` here. At spawn the handler
+    /// snapshots `baseline.load()` so the run's `budget.spent()` is turn-relative
+    /// (`pool - baseline` = `getTurnSpent()`). Unset (tests) ⇒ baseline 0.
+    turn_baseline_cell: Option<Arc<OnceLock<Arc<AtomicU64>>>>,
 }
 
 impl LocalWorkflowHandler {
@@ -143,6 +181,7 @@ impl LocalWorkflowHandler {
             pending_kill: Arc::new(Mutex::new(HashMap::new())),
             token_budget_total: None,
             output_pool_cell: None,
+            turn_baseline_cell: None,
         }
     }
 
@@ -170,6 +209,16 @@ impl LocalWorkflowHandler {
     #[must_use]
     pub fn with_output_pool_cell(mut self, cell: Arc<OnceLock<Arc<AtomicU64>>>) -> Self {
         self.output_pool_cell = Some(cell);
+        self
+    }
+
+    /// Late-bind the turn-start output baseline cell (claude-code `xtr`). The
+    /// composition root publishes the orchestrator's `turn_start_output_baseline`
+    /// so each run's `budget.spent()` is turn-relative. See
+    /// [`Self::turn_baseline_cell`].
+    #[must_use]
+    pub fn with_turn_baseline_cell(mut self, cell: Arc<OnceLock<Arc<AtomicU64>>>) -> Self {
+        self.turn_baseline_cell = Some(cell);
         self
     }
 
@@ -271,18 +320,30 @@ fn format_progress(p: &workflow::Progress) -> String {
 }
 
 /// Backs the script's `budget` global: a fixed `total` (the turn's token target)
-/// and `spent` = the shared output-token pool (main loop + every workflow when
-/// wired by the root; this run's own subagent output when standalone).
+/// and `spent()` = output tokens spent SINCE THE CURRENT TURN STARTED — the
+/// shared cumulative pool minus the turn-start baseline (`baseline`). This is
+/// claude-code `getTurnSpent()` = `rT() - R` where `R = xtr` is the cumulative
+/// output at turn start (binary @192177594/@202008079): a turn-relative delta,
+/// NOT the absolute session pool. `baseline` is snapshotted at workflow start.
 struct OwnSpendBudget {
     total: Option<u64>,
     spent: Arc<std::sync::atomic::AtomicU64>,
+    /// Cumulative output at the start of the turn this workflow was spawned in.
+    baseline: u64,
+}
+impl OwnSpendBudget {
+    fn turn_spent(&self) -> u64 {
+        self.spent
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_sub(self.baseline)
+    }
 }
 impl workflow::WorkflowBudgetSource for OwnSpendBudget {
     fn total(&self) -> Option<u64> {
         self.total
     }
     fn spent(&self) -> u64 {
-        self.spent.load(std::sync::atomic::Ordering::Relaxed)
+        self.turn_spent()
     }
 }
 
@@ -325,6 +386,7 @@ pub async fn run_workflow_script(
     journal: Option<Arc<std::sync::Mutex<HashMap<String, String>>>>,
     token_budget_total: Option<u64>,
     shared_pool: Option<Arc<AtomicU64>>,
+    turn_start_baseline: u64,
     nested: NestedConfig,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
     let NestedConfig {
@@ -343,6 +405,7 @@ pub async fn run_workflow_script(
     let budget_source: Arc<dyn workflow::WorkflowBudgetSource> = Arc::new(OwnSpendBudget {
         total: token_budget_total,
         spent: spent.clone(),
+        baseline: turn_start_baseline,
     });
     // Request channel: each in-flight batch is (calls, reply-sender), where a
     // call is (prompt, opts_json). A buffer of one suffices — the runner blocks
@@ -410,6 +473,8 @@ pub async fn run_workflow_script(
                 let spent = spent.clone();
                 let agent_count = agent_count.clone();
                 let nested_fs = nested_fs.clone();
+                let budget_total = token_budget_total;
+                let baseline = turn_start_baseline;
                 async move {
                     // `workflow()` resolution: the runtime asks the host to resolve
                     // a nested workflow reference to its SOURCE (it then evaluates
@@ -433,13 +498,25 @@ pub async fn run_workflow_script(
                             return cached;
                         }
                     }
+                    // Budget hard ceiling (claude-code `v()` before each spawn):
+                    // when a token target is set and the turn-relative spend has
+                    // reached it, refuse the spawn → the prelude throws
+                    // WorkflowBudgetExceededError (sequential loops stop; in
+                    // parallel/pipeline the throw is caught → null). Checked
+                    // before the cap so an over-budget run reports the budget error.
+                    if let Some(total) = budget_total.filter(|&t| t > 0) {
+                        let turn_spent = spent.load(Ordering::Relaxed).saturating_sub(baseline);
+                        if turn_spent >= total {
+                            return wf_throw(&workflow_budget_exceeded_message(turn_spent, total));
+                        }
+                    }
                     // 1000-agent lifetime cap (claude-code `S()` before each real
                     // spawn): this is reached only after the cache-miss + non-resolve
                     // checks, so replayed/resolve calls are exempt. `fetch_add`
                     // returns the prior count → spawns 0..999 proceed, the 1001st
-                    // returns the sentinel and the prelude throws WorkflowAgentCapError.
+                    // throws WorkflowAgentCapError.
                     if agent_count.fetch_add(1, Ordering::SeqCst) >= WORKFLOW_AGENT_CAP {
-                        return WF_AGENT_CAP_SENTINEL.to_string();
+                        return wf_throw(WORKFLOW_AGENT_CAP_MESSAGE);
                     }
                     let inherit = SubagentInheritance {
                         tool_invoker,
@@ -571,6 +648,15 @@ impl Task for LocalWorkflowHandler {
             .output_pool_cell
             .as_ref()
             .and_then(|c| c.get().cloned());
+        // Snapshot the turn-start baseline (claude-code `R = xtr`) once, now, at
+        // spawn — it is fixed for this workflow's life even as later turns update
+        // the orchestrator's live baseline.
+        let turn_start_baseline = self
+            .turn_baseline_cell
+            .as_ref()
+            .and_then(|c| c.get())
+            .map(|a| a.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
         let worker_spool_path = spool_path.clone();
         let worker_task_id = task_id.clone();
         let worker = Box::pin(async move {
@@ -629,6 +715,7 @@ impl Task for LocalWorkflowHandler {
                 Some(journal.clone()),
                 token_budget_total,
                 shared_pool,
+                turn_start_baseline,
                 NestedConfig {
                     allow_nested: true,
                     args: workflow_args,
@@ -968,6 +1055,7 @@ mod tests {
             None,
             None,
             None,
+            0,
             NestedConfig::default(),
         )
         .await
@@ -989,6 +1077,7 @@ mod tests {
             None,
             None,
             None,
+            0,
             NestedConfig::default(),
         )
         .await;
@@ -1012,6 +1101,68 @@ mod tests {
         assert_eq!(outcome.result.as_deref(), Some("\"ok\""));
     }
 
+    /// `budget.spent()` is TURN-RELATIVE: the shared pool minus the turn-start
+    /// baseline (claude-code `getTurnSpent()=rT()-xtr`), so prior-turn output is
+    /// excluded.
+    #[tokio::test]
+    async fn budget_spent_is_turn_relative_via_baseline() {
+        use std::sync::atomic::AtomicU64;
+        // Pool already at 500 from prior turns; THIS turn started at 500 → the
+        // baseline is 500, so a fresh 100-token subagent yields spent()==100.
+        let pool = Arc::new(AtomicU64::new(500));
+        let spawner = Arc::new(EchoSpawner::default());
+        let outcome = run_workflow_script(
+            "await agent('a'); log('spent=' + budget.spent()); return '';",
+            DEFAULT_WORKFLOW_SUBAGENT,
+            spawner,
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            None,
+            None,
+            None,
+            Some(pool),
+            500,
+            NestedConfig::default(),
+        )
+        .await
+        .expect("runs");
+        assert!(
+            logs(&outcome).iter().any(|l| l == "spent=100"),
+            "spent should be turn-relative (100), logs: {:?}",
+            logs(&outcome)
+        );
+    }
+
+    /// The budget hard ceiling: once turn-relative spend reaches the target, the
+    /// next `agent()` throws the byte-exact `WorkflowBudgetExceededError`.
+    #[tokio::test]
+    async fn budget_ceiling_throws_when_turn_spend_exceeds_total() {
+        use std::sync::atomic::AtomicU64;
+        // total=100; pool already at 150 this turn (baseline 0) → 150 >= 100.
+        let pool = Arc::new(AtomicU64::new(150));
+        let spawner = Arc::new(EchoSpawner::default());
+        let result = run_workflow_script(
+            "await agent('a'); return 'done';",
+            DEFAULT_WORKFLOW_SUBAGENT,
+            spawner,
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            None,
+            None,
+            Some(100),
+            Some(pool),
+            0,
+            NestedConfig::default(),
+        )
+        .await;
+        let err = result.expect_err("over-budget agent() must throw");
+        assert!(
+            format!("{err}")
+                .contains("Workflow token budget exceeded (150 / 100 output tokens)"),
+            "got: {err}"
+        );
+    }
+
     /// `budget.spent()` reads the shared pool: a pre-seeded value (standing in
     /// for main-loop output the orchestrator already accumulated) plus every
     /// subagent's output tokens — the union claude-code exposes, not own-spend.
@@ -1031,6 +1182,7 @@ mod tests {
             None,
             Some(1_000_000),
             Some(pool.clone()),
+            0,
             NestedConfig::default(),
         )
         .await
@@ -1162,6 +1314,7 @@ mod tests {
             None,
             None,
             None,
+            0,
             NestedConfig {
                 allow_nested: false,
                 args: Some(r#"{"a":5}"#.to_string()),
@@ -1201,6 +1354,7 @@ mod tests {
             None,
             None,
             None,
+            0,
             NestedConfig {
                 allow_nested: true,
                 args: None,

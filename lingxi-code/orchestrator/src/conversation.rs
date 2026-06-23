@@ -667,6 +667,13 @@ pub struct ConversationOrchestrator {
     /// claude-code's shared per-turn pool (cumulative over the session; exact for
     /// the dominant single-directive case).
     pub(crate) output_token_pool: Arc<std::sync::atomic::AtomicU64>,
+    /// Turn-start output baseline (claude-code `xtr`, set by `UAc(e)` each turn):
+    /// the cumulative [`Self::output_token_pool`] value captured at the START of
+    /// the current turn. A launched workflow's `budget.spent()` reads
+    /// `pool - baseline` = `getTurnSpent()` (output spent THIS turn), so prior
+    /// turns' output is excluded. Updated by each turn driver as its per-turn
+    /// token counter resets to 0.
+    pub(crate) turn_start_output_baseline: Arc<std::sync::atomic::AtomicU64>,
     /// Shared cache-safe prompt-prefix slot (In-Loop Compaction Batch 6). When
     /// wired (via [`Self::with_cache_safe_slot`]), the turn drivers write a
     /// [`sidequery::CacheSafeParams`] snapshot after every successful API call
@@ -902,6 +909,7 @@ impl ConversationOrchestrator {
             compaction_tracking: Mutex::new(compaction::AutoCompactTrackingState::default()),
             last_response_input_tokens: std::sync::atomic::AtomicU64::new(0),
             output_token_pool: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_start_output_baseline: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_safe_slot: None,
             current_turn_system_prompt: Mutex::new(None),
             read_file_state: Arc::new(Mutex::new(Vec::new())),
@@ -1772,6 +1780,15 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn output_token_pool(&self) -> Arc<std::sync::atomic::AtomicU64> {
         self.output_token_pool.clone()
+    }
+
+    /// The turn-start output baseline (claude-code `xtr`) backing a launched
+    /// workflow's turn-relative `budget.spent()`. The composition root hands this
+    /// `Arc` to the `LocalWorkflowHandler` (snapshotted at workflow spawn). See
+    /// [`Self::turn_start_output_baseline`].
+    #[must_use]
+    pub fn turn_start_output_baseline(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        self.turn_start_output_baseline.clone()
     }
 
     /// Fire the `tengu_auto_compact_prefix_overflow` telemetry event for a
@@ -3543,6 +3560,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // NO-OP and the loop stops at the first `end_turn` (parity default).
         let mut budget = self.new_budget_tracker();
         let mut global_turn_tokens: u64 = 0;
+        // Turn-start output baseline (claude-code `xtr` via `UAc(e)`): snapshot the
+        // cumulative pool as this turn begins, so a workflow launched this turn
+        // reads `budget.spent()` = `pool - baseline` (output spent THIS turn).
+        self.turn_start_output_baseline.store(
+            self.output_token_pool
+                .load(std::sync::atomic::Ordering::Relaxed),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let mut turn_count: u32 = 0;
         let final_message_id;
         loop {
@@ -3731,6 +3756,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // budget check is a NO-OP and the loop stops at the first `end_turn`.
         let mut budget = self.new_budget_tracker();
         let mut global_turn_tokens: u64 = 0;
+        // Turn-start output baseline (claude-code `xtr` via `UAc(e)`): snapshot the
+        // cumulative pool as this turn begins, so a workflow launched this turn
+        // reads `budget.spent()` = `pool - baseline` (output spent THIS turn).
+        self.turn_start_output_baseline.store(
+            self.output_token_pool
+                .load(std::sync::atomic::Ordering::Relaxed),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let mut turn_count: u32 = 0;
         // Malformed-tool-use retry guard (claude-code `transition.reason ===
         // "malformed_tool_use_retry"`): set after the FIRST `tool_use`

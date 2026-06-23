@@ -3077,6 +3077,10 @@ pub async fn build(
     // pattern as `local_workflow_invoker` (handler registered before the orch).
     let local_workflow_output_pool: Arc<std::sync::OnceLock<Arc<std::sync::atomic::AtomicU64>>> =
         Arc::new(std::sync::OnceLock::new());
+    // Turn-start output baseline (claude-code `xtr`) backing the workflow's
+    // turn-relative `budget.spent()`; published from the orchestrator below.
+    let local_workflow_turn_baseline: Arc<std::sync::OnceLock<Arc<std::sync::atomic::AtomicU64>>> =
+        Arc::new(std::sync::OnceLock::new());
     task_registry_inner.register_handler(
         tasks::TaskType::LocalWorkflow,
         Arc::new(
@@ -3090,7 +3094,8 @@ pub async fn build(
             // (`OrchestratorConfig.token_budget`); `spent()` reads the shared
             // pool (main loop + all workflows) once `output_pool_cell` is bound.
             .with_token_budget(orch_cfg.token_budget)
-            .with_output_pool_cell(local_workflow_output_pool.clone()),
+            .with_output_pool_cell(local_workflow_output_pool.clone())
+            .with_turn_baseline_cell(local_workflow_turn_baseline.clone()),
         ),
     );
 
@@ -3724,6 +3729,7 @@ pub async fn build(
     // workflow's `budget.spent()` reads the same `Arc<AtomicU64>` the main loop
     // feeds per response — main loop + all workflows, claude-code's shared pool.
     let _ = local_workflow_output_pool.set(orch.output_token_pool());
+    let _ = local_workflow_turn_baseline.set(orch.turn_start_output_baseline());
 
     // (6) Command registry through the desktop composition root.
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();

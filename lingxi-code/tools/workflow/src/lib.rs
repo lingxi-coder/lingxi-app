@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
+use traits::env::is_env_truthy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
@@ -181,7 +182,23 @@ impl Tool for WorkflowTool {
         &INPUT_SCHEMA
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
-        true
+        // Port of `fbn()` + `pA()` from claude-code v2.1.186 (offset 196461282).
+        // `fbn()` returns true (= disable) when:
+        //   `isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_WORKFLOWS)` OR
+        //   `$H()?.settings.disableWorkflows === true`
+        //
+        // LingXi: the env-var branch is implemented faithfully.
+        // ⚠️ managed-setting `disableWorkflows` has no ctx seam:
+        //   `ToolStaticContext` carries only `feature_flags`; the managed settings
+        //   object is not threaded to `is_enabled`. The setting gate is therefore
+        //   not implemented; a future refactor that adds managed-settings to
+        //   `ToolStaticContext` should add the second arm.
+        //
+        // The org/launch (`Xs("allow_workflows")`), GrowthBook
+        // (`tengu_workflows_enabled`), and plan-availability gates have no LingXi
+        // backing and are treated as permissive (enabled), matching the
+        // Max/Team/null-plan default.
+        !is_env_truthy(std::env::var("CLAUDE_CODE_DISABLE_WORKFLOWS").ok().as_deref())
     }
     fn max_result_size_chars(&self) -> usize {
         // The result is a tiny `{status, taskId, taskType}` object.
@@ -470,5 +487,68 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::Internal(_)));
+    }
+
+    // is_enabled gate tests — port of `fbn()` / `pA()` local-deterministic subset.
+    //
+    // Env vars are process-global; all tests that touch CLAUDE_CODE_DISABLE_WORKFLOWS
+    // must hold ENV_LOCK so they don't race with each other.
+    use std::sync::Mutex;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Default: no env var set → tool is enabled.
+    #[test]
+    fn is_enabled_default() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+        let t = tool(None);
+        assert!(
+            t.is_enabled(&ToolStaticContext::default()),
+            "Workflow must be enabled by default"
+        );
+    }
+
+    /// CLAUDE_CODE_DISABLE_WORKFLOWS=1 → tool is disabled.
+    #[test]
+    fn is_enabled_disabled_by_env_1() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("CLAUDE_CODE_DISABLE_WORKFLOWS", "1");
+        let t = tool(None);
+        let enabled = t.is_enabled(&ToolStaticContext::default());
+        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+        assert!(!enabled, "Workflow must be disabled when env var is '1'");
+    }
+
+    /// CLAUDE_CODE_DISABLE_WORKFLOWS=true → tool is disabled.
+    #[test]
+    fn is_enabled_disabled_by_env_true() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("CLAUDE_CODE_DISABLE_WORKFLOWS", "true");
+        let t = tool(None);
+        let enabled = t.is_enabled(&ToolStaticContext::default());
+        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+        assert!(!enabled, "Workflow must be disabled when env var is 'true'");
+    }
+
+    /// CLAUDE_CODE_DISABLE_WORKFLOWS=yes → tool is disabled.
+    #[test]
+    fn is_enabled_disabled_by_env_yes() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("CLAUDE_CODE_DISABLE_WORKFLOWS", "yes");
+        let t = tool(None);
+        let enabled = t.is_enabled(&ToolStaticContext::default());
+        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+        assert!(!enabled, "Workflow must be disabled when env var is 'yes'");
+    }
+
+    /// CLAUDE_CODE_DISABLE_WORKFLOWS=0 (falsy) → tool remains enabled.
+    #[test]
+    fn is_enabled_falsy_env_value_stays_enabled() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("CLAUDE_CODE_DISABLE_WORKFLOWS", "0");
+        let t = tool(None);
+        let enabled = t.is_enabled(&ToolStaticContext::default());
+        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+        assert!(enabled, "Workflow must stay enabled when env var is '0' (falsy)");
     }
 }

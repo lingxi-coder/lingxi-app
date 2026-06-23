@@ -518,6 +518,29 @@ pub async fn run_workflow_script(
                     if agent_count.fetch_add(1, Ordering::SeqCst) >= WORKFLOW_AGENT_CAP {
                         return wf_throw(WORKFLOW_AGENT_CAP_MESSAGE);
                     }
+                    // agentType validation (binary `F` @202933121): an explicit
+                    // `agentType` must name a known agent, else throw the byte-exact
+                    // not-found error listing the available agents. (LingXi applies
+                    // no `agents()` permission filtering in the workflow path — as
+                    // the AgentTool's own not-found-only check shows — so the
+                    // binary's "denied by permission rule" branch is unreachable.)
+                    if let Some(at) = opts
+                        .get("agentType")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        let listing = spawner.agent_listing().await;
+                        if !listing.iter().any(|e| e.agent_type == at) {
+                            let available = listing
+                                .iter()
+                                .map(|e| e.agent_type.clone())
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            return wf_throw(&format!(
+                                "agent({{agentType}}): agent type '{at}' not found. Available agents: {available}"
+                            ));
+                        }
+                    }
                     let inherit = SubagentInheritance {
                         tool_invoker,
                         budget,
@@ -829,6 +852,16 @@ mod tests {
 
     #[async_trait]
     impl SubagentSpawner for EchoSpawner {
+        async fn agent_listing(&self) -> Vec<traits::subagent_spawn::SubagentListingEntry> {
+            ["general-purpose", "Explore", "code-reviewer"]
+                .iter()
+                .map(|t| traits::subagent_spawn::SubagentListingEntry {
+                    agent_type: (*t).to_string(),
+                    when_to_use: String::new(),
+                    tools_description: String::new(),
+                })
+                .collect()
+        }
         async fn spawn(
             &self,
             request: SubagentSpawnRequest,
@@ -1086,6 +1119,34 @@ mod tests {
         assert!(
             msg.contains("Workflow agent() call cap reached (1000)"),
             "got: {msg}"
+        );
+    }
+
+    /// An explicit unknown `agentType` throws the byte-exact not-found error
+    /// listing the available agents; a known one runs fine.
+    #[tokio::test]
+    async fn unknown_agent_type_throws_not_found() {
+        let spawner = Arc::new(EchoSpawner::default());
+        let result = run_workflow_script(
+            "await agent('p', { agentType: 'nope' }); return 'done';",
+            DEFAULT_WORKFLOW_SUBAGENT,
+            spawner,
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            None,
+            None,
+            None,
+            None,
+            0,
+            NestedConfig::default(),
+        )
+        .await;
+        let err = result.expect_err("unknown agentType must throw");
+        assert!(
+            format!("{err}").contains(
+                "agent({agentType}): agent type 'nope' not found. Available agents: general-purpose, Explore, code-reviewer"
+            ),
+            "got: {err}"
         );
     }
 

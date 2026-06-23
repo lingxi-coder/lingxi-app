@@ -741,11 +741,15 @@ mod tests {
 
     #[test]
     fn workflow_subagent_schema_prompt_binds_structured_output_name() {
-        // xBp with ${Lp} resolved to "StructuredOutput".
-        assert!(
-            WORKFLOW_SUBAGENT_SCHEMA_PROMPT.contains("StructuredOutput"),
-            "xBp must reference the StructuredOutput tool name"
+        // xBp verbatim from oracle §2 (agentdef-and-validation.md).
+        // ${Lp} resolved to "StructuredOutput" (orchestrator::STRUCTURED_OUTPUT_TOOL_NAME).
+        // Byte offset 202949377 in v2.1.186 binary.
+        let expected = "You are a subagent spawned by a workflow orchestration script. Use the tools available to complete the task.\n\nCRITICAL: You MUST call the StructuredOutput tool exactly once to return your final answer. The tool's input schema defines the required shape.\n- Do your work (Read files, run commands, etc.), then call StructuredOutput with your answer.\n- Do NOT put your answer in a text response. The script reads ONLY the StructuredOutput tool call.\n- If the schema validation fails, read the error and call StructuredOutput again with a corrected shape.\n- After calling StructuredOutput successfully, end your turn. No acknowledgment needed.";
+        assert_eq!(
+            WORKFLOW_SUBAGENT_SCHEMA_PROMPT, expected,
+            "xBp must equal the verbatim oracle §2 string (${{Lp}} resolved to StructuredOutput)"
         );
+        // Belt-and-suspenders: confirm no unreplaced placeholder survives.
         assert!(
             !WORKFLOW_SUBAGENT_SCHEMA_PROMPT.contains("${Lp}"),
             "xBp must have the Lp placeholder resolved"

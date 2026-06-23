@@ -250,7 +250,7 @@ pub async fn run_subagent(
 /// forwards it. Only when the spawner has no `default_model` wired (legacy /
 /// tests) does this forward a raw `"inherit"` / bare alias — which then resolves
 /// solely via any configured `routing.aliases`.
-fn resolve_model(ctx: &SubagentContext) -> String {
+pub(crate) fn resolve_model(ctx: &SubagentContext) -> String {
     match &ctx.agent_definition.model {
         crate::definition::AgentModel::Inherit => "inherit".to_string(),
         crate::definition::AgentModel::Alias(n) | crate::definition::AgentModel::Explicit(n) => {

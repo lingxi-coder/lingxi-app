@@ -15,6 +15,7 @@ pub mod git_status;
 pub mod locked_templates;
 pub mod memory_block;
 pub mod skill_listing;
+pub mod subagent_env;
 pub mod task_notification;
 pub mod todo_reminder;
 pub mod tools_block;

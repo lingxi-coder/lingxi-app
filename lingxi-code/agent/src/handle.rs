@@ -166,7 +166,25 @@ pub struct PoolSubagentSpawner {
     /// resolved tool's name by [`permission::tool_wide_name_matches`] (exact name
     /// OR an `mcp__server` prefix).
     tool_wide_deny_names: Arc<std::sync::OnceLock<Vec<String>>>,
+    /// Renderer for the subagent `<env>` block claude-code 2.1.186 appends to a
+    /// NON-fork subagent's system prompt after the `Notes:` trailer (`tIm` — see
+    /// `orchestrator::prompt::subagent_env`). Given a RESOLVED model id it returns
+    /// the byte-exact block (cwd / git / platform / shell / OS / model + cutoff);
+    /// the static environment inputs are captured at the composition root. A
+    /// SET-ONCE cell mirroring [`Self::tool_wide_deny_names`]: the renderer is
+    /// built at the composition root (which can reach the orchestrator formatter +
+    /// the git/uname probes; the `agent` crate cannot, to avoid a dep cycle) and
+    /// filled via [`Self::subagent_env_renderer_handle`] after the spawner is
+    /// boxed. Unfilled (the default / tests) ⇒ NO env block appended
+    /// (byte-identical legacy). Fork spawns NEVER get it (the parent's rendered
+    /// prompt is replayed verbatim — no `enhanceSystemPromptWithEnvDetails`).
+    subagent_env_renderer: Arc<std::sync::OnceLock<SubagentEnvRenderer>>,
 }
+
+/// Renders the subagent `<env>` block for a resolved model id (claude-code
+/// `tIm`). The static environment is captured by the closure at the composition
+/// root; only the resolved model id varies per spawn.
+pub type SubagentEnvRenderer = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
 impl PoolSubagentSpawner {
     /// Construct an adapter wrapping `pool` with no API client (legacy stub
@@ -194,7 +212,27 @@ impl PoolSubagentSpawner {
             hook_subagents_dir: None,
             name_registry: Arc::new(RwLock::new(HashMap::new())),
             tool_wide_deny_names: Arc::new(std::sync::OnceLock::new()),
+            subagent_env_renderer: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// Return a clone of the set-once subagent-`<env>`-renderer cell so the host
+    /// can fill it AFTER the orchestrator env formatter + probes are available
+    /// (same cycle-break as [`Self::tool_wide_deny_names_handle`]). First fill
+    /// wins. Unfilled ⇒ no env block appended (byte-identical legacy).
+    #[must_use]
+    pub fn subagent_env_renderer_handle(
+        &self,
+    ) -> Arc<std::sync::OnceLock<SubagentEnvRenderer>> {
+        self.subagent_env_renderer.clone()
+    }
+
+    /// Builder: set the subagent `<env>` renderer immediately (tests). The boot
+    /// path uses [`Self::subagent_env_renderer_handle`] to fill it later.
+    #[must_use]
+    pub fn with_subagent_env_renderer(self, renderer: SubagentEnvRenderer) -> Self {
+        let _ = self.subagent_env_renderer.set(renderer);
+        self
     }
 
     /// Return a clone of the set-once tool-wide-deny-names cell so the host can
@@ -559,13 +597,14 @@ impl PoolSubagentSpawner {
     /// that copy's terminal `\n`; the orchestrator crate is not reachable from
     /// here — it depends on `agent` — so the literal is single-sourced locally.)
     ///
-    /// NOTE: TS appends the `<env>` block (cwd / git / platform / shell / OS /
-    /// resolved model + cutoff) AFTER this trailer. That block is NOT ported
-    /// here: its byte-locked formatter lives in `orchestrator::prompt`
-    /// (`env_block` + `env_meta`), unreachable from `agent` without a
-    /// dependency cycle, and its inputs (the *resolved* model id, git/uname
-    /// probes) are not available at this synchronous call site. See the
-    /// SYSPROMPT.4 report for the unblock path.
+    /// NOTE: claude-code 2.1.186 appends the `<env>` block (cwd / git / platform
+    /// / shell / OS / resolved model + cutoff) AFTER this trailer (`tIm`). Its
+    /// byte-locked formatter lives in `orchestrator::prompt::subagent_env`,
+    /// unreachable from `agent` without a dependency cycle, so the composition
+    /// root renders it into a [`SubagentEnvRenderer`] closure (capturing the
+    /// git/uname/cwd probes) and fills [`Self::subagent_env_renderer`]; the
+    /// non-fork [`Self::build_subagent_context`] path invokes it with the spawn's
+    /// resolved model id and appends the result here.
     const SUBAGENT_NOTES_TRAILER: &'static str = "Notes:\n\
 - Agent threads always have their cwd reset between bash calls, as a result please only use absolute file paths.\n\
 - In your final response, share file paths (always absolute, never relative) that are relevant to the task. Include code snippets only when the exact text is load-bearing (e.g., a bug you found, a function signature the caller asked for) — do not recap code you merely read.\n\
@@ -727,6 +766,23 @@ impl PoolSubagentSpawner {
             request.fork_context_messages.clone(),
             request.fork_parent_system_prompt.clone(),
         );
+        // Append the subagent `<env>` block (claude-code 2.1.186 `tIm`, after the
+        // `Notes:` trailer) on the NON-fork path only — the fork path replays the
+        // parent's rendered prompt verbatim with no `enhanceSystemPromptWithEnvDetails`.
+        // Rendered with THIS spawn's resolved model id so a model-override agent's
+        // env line matches the model it actually runs as. Unfilled cell ⇒ no-op.
+        let is_fork_spawn = request.fork_parent_system_prompt.is_some()
+            || request.fork_context_messages.is_some();
+        if !is_fork_spawn {
+            if let (Some(render), Some(body)) = (
+                self.subagent_env_renderer.get(),
+                ctx.rendered_system_prompt.as_ref(),
+            ) {
+                let model_id = crate::runner::resolve_model(&ctx);
+                let env = render(&model_id);
+                ctx.rendered_system_prompt = Some(Arc::from(format!("{body}\n\n{env}")));
+            }
+        }
         // Hand the child the parent's tool invoker + budget enforcer + our model
         // API seam (recursion-lock / budget-inheritance invariants).
         ctx.tool_invoker = Some(inherit.tool_invoker);
@@ -2013,6 +2069,63 @@ mod tests {
         let one_shot = spawner.build_subagent_context(&req, mk_inherit(), false).await;
         assert!(!one_shot.persistent, "the one-shot spawn path must NOT park");
         assert!(!one_shot.is_async);
+    }
+
+    /// 2.1.186: the subagent `<env>` block (`tIm`) is appended after the
+    /// `Notes:` trailer on a NON-fork spawn, rendered with the spawn's RESOLVED
+    /// model id. The fork path is byte-verbatim (no env block). An unfilled
+    /// renderer cell is a no-op.
+    #[tokio::test]
+    async fn build_subagent_context_appends_env_block_nonfork_only() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        // A renderer that echoes the resolved model id into a sentinel block.
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_default_model("claude-opus-4-8[1m]")
+            .with_subagent_env_renderer(Arc::new(|model_id: &str| {
+                format!("<env>\nMODEL: {model_id}\n</env>")
+            }));
+        let mk_inherit = || SubagentInheritance {
+            tool_invoker: Arc::new(DummyInvoker),
+            budget: Arc::new(DummyBudget),
+        };
+        let mut req = SubagentSpawnRequest {
+            subagent_type: "general-purpose".to_string(),
+            prompt: "go".to_string(),
+            context_paths: vec![],
+            description: None,
+            model: None,
+            run_in_background: false,
+            name: None,
+            team_name: None,
+            mode: None,
+            isolation: None,
+            cwd: None,
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
+            schema: None,
+            effort: None,
+        };
+
+        // Non-fork: env block appended after the body, joined by a blank line,
+        // rendered with the resolved default model id.
+        let ctx = spawner.build_subagent_context(&req, mk_inherit(), false).await;
+        let sys = ctx.rendered_system_prompt.as_deref().unwrap();
+        assert!(
+            sys.ends_with("\n\n<env>\nMODEL: claude-opus-4-8[1m]\n</env>"),
+            "env block must be appended with the resolved model; got:\n{sys}"
+        );
+        // The Notes trailer still precedes it.
+        assert!(sys.contains("not files you create.\n\n<env>"));
+
+        // Fork path: the parent's rendered prompt is replayed verbatim — NO env.
+        req.fork_parent_system_prompt = Some("PARENT VERBATIM".to_string());
+        let fork_ctx = spawner.build_subagent_context(&req, mk_inherit(), false).await;
+        assert_eq!(
+            fork_ctx.rendered_system_prompt.as_deref(),
+            Some("PARENT VERBATIM"),
+            "fork path must not append the env block"
+        );
     }
 
     // ── G11: resolve_selection source mapping + model resolution ──

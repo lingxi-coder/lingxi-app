@@ -6,9 +6,11 @@
 //! Byte-locked against claude-code v2.1.183 `Kym` (the `env_info_simple`
 //! body section, binary offset ~205822740). The MAIN prompt's
 //! `getSystemPrompt` selects `Kym` (`env_info_simple`) when
-//! `excludeDynamicSections` is false; the SUBAGENT path selects `zym`
-//! (`env_info_static` — model + cutoff only, no environment block). LingXi's
-//! subagent path is assembled separately (`agent/handle.rs`).
+//! `excludeDynamicSections` is false. (In v2.1.183 the SUBAGENT path selected
+//! the static `zym` — model + cutoff only; as of v2.1.186 the subagent path
+//! instead appends the FULL `<env>` block via `tIm` — see
+//! [`super::subagent_env`].) LingXi's subagent path is assembled separately
+//! (`agent/handle.rs` + `subagent_env`).
 //!
 //! Shape (`Kym`):
 //! ```text

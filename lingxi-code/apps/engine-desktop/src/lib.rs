@@ -2255,7 +2255,16 @@ pub async fn build(
             subagent_hook_session_id,
             cwd.clone(),
             Some(main_subagents_dir.clone()),
-        );
+        )
+        // 2.1.186: append the subagent `<env>` block (`tIm`) after the `Notes:`
+        // trailer on every NON-fork spawn. The renderer probes the boot-stable
+        // environment once (cwd/git/platform/shell/OS) via the orchestrator's own
+        // helpers and fills in the spawn's resolved model id per call. Lives at the
+        // composition root because the `agent` crate cannot reach
+        // `orchestrator::prompt` (dep cycle).
+        .with_subagent_env_renderer(std::sync::Arc::new(
+            orchestrator::prompt::subagent_env::boot_renderer(cwd.clone()),
+        ));
     let subagent_tool_registry_cell = subagent_spawner_concrete.tool_registry_handle();
     let subagent_agent_catalog_cell = subagent_spawner_concrete.agent_catalog_handle();
     // G4/G5: grab the set-once hook-executor + skill-loader cells BEFORE boxing,

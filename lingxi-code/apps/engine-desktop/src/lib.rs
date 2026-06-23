@@ -317,12 +317,20 @@ fn should_enforce_permissions(
     if mode == permission::PermissionMode::BypassPermissions {
         return false;
     }
+    // `use_noop_inner` no longer gates the default: claude-code enforces ONE core
+    // policy on every host, so transport hosts (the bridge-server's
+    // AdapterPermissionGate) ALSO wrap with the local PolicyPermissionGate by
+    // default — the adapter gate becomes the Ask-delegation transport (an
+    // unresolved mutating Ask still forwards to the remote client), but local
+    // deny/allow rules + defaultMode now bind regardless of what the client
+    // replicates. The explicit env escape hatch + BypassPermissions still opt out.
+    let _ = use_noop_inner;
     match env_value {
         Some(v) => !matches!(
             v.trim().to_ascii_lowercase().as_str(),
             "" | "0" | "off" | "false" | "no"
         ),
-        None => use_noop_inner,
+        None => true,
     }
 }
 
@@ -383,6 +391,59 @@ fn sandbox_runtime_config_from_settings_tiers(
         },
         ctx,
     )
+}
+
+/// Compute the managed-only sandbox overrides for the
+/// `allowManagedDomainsOnly` / `allowManagedReadPathsOnly` enforcement. Parses
+/// the MANAGED (`policySettings`) raw tiers ONLY — the per-source knowledge
+/// claude-code uses via `getSettingsForSource('policySettings')`. When a flag is
+/// set there, returns `Some(allowlist)` (the managed-source domains / read paths)
+/// to OVERRIDE the merged config; `None` ⇒ no restriction. Threaded onto
+/// [`SandboxConvertContext`] so [`convert_settings_to_runtime_config`] applies it.
+fn managed_only_sandbox_overrides(
+    managed_raw_tiers: &[String],
+    settings_dir: &std::path::Path,
+) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    use sandbox::runtime_config::{SandboxSettingsJson, SettingsJson, SettingsPermissions};
+    let mut merged_sandbox: Option<SandboxSettingsJson> = None;
+    let mut merged_perms = SettingsPermissions::default();
+    let mut saw_perms = false;
+    for raw in managed_raw_tiers {
+        let Ok(parsed) = serde_json::from_str::<SettingsJson>(raw) else {
+            continue;
+        };
+        if let Some(p) = parsed.permissions {
+            saw_perms = true;
+            merged_perms.allow.extend(p.allow);
+            merged_perms.deny.extend(p.deny);
+            merged_perms
+                .additional_directories
+                .extend(p.additional_directories);
+        }
+        if let Some(s) = parsed.sandbox {
+            merged_sandbox = Some(s);
+        }
+    }
+    let managed = SettingsJson {
+        permissions: saw_perms.then_some(merged_perms),
+        sandbox: merged_sandbox,
+        settings_dir: Some(settings_dir.to_path_buf()),
+    };
+    let domains_only = managed
+        .sandbox
+        .as_ref()
+        .and_then(|s| s.network.as_ref())
+        .is_some_and(|n| n.allow_managed_domains_only);
+    let reads_only = managed
+        .sandbox
+        .as_ref()
+        .and_then(|s| s.filesystem.as_ref())
+        .is_some_and(|f| f.allow_managed_read_paths_only);
+    let domains =
+        domains_only.then(|| sandbox::policy_convert::managed_domain_allowlist(&managed));
+    let reads = reads_only
+        .then(|| sandbox::policy_convert::managed_read_path_allowlist(&managed, settings_dir));
+    (domains, reads)
 }
 
 /// claude-code `getClaudeTempDir()` + `getClaudeTempDirName()` analog (Shell.ts:307),
@@ -2304,7 +2365,16 @@ pub async fn build(
             subagent_hook_session_id,
             cwd.clone(),
             Some(main_subagents_dir.clone()),
-        );
+        )
+        // 2.1.186: append the subagent `<env>` block (`tIm`) after the `Notes:`
+        // trailer on every NON-fork spawn. The renderer probes the boot-stable
+        // environment once (cwd/git/platform/shell/OS) via the orchestrator's own
+        // helpers and fills in the spawn's resolved model id per call. Lives at the
+        // composition root because the `agent` crate cannot reach
+        // `orchestrator::prompt` (dep cycle).
+        .with_subagent_env_renderer(std::sync::Arc::new(
+            orchestrator::prompt::subagent_env::boot_renderer(cwd.clone()),
+        ));
     let subagent_tool_registry_cell = subagent_spawner_concrete.tool_registry_handle();
     let subagent_agent_catalog_cell = subagent_spawner_concrete.agent_catalog_handle();
     // G4/G5: grab the set-once hook-executor + skill-loader cells BEFORE boxing,
@@ -2487,12 +2557,13 @@ pub async fn build(
     // (`0|off|false|no|""`), or (b) the session is in BypassPermissions mode
     // (already root/Docker-guarded upstream by `enforce_bypass_safety`).
     //
-    // Scope: when the env var is UNSET, default-on applies only to the
-    // `NoOpPermissionGate` (CLI/desktop) inner — the path finding §0.1 is about
-    // (allow-all). Transport hosts (the bridge-server, `use_noop=false`) bind the
-    // connection-scoped `AdapterPermissionGate`, whose remote client IS the
-    // enforcement; they keep the prior env-opt-in behavior so their transport-driven
-    // semantics are unchanged. An explicit env value still overrides either way.
+    // Scope: when the env var is UNSET, default-on applies to BOTH inners — the
+    // `NoOpPermissionGate` (CLI/desktop, allow-all) AND the connection-scoped
+    // `AdapterPermissionGate` (transport hosts). claude-code enforces ONE core
+    // policy on every host; wrapping the adapter gate with `PolicyPermissionGate`
+    // makes local deny/allow rules + defaultMode bind on the bridge too, while the
+    // adapter gate stays the Ask-delegation transport (an unresolved mutating Ask
+    // still forwards to the remote client). An explicit env value still overrides.
     //
     // Inner-gate selection (the `(perms, adapter_gate)` match at :1836):
     // - INTERACTIVE TUI sessions inject `tui::permission_bridge::TuiPermissionGate`
@@ -3049,7 +3120,23 @@ pub async fn build(
         hooks.clone(),
         cwd.clone(),
         main_transcript_path.clone(),
-    )));
+    )))
+    // Full teammate parity (P1): inherit the shared budget enforcer + fire
+    // SubagentStart via the same `HookExecutorImpl` the orchestrator uses, and
+    // stamp the SubagentStart `HookContext` (session id + cwd). `hooks` /
+    // `budget_enforcer` already exist here (the teammate handler is built after
+    // them), unlike the spawner's deferred cells. The advertised tool pool +
+    // skills-preload registries are filled via handles below (they don't exist
+    // yet). This makes a teammate a full team worker (tools + budget + hooks),
+    // not a chat-only stub.
+    .with_budget_enforcer(budget_enforcer.clone())
+    .with_hook_executor(hooks.clone())
+    .with_hook_context(subagent_hook_session_id, cwd.clone());
+    // Grab the teammate handler's set-once cells BEFORE boxing, to fill once the
+    // tool registry / skill loader exist (same deferred-fill the spawner uses).
+    let teammate_tool_registry_cell = teammate_handler.tool_registry_handle();
+    let teammate_skill_loader_cell = teammate_handler.skill_loader_handle();
+    let teammate_tool_wide_deny_cell = teammate_handler.tool_wide_deny_names_handle();
     task_registry_inner.register_handler(
         tasks::TaskType::InProcessTeammate,
         Arc::new(teammate_handler),
@@ -3254,8 +3341,14 @@ pub async fn build(
         // flagSettings is omitted: the engine has no boot-time `--settings`
         // analog (see spec §4e); if one is added, push its raw text BEFORE the
         // managed tier to honor `localSettings→flagSettings→policySettings`.
-        tiers.extend(crate::settings_watch::managed_settings_raw_tiers().await);
+        let managed_tiers = crate::settings_watch::managed_settings_raw_tiers().await;
+        tiers.extend(managed_tiers.iter().cloned());
         let refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
+        // allowManagedDomainsOnly / allowManagedReadPathsOnly: resolved from the
+        // MANAGED tiers ONLY (per-source), then threaded onto the context so the
+        // conversion overrides the merged allowlist when the flag is set.
+        let (managed_allowed_domains, managed_read_paths) =
+            managed_only_sandbox_overrides(&managed_tiers, &cwd);
         // Seed the `SandboxConvertContext` with the boot-resolvable hardening
         // paths so the settings/skills denyWrite defense actually fires
         // (sandbox-adapter.ts:225-299). Seeds with no boot analog
@@ -3273,6 +3366,8 @@ pub async fn build(
             ],
             managed_drop_in_dir: Some(to_s(managed.join("managed-settings.d"))),
             skills_dirs: vec![to_s(cwd.join(".claude").join("skills"))],
+            managed_allowed_domains,
+            managed_read_paths,
             ..Default::default()
         };
         sandbox_runtime_config_from_settings_tiers(&refs, &cwd, &ctx)
@@ -3520,12 +3615,15 @@ pub async fn build(
     // so a child agent runner can preload its frontmatter `skills:` (claude
     // runAgent.ts:577-646). First fill wins; the registry is filled at (6) before
     // any spawn fires, so the loader never reads the empty registry.
-    let _ = subagent_skill_loader_cell.set(Arc::new(
+    let skill_loader_arc: Arc<dyn traits::skill_loader::SkillLoader> = Arc::new(
         agent_skill_loader::AgentSkillLoader::new(
             shared_command_registry.clone(),
             Some(skill_session_id),
         ),
-    ) as Arc<dyn traits::skill_loader::SkillLoader>);
+    );
+    let _ = subagent_skill_loader_cell.set(skill_loader_arc.clone());
+    // Same skills-preload loader for the in-process teammate (full parity).
+    let _ = teammate_skill_loader_cell.set(skill_loader_arc);
     // Fire the `CwdChanged` hook (claude-code `onCwdChangedForHooks`,
     // Shell.ts:409) when a `cd` inside a Bash call moves the persistent shell
     // cwd. The firer wraps the SAME `Arc<HookExecutorImpl>` the orchestrator
@@ -3634,6 +3732,15 @@ pub async fn build(
     // copy (parity batch 21). First fill wins.
     let _ = subagent_tool_registry_cell.set(tools.clone());
     let _ = subagent_agent_catalog_cell.set(agent_catalog.clone());
+    // In-process teammate full parity (P1): advertise the SAME resolved tool pool
+    // + apply the SAME tool-wide deny filter as the spawner, so a teammate can
+    // actually use tools (not chat-only). The deny names are copied from the
+    // spawner's already-filled cell (set in the enforcement branch above; empty /
+    // unfilled ⇒ no filtering).
+    let _ = teammate_tool_registry_cell.set(tools.clone());
+    if let Some(deny) = subagent_tool_wide_deny_cell.get() {
+        let _ = teammate_tool_wide_deny_cell.set(deny.clone());
+    }
 
     // Clone `cwd` for the settings watcher before it is moved into the
     // orchestrator constructor below.
@@ -5781,11 +5888,11 @@ mod tests {
         use super::should_enforce_permissions;
         use permission::PermissionMode;
 
-        // Unset env: default-ON for the CLI/desktop NoOp inner; OFF for transport
-        // (AdapterPermissionGate) so the bridge-server's remote-driven gate is
-        // unchanged.
+        // Unset env: default-ON for BOTH the CLI/desktop NoOp inner AND transport
+        // (AdapterPermissionGate) — claude-code enforces one core policy on every
+        // host, so the bridge wraps its remote-driven gate with the local policy.
         assert!(should_enforce_permissions(None, true, PermissionMode::Default));
-        assert!(!should_enforce_permissions(None, false, PermissionMode::Default));
+        assert!(should_enforce_permissions(None, false, PermissionMode::Default));
 
         // An explicit env value wins for BOTH inners.
         assert!(should_enforce_permissions(Some("1"), false, PermissionMode::Default));

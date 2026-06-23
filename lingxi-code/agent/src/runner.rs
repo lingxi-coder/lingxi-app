@@ -250,7 +250,71 @@ pub async fn run_subagent(
 /// forwards it. Only when the spawner has no `default_model` wired (legacy /
 /// tests) does this forward a raw `"inherit"` / bare alias — which then resolves
 /// solely via any configured `routing.aliases`.
-fn resolve_model(ctx: &SubagentContext) -> String {
+/// Validate a captured `StructuredOutput` input against the workflow
+/// `agent({schema})` JSON Schema (claude-code's Ajv `validateSchema`/`compile`
+/// inside the StructuredOutput tool `call`). Returns a concise leaf-error string
+/// on mismatch, `Ok(())` on a valid input.
+///
+/// BEHAVIORAL parity only: PASS/FAIL matches claude-code (full JSON-Schema
+/// validation), but the error-detail bytes differ from Ajv's
+/// `${instancePath}: ${message}` form (boon's native messages are unportable —
+/// the same intentional divergence as `orchestrator::schema_validation`). The
+/// byte-exact part is the `Output does not match required schema: ` WRAPPER the
+/// caller prepends. A schema that fails to COMPILE is treated as PASS (a LingXi
+/// schema bug must not block the model), matching the binary's stance.
+fn validate_structured_output(schema_json: Option<&str>, input: &serde_json::Value) -> Result<(), String> {
+    let Some(schema_str) = schema_json else {
+        return Ok(());
+    };
+    let schema: serde_json::Value = match serde_json::from_str(schema_str) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    const URL: &str = "mem://structured-output-schema";
+    let mut schemas = boon::Schemas::new();
+    let mut compiler = boon::Compiler::new();
+    if compiler.add_resource(URL, schema).is_err() {
+        return Ok(());
+    }
+    let sch = match compiler.compile(URL, &mut schemas) {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+    match schemas.validate(input, sch) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let mut out = Vec::new();
+            flatten_schema_error(&err, &mut out);
+            Err(out.join(", "))
+        }
+    }
+}
+
+/// Flatten a boon validation error into concise `at '<loc>': <kind>` leaves
+/// (mirrors `orchestrator::schema_validation::flatten`).
+fn flatten_schema_error(err: &boon::ValidationError, out: &mut Vec<String>) {
+    if err.causes.is_empty() {
+        let loc = err.instance_location.to_string();
+        let loc = if loc.is_empty() { "(root)".to_string() } else { loc };
+        out.push(format!("at '{loc}': {}", err.kind));
+    } else {
+        for cause in &err.causes {
+            flatten_schema_error(cause, out);
+        }
+    }
+}
+
+/// The workflow `agent({schema})` StructuredOutput retry cap — claude-code
+/// `Fe.MAX_STRUCTURED_OUTPUT_RETRIES ?? OBp`, where `OBp = 5`. The env override
+/// matches the binary's `parseInt(process.env.MAX_STRUCTURED_OUTPUT_RETRIES||"5")`.
+fn structured_output_retry_cap() -> u32 {
+    std::env::var("MAX_STRUCTURED_OUTPUT_RETRIES")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(5)
+}
+
+pub(crate) fn resolve_model(ctx: &SubagentContext) -> String {
     match &ctx.agent_definition.model {
         crate::definition::AgentModel::Inherit => "inherit".to_string(),
         crate::definition::AgentModel::Alias(n) | crate::definition::AgentModel::Explicit(n) => {
@@ -573,9 +637,17 @@ async fn run_subagent_loop(
     } else {
         None
     };
-    // Captured when the model calls the synthetic `StructuredOutput` tool — that
-    // input becomes the run's result, and the loop terminates.
+    // Captured when the model calls the synthetic `StructuredOutput` tool with an
+    // input that VALIDATES against the schema — that input becomes the run's
+    // result, and the loop terminates.
     let mut structured_result: Option<serde_json::Value> = None;
+    // claude-code `agent({schema})` run-scoped counters: `kn` (failed
+    // StructuredOutput validations) and `ft` (in-conversation nudges injected
+    // when the model ends a turn without calling StructuredOutput). `Yr` is the
+    // retry cap (`MAX_STRUCTURED_OUTPUT_RETRIES ?? 5`).
+    let mut structured_failed_count: u32 = 0;
+    let mut structured_nudge_count: u32 = 0;
+    let structured_retry_cap = structured_output_retry_cap();
     // Per-agent tool allow-list enforced at dispatch (see below). Empty = no
     // restriction (the resolver has not filtered, e.g. `AgentToolPolicy::All`).
     // This is the dispatch-time guard the advertised set relies on: the
@@ -827,17 +899,40 @@ async fn run_subagent_loop(
             let mut tool_results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
             for (tool_use_id, name, input, provider_id) in &tool_uses {
                 // Structured output: the synthetic `StructuredOutput` tool is not
-                // dispatched — its input IS the run's result. Capture it and feed
-                // back a benign ToolResult; the loop terminates below.
+                // dispatched — its input IS the run's result, but ONLY when it
+                // VALIDATES against the schema (claude-code Ajv validation inside
+                // the tool `call`). A valid input is captured + a benign result fed
+                // back (the loop terminates below); an INVALID input feeds back an
+                // `is_error` ToolResult (`Output does not match required schema: …`)
+                // and increments the failed-validation count `kn` — the model sees
+                // the error and retries on the next turn (the `tool_use` stop keeps
+                // the loop going), up to the retry cap checked after dispatch.
                 if force_structured_tool == Some(name.as_str()) {
-                    structured_result = Some(input.clone());
-                    tool_results.push(ContentBlock::ToolResult {
-                        tool_use_id: tool_use_id.clone(),
-                        content: "(structured output captured)".to_string(),
-                        is_error: false,
-                        provider_tool_use_id: provider_id.clone(),
-                        content_blocks: None,
-                    });
+                    match validate_structured_output(ctx.schema.as_deref(), input) {
+                        Ok(()) => {
+                            structured_result = Some(input.clone());
+                            tool_results.push(ContentBlock::ToolResult {
+                                tool_use_id: tool_use_id.clone(),
+                                content: "(structured output captured)".to_string(),
+                                is_error: false,
+                                provider_tool_use_id: provider_id.clone(),
+                                content_blocks: None,
+                            });
+                        }
+                        Err(detail) => {
+                            structured_failed_count =
+                                structured_failed_count.saturating_add(1);
+                            tool_results.push(ContentBlock::ToolResult {
+                                tool_use_id: tool_use_id.clone(),
+                                content: format!(
+                                    "Output does not match required schema: {detail}"
+                                ),
+                                is_error: true,
+                                provider_tool_use_id: provider_id.clone(),
+                                content_blocks: None,
+                            });
+                        }
+                    }
                     continue;
                 }
                 // Allow-list guard: when `allowed_tools` is non-empty, a model
@@ -870,6 +965,10 @@ async fn run_subagent_loop(
                     // R1: an async (backgrounded) subagent runs its tools with
                     // is_non_interactive_session=true (claude-code runAgent.ts:668-672).
                     is_async: ctx.is_async,
+                    // Whether this worker may surface a permission prompt to the
+                    // user — drives the worker attribution on the prompt dialog
+                    // (claude-code's worker permission badge).
+                    can_show_permission_prompts: ctx.can_show_permission_prompts,
                 };
                 match invoker.invoke(name, input.clone(), inv_ctx).await {
                     Ok(value) => {
@@ -911,6 +1010,27 @@ async fn run_subagent_loop(
             emit_message(&out_tx, agent_id, &tool_results_msg).await;
         }
 
+        // claude `agent({schema})`: `kn>0 && kn>=Yr && rn===undefined` → throw the
+        // retry-cap-exceeded error (surfaced here as a terminal `Failed`). The
+        // model's StructuredOutput validations have exhausted the cap (`Yr`,
+        // `MAX_STRUCTURED_OUTPUT_RETRIES ?? 5`) with no valid output captured.
+        if force_structured_tool.is_some()
+            && structured_result.is_none()
+            && structured_failed_count > 0
+            && structured_failed_count >= structured_retry_cap
+        {
+            let calls = if structured_failed_count == 1 { "call" } else { "calls" };
+            let _ = out_tx
+                .send(SubagentEvent::Failed {
+                    agent_id,
+                    error: format!(
+                        "agent({{schema}}): StructuredOutput retry cap ({structured_retry_cap}) exceeded \u{2014} {structured_failed_count} failed {calls} with no valid output"
+                    ),
+                })
+                .await;
+            return;
+        }
+
         // Loop disposition. Continue ONLY when the model asked to use tools and
         // actually emitted some; every other case is terminal — including
         // `end_turn`, a stream with no stop_reason (`None`), and any other
@@ -922,6 +1042,35 @@ async fn run_subagent_loop(
             && !tool_uses.is_empty()
             && structured_result.is_none();
         if !should_continue {
+            // claude `agent({schema})` SubagentStop nudge: when the model ends a
+            // turn without a captured (valid) StructuredOutput, inject an
+            // in-conversation nudge and run another turn — up to 2 nudges (`ft`).
+            // After the 2nd, give up with the byte-exact "completed without
+            // calling" error. (The validation-RETRY case — StructuredOutput called
+            // but its input failed — does NOT reach here: that turn's `tool_use`
+            // stop keeps `should_continue` true, so the model retries until the
+            // retry cap above fires.)
+            if force_structured_tool.is_some() && structured_result.is_none() {
+                if structured_nudge_count < 2 {
+                    structured_nudge_count = structured_nudge_count.saturating_add(1);
+                    let nudge = ConversationMessage::user(
+                        MessageId::new(),
+                        "You did not call StructuredOutput. You MUST call StructuredOutput to return your answer \u{2014} the tool input IS your answer. Call it now.".to_string(),
+                    );
+                    history.push(nudge.clone());
+                    emit_message(&out_tx, agent_id, &nudge).await;
+                    // Re-run the turn loop with the nudge appended (still bounded
+                    // by `max_turns`).
+                    continue;
+                }
+                let _ = out_tx
+                    .send(SubagentEvent::Failed {
+                        agent_id,
+                        error: "agent({schema}): subagent completed without calling StructuredOutput (after 2 in-conversation nudges)".to_string(),
+                    })
+                    .await;
+                return;
+            }
             // claude `finalizeAgentTool`: the result's `content` is the LAST
             // assistant message's text blocks, with a backward-scan fallback to
             // the most recent assistant message that has text when the final turn
@@ -1885,6 +2034,121 @@ mod tests {
         let evs = drain(out_rx).await;
         // The Completed result IS the captured StructuredOutput tool input.
         assert_eq!(one_completed(&evs), structured);
+    }
+
+    /// A StructuredOutput call whose input FAILS the schema is fed back as an
+    /// `is_error` result (the model retries); a later VALID call is captured.
+    #[tokio::test]
+    async fn schema_invalid_output_retried_then_captured() {
+        let so = |input: serde_json::Value| llm_client::LlmResponse {
+            content: vec![llm_client::ContentBlock::ToolCall {
+                id: ToolUseId::new().to_string(),
+                name: "StructuredOutput".into(),
+                input,
+            }],
+            ..tool_use_response("StructuredOutput", Some("tool_use"))
+        };
+        let valid = serde_json::json!({ "answer": 42 });
+        let api = MockSubagentApiClient::new(vec![
+            Ok(so(serde_json::json!({ "answer": "not-an-int" }))), // fails: wrong type
+            Ok(so(valid.clone())),                                  // passes
+        ]);
+        let invoker = CountingInvoker::new();
+        let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 6);
+        ctx.schema = Some(
+            r#"{"type":"object","required":["answer"],"properties":{"answer":{"type":"integer"}}}"#
+                .to_string(),
+        );
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+        assert_eq!(one_completed(&evs), valid, "the valid retry is captured");
+        assert_eq!(api.call_count(), 2, "the model retried once after the failure");
+    }
+
+    /// Repeated schema-invalid StructuredOutput calls exhaust the retry cap (5)
+    /// and abort with the byte-exact retry-cap-exceeded message.
+    #[tokio::test]
+    async fn schema_retry_cap_exceeded_aborts() {
+        let bad_so = || llm_client::LlmResponse {
+            content: vec![llm_client::ContentBlock::ToolCall {
+                id: ToolUseId::new().to_string(),
+                name: "StructuredOutput".into(),
+                input: serde_json::json!({ "answer": "still-wrong" }),
+            }],
+            ..tool_use_response("StructuredOutput", Some("tool_use"))
+        };
+        // 5 failing calls → kn reaches the default cap (5) → abort.
+        let api = MockSubagentApiClient::new((0..5).map(|_| Ok(bad_so())).collect());
+        let invoker = CountingInvoker::new();
+        let mut ctx = loop_ctx(api, Some(invoker), 10);
+        ctx.schema = Some(
+            r#"{"type":"object","properties":{"answer":{"type":"integer"}}}"#.to_string(),
+        );
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+        let err = evs
+            .iter()
+            .find_map(|e| match e {
+                SubagentEvent::Failed { error, .. } => Some(error.clone()),
+                _ => None,
+            })
+            .expect("a Failed event");
+        assert_eq!(
+            err,
+            "agent({schema}): StructuredOutput retry cap (5) exceeded \u{2014} 5 failed calls with no valid output"
+        );
+    }
+
+    /// When the model ends turns WITHOUT calling StructuredOutput, the runner
+    /// nudges up to 2 times then aborts with the byte-exact "completed without
+    /// calling" message.
+    #[tokio::test]
+    async fn schema_no_call_nudges_twice_then_aborts() {
+        // 3 end_turn text turns: turn 1 → nudge, turn 2 → nudge, turn 3 → abort.
+        let api = MockSubagentApiClient::new(vec![
+            Ok(text_response("no tool here", Some("end_turn"))),
+            Ok(text_response("still none", Some("end_turn"))),
+            Ok(text_response("nope", Some("end_turn"))),
+        ]);
+        let invoker = CountingInvoker::new();
+        let api2 = api.clone();
+        let mut ctx = loop_ctx(api, Some(invoker), 10);
+        ctx.schema = Some(r#"{"type":"object"}"#.to_string());
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+        let err = evs
+            .iter()
+            .find_map(|e| match e {
+                SubagentEvent::Failed { error, .. } => Some(error.clone()),
+                _ => None,
+            })
+            .expect("a Failed event");
+        assert_eq!(
+            err,
+            "agent({schema}): subagent completed without calling StructuredOutput (after 2 in-conversation nudges)"
+        );
+        // 3 round-trips: the original turn + 2 nudge re-runs.
+        assert_eq!(api2.call_count(), 3);
+    }
+
+    #[test]
+    fn structured_output_validation_and_cap_helpers() {
+        // Valid input passes; type-mismatch fails with a leaf message.
+        let schema = r#"{"type":"object","required":["n"],"properties":{"n":{"type":"integer"}}}"#;
+        assert!(validate_structured_output(Some(schema), &serde_json::json!({"n":1})).is_ok());
+        assert!(validate_structured_output(Some(schema), &serde_json::json!({"n":"x"})).is_err());
+        // No schema ⇒ always Ok. A malformed schema ⇒ Ok (LingXi schema bug,
+        // not a model error).
+        assert!(validate_structured_output(None, &serde_json::json!({})).is_ok());
+        assert!(validate_structured_output(Some("{ not json"), &serde_json::json!({})).is_ok());
+        // Default cap is 5 (claude `OBp`).
+        assert_eq!(structured_output_retry_cap(), 5);
     }
 
     #[tokio::test]

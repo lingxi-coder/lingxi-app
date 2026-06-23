@@ -47,8 +47,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use client_protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
+    WorkerInfoDto,
 };
-use permission::gate::{PermissionDecision, PermissionGate, PermissionResponse};
+use permission::gate::{PermissionDecision, PermissionGate, PermissionResponse, PromptWorker};
 use permission::{
     persist_permission_update, PermissionPaths, PermissionRule, PermissionUpdate,
     PermissionUpdateDestination,
@@ -79,6 +80,15 @@ pub trait PermissionRequestSink: Send + Sync {
     async fn emit_request(&self, request: PermissionRequestDto);
 }
 
+/// One parked permission round-trip: the oneshot the awaiting `check()` blocks
+/// on, plus the call's tool input (so `resolve` can narrow an `AllowAlways`).
+struct ParkedRequest {
+    /// Resolves the awaiting `check()` future.
+    sender: oneshot::Sender<PermissionResponse>,
+    /// The tool input of the call, captured at `check()` time.
+    input: serde_json::Value,
+}
+
 /// The id-keyed, fail-closed permission gate the orchestrator binds as its
 /// `Arc<dyn PermissionGate>` on a client connection.
 ///
@@ -95,10 +105,12 @@ pub struct AdapterPermissionGate {
     /// Monotonic `request_id` source. Each `check()` reserves a fresh id so
     /// concurrent worker + main requests never collide.
     next_id: Arc<AtomicU64>,
-    /// Parked oneshot senders keyed by `request_id`. The fail-closed owner: when
-    /// this map is drained (or the gate dropped), every sender drops and the
-    /// matching `check()` resolves `Deny`.
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<PermissionResponse>>>>,
+    /// Parked requests keyed by `request_id`. The fail-closed owner: when this map
+    /// is drained (or the gate dropped), every [`ParkedRequest::sender`] drops and
+    /// the matching `check()` resolves `Deny`. Each entry also carries the call's
+    /// tool input so [`Self::resolve`] can NARROW an `AllowAlways` to the specific
+    /// command / path / domain (the input is not echoed back on the wire).
+    pending: Arc<Mutex<HashMap<u64, ParkedRequest>>>,
     /// Per-request timeout — a parked `check()` that is not resolved within this
     /// window resolves `Deny`.
     timeout: Duration,
@@ -170,13 +182,15 @@ impl AdapterPermissionGate {
         response: PermissionResponseDto,
         tool_name: &str,
     ) -> bool {
-        let sender = { self.pending.lock().await.remove(&request_id) };
-        let Some(sender) = sender else {
+        let parked = { self.pending.lock().await.remove(&request_id) };
+        let Some(ParkedRequest { sender, input }) = parked else {
             return false;
         };
 
         if matches!(response, PermissionResponseDto::AllowAlways) {
-            let rule = PermissionRule::allow_tool_session(tool_name);
+            // NARROW the persisted grant to the specific command / path / domain
+            // the call used (claude-code `ruleSuggestions`), not a tool-wide allow.
+            let rule = permission::allow_suggestion(tool_name, &input);
             self.session_allow_rules.lock().await.push(rule.clone());
             // (3c) Durably record the choice to settings.local.json when a
             // persist target is wired. Best-effort: a write failure must not
@@ -239,10 +253,24 @@ impl Drop for AdapterPermissionGate {
 #[async_trait]
 impl PermissionGate for AdapterPermissionGate {
     async fn check(&self, name: &str, input: &serde_json::Value) -> PermissionDecision {
-        // Step 1: consult session rules (identical to the TUI gate).
+        // Main-thread call — no worker attribution on the wire.
+        self.check_with_worker(name, input, None).await
+    }
+
+    async fn check_with_worker(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        worker: Option<PromptWorker>,
+    ) -> PermissionDecision {
+        // Step 1: consult session rules (identical to the TUI gate; content-aware
+        // so a narrowed AllowAlways rule only short-circuits a matching call).
         {
             let rules = self.session_allow_rules.lock().await;
-            if rules.iter().any(|r| r.matches_tool(name)) {
+            if rules
+                .iter()
+                .any(|r| permission::call_matches_rule(r, name, input))
+            {
                 return PermissionDecision::Allow;
             }
         }
@@ -260,13 +288,26 @@ impl PermissionGate for AdapterPermissionGate {
         let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         {
-            self.pending.lock().await.insert(request_id, tx);
+            self.pending.lock().await.insert(
+                request_id,
+                ParkedRequest {
+                    sender: tx,
+                    input: input.clone(),
+                },
+            );
         }
         let request = PermissionRequestDto {
             request_id,
             kind,
-            // No wire worker identity in the foundation (decision §0.6).
-            worker: None,
+            // Worker attribution (claude-code 2.1.186): a subagent/teammate's
+            // permission prompt carries the asking worker so the remote client
+            // renders the `● @name` badge. `color` seeds the multiagent color
+            // (the worker's display name); `None` for a main-thread call.
+            worker: worker.map(|w| WorkerInfoDto {
+                color: w.name.clone(),
+                name: w.name,
+                team: w.team,
+            }),
         };
         self.sink.emit_request(request).await;
 
@@ -413,6 +454,48 @@ mod tests {
         let stored = stored.lock().await;
         assert_eq!(stored.len(), 1);
         assert!(stored[0].matches_tool("Bash"));
+    }
+
+    /// `AllowAlways` NARROWS the persisted rule to the call's command (not a bare
+    /// tool-wide allow), and the narrowed rule still short-circuits a matching
+    /// later call within the session.
+    #[tokio::test]
+    async fn gate_persists_allow_always_narrows_to_command() {
+        let sink = MockRequestSink::arc();
+        let gate = Arc::new(AdapterPermissionGate::new(sink.clone()));
+
+        let g = gate.clone();
+        let input = json!({ "command": "git commit -m \"x\"" });
+        let task = tokio::spawn(async move { g.check("Bash", &input).await });
+
+        wait_for_pending(&gate, 1).await;
+        let req = sink.last().await;
+        assert!(gate.resolve(req.request_id, PermissionResponseDto::AllowAlways, "Bash").await);
+        assert_eq!(task.await.unwrap(), PermissionDecision::Allow);
+
+        // The stored rule is narrowed to the command prefix, NOT tool-wide.
+        {
+            let stored = gate.session_allow_rules();
+            let stored = stored.lock().await;
+            assert_eq!(stored.len(), 1);
+            assert_eq!(stored[0].value.rule_content.as_deref(), Some("git commit:*"));
+            assert!(!stored[0].matches_tool("Bash"), "narrowed rule is not tool-wide");
+        }
+
+        // A matching later command short-circuits (no new request emitted)...
+        assert_eq!(
+            gate.check("Bash", &json!({ "command": "git commit -m \"y\"" })).await,
+            PermissionDecision::Allow
+        );
+        // ...but a DIFFERENT command still prompts (would park a new request).
+        let g2 = gate.clone();
+        let other = tokio::spawn(async move {
+            g2.check("Bash", &json!({ "command": "rm -rf /" })).await
+        });
+        wait_for_pending(&gate, 1).await;
+        let req2 = sink.last().await;
+        assert!(gate.resolve(req2.request_id, PermissionResponseDto::Deny, "Bash").await);
+        assert!(matches!(other.await.unwrap(), PermissionDecision::Deny { .. }));
     }
 
     /// (3c) `gate_persists_allow_always_writes_local_settings` — with a persist

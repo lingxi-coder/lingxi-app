@@ -80,6 +80,21 @@ impl PolicyPermissionGate {
         name: &str,
         input: &Value,
     ) -> PermissionDecision {
+        // No worker attribution (main turn loop / plan-mode path).
+        self.decide_with_worker(result, name, input, None).await
+    }
+
+    /// Like [`Self::decide`], but forwards the originating-worker identity to the
+    /// inner prompt transport on the Ask-delegate path so the prompt is
+    /// attributed (claude-code's worker permission badge). `None` → identical to
+    /// [`Self::decide`].
+    async fn decide_with_worker(
+        &self,
+        result: PermissionResult,
+        name: &str,
+        input: &Value,
+        worker: Option<crate::gate::PromptWorker>,
+    ) -> PermissionDecision {
         match result {
             PermissionResult::Allow { .. } => PermissionDecision::Allow,
             PermissionResult::Deny {
@@ -89,14 +104,18 @@ impl PolicyPermissionGate {
             } => PermissionDecision::Deny {
                 reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
             },
-            PermissionResult::Ask { .. } => {
-                if matches!(tool_default(name), PromptDefault::AllowByDefault) {
-                    // Read-only / agent-local tool — auto-allow rather than
-                    // ask-storm. (phase-2 stand-in for the per-tool default.)
+            PermissionResult::Ask { ref reason, .. } => {
+                if read_only_default_auto_allows(name, reason) {
+                    // Read-only / agent-local tool with NO explicit `ask` rule —
+                    // auto-allow rather than ask-storm (phase-2 stand-in for the
+                    // per-tool default). An explicit `ask` rule (tool-wide or
+                    // content) tags the ask `MatchedRule` and is NOT short-circuited
+                    // here — it falls through to the prompt transport below.
                     PermissionDecision::Allow
                 } else {
-                    // Surface the prompt through the host's transport.
-                    self.inner.check(name, input).await
+                    // Surface the prompt through the host's transport, carrying
+                    // the worker identity so it is attributed in the dialog.
+                    self.inner.check_with_worker(name, input, worker).await
                 }
             }
         }
@@ -125,18 +144,35 @@ impl PolicyPermissionGate {
                 behavior_ask: false,
                 content_blocks: Vec::new(),
             },
-            PermissionResult::Ask { .. } => {
-                if matches!(tool_default(name), PromptDefault::AllowByDefault) {
-                    // Read-only / agent-local tool — auto-allowed, no prompt.
+            PermissionResult::Ask { ref reason, .. } => {
+                if read_only_default_auto_allows(name, reason) {
+                    // Read-only / agent-local tool with NO explicit `ask` rule —
+                    // auto-allowed, no prompt.
                     PermissionResolution::Allow
                 } else {
-                    // A would-be prompt: the turn loop fires PermissionRequest
-                    // before this is delegated to the inner transport.
+                    // A would-be prompt (a mutating tool, OR an explicit `ask`
+                    // rule on a read-only tool): the turn loop fires
+                    // PermissionRequest before this is delegated to the transport.
                     PermissionResolution::Ask
                 }
             }
         }
     }
+}
+
+/// Whether the read-only / agent-local default-allow stand-in applies to an
+/// `Ask`. It does ONLY when the tool is [`PromptDefault::AllowByDefault`] AND the
+/// ask was NOT produced by an explicit `ask` rule. claude-code's read-only
+/// default-allow (`checkPermissions`' allow verdict) is reached only AFTER the
+/// ask-rule walk (`mSm` steps 1c/1d precede the per-tool allow), so an explicit
+/// `ask:["Read(...)"]` / `ask:["Glob"]` rule — tool-wide or content, tagged
+/// [`PermissionDecisionReason::MatchedRule`] — PRE-EMPTS it and forces the prompt
+/// (firing the `PermissionRequest` hook). A mode-fallback ask
+/// ([`PermissionDecisionReason::PermissionMode`]) keeps the frictionless
+/// read-only auto-allow so the common no-rule case never ask-storms.
+fn read_only_default_auto_allows(name: &str, reason: &PermissionDecisionReason) -> bool {
+    matches!(tool_default(name), PromptDefault::AllowByDefault)
+        && !matches!(reason, PermissionDecisionReason::MatchedRule { .. })
 }
 
 #[async_trait]
@@ -145,6 +181,20 @@ impl PermissionGate for PolicyPermissionGate {
         // Authorize under the policy's boot mode, then map the 3-valued result
         // (an `Ask` auto-allows read-only tools or delegates to the prompt).
         self.decide(self.policy.authorize(name, input), name, input)
+            .await
+    }
+
+    /// As [`Self::check`], but forwards the originating subagent/teammate
+    /// worker identity to the inner prompt transport when an `Ask` is delegated,
+    /// so the dialog attributes the request to that worker. The rule/mode
+    /// decision is unchanged — only the prompt presentation gains attribution.
+    async fn check_with_worker(
+        &self,
+        name: &str,
+        input: &Value,
+        worker: Option<crate::gate::PromptWorker>,
+    ) -> PermissionDecision {
+        self.decide_with_worker(self.policy.authorize(name, input), name, input, worker)
             .await
     }
 
@@ -204,6 +254,25 @@ impl PermissionGate for PolicyPermissionGate {
     /// not the tool). With zero deny rules this is empty ⇒ no tools stripped.
     async fn tool_wide_deny_names(&self) -> Vec<String> {
         self.policy.tool_wide_deny_names()
+    }
+
+    /// Surface the source of a matching `Agent(<type>)` deny rule so the Agent
+    /// tool can reject a denied subagent type with the byte-exact
+    /// `AgentTypeError` message (claude-code `getDenyRuleForAgent`). The source is
+    /// rendered as the raw `SettingSource` identifier
+    /// ([`PermissionRuleSource::claude_settings_source`]), matching the binary's
+    /// `… from ${rule.source}.`.
+    async fn agent_type_deny(&self, agent_type: &str) -> Option<String> {
+        self.policy
+            .agent_type_deny_source(agent_type)
+            .map(|s| s.claude_settings_source().to_string())
+    }
+
+    /// Surface the wrapped policy's CONTENT-ful `Agent(<x>)` deny set so the
+    /// advertised agent catalog and `Available agents:` lists exclude denied
+    /// types (claude-code `Pxe`).
+    async fn agent_deny_content_types(&self) -> Vec<String> {
+        self.policy.agent_deny_content_types()
     }
 }
 
@@ -347,6 +416,100 @@ mod tests {
             PermissionDecision::Allow
         );
         assert_eq!(inner.calls(), 0, "read-only tool auto-allows, no prompt");
+    }
+
+    #[tokio::test]
+    async fn explicit_ask_rule_prompts_even_for_read_only_tool() {
+        // An explicit `ask:["Read"]` rule tags the ask `MatchedRule`, which must
+        // PRE-EMPT the read-only auto-allow stand-in and surface the prompt —
+        // claude-code reaches the read-only default-allow only after the ask walk.
+        let policy = policy_with(
+            r#"{ "permissions": { "ask": ["Read"] } }"#,
+            PermissionMode::Default,
+        );
+        let inner = RecordingInner::new(PermissionDecision::Allow);
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        assert_eq!(
+            gate.check("Read", &serde_json::json!({ "file_path": "/x.rs" }))
+                .await,
+            PermissionDecision::Allow // whatever the prompt returned
+        );
+        assert_eq!(
+            inner.calls(),
+            1,
+            "an explicit ask rule on a read-only tool delegates to the prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_content_ask_rule_surfaces_as_ask_for_read_only_tool() {
+        // A CONTENT ask rule `ask:["Read(./secrets/**)"]` likewise tags the ask
+        // `MatchedRule`, so resolve_detailed surfaces `Ask` (firing
+        // PermissionRequest) rather than auto-allowing the read. (Path-content
+        // discrimination is roots-gated and not exercised here — this policy is
+        // built without roots, so the content rule matches the tool; the point is
+        // that a MatchedRule ask is never short-circuited to auto-allow.)
+        let policy = policy_with(
+            r#"{ "permissions": { "ask": ["Read(./secrets/**)"] } }"#,
+            PermissionMode::Default,
+        );
+        let inner = RecordingInner::new(PermissionDecision::Allow);
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        assert_eq!(
+            gate.resolve_detailed("Read", &serde_json::json!({ "file_path": "./secrets/key.pem" }))
+                .await,
+            PermissionResolution::Ask,
+            "a content ask rule surfaces as Ask, not an auto-allow"
+        );
+    }
+
+    /// Inner gate that records the worker handed to `check_with_worker`.
+    struct WorkerRecordingInner {
+        worker: std::sync::Mutex<Option<Option<crate::gate::PromptWorker>>>,
+    }
+    #[async_trait]
+    impl PermissionGate for WorkerRecordingInner {
+        async fn check(&self, _name: &str, _input: &Value) -> PermissionDecision {
+            *self.worker.lock().unwrap() = Some(None);
+            PermissionDecision::Allow
+        }
+        async fn check_with_worker(
+            &self,
+            _name: &str,
+            _input: &Value,
+            worker: Option<crate::gate::PromptWorker>,
+        ) -> PermissionDecision {
+            *self.worker.lock().unwrap() = Some(worker);
+            PermissionDecision::Allow
+        }
+    }
+
+    #[tokio::test]
+    async fn check_with_worker_forwards_attribution_to_inner_on_ask() {
+        // No rule for Bash → Default mode asks; Bash is DenyByDefault → delegate.
+        // The worker identity must reach the inner prompt transport so the dialog
+        // is attributed (claude-code worker permission badge).
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let inner = Arc::new(WorkerRecordingInner {
+            worker: std::sync::Mutex::new(None),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        let decision = gate
+            .check_with_worker(
+                "Bash",
+                &serde_json::json!({}),
+                Some(crate::gate::PromptWorker {
+                    name: "researcher".into(),
+                    team: Some("alpha".into()),
+                    is_async: true,
+                }),
+            )
+            .await;
+        assert_eq!(decision, PermissionDecision::Allow);
+        let seen = inner.worker.lock().unwrap().clone().expect("inner consulted");
+        let w = seen.expect("worker forwarded to inner transport");
+        assert_eq!(w.name, "researcher");
+        assert_eq!(w.team.as_deref(), Some("alpha"));
     }
 
     #[tokio::test]

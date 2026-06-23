@@ -957,19 +957,26 @@ pub(crate) enum PtlCallOutcome {
 ///    and retry once more. If that STILL returns `PromptTooLong`, return
 ///    `PromptTooLong` (the caller ends the turn).
 ///
-/// DIVERGENCE (documented in SPECS §"Non-byte-faithful divergences" #1): this
-/// tail is the simpler "PTL-truncate ×N → one full compact → error" sequence.
-/// claude-code's fuller recovery is the `contextCollapse` subsystem — verified
-/// against the v2.1.186 binary (2026-06-23) to be a PERSISTED state machine, NOT
-/// a tail tweak: it journals `contextCollapseSnapshot` + `contextCollapseCommits`
-/// into the session JSONL (read/written across ~10 session load/save/fork
-/// functions), records `recordContextCollapseSnapshot` / `…Reset` / `…Commit`
-/// telemetry, and applies staged content collapse with snapshot→commit→reset
-/// (restore) semantics. A faithful port is a dedicated subsystem feature
-/// touching the session-persistence + JSONL-schema + telemetry layers; an ad-hoc
-/// multi-stage loop here would be a guess, not parity, so the simpler tail is
-/// kept deliberately. Scoped plan recorded in the project memory
-/// (`mainloop-parity-2026-06-23`).
+/// NOT A PARITY GAP (verified 2026-06-23, codex finding #4 REFUTED): this tail
+/// is the "PTL-truncate ×N → one full compact → error" sequence, and that
+/// matches claude-code's DEFAULT behavior. claude-code's fuller multi-stage
+/// recovery (`contextCollapse.recoverFromOverflow` / `reactiveCompact.
+/// tryReactiveCompact`, the "marble-origami" subsystem) lives behind
+/// build/runtime feature gates that are OFF by default:
+///   * `feature('CONTEXT_COLLAPSE')` — the flag isn't even present in the
+///     `FEATURE_FLAGS` map (`shims/bun-bundle.ts`), so `feature()` returns
+///     `false` UNCONDITIONALLY; the `contextCollapse` module is never required.
+///   * `feature('REACTIVE_COMPACT')` — `envBool('CLAUDE_CODE_REACTIVE_COMPACT',
+///     false)`, i.e. default-off, opt-in only.
+/// Cross-checked against the v2.1.186 binary: the service symbols
+/// `applyCollapsesIfNeeded` / `recoverFromOverflow` / `tryReactiveCompact` /
+/// `collapse_drain_retry` / `isContextCollapseEnabled` are ALL 0-hit — the
+/// algorithm is dead-code-eliminated from the shipping binary (only the dormant
+/// `marble-origami-*` session-storage recorders remain, never called when the
+/// feature is off). So the model's DEFAULT overflow recovery is exactly the
+/// simpler path this tail implements; porting the gated subsystem would make
+/// LingXi DIVERGE from default claude-code behavior. Details + the refutation
+/// evidence: project memory `mainloop-parity-2026-06-23`.
 ///
 /// `betas` for the blocking-limit window math is `&[]` (conservative): the
 /// orchestrator does not currently thread the per-request beta set down to this

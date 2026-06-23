@@ -75,7 +75,23 @@ impl ToolInvoker for RegistryToolInvoker {
         // `find_by_name` so an unknown tool stays `NotFound`, and BEFORE the
         // borrow of `input` is moved into `call`.
         if let Some(gate) = &self.gate {
-            if let PermissionDecision::Deny { reason } = gate.check(name, &input).await {
+            // Attribute the prompt to the originating worker (claude-code 2.1.186:
+            // a background subagent's permission prompt surfaces in the main
+            // session with a `● @name` badge). Attach the worker identity only for
+            // a NAMED worker that may surface prompts (`can_show_permission_prompts`)
+            // — a one-shot subagent (no display name) carries `None`, leaving the
+            // prompt unattributed exactly as before.
+            let worker = (ctx.can_show_permission_prompts)
+                .then(|| ctx.agent_name.clone())
+                .flatten()
+                .map(|name| traits::permission_gate::PromptWorker {
+                    name,
+                    team: ctx.team_name.clone(),
+                    is_async: ctx.is_async,
+                });
+            if let PermissionDecision::Deny { reason } =
+                gate.check_with_worker(name, &input, worker).await
+            {
                 return Err(ToolInvokerError::Internal(reason));
             }
         }
@@ -465,6 +481,7 @@ mod tests {
                     agent_name: Some("researcher".to_string()),
                     team_name: Some("alpha".to_string()),
                     is_async: false,
+                    can_show_permission_prompts: true,
                 },
             )
             .await
@@ -506,6 +523,7 @@ mod tests {
             agent_name: None,
             team_name: None,
             is_async: false,
+            can_show_permission_prompts: false,
         }
     }
 
@@ -558,6 +576,79 @@ mod tests {
             .await
             .expect("legacy dispatch");
         assert_eq!(out, json!({ "echo": {} }));
+    }
+
+    /// Gate that records the [`PromptWorker`] handed to `check_with_worker`.
+    struct WorkerRecordingGate {
+        seen: Arc<StdMutex<Option<Option<traits::permission_gate::PromptWorker>>>>,
+    }
+    #[async_trait]
+    impl Gate for WorkerRecordingGate {
+        async fn check(&self, _name: &str, _input: &Value) -> GateDecision {
+            // `check_with_worker`'s default would land here; record None so a
+            // missing override is visible. The real override is below.
+            *self.seen.lock().unwrap() = Some(None);
+            GateDecision::Allow
+        }
+        async fn check_with_worker(
+            &self,
+            _name: &str,
+            _input: &Value,
+            worker: Option<traits::permission_gate::PromptWorker>,
+        ) -> GateDecision {
+            *self.seen.lock().unwrap() = Some(worker);
+            GateDecision::Allow
+        }
+    }
+
+    fn named_ctx(can_show: bool) -> SubagentInvocationContext {
+        SubagentInvocationContext {
+            parent_agent_id: None,
+            agent_name: Some("researcher".to_string()),
+            team_name: Some("alpha".to_string()),
+            is_async: true,
+            can_show_permission_prompts: can_show,
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_identity_threads_to_gate_when_named_and_eligible() {
+        let seen = Arc::new(StdMutex::new(None));
+        let gate = Arc::new(WorkerRecordingGate { seen: seen.clone() });
+        let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+        invoker
+            .invoke("TestEcho", json!({}), named_ctx(true))
+            .await
+            .expect("allow dispatches");
+        let worker = seen.lock().unwrap().clone().expect("gate consulted");
+        let worker = worker.expect("a named, prompt-eligible worker is attributed");
+        assert_eq!(worker.name, "researcher");
+        assert_eq!(worker.team.as_deref(), Some("alpha"));
+        assert!(worker.is_async);
+    }
+
+    #[tokio::test]
+    async fn no_worker_attribution_for_unnamed_or_ineligible() {
+        // Unnamed (one-shot subagent) → no attribution.
+        let seen = Arc::new(StdMutex::new(None));
+        let gate = Arc::new(WorkerRecordingGate { seen: seen.clone() });
+        RegistryToolInvoker::new(registry_with_echo())
+            .with_gate(gate)
+            .invoke("TestEcho", json!({}), no_ctx())
+            .await
+            .expect("ok");
+        assert_eq!(seen.lock().unwrap().clone().expect("consulted"), None);
+
+        // Named but NOT prompt-eligible (`can_show_permission_prompts = false`)
+        // → no worker chrome.
+        let seen2 = Arc::new(StdMutex::new(None));
+        let gate2 = Arc::new(WorkerRecordingGate { seen: seen2.clone() });
+        RegistryToolInvoker::new(registry_with_echo())
+            .with_gate(gate2)
+            .invoke("TestEcho", json!({}), named_ctx(false))
+            .await
+            .expect("ok");
+        assert_eq!(seen2.lock().unwrap().clone().expect("consulted"), None);
     }
 
     #[tokio::test]

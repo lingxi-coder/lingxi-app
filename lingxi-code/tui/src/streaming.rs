@@ -82,7 +82,7 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
                 tool_input: input,
                 default_decision,
             };
-            crate::state::open_permission_dialog(state, request, None);
+            crate::state::open_permission_dialog(state, request, None, None);
         }
         TurnEvent::TurnEnded(_outcome) => {
             state.streaming = None;

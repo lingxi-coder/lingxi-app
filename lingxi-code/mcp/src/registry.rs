@@ -1074,6 +1074,45 @@ impl McpRegistry {
     /// order and deduplicated — claude builds `serversWithTools` by iterating
     /// `appState.mcp.tools` in order and pushing first-seen server names, with
     /// NO sort, so the required-MCP error lists servers in that same order.
+    /// Names of servers currently in a PENDING (still-connecting) state —
+    /// `Connecting` / `AwaitingOAuth` / `Reconnecting` (claude-code's MCP client
+    /// `type === "pending"`). These may yet expose tools, so the `AgentTool`
+    /// required-MCP gate waits on them before failing. NOTE: the public
+    /// [`traits::McpStatus`] UI projection collapses these into `Disconnected`;
+    /// this reads the INTERNAL state map so a connecting server is
+    /// distinguishable from a failed/absent one (the gap that blocked the
+    /// 30s poll-wait).
+    pub async fn servers_pending(&self) -> Vec<String> {
+        self.connections
+            .read()
+            .await
+            .values()
+            .filter(|s| {
+                matches!(
+                    s,
+                    McpConnectionState::Connecting { .. }
+                        | McpConnectionState::AwaitingOAuth { .. }
+                        | McpConnectionState::Reconnecting { .. }
+                )
+            })
+            .map(|s| s.name().to_string())
+            .collect()
+    }
+
+    /// Names of servers in a terminal FAILED state (`Failed` — exhausted retries;
+    /// claude-code's MCP client `type === "failed"`). The required-MCP gate's
+    /// poll-wait stops early when a required server fails rather than waiting out
+    /// the full deadline.
+    pub async fn servers_failed(&self) -> Vec<String> {
+        self.connections
+            .read()
+            .await
+            .values()
+            .filter(|s| matches!(s, McpConnectionState::Failed { .. }))
+            .map(|s| s.name().to_string())
+            .collect()
+    }
+
     pub async fn servers_with_tools(&self) -> Vec<String> {
         let clients: Vec<Arc<McpClient>> = self.clients.read().await.values().cloned().collect();
         let mut out: Vec<String> = Vec::new();
@@ -1871,6 +1910,61 @@ mod snapshot_tests {
         // exposes no tools) → empty. Used by AgentTool's required-MCP gate.
         let r = McpRegistry::new(Arc::new(StubTransport));
         assert!(r.servers_with_tools().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn servers_pending_and_failed_classify_internal_states() {
+        // The required-MCP poll-wait needs to distinguish a still-connecting
+        // server from a failed/absent one — the public `McpStatus` projection
+        // collapses these, so `servers_pending`/`servers_failed` read the
+        // internal state map. `pending` = Connecting | AwaitingOAuth |
+        // Reconnecting; `failed` = Failed. Connected/Disconnected/Stopped are
+        // neither.
+        let r = McpRegistry::new(Arc::new(StubTransport));
+        {
+            let mut c = r.connections.write().await;
+            c.insert(
+                "connecting".into(),
+                McpConnectionState::Connecting {
+                    config: stdio_cfg("connecting"),
+                    started_at: SystemTime::now(),
+                },
+            );
+            c.insert(
+                "awaiting".into(),
+                McpConnectionState::AwaitingOAuth {
+                    config: stdio_cfg("awaiting"),
+                    callback_port: 7777,
+                },
+            );
+            c.insert(
+                "reconnecting".into(),
+                McpConnectionState::Reconnecting {
+                    config: stdio_cfg("reconnecting"),
+                    retry_count: 2,
+                    next_retry_at: SystemTime::now(),
+                },
+            );
+            c.insert(
+                "boom".into(),
+                McpConnectionState::Failed {
+                    config: stdio_cfg("boom"),
+                    error: "nope".into(),
+                    attempts: 5,
+                },
+            );
+            c.insert(
+                "idle".into(),
+                McpConnectionState::Disconnected {
+                    config: stdio_cfg("idle"),
+                    last_error: None,
+                },
+            );
+        }
+        let mut pending = r.servers_pending().await;
+        pending.sort();
+        assert_eq!(pending, vec!["awaiting", "connecting", "reconnecting"]);
+        assert_eq!(r.servers_failed().await, vec!["boom".to_string()]);
     }
 
     #[tokio::test]

@@ -231,6 +231,44 @@ impl PermissionPolicy {
             .collect()
     }
 
+    /// The source of the highest-priority DENY rule that denies `Agent(<type>)`,
+    /// or `None` if no such rule exists.
+    ///
+    /// 1:1 with claude-code `getDenyRuleForAgent` (`o5e(ctx, "Agent", type)`): a
+    /// CONTENT deny rule whose `tool_name == "Agent"` and whose `rule_content`
+    /// equals `agent_type` exactly. When several sources match, the one with the
+    /// highest citation [`PermissionRuleSource::priority`] is returned (claude
+    /// cites the first source in its walk). The deny rule keys on the `"Agent"`
+    /// tool name even when the call arrives via the legacy `Task` alias.
+    #[must_use]
+    pub fn agent_type_deny_source(&self, agent_type: &str) -> Option<PermissionRuleSource> {
+        self.deny_rules
+            .values()
+            .flat_map(|rules| rules.iter())
+            .filter(|r| {
+                (r.value.tool_name == "Agent" || r.value.tool_name == "Task")
+                    && r.value.rule_content.as_deref() == Some(agent_type)
+            })
+            .map(|r| r.source)
+            .max_by_key(|s| s.priority())
+    }
+
+    /// The set of agent-type names denied by a CONTENT-ful `Agent(<x>)` deny rule
+    /// — the listing-filter set (claude-code `Pxe`). Order follows source-bucket
+    /// iteration; callers test membership, so duplicates are harmless.
+    #[must_use]
+    pub fn agent_deny_content_types(&self) -> Vec<String> {
+        self.deny_rules
+            .values()
+            .flat_map(|rules| rules.iter())
+            .filter(|r| {
+                (r.value.tool_name == "Agent" || r.value.tool_name == "Task")
+                    && r.value.rule_content.is_some()
+            })
+            .filter_map(|r| r.value.rule_content.clone())
+            .collect()
+    }
+
     /// Resolve a tool call to a [`PermissionResult`].
     ///
     /// Evaluation order (claude-code `checkPermissionsForToolUse` skeleton):
@@ -3402,6 +3440,50 @@ mod tests {
             p2.authorize("Agent", &serde_json::json!({ "subagent_type": "Explore" })),
             PermissionResult::Deny { .. }
         ));
+    }
+
+    #[test]
+    fn agent_type_deny_source_and_content_set() {
+        use crate::rule::PermissionRuleSource;
+        // `Agent(Explore)` in project-local settings → deny source is the matched
+        // type, surfaced as the raw `SettingSource` identifier, and the content
+        // set contains exactly that type.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Agent(Explore)", "Agent(Plan)"] } }"#,
+            PermissionMode::Default,
+        );
+        // `policy_with_roots` loads from the PROJECT settings bucket.
+        assert_eq!(
+            p.agent_type_deny_source("Explore"),
+            Some(PermissionRuleSource::ProjectSettings)
+        );
+        assert_eq!(
+            p.agent_type_deny_source("general-purpose"),
+            None,
+            "an unrelated type is not denied"
+        );
+        // Raw SettingSource identifier is byte-locked to claude-code.
+        assert_eq!(
+            PermissionRuleSource::ProjectSettings.claude_settings_source(),
+            "projectSettings"
+        );
+        assert_eq!(
+            PermissionRuleSource::LocalSettings.claude_settings_source(),
+            "localSettings"
+        );
+        let mut set = p.agent_deny_content_types();
+        set.sort();
+        assert_eq!(set, vec!["Explore".to_string(), "Plan".to_string()]);
+        // The `Task` alias is matched too (LingXi stores the alias verbatim).
+        let p2 = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Task(Explore)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert_eq!(
+            p2.agent_type_deny_source("Explore"),
+            Some(PermissionRuleSource::ProjectSettings)
+        );
+        assert_eq!(p2.agent_deny_content_types(), vec!["Explore".to_string()]);
     }
 
     // ── PERM.4: Plan mode + isBypassPermissionsModeAvailable bypasses ──────

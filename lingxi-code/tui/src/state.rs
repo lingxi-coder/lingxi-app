@@ -512,11 +512,9 @@ pub fn open_permission_dialog(
     st: &mut AppState,
     request: PermissionRequest,
     resp_tx: Option<oneshot::Sender<PermissionResponse>>,
+    worker: Option<crate::components::permissions::worker::WorkerPermissionInfo>,
 ) {
-    st.pending_permission = Some(PendingPermission {
-        request,
-        worker: None,
-    });
+    st.pending_permission = Some(PendingPermission { request, worker });
     st.pending_permission_resp_tx = resp_tx;
     st.pending_permission_started_at = Some(Instant::now());
     st.tool_use_dialog_state =
@@ -532,7 +530,12 @@ pub fn promote_next_permission(st: &mut AppState) {
         return;
     }
     if let Some(exchange) = st.permission_queue.pop_front() {
-        open_permission_dialog(st, exchange.request, Some(exchange.resp_tx));
+        open_permission_dialog(
+            st,
+            exchange.request,
+            Some(exchange.resp_tx),
+            exchange.worker,
+        );
     }
 }
 
@@ -1895,13 +1898,37 @@ mod tests {
             tool_input: serde_json::json!({"file_path": "a.txt"}),
             default_decision: permission::tool_default("Write"),
         };
-        open_permission_dialog(&mut st, req, Some(tx));
+        open_permission_dialog(&mut st, req, Some(tx), None);
         assert!(st.pending_permission.is_some());
         assert!(st.pending_permission_resp_tx.is_some());
         assert!(
             st.pending_permission_started_at.is_some(),
             "started_at must be set for telemetry"
         );
+        // No worker → no badge.
+        assert!(st.pending_permission.as_ref().unwrap().worker.is_none());
+    }
+
+    #[test]
+    fn open_permission_dialog_carries_worker_attribution() {
+        use crate::components::permissions::worker::WorkerPermissionInfo;
+        let mut st = AppState::new(StatusSnapshot::default());
+        let (tx, _rx) = oneshot::channel();
+        let req = permission::gate::PermissionRequest::ToolUseConfirm {
+            tool_name: "Bash".to_string(),
+            tool_input: serde_json::json!({"command": "ls"}),
+            default_decision: permission::tool_default("Bash"),
+        };
+        let worker = WorkerPermissionInfo {
+            name: "researcher".to_string(),
+            color: "researcher".to_string(),
+            team: Some("alpha".to_string()),
+        };
+        open_permission_dialog(&mut st, req, Some(tx), Some(worker));
+        // The worker rides onto the pending permission → the dialog renders the
+        // `● @name` badge (app.rs maps `pp.worker` → `render_worker_badge`).
+        let pp = st.pending_permission.as_ref().unwrap();
+        assert_eq!(pp.worker.as_ref().unwrap().name, "researcher");
     }
 
     #[test]
@@ -1917,6 +1944,7 @@ mod tests {
                     default_decision: permission::tool_default(tool),
                 },
                 resp_tx: tx,
+                worker: None,
             }
         };
         st.permission_queue.push_back(mk("Write"));

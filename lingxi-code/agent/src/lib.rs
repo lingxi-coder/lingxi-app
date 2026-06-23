@@ -54,6 +54,11 @@ pub use traits::fork_subagent::{
     is_in_fork_child, FORK_SUBAGENT_TYPE,
 };
 pub use model_resolution::resolve_agent_model;
+pub use tool_resolver::resolve_subagent_tools;
+// Re-export `ToolRegistry` (from `tool_api`, an existing `agent` dep) so the
+// `tasks` in-process-teammate handler can hold one for per-spawn tool resolution
+// without widening its own dep graph.
+pub use tool_api::ToolRegistry;
 // Re-export `PermissionMode` (lives in the `permission` crate, which `agent`
 // already depends on) so the `tasks` crate can reference `agent::PermissionMode`
 // for `resolve_agent_model`'s seam without widening its own dep graph.

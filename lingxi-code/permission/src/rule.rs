@@ -199,6 +199,27 @@ impl PermissionRuleSource {
             Self::UserSettings => 7,
         }
     }
+
+    /// The RAW claude-code `SettingSource` identifier string for this source.
+    ///
+    /// This is the camelCase token claude-code interpolates verbatim into rule
+    /// citations such as the `AgentTypeError` deny message
+    /// `… from ${rule.source}.` — distinct from the human display strings in
+    /// [`crate::shadow::format_source`] (`"user settings"` etc.). Byte-locked to
+    /// claude-code's `SettingSource` union.
+    #[must_use]
+    pub fn claude_settings_source(self) -> &'static str {
+        match self {
+            Self::UserSettings => "userSettings",
+            Self::ProjectSettings => "projectSettings",
+            Self::LocalSettings => "localSettings",
+            Self::FlagSettings => "flagSettings",
+            Self::PolicySettings => "policySettings",
+            Self::CliArg => "cliArg",
+            Self::Command => "command",
+            Self::Session => "session",
+        }
+    }
 }
 
 impl PermissionRule {

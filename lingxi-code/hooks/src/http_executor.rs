@@ -16,17 +16,56 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use protocol::{HttpMethod, HttpRequest};
+use regex::Regex;
 use traits::{HttpError, HttpTransport};
 
 use crate::definition::{HookDefinition, HookExecutor};
 use crate::hook_payload::parse_response;
 use crate::response::{HookOutcome, HookResponse, HookResult};
 use crate::ssrf_guard::SsrfGuard;
+
+/// Interpolate a single header VALUE, substituting `$VAR` / `${VAR}` references
+/// gated on `allowed`. Byte-faithful port of claude-code `cHm`
+/// (`execHttpHook.ts`, BIN off ~206545453):
+///
+/// - the match regex is `/\$\{([A-Z_][A-Z0-9_]*)\}|\$([A-Z_][A-Z0-9_]*)/g`
+///   (UPPERCASE/underscore names only — a lowercase `$var` never matches and is
+///   left verbatim);
+/// - a name NOT in `allowed` resolves to `""` (claude-code also logs a
+///   `Hooks: env var $NAME not in allowedEnvVars, skipping interpolation` warning);
+/// - a name in `allowed` resolves to `process.env[NAME] ?? ""`;
+/// - finally `\r`, `\n`, `\x00` are stripped from the whole result (`lHm`,
+///   header-injection hardening).
+fn interpolate_header_value(value: &str, allowed: &HashSet<&str>) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"\$\{([A-Z_][A-Z0-9_]*)\}|\$([A-Z_][A-Z0-9_]*)").unwrap()
+    });
+    let substituted = re.replace_all(value, |caps: &regex::Captures| {
+        let name = caps
+            .get(1)
+            .or_else(|| caps.get(2))
+            .map_or("", |m| m.as_str());
+        if !allowed.contains(name) {
+            tracing::warn!(
+                "Hooks: env var ${name} not in allowedEnvVars, skipping interpolation"
+            );
+            return String::new();
+        }
+        std::env::var(name).unwrap_or_default()
+    });
+    // `lHm`: strip CR / LF / NUL from the interpolated value.
+    substituted
+        .chars()
+        .filter(|c| !matches!(c, '\r' | '\n' | '\u{0}'))
+        .collect()
+}
 
 /// Telemetry hint the caller (`HookExecutorImpl::execute_single`) emits.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,11 +140,18 @@ impl HttpExecutor {
             _ => self.timeout,
         };
 
-        // 3. Build the request. Inject Content-Type: application/json if the
-        //    caller didn't supply one.
+        // 3. Build the request. Interpolate `$VAR`/`${VAR}` in header VALUES
+        //    gated on the hook's `allowedEnvVars` (claude-code `cHm`), then inject
+        //    Content-Type: application/json if the caller didn't supply one.
+        let allowed: HashSet<&str> = match &hook.executor {
+            HookExecutor::Http {
+                allowed_env_vars, ..
+            } => allowed_env_vars.iter().map(String::as_str).collect(),
+            _ => HashSet::new(),
+        };
         let mut req_headers: Vec<(String, String)> = headers
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| (k.clone(), interpolate_header_value(v, &allowed)))
             .collect();
         let has_content_type = req_headers
             .iter()
@@ -229,6 +275,7 @@ mod tests {
                 url: url.into(),
                 method: "POST".into(),
                 headers: HashMap::new(),
+                allowed_env_vars: Vec::new(),
                 timeout: Duration::from_secs(5),
             },
             source: HookSource::User,
@@ -238,6 +285,46 @@ mod tests {
             once: false,
             status_message: None,
         }
+    }
+
+    #[test]
+    fn interpolate_header_value_honors_allowlist_and_strips_controls() {
+        // `set_var` forbids NUL in the value, so test CR/LF stripping via env and
+        // NUL stripping via a literal value (below).
+        std::env::set_var("LX_HOOK_TEST_TOKEN", "secret\nval\rue");
+        let allowed: HashSet<&str> = ["LX_HOOK_TEST_TOKEN"].into_iter().collect();
+
+        // `${VAR}` and `$VAR` both interpolate when allowed; CR/LF stripped.
+        assert_eq!(
+            interpolate_header_value("Bearer ${LX_HOOK_TEST_TOKEN}", &allowed),
+            "Bearer secretvalue"
+        );
+        assert_eq!(
+            interpolate_header_value("$LX_HOOK_TEST_TOKEN", &allowed),
+            "secretvalue"
+        );
+        // `lHm` strips CR/LF/NUL from the final value even with no interpolation.
+        assert_eq!(
+            interpolate_header_value("a\u{0}b\r\nc", &allowed),
+            "abc"
+        );
+        // A name NOT in the allowlist resolves to empty string.
+        assert_eq!(
+            interpolate_header_value("a${OTHER_VAR}b", &allowed),
+            "ab"
+        );
+        // Lowercase `$var` does not match the [A-Z_] grammar — left verbatim.
+        assert_eq!(
+            interpolate_header_value("x$lowercase y", &allowed),
+            "x$lowercase y"
+        );
+        // Empty allowlist blanks every reference.
+        let empty: HashSet<&str> = HashSet::new();
+        assert_eq!(
+            interpolate_header_value("Bearer $LX_HOOK_TEST_TOKEN", &empty),
+            "Bearer "
+        );
+        std::env::remove_var("LX_HOOK_TEST_TOKEN");
     }
 
     #[tokio::test]

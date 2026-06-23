@@ -379,3 +379,74 @@ fn allowed_domains_order_subsection_before_webfetch() {
         vec!["sub.example".to_string(), "fetch.example".to_string()]
     );
 }
+
+// ── allowManagedDomainsOnly / allowManagedReadPathsOnly enforcement ──────────
+
+#[test]
+fn managed_allowed_domains_override_replaces_merged_allowlist() {
+    // The merged settings allow a user domain via WebFetch; when the managed-only
+    // override is active, only the managed allowlist survives.
+    let s = settings(vec!["WebFetch(domain:user-allowed.com)"], vec![]);
+    let c = SandboxConvertContext {
+        managed_allowed_domains: Some(vec!["managed.example".to_string()]),
+        ..SandboxConvertContext::default()
+    };
+    let cfg = convert_settings_to_runtime_config(&s, &c);
+    assert_eq!(
+        cfg.network.allowed_domains,
+        vec!["managed.example".to_string()],
+        "user domain dropped under allowManagedDomainsOnly"
+    );
+}
+
+#[test]
+fn managed_read_paths_override_replaces_allow_read() {
+    use sandbox::runtime_config::{FilesystemRestrictionConfig, SandboxSettingsJson};
+    let mut s = settings(vec![], vec![]);
+    s.sandbox = Some(SandboxSettingsJson {
+        enabled: Some(true),
+        filesystem: Some(FilesystemRestrictionConfig {
+            allow_read: vec!["/user/path".to_string()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let c = SandboxConvertContext {
+        managed_read_paths: Some(vec!["/managed/only".to_string()]),
+        ..SandboxConvertContext::default()
+    };
+    let cfg = convert_settings_to_runtime_config(&s, &c);
+    assert_eq!(
+        cfg.filesystem.allow_read,
+        vec!["/managed/only".to_string()],
+        "user read path dropped under allowManagedReadPathsOnly"
+    );
+}
+
+#[test]
+fn no_override_keeps_merged_allowlist() {
+    // Without the override (None), the merged WebFetch domain is kept as-is.
+    let s = settings(vec!["WebFetch(domain:keep.me)"], vec![]);
+    let cfg = convert_settings_to_runtime_config(&s, &ctx());
+    assert!(cfg.network.allowed_domains.contains(&"keep.me".to_string()));
+}
+
+#[test]
+fn managed_domain_allowlist_collects_subsection_and_webfetch() {
+    use sandbox::policy_convert::managed_domain_allowlist;
+    use sandbox::runtime_config::{NetworkRestrictionConfig, SandboxSettingsJson};
+    let mut s = settings(vec!["WebFetch(domain:from-rule.com)", "Bash(curl:*)"], vec![]);
+    s.sandbox = Some(SandboxSettingsJson {
+        enabled: Some(true),
+        network: Some(NetworkRestrictionConfig {
+            allowed_domains: vec!["from-subsection.com".to_string()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    // Subsection domains first, then WebFetch-derived; Bash ignored.
+    assert_eq!(
+        managed_domain_allowlist(&s),
+        vec!["from-subsection.com".to_string(), "from-rule.com".to_string()]
+    );
+}

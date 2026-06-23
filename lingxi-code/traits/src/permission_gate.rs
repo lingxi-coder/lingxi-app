@@ -17,6 +17,25 @@ use async_trait::async_trait;
 use protocol::ContentBlock;
 use serde_json::Value;
 
+/// Identity of the SUBAGENT / in-process-teammate worker a permission prompt is
+/// being raised on behalf of, so the prompt UI can ATTRIBUTE it.
+///
+/// claude-code 2.1.186 surfaces a background worker's permission prompt in the
+/// main session attributed to the asking agent (`${agent_id} needs permission
+/// for ${tool_name}` + the `● @name` worker badge). Threaded from
+/// [`crate::tool_invoker::SubagentInvocationContext`] through the dispatch
+/// invoker into the prompt-building gate. `None` for a main-thread / leader
+/// tool call (the turn loop's own [`PermissionGate::check`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptWorker {
+    /// Worker DISPLAY name (claude-code `getAgentName()` — e.g. `"researcher"`).
+    pub name: String,
+    /// Team the worker belongs to (claude-code `getTeammateContext()?.teamName`).
+    pub team: Option<String>,
+    /// Whether the worker runs ASYNC (backgrounded).
+    pub is_async: bool,
+}
+
 /// Outcome of a [`PermissionGate::check`] call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionDecision {
@@ -102,6 +121,29 @@ pub trait PermissionGate: Send + Sync {
     /// [`PermissionDecision::Deny`] — the caller never has to handle an
     /// error tier.
     async fn check(&self, name: &str, input: &Value) -> PermissionDecision;
+
+    /// Like [`Self::check`], but carrying the identity of the SUBAGENT/teammate
+    /// worker the call originates from so a prompt-building gate can ATTRIBUTE
+    /// the prompt to that worker — claude-code 2.1.186 surfaces a background
+    /// worker's permission prompt in the main session with a `● @name` badge
+    /// (`${agent_id} needs permission for ${tool_name}`). The subagent dispatch
+    /// invoker ([`crate::tool_invoker::ToolInvoker`]) calls this; the main turn
+    /// loop uses [`Self::check`] (no worker).
+    ///
+    /// Additive DEFAULTED (frozen-trait safe): the default IGNORES `worker` and
+    /// delegates to [`Self::check`], so every existing impl is unchanged. Only
+    /// the prompt-building gates (`TuiPermissionGate` / `AdapterPermissionGate`)
+    /// and the wrapping `PolicyPermissionGate` (which forwards it to its inner
+    /// transport) OVERRIDE it.
+    async fn check_with_worker(
+        &self,
+        name: &str,
+        input: &Value,
+        worker: Option<PromptWorker>,
+    ) -> PermissionDecision {
+        let _ = worker;
+        self.check(name, input).await
+    }
 
     /// Resolve permission when a `PreToolUse` / `PermissionRequest` hook has
     /// already returned `allow` (`HookDecision::Approve`).
@@ -195,6 +237,42 @@ pub trait PermissionGate: Send + Sync {
     /// the rule-evaluating `PolicyPermissionGate` OVERRIDES this to surface its
     /// policy's tool-wide deny names. Additive DEFAULTED (frozen-trait safe).
     async fn tool_wide_deny_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// If `Agent(<agent_type>)` is DENIED by a permission rule, the rule's source
+    /// identifier (claude-code `SettingSource` raw string — e.g. `localSettings`,
+    /// `projectSettings`, `cliArg`), else `None`.
+    ///
+    /// 1:1 with claude-code `getDenyRuleForAgent` (`o5e(ctx, "Agent", type)`):
+    /// finds a DENY rule whose `toolName === "Agent"` and whose `ruleContent`
+    /// equals the agent type exactly. The Agent tool uses this to reject a model
+    /// selection of a denied subagent type with the byte-exact message
+    /// `Agent type '<t>' has been denied by permission rule 'Agent(<t>)' from
+    /// <source>.` (`AgentTypeError`). The deny rule keys on the `"Agent"` tool
+    /// name even when invoked via the legacy `Task` alias.
+    ///
+    /// The default returns `None` — a gate with no rule layer denies no agent
+    /// type. Only `PolicyPermissionGate` OVERRIDES it. Additive DEFAULTED
+    /// (frozen-trait safe).
+    async fn agent_type_deny(&self, agent_type: &str) -> Option<String> {
+        let _ = agent_type;
+        None
+    }
+
+    /// The set of agent-type names that are denied by a CONTENT-ful `Agent(<x>)`
+    /// deny rule — the listing-filter set.
+    ///
+    /// 1:1 with claude-code `Pxe(list, ctx, "Agent")`: collects every DENY rule
+    /// whose `toolName === "Agent"` and that carries a (non-undefined)
+    /// `ruleContent`, so the advertised agent catalog and the `Available agents:`
+    /// error lists exclude denied types — the 2.1.186 Agent(type)-restriction
+    /// change that filters the prompt/list the model sees.
+    ///
+    /// The default returns `Vec::new()` — no agent types filtered. Only
+    /// `PolicyPermissionGate` OVERRIDES it. Additive DEFAULTED (frozen-trait
+    /// safe).
+    async fn agent_deny_content_types(&self) -> Vec<String> {
         Vec::new()
     }
 }

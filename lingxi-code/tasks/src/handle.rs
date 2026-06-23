@@ -171,6 +171,7 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             agent_id: protocol::AgentId::nil(),
             name: String::new(),
             team_name: String::new(),
+            description: String::new(),
         },
         TaskType::LocalWorkflow => TaskSpawnInput::LocalWorkflow {
             workflow_id: String::new(),

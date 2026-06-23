@@ -502,6 +502,7 @@ mod m6_02_tests {
                 default_decision: permission::tool_default("Write"),
             },
             Some(tx0),
+            None,
         );
         // A second exchange waiting in the FIFO.
         let (tx1, _rx1) = oneshot::channel();
@@ -512,6 +513,7 @@ mod m6_02_tests {
                 default_decision: permission::tool_default("Edit"),
             },
             resp_tx: tx1,
+            worker: None,
         });
 
         // Resolve the active "Write" dialog with Deny.

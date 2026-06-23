@@ -125,8 +125,17 @@ pub enum HookExecutor {
         url: String,
         /// HTTP method (typically `"POST"`).
         method: String,
-        /// Request headers to attach.
+        /// Request headers to attach. Values may reference environment variables
+        /// via `$VAR`/`${VAR}`; only names in [`Self::Http::allowed_env_vars`]
+        /// are interpolated (claude-code `cHm`).
         headers: HashMap<String, String>,
+        /// Env-var names that header values may interpolate (`allowedEnvVars`,
+        /// `schemas/hooks.ts`). A `$VAR`/`${VAR}` reference whose name is NOT in
+        /// this list resolves to an empty string (claude-code `cHm` warns +
+        /// substitutes `""`); a name present resolves to the process env value
+        /// (`process.env[VAR] ?? ""`). Empty ⇒ no interpolation (every `$VAR`
+        /// reference is blanked).
+        allowed_env_vars: Vec<String>,
         /// Request timeout enforced by the executor.
         timeout: Duration,
     },
@@ -137,6 +146,9 @@ pub enum HookExecutor {
         agent_type: String,
         /// Prompt text supplied to the spawned agent.
         prompt: String,
+        /// Optional model override (`schemas/hooks.ts:128-163` `model`). When
+        /// `None` the spawned verifier inherits the spawner's default model.
+        model: Option<String>,
     },
     /// Evaluate an inline single-turn LLM query and map the model's
     /// `{ok, reason?}` JSON to a hook decision (claude-code

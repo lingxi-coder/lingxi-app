@@ -899,10 +899,20 @@ impl Tool for AgentTool {
         // `formatAgentLine` per resolved AgentDefinition) and the available MCP
         // server names. Pull the catalog from the spawner (defaulted-empty when
         // unwired) and the MCP server names from the registry.
-        let agents = match &self.ctx.subagent_spawner {
+        let mut agents = match &self.ctx.subagent_spawner {
             Some(s) => s.agent_listing().await,
             None => Vec::new(),
         };
+        // Filter out agent types denied by a content-ful `Agent(<x>)` rule, so the
+        // advertised catalog the model sees excludes them (claude-code `Pxe` —
+        // the 2.1.186 Agent(type)-restriction prompt filter). No gate / no rules
+        // ⇒ nothing removed (byte-identical to before).
+        if let Some(gate) = &self.ctx.permission_gate {
+            let denied = gate.agent_deny_content_types().await;
+            if !denied.is_empty() {
+                agents.retain(|a| !denied.iter().any(|d| d == &a.agent_type));
+            }
+        }
         let mcp_server_names: Vec<String> = match &self.ctx.mcp_registry {
             Some(reg) => reg
                 .snapshot()
@@ -1006,11 +1016,33 @@ impl Tool for AgentTool {
         //   - EXPLICIT (`Some(x)`) ⇒ validated against the agent listing; an
         //     unknown explicit type is REJECTED with claude's "Agent type 'x'
         //     not found. Available agents: …" error (AgentTool.tsx:353).
-        // (Denied-by-permission-rule — AgentTool.tsx:349-351 — has no reachable
-        //  per-agent `Agent(x)` deny seam in tool-agent today; see follow-ups.)
+        // Denied-by-permission-rule (claude-code `getDenyRuleForAgent` →
+        // `AgentTypeError`, AgentTool.tsx:349-351): a content-ful `Agent(<type>)`
+        // deny rule rejects the resolved subagent type — checked BEFORE the
+        // not-found lookup (binary `o5e` precedes the catalog match) and applied
+        // to the `general-purpose` default too (deny `Agent(general-purpose)`
+        // blocks an omitted type). Byte-exact message + raw `SettingSource`.
         let effective_type: String = if is_fork {
             traits::fork_subagent::FORK_SUBAGENT_TYPE.to_string()
         } else {
+            let candidate = parsed
+                .subagent_type
+                .as_deref()
+                .unwrap_or(GENERAL_PURPOSE_AGENT_TYPE);
+            if let Some(gate) = &self.ctx.permission_gate {
+                if let Some(source) = gate.agent_type_deny(candidate).await {
+                    Self::emit_failed(
+                        &bus,
+                        &invocation_id,
+                        "agent_type_denied",
+                        started.elapsed().as_millis() as u64,
+                    )
+                    .await;
+                    return Err(ToolError::InvalidInput(format!(
+                        "Agent type '{candidate}' has been denied by permission rule 'Agent({candidate})' from {source}."
+                    )));
+                }
+            }
             match parsed.subagent_type.as_deref() {
                 None => GENERAL_PURPOSE_AGENT_TYPE.to_string(),
                 Some(explicit) => {
@@ -1018,8 +1050,16 @@ impl Tool for AgentTool {
                     if listing.iter().any(|a| a.agent_type == explicit) {
                         explicit.to_string()
                     } else {
+                        // The `Available agents:` set is the deny-filtered listing
+                        // (claude-code `Pxe`), so a denied type never appears as a
+                        // suggestion.
+                        let denied = match &self.ctx.permission_gate {
+                            Some(gate) => gate.agent_deny_content_types().await,
+                            None => Vec::new(),
+                        };
                         let available = listing
                             .iter()
+                            .filter(|a| !denied.iter().any(|d| d == &a.agent_type))
                             .map(|a| a.agent_type.clone())
                             .collect::<Vec<_>>()
                             .join(", ");
@@ -1044,15 +1084,45 @@ impl Tool for AgentTool {
         // authenticated). A missing requirement is a hard error listing the
         // unmatched patterns + the servers that DO have tools.
         //
-        // DIVERGENCE (flagged): claude first waits up to 30s (500ms poll) for any
-        // required server still in the `pending` (connecting) state before
-        // checking tool availability. LingXi's `McpStatus` collapses
-        // Connecting/AwaitingOAuth/Reconnecting → `Disconnected` (registry.rs
-        // `project_status`), so a `pending` server cannot be distinguished from a
-        // failed/absent one — the poll-wait is NOT reproducible. We check tool
-        // availability immediately. See the step report's follow-ups.
+        // Pending-wait (claude AgentTool.tsx): if any REQUIRED server is currently
+        // PENDING (connecting / awaiting-OAuth / reconnecting), wait up to 30s
+        // (500ms poll) for it to either expose tools or fail BEFORE checking
+        // availability — so an agent that needs an OAuth/slow-login MCP server is
+        // not spuriously failed mid-connect. The loop stops early when a required
+        // server FAILS (no point waiting) or when none remain pending. Reads the
+        // registry's INTERNAL pending/failed state (the public `McpStatus` UI
+        // projection collapses Connecting/AwaitingOAuth/Reconnecting →
+        // `Disconnected`; `servers_pending`/`servers_failed` read the real state).
         let required_mcp_servers = spawner.resolve_required_mcp_servers(&effective_type).await;
         if !required_mcp_servers.is_empty() {
+            if let Some(reg) = &self.ctx.mcp_registry {
+                // claude `he.name.toLowerCase().includes(pattern.toLowerCase())`:
+                // a server name matches a required pattern by case-insensitive
+                // substring. Reused for the pending + failed lists.
+                let any_required = |names: &[String]| {
+                    names.iter().any(|name| {
+                        let n = name.to_lowercase();
+                        required_mcp_servers
+                            .iter()
+                            .any(|pat| n.contains(&pat.to_lowercase()))
+                    })
+                };
+                if any_required(&reg.servers_pending().await) {
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_secs(30);
+                    while std::time::Instant::now() < deadline {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        // A required server FAILED → stop waiting.
+                        if any_required(&reg.servers_failed().await) {
+                            break;
+                        }
+                        // No required server still pending → stop waiting.
+                        if !any_required(&reg.servers_pending().await) {
+                            break;
+                        }
+                    }
+                }
+            }
             let servers_with_tools: Vec<String> = match &self.ctx.mcp_registry {
                 Some(reg) => reg.servers_with_tools().await,
                 None => Vec::new(),
@@ -2163,6 +2233,92 @@ mod tests {
         // Core structural anchors from getPrompt.
         assert!(prompt.contains("Launch a new agent to handle complex, multi-step tasks"));
         assert!(prompt.contains("If omitted, the general-purpose agent is used."));
+    }
+
+    // A permission gate that denies the `Explore` agent type, for the
+    // Agent(type)-restriction filter tests (claude-code `Pxe` / `getDenyRuleForAgent`).
+    struct DenyExploreGate;
+    #[async_trait::async_trait]
+    impl traits::permission_gate::PermissionGate for DenyExploreGate {
+        async fn check(
+            &self,
+            _name: &str,
+            _input: &serde_json::Value,
+        ) -> traits::permission_gate::PermissionDecision {
+            traits::permission_gate::PermissionDecision::Allow
+        }
+        async fn agent_type_deny(&self, agent_type: &str) -> Option<String> {
+            (agent_type == "Explore").then(|| "localSettings".to_string())
+        }
+        async fn agent_deny_content_types(&self) -> Vec<String> {
+            vec!["Explore".to_string()]
+        }
+    }
+
+    // The advertised catalog excludes a denied agent type (claude-code `Pxe`):
+    // `Explore` is denied, so it must NOT appear in the prompt while
+    // `general-purpose` still does.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn prompt_filters_denied_agent_types() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        let spawner = arc_mock_spawner();
+        let mut bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        bctx.permission_gate = Some(Arc::new(DenyExploreGate));
+        let tool = AgentTool::new(bctx);
+        let prompt = tool
+            .prompt(&PromptOptions {
+                include_examples: true,
+                model: None,
+            })
+            .await;
+        assert!(
+            prompt.contains("- general-purpose:"),
+            "general-purpose should remain; prompt was:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("- Explore:"),
+            "denied Explore must be filtered out; prompt was:\n{prompt}"
+        );
+    }
+
+    // An explicit denied subagent_type is rejected with the byte-exact
+    // claude-code `AgentTypeError` message (raw `SettingSource` identifier).
+    #[tokio::test]
+    async fn call_rejects_denied_agent_type_with_byte_exact_message() {
+        let spawner = arc_mock_spawner();
+        let mut bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        bctx.permission_gate = Some(Arc::new(DenyExploreGate));
+        let tool = AgentTool::new(bctx);
+        let input = serde_json::json!({
+            "description": "desc here",
+            "prompt": "do a thing",
+            "subagent_type": "Explore"
+        });
+        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let err = tool.call(input, ctx, fresh_tx()).await.unwrap_err();
+        match err {
+            ToolError::InvalidInput(msg) => assert_eq!(
+                msg,
+                "Agent type 'Explore' has been denied by permission rule 'Agent(Explore)' from localSettings."
+            ),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        // No spawn happened.
+        assert!(spawner.invocations().is_empty());
     }
 
     // build_prompt's coordinator branch returns the slim shared prompt only

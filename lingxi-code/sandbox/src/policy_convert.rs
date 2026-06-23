@@ -56,6 +56,22 @@ pub struct SandboxConvertContext {
     /// `permissions.additionalDirectories` into `allow_write`
     /// (sandbox-adapter.ts:295-299).
     pub additional_md_dirs: Vec<String>,
+    /// `allowManagedDomainsOnly` enforcement (sandbox-adapter.ts: the per-source
+    /// merge that drops lower-source `allowedDomains` when managed settings set
+    /// the flag). `Some(domains)` ⇒ the flag is active in MANAGED settings, and
+    /// `domains` is the MANAGED-source allowlist (managed
+    /// `sandbox.network.allowedDomains` + managed `WebFetch(domain:)` allow
+    /// rules). When set, the derived `network.allowed_domains` is REPLACED by
+    /// this list — user/project/local/flag domain allows are ignored. Denied
+    /// domains still merge from all sources (handled in the rule walk). `None` ⇒
+    /// no restriction (the merged allowlist is used as-is). The composition root
+    /// computes this from the per-source settings it already loads.
+    pub managed_allowed_domains: Option<Vec<String>>,
+    /// `allowManagedReadPathsOnly` enforcement, the read-path twin of
+    /// [`Self::managed_allowed_domains`]. `Some(paths)` ⇒ the flag is active in
+    /// MANAGED settings; `filesystem.allow_read` is REPLACED by the MANAGED-source
+    /// `sandbox.filesystem.allowRead` paths. `None` ⇒ no restriction.
+    pub managed_read_paths: Option<Vec<String>>,
 }
 
 /// Parse a `Tool(content)` permission rule string into `(tool, content)`.
@@ -100,33 +116,17 @@ pub fn convert_settings_to_runtime_config(
     settings: &SettingsJson,
     ctx: &SandboxConvertContext,
 ) -> SandboxRuntimeConfig {
-    // Gap C (allowManagedDomainsOnly / allowManagedReadPathsOnly): claude-code
-    // enforces these by knowing WHICH settings source each rule came from
-    // (`getSettingsForSource('policySettings')`). lingxi-core's conversion
-    // pipeline takes a single merged `SettingsJson` with no per-source model, so
-    // we CANNOT faithfully restrict to managed-only here. We surface the flags
-    // on the wire (they round-trip) but do NOT silently honor them as if they
-    // restricted the source — doing so would be MORE permissive-looking than the
-    // real (source-aware) behavior. See sandbox-adapter.ts:181-210, 343-347.
-    debug_assert!(
-        settings
-            .sandbox
-            .as_ref()
-            .and_then(|s| s.network.as_ref())
-            .map_or(true, |n| !n.allow_managed_domains_only),
-        "Gap C: allowManagedDomainsOnly cannot be source-restricted without a \
-         per-source settings model; flag is surfaced but not enforced here"
-    );
-    debug_assert!(
-        settings
-            .sandbox
-            .as_ref()
-            .and_then(|s| s.filesystem.as_ref())
-            .map_or(true, |f| !f.allow_managed_read_paths_only),
-        "Gap C: allowManagedReadPathsOnly cannot be source-restricted without a \
-         per-source settings model; flag is surfaced but not enforced here"
-    );
-
+    // allowManagedDomainsOnly / allowManagedReadPathsOnly are ENFORCED via the
+    // managed-source subsets the composition root threads on
+    // [`SandboxConvertContext::managed_allowed_domains`] /
+    // [`SandboxConvertContext::managed_read_paths`]. claude-code resolves these
+    // source-aware (`getSettingsForSource('policySettings')`,
+    // sandbox-adapter.ts:181-210, 343-347): when managed settings set the flag,
+    // lower-source `allowedDomains` / `allowRead` are dropped and only the
+    // managed allowlist survives (denied domains still merge from all sources).
+    // lingxi-core merges to a single `SettingsJson`, so the per-source decision
+    // is made at the composition root and the resolved allowlist is applied as an
+    // override at the end of this function (see the `managed_*` blocks below).
     let settings_dir: PathBuf = settings
         .settings_dir
         .clone()
@@ -287,7 +287,70 @@ pub fn convert_settings_to_runtime_config(
         }
     }
 
+    // allowManagedDomainsOnly / allowManagedReadPathsOnly enforcement (applied
+    // LAST so it overrides every merged source). When the composition root
+    // detected the flag set in MANAGED settings, the derived allowlist is
+    // REPLACED by the managed-source subset; denied domains / paths are left
+    // untouched (they merge from all sources). See the field docs on
+    // [`SandboxConvertContext`].
+    if let Some(domains) = &ctx.managed_allowed_domains {
+        cfg.network.allowed_domains = domains.clone();
+    }
+    if let Some(read_paths) = &ctx.managed_read_paths {
+        cfg.filesystem.allow_read = read_paths.clone();
+    }
+
     cfg
+}
+
+/// Compute the MANAGED-source domain allowlist for `allowManagedDomainsOnly`
+/// enforcement: the managed `sandbox.network.allowedDomains` plus every
+/// `WebFetch(domain:host)` allow rule in the managed `permissions.allow`. The
+/// composition root calls this on the parsed MANAGED settings (only) and threads
+/// the result onto [`SandboxConvertContext::managed_allowed_domains`] when the
+/// managed `sandbox.network.allowManagedDomainsOnly` flag is `true`. Order mirrors
+/// the normal derivation: subsection domains first, then WebFetch-derived ones.
+#[must_use]
+pub fn managed_domain_allowlist(managed: &SettingsJson) -> Vec<String> {
+    let mut domains: Vec<String> = managed
+        .sandbox
+        .as_ref()
+        .and_then(|s| s.network.as_ref())
+        .map(|n| n.allowed_domains.clone())
+        .unwrap_or_default();
+    if let Some(perms) = &managed.permissions {
+        for rule in &perms.allow {
+            if let Some((tool, content)) = parse_rule(rule) {
+                if tool == TOOL_WEBFETCH {
+                    if let Some(domain) = content.strip_prefix("domain:") {
+                        domains.push(domain.to_string());
+                    }
+                }
+            }
+        }
+    }
+    domains
+}
+
+/// Compute the MANAGED-source read-path allowlist for `allowManagedReadPathsOnly`
+/// enforcement: the managed `sandbox.filesystem.allowRead`, resolved with the
+/// same `resolveSandboxFilesystemPath` semantics the normal walk uses. The
+/// composition root threads the result onto
+/// [`SandboxConvertContext::managed_read_paths`] when the managed
+/// `sandbox.filesystem.allowManagedReadPathsOnly` flag is `true`.
+#[must_use]
+pub fn managed_read_path_allowlist(managed: &SettingsJson, settings_dir: &Path) -> Vec<String> {
+    managed
+        .sandbox
+        .as_ref()
+        .and_then(|s| s.filesystem.as_ref())
+        .map(|f| {
+            f.allow_read
+                .iter()
+                .map(|p| resolve_sandbox_filesystem_path(p, settings_dir))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Port of `resolveSandboxFilesystemPath` (sandbox-adapter.ts:138-146 + the

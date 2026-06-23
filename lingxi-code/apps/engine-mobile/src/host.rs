@@ -799,6 +799,18 @@ pub async fn build_mobile_inner(
         sandbox,
         clock: clock.clone(),
         sandbox_runtime: SandboxRuntimeConfig::default(),
+        // RUNNER ↔ AVAILABILITY COUPLING (#5): the live `SandboxRuntimeRunner`
+        // (domain/proxy/policy enforcement) requires host forward proxies +
+        // bwrap/seatbelt — desktop-OS primitives a phone (iOS/Android,
+        // `platform-posix-minimal`) does NOT have. So mobile keeps the legacy
+        // wrap AND reports `sandbox_available: false`, which makes
+        // `should_use_sandbox` short-circuit to `NoSandbox`
+        // (`sandbox/decision.rs:64`) BEFORE the runner is ever consulted — the
+        // legacy wrap is therefore inert here, not an under-enforcement gap. The
+        // `debug_assert!` below pins the invariant: if a future capable host flips
+        // `sandbox_available` to `true`, it MUST also inject a live runner (the
+        // legacy wrap can only express `--unshare-net`/`--share-net`, never the
+        // domain/proxy enforcement the desktop runtime provides).
         sandbox_runner: tool_api::default_sandbox_runner(),
         permission_mode: PermissionMode::Default,
         sandbox_available: false,
@@ -845,6 +857,15 @@ pub async fn build_mobile_inner(
         // path is then non-blocking, matching the registry firer behavior).
         task_lifecycle_hooks: None,
     };
+    // #5 invariant: mobile has no live sandbox runtime, so sandboxing must stay
+    // unavailable — otherwise `should_use_sandbox` would route commands through
+    // the under-enforcing legacy wrap. Enabling sandboxing on a future capable
+    // host REQUIRES injecting a live runner alongside flipping this flag.
+    debug_assert!(
+        !tool_ctx.sandbox_available,
+        "mobile sets sandbox_available=false because it has no live SandboxRuntimeRunner; \
+         enabling sandboxing requires injecting one (see the sandbox_runner coupling note)"
+    );
     let tools = Arc::new(mobile_tool_registry(tool_ctx));
 
     // P0.1 ACTIVATION on mobile (gated, default OFF) — the same gate as desktop,

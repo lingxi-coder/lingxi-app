@@ -89,10 +89,13 @@ impl PolicyPermissionGate {
             } => PermissionDecision::Deny {
                 reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
             },
-            PermissionResult::Ask { .. } => {
-                if matches!(tool_default(name), PromptDefault::AllowByDefault) {
-                    // Read-only / agent-local tool — auto-allow rather than
-                    // ask-storm. (phase-2 stand-in for the per-tool default.)
+            PermissionResult::Ask { ref reason, .. } => {
+                if read_only_default_auto_allows(name, reason) {
+                    // Read-only / agent-local tool with NO explicit `ask` rule —
+                    // auto-allow rather than ask-storm (phase-2 stand-in for the
+                    // per-tool default). An explicit `ask` rule (tool-wide or
+                    // content) tags the ask `MatchedRule` and is NOT short-circuited
+                    // here — it falls through to the prompt transport below.
                     PermissionDecision::Allow
                 } else {
                     // Surface the prompt through the host's transport.
@@ -125,18 +128,35 @@ impl PolicyPermissionGate {
                 behavior_ask: false,
                 content_blocks: Vec::new(),
             },
-            PermissionResult::Ask { .. } => {
-                if matches!(tool_default(name), PromptDefault::AllowByDefault) {
-                    // Read-only / agent-local tool — auto-allowed, no prompt.
+            PermissionResult::Ask { ref reason, .. } => {
+                if read_only_default_auto_allows(name, reason) {
+                    // Read-only / agent-local tool with NO explicit `ask` rule —
+                    // auto-allowed, no prompt.
                     PermissionResolution::Allow
                 } else {
-                    // A would-be prompt: the turn loop fires PermissionRequest
-                    // before this is delegated to the inner transport.
+                    // A would-be prompt (a mutating tool, OR an explicit `ask`
+                    // rule on a read-only tool): the turn loop fires
+                    // PermissionRequest before this is delegated to the transport.
                     PermissionResolution::Ask
                 }
             }
         }
     }
+}
+
+/// Whether the read-only / agent-local default-allow stand-in applies to an
+/// `Ask`. It does ONLY when the tool is [`PromptDefault::AllowByDefault`] AND the
+/// ask was NOT produced by an explicit `ask` rule. claude-code's read-only
+/// default-allow (`checkPermissions`' allow verdict) is reached only AFTER the
+/// ask-rule walk (`mSm` steps 1c/1d precede the per-tool allow), so an explicit
+/// `ask:["Read(...)"]` / `ask:["Glob"]` rule — tool-wide or content, tagged
+/// [`PermissionDecisionReason::MatchedRule`] — PRE-EMPTS it and forces the prompt
+/// (firing the `PermissionRequest` hook). A mode-fallback ask
+/// ([`PermissionDecisionReason::PermissionMode`]) keeps the frictionless
+/// read-only auto-allow so the common no-rule case never ask-storms.
+fn read_only_default_auto_allows(name: &str, reason: &PermissionDecisionReason) -> bool {
+    matches!(tool_default(name), PromptDefault::AllowByDefault)
+        && !matches!(reason, PermissionDecisionReason::MatchedRule { .. })
 }
 
 #[async_trait]
@@ -366,6 +386,51 @@ mod tests {
             PermissionDecision::Allow
         );
         assert_eq!(inner.calls(), 0, "read-only tool auto-allows, no prompt");
+    }
+
+    #[tokio::test]
+    async fn explicit_ask_rule_prompts_even_for_read_only_tool() {
+        // An explicit `ask:["Read"]` rule tags the ask `MatchedRule`, which must
+        // PRE-EMPT the read-only auto-allow stand-in and surface the prompt —
+        // claude-code reaches the read-only default-allow only after the ask walk.
+        let policy = policy_with(
+            r#"{ "permissions": { "ask": ["Read"] } }"#,
+            PermissionMode::Default,
+        );
+        let inner = RecordingInner::new(PermissionDecision::Allow);
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        assert_eq!(
+            gate.check("Read", &serde_json::json!({ "file_path": "/x.rs" }))
+                .await,
+            PermissionDecision::Allow // whatever the prompt returned
+        );
+        assert_eq!(
+            inner.calls(),
+            1,
+            "an explicit ask rule on a read-only tool delegates to the prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_content_ask_rule_surfaces_as_ask_for_read_only_tool() {
+        // A CONTENT ask rule `ask:["Read(./secrets/**)"]` likewise tags the ask
+        // `MatchedRule`, so resolve_detailed surfaces `Ask` (firing
+        // PermissionRequest) rather than auto-allowing the read. (Path-content
+        // discrimination is roots-gated and not exercised here — this policy is
+        // built without roots, so the content rule matches the tool; the point is
+        // that a MatchedRule ask is never short-circuited to auto-allow.)
+        let policy = policy_with(
+            r#"{ "permissions": { "ask": ["Read(./secrets/**)"] } }"#,
+            PermissionMode::Default,
+        );
+        let inner = RecordingInner::new(PermissionDecision::Allow);
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        assert_eq!(
+            gate.resolve_detailed("Read", &serde_json::json!({ "file_path": "./secrets/key.pem" }))
+                .await,
+            PermissionResolution::Ask,
+            "a content ask rule surfaces as Ask, not an auto-allow"
+        );
     }
 
     #[tokio::test]

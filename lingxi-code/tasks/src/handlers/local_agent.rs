@@ -215,6 +215,9 @@ impl Task for LocalAgentHandler {
             subagent_type,
             prompt,
             is_backgrounded,
+            // The registry's `state_for_spawn` stamps this onto `TaskStateBase`;
+            // the handler itself doesn't consume it.
+            tool_use_id: _,
         } = input
         else {
             return Err(TaskError::Internal(
@@ -264,6 +267,7 @@ impl Task for LocalAgentHandler {
             fork_parent_system_prompt: None,
             schema: None,
             effort: None,
+            tool_use_id: None,
         };
 
         // 4. Bundle the inheritance. Cloning the Arcs preserves pointer
@@ -821,6 +825,7 @@ mod tests {
             subagent_type: "general-purpose".into(),
             prompt: prompt.into(),
             is_backgrounded: true,
+            tool_use_id: None,
         }
     }
 
@@ -1245,6 +1250,7 @@ mod tests {
             subagent_type: "code-reviewer".into(),
             prompt: "p".into(),
             is_backgrounded: true,
+            tool_use_id: None,
         };
 
         handler.spawn(input, make_ctx(fs)).await.unwrap();

@@ -122,6 +122,7 @@ impl AgentExecutor {
             fork_parent_system_prompt: None,
             schema: None,
             effort: None,
+            tool_use_id: None,
         };
 
         let fut = spawner.spawn(req, inherit);

@@ -110,6 +110,9 @@ impl SubagentSpawner for BackgroundAgentSpawner {
                     subagent_type: request.subagent_type.clone(),
                     prompt: request.prompt.clone(),
                     is_backgrounded: true,
+                    // Stamp the originating tool_use_id so the task-notification
+                    // carries `<tool-use-id>` (claude-code parity).
+                    tool_use_id: request.tool_use_id.clone(),
                 },
                 description,
             )
@@ -251,6 +254,7 @@ mod tests {
             fork_parent_system_prompt: None,
             schema: None,
             effort: None,
+            tool_use_id: None,
         }
     }
 

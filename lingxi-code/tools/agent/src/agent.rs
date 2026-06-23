@@ -698,7 +698,7 @@ Usage notes:\n\
         spawner: &dyn traits::subagent_spawn::SubagentSpawner,
         parsed: &AgentToolInput,
         effective_type: &str,
-        _selected: &traits::subagent_spawn::SelectedAgentMeta,
+        selected: &traits::subagent_spawn::SelectedAgentMeta,
         is_fork: bool,
         ctx: &ToolUseContext,
         budget: Arc<dyn traits::budget::BudgetEnforcerHandle>,
@@ -731,6 +731,9 @@ Usage notes:\n\
             // The Agent (Task) tool has no structured-output schema param.
             schema: None,
             effort: None,
+            // Thread the originating tool_use_id so the backgrounded agent's
+            // `<task-notification>` carries `<tool-use-id>` (claude-code parity).
+            tool_use_id: ctx.tool_use_id.as_ref().map(std::string::ToString::to_string),
         };
 
         match spawner.spawn_async(request, inherit).await {
@@ -776,6 +779,9 @@ Usage notes:\n\
                         "status": "async_launched",
                         "agentId": agent_id_str,
                         "description": parsed.description,
+                        // claude `async_launched` payload includes the resolved
+                        // model id (`resolvedModel: U`).
+                        "resolvedModel": selected.resolved_model.clone(),
                         "prompt": parsed.prompt,
                         "outputFile": launch.output_file,
                         "canReadOutputFile": can_read_output_file,
@@ -1215,14 +1221,21 @@ Use /mcp to configure and authenticate the required MCP servers.",
             .resolve_selection(&effective_type, parsed.model.as_deref())
             .await;
         // claude `is_async = (run_in_background === true || selectedAgent.background
-        // === true) && !isBackgroundTasksDisabled` (AgentTool.tsx:426). The agent
-        // definition's `background` frontmatter flag is now surfaced on
-        // `SelectedAgentMeta.background` and honored here, so a `background: true`
-        // agent dispatches async even when the caller omits `run_in_background`.
-        // `isBackgroundTasksDisabled` is not threaded → assumed false (documented
-        // residual). The same `run_in_background` value drives BOTH the telemetry
-        // `is_async` flag and the async-dispatch branch below.
-        let run_in_background = parsed.run_in_background.unwrap_or(false) || selected.background;
+        // === true) && !isBackgroundTasksDisabled` (AgentTool.tsx:426; the binary
+        // `K = …&& !dqt` where `dqt = CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`). The
+        // agent definition's `background` frontmatter flag is surfaced on
+        // `SelectedAgentMeta.background`, so a `background: true` agent dispatches
+        // async even when the caller omits `run_in_background`. The env kill-switch
+        // forces the whole local-async group off — an explicit `run_in_background:
+        // true` then runs SYNCHRONOUSLY. (claude gates only the LOCAL group with
+        // `!dqt`; the remote path is separate and out of scope here.) The same
+        // `run_in_background` value drives BOTH the telemetry `is_async` flag and
+        // the async-dispatch branch below.
+        let background_tasks_disabled =
+            traits::env::is_env_truthy(std::env::var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS").ok().as_deref());
+        let run_in_background = (parsed.run_in_background.unwrap_or(false)
+            || selected.background)
+            && !background_tasks_disabled;
         let is_async = run_in_background;
         Self::emit_agent_tool_selected(
             &bus,
@@ -1395,6 +1408,9 @@ Use /mcp to configure and authenticate the required MCP servers.",
             },
             schema: None,
             effort: None,
+            // Sync spawn: no background task / notification, so no tool_use_id
+            // to stamp (only the async/background path threads it).
+            tool_use_id: None,
         };
 
         let outcome = spawner.spawn(request, inherit).await;
@@ -2023,6 +2039,83 @@ mod tests {
             invocations[0].request.subagent_type, "general-purpose",
             "omitted → effective general-purpose threaded into the request"
         );
+    }
+
+    // Serializes the CLAUDE_CODE_DISABLE_BACKGROUND_TASKS env across the two
+    // background tests below (env is process-global).
+    static BG_DISABLE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // `run_in_background:true` (kill-switch unset) → the `async_launched` payload
+    // carries `resolvedModel` + `isAsync`, and the originating `tool_use_id` is
+    // threaded into the spawn request (so the bg `<task-notification>` renders
+    // `<tool-use-id>`).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn async_launch_payload_has_resolved_model_and_threads_tool_use_id() {
+        let _g = BG_DISABLE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS");
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let tid = protocol::ToolUseId::new();
+        ctx.tool_use_id = Some(tid.clone());
+        let input = serde_json::json!({
+            "description": "bg work",
+            "prompt": "go",
+            "run_in_background": true
+        });
+        let result = tool.call(input, ctx, fresh_tx()).await.expect("async launch ok");
+        assert_eq!(result.data["status"], "async_launched");
+        assert_eq!(result.data["isAsync"], true);
+        assert!(
+            result.data["resolvedModel"].is_string(),
+            "resolvedModel present; got {:?}",
+            result.data
+        );
+        // The originating tool_use_id reached the spawn request.
+        let inv = spawner.invocations();
+        assert_eq!(
+            inv[0].request.tool_use_id.as_deref(),
+            Some(tid.to_string().as_str()),
+            "tool_use_id threaded into the async spawn request"
+        );
+    }
+
+    // `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` forces a `run_in_background:true`
+    // agent to run SYNCHRONOUSLY (claude `K = … && !dqt`) — the result is a sync
+    // completion, NOT `async_launched`.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn disable_background_tasks_env_forces_sync() {
+        let _g = BG_DISABLE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let input = serde_json::json!({
+            "description": "x",
+            "prompt": "go",
+            "run_in_background": true
+        });
+        let result = tool.call(input, ctx, fresh_tx()).await.expect("sync ok");
+        std::env::remove_var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS");
+        assert_ne!(
+            result.data["status"], "async_launched",
+            "the kill-switch must force a run_in_background agent to run sync"
+        );
+        assert_eq!(result.data["status"], "completed");
     }
 
     // #1 — a KNOWN explicit type (in the listing) spawns and threads through.
@@ -3010,7 +3103,11 @@ mod tests {
     // =====================================================================
     #[tokio::test]
     async fn g13_async_unwired_returns_clear_error_not_sync() {
-        let spawner = arc_mock_spawner(); // default spawn_async → Internal error
+        let spawner = arc_mock_spawner();
+        // Exercise the DEFAULT (unwired) spawn_async stub — production wires it
+        // (BackgroundAgentSpawner), but a host that doesn't must still surface a
+        // clear error rather than silently running sync.
+        spawner.set_async_unwired();
         let bctx = wired_ctx(
             spawner.clone(),
             arc_mock_task_registry(),

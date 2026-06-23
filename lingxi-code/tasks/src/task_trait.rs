@@ -53,6 +53,11 @@ pub enum TaskSpawnInput {
         prompt: String,
         /// Whether to start backgrounded.
         is_backgrounded: bool,
+        /// Originating `tool_use_id` of the spawning Agent tool call, stamped on
+        /// the task so a backgrounded agent's `<task-notification>` carries the
+        /// `<tool-use-id>` line (claude-code parity). `None` when not launched
+        /// from a tool call.
+        tool_use_id: Option<String>,
     },
     /// Spawn a remote agent.
     RemoteAgent {

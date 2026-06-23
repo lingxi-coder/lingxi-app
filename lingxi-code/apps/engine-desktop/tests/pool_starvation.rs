@@ -219,6 +219,7 @@ fn agent_tool_request() -> SubagentSpawnRequest {
         schema: None,
         effort: None,
         run_in_background: false,
+        tool_use_id: None,
     }
 }
 

@@ -774,7 +774,15 @@ fn task_err_to_team_spawn_err(e: TaskError) -> TeamSpawnError {
 /// Build the typed [`TaskState`] for a [`spawn`](TaskRegistry::spawn) using the
 /// REAL `input` fields (the spawn path, unlike `create`'s placeholder path,
 /// has the agent ids / commands the variant carries).
-fn state_for_spawn(base: TaskStateBase, input: &TaskSpawnInput) -> TaskState {
+fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState {
+    // Stamp the originating `tool_use_id` onto the task so a backgrounded agent's
+    // `<task-notification>` carries the `<tool-use-id>` line (claude-code parity).
+    // Only `LocalAgent` threads it today; other types keep the caller's `None`.
+    if let TaskSpawnInput::LocalAgent { tool_use_id, .. } = input {
+        if base.tool_use_id.is_none() {
+            base.tool_use_id = tool_use_id.clone();
+        }
+    }
     match input {
         TaskSpawnInput::LocalBash { command, .. } => {
             TaskState::LocalBash(crate::state::LocalBashTaskState {
@@ -1195,6 +1203,7 @@ mod spawn_tests {
             subagent_type: "general-purpose".into(),
             prompt: "do the work".into(),
             is_backgrounded: true,
+            tool_use_id: None,
         }
     }
 
@@ -2123,6 +2132,59 @@ mod spawn_tests {
             registry.take_pending_task_notifications().await.is_empty(),
             "a drained completion is not reported a second time"
         );
+    }
+
+    #[test]
+    fn state_for_spawn_stamps_local_agent_tool_use_id() {
+        // A backgrounded LocalAgent carries the originating `tool_use_id` onto its
+        // `TaskStateBase`, so its `<task-notification>` later renders the
+        // `<tool-use-id>` line (claude-code parity). The caller passes a base with
+        // `tool_use_id: None`; `state_for_spawn` stamps it from the input.
+        let base = TaskStateBase {
+            id: "abg01".into(),
+            task_type: TaskType::LocalAgent,
+            status: TaskStatus::Running,
+            description: "research".into(),
+            tool_use_id: None,
+            start_time: SystemTime::now(),
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: std::path::PathBuf::from("/tmp/tasks/abg01.output"),
+            output_offset: 0,
+            notified: false,
+        };
+        let input = TaskSpawnInput::LocalAgent {
+            agent_id: protocol::AgentId::nil(),
+            subagent_type: "general-purpose".into(),
+            prompt: "go".into(),
+            is_backgrounded: true,
+            tool_use_id: Some("toolu_bg42".into()),
+        };
+        let state = state_for_spawn(base, &input);
+        assert_eq!(state.base().tool_use_id.as_deref(), Some("toolu_bg42"));
+
+        // A `None` input tool_use_id leaves the base untouched.
+        let base2 = TaskStateBase {
+            id: "abg02".into(),
+            task_type: TaskType::LocalAgent,
+            status: TaskStatus::Running,
+            description: "x".into(),
+            tool_use_id: None,
+            start_time: SystemTime::now(),
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: std::path::PathBuf::from("/tmp/tasks/abg02.output"),
+            output_offset: 0,
+            notified: false,
+        };
+        let input2 = TaskSpawnInput::LocalAgent {
+            agent_id: protocol::AgentId::nil(),
+            subagent_type: "general-purpose".into(),
+            prompt: "go".into(),
+            is_backgrounded: true,
+            tool_use_id: None,
+        };
+        assert_eq!(state_for_spawn(base2, &input2).base().tool_use_id, None);
     }
 
     #[tokio::test]

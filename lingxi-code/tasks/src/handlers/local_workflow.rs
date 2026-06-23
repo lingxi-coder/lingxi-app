@@ -320,6 +320,8 @@ fn make_request(default_subagent_type: &str, prompt: &str, opts_json: &str) -> S
         // (claude-code `me={...ie,effort:ae}`). A level string or integer, carried
         // raw for the spawner to apply onto the resolved agent definition.
         effort: opts.get("effort").filter(|v| !v.is_null()).cloned(),
+        // Workflow `agent()` spawns are not tool-call-originated background tasks.
+        tool_use_id: None,
     }
 }
 
@@ -1861,6 +1863,7 @@ mod tests {
             subagent_type: "general-purpose".into(),
             prompt: "p".into(),
             is_backgrounded: true,
+            tool_use_id: None,
         };
         match handler.spawn(wrong, make_ctx(fs)).await {
             Err(TaskError::Internal(_)) => {}

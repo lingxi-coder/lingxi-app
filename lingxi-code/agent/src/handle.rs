@@ -1928,6 +1928,7 @@ mod tests {
             fork_parent_system_prompt: None,
             schema: None,
             effort: None,
+            tool_use_id: None,
         };
         // Drive resolve_definition + the override branch directly by replicating
         // the spawn-path logic (spawn() would require a live runner).
@@ -2025,6 +2026,7 @@ mod tests {
             fork_parent_system_prompt: None,
             schema: None,
             effort: None,
+            tool_use_id: None,
         };
         let mk_inherit = || SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
@@ -2077,6 +2079,7 @@ mod tests {
             fork_parent_system_prompt: None,
             schema: None,
             effort: None,
+            tool_use_id: None,
         };
 
         // Non-fork: env block appended after the body, joined by a blank line,
@@ -2206,6 +2209,7 @@ mod tests {
             fork_parent_system_prompt: None,
             schema: None,
             effort: None,
+            tool_use_id: None,
         };
         let err = spawner
             .spawn_async(req, SubagentInheritance { tool_invoker: invoker, budget })

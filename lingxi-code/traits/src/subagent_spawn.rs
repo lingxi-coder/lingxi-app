@@ -111,6 +111,12 @@ pub struct SubagentSpawnRequest {
     /// `effort`. `None` ⇒ the definition's own effort (frontmatter) stands.
     #[serde(default)]
     pub effort: Option<serde_json::Value>,
+    /// Originating `tool_use_id` of the spawning Agent tool call. Threaded into a
+    /// BACKGROUND agent's task so its `<task-notification>` carries the
+    /// `<tool-use-id>` line (claude-code stamps `toolUseId` on the async task).
+    /// `None` for sync spawns / call sites that don't carry it.
+    #[serde(default)]
+    pub tool_use_id: Option<String>,
 }
 
 /// Token-usage rollup returned at the end of a successful spawn.

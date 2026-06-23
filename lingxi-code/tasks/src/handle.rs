@@ -162,6 +162,7 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             subagent_type: String::new(),
             prompt: String::new(),
             is_backgrounded: false,
+            tool_use_id: None,
         },
         TaskType::RemoteAgent => TaskSpawnInput::RemoteAgent {
             endpoint: String::new(),

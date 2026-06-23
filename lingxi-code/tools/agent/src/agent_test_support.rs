@@ -50,6 +50,11 @@ pub struct MockSubagentSpawner {
     /// Captured `register_name(name, agent_id)` calls (G14) so tests can assert
     /// that a name-carrying spawn registered the mapping.
     registered_names: Mutex<Vec<(String, protocol::AgentId)>>,
+    /// When `true`, `spawn_async` behaves as the DEFAULT unwired stub (returns a
+    /// clear `Internal` error, no invocation recorded) so the "unwired async
+    /// surfaces an error, not a silent sync fallback" invariant stays testable.
+    /// Default `false` (wired — returns an `AsyncLaunch`).
+    async_unwired: Mutex<bool>,
 }
 
 #[derive(Clone)]
@@ -83,7 +88,15 @@ impl MockSubagentSpawner {
             required_mcp_servers: Mutex::new(Vec::new()),
             selection: Mutex::new(None),
             registered_names: Mutex::new(Vec::new()),
+            async_unwired: Mutex::new(false),
         }
+    }
+
+    /// Make `spawn_async` behave as the DEFAULT unwired stub (clear error, no
+    /// invocation recorded) — for the "unwired async → error, not silent sync"
+    /// test.
+    pub fn set_async_unwired(&self) {
+        *self.async_unwired.lock().unwrap() = true;
     }
 
     /// Script the `SelectedAgentMeta` the next `resolve_selection` returns (G11).
@@ -234,6 +247,32 @@ impl SubagentSpawner for MockSubagentSpawner {
             MockSpawnResponse::Killed => SubagentResult::Killed {
                 agent_id: protocol::AgentId::new(),
             },
+        })
+    }
+
+    /// Records the spawn request (so tests can assert the threaded
+    /// `tool_use_id`) and returns a fixed [`traits::subagent_spawn::AsyncLaunch`]
+    /// — overriding the defaulted "not wired" stub so the async dispatch path is
+    /// exercisable in tests.
+    async fn spawn_async(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+    ) -> Result<traits::subagent_spawn::AsyncLaunch, SubagentSpawnError> {
+        if *self.async_unwired.lock().unwrap() {
+            // Mirror the default trait stub — no invocation recorded (no silent
+            // sync fallback).
+            return Err(SubagentSpawnError::Internal(
+                "async subagent spawn (run_in_background) is not wired in this build".to_string(),
+            ));
+        }
+        self.invocations.lock().unwrap().push(MockSpawnInvocation {
+            request,
+            inherit,
+        });
+        Ok(traits::subagent_spawn::AsyncLaunch {
+            agent_id: protocol::AgentId::new(),
+            output_file: "/tmp/mock-agent.output".to_string(),
         })
     }
 

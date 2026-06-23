@@ -18,5 +18,12 @@ license.workspace = true
 # resolves that pin in a later stage.
 rquickjs = { version = "0.6" }
 
+# Real JS parser for `meta`-block validation (claude-code parses the script to an
+# ESTree AST: ExportNamedDeclaration / ObjectExpression / pure-literal walk).
+# tree-sitter is already a workspace dependency (bash safety) and builds on the
+# MSRV-1.82 toolchain; the JS grammar is the lightest way to a real parse tree.
+tree-sitter = "=0.25.10"
+tree-sitter-javascript = "0.23"
+
 [lints]
 workspace = true

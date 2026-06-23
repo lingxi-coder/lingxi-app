@@ -674,6 +674,16 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
             };
             std::fs::read_to_string(full)
         })?;
+        // Reject a malformed `meta` block at the tool boundary (claude-code parses
+        // + validates `meta` when the Workflow tool accepts a script). The
+        // byte-exact message surfaces to the model as the tool error.
+        workflow::validate_meta(&script).map_err(|e| {
+            let msg = match e {
+                workflow::WorkflowError::Script(m) => m,
+                other => other.to_string(),
+            };
+            tool_workflow::WorkflowLaunchError(msg)
+        })?;
         let task_id = self
             .registry
             .spawn(

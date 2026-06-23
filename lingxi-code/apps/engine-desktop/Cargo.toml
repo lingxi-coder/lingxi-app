@@ -114,6 +114,7 @@ tool-ui = { path = "../../tools/ui" }
 tool-skill = { path = "../../tools/skill" }
 tool-agent = { path = "../../tools/agent" }
 tool-workflow = { path = "../../tools/workflow" }
+workflow = { path = "../../workflow" }
 tool-mcp = { path = "../../tools/mcp" }
 tool-lsp = { path = "../../tools/lsp" }
 tool-team = { path = "../../tools/team" }

@@ -178,6 +178,248 @@ pub fn strip_meta_export(script: &str) -> String {
     out
 }
 
+/// Validate the script's `meta` block by PARSING it (tree-sitter JS) and walking
+/// the tree exactly as claude-code does (@202919276 `_Bp`/`OKa`/`PKa`/`yBp`/
+/// `TBp`): `export const meta = {…}` must be the FIRST statement, the object a
+/// PURE LITERAL (no spreads / computed keys / methods / accessors / runtime
+/// values / template interpolation / reserved keys), and `meta.name` /
+/// `meta.description` non-empty strings. Every error string is byte-exact; the
+/// dynamic `${type}` slots are mapped back to the ESTree node names the binary
+/// emits ([`estree_name`]).
+///
+/// # Errors
+/// Returns [`WorkflowError::Script`] with the byte-exact message on violation.
+pub fn validate_meta(script: &str) -> Result<(), WorkflowError> {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_javascript::LANGUAGE.into())
+        .map_err(|e| WorkflowError::Engine(format!("tree-sitter init: {e}")))?;
+    let tree = parser
+        .parse(script, None)
+        .ok_or_else(|| WorkflowError::Engine("tree-sitter parse returned no tree".into()))?;
+    let src = script.as_bytes();
+
+    let Some(obj) = first_statement(tree.root_node()).and_then(|s| meta_object(s, src)) else {
+        return Err(WorkflowError::Script(
+            "`export const meta = { name, description, phases }` must be the FIRST statement in the script".into(),
+        ));
+    };
+    if let Err(reason) = walk_object_literal(obj, src) {
+        return Err(WorkflowError::Script(format!(
+            "meta must be a pure literal: {reason}"
+        )));
+    }
+    if !meta_string_field_nonempty(obj, src, "name") {
+        return Err(WorkflowError::Script(
+            "meta.name must be a non-empty string".into(),
+        ));
+    }
+    if !meta_string_field_nonempty(obj, src, "description") {
+        return Err(WorkflowError::Script(
+            "meta.description must be a non-empty string".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn node_text<'a>(node: tree_sitter::Node, src: &'a [u8]) -> &'a str {
+    node.utf8_text(src).unwrap_or("")
+}
+
+/// The program's first non-comment statement.
+fn first_statement(program: tree_sitter::Node) -> Option<tree_sitter::Node> {
+    let mut c = program.walk();
+    let first = program.named_children(&mut c).find(|n| n.kind() != "comment");
+    first
+}
+
+/// If `stmt` is `export const meta = {object}` (binary `_Bp`), return the object
+/// node; else `None`.
+fn meta_object<'t>(stmt: tree_sitter::Node<'t>, src: &[u8]) -> Option<tree_sitter::Node<'t>> {
+    if stmt.kind() != "export_statement" {
+        return None;
+    }
+    let decl = stmt.child_by_field_name("declaration")?;
+    if decl.kind() != "lexical_declaration" || decl.child(0)?.kind() != "const" {
+        return None;
+    }
+    let mut c = decl.walk();
+    let mut declarators = decl
+        .named_children(&mut c)
+        .filter(|n| n.kind() == "variable_declarator");
+    let d = declarators.next()?;
+    if declarators.next().is_some() {
+        return None; // const meta + other declarators ⇒ not the single-`meta` form
+    }
+    let name = d.child_by_field_name("name")?;
+    if name.kind() != "identifier" || node_text(name, src) != "meta" {
+        return None;
+    }
+    let value = d.child_by_field_name("value")?;
+    (value.kind() == "object").then_some(value)
+}
+
+/// `OKa`: every member must be a plain, non-computed, `init` property with a
+/// pure-literal value and a non-reserved key. Returns the bare error message
+/// (the caller prefixes `meta must be a pure literal: `).
+fn walk_object_literal(obj: tree_sitter::Node, src: &[u8]) -> Result<(), String> {
+    let mut c = obj.walk();
+    for m in obj.named_children(&mut c) {
+        match m.kind() {
+            "comment" => {}
+            "pair" => {
+                let key = m
+                    .child_by_field_name("key")
+                    .ok_or("only plain properties allowed in meta")?;
+                if key.kind() == "computed_property_name" {
+                    return Err("computed keys not allowed in meta".into());
+                }
+                let kname = key_name(key, src)?;
+                if matches!(kname.as_str(), "__proto__" | "constructor" | "prototype") {
+                    return Err(format!("reserved key name not allowed in meta: {kname}"));
+                }
+                let value = m
+                    .child_by_field_name("value")
+                    .ok_or("only plain properties allowed in meta")?;
+                walk_value(value, src)?;
+            }
+            // An object method / getter / setter (ESTree Property method/kind≠init).
+            "method_definition" => return Err("methods/accessors not allowed in meta".into()),
+            // Shorthand `{name}` → the value is an Identifier (a runtime ref).
+            "shorthand_property_identifier" => {
+                return Err("non-literal node type in meta: Identifier".into())
+            }
+            // SpreadElement (`...x`) and anything else → not a plain Property.
+            _ => return Err("only plain properties allowed in meta".into()),
+        }
+    }
+    Ok(())
+}
+
+/// `yBp`: a property key's name. Identifier / string / number keys are allowed.
+fn key_name(key: tree_sitter::Node, src: &[u8]) -> Result<String, String> {
+    match key.kind() {
+        "property_identifier" => Ok(node_text(key, src).to_string()),
+        "string" => Ok(string_inner(key, src)),
+        "number" => Ok(node_text(key, src).to_string()),
+        other => Err(format!("unsupported key type in meta: {}", estree_name(other))),
+    }
+}
+
+/// `PKa`: a property value must be a pure literal.
+fn walk_value(v: tree_sitter::Node, src: &[u8]) -> Result<(), String> {
+    match v.kind() {
+        "string" | "number" | "true" | "false" | "null" => Ok(()),
+        "object" => walk_object_literal(v, src),
+        "array" => {
+            let mut c = v.walk();
+            for el in v.named_children(&mut c) {
+                match el.kind() {
+                    "comment" => {}
+                    "spread_element" => return Err("spread not allowed in meta".into()),
+                    _ => walk_value(el, src)?,
+                }
+            }
+            Ok(())
+        }
+        "template_string" => {
+            let mut c = v.walk();
+            if v.named_children(&mut c)
+                .any(|n| n.kind() == "template_substitution")
+            {
+                Err("template interpolation not allowed in meta".into())
+            } else {
+                Ok(())
+            }
+        }
+        "unary_expression" => {
+            let op = v.child_by_field_name("operator").map(|o| node_text(o, src));
+            let arg_is_num = v
+                .child_by_field_name("argument")
+                .is_some_and(|a| a.kind() == "number");
+            if op == Some("-") && arg_is_num {
+                Ok(())
+            } else {
+                Err("only negative-number unary allowed in meta".into())
+            }
+        }
+        other => Err(format!("non-literal node type in meta: {}", estree_name(other))),
+    }
+}
+
+/// Map a tree-sitter node kind to the ESTree type name the binary embeds in its
+/// `unsupported key type` / `non-literal node type` messages.
+fn estree_name(kind: &str) -> &str {
+    match kind {
+        "identifier" => "Identifier",
+        "call_expression" => "CallExpression",
+        "member_expression" | "subscript_expression" => "MemberExpression",
+        "arrow_function" => "ArrowFunctionExpression",
+        "function" | "function_expression" | "generator_function" => "FunctionExpression",
+        "binary_expression" => "BinaryExpression",
+        "ternary_expression" => "ConditionalExpression",
+        "new_expression" => "NewExpression",
+        "await_expression" => "AwaitExpression",
+        "object" => "ObjectExpression",
+        "array" => "ArrayExpression",
+        "string" | "number" | "regex" => "Literal",
+        "template_string" => "TemplateLiteral",
+        "unary_expression" => "UnaryExpression",
+        "assignment_expression" => "AssignmentExpression",
+        "parenthesized_expression" => "ParenthesizedExpression",
+        other => other,
+    }
+}
+
+/// The inner text of a `string`/`template_string` node (delimiters stripped).
+/// Best-effort cooked value — sufficient for non-emptiness and reserved-key
+/// comparison.
+fn string_inner(node: tree_sitter::Node, src: &[u8]) -> String {
+    let t = node_text(node, src);
+    let n = t.len();
+    match t.chars().next() {
+        Some('"' | '\'' | '`') if n >= 2 && t.is_char_boundary(n - 1) => t[1..n - 1].to_string(),
+        _ => t.to_string(),
+    }
+}
+
+/// `TBp`: the object's `field` property exists and is a non-empty string literal
+/// (a plain `string` or a `template_string` with no interpolation).
+fn meta_string_field_nonempty(obj: tree_sitter::Node, src: &[u8], field: &str) -> bool {
+    let mut c = obj.walk();
+    for m in obj.named_children(&mut c) {
+        if m.kind() != "pair" {
+            continue;
+        }
+        let Some(key) = m.child_by_field_name("key") else {
+            continue;
+        };
+        let kname = match key.kind() {
+            "property_identifier" => node_text(key, src).to_string(),
+            "string" => string_inner(key, src),
+            _ => continue,
+        };
+        if kname != field {
+            continue;
+        }
+        let Some(value) = m.child_by_field_name("value") else {
+            return false;
+        };
+        return match value.kind() {
+            "string" => !string_inner(value, src).is_empty(),
+            "template_string" => {
+                let mut cc = value.walk();
+                let has_subst = value
+                    .named_children(&mut cc)
+                    .any(|n| n.kind() == "template_substitution");
+                !has_subst && !string_inner(value, src).is_empty()
+            }
+            _ => false,
+        };
+    }
+    false
+}
+
 /// Execute a workflow script's **synchronous** body, capturing `phase()` and
 /// `log()` calls. The orchestration globals that require the async engine
 /// (`agent`/`parallel`/`pipeline`) are not yet injected here — this validates
@@ -474,6 +716,112 @@ where
     let progress = progress.borrow().clone();
     let result = result_slot.borrow().clone();
     Ok(RunOutcome { progress, result })
+}
+
+#[cfg(test)]
+mod meta_validation_tests {
+    use super::*;
+
+    fn err(script: &str) -> String {
+        match validate_meta(script) {
+            Err(WorkflowError::Script(m)) => m,
+            other => panic!("expected Script error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accepts_a_valid_pure_literal_meta() {
+        validate_meta(
+            "export const meta = { name: 'x', description: 'd', phases: [{ title: 'A' }] };\nreturn 1;",
+        )
+        .expect("valid meta");
+        // numbers, negative numbers, booleans, null, nested objects/arrays, and
+        // non-interpolated templates are all pure literals.
+        validate_meta(
+            "export const meta = { name: `n`, description: 'd', n: -3, b: true, z: null, o: { k: [1, 2] } };",
+        )
+        .expect("valid literals");
+    }
+
+    #[test]
+    fn first_statement_must_be_export_const_meta() {
+        let m = "`export const meta = { name, description, phases }` must be the FIRST statement in the script";
+        assert_eq!(err("const x = 1; export const meta = { name: 'a', description: 'b' };"), m);
+        assert_eq!(err("log('hi'); return 1;"), m);
+        assert_eq!(err("const meta = { name: 'a', description: 'b' };"), m); // not exported
+        assert_eq!(err("export let meta = { name: 'a', description: 'b' };"), m); // let, not const
+        assert_eq!(err("export const other = { name: 'a' };"), m); // wrong name
+    }
+
+    #[test]
+    fn name_and_description_must_be_nonempty_strings() {
+        assert_eq!(
+            err("export const meta = { description: 'd' };"),
+            "meta.name must be a non-empty string"
+        );
+        assert_eq!(
+            err("export const meta = { name: '', description: 'd' };"),
+            "meta.name must be a non-empty string"
+        );
+        assert_eq!(
+            err("export const meta = { name: 5, description: 'd' };"),
+            "meta.name must be a non-empty string"
+        );
+        assert_eq!(
+            err("export const meta = { name: 'x' };"),
+            "meta.description must be a non-empty string"
+        );
+        assert_eq!(
+            err("export const meta = { name: 'x', description: '' };"),
+            "meta.description must be a non-empty string"
+        );
+    }
+
+    #[test]
+    fn pure_literal_violations_are_byte_exact() {
+        let p = |reason: &str| format!("meta must be a pure literal: {reason}");
+        assert_eq!(
+            err("export const meta = { name: 'x', description: 'd', ...rest };"),
+            p("only plain properties allowed in meta")
+        );
+        assert_eq!(
+            err("export const meta = { ['a' + 'b']: 1, name: 'x', description: 'd' };"),
+            p("computed keys not allowed in meta")
+        );
+        assert_eq!(
+            err("export const meta = { foo() {}, name: 'x', description: 'd' };"),
+            p("methods/accessors not allowed in meta")
+        );
+        assert_eq!(
+            err("export const meta = { name: 'x', description: 'd', v: someVar };"),
+            p("non-literal node type in meta: Identifier")
+        );
+        assert_eq!(
+            err("export const meta = { name: 'x', description: 'd', v: f() };"),
+            p("non-literal node type in meta: CallExpression")
+        );
+        assert_eq!(
+            err("export const meta = { name: 'x', description: 'd', v: `a${b}c` };"),
+            p("template interpolation not allowed in meta")
+        );
+        assert_eq!(
+            err("export const meta = { name: 'x', description: 'd', v: [...a] };"),
+            p("spread not allowed in meta")
+        );
+        assert_eq!(
+            err("export const meta = { name: 'x', description: 'd', constructor: 1 };"),
+            p("reserved key name not allowed in meta: constructor")
+        );
+        assert_eq!(
+            err("export const meta = { name: 'x', description: 'd', v: +1 };"),
+            p("only negative-number unary allowed in meta")
+        );
+        // shorthand property references a runtime identifier.
+        assert_eq!(
+            err("export const meta = { name, description: 'd' };"),
+            p("non-literal node type in meta: Identifier")
+        );
+    }
 }
 
 #[cfg(test)]

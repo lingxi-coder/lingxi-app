@@ -333,14 +333,22 @@ pub(crate) enum TurnStepOutcome {
 /// per turn-step — the prompt is stable across the conversation lifetime
 /// (see M5-03 plan "Out of scope" note: SSE M5-04 will not re-assemble
 /// per turn-step either).
+// Retained as a test-only convenience: the legacy no-recovery shim. As of #2
+// (main-loop parity) the cancelable REPL driver no longer uses it — it now
+// calls the recovery-aware [`execute_one_turn_with_recovery_tracked`] like the
+// main batched [`ConversationOrchestrator::run_turn`] loop. The in-file
+// `#[cfg(test)]` suites still drive this clean-signature wrapper, so it is kept
+// (not `#[cfg(test)]`-gated, to preserve the intra-doc links from the live
+// `_tracked` function).
+#[allow(dead_code)]
 pub(crate) async fn execute_one_turn(
     orch: &ConversationOrchestrator,
     system: Option<&str>,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
     // Backward-compatible shim: no recovery state → legacy disposition
-    // (any non-`end_turn` stop_reason Continues). Used by the cancelable
-    // REPL driver and the in-file tests. The recovery-aware drivers call
-    // [`execute_one_turn_with_recovery`] with a live `RecoveryState`.
+    // (any non-`end_turn` stop_reason Continues). Used by the in-file tests.
+    // The recovery-aware drivers call [`execute_one_turn_with_recovery`] with a
+    // live `RecoveryState`.
     execute_one_turn_with_recovery(orch, system, None).await
 }
 
@@ -355,7 +363,12 @@ pub(crate) async fn execute_one_turn(
 /// count has reached the limit, the turn ends with `stop_reason = "max_tokens"`
 /// (TS `query.ts:1254-1255` surfaces the withheld error). When `recovery` is
 /// `None`, the `max_tokens` path falls through to the legacy disposition
-/// (Continue), preserving the cancelable driver's behavior.
+/// (Continue), preserving the legacy disposition.
+///
+/// Test-only as of #2: the production drivers all call the `_tracked` variant
+/// directly. Retained (not `#[cfg(test)]`) so intra-doc links resolve in the
+/// normal doc build.
+#[allow(dead_code)]
 pub(crate) async fn execute_one_turn_with_recovery(
     orch: &ConversationOrchestrator,
     system: Option<&str>,

@@ -7,7 +7,7 @@ use crate::error::OrchestratorError;
 use crate::test_support::{HookExecutor, PermissionGate};
 use crate::token_budget::{check_token_budget, BudgetTracker, TokenBudgetDecision};
 use crate::turn_loop::{
-    execute_one_turn, execute_one_turn_with_recovery_tracked, surface_prompt_too_long,
+    execute_one_turn_with_recovery_tracked, surface_prompt_too_long,
     RecoveryState, TurnStepOutcome, MALFORMED_TOOL_USE_RETRY_FAILED,
     MALFORMED_TOOL_USE_RETRY_NUDGE, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
     MAX_OUTPUT_TOKENS_RECOVERY_NUDGE, THINKING_ONLY_NUDGE,
@@ -4734,9 +4734,29 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         }
 
         // 2. Turn-by-turn loop — check cancel before each API call.
-        let mut turn_count: u32 = 0;
+        //
+        // #2 (main-loop parity): the cancelable driver is recovery- AND
+        // budget-aware, identical to the non-cancelable [`Self::run_turn`]
+        // batched loop, except each API round-trip is raced against `cancel`.
+        // The legacy no-recovery shim ([`execute_one_turn`]) is no longer used
+        // here: a `max_tokens` stop_reason now drives the A1 multi-turn recovery
+        // nudge (and exhaustion-ends) exactly as the main batched path does,
+        // rather than legacy-continuing without the nudge.
+        let mut recovery = RecoveryState::default();
         // hooks B4: Stop-hook re-entry guard (cancelable twin).
         let mut stop_hook_active = false;
+        // A3: token-budget continuation bookkeeping (no-op unless gated + set).
+        let mut budget = self.new_budget_tracker();
+        let mut global_turn_tokens: u64 = 0;
+        // Turn-start output baseline (claude-code `xtr` via `UAc(e)`): snapshot
+        // the cumulative pool as this turn begins, so a workflow launched this
+        // turn reads `budget.spent()` = output spent THIS turn.
+        self.turn_start_output_baseline.store(
+            self.output_token_pool
+                .load(std::sync::atomic::Ordering::Relaxed),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let mut turn_count: u32 = 0;
         loop {
             if cancel.is_cancelled() {
                 return Ok(TurnOutcome::Cancelled);
@@ -4744,13 +4764,27 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             if self.config.max_turns != 0 && turn_count >= self.config.max_turns {
                 return Ok(TurnOutcome::MaxTurns);
             }
+            if self.over_budget().await {
+                return Err(OrchestratorError::MaxBudgetReached {
+                    budget_nano_usd: self.config.max_budget_nano_usd.unwrap_or(0),
+                });
+            }
             turn_count = turn_count.saturating_add(1);
 
-            // Race the API call against the cancellation token.
-            let step = tokio::select! {
-                r = execute_one_turn(self, system_prompt.as_deref()) => r?,
+            // Race the recovery-aware API turn-step against the cancellation
+            // token. The `_tracked` variant returns this step's output-token
+            // count for the A3 budget accumulation, mirroring `run_turn`.
+            let (step, output_tokens) = tokio::select! {
+                r = execute_one_turn_with_recovery_tracked(
+                    self,
+                    system_prompt.as_deref(),
+                    Some(&mut recovery),
+                ) => r?,
                 () = cancel.cancelled() => return Ok(TurnOutcome::Cancelled),
             };
+            // A3: accumulate the running per-turn output tokens (TS
+            // `getTurnOutputTokens()`). No-op for accounting when budget is off.
+            global_turn_tokens = global_turn_tokens.saturating_add(output_tokens);
             match step {
                 TurnStepOutcome::Continue => continue,
                 TurnStepOutcome::Ended {
@@ -4768,8 +4802,29 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         .await
                     {
                         StopHookFlow::Terminate(_) => return Ok(TurnOutcome::EndTurn),
-                        StopHookFlow::LoopAgain => continue,
+                        StopHookFlow::LoopAgain => {
+                            // RECOV.4: a Stop hook forced the loop to continue —
+                            // reset the max_output_tokens recovery bookkeeping so
+                            // the continued turn starts a fresh escalation episode
+                            // (TS `query.ts:1291`), matching `run_turn`.
+                            recovery.reset_max_output_tokens_recovery();
+                            continue;
+                        }
                         StopHookFlow::FallThrough => {}
+                    }
+                    // A3: at a natural end-of-turn, consult the token budget. If
+                    // it says continue, inject the meta nudge, reset the A1
+                    // recovery count, and loop again instead of ending. When the
+                    // budget is off this is a no-op (parity default).
+                    if self
+                        .maybe_continue_for_budget(
+                            budget.as_mut(),
+                            &mut recovery,
+                            global_turn_tokens,
+                        )
+                        .await
+                    {
+                        continue;
                     }
                     let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn(&stop_reason, &cost).await;

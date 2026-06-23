@@ -1084,15 +1084,45 @@ impl Tool for AgentTool {
         // authenticated). A missing requirement is a hard error listing the
         // unmatched patterns + the servers that DO have tools.
         //
-        // DIVERGENCE (flagged): claude first waits up to 30s (500ms poll) for any
-        // required server still in the `pending` (connecting) state before
-        // checking tool availability. LingXi's `McpStatus` collapses
-        // Connecting/AwaitingOAuth/Reconnecting → `Disconnected` (registry.rs
-        // `project_status`), so a `pending` server cannot be distinguished from a
-        // failed/absent one — the poll-wait is NOT reproducible. We check tool
-        // availability immediately. See the step report's follow-ups.
+        // Pending-wait (claude AgentTool.tsx): if any REQUIRED server is currently
+        // PENDING (connecting / awaiting-OAuth / reconnecting), wait up to 30s
+        // (500ms poll) for it to either expose tools or fail BEFORE checking
+        // availability — so an agent that needs an OAuth/slow-login MCP server is
+        // not spuriously failed mid-connect. The loop stops early when a required
+        // server FAILS (no point waiting) or when none remain pending. Reads the
+        // registry's INTERNAL pending/failed state (the public `McpStatus` UI
+        // projection collapses Connecting/AwaitingOAuth/Reconnecting →
+        // `Disconnected`; `servers_pending`/`servers_failed` read the real state).
         let required_mcp_servers = spawner.resolve_required_mcp_servers(&effective_type).await;
         if !required_mcp_servers.is_empty() {
+            if let Some(reg) = &self.ctx.mcp_registry {
+                // claude `he.name.toLowerCase().includes(pattern.toLowerCase())`:
+                // a server name matches a required pattern by case-insensitive
+                // substring. Reused for the pending + failed lists.
+                let any_required = |names: &[String]| {
+                    names.iter().any(|name| {
+                        let n = name.to_lowercase();
+                        required_mcp_servers
+                            .iter()
+                            .any(|pat| n.contains(&pat.to_lowercase()))
+                    })
+                };
+                if any_required(&reg.servers_pending().await) {
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_secs(30);
+                    while std::time::Instant::now() < deadline {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        // A required server FAILED → stop waiting.
+                        if any_required(&reg.servers_failed().await) {
+                            break;
+                        }
+                        // No required server still pending → stop waiting.
+                        if !any_required(&reg.servers_pending().await) {
+                            break;
+                        }
+                    }
+                }
+            }
             let servers_with_tools: Vec<String> = match &self.ctx.mcp_registry {
                 Some(reg) => reg.servers_with_tools().await,
                 None => Vec::new(),

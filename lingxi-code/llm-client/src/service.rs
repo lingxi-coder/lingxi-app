@@ -173,6 +173,9 @@ pub struct ApiService {
     analytics: Option<Arc<::telemetry::AnalyticsBus>>,
     /// Global fallback model, if configured (used by `messages_create_with_fallback`
     /// when no per-model entry exists in `fallback_overrides`).
+    // Read only by the fallback / available-models entry points, which still
+    // live in the orchestrator's trait impls until Task 3 delegates them here.
+    #[allow(dead_code)]
     fallback_model: Option<String>,
     /// Per-model fallback chains from `routing.fallback`.
     ///
@@ -180,12 +183,16 @@ pub struct ApiService {
     /// of fallback target display models.  A per-model entry **wins** over
     /// `fallback_model` (global).  The adapter walks the chain in order on
     /// consecutive overload events: chain[0] fires first, chain[1] next, etc.
+    // Read only by the fallback entry point (orchestrator trait impl until Task 3).
+    #[allow(dead_code)]
     fallback_overrides: std::collections::BTreeMap<String, Vec<String>>,
     /// Alias → display-model map built at construction from
     /// `client.available_models()`. Used by `messages_create_with_fallback`
     /// to normalize an alias request string to the display model before
     /// probing `fallback_overrides` (whose keys are display-normalized at
     /// parse time).
+    // Read only by the fallback entry point (orchestrator trait impl until Task 3).
+    #[allow(dead_code)]
     alias_to_display: std::collections::BTreeMap<String, String>,
     /// `routing.retry.maxAttempts` override.
     ///
@@ -198,6 +205,8 @@ pub struct ApiService {
     /// Jitter ±20% still applies.
     settings_backoff_ms: Option<u64>,
     /// Available model ids from the client registry (for `available_models`).
+    // Read only by the available-models entry point (orchestrator trait impl until Task 3).
+    #[allow(dead_code)]
     available_model_ids: Vec<String>,
     /// Optional cost estimator for populating `LlmResponse.cost`.
     ///
@@ -1543,6 +1552,374 @@ impl ApiService {
             self.settings_max_retries,
         );
         self.drive_non_stream(req, ctl).await
+    }
+
+    // ── OpenAI Responses WebSocket preconnect ────────────────────────────────
+
+    /// Best-effort startup preconnect for OpenAI Responses WebSocket profiles.
+    ///
+    /// This opens the WebSocket handshake only; no prompt payload is sent.
+    /// Callers intentionally ignore failures so normal HTTP/SSE or later WS
+    /// connect paths remain authoritative.
+    pub async fn preconnect_responses_websocket(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<(), LlmError> {
+        let mut request = LlmRequest::new(model);
+        request.profile = profile.map(str::to_string);
+        request.stream = true;
+        let mut session = self.responses_ws_session.lock().await;
+        self.client
+            .preconnect_websocket(&request, self.transport.as_ref(), &mut session)
+            .await
+    }
+
+    /// Spawn [`Self::preconnect_responses_websocket`] on the current runtime and
+    /// discard errors. Intended for engine startup where latency reduction must
+    /// never block session initialization.
+    pub fn spawn_responses_websocket_preconnect(
+        self: &Arc<Self>,
+        model: String,
+        profile: Option<String>,
+    ) {
+        let adapter = Arc::clone(self);
+        tokio::spawn(async move {
+            let _ = adapter
+                .preconnect_responses_websocket(&model, profile.as_deref())
+                .await;
+        });
+    }
+
+    // ── Stream drive (Step 2) ─────────────────────────────────────────────────
+
+    /// Drive a streaming call; connect-phase failures retry through the driver.
+    ///
+    /// Uses `DefaultLlmClient::execute_stream` which already handles the
+    /// connect-phase error-drain path internally.  For the retry loop we re-prepare
+    /// on each attempt so a fresh `PreparedLlmCall` (with correct auth headers) is
+    /// sent even after a previous attempt fails.
+    ///
+    /// **Streaming rate-limit headers (3c-T1 closed):** `Transport::open_stream`
+    /// now returns real `StreamingResponse{status, headers}` via the additive
+    /// `stream_sse_with_meta` path added in plan 3c.  The connect-phase ≥400
+    /// branch below reads `streaming.headers` and calls `resolve_retry_after`
+    /// just as the non-stream path does, so 429+`retry-after` delays are
+    /// honoured on the streaming path.
+    #[allow(clippy::too_many_lines)]
+    async fn drive_stream(
+        &self,
+        req: LlmRequest,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        let request_id = new_request_id();
+        telemetry::emit_started(&self.analytics, &req.model, &request_id, true).await;
+
+        // B6-T1: discard any 429 snapshot staged by a PRIOR drive (see the
+        // non-stream drive fn) — per-error state, never carried across calls.
+        self.clear_pending_429();
+
+        // Batch-5 Task 3: live subscriber state, resolved ONCE per drive call
+        // (see `drive_non_stream_seeded_with_chain` for the granularity note).
+        let sub = self.effective_subscriber();
+        let mut state = RetryState {
+            is_subscriber: sub.is_subscriber,
+            is_enterprise: sub.is_enterprise,
+            ..RetryState::default()
+        };
+        // Stream path uses settings-based retry control (same precedence as non-stream).
+        let ctl = resolve_retry_control_with_settings(
+            &req.model,
+            None, // fallback not used on stream connect-phase
+            sub.is_subscriber,
+            &ResolveRetryEnv::from_process_env(),
+            self.settings_max_retries,
+        );
+        let thinking_budget: u32 = reasoning_budget(req.reasoning);
+
+        loop {
+            // Prepare so we can inject headers, then call execute_stream via
+            // a thin wrapper transport that uses our already-modified request.
+            let mut prepared = match self.client.prepare(&req).await {
+                Ok(p) => p,
+                Err(e) => return Err(e),
+            };
+            self.inject_stream_headers(&mut prepared, &request_id);
+
+            // Open stream through the prepared-call path so injected headers are
+            // preserved while OpenAI Responses providers can reuse a WebSocket
+            // session and apply previous_response_id deltas.
+            let opened = {
+                let mut responses_ws_session = self.responses_ws_session.lock().await;
+                self.client
+                    .open_prepared_stream_with_session(
+                        prepared,
+                        self.transport.as_ref(),
+                        &mut responses_ws_session,
+                    )
+                    .await
+            };
+            match opened {
+                Err(transport_err) => {
+                    let step = next_step_with_backoff(
+                        &mut state,
+                        &ctl,
+                        &transport_err,
+                        thinking_budget,
+                        self.settings_backoff_ms,
+                    );
+                    match step {
+                        DriveStep::RetryAfter(delay) => {
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        _ => return Err(transport_err),
+                    }
+                }
+                Ok((prepared, streaming)) => {
+                    // Connect-phase status ≥ 400: drain and decode as error.
+                    if streaming.status >= 400 {
+                        let response_headers = streaming.headers;
+                        let mut frames = streaming.frames;
+                        let mut body = Vec::new();
+                        loop {
+                            match frames.next_frame().await {
+                                Ok(Some(frame)) => body.extend_from_slice(&frame.bytes),
+                                Ok(None) => break,
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        let body_json =
+                            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+                        let err_response = crate::ProviderResponse {
+                            status: streaming.status,
+                            headers: response_headers.clone(),
+                            body_json,
+                            request_id: None,
+                        };
+                        let decode_err = match prepared.route.codec.decode_response(err_response) {
+                            Err(e) => e,
+                            Ok(_) => LlmError::ProviderInternal,
+                        };
+
+                        // Mirror the non-stream path: for 429s, resolve the
+                        // actual retry delay from the real response headers
+                        // (retry-after / anthropic-ratelimit-*).  Empty headers
+                        // fall through to the 1 s fallback inside
+                        // `resolve_retry_after`.
+                        let effective_err = if let LlmError::RateLimited { .. } = &decode_err {
+                            // Task 6 (batch 5): same 429-error-header capture
+                            // as the non-stream path (errors.ts:471-516).
+                            self.record_rate_limit_from_429(&response_headers);
+                            LlmError::RateLimited {
+                                retry_after: Some(Self::resolve_retry_after(&response_headers)),
+                                scope: None,
+                            }
+                        } else {
+                            decode_err.clone()
+                        };
+
+                        let step = next_step_with_backoff(
+                            &mut state,
+                            &ctl,
+                            &effective_err,
+                            thinking_budget,
+                            self.settings_backoff_ms,
+                        );
+                        if let DriveStep::RetryAfter(delay) = step {
+                            tokio::time::sleep(delay).await;
+                            // Re-prepare on next iteration so headers stay fresh.
+                            continue;
+                        }
+                        // B6-T1: the stream connect DIES here — promote the
+                        // 429 snapshot staged this attempt (TS terminal catch
+                        // handler, claudeAiLimits.ts:487). Gated on the
+                        // RateLimited discriminant so a non-429 terminal never
+                        // promotes a stale slot.
+                        if matches!(decode_err, LlmError::RateLimited { .. }) {
+                            self.promote_pending_429();
+                        }
+                        // Terminal twin for the connect-phase emit_started
+                        // (mirrors the non-stream terminal arms).
+                        telemetry::emit_failed(
+                            &self.analytics,
+                            &req.model,
+                            &request_id,
+                            Self::error_kind(&decode_err),
+                            Self::status_of(&decode_err),
+                        )
+                        .await;
+                        return Err(decode_err);
+                    }
+
+                    // Feed rate-limit headers from the connect-success response.
+                    self.record_rate_limit_from_headers(&streaming.headers);
+                    // #5: surface the connect-phase retry count to the cost path
+                    // via `last_retry_count()` (the value known at stream return).
+                    *self.last_retry_count.lock().unwrap() = u32::from(state.attempt);
+
+                    // Success: wrap the LlmEventStream from the codec into a BoxStream.
+                    // Build the event stream from the codec decoder + raw frames.
+                    let mut decoder = prepared.route.codec.stream_decoder();
+                    decoder.set_provider_metadata(
+                        crate::stream_provider_metadata_from_headers(&streaming.headers),
+                    );
+                    let frames = streaming.frames;
+
+                    // Clone analytics + metadata into the unfold state so
+                    // emit_succeeded / emit_failed can fire from inside the async closure.
+                    let stream_started = Instant::now();
+                    let stream_analytics = self.analytics.clone();
+                    let stream_model = req.model.clone();
+                    let stream_request_id = request_id.clone();
+
+                    // Assemble events via a manual unfold that drives next_frame + decode.
+                    // We keep a queue of pre-decoded events and drain them first.
+                    let stream_state = StreamState {
+                        decoder,
+                        frames,
+                        queue: VecDeque::new(),
+                        finished: false,
+                        done: false,
+                        analytics: stream_analytics,
+                        model: stream_model,
+                        request_id: stream_request_id,
+                        started: stream_started,
+                    };
+
+                    let boxed: BoxStream<'static, Result<LlmEvent, LlmError>> =
+                        Box::pin(futures::stream::unfold(stream_state, |mut s| async move {
+                            loop {
+                                if let Some(event) = s.queue.pop_front() {
+                                    // Emit succeed telemetry on the terminal event
+                                    // (MessageStop or Completed) — once, guarded by `done`.
+                                    let is_terminal = matches!(
+                                        event,
+                                        LlmEvent::MessageStop | LlmEvent::Completed { .. }
+                                    );
+                                    if is_terminal && !s.done {
+                                        s.done = true;
+                                        let elapsed_ms =
+                                            u64::try_from(s.started.elapsed().as_millis())
+                                                .unwrap_or(u64::MAX);
+                                        telemetry::emit_succeeded(
+                                            &s.analytics,
+                                            &s.model,
+                                            &s.request_id,
+                                            elapsed_ms,
+                                            200,
+                                        )
+                                        .await;
+                                    }
+                                    return Some((Ok(event), s));
+                                }
+                                if s.finished {
+                                    return None;
+                                }
+                                match s.frames.next_frame().await {
+                                    Ok(Some(frame)) => match s.decoder.decode_frame(frame) {
+                                        Ok(events) => s.queue.extend(events),
+                                        Err(e) => {
+                                            s.finished = true;
+                                            if !s.done {
+                                                s.done = true;
+                                                telemetry::emit_failed(
+                                                    &s.analytics,
+                                                    &s.model,
+                                                    &s.request_id,
+                                                    ApiService::error_kind(&e),
+                                                    ApiService::status_of(&e),
+                                                )
+                                                .await;
+                                            }
+                                            return Some((Err(e), s));
+                                        }
+                                    },
+                                    Ok(None) => {
+                                        s.finished = true;
+                                        match s.decoder.finish() {
+                                            Ok(events) => s.queue.extend(events),
+                                            Err(e) => {
+                                                if !s.done {
+                                                    s.done = true;
+                                                    telemetry::emit_failed(
+                                                        &s.analytics,
+                                                        &s.model,
+                                                        &s.request_id,
+                                                        ApiService::error_kind(&e),
+                                                        ApiService::status_of(&e),
+                                                    )
+                                                    .await;
+                                                }
+                                                return Some((Err(e), s));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        s.finished = true;
+                                        if !s.done {
+                                            s.done = true;
+                                            telemetry::emit_failed(
+                                                &s.analytics,
+                                                &s.model,
+                                                &s.request_id,
+                                                ApiService::error_kind(&e),
+                                                ApiService::status_of(&e),
+                                            )
+                                            .await;
+                                        }
+                                        return Some((Err(e), s));
+                                    }
+                                }
+                            }
+                        }));
+                    return Ok(boxed);
+                }
+            }
+        }
+    }
+
+    // ── Inherent streaming entry points ──────────────────────────────────────
+
+    /// Streaming call (provider-neutral). The drive logic of the orchestrator's
+    /// `StreamingApiClient::stream` and the subagent's `messages_create_stream`
+    /// — `profile` is `None` for the subagent path; `effort` is `None` for the
+    /// `StreamingApiClient::stream` path (leaving `req.effort` at its default).
+    pub async fn stream(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        effort: Option<serde_json::Value>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        let mut req = self.build_request(model, profile, system, messages, tools, true, None)?;
+        req.effort = effort;
+        self.drive_stream(req).await
+    }
+
+    /// Structured-output streaming call (provider-neutral). The drive logic of
+    /// the subagent's `messages_create_stream_forced`: build the request, attach
+    /// `effort`, and force `tool_choice` to the named tool so the model must emit
+    /// a matching structured call.
+    pub async fn stream_forced(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        forced_tool: Option<&str>,
+        effort: Option<serde_json::Value>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        let mut req = self.build_request(model, profile, system, messages, tools, true, None)?;
+        req.effort = effort;
+        if let Some(name) = forced_tool {
+            req.tool_choice = Some(crate::ToolChoice::Tool {
+                name: name.to_string(),
+            });
+        }
+        self.drive_stream(req).await
     }
 }
 

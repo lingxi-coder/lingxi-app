@@ -17,6 +17,7 @@ architectural and specced below.
 | P1 | Agent(type) deny filtering + `AgentTypeError` | `39607519` |
 | P2 | subagent `<env>` block in system prompt (`tIm`) | `431fc59e` |
 | P2 | workflow `agent({schema})` StructuredOutput validation + retry/nudge | `3a09b659` |
+| P1 | in-process teammate full team-worker parity | `57ab7fda` |
 
 Key binary facts captured during the work:
 - **Agent deny**: `o5e(ctx,"Agent",type)` = getDenyRuleForAgent (exact
@@ -45,29 +46,20 @@ These are genuine multi-file architectural additions (the code comments label
 them "deferred"/"boot-wiring gap"/"blocked"); rushing a non-faithful version
 would be worse than a precise plan. Each is grounded against the 2.1.186 binary.
 
-### P1 — In-process teammate is not yet a full Claude team worker
-`tasks/src/handlers/in_process_teammate.rs` `build_context` (~:299) builds the
-`SubagentContext` with `prompt_messages: vec![]`, `tool_schemas: vec![]`,
-`budget: None`, `hook_executor/skill_loader: None`. So a teammate cannot run an
-initial task, advertises no tools (chat-only), inherits no budget, and fires no
-SubagentStart/skills.
-
-Root cause: this is a SEPARATE construction path from `PoolSubagentSpawner`,
-and the handler lacks the wiring `PoolSubagentSpawner` has. Notably
-`build_context` is not even passed the TeamCreate `description`.
-
-Plan (mirror `PoolSubagentSpawner::build_subagent_context`):
-1. Thread the TeamCreate `description` into `build_context` → seed
-   `prompt_messages = [user(description)]` (claude's initial teammate task).
-2. Give the handler a tool-registry handle + run `agent::tool_resolver`
-   (`AgentToolResolver`) per teammate to fill `tool_schemas` + `allowed_tools`
-   from the resolved definition's policy (reuse `PoolSubagentSpawner::resolve_tools`
-   — consider promoting it to a shared free fn).
-3. Thread a `BudgetEnforcerHandle` (from the composition root) → `budget`.
-4. Thread the set-once `hook_executor` + `skill_loader` cells (same cycle-break
-   the spawner uses) → enables SubagentStart + skills preload.
-This is the same "fill the boot cells at the composition root" pattern used for
-`PoolSubagentSpawner` (see `engine-desktop/src/lib.rs:2219`).
+### P1 — In-process teammate full team-worker parity ✅ LANDED `57ab7fda`
+(Was: `build_context` built a chat-only stub — empty prompt_messages/tool_schemas,
+no budget, no hooks.) Fixed by mirroring `PoolSubagentSpawner`'s wiring:
+1. Extracted `agent::resolve_subagent_tools` (the shared `assembleToolPool`
+   resolver) — `PoolSubagentSpawner::resolve_tools` now delegates to it.
+2. `TaskSpawnInput::InProcessTeammate` gains `description` (already at the
+   `TeamSpawnSeam`) → seeded as the teammate's first user message.
+3. Handler gains set-once cells + builders (tool_registry, tool_wide_deny,
+   hook_executor, skill_loader, hook context) + a `budget_enforcer`;
+   `build_context` (now async) populates tool_schemas/allowed_tools/budget/
+   hooks/skills.
+4. engine-desktop composition root fills them (budget/hooks/hook-context
+   immediate; registry/skills via deferred handles; deny copied from the
+   spawner's cell).
 
 ### P1 — Background subagent permission prompts lack main-session attribution
 `SubagentContext.can_show_permission_prompts` (context.rs:80) is set but never

@@ -12,11 +12,12 @@
 //! (`AgentTool/agentToolUtils.ts:70-116`), every subagent pool has the
 //! agent-management / plan-mode / recursion tools stripped by default:
 //! `Agent`, `TaskOutput`, `ExitPlanMode`, `EnterPlanMode`, `AskUserQuestion`,
-//! `TaskStop`. The `Agent` entry is OMITTED when `USER_TYPE === "ant"` so
-//! nested agents may spawn further agents (claude `tools.ts:40-41`). The
-//! `Workflow` tool is faithfully omitted: claude gates it behind
-//! `feature('WORKFLOW_SCRIPTS')` and there is no Workflow tool in the LingXi
-//! registry.
+//! `TaskStop`. The `Agent` AND `Workflow` entries are OMITTED when `USER_TYPE
+//! === "ant"` so nested agents may spawn further agents / workflows (claude
+//! v2.1.186 `HDd`: `...(USER_TYPE !== 'ant' ? [WORKFLOW_TOOL_NAME] : [])`,
+//! mirroring the `Agent` gate). `Workflow` is now a registered LingXi tool, so
+//! it is dropped for non-ant subagents to preserve the explicit-opt-in contract
+//! and block recursive workflow fan-out.
 //!
 //! ## Per-definition `disallowedTools` subtraction (claude `resolveAgentTools`)
 //!
@@ -54,8 +55,8 @@ impl AgentToolResolver {
     /// The tool names are hardcoded string literals because the `agent` crate
     /// has no path-dep on `tools/*` (verified via `agent/Cargo.toml`), so the
     /// `*_TOOL_NAME` consts are unreachable — `builtins.rs` already hardcodes
-    /// the same names. `Workflow` is omitted (claude gates it behind
-    /// `feature('WORKFLOW_SCRIPTS')`; no Workflow tool exists in LingXi).
+    /// the same names. `Workflow` is dropped for non-ant subagents (claude
+    /// v2.1.186 `HDd` ant-gates it exactly like `Agent`).
     #[must_use]
     pub fn all_agent_disallowed_tools(is_ant: bool) -> Vec<&'static str> {
         let mut names = vec![
@@ -66,8 +67,16 @@ impl AgentToolResolver {
             "TaskStop",
         ];
         // claude: `...(process.env.USER_TYPE === 'ant' ? [] : [AGENT_TOOL_NAME])`
+        // and, in the same agent-disallowed set (binary v2.1.186 `HDd`/`nke`),
+        // `...(USER_TYPE !== 'ant' ? [WORKFLOW_TOOL_NAME] : [])`. Both gate on the
+        // EXACT `USER_TYPE === 'ant'` flag, so non-ant subagents may not recurse
+        // into either `Agent` or `Workflow`; ant subagents keep both. The
+        // `Workflow` tool is now registered in the LingXi registry (it was not
+        // when this list was first written), so it MUST be dropped here to honour
+        // the explicit-opt-in contract and prevent recursive workflow fan-out.
         if !is_ant {
             names.push("Agent");
+            names.push("Workflow");
         }
         names
     }
@@ -373,14 +382,16 @@ mod tests {
         assert!(set.contains(&"EnterPlanMode"));
         assert!(set.contains(&"AskUserQuestion"));
         assert!(set.contains(&"TaskStop"));
-        // claude omits Workflow (WORKFLOW_SCRIPTS feature; no LingXi tool).
-        assert!(!set.contains(&"Workflow"));
+        // non-ant: Workflow is dropped from subagent pools (binary HDd ant-gate).
+        assert!(set.contains(&"Workflow"));
     }
 
     #[test]
     fn core_ant_omits_agent_keeps_rest() {
         let set = AgentToolResolver::all_agent_disallowed_tools(true);
         assert!(!set.contains(&"Agent"));
+        // ant: Workflow is kept (allowed for ant subagents), like Agent.
+        assert!(!set.contains(&"Workflow"));
         assert!(set.contains(&"TaskOutput"));
         assert!(set.contains(&"TaskStop"));
     }
@@ -396,6 +407,21 @@ mod tests {
         let resolved = AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], false);
         let got = names(&resolved);
         assert!(!got.contains(&"Agent".to_string()), "Agent must be stripped");
+        assert!(got.contains(&"Read".to_string()));
+        assert!(got.contains(&"Bash".to_string()));
+    }
+
+    #[test]
+    fn all_policy_strips_workflow_for_non_ant() {
+        // The registered Workflow tool must not leak into subagent pools (binary
+        // HDd: Workflow disallowed for USER_TYPE !== "ant").
+        let parent = pool(&["Read", "Workflow", "Bash"]);
+        let resolved = AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], false);
+        let got = names(&resolved);
+        assert!(
+            !got.contains(&"Workflow".to_string()),
+            "Workflow must be stripped from non-ant subagents"
+        );
         assert!(got.contains(&"Read".to_string()));
         assert!(got.contains(&"Bash".to_string()));
     }

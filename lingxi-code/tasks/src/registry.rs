@@ -817,6 +817,7 @@ fn state_for_spawn(base: TaskStateBase, input: &TaskSpawnInput) -> TaskState {
             script,
             resume_from_run_id,
             args,
+            run_id: _,
         } => TaskState::LocalWorkflow(crate::state::LocalWorkflowTaskState {
             base,
             workflow_id: workflow_id.clone(),

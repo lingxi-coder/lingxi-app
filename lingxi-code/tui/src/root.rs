@@ -2255,6 +2255,37 @@ pub async fn pump_copy_clipboard(state: &Arc<Mutex<AppState>>) -> bool {
     true
 }
 
+/// (#6 main-loop parity) Drain `AppState.pending_terminal_sequence` and write the
+/// validated OSC/BEL escape sequence to the TUI's stdout — the host that owns the
+/// controlling terminal the orchestrator process lacks (claude-code `BEo` writes
+/// the allowlisted sequence to `process.stdout`). Driven by the same 100 ms
+/// ticker `use_future` as [`pump_copy_clipboard`].
+///
+/// The orchestrator already validated the sequence against the OSC
+/// 0/1/2/9/99/777 + BEL allowlist (`hooks::terminal_seq::validate_terminal_sequence`),
+/// so only screen-safe control sequences (terminal title, notifications, bell)
+/// reach stdout — the terminal interprets them out-of-band, so they do not
+/// corrupt iocraft's rendered frame. The write runs OUTSIDE the `AppState` lock
+/// on a blocking thread and is best-effort (a write/flush error is ignored,
+/// matching claude-code's fire-and-forget terminal write). Returns `true` iff a
+/// sequence was pending.
+pub async fn pump_terminal_sequence(state: &Arc<Mutex<AppState>>) -> bool {
+    let seq = {
+        let mut st = state.lock().await;
+        let Some(seq) = st.pending_terminal_sequence.take() else {
+            return false;
+        };
+        seq
+    };
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        let mut out = std::io::stdout();
+        let _ = out.write_all(seq.as_bytes());
+        let _ = out.flush();
+    });
+    true
+}
+
 /// Shell out to a native clipboard utility, writing `text` to its stdin. Best
 /// effort: a missing binary or non-zero exit is ignored (claude-code
 /// `copyNative` / `execFileNoThrow`). Probes the same per-platform utilities
@@ -2644,6 +2675,13 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 // synchronously by the submit intercept; only the clipboard
                 // write is deferred here (best-effort, fire-and-forget).
                 let _copied = pump_copy_clipboard(&state).await;
+                // (#6) Terminal-sequence write pump. Runs UNCONDITIONALLY: a
+                // hook-returned, allowlisted OSC/BEL sequence staged by
+                // `apply_event` is written to stdout here (the TUI owns the
+                // controlling terminal the orchestrator lacks). No-op when
+                // nothing is pending; no redraw tick (out-of-band terminal
+                // control, not screen content).
+                let _wrote_term_seq = pump_terminal_sequence(&state).await;
                 // (M9-05) Poll the live multi-agent feed once on the SAME
                 // cadence and forward its events into the channel. We do NOT bump
                 // `tick` here — the MultiAgent pump (which drains the channel)

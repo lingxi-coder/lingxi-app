@@ -17,7 +17,7 @@ use crate::model::retry::{
 };
 use crate::model::telemetry;
 use crate::model::user_agent::{user_agent, UserAgentEnv};
-use agent::convert::{
+use llm_client::convert::{
     ensure_tool_result_pairing, normalize_messages_for_api, to_llm_messages, to_tool_declarations,
 };
 use async_trait::async_trait;
@@ -226,6 +226,16 @@ pub struct ProviderApiAdapter {
     /// `last_request_id()` trait method to stamp the persisted assistant line's
     /// top-level `requestId`. `None` until the first recorded response.
     last_request_id: Mutex<Option<String>>,
+    /// Number of budget-consuming retry attempts the most recent drive
+    /// performed before its terminal outcome (`RetryState::attempt`). Recorded
+    /// on the non-stream success path and at stream connect-success; read via
+    /// the `last_retry_count()` trait method (both `OrchestratorApiClient` and
+    /// `StreamingApiClient`) so the orchestrator's cost-recording call sites can
+    /// pass the real retry count to `CostTracker::record_api_response_v2`
+    /// instead of the previous hardcoded `0` (#5 main-loop parity). For the
+    /// stream this reflects connect-phase retries only (the value the adapter
+    /// knows when it returns the `BoxStream`). `0` until the first drive.
+    last_retry_count: Mutex<u32>,
     /// Most recently observed RAW per-window utilization snapshot.
     ///
     /// Task 2 (llm-client future-work batch 5): parsed via
@@ -449,6 +459,7 @@ impl ProviderApiAdapter {
             estimator,
             last_rate_limit: Mutex::new(None),
             last_request_id: Mutex::new(None),
+            last_retry_count: Mutex::new(0),
             last_raw_utilization: Mutex::new(None),
             last_429_message: Mutex::new(None),
             pending_429: Mutex::new(None),
@@ -1373,6 +1384,9 @@ impl ProviderApiAdapter {
                                 provider_resp.status,
                             )
                             .await;
+                            // #5: surface this drive's retry count to the cost
+                            // path via `last_retry_count()`.
+                            *self.last_retry_count.lock().unwrap() = u32::from(state.attempt);
                             return Ok(response);
                         }
                         Err(decode_err) => {
@@ -1679,6 +1693,9 @@ impl ProviderApiAdapter {
 
                     // Feed rate-limit headers from the connect-success response.
                     self.record_rate_limit_from_headers(&streaming.headers);
+                    // #5: surface the connect-phase retry count to the cost path
+                    // via `last_retry_count()` (the value known at stream return).
+                    *self.last_retry_count.lock().unwrap() = u32::from(state.attempt);
 
                     // Success: wrap the LlmEventStream from the codec into a BoxStream.
                     // Build the event stream from the codec decoder + raw frames.
@@ -1992,6 +2009,10 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         self.last_request_id.lock().unwrap().clone()
     }
 
+    fn last_retry_count(&self) -> u32 {
+        *self.last_retry_count.lock().unwrap()
+    }
+
     /// Task 8 (llm-client future-work batch 3): expose the FULL internal
     /// nine-field snapshot for the turn drivers' `emit_rate_limit` seam.
     /// Delegates to the inherent [`Self::last_rate_limit_info`] (which
@@ -2140,6 +2161,10 @@ impl StreamingApiClient for ProviderApiAdapter {
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         let req = self.build_request(model, profile, system, messages, tools, true, None)?;
         self.drive_stream(req).await
+    }
+
+    fn last_retry_count(&self) -> u32 {
+        *self.last_retry_count.lock().unwrap()
     }
 }
 
@@ -4634,6 +4659,49 @@ mod tests {
             transport.seen_count(),
             2,
             "should have made 2 requests (429 then 200)"
+        );
+    }
+
+    /// #5 (main-loop parity): the adapter surfaces the most recent drive's
+    /// budget-consuming retry count via `last_retry_count()`, so the cost path
+    /// can record the REAL retry count (not the previous hardcoded `0`). A 429
+    /// followed by a 200 is exactly one retry.
+    #[tokio::test]
+    async fn last_retry_count_reflects_429_retry() {
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse {
+                status: 429,
+                headers: {
+                    let mut h = BTreeMap::new();
+                    h.insert("retry-after".to_string(), "0".to_string());
+                    h
+                },
+                body_json: serde_json::json!({
+                    "type": "error",
+                    "error": {"type": "rate_limit_error", "message": "rate limited"}
+                }),
+                request_id: None,
+            }),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let adapter = make_adapter_with_subscriber(
+            transport.clone(),
+            SubscriberState {
+                is_subscriber: true,
+                is_enterprise: true,
+            },
+        );
+        // No drive yet ⇒ zero.
+        assert_eq!(OrchestratorApiClient::last_retry_count(&adapter), 0);
+        let result = adapter
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .await;
+        assert!(result.is_ok(), "429→200 must succeed");
+        // Exactly one budget-consuming retry was performed.
+        assert_eq!(
+            OrchestratorApiClient::last_retry_count(&adapter),
+            1,
+            "one 429 retry ⇒ last_retry_count() == 1"
         );
     }
 

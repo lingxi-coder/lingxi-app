@@ -14,11 +14,19 @@ base64 = "0.22"
 httpdate = "1"
 hmac = "0.12"
 sha2 = "0.10"
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "net", "io-util", "macros", "rt-multi-thread"] }
 traits = { path = "../traits" }
 protocol = { path = "../protocol" }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
+telemetry = { path = "../telemetry" }
+secret = { path = "../secret" }
+regex = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+iana-time-zone = "0.1"
+rand = "0.9"
+urlencoding = "2"
+tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

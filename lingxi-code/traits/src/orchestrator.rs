@@ -600,6 +600,12 @@ pub enum OutputEvent {
         /// The text payload emitted.
         text: String,
     },
+    /// An allowlisted terminal escape sequence to write to the terminal
+    /// (#6 main-loop parity, [`OutputStream::emit_terminal_sequence`]).
+    TerminalSequence {
+        /// The validated OSC/BEL sequence.
+        seq: String,
+    },
     /// A tool invocation about to dispatch.
     ToolCall {
         /// Stable id (the `tool_use_id` echoed in the matching `ToolResult`).
@@ -897,6 +903,21 @@ pub trait OutputStream: Send + Sync {
         _seven_day_resets_at: Option<u64>,
     ) {
     }
+
+    /// Write an allowlisted terminal escape sequence to the active terminal.
+    ///
+    /// The orchestrator calls this (#6 main-loop parity) after a hook returns a
+    /// `terminalSequence` that PASSES the OSC/BEL allowlist validator
+    /// (claude-code `szn`→`BEo`, which writes the validated sequence to the
+    /// controlling terminal). The orchestrator process holds no TTY — the TUI
+    /// owns the terminal — so it forwards the validated bytes through this seam;
+    /// the interactive host (TUI) writes them to its stdout. `seq` is the
+    /// already-validated, BEL-normalized string.
+    ///
+    /// **Default no-op**: non-interactive hosts (print mode, tests, CLI sink)
+    /// and any host without a controlling terminal ignore it, and every
+    /// pre-existing sink keeps compiling unchanged.
+    async fn emit_terminal_sequence(&self, _seq: &str) {}
 }
 
 #[cfg(test)]

@@ -108,6 +108,12 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
             // threshold (claude-code's `<TokenWarning>` returning null).
             state.context_pressure = banner;
         }
+        TurnEvent::TerminalSequence { seq } => {
+            // #6: stage the validated terminal escape sequence; the async pump
+            // (`pump_terminal_sequence`) writes the bytes to the TUI's stdout —
+            // the host that owns the controlling terminal (claude-code `BEo`).
+            state.pending_terminal_sequence = Some(seq);
+        }
         TurnEvent::CompactionCompleted {
             messages_before,
             messages_after,
@@ -276,6 +282,27 @@ mod tests {
         // context drops back below the warning threshold).
         apply_event(&mut s, TurnEvent::ContextPressure { banner: None }, &n);
         assert!(s.context_pressure.is_none(), "None clears the banner");
+    }
+
+    /// #6: a `TerminalSequence` event stages the validated escape sequence on
+    /// `AppState` for the async `pump_terminal_sequence` to write to stdout.
+    #[test]
+    fn terminal_sequence_event_stages_pending_write() {
+        let mut s = new_state();
+        let n = Notify::new();
+        assert!(s.pending_terminal_sequence.is_none());
+        apply_event(
+            &mut s,
+            TurnEvent::TerminalSequence {
+                seq: "\u{001B}]9;hi\u{0007}".into(),
+            },
+            &n,
+        );
+        assert_eq!(
+            s.pending_terminal_sequence.as_deref(),
+            Some("\u{001B}]9;hi\u{0007}"),
+            "the validated sequence must be staged for the terminal-write pump"
+        );
     }
 
     #[test]

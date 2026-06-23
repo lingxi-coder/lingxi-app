@@ -75,6 +75,63 @@ async fn run_turn_with_cancel_returns_cancelled_when_token_fires_before_turn() {
     assert_eq!(api.captured_msgs().await.len(), 0);
 }
 
+/// #2 (main-loop parity): the cancelable REPL driver must be recovery-aware,
+/// like the non-cancelable [`ConversationOrchestrator::run_turn`] batched path.
+/// A `max_tokens` stop_reason must trigger the A1 multi-turn recovery nudge
+/// (a byte-exact "resume directly" user message appended before the next call),
+/// NOT the legacy no-recovery shim which continued WITHOUT injecting the nudge.
+#[tokio::test]
+async fn run_turn_with_cancel_injects_max_tokens_recovery_nudge() {
+    let api = Arc::new(MockApiClient::new(vec![
+        mock_message_response(
+            vec![LlmContentBlock::Text {
+                text: "partial".into(),
+                cache_control: None,
+            }],
+            Some("max_tokens"),
+        ),
+        mock_message_response(
+            vec![LlmContentBlock::Text {
+                text: "done".into(),
+                cache_control: None,
+            }],
+            Some("end_turn"),
+        ),
+    ]));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api.clone(),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        orchestrator::test_support::noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+    let token = CancellationToken::new();
+    let outcome = orch
+        .run_turn_with_cancel("hello", token)
+        .await
+        .expect("turn ok");
+    assert_eq!(outcome, TurnOutcome::EndTurn);
+
+    let calls = api.captured_msgs().await;
+    assert_eq!(
+        calls.len(),
+        2,
+        "max_tokens should trigger a recovery continuation (2 API calls)"
+    );
+    // The 2nd call must carry the byte-exact A1 recovery nudge appended to
+    // history after the `max_tokens` response. The legacy no-recovery shim
+    // continued WITHOUT injecting the nudge, so this asserts the recovery path.
+    let second = format!("{:?}", calls[1]);
+    assert!(
+        second.contains("Output token limit hit. Resume directly"),
+        "expected the A1 max_output_tokens recovery nudge in the 2nd call's messages, got: {second}"
+    );
+}
+
 #[tokio::test]
 async fn current_should_exit_returns_false_by_default() {
     let resp = mock_message_response(vec![], Some("end_turn"));

@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anthropic_oauth::limits::SubscriptionType;
+use llm_client::oauth::anthropic::limits::SubscriptionType;
 use serde_json::Value;
 use telemetry::AnalyticsBus;
 

@@ -86,12 +86,18 @@ pub enum TaskSpawnInput {
         workflow_id: String,
         /// The model-authored workflow script source (JavaScript) to execute.
         script: String,
-        /// Resume a prior run (`wf_…`): journaled `agent()` results for
-        /// unchanged (prompt, opts) are replayed instead of re-spawned.
+        /// Resume a prior run (`wf_…`): journaled `agent()` results for the
+        /// longest unchanged prefix of `agent()` calls are replayed instead of
+        /// re-spawned.
         resume_from_run_id: Option<String>,
         /// The `args` global value (the Workflow tool's `args` input), as a JSON
         /// string. `None` ⇒ `undefined`.
         args: Option<String>,
+        /// The run id (`wf_…`) to use for a FRESH run, minted by the launcher so
+        /// it can be returned in the Workflow tool result (claude-code `runId`).
+        /// `None` ⇒ the worker mints one. Ignored when `resume_from_run_id` is
+        /// set (the resume id wins).
+        run_id: Option<String>,
     },
     /// Spawn an MCP monitor.
     MonitorMcp {

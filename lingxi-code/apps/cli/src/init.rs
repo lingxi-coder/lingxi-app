@@ -13,7 +13,7 @@
 //!    `SecureStorage`.
 //! 2. The llm-client transport bridge is built from `cfg.api_base`
 //!    (default `https://api.anthropic.com`) + `cfg.api_key`.
-//! 3. `anthropic-oauth::ClaudeAiOAuthClient` wraps the credential manager so
+//! 3. `llm_client::oauth::anthropic::ClaudeAiOAuthClient` wraps the credential manager so
 //!    `/login` + `/logout` have a real handle.
 //! 4. `orchestrator::ConversationOrchestrator` is constructed with
 //!    `test_support` fillers for the hook/memory slots and — because the CLI

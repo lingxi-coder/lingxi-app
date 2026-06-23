@@ -8,6 +8,14 @@
 
 **Tech Stack:** Rust (MSRV 1.82), the existing `llm-client` + `orchestrator` + `agent` crates.
 
+> **STATUS (2026-06-23):** Tasks 1-2 LANDED on `main` (`eeb1eaec`, `b40a4069`) — all 10 `model/`
+> policy modules + `agent::convert` moved into `llm-client` (`prompt_too_long` promoted out of
+> `compaction` to break a cycle; the "3 stayers" split was artificial — all 10 are pure). Full
+> workspace green (8565 tests). **Tasks 3-4 (the `ApiService` facade) are DEFERRED** to a dedicated
+> design pass — the drive loop is entangled with orchestrator-domain `crate::prompt` (system-prompt
+> splitting / cache-breakpoint structure) + `crate::cost_wiring`, so the extraction is a
+> *parameterizing refactor*, not the byte-identical relocation Task 3 below assumes, and needs its own spec.
+
 ## Global Constraints
 
 - **MSRV 1.82** — no crate may raise the floor.

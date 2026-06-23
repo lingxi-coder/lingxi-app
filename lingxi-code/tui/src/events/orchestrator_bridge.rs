@@ -76,6 +76,15 @@ pub enum TurnEvent {
         /// `Some` shows the banner; `None` clears a previously-shown one.
         banner: Option<ContextPressureBanner>,
     },
+    /// An allowlisted terminal escape sequence a hook returned (#6 main-loop
+    /// parity). `apply_event` stages it on `state.pending_terminal_sequence`;
+    /// the async pump writes the bytes directly to the TUI's stdout (the host
+    /// that actually owns the controlling terminal — claude-code `BEo`). Already
+    /// validated + BEL-normalized by the orchestrator.
+    TerminalSequence {
+        /// The validated OSC/BEL sequence to write to the terminal.
+        seq: String,
+    },
     /// A successful `force_compact` finished. The TUI appends a
     /// `CompactBoundary` variant, rendered by `CompactBoundaryMessage`
     /// (M7-04) as `✻ Conversation compacted (ctrl+o for history)`. (M6-08
@@ -197,6 +206,12 @@ impl OutputStream for BridgeOutputStream {
 
     async fn emit_context_pressure(&self, banner: Option<ContextPressureBanner>) {
         let _ = self.tx.send(TurnEvent::ContextPressure { banner });
+    }
+
+    async fn emit_terminal_sequence(&self, seq: &str) {
+        let _ = self.tx.send(TurnEvent::TerminalSequence {
+            seq: seq.to_string(),
+        });
     }
 
     async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot) {

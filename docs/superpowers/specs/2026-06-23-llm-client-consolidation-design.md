@@ -4,6 +4,20 @@
 **Date:** 2026-06-23
 **Author:** luolingfeng (with Claude)
 
+## Implementation status (updated 2026-06-23)
+
+- **Plan A — `http-client` unification:** ✅ landed on `main`.
+- **Plan B — policy + convert (Tasks 1-2):** ✅ landed on `main`. NOTE: **all 10** `model/`
+  modules moved into `llm_client::model` — the §2/§7.2 "overflow/prompt_too_long/fallback
+  *stay*" split was artificial (they're pure protocol-policy that the movers depend on;
+  `prompt_too_long` was promoted out of `compaction` to break a cycle). Treat the "what stays"
+  text below as superseded for the model modules.
+- **Plan B — `ApiService` facade (Tasks 3-4):** ⏸ **DEFERRED** to a dedicated design pass — the
+  drive loop is entangled with orchestrator-domain `crate::prompt` (system-prompt splitting /
+  cache-breakpoint structure) + `crate::cost_wiring`, so the extraction is a *parameterizing
+  refactor*, not a byte-identical relocation, and needs its own spec.
+- **Plan C — OAuth merge:** 📋 planned, not started.
+
 ## 1. Summary
 
 Make `llm-client` the single, self-contained subsystem for talking to LLMs:

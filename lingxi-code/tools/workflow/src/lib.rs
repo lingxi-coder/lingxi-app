@@ -71,10 +71,20 @@ pub struct WorkflowLaunchSpec {
 }
 
 /// The result of a successful launch.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WorkflowLaunched {
     /// The background task id (claude-code `taskId`).
     pub task_id: String,
+    /// The local run id for `resumeFromRunId` (claude-code `runId`). Minted at
+    /// launch so the model can pass it back to resume; `None` if unavailable.
+    pub run_id: Option<String>,
+    /// Path to the persisted workflow script for this invocation (claude-code
+    /// `scriptPath`) — editable, and passable back as `scriptPath` to re-run
+    /// without resending the script. `None` if the host did not persist it.
+    pub script_path: Option<String>,
+    /// `meta.name` from the script (claude-code `workflowName`). `None` if not
+    /// extracted.
+    pub workflow_name: Option<String>,
 }
 
 /// Error launching a workflow.
@@ -237,15 +247,28 @@ impl Tool for WorkflowTool {
             .launch(spec)
             .await
             .map_err(|e| ToolError::Internal(e.to_string()))?;
-        // claude-code result shape: { status: "async_launched", taskId, taskType }.
-        // (The "remote_launched"/"remote_agent" variants are the CCR/remote path,
-        // out of scope for the single-process build.)
+        // claude-code result shape (output schema `sUp`, local path): status,
+        // taskId, taskType, plus the optional workflowName / runId / scriptPath.
+        // (The "remote_launched"/"remote_agent" + sessionUrl variants are the
+        // CCR/remote path, out of scope for the single-process build.) The
+        // optional fields are omitted when the host did not supply them.
+        let mut data = json!({
+            "status": "async_launched",
+            "taskId": launched.task_id,
+            "taskType": "local_workflow",
+        });
+        let obj = data.as_object_mut().expect("json object");
+        if let Some(name) = launched.workflow_name {
+            obj.insert("workflowName".into(), Value::String(name));
+        }
+        if let Some(run_id) = launched.run_id {
+            obj.insert("runId".into(), Value::String(run_id));
+        }
+        if let Some(path) = launched.script_path {
+            obj.insert("scriptPath".into(), Value::String(path));
+        }
         Ok(ToolCallResult {
-            data: json!({
-                "status": "async_launched",
-                "taskId": launched.task_id,
-                "taskType": "local_workflow",
-            }),
+            data,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -287,6 +310,7 @@ mod tests {
             *self.seen.lock().unwrap() = Some(spec);
             Ok(WorkflowLaunched {
                 task_id: self.task_id.clone(),
+                ..Default::default()
             })
         }
     }

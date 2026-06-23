@@ -32,7 +32,7 @@
 //! ordering.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
@@ -158,6 +158,35 @@ pub struct InProcessTeammateHandler {
     /// runtime resolution; without it (the default) the Inherit branch returns the
     /// parent model unchanged (mirrors `PoolSubagentSpawner::model_setting`).
     model_setting: Option<String>,
+    /// Live tool registry used to resolve the teammate's advertised tool
+    /// SCHEMAS + dispatch allow-list per spawn (claude-code `assembleToolPool`),
+    /// mirroring [`agent::PoolSubagentSpawner`]. A SET-ONCE cell (same
+    /// construction cycle-break: the registry is built AFTER the handler is
+    /// boxed, so the composition root fills it via
+    /// [`Self::tool_registry_handle`]). Unfilled (the default / tests) ⇒ no tools
+    /// advertised (chat-only — byte-identical to before this seam).
+    tool_registry: Arc<OnceLock<Arc<agent::ToolRegistry>>>,
+    /// Tool-wide deny-rule names from the boot permission policy, applied in the
+    /// per-spawn tool resolution so a blanket-denied tool never leaks into the
+    /// teammate's advertised pool (claude-code `filterToolsByDenyRules`).
+    /// SET-ONCE; unfilled ⇒ no filtering.
+    tool_wide_deny_names: Arc<OnceLock<Vec<String>>>,
+    /// Budget enforcer inherited by the teammate so its turns charge the shared
+    /// cumulative cost (claude-code teammates share the session budget). `None`
+    /// (the default / tests) ⇒ no per-turn budget gate.
+    budget_enforcer: Option<Arc<dyn traits::budget::BudgetEnforcerHandle>>,
+    /// Hook executor handed to the teammate's runner so it fires `SubagentStart`
+    /// (+ frontmatter hooks) like a normal subagent. SET-ONCE cell (same
+    /// cycle-break as [`Self::tool_registry`]); unfilled ⇒ the runner skips the
+    /// SubagentStart fire (byte-identical legacy).
+    hook_executor: Arc<OnceLock<Arc<hooks::HookExecutorImpl>>>,
+    /// Skill loader handed to the teammate's runner so it preloads the
+    /// definition's frontmatter `skills:`. SET-ONCE; unfilled ⇒ no preloading.
+    skill_loader: Arc<OnceLock<Arc<dyn traits::skill_loader::SkillLoader>>>,
+    /// Session id + cwd stamped on the `HookContext` the runner builds for the
+    /// SubagentStart fire (only consulted when [`Self::hook_executor`] is filled).
+    hook_session_id: protocol::SessionId,
+    hook_cwd: std::path::PathBuf,
     /// Terminal-status sink (same seam as `LocalBashHandler`).
     status_sink: Arc<dyn TaskStatusSink>,
     /// Best-effort seam to fire the `TeammateIdle` hook each time the persistent
@@ -192,10 +221,88 @@ impl InProcessTeammateHandler {
             default_model: None,
             permission_mode: PermissionMode::Default,
             model_setting: None,
+            tool_registry: Arc::new(OnceLock::new()),
+            tool_wide_deny_names: Arc::new(OnceLock::new()),
+            budget_enforcer: None,
+            hook_executor: Arc::new(OnceLock::new()),
+            skill_loader: Arc::new(OnceLock::new()),
+            hook_session_id: protocol::SessionId::nil(),
+            hook_cwd: std::path::PathBuf::new(),
             status_sink: Arc::new(NoopStatusSink),
             teammate_idle_firer: None,
             entries: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Return a clone of the set-once tool-registry cell so the composition root
+    /// can fill it AFTER the registry is built (same cycle-break as
+    /// [`agent::PoolSubagentSpawner::tool_registry_handle`]). Enables per-spawn
+    /// tool resolution. First fill wins; unfilled ⇒ chat-only teammate.
+    #[must_use]
+    pub fn tool_registry_handle(&self) -> Arc<OnceLock<Arc<agent::ToolRegistry>>> {
+        self.tool_registry.clone()
+    }
+
+    /// Builder: set the tool registry immediately (tests).
+    #[must_use]
+    pub fn with_tool_registry(self, registry: Arc<agent::ToolRegistry>) -> Self {
+        let _ = self.tool_registry.set(registry);
+        self
+    }
+
+    /// Return a clone of the set-once tool-wide-deny-names cell (filled from the
+    /// boot permission policy, like the spawner).
+    #[must_use]
+    pub fn tool_wide_deny_names_handle(&self) -> Arc<OnceLock<Vec<String>>> {
+        self.tool_wide_deny_names.clone()
+    }
+
+    /// Builder: inherit a budget enforcer so the teammate's turns charge the
+    /// shared cumulative cost.
+    #[must_use]
+    pub fn with_budget_enforcer(
+        mut self,
+        enforcer: Arc<dyn traits::budget::BudgetEnforcerHandle>,
+    ) -> Self {
+        self.budget_enforcer = Some(enforcer);
+        self
+    }
+
+    /// Return a clone of the set-once hook-executor cell so the composition root
+    /// can fill it after the `HookExecutorImpl` exists (enables SubagentStart).
+    #[must_use]
+    pub fn hook_executor_handle(&self) -> Arc<OnceLock<Arc<hooks::HookExecutorImpl>>> {
+        self.hook_executor.clone()
+    }
+
+    /// Builder: set the hook executor immediately (the executor already exists
+    /// when the teammate handler is constructed at the composition root, unlike
+    /// the spawner's deferred cell). Enables the teammate runner's SubagentStart.
+    #[must_use]
+    pub fn with_hook_executor(self, executor: Arc<hooks::HookExecutorImpl>) -> Self {
+        let _ = self.hook_executor.set(executor);
+        self
+    }
+
+    /// Return a clone of the set-once skill-loader cell.
+    #[must_use]
+    pub fn skill_loader_handle(
+        &self,
+    ) -> Arc<OnceLock<Arc<dyn traits::skill_loader::SkillLoader>>> {
+        self.skill_loader.clone()
+    }
+
+    /// Set the session id + cwd stamped on the teammate runner's SubagentStart
+    /// `HookContext` (only consulted when the hook executor is filled).
+    #[must_use]
+    pub fn with_hook_context(
+        mut self,
+        session_id: protocol::SessionId,
+        cwd: std::path::PathBuf,
+    ) -> Self {
+        self.hook_session_id = session_id;
+        self.hook_cwd = cwd;
+        self
     }
 
     /// Attach the tool dispatch seam inherited by spawned teammates.
@@ -276,11 +383,12 @@ impl InProcessTeammateHandler {
     /// claude-code running the teammate inside `runWithTeammateContext` so
     /// `getAgentName()` / `getTeammateContext()?.teamName` resolve inside its
     /// tool calls.
-    fn build_context(
+    async fn build_context(
         &self,
         agent_id: protocol::AgentId,
         name: &str,
         team_name: &str,
+        description: &str,
         mut definition: AgentDefinition,
     ) -> SubagentContext {
         // Resolve the model preference to a concrete wire id, mirroring the
@@ -295,6 +403,37 @@ impl InProcessTeammateHandler {
                 self.model_setting.as_deref(),
             ));
         }
+        // Advertise the teammate's tool pool (claude-code `assembleToolPool`) via
+        // the SAME shared resolver `PoolSubagentSpawner` uses, keyed on the
+        // resolved model. Unfilled registry ⇒ empty (chat-only, byte-identical to
+        // before this seam). With tools advertised the teammate can actually emit
+        // `tool_use`; the dispatch allow-list guards what the inherited invoker runs.
+        let (tool_schemas, allowed_tools) = match self.tool_registry.get() {
+            Some(registry) => {
+                let empty: Vec<String> = Vec::new();
+                let denied = self.tool_wide_deny_names.get().unwrap_or(&empty);
+                agent::resolve_subagent_tools(
+                    registry,
+                    &definition,
+                    denied,
+                    self.default_model.as_deref(),
+                )
+                .await
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+        // The TeamCreate description IS the teammate's initial task (claude-code
+        // the team lead's purpose): seed it as the first user message so the
+        // teammate has work to do, not just chat. Empty ⇒ no seed message (parks
+        // awaiting the first injected message — prior behavior).
+        let prompt_messages = if description.is_empty() {
+            vec![]
+        } else {
+            vec![protocol::ConversationMessage::user(
+                protocol::MessageId::new(),
+                description.to_string(),
+            )]
+        };
         let icon = definition.icon.clone();
         SubagentContext {
             agent_id,
@@ -311,9 +450,9 @@ impl InProcessTeammateHandler {
             agent_name: (!name.is_empty()).then(|| name.to_string()),
             team_name: (!team_name.is_empty()).then(|| team_name.to_string()),
             agent_definition: definition,
-            prompt_messages: vec![],
+            prompt_messages,
             fork_context_messages: None,
-            allowed_tools: vec![],
+            allowed_tools,
             worktree_handle: None,
             is_async: false,
             // The defining trait of a teammate: park between turn-sets and
@@ -331,27 +470,21 @@ impl InProcessTeammateHandler {
             },
             api_client: Some(self.api_client.clone()),
             tool_invoker: self.tool_invoker.clone(),
-            // Teammates do not yet advertise tool schemas to the model (same
-            // boot-wiring gap as `PoolSubagentSpawner`). Empty = no tools
-            // advertised, so the teammate cannot emit `tool_use`. NOTE: the
-            // dispatch seam does NOT enforce per-agent policy today (see the
-            // `SubagentContext::tool_schemas` WARNING), so keeping this empty is
-            // also what prevents advertising tools the agent's policy forbids.
-            tool_schemas: vec![],
+            // Advertised tool schemas (claude-code `assembleToolPool`) — resolved
+            // above from the live registry per the definition's policy.
+            tool_schemas,
             // Teammates have no structured-output schema.
             schema: None,
-            // Teammates do not currently inherit a budget enforcer; `None`
-            // preserves today's behavior (no per-turn budget gate) and is
-            // purely additive.
-            budget: None,
-            // Teammates do not yet wire the SubagentStart-hook / skills-preload
-            // seam (the in-process-teammate handler has no separate hook executor
-            // / skill loader cell); `None` keeps the child history byte-identical
-            // to today. Additive — wire alongside `PoolSubagentSpawner` later.
-            hook_executor: None,
-            skill_loader: None,
-            hook_session_id: protocol::SessionId::nil(),
-            hook_cwd: std::path::PathBuf::new(),
+            // Inherit the shared budget enforcer when wired (claude-code teammates
+            // charge the session's cumulative cost); `None` ⇒ no per-turn gate.
+            budget: self.budget_enforcer.clone(),
+            // Wire the SubagentStart-hook + skills-preload seam from the set-once
+            // cells (filled at the composition root, same as `PoolSubagentSpawner`).
+            // Unfilled ⇒ the runner skips them (byte-identical legacy).
+            hook_executor: self.hook_executor.get().cloned(),
+            skill_loader: self.skill_loader.get().cloned(),
+            hook_session_id: self.hook_session_id,
+            hook_cwd: self.hook_cwd.clone(),
         }
     }
 }
@@ -426,6 +559,7 @@ impl Task for InProcessTeammateHandler {
             agent_id,
             name,
             team_name,
+            description,
         } = input
         else {
             return Err(TaskError::Internal(
@@ -450,7 +584,9 @@ impl Task for InProcessTeammateHandler {
             .definitions
             .resolve(&agent_id, &name)
             .ok_or_else(|| TaskError::Internal(format!("no agent definition for teammate {name}")))?;
-        let subagent_ctx = self.build_context(agent_id, &name, &team_name, definition);
+        let subagent_ctx = self
+            .build_context(agent_id, &name, &team_name, &description, definition)
+            .await;
 
         // 4. Allocate the slot — the pool spawns the persistent runner and
         //    hands back the outbound SubagentEvent stream.
@@ -932,8 +1068,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn build_context_resolves_inherit_to_default_model() {
+    #[tokio::test]
+    async fn build_context_resolves_inherit_to_default_model() {
         // DefaultTeammateDefinition yields AgentModel::Inherit; with a default
         // model wired the teammate ctx carries a concrete wire id (folded via
         // the same `resolve_agent_model` seam as the spawner).
@@ -941,26 +1077,73 @@ mod tests {
         let def = DefaultTeammateDefinition
             .resolve(&protocol::AgentId::new(), "lead")
             .unwrap();
-        let ctx = handler.build_context(protocol::AgentId::new(), "lead", "alpha", def);
+        let ctx = handler
+            .build_context(protocol::AgentId::new(), "lead", "alpha", "go research", def)
+            .await;
         assert!(matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-opus-4-7"));
         // Swarm identity threaded onto the context (claude-code
         // `TeammateContext.agentName` / `.teamName`).
         assert_eq!(ctx.agent_name.as_deref(), Some("lead"));
         assert_eq!(ctx.team_name.as_deref(), Some("alpha"));
+        // The TeamCreate description becomes the teammate's first user message.
+        assert_eq!(ctx.prompt_messages.len(), 1);
+        assert_eq!(ctx.prompt_messages[0].text_content(), "go research");
     }
 
-    #[test]
-    fn build_context_without_default_model_leaves_model_raw() {
+    // Full teammate parity (P1): the handler inherits a budget enforcer, seeds
+    // the TeamCreate description as the first user message, and runs the shared
+    // tool resolver when a registry is wired (advertising a real pool instead of
+    // the prior chat-only empty set).
+    #[tokio::test]
+    async fn build_context_wires_budget_description_and_tool_resolution() {
+        struct DummyBudget;
+        #[async_trait]
+        impl traits::budget::BudgetEnforcerHandle for DummyBudget {
+            async fn check_and_charge(&self, _: u64) -> Result<(), traits::budget::BudgetError> {
+                Ok(())
+            }
+            async fn snapshot_total_nano_usd(&self) -> u64 {
+                0
+            }
+        }
+        let handler = model_test_handler(Some("claude-opus-4-7"))
+            .with_budget_enforcer(Arc::new(DummyBudget))
+            // An EMPTY registry still exercises the resolution path (returns an
+            // empty pool); a populated registry is covered by the agent crate's
+            // `resolve_subagent_tools` tests (shared code path).
+            .with_tool_registry(Arc::new(agent::ToolRegistry::new()));
+        let def = DefaultTeammateDefinition
+            .resolve(&protocol::AgentId::new(), "lead")
+            .unwrap();
+        let ctx = handler
+            .build_context(protocol::AgentId::new(), "lead", "alpha", "do the task", def)
+            .await;
+        // Budget inherited (was None before this fix).
+        assert!(ctx.budget.is_some(), "teammate must inherit the budget enforcer");
+        // Description seeded as the first user message (was empty before).
+        assert_eq!(ctx.prompt_messages.len(), 1);
+        assert_eq!(ctx.prompt_messages[0].text_content(), "do the task");
+        // The resolver ran (empty registry ⇒ empty pool, but the path is wired —
+        // no panic, and the allow-list mirrors the advertised set).
+        assert_eq!(ctx.tool_schemas.len(), ctx.allowed_tools.len());
+    }
+
+    #[tokio::test]
+    async fn build_context_without_default_model_leaves_model_raw() {
         // No default model wired → legacy behavior: Inherit is left untouched.
         let handler = model_test_handler(None);
         let def = DefaultTeammateDefinition
             .resolve(&protocol::AgentId::new(), "lead")
             .unwrap();
-        let ctx = handler.build_context(protocol::AgentId::new(), "lead", "", def);
+        let ctx = handler
+            .build_context(protocol::AgentId::new(), "lead", "", "", def)
+            .await;
         assert!(matches!(&ctx.agent_definition.model, AgentModel::Inherit));
         // Empty team_name spawns standalone → team_name is None (leader default).
         assert_eq!(ctx.agent_name.as_deref(), Some("lead"));
         assert_eq!(ctx.team_name, None);
+        // Empty description ⇒ no seed message (parks awaiting first injection).
+        assert!(ctx.prompt_messages.is_empty());
     }
 
     // ---- #15: opusplan + plan mode resolves an Inherit teammate to Opus -------
@@ -979,8 +1162,8 @@ mod tests {
     // to Opus (without `[1m]`), NOT the resolved Sonnet main-loop model — i.e. the
     // plan-mode swap fires through the builders the composition root populates.
 
-    #[test]
-    fn build_context_opusplan_plan_mode_resolves_inherit_to_opus() {
+    #[tokio::test]
+    async fn build_context_opusplan_plan_mode_resolves_inherit_to_opus() {
         // Pin firstParty so `getDefaultOpusModel()` is deterministic regardless of
         // any provider env this process inherits.
         let _g = OpusEnvGuard::clear_providers();
@@ -994,7 +1177,9 @@ mod tests {
         let def = DefaultTeammateDefinition
             .resolve(&protocol::AgentId::new(), "lead")
             .unwrap();
-        let ctx = handler.build_context(protocol::AgentId::new(), "lead", "", def);
+        let ctx = handler
+            .build_context(protocol::AgentId::new(), "lead", "", "", def)
+            .await;
         assert!(
             matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-opus-4-7"),
             "opusplan + plan mode must resolve an Inherit teammate to Opus, got {:?}",
@@ -1002,8 +1187,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_context_opusplan_default_mode_returns_resolved_parent() {
+    #[tokio::test]
+    async fn build_context_opusplan_default_mode_returns_resolved_parent() {
         // Same opusplan setting but NOT in plan mode → the Inherit branch returns
         // the resolved main-loop model unchanged (Sonnet), proving the swap is
         // gated on plan mode (not on the setting alone). Parent derived via the
@@ -1017,7 +1202,9 @@ mod tests {
         let def = DefaultTeammateDefinition
             .resolve(&protocol::AgentId::new(), "lead")
             .unwrap();
-        let ctx = handler.build_context(protocol::AgentId::new(), "lead", "", def);
+        let ctx = handler
+            .build_context(protocol::AgentId::new(), "lead", "", "", def)
+            .await;
         assert!(
             matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-sonnet-4-6"),
             "opusplan outside plan mode must keep the resolved parent (Sonnet), got {:?}",
@@ -1104,6 +1291,7 @@ mod tests {
                     agent_id: protocol::AgentId::new(),
                     name: "buddy".into(),
                     team_name: "alpha".into(),
+                    description: String::new(),
                 },
                 c.clone(),
             )
@@ -1171,6 +1359,7 @@ mod tests {
                     agent_id: protocol::AgentId::new(),
                     name: "buddy".into(),
                     team_name: "alpha".into(),
+                    description: String::new(),
                 },
                 c,
             )
@@ -1208,6 +1397,7 @@ mod tests {
                     agent_id: protocol::AgentId::new(),
                     name: "buddy".into(),
                     team_name: "alpha".into(),
+                    description: String::new(),
                 },
                 c.clone(),
             )
@@ -1321,6 +1511,7 @@ mod tests {
                     agent_id: protocol::AgentId::new(),
                     name: "buddy".into(),
                     team_name: "alpha".into(),
+                    description: String::new(),
                 },
                 c.clone(),
             )
@@ -1368,6 +1559,7 @@ mod tests {
                     agent_id: protocol::AgentId::new(),
                     name: "buddy".into(),
                     team_name: "alpha".into(),
+                    description: String::new(),
                 },
                 c.clone(),
             )

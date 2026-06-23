@@ -3009,7 +3009,23 @@ pub async fn build(
         hooks.clone(),
         cwd.clone(),
         main_transcript_path.clone(),
-    )));
+    )))
+    // Full teammate parity (P1): inherit the shared budget enforcer + fire
+    // SubagentStart via the same `HookExecutorImpl` the orchestrator uses, and
+    // stamp the SubagentStart `HookContext` (session id + cwd). `hooks` /
+    // `budget_enforcer` already exist here (the teammate handler is built after
+    // them), unlike the spawner's deferred cells. The advertised tool pool +
+    // skills-preload registries are filled via handles below (they don't exist
+    // yet). This makes a teammate a full team worker (tools + budget + hooks),
+    // not a chat-only stub.
+    .with_budget_enforcer(budget_enforcer.clone())
+    .with_hook_executor(hooks.clone())
+    .with_hook_context(subagent_hook_session_id, cwd.clone());
+    // Grab the teammate handler's set-once cells BEFORE boxing, to fill once the
+    // tool registry / skill loader exist (same deferred-fill the spawner uses).
+    let teammate_tool_registry_cell = teammate_handler.tool_registry_handle();
+    let teammate_skill_loader_cell = teammate_handler.skill_loader_handle();
+    let teammate_tool_wide_deny_cell = teammate_handler.tool_wide_deny_names_handle();
     task_registry_inner.register_handler(
         tasks::TaskType::InProcessTeammate,
         Arc::new(teammate_handler),
@@ -3480,12 +3496,15 @@ pub async fn build(
     // so a child agent runner can preload its frontmatter `skills:` (claude
     // runAgent.ts:577-646). First fill wins; the registry is filled at (6) before
     // any spawn fires, so the loader never reads the empty registry.
-    let _ = subagent_skill_loader_cell.set(Arc::new(
+    let skill_loader_arc: Arc<dyn traits::skill_loader::SkillLoader> = Arc::new(
         agent_skill_loader::AgentSkillLoader::new(
             shared_command_registry.clone(),
             Some(skill_session_id),
         ),
-    ) as Arc<dyn traits::skill_loader::SkillLoader>);
+    );
+    let _ = subagent_skill_loader_cell.set(skill_loader_arc.clone());
+    // Same skills-preload loader for the in-process teammate (full parity).
+    let _ = teammate_skill_loader_cell.set(skill_loader_arc);
     // Fire the `CwdChanged` hook (claude-code `onCwdChangedForHooks`,
     // Shell.ts:409) when a `cd` inside a Bash call moves the persistent shell
     // cwd. The firer wraps the SAME `Arc<HookExecutorImpl>` the orchestrator
@@ -3594,6 +3613,15 @@ pub async fn build(
     // copy (parity batch 21). First fill wins.
     let _ = subagent_tool_registry_cell.set(tools.clone());
     let _ = subagent_agent_catalog_cell.set(agent_catalog.clone());
+    // In-process teammate full parity (P1): advertise the SAME resolved tool pool
+    // + apply the SAME tool-wide deny filter as the spawner, so a teammate can
+    // actually use tools (not chat-only). The deny names are copied from the
+    // spawner's already-filled cell (set in the enforcement branch above; empty /
+    // unfilled ⇒ no filtering).
+    let _ = teammate_tool_registry_cell.set(tools.clone());
+    if let Some(deny) = subagent_tool_wide_deny_cell.get() {
+        let _ = teammate_tool_wide_deny_cell.set(deny.clone());
+    }
 
     // Clone `cwd` for the settings watcher before it is moved into the
     // orchestrator constructor below.

@@ -21,13 +21,11 @@ use permission::PermissionMode;
 use crate::display::{AgentColor, AgentDisplay};
 use crate::pool::StateMachinePool;
 use crate::runner::SubagentEvent;
-use crate::tool_resolver::AgentToolResolver;
 use async_trait::async_trait;
 use protocol::{AgentId, ConversationMessage, MessageId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tool_api::tool_trait::{PromptOptions, ToolStaticContext};
 use tool_api::ToolRegistry;
 use traits::subagent_spawn::{
     SubagentInheritance, SubagentListingEntry, SubagentResult, SubagentSpawnError,
@@ -514,62 +512,19 @@ impl PoolSubagentSpawner {
         let Some(registry) = self.tool_registry.get() else {
             return (Vec::new(), Vec::new());
         };
-        let parent_tools = registry.available_tools(&ToolStaticContext::default());
-        let mut resolved = AgentToolResolver::resolve(agent_def, &parent_tools, &[], false);
-        // Tool-wide deny filter (claude-code `assembleToolPool` →
-        // `filterToolsByDenyRules`, the SAME pool builder coordinator workers use
-        // in `runAgent.ts`): a blanket-denied tool must not leak into the
-        // subagent's advertised wire `tools` array either. Names come from the
-        // boot policy via the set-once cell; UNFILLED / EMPTY (the default / no
-        // enforcement) ⇒ no tools dropped ⇒ the child pool is byte-identical to
-        // before (regression-safe). Same matcher as the runtime + main-loop wire
-        // filter (`tool_wide_name_matches`: exact name OR `mcp__server` prefix).
-        if let Some(denied) = self.tool_wide_deny_names.get() {
-            if !denied.is_empty() {
-                resolved.retain(|t| {
-                    !denied
-                        .iter()
-                        .any(|d| permission::tool_wide_name_matches(d, t.name()))
-                });
-            }
-        }
-        // The allow-list must cover the SAME surface the inherited
-        // `RegistryToolInvoker` accepts: `find_by_name` matches a tool by
-        // `name()` OR any `aliases()` entry (registry.rs). Building the list
-        // from canonical names alone would leave a legacy alias (e.g.
-        // `AgentTool`'s `"Task"`) advertised+dispatchable yet refused by the
-        // runner guard. Include each resolved tool's aliases so the guard's
-        // name set matches the invoker's. The advertised schemas stay
-        // canonical-name-only — claude-code advertises the canonical name.
-        let allowed: Vec<String> = resolved
-            .iter()
-            .flat_map(|t| {
-                std::iter::once(t.name().to_string())
-                    .chain(t.aliases().iter().map(|a| (*a).to_string()))
-            })
-            .collect();
-        // claude-code builds a subagent's wire `tools` array with
-        // `prompt({model})` keyed on the SUBAGENT's resolved model, so a
-        // model-gated tool prompt (TodoWrite's `Xla(model)=Dh(model)?FWd:UWd`)
-        // tracks the child's model, not the parent's. `resolve_definition`
-        // (and the explicit-model override in `spawn`) resolve the def's
-        // `AgentModel` to a concrete id BEFORE this runs, so `Explicit` carries
-        // the wire id; `Inherit` falls back to the parent (`default_model`);
-        // a bare `Alias` is passed through raw. `None` ⇒ `Dh(undefined)` → UWd.
-        let model = match &agent_def.model {
-            AgentModel::Explicit(id) => Some(id.clone()),
-            AgentModel::Alias(a) => Some(a.clone()),
-            AgentModel::Inherit => self.default_model.clone(),
-        };
-        let schemas = tool_api::wire::tools_to_wire(
-            &resolved,
-            &PromptOptions {
-                include_examples: true,
-                model,
-            },
+        // Delegate to the shared resolver (single source of truth, also used by
+        // the in-process teammate handler). The tool-wide deny names come from the
+        // boot policy via the set-once cell (UNFILLED / EMPTY ⇒ no tools dropped,
+        // regression-safe); the resolved model anchors the model-gated tool prompt.
+        let empty: Vec<String> = Vec::new();
+        let denied = self.tool_wide_deny_names.get().unwrap_or(&empty);
+        crate::tool_resolver::resolve_subagent_tools(
+            registry,
+            agent_def,
+            denied,
+            self.default_model.as_deref(),
         )
-        .await;
-        (schemas, allowed)
+        .await
     }
 
     /// Build the child context from a RESOLVED [`AgentDefinition`] and the
@@ -1154,6 +1109,7 @@ mod tests {
     use serde_json::Value;
     use std::sync::Arc;
     use test_harness::mocks::MockRuntimeSpawner;
+    use tool_api::tool_trait::PromptOptions;
     use tool_api::Tool;
     use traits::budget::{BudgetEnforcerHandle, BudgetError};
     use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};

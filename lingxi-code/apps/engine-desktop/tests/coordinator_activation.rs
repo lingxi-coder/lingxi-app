@@ -406,6 +406,7 @@ async fn anti_hollow_create_path_emits_nothing() {
                     agent_id,
                     name: "alpha".into(),
                     team_name: "alpha".into(),
+                    description: "hollow".into(),
                 },
                 "hollow".into(),
             )

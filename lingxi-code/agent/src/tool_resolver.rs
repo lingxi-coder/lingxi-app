@@ -36,7 +36,7 @@
 //! tool to a child. LingXi's resolver does not model `allowedAgentTypes` at all
 //! and so structurally cannot wrongly add `Agent` to a child based on it.
 
-use crate::definition::{AgentDefinition, AgentPermissionMode, AgentToolPolicy};
+use crate::definition::{AgentDefinition, AgentModel, AgentPermissionMode, AgentToolPolicy};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tool_api::Tool;
@@ -187,6 +187,61 @@ impl AgentToolResolver {
 /// case (`"Bash"`) is returned unchanged (trimmed).
 fn tool_name_from_spec(spec: &str) -> &str {
     spec.split('(').next().unwrap_or(spec).trim()
+}
+
+/// Resolve a subagent spawn's advertised tool SCHEMAS + dispatch allow-list from
+/// a live registry per `agent_def`'s [`AgentToolPolicy`]. Returns
+/// `(tool_schemas, allowed_tool_names)`.
+///
+/// This is the single source of truth shared by the one-shot/persistent
+/// [`crate::handle::PoolSubagentSpawner`] and the in-process teammate handler —
+/// both must advertise the same `assembleToolPool`-equivalent pool (claude-code
+/// `runAgent.ts`): [`AgentToolResolver::resolve`] over the registry's
+/// `available_tools`, then the tool-wide deny filter
+/// (`filterToolsByDenyRules`), then wire serialization keyed on the subagent's
+/// resolved `model` (so a model-gated tool prompt tracks the child's model).
+///
+/// The allow-list includes each resolved tool's `aliases()` so the runner's
+/// dispatch guard accepts the SAME surface the inherited `RegistryToolInvoker`
+/// does (e.g. `AgentTool`'s legacy `"Task"`); the advertised schemas stay
+/// canonical-name-only. An empty `tool_wide_deny` drops nothing.
+pub async fn resolve_subagent_tools(
+    registry: &tool_api::ToolRegistry,
+    agent_def: &AgentDefinition,
+    tool_wide_deny: &[String],
+    default_model: Option<&str>,
+) -> (Vec<serde_json::Value>, Vec<String>) {
+    use tool_api::tool_trait::{PromptOptions, ToolStaticContext};
+
+    let parent_tools = registry.available_tools(&ToolStaticContext::default());
+    let mut resolved = AgentToolResolver::resolve(agent_def, &parent_tools, &[], false);
+    if !tool_wide_deny.is_empty() {
+        resolved.retain(|t| {
+            !tool_wide_deny
+                .iter()
+                .any(|d| permission::tool_wide_name_matches(d, t.name()))
+        });
+    }
+    let allowed: Vec<String> = resolved
+        .iter()
+        .flat_map(|t| {
+            std::iter::once(t.name().to_string())
+                .chain(t.aliases().iter().map(|a| (*a).to_string()))
+        })
+        .collect();
+    let model = match &agent_def.model {
+        AgentModel::Explicit(id) | AgentModel::Alias(id) => Some(id.clone()),
+        AgentModel::Inherit => default_model.map(str::to_string),
+    };
+    let schemas = tool_api::wire::tools_to_wire(
+        &resolved,
+        &PromptOptions {
+            include_examples: true,
+            model,
+        },
+    )
+    .await;
+    (schemas, allowed)
 }
 
 #[cfg(test)]

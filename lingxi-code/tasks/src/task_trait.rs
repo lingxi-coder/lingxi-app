@@ -73,6 +73,12 @@ pub enum TaskSpawnInput {
         /// `SubagentContext.team_name` so its dispatched tools see the team
         /// identity (`getTeammateContext()?.teamName`).
         team_name: String,
+        /// The teammate's initial TASK (claude-code the TeamCreate `description`
+        /// / the team lead's purpose) — seeded as the teammate's first user
+        /// message (`SubagentContext::prompt_messages`) so it has a task to work
+        /// on rather than only chatting. Empty ⇒ no initial message (the
+        /// teammate parks awaiting the first injected message).
+        description: String,
     },
     /// Spawn a local workflow.
     LocalWorkflow {

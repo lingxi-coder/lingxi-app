@@ -689,6 +689,10 @@ impl TeamSpawnSeam for TaskRegistry {
                 agent_id,
                 name,
                 team_name,
+                // The TeamCreate description IS the teammate's initial task
+                // (seeded as its first user message); also reused as the task
+                // subject below.
+                description: description.clone(),
             },
             description,
         )
@@ -1124,6 +1128,7 @@ mod spawn_tests {
             agent_id: protocol::AgentId::new(),
             name: "buddy".into(),
             team_name: "alpha".into(),
+            description: String::new(),
         }
     }
 

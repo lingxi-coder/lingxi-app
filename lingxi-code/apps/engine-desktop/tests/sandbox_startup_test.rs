@@ -90,6 +90,8 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         max_turns: None,
         max_budget_usd: None,
         json_schema: None,
+        system_prompt_override: None,
+        append_system_prompt: None,
     };
     (tmp, cfg)
 }

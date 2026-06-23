@@ -677,25 +677,7 @@ mod tests {
 
     /// A test `Argv` with a fresh (TUI-style, no prompt) shape.
     fn tui_argv() -> Argv {
-        Argv {
-            prompt: None,
-            print: false,
-            resume: None,
-            model: None,
-            fallback_model: None,
-            max_turns: None,
-            max_budget_usd: None,
-            cwd: None,
-            no_stream: false,
-            json: false,
-            json_schema: None,
-            debug: false,
-            no_tui: false,
-            dangerously_skip_permissions: false,
-            permission_mode: None,
-            continue_session: false,
-            fork_session: false,
-        }
+        Argv::default()
     }
 
     /// A raw `JsonlMessage` (wire-shape line) the loader hands the resume path.

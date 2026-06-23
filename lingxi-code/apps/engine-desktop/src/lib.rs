@@ -1139,6 +1139,17 @@ pub struct DesktopConfig {
     /// supplies its masked-input widget; `None` → a headless no-op prompt
     /// (`crate::connect::NoopKeyPrompt`) that cancels.
     pub connect_prompt: Option<Arc<dyn crate::connect::SecureKeyPrompt>>,
+    /// CLI `--system-prompt <prompt>` / `--system-prompt-file <file>`: override
+    /// the assembled system prompt for the session. When `Some`, replaces the
+    /// default memory-hierarchy prompt entirely (`OrchestratorConfig.system_prompt_override`).
+    /// `None` (the default) keeps the assembled CLAUDE.md hierarchy prompt
+    /// (byte-identical to before this field was added).
+    pub system_prompt_override: Option<String>,
+    /// CLI `--append-system-prompt <prompt>` / `--append-system-prompt-file <file>`:
+    /// text to append to the assembled system prompt for the session. When `Some`,
+    /// appended after the memory-hierarchy prompt (or after `system_prompt_override`
+    /// when both are set). `None` (the default) keeps the assembled prompt unchanged.
+    pub append_system_prompt: Option<String>,
 }
 
 impl std::fmt::Debug for DesktopConfig {
@@ -1187,6 +1198,8 @@ impl std::fmt::Debug for DesktopConfig {
                     &"None"
                 },
             )
+            .field("system_prompt_override", &self.system_prompt_override)
+            .field("append_system_prompt", &self.append_system_prompt)
             .finish()
     }
 }
@@ -1213,6 +1226,8 @@ impl Default for DesktopConfig {
             memory_provider: None,
             permission_mode: permission::PermissionMode::Default,
             connect_prompt: None,
+            system_prompt_override: None,
+            append_system_prompt: None,
         }
     }
 }
@@ -2321,6 +2336,24 @@ pub async fn build(
         cfg.claude_home.join("output-styles"),
         cfg.cwd.join(".claude").join("output-styles"),
     ];
+    // CLI `--system-prompt` / `--system-prompt-file`: override the assembled
+    // system prompt for the session. `None` keeps the memory-hierarchy prompt
+    // assembled from CLAUDE.md files (byte-identical to the pre-field state).
+    if let Some(override_prompt) = cfg.system_prompt_override.clone() {
+        orch_cfg.system_prompt_override = Some(override_prompt);
+    }
+    // CLI `--append-system-prompt` / `--append-system-prompt-file`: text to
+    // append after the assembled system prompt (or after `system_prompt_override`
+    // when both are set). Appended with a newline separator.
+    if let Some(append) = cfg.append_system_prompt.clone() {
+        let base = orch_cfg
+            .system_prompt_override
+            .get_or_insert_with(String::new);
+        if !base.is_empty() {
+            base.push('\n');
+        }
+        base.push_str(&append);
+    }
 
     // (4.5) One CostTracker per process. The persist channel drains into a
     //       fire-and-forget task that discards snapshots (on-disk persistence is
@@ -4713,6 +4746,8 @@ mod tests {
             memory_provider: None,
             permission_mode: permission::PermissionMode::Default,
             connect_prompt: None,
+            system_prompt_override: None,
+            append_system_prompt: None,
         };
         (tmp, cfg)
     }

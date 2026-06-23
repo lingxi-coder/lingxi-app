@@ -126,7 +126,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // construction time. For `--json` the session id used in `turn_start`
     // is minted afresh (synchronous mint via `SessionId::new`); for
     // plain mode the id is unused.
-    let sink: Arc<dyn output::OutputSink> = if parsed.json {
+    let sink: Arc<dyn output::OutputSink> = if parsed.is_json_output() {
         Arc::new(output::JsonSink::new(protocol::SessionId::new()))
     } else {
         Arc::new(output::PlainSink::new())
@@ -324,23 +324,8 @@ mod startup_notice_tests {
 
     fn argv_with_model(model: Option<&str>) -> Argv {
         Argv {
-            prompt: None,
-            print: false,
-            resume: None,
             model: model.map(String::from),
-            fallback_model: None,
-            max_turns: None,
-            max_budget_usd: None,
-            cwd: None,
-            no_stream: false,
-            json: false,
-            json_schema: None,
-            debug: false,
-            no_tui: false,
-            dangerously_skip_permissions: false,
-            permission_mode: None,
-            continue_session: false,
-            fork_session: false,
+            ..Argv::default()
         }
     }
 
@@ -419,25 +404,7 @@ mod cli_mode_settings_tests {
     }
 
     fn argv() -> Argv {
-        Argv {
-            prompt: None,
-            print: false,
-            resume: None,
-            model: None,
-            fallback_model: None,
-            max_turns: None,
-            max_budget_usd: None,
-            cwd: None,
-            no_stream: false,
-            json: false,
-            json_schema: None,
-            debug: false,
-            no_tui: false,
-            dangerously_skip_permissions: false,
-            permission_mode: None,
-            continue_session: false,
-            fork_session: false,
-        }
+        Argv::default()
     }
 
     /// With no `~/.claude/settings.json` and no `<cwd>/.claude/settings.json`,

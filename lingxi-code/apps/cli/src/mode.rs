@@ -444,22 +444,8 @@ mod tests {
     fn argv(prompt: Option<&str>, no_tui: bool) -> Argv {
         Argv {
             prompt: prompt.map(String::from),
-            print: false,
-            resume: None,
-            model: None,
-            fallback_model: None,
-            max_turns: None,
-            max_budget_usd: None,
-            cwd: None,
-            no_stream: false,
-            json: false,
-            json_schema: None,
-            debug: false,
             no_tui,
-            dangerously_skip_permissions: false,
-            permission_mode: None,
-            continue_session: false,
-            fork_session: false,
+            ..Argv::default()
         }
     }
 

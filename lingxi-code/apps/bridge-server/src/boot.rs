@@ -238,6 +238,9 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         max_budget_usd: None,
         // The bridge has no structured-output flag; unconstrained turns.
         json_schema: None,
+        // The bridge has no --system-prompt / --append-system-prompt CLI flags.
+        system_prompt_override: None,
+        append_system_prompt: None,
     }
 }
 
@@ -514,6 +517,8 @@ mod tests {
             max_turns: None,
             max_budget_usd: None,
             json_schema: None,
+            system_prompt_override: None,
+            append_system_prompt: None,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.

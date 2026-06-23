@@ -360,8 +360,29 @@ pub(crate) fn resolve_desktop_config(
         // store + `pump_store_provider_key`, not this engine port — so the
         // engine `/connect` text-command path uses the headless no-op default.
         connect_prompt: None,
+        // CLI `--system-prompt` / `--system-prompt-file` (print-mode only):
+        // override the assembled system prompt for the session. `None` in
+        // interactive mode so the CLAUDE.md hierarchy prompt is used unchanged.
+        system_prompt_override: if argv.print {
+            argv.resolve_system_prompt()
+        } else {
+            None
+        },
+        // CLI `--append-system-prompt` / `--append-system-prompt-file`
+        // (print-mode only): text appended to the assembled system prompt.
+        // `None` in interactive mode.
+        append_system_prompt: if argv.print {
+            argv.resolve_append_system_prompt()
+        } else {
+            None
+        },
     }
+    // TODO(add-dir): wire `argv.add_dir` into the memory provider so extra
+    // directories are searched for CLAUDE.md files. Currently requires a new
+    // `real_provider_with_excludes_and_dirs(excludes, dirs)` seam in
+    // `orchestrator::prompt::memory_block`. Parsing is wired; behavior is not.
 }
+
 
 /// Build the full runtime from parsed argv + the chosen output stream.
 ///
@@ -473,25 +494,7 @@ mod tests {
     #[tokio::test]
     async fn build_runtime_for_tui_wires_permission_channel() {
         // Non-print (interactive) argv: the TUI path injects the gate + channel.
-        let argv = Argv {
-            prompt: None,
-            print: false,
-            resume: None,
-            model: None,
-            fallback_model: None,
-            max_turns: None,
-            max_budget_usd: None,
-            cwd: None,
-            no_stream: false,
-            json: false,
-            json_schema: None,
-            debug: false,
-            no_tui: false,
-            dangerously_skip_permissions: false,
-            permission_mode: None,
-            continue_session: false,
-            fork_session: false,
-        };
+        let argv = Argv::default();
         let build = build_runtime_for_tui(&argv)
             .await
             .expect("build_runtime_for_tui");
@@ -509,21 +512,8 @@ mod tests {
         let argv = Argv {
             prompt: Some("hi".into()),
             print: true,
-            resume: None,
-            model: None,
-            fallback_model: None,
-            max_turns: None,
-            max_budget_usd: None,
-            cwd: None,
             no_stream: true,
-            json: false,
-            json_schema: None,
-            debug: false,
-            no_tui: false,
-            dangerously_skip_permissions: false,
-            permission_mode: None,
-            continue_session: false,
-            fork_session: false,
+            ..Argv::default()
         };
         let output: Arc<dyn OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
@@ -563,21 +553,9 @@ mod tests {
         let base = Argv {
             prompt: Some("hi".into()),
             print: true,
-            resume: None,
-            model: None,
             fallback_model: Some("claude-opus-4-20250514".into()),
-            max_turns: None,
-            max_budget_usd: None,
-            cwd: None,
             no_stream: true,
-            json: false,
-            json_schema: None,
-            debug: false,
-            no_tui: false,
-            dangerously_skip_permissions: false,
-            permission_mode: None,
-            continue_session: false,
-            fork_session: false,
+            ..Argv::default()
         };
 
         // `--print` ⟶ honored.

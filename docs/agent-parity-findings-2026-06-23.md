@@ -7,7 +7,7 @@ off `ac46d0c3`.
 
 Codex flagged 7 gaps. **All 7 verified TRUE against the 2.1.186 binary** (each
 was backed by an explicit `// deferred`/`NOTE:` comment in the code AND
-confirmed by binary string/JS extraction). Three are landed; four are
+confirmed by binary string/JS extraction). Five are landed; two are
 architectural and specced below.
 
 ## Landed this branch (byte-exact, tested, green)
@@ -18,6 +18,7 @@ architectural and specced below.
 | P2 | subagent `<env>` block in system prompt (`tIm`) | `431fc59e` |
 | P2 | workflow `agent({schema})` StructuredOutput validation + retry/nudge | `3a09b659` |
 | P1 | in-process teammate full team-worker parity | `57ab7fda` |
+| P1 | background subagent permission-prompt attribution | `e4c27dc7` |
 
 Key binary facts captured during the work:
 - **Agent deny**: `o5e(ctx,"Agent",type)` = getDenyRuleForAgent (exact
@@ -61,21 +62,32 @@ no budget, no hooks.) Fixed by mirroring `PoolSubagentSpawner`'s wiring:
    immediate; registry/skills via deferred handles; deny copied from the
    spawner's cell).
 
-### P1 — Background subagent permission prompts lack main-session attribution
-`SubagentContext.can_show_permission_prompts` (context.rs:80) is set but never
-CONSUMED; `SubagentInvocationContext` threads `agent_name`/`team_name`/`is_async`
-(tool_invoker.rs:24) but the permission `check`/prompt request carries only
-`tool_name`/`tool_input` (prompting_gate.rs:146). claude 2.1.186 surfaces a
-background subagent's prompt in the MAIN session with a dialog that names the
-asking agent.
+### P1 — Background subagent permission-prompt attribution ✅ LANDED `e4c27dc7`
+(Was: the gate's `check(name,input)` was identity-blind and
+`can_show_permission_prompts` was set-but-dead.) Binary mechanism = a
+`worker_permission_prompt` + `[InboxPoller]` mailbox routing to the team-lead
+(`${agent_id} needs permission for ${tool_name}`, responses `approved`/`rejected`,
+"Ignoring permission response from non-team-lead"). For LingXi's SINGLE-PROCESS
+build, in-process teammates' tool calls already land on the main-session gate and
+open the dialog there — so "surface in the main session" already worked; only
+ATTRIBUTION was missing. Fixed:
+- `traits::PromptWorker {name,team,is_async}` + additive-defaulted
+  `PermissionGate::check_with_worker` (default delegates to `check`);
+  `SubagentInvocationContext` gains `can_show_permission_prompts`.
+- `RegistryToolInvoker` attributes a NAMED + prompt-eligible worker (one-shot
+  unnamed subagents stay unattributed); agent runner threads
+  `can_show_permission_prompts` (reviving the dead field).
+- `PolicyPermissionGate::check_with_worker` forwards the worker to its inner
+  transport on the Ask path; TUI populates `PendingPermission.worker` → the
+  already-built `● @name` badge (was hard-coded `None`); `AdapterPermissionGate`
+  populates the reserved wire `PermissionRequest.worker` DTO.
 
-Plan: extend the permission request the gate builds (PermissionRequest /
-ToolUseConfirm) with optional `agent_name` + `is_async` fields, plumb them from
-`SubagentInvocationContext` through `RegistryToolInvoker` → the gate, and have
-the TUI/stdio prompt render "Agent <name> is requesting…" when present.
-`can_show_permission_prompts=false` async agents that cannot prompt should route
-to the main session's prompt sink rather than auto-deny. Cross-cutting
-(traits permission request + invoker + TUI), hence deferred.
+DEFERRED remainder: the cross-process `InboxPoller`/`worker_permission_prompt`
+mailbox routing (a BLOCKING permission round-trip to the lead via a new mailbox
+message-type) — only matters for truly detached cross-process workers, out of
+single-process scope (like remote/CCR). The `AdapterPermissionGate`
+request/response seam already exists for bridge/mobile and now carries the
+`worker` DTO.
 
 ### P2 — Required MCP servers: no 30s pending-wait
 `tools/agent/src/agent.rs` (~:1047) checks required-MCP tool availability

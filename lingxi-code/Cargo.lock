@@ -1925,6 +1925,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "bytes",
+ "eventsource-stream",
+ "futures",
+ "futures-core",
+ "futures-util",
+ "http",
+ "protocol",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.21.0",
+ "tokio-util",
+ "tracing",
+ "traits",
+ "url",
+]
+
+[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3149,6 +3174,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "http",
+ "http-client",
  "jsonrpc",
  "llm-client",
  "protocol",

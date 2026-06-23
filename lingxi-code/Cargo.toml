@@ -43,6 +43,7 @@ members = [
     "jsonrpc",
     "mcp",
     "llm-client",
+    "http-client",
     "provider-config",
     "orchestrator",
     "compaction",

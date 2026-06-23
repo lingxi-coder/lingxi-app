@@ -685,6 +685,12 @@ pub struct ConversationOrchestrator {
     /// [`compaction::Autocompactor::with_forked_runner`] at the composition root
     /// so producer (here) and consumer (the summarizer) share one slot.
     pub(crate) cache_safe_slot: Option<Arc<sidequery::CacheSafeParamsSlot>>,
+    /// Passive `<new-diagnostics>` source (the LSP diagnostic registry). When
+    /// wired (via [`Self::with_new_diagnostics_source`]), each turn polls it for
+    /// LSP diagnostics not yet surfaced and injects them as a transient meta
+    /// user message (claude-code's `formatDiagnosticsBlock` flow). `None` when
+    /// no LSP servers are configured (the common case) ⇒ no reminder.
+    pub(crate) new_diagnostics_source: Option<Arc<dyn traits::NewDiagnosticsSource>>,
     /// FORK (codex #5 follow-up): the rendered system-prompt bytes the current
     /// turn handed the model, recorded by the turn driver after a successful API
     /// call so a fork-subagent spawn dispatched LATER in the same turn can thread
@@ -911,6 +917,7 @@ impl ConversationOrchestrator {
             output_token_pool: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             turn_start_output_baseline: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_safe_slot: None,
+            new_diagnostics_source: None,
             current_turn_system_prompt: Mutex::new(None),
             read_file_state: Arc::new(Mutex::new(Vec::new())),
             read_state_map: tool_api::read_file_state::new_read_file_state_map(),
@@ -1254,6 +1261,18 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_cache_safe_slot(mut self, slot: Arc<sidequery::CacheSafeParamsSlot>) -> Self {
         self.cache_safe_slot = Some(slot);
+        self
+    }
+
+    /// Wire the passive `<new-diagnostics>` source (the LSP diagnostic registry)
+    /// so each turn surfaces newly-reported LSP diagnostics to the model. See
+    /// [`Self::new_diagnostics_source`] / [`Self::new_diagnostics_reminder_message`].
+    #[must_use]
+    pub fn with_new_diagnostics_source(
+        mut self,
+        source: Arc<dyn traits::NewDiagnosticsSource>,
+    ) -> Self {
+        self.new_diagnostics_source = Some(source);
         self
     }
 
@@ -5531,6 +5550,22 @@ As you answer the user's questions, you can use the following context:\n\
     ///
     /// Appended ONLY to the per-turn outgoing snapshot (never `session.history` /
     /// JSONL), exactly like the skill-listing + output-style reminders.
+    /// Per-turn, transient `<new-diagnostics>` reminder — newly-reported LSP
+    /// diagnostics not yet surfaced to the model (claude-code's
+    /// `formatDiagnosticsBlock` flow). `None` when no LSP source is wired (no
+    /// servers ⇒ the common case) or there are no new diagnostics. The block is
+    /// already wrapped in its own `<new-diagnostics>` tag (NOT `<system-reminder>`),
+    /// so it is injected as a bare meta user message, appended ONLY to the
+    /// outgoing snapshot (never `session.history` / JSONL).
+    pub(crate) async fn new_diagnostics_reminder_message(&self) -> Option<ConversationMessage> {
+        let block = self
+            .new_diagnostics_source
+            .as_ref()?
+            .take_new_diagnostics_block()
+            .await?;
+        Some(ConversationMessage::user(MessageId::new(), block))
+    }
+
     pub(crate) async fn conditional_rules_reminder_message(&self) -> Option<ConversationMessage> {
         // (1) CACHE — fill once from the same memory load the system prompt uses.
         let cwd = self.cwd.clone();
@@ -8579,6 +8614,68 @@ mod agent_listing_reminder_tests {
 // set is seeded directly into `read_file_state`, and
 // `conditional_rules_reminder_message` is asserted to inject the matching rule
 // once (with sent-tracking dedup) and skip non-matching / already-sent rules.
+#[cfg(test)]
+mod new_diagnostics_reminder_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use std::sync::Arc;
+    use tool_api::registry::ToolRegistry;
+
+    struct MockDiag(Option<String>);
+    #[async_trait::async_trait]
+    impl traits::NewDiagnosticsSource for MockDiag {
+        async fn take_new_diagnostics_block(&self) -> Option<String> {
+            self.0.clone()
+        }
+    }
+
+    fn orch_with_diag(source: Option<Arc<dyn traits::NewDiagnosticsSource>>) -> ConversationOrchestrator {
+        let o = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            std::path::PathBuf::from("/work"),
+        );
+        match source {
+            Some(s) => o.with_new_diagnostics_source(s),
+            None => o,
+        }
+    }
+
+    #[tokio::test]
+    async fn injects_block_when_source_has_new_diagnostics() {
+        let block = "<new-diagnostics>The following new diagnostic issues were detected:\n\nx.rs:\n  \u{2718} [Line 1:1] boom</new-diagnostics>";
+        let orch = orch_with_diag(Some(Arc::new(MockDiag(Some(block.to_string())))));
+        let msg = orch
+            .new_diagnostics_reminder_message()
+            .await
+            .expect("a block is injected");
+        assert_eq!(msg.text_content(), block);
+    }
+
+    #[tokio::test]
+    async fn no_reminder_without_source_or_when_empty() {
+        // No source wired (the common no-LSP case).
+        assert!(orch_with_diag(None)
+            .new_diagnostics_reminder_message()
+            .await
+            .is_none());
+        // Source wired but nothing new.
+        assert!(orch_with_diag(Some(Arc::new(MockDiag(None))))
+            .new_diagnostics_reminder_message()
+            .await
+            .is_none());
+    }
+}
+
 #[cfg(test)]
 mod conditional_rules_reminder_tests {
     use super::*;

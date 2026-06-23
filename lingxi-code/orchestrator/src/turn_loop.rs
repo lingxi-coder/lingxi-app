@@ -450,6 +450,15 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         history_snapshot.push(reminder);
     }
 
+    // Per-turn, transient `<new-diagnostics>` reminder — newly-reported LSP
+    // diagnostics not yet surfaced (claude-code `formatDiagnosticsBlock`).
+    // Appended to THIS call's OUTGOING snapshot only. `None` when no LSP source
+    // is wired (no servers) or no new diagnostics. See
+    // [`ConversationOrchestrator::new_diagnostics_reminder_message`].
+    if let Some(reminder) = orch.new_diagnostics_reminder_message().await {
+        history_snapshot.push(reminder);
+    }
+
     // `agent_listing_delta`: per-turn, transient agent catalog reminder, emitted
     // ONLY when the `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES` gate is ON (default OFF
     // ⇒ `None`, keeping the locked turn-loop fixtures byte-identical and the

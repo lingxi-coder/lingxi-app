@@ -70,7 +70,10 @@ pub use http::{
     HttpError, HttpTransport, RawByteStreamWithMeta, WebSocketConnection,
     WebSocketConnectionWithMeta, WebSocketMessageStream, WebSocketMessageStreamWithMeta,
 };
-pub use lsp::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
+pub use lsp::{
+    LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
+    NewDiagnosticsSource,
+};
 pub use mailbox::{
     MailboxError as RouterMailboxError, MailboxMessage, MailboxRouterHandle, RouteAck,
 };

@@ -3274,9 +3274,15 @@ pub async fn build(
     // plugin-supplied LSP servers (`.lsp.json`) are registered into the very
     // registry the `LSPTool` reads at runtime (the registry's
     // `register_plugin_servers` is the ONLY supported registration path).
-    let plugin_lsp_registry = Arc::new(lsp::LspRegistry::new(Arc::new(
-        platform_posix::PosixLspTransport::new(),
-    )));
+    // Shared LSP diagnostics sink: the registry's `ensure_server_for_file`
+    // spawns a passive subscriber per started server that drains
+    // `publishDiagnostics` into it, and the orchestrator polls it each turn to
+    // surface the `<new-diagnostics>` reminder to the model.
+    let lsp_diagnostics = lsp::diagnostic_registry::LspDiagnosticRegistry::new();
+    let plugin_lsp_registry = Arc::new(
+        lsp::LspRegistry::new(Arc::new(platform_posix::PosixLspTransport::new()))
+            .with_diagnostics(lsp_diagnostics.clone()),
+    );
 
     // (5.5b) Decorate the subagent spawner so AgentTool's `run_in_background`
     // path is LIVE: `spawn_async` spawns a PERSISTENT LocalAgent through the
@@ -3664,6 +3670,11 @@ pub async fn build(
     .with_agent_catalog(agent_catalog)
     .with_compaction(compactor)
     .with_cache_safe_slot(cache_safe_slot)
+    // Surface LSP `<new-diagnostics>` to the model each turn (the same sink the
+    // LSP registry drains publishDiagnostics into).
+    .with_new_diagnostics_source(
+        Arc::new(lsp_diagnostics.clone()) as Arc<dyn traits::NewDiagnosticsSource>
+    )
     // SKILLLIST.1: enumerate model-invocable skills each turn so the model
     // can discover them. Reads `shared_command_registry` lazily at turn time
     // (populated below at (6), before any turn fires).

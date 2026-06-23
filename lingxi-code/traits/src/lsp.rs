@@ -155,6 +155,18 @@ pub trait LspTransport: Send + Sync {
     fn is_available(&self) -> bool;
 }
 
+/// Source of the passive `<new-diagnostics>` reminder. The orchestrator polls
+/// this once per turn and, when it returns a block, injects it as a transient
+/// meta user message — claude-code's `formatDiagnosticsBlock` flow. Implemented
+/// by the LSP diagnostic registry (which dedups against already-surfaced
+/// diagnostics). A separate trait so the orchestrator need not depend on `lsp`.
+#[async_trait]
+pub trait NewDiagnosticsSource: Send + Sync {
+    /// The next `<new-diagnostics>` block for diagnostics not yet surfaced to
+    /// the model, or `None` when there are none.
+    async fn take_new_diagnostics_block(&self) -> Option<String>;
+}
+
 /// Failure modes shared by every [`LspTransport`] method.
 #[derive(Debug, Clone, Error)]
 pub enum LspError {

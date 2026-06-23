@@ -1204,6 +1204,346 @@ impl ApiService {
             | LlmError::UnsupportedCapability { .. } => None,
         }
     }
+
+    // ── Non-stream drive (Step 1 + 1b) ───────────────────────────────────────
+
+    /// Shared non-stream retry driver. Accepts an already-built `LlmRequest` so
+    /// the two call-paths (`messages_create` and `messages_create_with_fallback`)
+    /// can both route here.
+    ///
+    /// Step 1b: before classifying a retryable 5xx, the driver checks
+    /// `x-should-retry: false` — that header makes the response terminal (same
+    /// behaviour as api-client `retry.rs:196`).
+    #[allow(clippy::too_many_lines)]
+    async fn drive_non_stream(
+        &self,
+        req: LlmRequest,
+        retry_control: RetryControl,
+    ) -> Result<LlmResponse, LlmError> {
+        self.drive_non_stream_seeded_with_chain(req, retry_control, 0, &[])
+            .await
+    }
+
+    /// Non-stream retry driver with a pre-seeded `consecutive_overloaded` counter
+    /// and an optional fallback chain.
+    ///
+    /// The seed is set to 1 when this call is a non-streaming fallback triggered by
+    /// a mid-stream `LlmError::Overloaded` — mirroring TS `claude.ts:2559`
+    /// (`initialConsecutive529Errors: is529Error(streamingError) ? 1 : 0`).
+    ///
+    /// `chain` is the ordered slice of fallback models to walk on consecutive
+    /// overload events.  `retry_control` must already carry `chain[0]` as
+    /// `fallback_model` (set by [`Self::messages_create_with_fallback`]); on
+    /// each [`DriveStep::Fallback`] the loop advances `chain_idx` and rebuilds
+    /// `retry_control` with `chain[chain_idx]` (or disables fallback when
+    /// exhausted).
+    #[allow(clippy::too_many_lines)]
+    async fn drive_non_stream_seeded_with_chain(
+        &self,
+        mut req: LlmRequest,
+        mut retry_control: RetryControl,
+        initial_consecutive_overloaded: u8,
+        chain: &[String],
+    ) -> Result<LlmResponse, LlmError> {
+        let request_id = new_request_id();
+        let started = Instant::now();
+        telemetry::emit_started(&self.analytics, &req.model, &request_id, false).await;
+
+        // B6-T1: discard any 429 snapshot staged by a PRIOR drive (whose
+        // terminal was non-rate-limited, so it never promoted) — TS module
+        // state for the terminal catch handler is per-error, never carried
+        // across calls.
+        self.clear_pending_429();
+
+        // Batch-5 Task 3: resolve the live subscriber state ONCE per drive call
+        // (not per attempt) — RetryState persists across the retry loop, so the
+        // 429/enterprise gate is stable for the whole request, matching the TS
+        // granularity (the gate effectively stabilizes per request).
+        let sub = self.effective_subscriber();
+        let mut state = RetryState {
+            consecutive_overloaded: initial_consecutive_overloaded,
+            is_subscriber: sub.is_subscriber,
+            is_enterprise: sub.is_enterprise,
+            ..RetryState::default()
+        };
+        // thinking_budget for telemetry: Adaptive → 0, Enabled{b} → b.
+        let thinking_budget: u32 = reasoning_budget(req.reasoning);
+        // Index into `chain` for the NEXT fallback entry to use.
+        // chain_idx=0 means chain[0] is the current fallback in `retry_control`.
+        // After a Fallback step, chain_idx advances to point at the next entry.
+        // When chain_idx >= chain.len(), the chain is exhausted.
+        let mut chain_idx: usize = 0;
+
+        loop {
+            // prepare → inject headers → execute.
+            let mut prepared = match self.client.prepare(&req).await {
+                Ok(p) => p,
+                Err(e) => {
+                    // prepare() errors (auth, capability, encoding) are always terminal.
+                    telemetry::emit_failed(
+                        &self.analytics,
+                        &req.model,
+                        &request_id,
+                        Self::error_kind(&e),
+                        Self::status_of(&e),
+                    )
+                    .await;
+                    return Err(e);
+                }
+            };
+            self.inject_headers(&mut prepared, &request_id);
+
+            let resp_result = self.transport.execute(&prepared.provider_request).await;
+
+            match resp_result {
+                Err(transport_err) => {
+                    // Transport-layer failure; feed into the retry driver.
+                    let step = next_step_with_backoff(
+                        &mut state,
+                        &retry_control,
+                        &transport_err,
+                        thinking_budget,
+                        self.settings_backoff_ms,
+                    );
+                    if let DriveStep::RetryAfter(delay) = step {
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    telemetry::emit_failed(
+                        &self.analytics,
+                        &req.model,
+                        &request_id,
+                        Self::error_kind(&transport_err),
+                        None,
+                    )
+                    .await;
+                    return Err(transport_err);
+                }
+                Ok(provider_resp) => {
+                    // Step 1b: x-should-retry: false is terminal for retryable 5xx.
+                    let x_should_retry_false = provider_resp
+                        .headers
+                        .get("x-should-retry")
+                        .is_some_and(|v| v.as_str() == "false");
+
+                    match prepared.route.codec.decode_response(provider_resp.clone()) {
+                        Ok(mut response) => {
+                            // Feed rate-limit headers from every 2xx success response.
+                            self.record_rate_limit_from_headers(&provider_resp.headers);
+                            // 3c-T3: populate response.cost when an estimator is wired.
+                            // Unpriced or unknown models leave response.cost = None — never an error.
+                            if let Some(est) = &self.estimator {
+                                let pricing_ref =
+                                    prepared.route.resolved_route.pricing_model.clone();
+                                if let Ok(estimate) = est.estimate(pricing_ref, &response.usage) {
+                                    if estimate.total_cost_usd.is_some() {
+                                        response.cost = Some(estimate);
+                                    }
+                                }
+                            }
+                            let elapsed_ms =
+                                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                            telemetry::emit_succeeded(
+                                &self.analytics,
+                                &req.model,
+                                &request_id,
+                                elapsed_ms,
+                                provider_resp.status,
+                            )
+                            .await;
+                            // #5: surface this drive's retry count to the cost
+                            // path via `last_retry_count()`.
+                            *self.last_retry_count.lock().unwrap() = u32::from(state.attempt);
+                            return Ok(response);
+                        }
+                        Err(decode_err) => {
+                            // Step 1b: honour x-should-retry: false as terminal.
+                            if x_should_retry_false {
+                                telemetry::emit_failed(
+                                    &self.analytics,
+                                    &req.model,
+                                    &request_id,
+                                    Self::error_kind(&decode_err),
+                                    Self::status_of(&decode_err),
+                                )
+                                .await;
+                                return Err(decode_err);
+                            }
+
+                            // Rate-limited: resolve delay from headers.
+                            let effective_err = if let LlmError::RateLimited { .. } = &decode_err {
+                                // Task 6 (batch 5): capture the 429's OWN
+                                // unified headers (errors.ts:471-516) so a
+                                // terminal 429 can surface the limits copy.
+                                self.record_rate_limit_from_429(&provider_resp.headers);
+                                let delay = Self::resolve_retry_after(&provider_resp.headers);
+                                telemetry::emit_rate_limited(
+                                    &self.analytics,
+                                    &req.model,
+                                    u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                                )
+                                .await;
+                                LlmError::RateLimited {
+                                    retry_after: Some(delay),
+                                    scope: None,
+                                }
+                            } else {
+                                decode_err.clone()
+                            };
+
+                            let step = next_step_with_backoff(
+                                &mut state,
+                                &retry_control,
+                                &effective_err,
+                                thinking_budget,
+                                self.settings_backoff_ms,
+                            );
+                            match step {
+                                DriveStep::RetryAfter(delay) => {
+                                    tokio::time::sleep(delay).await;
+                                    continue;
+                                }
+                                DriveStep::AdjustMaxTokens(new_max) => {
+                                    // Emit telemetry for the overflow adjustment.
+                                    if let Some(overflow) =
+                                        crate::model::overflow::parse_overflow_message(
+                                            match &decode_err {
+                                                LlmError::InvalidRequest { message } => message,
+                                                _ => "",
+                                            },
+                                        )
+                                    {
+                                        telemetry::emit_max_tokens_overflow_adjustment(
+                                            &self.analytics,
+                                            &req.model,
+                                            overflow.input_tokens,
+                                            overflow.context_limit,
+                                            new_max,
+                                            state.attempt,
+                                        )
+                                        .await;
+                                    }
+                                    req.max_tokens = Some(new_max);
+                                    continue;
+                                }
+                                DriveStep::Fallback { fallback_model } => {
+                                    // Switch to the fallback model; advance the
+                                    // chain index so the next iteration's ctl
+                                    // points at chain[chain_idx] (or is
+                                    // exhausted → allow_fallback=false).
+                                    req.model = fallback_model;
+                                    chain_idx += 1;
+                                    // Reset the consecutive-overload counter so
+                                    // the new primary model's 529 budget is fresh.
+                                    state.consecutive_overloaded = 0;
+                                    // Rebuild retry_control with the next chain
+                                    // entry (None when exhausted).
+                                    let next_fallback = chain.get(chain_idx).cloned();
+                                    let allow_fallback = next_fallback.is_some();
+                                    retry_control = resolve_retry_control_with_settings(
+                                        &req.model,
+                                        next_fallback,
+                                        sub.is_subscriber,
+                                        &ResolveRetryEnv::from_process_env(),
+                                        self.settings_max_retries,
+                                    );
+                                    if allow_fallback {
+                                        retry_control.allow_fallback = true;
+                                    }
+                                    continue;
+                                }
+                                DriveStep::Terminal => {
+                                    // B6-T1: the turn DIES here — promote the
+                                    // 429 snapshot staged this attempt into the
+                                    // live caches (the TS terminal catch handler
+                                    // `extractQuotaStatusFromError`,
+                                    // claudeAiLimits.ts:487). Gated on the
+                                    // RateLimited discriminant so a non-429
+                                    // terminal never promotes a stale slot.
+                                    if matches!(decode_err, LlmError::RateLimited { .. }) {
+                                        self.promote_pending_429();
+                                    }
+                                    telemetry::emit_failed(
+                                        &self.analytics,
+                                        &req.model,
+                                        &request_id,
+                                        Self::error_kind(&decode_err),
+                                        Self::status_of(&decode_err),
+                                    )
+                                    .await;
+                                    return Err(decode_err);
+                                }
+                                DriveStep::RepeatedOverloaded => {
+                                    // External non-sandbox threshold: surface the
+                                    // repeated bit so the conversion layer produces
+                                    // `OrchestratorError::RepeatedOverloaded` with the
+                                    // byte-locked "Repeated 529 Overloaded errors" copy
+                                    // (errors.ts:166).
+                                    let repeated_err = LlmError::Overloaded { repeated: true };
+                                    telemetry::emit_failed(
+                                        &self.analytics,
+                                        &req.model,
+                                        &request_id,
+                                        Self::error_kind(&repeated_err),
+                                        Self::status_of(&repeated_err),
+                                    )
+                                    .await;
+                                    return Err(repeated_err);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Inherent provider-neutral entry points ───────────────────────────────
+
+    /// Non-streaming call (provider-neutral). The drive logic of the
+    /// orchestrator's `OrchestratorApiClient::messages_create`, minus the
+    /// provider `profile` (subagent/streaming callers pass `None`).
+    pub async fn messages_create(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Result<LlmResponse, LlmError> {
+        let req = self.build_request(model, None, system, messages, tools, false, None)?;
+        let ctl = resolve_retry_control_with_settings(
+            model,
+            None,
+            self.effective_subscriber().is_subscriber,
+            &ResolveRetryEnv::from_process_env(),
+            self.settings_max_retries,
+        );
+        self.drive_non_stream(req, ctl).await
+    }
+
+    /// Non-streaming call with an explicit `max_tokens` escalation override
+    /// (provider-neutral). The drive logic of the orchestrator's
+    /// `OrchestratorApiClient::messages_create_with_opts`, minus the provider
+    /// `profile`.
+    pub async fn messages_create_with_opts(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        max_tokens: u32,
+    ) -> Result<LlmResponse, LlmError> {
+        let req =
+            self.build_request(model, None, system, messages, tools, false, Some(max_tokens))?;
+        let ctl = resolve_retry_control_with_settings(
+            model,
+            None,
+            self.effective_subscriber().is_subscriber,
+            &ResolveRetryEnv::from_process_env(),
+            self.settings_max_retries,
+        );
+        self.drive_non_stream(req, ctl).await
+    }
 }
 
 // ── Media capping (stripExcessMediaItems) ─────────────────────────────────────

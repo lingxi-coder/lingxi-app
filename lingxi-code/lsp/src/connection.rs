@@ -54,3 +54,17 @@ pub enum LspConnectionState {
         config: LspServerConfig,
     },
 }
+
+impl LspConnectionState {
+    /// The server configuration this state carries (present in every variant).
+    #[must_use]
+    pub fn config(&self) -> &LspServerConfig {
+        match self {
+            LspConnectionState::Disconnected { config }
+            | LspConnectionState::Starting { config, .. }
+            | LspConnectionState::Initialized { config, .. }
+            | LspConnectionState::Failed { config, .. }
+            | LspConnectionState::Stopped { config } => config,
+        }
+    }
+}

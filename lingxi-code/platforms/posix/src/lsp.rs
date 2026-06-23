@@ -168,6 +168,17 @@ impl LspTransport for PosixLspTransport {
         client.notify(method, params).await
     }
 
+    async fn connection(
+        &self,
+        conn_id: McpConnectionId,
+    ) -> Result<Arc<Connection>, LspError> {
+        let client = self
+            .lookup_client(conn_id)
+            .await
+            .ok_or_else(|| LspError::Transport("connection not found".into()))?;
+        Ok(client.connection())
+    }
+
     async fn shutdown(&self, conn_id: McpConnectionId) -> Result<(), LspError> {
         let removed = self.connections.lock().await.remove(&conn_id);
         if let Some(entry) = removed {

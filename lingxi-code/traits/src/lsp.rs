@@ -129,6 +129,21 @@ pub trait LspTransport: Send + Sync {
         params: Value,
     ) -> Result<(), LspError>;
 
+    /// Return the live `Arc<jsonrpc::Connection>` for `conn_id` so the registry
+    /// can wrap it in an `LspClient` over the SAME shared connection the
+    /// transport drives (the bridge that lets `ensure_server_for_file` cache a
+    /// client for the LSP tool). Defaults to [`LspError::Unavailable`] for
+    /// transports that don't expose a connection.
+    ///
+    /// # Errors
+    /// Returns [`LspError`] when the connection is unknown or unavailable.
+    async fn connection(
+        &self,
+        _conn_id: protocol::McpConnectionId,
+    ) -> Result<std::sync::Arc<jsonrpc::Connection>, LspError> {
+        Err(LspError::Unavailable)
+    }
+
     /// Shutdown and tear down the server identified by `conn_id`.
     ///
     /// # Errors

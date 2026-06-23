@@ -7,6 +7,10 @@ license.workspace = true
 
 [dependencies]
 protocol = { path = "../protocol" }
+# The LSP transport exposes its live `Arc<jsonrpc::Connection>` so the registry
+# can bridge it into an `LspClient` (lsp `ensure_server_for_file`). jsonrpc is a
+# leaf crate (no `traits` dep) → no cycle.
+jsonrpc = { path = "../jsonrpc" }
 async-trait.workspace = true
 futures-core.workspace = true
 indexmap.workspace = true

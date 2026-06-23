@@ -5631,6 +5631,7 @@ dependencies = [
  "async-trait",
  "futures-core",
  "indexmap",
+ "jsonrpc",
  "protocol",
  "serde",
  "serde_json",

@@ -385,6 +385,59 @@ fn sandbox_runtime_config_from_settings_tiers(
     )
 }
 
+/// Compute the managed-only sandbox overrides for the
+/// `allowManagedDomainsOnly` / `allowManagedReadPathsOnly` enforcement. Parses
+/// the MANAGED (`policySettings`) raw tiers ONLY — the per-source knowledge
+/// claude-code uses via `getSettingsForSource('policySettings')`. When a flag is
+/// set there, returns `Some(allowlist)` (the managed-source domains / read paths)
+/// to OVERRIDE the merged config; `None` ⇒ no restriction. Threaded onto
+/// [`SandboxConvertContext`] so [`convert_settings_to_runtime_config`] applies it.
+fn managed_only_sandbox_overrides(
+    managed_raw_tiers: &[String],
+    settings_dir: &std::path::Path,
+) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    use sandbox::runtime_config::{SandboxSettingsJson, SettingsJson, SettingsPermissions};
+    let mut merged_sandbox: Option<SandboxSettingsJson> = None;
+    let mut merged_perms = SettingsPermissions::default();
+    let mut saw_perms = false;
+    for raw in managed_raw_tiers {
+        let Ok(parsed) = serde_json::from_str::<SettingsJson>(raw) else {
+            continue;
+        };
+        if let Some(p) = parsed.permissions {
+            saw_perms = true;
+            merged_perms.allow.extend(p.allow);
+            merged_perms.deny.extend(p.deny);
+            merged_perms
+                .additional_directories
+                .extend(p.additional_directories);
+        }
+        if let Some(s) = parsed.sandbox {
+            merged_sandbox = Some(s);
+        }
+    }
+    let managed = SettingsJson {
+        permissions: saw_perms.then_some(merged_perms),
+        sandbox: merged_sandbox,
+        settings_dir: Some(settings_dir.to_path_buf()),
+    };
+    let domains_only = managed
+        .sandbox
+        .as_ref()
+        .and_then(|s| s.network.as_ref())
+        .is_some_and(|n| n.allow_managed_domains_only);
+    let reads_only = managed
+        .sandbox
+        .as_ref()
+        .and_then(|s| s.filesystem.as_ref())
+        .is_some_and(|f| f.allow_managed_read_paths_only);
+    let domains =
+        domains_only.then(|| sandbox::policy_convert::managed_domain_allowlist(&managed));
+    let reads = reads_only
+        .then(|| sandbox::policy_convert::managed_read_path_allowlist(&managed, settings_dir));
+    (domains, reads)
+}
+
 /// claude-code `getClaudeTempDir()` + `getClaudeTempDirName()` analog (Shell.ts:307),
 /// identical to the canonical private `claude_temp_dir()` in `tool-shell`'s
 /// `prompt.rs`: `baseTmpDir = CLAUDE_CODE_TMPDIR || (windows ? tmpdir() : "/tmp")`,
@@ -3276,8 +3329,14 @@ pub async fn build(
         // flagSettings is omitted: the engine has no boot-time `--settings`
         // analog (see spec §4e); if one is added, push its raw text BEFORE the
         // managed tier to honor `localSettings→flagSettings→policySettings`.
-        tiers.extend(crate::settings_watch::managed_settings_raw_tiers().await);
+        let managed_tiers = crate::settings_watch::managed_settings_raw_tiers().await;
+        tiers.extend(managed_tiers.iter().cloned());
         let refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
+        // allowManagedDomainsOnly / allowManagedReadPathsOnly: resolved from the
+        // MANAGED tiers ONLY (per-source), then threaded onto the context so the
+        // conversion overrides the merged allowlist when the flag is set.
+        let (managed_allowed_domains, managed_read_paths) =
+            managed_only_sandbox_overrides(&managed_tiers, &cwd);
         // Seed the `SandboxConvertContext` with the boot-resolvable hardening
         // paths so the settings/skills denyWrite defense actually fires
         // (sandbox-adapter.ts:225-299). Seeds with no boot analog
@@ -3295,6 +3354,8 @@ pub async fn build(
             ],
             managed_drop_in_dir: Some(to_s(managed.join("managed-settings.d"))),
             skills_dirs: vec![to_s(cwd.join(".claude").join("skills"))],
+            managed_allowed_domains,
+            managed_read_paths,
             ..Default::default()
         };
         sandbox_runtime_config_from_settings_tiers(&refs, &cwd, &ctx)

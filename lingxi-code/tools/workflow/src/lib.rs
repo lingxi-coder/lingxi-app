@@ -33,6 +33,9 @@ use tool_api::tool_trait::{
     ValidationError,
 };
 
+/// Maximum script size in bytes (claude-code `P2 = 524288` = 512 KB).
+pub const MAX_SCRIPT_BYTES: usize = 524288;
+
 /// Tool name byte-lock.
 pub const TOOL_NAME: &str = "Workflow";
 
@@ -171,6 +174,29 @@ impl WorkflowTool {
             resume_from_run_id: s("resumeFromRunId"),
         }
     }
+
+    /// List saved workflow names from `.claude/workflows/`. Returns a
+    /// comma-joined string for the errorCode-1b message, or `None` on I/O error.
+    fn list_available_workflow_names() -> Option<String> {
+        let dir = std::fs::read_dir(".claude/workflows").ok()?;
+        let mut names: Vec<String> = dir
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let fname = e.file_name();
+                let fname = fname.to_string_lossy();
+                // Strip known extensions to get the bare name.
+                for ext in [".js", ".mjs", ".ts"] {
+                    if let Some(stem) = fname.strip_suffix(ext) {
+                        return Some(stem.to_string());
+                    }
+                }
+                Some(fname.into_owned())
+            })
+            .collect();
+        names.sort();
+        names.dedup();
+        Some(names.join(", "))
+    }
 }
 
 #[async_trait]
@@ -237,16 +263,145 @@ impl Tool for WorkflowTool {
     async fn validate_input(
         &self,
         input: &Value,
-        _: &ToolUseContext,
+        _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        // zod `.refine(e => e.script || e.name || e.scriptPath, { message: … })`.
-        let present =
-            |k: &str| input.get(k).and_then(Value::as_str).is_some_and(|s| !s.is_empty());
-        if !present("script") && !present("name") && !present("scriptPath") {
+        // ── Gate order mirrors claude-code v2.1.186 validateInput (offset 203004507) ──
+        //
+        // errorCode 7 — abort / input truncated
+        // ⚠️ UNREACHABLE: the binary's `yke(t.abortController.signal)` is the
+        // HTTP-layer server-retraction signal; LingXi's `ToolUseContext` exposes a
+        // local `cancel` (CancellationToken) that fires on sibling errors / user
+        // interrupt — a different thing. No server-fallback abort signal is threaded
+        // to `validate_input`. Kept as a named constant for documentation; the gate
+        // is not wired.
+        //
+        // errorCode 5 — `disableWorkflows` managed setting
+        // ⚠️ PARTIAL: the binary's `fbn()` checks an org-managed setting
+        // (`$H()?.settings.disableWorkflows`). `ToolStaticContext` carries only
+        // `feature_flags`; the managed-settings object is not threaded here. We
+        // fire the byte-exact message on the env-var branch (same branch as
+        // `is_enabled`) as a faithful-equivalent gate for local builds. The managed-
+        // setting arm is NOT reachable from this ctx.
+        if is_env_truthy(std::env::var("CLAUDE_CODE_DISABLE_WORKFLOWS").ok().as_deref()) {
+            return Err(ValidationError(
+                "Dynamic workflows are disabled by managed settings (`disableWorkflows`).".into(),
+            ));
+        }
+
+        // errorCode 6 — session gate (`pA()`)
+        // ⚠️ PARTIAL: the binary's `pA()` checks org policy, launch gate, and the
+        // user's `/config` "Dynamic workflows" toggle. None of these sources are
+        // threaded to validate_input in LingXi's ctx. The gate below is the local-
+        // equivalent env-var path; the managed org/launch/config arms are NOT
+        // reachable. In practice this gate is always permissive on local builds.
+        // Message byte-exact per §8 errorCode 6.
+        // (No additional local gate beyond the env-var above — pA() defaults
+        // permissive on Max/Team/null-plan; only fires when explicitly disabled.)
+
+        // errorCode 1 — script resolution (sub-errors 1a–1f, byte-exact per §8.1)
+        // Reproduces the binary's D7a() resolution logic with exact error strings.
+        let s = |k: &str| input.get(k).and_then(Value::as_str).map(str::to_string);
+        let script_path = s("scriptPath").filter(|v| !v.is_empty());
+        let script      = s("script").filter(|v| !v.is_empty());
+        let name        = s("name").filter(|v| !v.is_empty());
+
+        // Resolved script text (for errorCode 2 and 4 checks below).
+        let resolved_script: String;
+
+        if let Some(ref path) = script_path {
+            // 1c — UNC path not allowed
+            if path.starts_with("\\\\") {
+                return Err(ValidationError(format!(
+                    "UNC paths are not allowed for workflow scriptPath: {path}"
+                )));
+            }
+            // 1d / 1e / 1f — file read / not found / too large
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    if bytes.len() > MAX_SCRIPT_BYTES {
+                        return Err(ValidationError(format!(
+                            "Workflow script file {path} exceeds {MAX_SCRIPT_BYTES} bytes"
+                        )));
+                    }
+                    resolved_script = String::from_utf8_lossy(&bytes).into_owned();
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(ValidationError(format!(
+                        "Workflow script file not found: {path}"
+                    )));
+                }
+                Err(e) => {
+                    return Err(ValidationError(format!(
+                        "Failed to read workflow script file {path}: {e}"
+                    )));
+                }
+            }
+        } else if let Some(inline) = script {
+            resolved_script = inline;
+        } else if let Some(ref wf_name) = name {
+            // Try to resolve from saved workflows (.claude/workflows/<name>{.js,.mjs,.ts,""}).
+            let mut found: Option<String> = None;
+            for ext in [".js", ".mjs", ".ts", ""] {
+                let candidate = format!(".claude/workflows/{wf_name}{ext}");
+                match std::fs::read_to_string(&candidate) {
+                    Ok(src) => { found = Some(src); break; }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(_) => continue,
+                }
+            }
+            if let Some(src) = found {
+                resolved_script = src;
+            } else {
+                // 1b — workflow name not found; list available names
+                let available: String = Self::list_available_workflow_names()
+                    .unwrap_or_default();
+                let list = if available.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    available
+                };
+                return Err(ValidationError(format!(
+                    "Workflow \"{wf_name}\" not found. Available: {list}"
+                )));
+            }
+        } else {
+            // 1a — none of script/name/scriptPath provided
             return Err(ValidationError(
                 "Must provide script, name, or scriptPath".into(),
             ));
         }
+
+        // errorCode 2 — parse/meta error (`Invalid workflow script: ${error}`)
+        // Mirrors binary's `Bw(n.script)` → `validate_meta`.
+        if let Err(e) = workflow::validate_meta(&resolved_script) {
+            return Err(ValidationError(format!("Invalid workflow script: {e}")));
+        }
+
+        // errorCode 4 — determinism violation (inline script only)
+        // Binary: `e.script && HKa(r.scriptBody)`. We apply when scriptPath was
+        // NOT the source (inline `script` or name-resolved) to match the binary's
+        // `e.script` guard; file-sourced scripts skip this gate.
+        if script_path.is_none() {
+            if let Err(e) = workflow::check_determinism(&resolved_script) {
+                // The WorkflowError Display wraps the message; we want the raw
+                // NON_DETERMINISTIC_MESSAGE, which lives inside WorkflowError::Script.
+                use workflow::WorkflowError;
+                let msg = match e {
+                    WorkflowError::Script(m) => m,
+                    WorkflowError::Engine(m) => m,
+                };
+                return Err(ValidationError(msg));
+            }
+        }
+
+        // errorCode 3 — still-running resume target
+        // ⚠️ UNREACHABLE: the binary looks up a `local_workflow` task by
+        // `workflowRunId === resumeFromRunId` in the task registry. LingXi's
+        // `ToolUseContext` does not carry a task-registry handle; the registry is
+        // owned by the composition root and not threaded to `validate_input`.
+        // This gate is not wired. The model will proceed and the launcher will
+        // surface a conflict at launch time if the workflow is still running.
+
         Ok(())
     }
 
@@ -431,27 +586,104 @@ mod tests {
             .starts_with("Self-contained workflow script."));
     }
 
+    // A minimal valid workflow script: has a proper meta block, is deterministic.
+    const VALID_SCRIPT: &str = concat!(
+        "export const meta = { name: 'test', description: 'A test workflow' };\n",
+        "await agent('do something');\n",
+    );
+
     #[tokio::test]
-    async fn validate_requires_one_of_script_name_or_script_path() {
+    async fn validate_error_1a_must_provide_one_of_three_fields() {
+        // errorCode 1a — none of script/name/scriptPath provided.
         let t = tool(None);
         let ctx = tool_api::test_support::fresh_ctx();
-        assert!(t.validate_input(&json!({}), &ctx).await.is_err());
-        assert!(t
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+
+        let err = t.validate_input(&json!({}), &ctx).await.unwrap_err();
+        assert_eq!(err.0, "Must provide script, name, or scriptPath");
+
+        let err2 = t
             .validate_input(&json!({ "title": "x" }), &ctx)
             .await
-            .is_err());
-        assert!(t
-            .validate_input(&json!({ "script": "log('hi')" }), &ctx)
+            .unwrap_err();
+        assert_eq!(err2.0, "Must provide script, name, or scriptPath");
+    }
+
+    #[tokio::test]
+    async fn validate_error_2_invalid_workflow_script() {
+        // errorCode 2 — script is present but fails meta parse.
+        let t = tool(None);
+        let ctx = tool_api::test_support::fresh_ctx();
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+
+        // A script with no meta block at all triggers the "must be first statement" error.
+        let err = t
+            .validate_input(&json!({ "script": "console.log('hello');" }), &ctx)
             .await
-            .is_ok());
-        assert!(t
-            .validate_input(&json!({ "name": "review" }), &ctx)
+            .unwrap_err();
+        assert!(
+            err.0.starts_with("Invalid workflow script:"),
+            "expected errorCode 2 message, got: {:?}",
+            err.0
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_error_4_date_now_determinism() {
+        // errorCode 4 — inline script uses Date.now().
+        let t = tool(None);
+        let ctx = tool_api::test_support::fresh_ctx();
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+
+        let script = concat!(
+            "export const meta = { name: 'bad', description: 'non-det' };\n",
+            "const t = Date.now();\n",
+        );
+        let err = t
+            .validate_input(&json!({ "script": script }), &ctx)
             .await
-            .is_ok());
-        assert!(t
-            .validate_input(&json!({ "scriptPath": "/tmp/wf.js" }), &ctx)
+            .unwrap_err();
+        assert_eq!(
+            err.0,
+            workflow::NON_DETERMINISTIC_MESSAGE,
+            "errorCode 4 message must be byte-exact"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_error_5_disable_workflows_env() {
+        // errorCode 5 — CLAUDE_CODE_DISABLE_WORKFLOWS=1 fires the managed-settings message.
+        let t = tool(None);
+        let ctx = tool_api::test_support::fresh_ctx();
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("CLAUDE_CODE_DISABLE_WORKFLOWS", "1");
+        let result = t
+            .validate_input(&json!({ "script": VALID_SCRIPT }), &ctx)
+            .await;
+        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.0,
+            "Dynamic workflows are disabled by managed settings (`disableWorkflows`).",
+            "errorCode 5 message must be byte-exact"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_valid_script_passes() {
+        // A valid script with proper meta + deterministic code → Ok(()).
+        let t = tool(None);
+        let ctx = tool_api::test_support::fresh_ctx();
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+
+        t.validate_input(&json!({ "script": VALID_SCRIPT }), &ctx)
             .await
-            .is_ok());
+            .expect("valid script must pass all gates");
     }
 
     #[tokio::test]

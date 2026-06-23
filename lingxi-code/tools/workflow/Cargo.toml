@@ -15,6 +15,7 @@ license.workspace = true
 tool-api = { path = "../../tool-api" }
 permission = { path = "../../permission" }
 traits = { path = "../../traits" }
+workflow = { path = "../../workflow" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

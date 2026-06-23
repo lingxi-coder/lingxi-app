@@ -3,3 +3,4 @@
 //! refresh machinery; the auth abstractions already live in this crate.
 
 pub mod anthropic;
+pub mod openai;

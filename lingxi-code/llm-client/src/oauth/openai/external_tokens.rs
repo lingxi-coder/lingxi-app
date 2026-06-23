@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use llm_client::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
+use crate::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
 
 /// Static credential provider over externally-supplied `ChatGPT` tokens.
 pub struct ExternalTokensCredentialProvider {
@@ -21,7 +21,7 @@ impl ExternalTokensCredentialProvider {
     #[must_use]
     pub fn from_supplied(access_token: impl Into<String>, account_id: Option<String>) -> Self {
         let access_token = access_token.into();
-        let fedramp = crate::token_data::parse_id_token(&access_token)
+        let fedramp = crate::oauth::openai::token_data::parse_id_token(&access_token)
             .is_some_and(|c| c.fedramp);
         Self { access_token, account_id, fedramp }
     }
@@ -59,7 +59,7 @@ mod tests {
     async fn returns_chatgpt_oauth_with_supplied_account() {
         let p = ExternalTokensCredentialProvider::from_supplied("plain-token", Some("acc_2".into()));
         let scope = CredentialScope::new(
-            llm_client::ProviderId::OpenAICompatible { name: "openai-chatgpt".into() },
+            crate::ProviderId::OpenAICompatible { name: "openai-chatgpt".into() },
             "openai-chatgpt",
         );
         match p.load(&scope).await.expect("load") {

@@ -37,6 +37,7 @@ use llm_client::oauth::anthropic::client::ClaudeAiOAuthClient;
 use llm_client::oauth::anthropic::config::ClaudeAiOAuthConfig;
 use llm_client::oauth::anthropic::handle::OAuthHandle;
 use llm_client::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
+use llm_client::oauth::openai as openai_oauth;
 use tool_api::AnthropicRequestBuilder;
 use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
 use llm_client::{DefaultLlmClient, Transport};

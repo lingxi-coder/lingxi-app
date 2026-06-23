@@ -9,8 +9,8 @@
 
 #![allow(dead_code)]
 
-use crate::client::OAuthError;
-use crate::config::OpenAiOAuthConfig;
+use crate::oauth::openai::client::OAuthError;
+use crate::oauth::openai::config::OpenAiOAuthConfig;
 use async_trait::async_trait;
 use protocol::{HttpMethod, HttpRequest, Secret};
 use sha2::{Digest, Sha256};
@@ -367,7 +367,7 @@ impl RefreshDriver {
 
         // Update account_id/fedramp from id_token if present.
         let (new_account_id, new_fedramp) = if let Some(ref id_token) = body.id_token {
-            if let Some(claims) = crate::token_data::parse_id_token(id_token) {
+            if let Some(claims) = crate::oauth::openai::token_data::parse_id_token(id_token) {
                 (claims.account_id, claims.fedramp)
             } else {
                 // id_token present but unparseable — preserve existing values.
@@ -610,7 +610,7 @@ async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn traits::RuntimeS
 #[cfg(test)]
 mod refresh_tests {
     use super::*;
-    use crate::testsupport::{Canned, MockHttp, TestClock};
+    use crate::oauth::openai::testsupport::{Canned, MockHttp, TestClock};
 
     #[tokio::test]
     async fn reactive_refresh_sends_json_body_and_rotates_token() {
@@ -773,7 +773,7 @@ mod refresh_tests {
 
     #[tokio::test]
     async fn proactive_loop_fires_then_exits_on_401() {
-        use crate::testsupport::InstantSpawner;
+        use crate::oauth::openai::testsupport::InstantSpawner;
 
         let http = MockHttp::new(vec![(
             "oauth/token",

@@ -3,9 +3,9 @@
 //!
 //! See plan spec §P2-M4. Wire shape verified against codex `login/src/server.rs`.
 
-use crate::config::OpenAiOAuthConfig;
-use crate::pkce::{generate_pkce, generate_state_token};
-use crate::refresh::{AuthState, RefreshDriver};
+use crate::oauth::openai::config::OpenAiOAuthConfig;
+use crate::oauth::openai::pkce::{generate_pkce, generate_state_token};
+use crate::oauth::openai::refresh::{AuthState, RefreshDriver};
 use protocol::{HttpMethod, HttpRequest, Secret};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -345,7 +345,7 @@ pub async fn init_refresh_driver(
 #[cfg(test)]
 mod exchange_tests {
     use super::*;
-    use crate::testsupport::{Canned, MockHttp, TestClock};
+    use crate::oauth::openai::testsupport::{Canned, MockHttp, TestClock};
 
     fn client_with(http: Arc<MockHttp>, clock_secs: u64) -> OpenAiOAuthClient {
         let clock = TestClock::new(clock_secs);

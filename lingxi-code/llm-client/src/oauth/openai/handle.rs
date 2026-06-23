@@ -23,10 +23,10 @@
 //! `fedramp`. The engine M8 wrapper (`ChatGptConnectDriver`) will call these
 //! inherent methods directly.
 
-use crate::callback::{CallbackError, CallbackListener};
-use crate::client::OpenAiOAuthClient;
-use crate::device_code;
-use crate::token_data::parse_id_token;
+use crate::oauth::openai::callback::{CallbackError, CallbackListener};
+use crate::oauth::openai::client::OpenAiOAuthClient;
+use crate::oauth::openai::device_code;
+use crate::oauth::openai::token_data::parse_id_token;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
@@ -344,7 +344,7 @@ fn real_browser_open(url: &str) -> Result<(), OpenAiAuthError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testsupport::{
+    use crate::oauth::openai::testsupport::{
         mem_credential_manager, port_guard, Canned, MemStorage, MockHttp, TestClock,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -377,7 +377,7 @@ mod tests {
         let clock = TestClock::new(1_000);
         let storage = MemStorage::new();
         let cm = mem_credential_manager(storage.clone(), clock.clone());
-        let cfg = crate::config::OpenAiOAuthConfig::default();
+        let cfg = crate::oauth::openai::config::OpenAiOAuthConfig::default();
         let client = Arc::new(
             OpenAiOAuthClient::new(cfg, http as Arc<dyn HttpTransport>)
                 .with_clock(clock),

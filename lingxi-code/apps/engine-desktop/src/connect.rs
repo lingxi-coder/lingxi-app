@@ -59,7 +59,7 @@ impl ConnectCredentialWriter for EngineCredentialWriter {
 }
 
 use command_core::{ChatGptConnectDriver, CopilotConnectDriver, CopilotConnectStep};
-use openai_oauth;
+use llm_client::oauth::openai as openai_oauth;
 use llm_client::copilot::{CopilotHttp, CopilotLogin, DeviceCodeResponse, PollOutcome};
 use llm_client::transport::BoxFuture;
 use llm_client::LlmError;

@@ -7,7 +7,8 @@ use crate::error::OrchestratorError;
 use crate::test_support::{HookExecutor, PermissionGate};
 use crate::token_budget::{check_token_budget, BudgetTracker, TokenBudgetDecision};
 use crate::turn_loop::{
-    execute_one_turn_with_recovery_tracked, surface_prompt_too_long,
+    call_api_with_ptl_recovery, execute_one_turn_with_recovery_tracked,
+    surface_prompt_too_long, surface_rapid_refill_thrashing, PtlCallOutcome,
     RecoveryState, TurnStepOutcome, MALFORMED_TOOL_USE_RETRY_FAILED,
     MALFORMED_TOOL_USE_RETRY_NUDGE, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
     MAX_OUTPUT_TOKENS_RECOVERY_NUDGE, THINKING_ONLY_NUDGE,
@@ -4093,7 +4094,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // `self.streaming_api.last_retry_count()` at the billing site below.
             let api_call_started = std::time::Instant::now();
 
-            let stream = self
+            // Either an open stream to pump, or a turn already RECOVERED from a
+            // connect-phase prompt-too-long (#1, see the ContextOverflow arm).
+            enum OpenOutcome {
+                Stream(futures::stream::BoxStream<'static, Result<LlmEvent, LlmError>>),
+                Recovered(crate::streaming_loop::PumpedTurn),
+            }
+
+            let opened = match self
                 .streaming_api
                 .stream(
                     &model,
@@ -4103,7 +4111,125 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     wire_tools.clone(),
                 )
                 .await
-                .map_err(OrchestratorError::Streaming)?;
+            {
+                Ok(s) => OpenOutcome::Stream(s),
+                // #1 (main-loop parity): a connect-phase 413 / prompt-too-long
+                // surfaces HERE as `LlmError::ContextOverflow` — the adapter's
+                // `drive_stream` returns `Err` on connect status >= 400, so it
+                // never reaches the pump. The proactive blocking-limit preempt
+                // above undershot the server's own limit, so recover REACTIVELY
+                // via the SAME helper the batched path uses
+                // (`call_api_with_ptl_recovery`): truncate-head xN -> one full
+                // compact -> retry. On success we replay the recovered
+                // non-streaming response exactly like the 529 fallback below; on
+                // exhaustion we end the turn with the byte-exact prompt_too_long /
+                // rapid_refill copy — identical to the proactive preempt and the
+                // batched path. NOT gated on
+                // `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK` (that flag governs
+                // the 529 overload fallback; PTL recovery is the always-on batched
+                // behavior). Previously a streaming 413 bubbled as a hard
+                // `OrchestratorError::Streaming` error (documented divergence).
+                Err(LlmError::ContextOverflow { .. }) => {
+                    // Re-snapshot history — the per-turn `snapshot` was MOVED into
+                    // the failed `stream()` call. Prepend the additional-context
+                    // meta message, like every `callModel` (claude-code `A6n`).
+                    let (mut recov_snapshot, recov_model, recov_profile) = {
+                        let s = self.session.lock().await;
+                        (s.history.clone(), s.model.clone(), s.model_profile.clone())
+                    };
+                    if let Some(ctx_msg) = self.additional_context_message().await {
+                        recov_snapshot.insert(0, ctx_msg);
+                    }
+                    match call_api_with_ptl_recovery(
+                        self,
+                        system_prompt.as_deref(),
+                        &recov_model,
+                        recov_profile.as_deref(),
+                        recov_snapshot,
+                        wire_tools.clone(),
+                        None,
+                    )
+                    .await?
+                    {
+                        PtlCallOutcome::Response(resp) => {
+                            // Replay the recovered non-streaming response exactly
+                            // like the 529 fallback below: emit text live, rebuild
+                            // a fresh executor, register its tool_uses, and flow on
+                            // as the turn's `pumped` result.
+                            let pumped_from_recovery = llm_response_to_pumped_turn(&resp);
+                            for blk in &pumped_from_recovery.assistant_blocks {
+                                if let ContentBlock::Text { text } = blk {
+                                    self.output.emit_text(text).await;
+                                }
+                            }
+                            exec = match &user_cancel {
+                                Some(token) => {
+                                    crate::streaming_executor::StreamingToolExecutor::new_with_user_cancel(
+                                        self,
+                                        token.clone(),
+                                    )
+                                }
+                                None => crate::streaming_executor::StreamingToolExecutor::new(self),
+                            };
+                            for tu in &pumped_from_recovery.tool_uses {
+                                exec.add_tool(
+                                    tu.id.clone(),
+                                    tu.name.clone(),
+                                    tu.input.clone(),
+                                    tu.provider_id.clone(),
+                                    assistant_id,
+                                );
+                            }
+                            OpenOutcome::Recovered(pumped_from_recovery)
+                        }
+                        PtlCallOutcome::PromptTooLong => {
+                            // Recovery exhausted — end the turn EXACTLY like the
+                            // proactive blocking-limit preempt above.
+                            let id = surface_prompt_too_long(self).await;
+                            let _ = self
+                                .handle_stop_at_end(
+                                    "prompt_too_long",
+                                    &mut stop_hook_active,
+                                    turn_count,
+                                    id,
+                                )
+                                .await;
+                            if self
+                                .maybe_continue_for_budget(
+                                    budget.as_mut(),
+                                    &mut recovery,
+                                    global_turn_tokens,
+                                )
+                                .await
+                            {
+                                continue;
+                            }
+                            let cost = self.snapshot_cost_real().await;
+                            self.output.emit_end_turn("prompt_too_long", &cost).await;
+                            final_message_id = id;
+                            break;
+                        }
+                        PtlCallOutcome::RapidRefillBreaker => {
+                            // #54 reactive trip — surface the thrashing message and
+                            // end with `invalid_request`, mirroring the batched path.
+                            let id = surface_rapid_refill_thrashing(self).await;
+                            let _ = self
+                                .handle_stop_at_end(
+                                    "invalid_request",
+                                    &mut stop_hook_active,
+                                    turn_count,
+                                    id,
+                                )
+                                .await;
+                            let cost = self.snapshot_cost_real().await;
+                            self.output.emit_end_turn("invalid_request", &cost).await;
+                            final_message_id = id;
+                            break;
+                        }
+                    }
+                }
+                Err(other) => return Err(OrchestratorError::Streaming(other)),
+            };
 
             // 3. Pump the stream (with mid-stream 529 → non-streaming fallback).
             //
@@ -4128,7 +4254,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // `pumped_from_fallback.assistant_blocks` — not the discarded partial stream
             // fragments, which is correct: the partial stream never reached `content_block_stop`
             // for its text block, so no completed block was accumulated.
-            let pumped = match pump_stream_with_executor(
+            // #1: a connect-phase prompt-too-long already recovered above (its
+            // recovered non-streaming response was replayed) skips the pump; an
+            // open stream is pumped as before.
+            let pumped = match opened {
+                OpenOutcome::Recovered(pumped_from_recovery) => pumped_from_recovery,
+                OpenOutcome::Stream(stream) => match pump_stream_with_executor(
                 stream,
                 &self.output,
                 ExecutorPump {
@@ -4229,6 +4360,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     pumped_from_fallback
                 }
                 Err(other) => return Err(other),
+                },
             };
             // A3: accumulate this turn's output tokens (TS `getTurnOutputTokens()`).
             global_turn_tokens = global_turn_tokens.saturating_add(pumped.output_tokens);

@@ -216,3 +216,61 @@ async fn streaming_turn_injects_new_diagnostics_reminder() {
         "streaming turn must inject the new-diagnostics reminder (parity with batched); got: {first}"
     );
 }
+
+/// #1 (main-loop parity): a connect-phase prompt-too-long on the STREAMING path
+/// (the adapter returns `Err(ContextOverflow)` from `stream()`) must trigger the
+/// reactive PTL recovery — the SAME `call_api_with_ptl_recovery` helper the
+/// batched path uses — recovering via a non-streaming call, NOT bubbling a hard
+/// `OrchestratorError::Streaming` error (the prior documented divergence).
+#[tokio::test]
+async fn streaming_connect_413_recovers_via_reactive_ptl() {
+    use llm_client::LlmError;
+    // The stream OPEN returns a connect-phase 413/ContextOverflow once.
+    let streaming_mock = Arc::new(MockStreamingApiClient::with_open_error(
+        LlmError::ContextOverflow { token_gap: 100 },
+        Vec::new(),
+    ));
+    // Reactive recovery issues a batched messages_create that SUCCEEDS.
+    let batched_mock = Arc::new(MockApiClient::new(vec![batched_response("recovered")]));
+    let orch = ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig::default(),
+        batched_mock.clone(),
+        streaming_mock.clone(),
+        Arc::new(ToolRegistry::new()),
+        orchestrator::test_support::noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        PathBuf::from("/tmp"),
+    );
+    let outcome = orch
+        .run_turn_streaming("ping")
+        .await
+        .expect("streaming 413 must RECOVER, not surface a hard error");
+    match outcome {
+        ConversationOutcome::EndTurn { turn_count, .. } => assert_eq!(turn_count, 1),
+        other => panic!("expected EndTurn after recovery, got {other:?}"),
+    }
+    // One stream-open attempt; the recovery then used the batched API once.
+    assert_eq!(
+        streaming_mock.captured_calls().await.len(),
+        1,
+        "exactly one stream-open attempt"
+    );
+    assert_eq!(
+        batched_mock.captured_msgs().await.len(),
+        1,
+        "reactive recovery issued exactly one batched call"
+    );
+    // The recovered assistant text reached the session history.
+    let session = orch.session();
+    let s = session.lock().await;
+    let has_recovered = s.history.iter().any(|m| {
+        matches!(m, ConversationMessage::Assistant { content, .. }
+            if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == "recovered")))
+    });
+    assert!(
+        has_recovered,
+        "recovered assistant text must be appended to session history"
+    );
+}

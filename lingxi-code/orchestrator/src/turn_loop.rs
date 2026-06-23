@@ -853,7 +853,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
 /// `LlmResponse`, or a signal that the prompt-too-long reactive recovery
 /// (Batch 5) was exhausted and the turn should end with the byte-exact
 /// [`PROMPT_TOO_LONG_ERROR_MESSAGE`].
-enum PtlCallOutcome {
+pub(crate) enum PtlCallOutcome {
     /// The API call (or a retry after truncation/compaction) succeeded.
     Response(Box<LlmResponse>),
     /// The blocking-limit preempt fired, or the PTL retry budget +
@@ -901,7 +901,7 @@ enum PtlCallOutcome {
 /// call site, and the default window is the parity 200k. Documented divergence,
 /// not a frozen-surface change.
 #[allow(clippy::too_many_lines)]
-async fn call_api_with_ptl_recovery(
+pub(crate) async fn call_api_with_ptl_recovery(
     orch: &ConversationOrchestrator,
     system: Option<&str>,
     model: &str,

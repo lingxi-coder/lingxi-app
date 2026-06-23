@@ -49,6 +49,12 @@ pub struct CapturedStreamCall {
 pub struct MockStreamingApiClient {
     turns: Mutex<std::collections::VecDeque<Vec<Result<LlmEvent, LlmError>>>>,
     captured: Arc<Mutex<Vec<CapturedStreamCall>>>,
+    /// One-shot connect-phase error returned by the NEXT `stream()` call (then
+    /// cleared), so a test can mimic the real adapter returning `Err` from
+    /// `stream()` itself — e.g. a connect-phase 413/`ContextOverflow`, which the
+    /// real `drive_stream` surfaces by returning `Err` on status >= 400 rather
+    /// than as a stream event. `None` ⇒ normal scripted behavior.
+    open_error: Mutex<Option<LlmError>>,
 }
 
 impl MockStreamingApiClient {
@@ -69,6 +75,7 @@ impl MockStreamingApiClient {
         Self {
             turns: Mutex::new(mapped.into()),
             captured: Arc::new(Mutex::new(Vec::new())),
+            open_error: Mutex::new(None),
         }
     }
 
@@ -79,7 +86,19 @@ impl MockStreamingApiClient {
         Self {
             turns: Mutex::new(turns.into()),
             captured: Arc::new(Mutex::new(Vec::new())),
+            open_error: Mutex::new(None),
         }
+    }
+
+    /// Construct a mock whose FIRST `stream()` call returns `Err(err)` (the
+    /// connect-phase failure path, mimicking the real adapter's `drive_stream`
+    /// returning `Err` on a >= 400 connect response — e.g. a 413/PTL). The
+    /// remaining `turns` script serves any subsequent calls.
+    #[must_use]
+    pub fn with_open_error(err: LlmError, turns: Vec<Vec<LlmEvent>>) -> Self {
+        let mut me = Self::with_turns(turns);
+        me.open_error = Mutex::new(Some(err));
+        me
     }
 
     /// Snapshot the captured `stream` call args (one entry per call).
@@ -105,6 +124,10 @@ impl StreamingApiClient for MockStreamingApiClient {
             messages,
             tools,
         });
+        // One-shot connect-phase error (see `with_open_error`).
+        if let Some(e) = self.open_error.lock().await.take() {
+            return Err(e);
+        }
         let mut queue = self.turns.lock().await;
         let next = queue.pop_front().ok_or_else(|| LlmError::Transport {
             message: "streaming script exhausted".into(),

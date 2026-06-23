@@ -217,6 +217,18 @@ fn base_body(request: &LlmRequest) -> Result<serde_json::Map<String, Value>, Llm
         };
         body.insert("thinking".to_string(), thinking);
     }
+    if let Some(effort) = &request.effort {
+        // claude-code `output_config.effort` (the `effort-2025-11-24` beta): a
+        // level string or an integer budget, emitted verbatim. Merge into any
+        // `output_config` already set (e.g. by structured output).
+        if let Some(oc) = body
+            .entry("output_config".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+        {
+            oc.insert("effort".to_string(), effort.clone());
+        }
+    }
     Ok(body)
 }
 
@@ -707,4 +719,32 @@ fn u32_field(value: &Value, field: &str) -> Result<u32, LlmError> {
         .ok_or_else(|| LlmError::InvalidRequest {
             message: format!("Anthropic payload missing u32 field: {field}"),
         })
+}
+
+#[cfg(test)]
+mod effort_codec_tests {
+    use super::base_body;
+    use crate::LlmRequest;
+    use serde_json::json;
+
+    fn req_with_effort(effort: Option<serde_json::Value>) -> LlmRequest {
+        LlmRequest {
+            model: "claude-opus-4-8".into(),
+            effort,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn effort_emitted_as_output_config_effort() {
+        // A level string.
+        let body = base_body(&req_with_effort(Some(json!("high")))).unwrap();
+        assert_eq!(body["output_config"]["effort"], json!("high"));
+        // An integer budget passes through verbatim.
+        let body = base_body(&req_with_effort(Some(json!(8000)))).unwrap();
+        assert_eq!(body["output_config"]["effort"], json!(8000));
+        // Unset ⇒ no output_config from effort (zero effect on existing requests).
+        let body = base_body(&req_with_effort(None)).unwrap();
+        assert!(body.get("output_config").is_none());
+    }
 }

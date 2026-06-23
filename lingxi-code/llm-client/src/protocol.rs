@@ -79,6 +79,13 @@ pub struct LlmRequest {
     /// Optional reasoning/thinking budget request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningConfig>,
+    /// Optional per-request thinking-effort hint (claude-code `output_config.effort`):
+    /// a level (`"low"`/`"medium"`/`"high"`/`"xhigh"`/`"max"`) or an integer
+    /// budget. The Anthropic codec emits it as `output_config: { effort }` and
+    /// the caller adds the `effort-2025-11-24` beta header. `None` ⇒ omitted
+    /// (zero effect on every existing request).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<serde_json::Value>,
     /// Optional request metadata. Emitted by the Anthropic codec as the
     /// `metadata` object (claude-code `claude.ts:1699-1728` always sends it).
     #[serde(default, skip_serializing_if = "Option::is_none")]

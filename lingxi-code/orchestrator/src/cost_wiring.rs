@@ -11,28 +11,6 @@ use cost::usage::{ApiSpeed, ServerToolUsage, TokenUsage, Usage};
 use cost::ModelRef;
 use llm_client::Usage as LlmUsage;
 
-/// The default profile name used for bare / `claude-*` model strings.
-/// Mirrors `providers::model_spec::DEFAULT_PROFILE`.
-const DEFAULT_PROFILE: &str = "anthropic";
-
-/// Parse a model string into `(profile, bare_model)` for cost routing.
-///
-/// Replicates `providers::ModelSpec::parse` semantics:
-/// - `"claude-*"` → profile `"anthropic"`, model = full string (back-compat).
-/// - `"profile/model"` (non-empty both sides) → `(profile, model)`.
-/// - Everything else (bare string, no `/`) → `("anthropic", full string)`.
-fn split_profile(model: &str) -> (String, String) {
-    if model.starts_with("claude-") {
-        return (DEFAULT_PROFILE.to_string(), model.to_string());
-    }
-    match model.split_once('/') {
-        Some((profile, bare)) if !profile.is_empty() && !bare.is_empty() => {
-            (profile.to_string(), bare.to_string())
-        }
-        _ => (DEFAULT_PROFILE.to_string(), model.to_string()),
-    }
-}
-
 /// Translate an `llm_client::Usage` into the cost crate's `Usage` shape.
 ///
 /// Maps `billable_tokens.cache_write` → `TokenUsage::cache_write`
@@ -68,27 +46,18 @@ pub(crate) fn llm_usage_to_cost_usage(usage: &LlmUsage) -> Usage {
     }
 }
 
-/// Map a provider-profile name to its cost [`ProviderId`].
-///
-/// Mirrors the registry's choice: built-in `anthropic`/`openai`/`gemini` map
-/// to their first-party ids. The managed-cloud profiles map to the price
-/// table that applies: `bedrock` has its own (`AmazonBedrock`); `vertex`
-/// reuses Gemini list prices (Vertex *is* Gemini); `azure` reuses `OpenAI`
-/// list prices (wire-compatible). Any other (settings-declared) profile name
-/// is an `OpenAI`-compatible endpoint.
-#[must_use]
-fn provider_id_for_profile(profile: &str) -> ProviderId {
-    match profile {
-        "anthropic" => ProviderId::Anthropic,
-        // `azure` reuses OpenAI list prices (wire-compatible).
-        "openai" | "azure" => ProviderId::OpenAI,
-        // Vertex *is* Gemini — reuse the Gemini price table.
-        "gemini" | "vertex" => ProviderId::GoogleGemini,
-        // Bedrock has its own price table.
-        "bedrock" => ProviderId::AmazonBedrock,
-        other => ProviderId::OpenAICompatible {
-            name: other.to_string(),
+fn llm_provider_to_cost_provider(provider: &llm_client::ProviderId) -> ProviderId {
+    match provider {
+        llm_client::ProviderId::AnthropicFirstParty => ProviderId::Anthropic,
+        llm_client::ProviderId::OpenAI | llm_client::ProviderId::AzureOpenAI => ProviderId::OpenAI,
+        llm_client::ProviderId::Gemini
+        | llm_client::ProviderId::VertexGemini
+        | llm_client::ProviderId::VertexClaude => ProviderId::GoogleGemini,
+        llm_client::ProviderId::BedrockClaude => ProviderId::AmazonBedrock,
+        llm_client::ProviderId::OpenAICompatible { name } => ProviderId::OpenAICompatible {
+            name: name.clone(),
         },
+        llm_client::ProviderId::Custom { name } => ProviderId::Custom { name: name.clone() },
     }
 }
 
@@ -98,9 +67,15 @@ fn provider_id_for_profile(profile: &str) -> ProviderId {
 /// model id, so Anthropic cost attribution is byte-identical to before.
 #[must_use]
 pub(crate) fn model_ref_from_string(model: &str) -> ModelRef {
-    let (profile, bare) = split_profile(model);
+    let (profile, bare) = llm_client::split_profile_model(model);
+    let pricing_provider = llm_client::pricing_provider_id_for_profile(
+        &profile,
+        &llm_client::ProviderId::OpenAICompatible {
+            name: profile.clone(),
+        },
+    );
     ModelRef {
-        provider: provider_id_for_profile(&profile),
+        provider: llm_provider_to_cost_provider(&pricing_provider),
         model: bare,
     }
 }
@@ -174,22 +149,28 @@ mod tests {
     /// `provider/model` prefix. Only needed in tests — the production path goes
     /// through `model_ref_from_string`.
     fn provider_from_model(model: &str) -> ProviderId {
-        let (profile, _) = split_profile(model);
-        provider_id_for_profile(&profile)
+        let (profile, _) = llm_client::split_profile_model(model);
+        let llm_provider = llm_client::pricing_provider_id_for_profile(
+            &profile,
+            &llm_client::ProviderId::OpenAICompatible {
+                name: profile.clone(),
+            },
+        );
+        llm_provider_to_cost_provider(&llm_provider)
     }
 
-    // --- split_profile tests (ported from providers::model_spec::tests) -----
+    // --- split_profile_model tests (ported from providers::model_spec::tests) -----
 
     #[test]
     fn split_prefixed_splits_profile_and_model() {
-        let (p, m) = split_profile("openai/gpt-4o");
+        let (p, m) = llm_client::split_profile_model("openai/gpt-4o");
         assert_eq!(p, "openai");
         assert_eq!(m, "gpt-4o");
     }
 
     #[test]
     fn split_bare_string_is_anthropic_backcompat() {
-        let (p, m) = split_profile("claude-opus-4-7");
+        let (p, m) = llm_client::split_profile_model("claude-opus-4-7");
         assert_eq!(p, "anthropic");
         assert_eq!(m, "claude-opus-4-7");
     }
@@ -197,21 +178,21 @@ mod tests {
     #[test]
     fn split_claude_with_slash_stays_anthropic() {
         // A claude model id is never reinterpreted as profile/model.
-        let (p, m) = split_profile("claude-3-5/sonnet");
+        let (p, m) = llm_client::split_profile_model("claude-3-5/sonnet");
         assert_eq!(p, "anthropic");
         assert_eq!(m, "claude-3-5/sonnet");
     }
 
     #[test]
     fn split_non_claude_no_slash_is_anthropic_profile() {
-        let (p, m) = split_profile("some-model");
+        let (p, m) = llm_client::split_profile_model("some-model");
         assert_eq!(p, "anthropic");
         assert_eq!(m, "some-model");
     }
 
     #[test]
     fn split_custom_profile_name() {
-        let (p, m) = split_profile("groq/llama-3.3-70b");
+        let (p, m) = llm_client::split_profile_model("groq/llama-3.3-70b");
         assert_eq!(p, "groq");
         assert_eq!(m, "llama-3.3-70b");
     }

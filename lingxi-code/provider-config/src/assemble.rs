@@ -1,17 +1,13 @@
 //! Assemble the merged `ClientConfig` + pricing + chains + credential sources
 //! from Anthropic state + `settings.providers` + `settings.routing` (spec §5.3).
 
-use llm_client::{
-    AuthStrategy, ClientConfig, CredentialConfig, PricingConfig, ProtocolFamily, ProviderId,
-    ProviderProfile,
-};
+use llm_client::{AuthStrategy, ClientConfig, CredentialConfig, ProviderId, ProviderProfile};
 
 use crate::parse_providers::parse_user_providers;
 use crate::parse_routing::parse_routing;
 use crate::types::{AssembleInputs, Assembled, ChainEntry, CredentialKind, CredentialSource};
 
-/// Build the Anthropic provider profile from the 3-way auth state. Mirrors the
-/// engine `anthropic_profile` (`apps/engine-desktop/src/lib.rs:795`).
+/// Build the Anthropic provider profile from the 3-way auth state.
 fn anthropic_profile(inputs: &AssembleInputs) -> (ProviderProfile, Option<CredentialSource>) {
     let (auth, credential, cred_source) = if inputs.anthropic_has_api_key {
         (
@@ -45,21 +41,9 @@ fn anthropic_profile(inputs: &AssembleInputs) -> (ProviderProfile, Option<Creden
         (AuthStrategy::None, CredentialConfig::None, None)
     };
 
-    let profile = ProviderProfile {
-        provider_id: ProviderId::AnthropicFirstParty,
-        profile_name: "anthropic".to_string(),
-        base_url: inputs.anthropic_api_base.clone(),
-        protocol: ProtocolFamily::AnthropicMessages,
-        auth,
-        credential,
-        models: inputs.anthropic_models.clone(),
-        pricing: PricingConfig::default(),
-        signing: None,
-        azure: None,
-        supports_websockets: false,
-        supports_websocket_compression: false,
-        websocket_connect_timeout_ms: None,
-    };
+    let mut profile =
+        llm_client::anthropic_provider_profile(&inputs.anthropic_api_base, auth, credential);
+    profile.models = inputs.anthropic_models.clone();
     (profile, cred_source)
 }
 

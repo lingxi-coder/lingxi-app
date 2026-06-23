@@ -3685,6 +3685,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         use crate::streaming_loop::{pump_stream_with_executor, ExecutorPump};
         use protocol::ContentBlock;
 
+        // Startup Responses WebSocket prewarm is strictly opportunistic. A real
+        // user turn must never wait for an in-flight `generate=false` request to
+        // finish before it can open its own stream.
+        self.abort_startup_responses_websocket_prewarm();
+
         // 0. Build the system prompt for THIS turn. Override always wins.
         let system_prompt: Option<String> = match &self.config.system_prompt_override {
             Some(custom) => Some(custom.clone()),
@@ -5855,9 +5860,10 @@ mod turn_recovery_tests {
     use llm_client::ContentBlock as LlmContentBlock;
     use protocol::{HookId, HttpRequest, HttpResponse};
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
-    use tokio::sync::RwLock;
+    use tokio::sync::{Notify, RwLock};
     use traits::{HttpError, HttpTransport, OutputEvent, RuntimeError, RuntimeSpawner};
 
     async fn wait_for_prewarm_capture(
@@ -5871,6 +5877,81 @@ mod turn_recovery_tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         api.captured_prewarm().await
+    }
+
+    struct BlockingPrewarmApiClient {
+        active: Arc<AtomicBool>,
+        started: Notify,
+    }
+
+    impl BlockingPrewarmApiClient {
+        fn new() -> Self {
+            Self {
+                active: Arc::new(AtomicBool::new(false)),
+                started: Notify::new(),
+            }
+        }
+
+        async fn wait_started(&self) {
+            loop {
+                let notified = self.started.notified();
+                if self.active.load(Ordering::SeqCst) {
+                    return;
+                }
+                tokio::time::timeout(Duration::from_secs(1), notified)
+                    .await
+                    .expect("startup prewarm should start");
+            }
+        }
+
+        async fn wait_inactive(&self) {
+            for _ in 0..50 {
+                if !self.active.load(Ordering::SeqCst) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("startup prewarm should have been aborted");
+        }
+    }
+
+    struct ActivePrewarmGuard(Arc<AtomicBool>);
+
+    impl Drop for ActivePrewarmGuard {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl OrchestratorApiClient for BlockingPrewarmApiClient {
+        async fn messages_create(
+            &self,
+            _model: &str,
+            _profile: Option<&str>,
+            _system: Option<&str>,
+            _msgs: Vec<ConversationMessage>,
+            _tools: Vec<serde_json::Value>,
+        ) -> Result<LlmResponse, LlmError> {
+            Err(LlmError::Transport {
+                message: "blocking prewarm api does not serve messages_create".into(),
+            })
+        }
+
+        async fn prewarm_responses_websocket(
+            &self,
+            _model: &str,
+            _profile: Option<&str>,
+            _system: Option<&str>,
+            _messages: Vec<ConversationMessage>,
+            _tools: Vec<serde_json::Value>,
+        ) -> Result<(), LlmError> {
+            self.active.store(true, Ordering::SeqCst);
+            self.started.notify_waiters();
+            let _guard = ActivePrewarmGuard(self.active.clone());
+            std::future::pending::<()>().await;
+            Ok(())
+        }
     }
 
     // ---- unused HTTP / Runtime stubs (Builtin hooks never touch them) ----
@@ -6290,6 +6371,57 @@ mod turn_recovery_tests {
                 .as_deref()
                 .is_some_and(|system| !system.is_empty()),
             "startup prewarm must use the assembled system prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_turn_aborts_pending_startup_prewarm_before_opening_stream() {
+        let api = Arc::new(BlockingPrewarmApiClient::new());
+        let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
+            message_start("m", "claude-opus-4-7"),
+            content_block_start_text(0),
+            text_delta(0, "ok"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ]]));
+        let output = Arc::new(MockOutputStream::new());
+        let orch = Arc::new(ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            api.clone(),
+            streaming.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output,
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        ));
+
+        orch.spawn_startup_responses_websocket_prewarm();
+        api.wait_started().await;
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), orch.run_turn_streaming("go"))
+            .await
+            .expect("streaming turn must not wait for startup prewarm")
+            .expect("streaming turn completes");
+
+        assert!(
+            matches!(outcome, ConversationOutcome::EndTurn { .. }),
+            "{outcome:?}"
+        );
+        api.wait_inactive().await;
+        assert!(
+            orch.startup_responses_websocket_prewarm
+                .lock()
+                .expect("startup responses websocket prewarm")
+                .is_none(),
+            "turn start must clear the pending startup prewarm handle"
+        );
+        assert_eq!(
+            streaming.captured_calls().await.len(),
+            1,
+            "the real streaming turn should still open normally"
         );
     }
 

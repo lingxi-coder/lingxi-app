@@ -9,23 +9,19 @@ use llm_client::{ProviderId as LlmProviderId, ProviderProfile};
 use cost::pricing::ProviderId as CostProviderId;
 use cost::{ModelPricing, ModelRef, PricingCatalog};
 
-/// Map a profile name + its llm-client `ProviderId` to the cost `ProviderId`.
-/// Mirrors `orchestrator::cost_wiring::provider_id_for_profile`.
 fn cost_provider_id(profile_name: &str, provider_id: &LlmProviderId) -> CostProviderId {
-    match profile_name {
-        "anthropic" => CostProviderId::Anthropic,
-        "openai" | "azure" => CostProviderId::OpenAI,
-        "gemini" | "vertex" => CostProviderId::GoogleGemini,
-        "bedrock" => CostProviderId::AmazonBedrock,
-        _ => match provider_id {
-            LlmProviderId::AnthropicFirstParty => CostProviderId::Anthropic,
-            LlmProviderId::OpenAICompatible { name } | LlmProviderId::Custom { name } => {
-                CostProviderId::OpenAICompatible { name: name.clone() }
-            }
-            other => CostProviderId::OpenAICompatible {
-                name: format!("{other:?}"),
-            },
-        },
+    let pricing_provider =
+        llm_client::pricing_provider_id_for_profile(profile_name, provider_id);
+    match pricing_provider {
+        LlmProviderId::AnthropicFirstParty => CostProviderId::Anthropic,
+        LlmProviderId::OpenAI | LlmProviderId::AzureOpenAI => CostProviderId::OpenAI,
+        LlmProviderId::Gemini | LlmProviderId::VertexGemini | LlmProviderId::VertexClaude => {
+            CostProviderId::GoogleGemini
+        }
+        LlmProviderId::BedrockClaude => CostProviderId::AmazonBedrock,
+        LlmProviderId::OpenAICompatible { name } | LlmProviderId::Custom { name } => {
+            CostProviderId::OpenAICompatible { name }
+        }
     }
 }
 

@@ -66,9 +66,8 @@ pub struct RoutingOverrides {
 }
 
 use llm_client::{
-    AuthStrategy, AzureConfig, Capabilities, ClientConfig, CredentialConfig, LlmError,
-    ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, SigningConfig,
-    TokenPricing,
+    anthropic_provider_profile, parse_provider_profiles_strict, AuthStrategy, ClientConfig,
+    CredentialConfig, LlmError, ProviderCredentialMode, ProviderParseOptions,
 };
 
 /// Build the built-in Anthropic [`ClientConfig`] for [`llm_client::DefaultLlmClient`].
@@ -81,23 +80,6 @@ use llm_client::{
 /// deferred to Plan 3c; this profile covers the default Anthropic-only path.
 #[must_use]
 pub fn builtin_anthropic_config(api_base: &str, oauth_path: bool) -> ClientConfig {
-    fn model(display: &str, billing: &str, aliases: &[&str], reasoning: bool) -> ModelProfile {
-        ModelProfile {
-            display_model: display.to_string(),
-            request_model: display.to_string(),
-            billing_model: billing.to_string(),
-            aliases: aliases.iter().map(|s| (*s).to_string()).collect(),
-            capabilities: Capabilities {
-                streaming: true,
-                tools: true,
-                vision: true,
-                documents: true,
-                reasoning,
-                structured_output: false,
-            },
-        }
-    }
-
     let (auth, credential) = if oauth_path {
         (
             AuthStrategy::OAuthBearer,
@@ -115,72 +97,7 @@ pub fn builtin_anthropic_config(api_base: &str, oauth_path: bool) -> ClientConfi
     };
 
     ClientConfig {
-        providers: vec![ProviderProfile {
-            provider_id: ProviderId::AnthropicFirstParty,
-            profile_name: "anthropic".to_string(),
-            base_url: api_base.to_string(),
-            protocol: ProtocolFamily::AnthropicMessages,
-            auth,
-            credential,
-            pricing: PricingConfig::default(),
-            signing: None,
-            azure: None,
-            supports_websockets: false,
-            supports_websocket_compression: false,
-            websocket_connect_timeout_ms: None,
-            models: vec![
-                // — Claude Sonnet 4 (default engine model) —
-                model(
-                    "claude-sonnet-4-20250514",
-                    "claude-sonnet-4",
-                    &["claude-sonnet-4", "claude-sonnet", "claude"],
-                    true,
-                ),
-                // — Claude Sonnet 4.5 —
-                model(
-                    "claude-sonnet-4-5-20250929",
-                    "claude-sonnet-4-5",
-                    &["claude-sonnet-4-5"],
-                    true,
-                ),
-                // — Claude Sonnet 4.6 —
-                model("claude-sonnet-4-6", "claude-sonnet-4-6", &[], true),
-                // — Claude Opus 4 (Opus-fallback gate target) —
-                model(
-                    "claude-opus-4-20250514",
-                    "claude-opus-4",
-                    &["claude-opus-4", "claude-opus"],
-                    true,
-                ),
-                // — Claude Opus 4.1 —
-                model(
-                    "claude-opus-4-1-20250805",
-                    "claude-opus-4-1",
-                    &["claude-opus-4-1"],
-                    true,
-                ),
-                // — Claude Opus 4.5 —
-                model(
-                    "claude-opus-4-5-20251101",
-                    "claude-opus-4-5",
-                    &["claude-opus-4-5"],
-                    true,
-                ),
-                // — Claude Opus 4.6 —
-                model("claude-opus-4-6", "claude-opus-4-6", &[], true),
-                // — Claude Opus 4.7 (orchestrator DEFAULT_MODEL; orchestrator/src/config.rs:18) —
-                model("claude-opus-4-7", "claude-opus-4-7", &[], true),
-                // — Claude Haiku 4 —
-                model(
-                    "claude-haiku-4-20250307",
-                    "claude-haiku-4",
-                    &["claude-haiku-4", "claude-haiku"],
-                    true,
-                ),
-                // — Claude Haiku 4.5 —
-                model("claude-haiku-4-5", "claude-haiku-4-5", &[], true),
-            ],
-        }],
+        providers: vec![anthropic_provider_profile(api_base, auth, credential)],
     }
 }
 
@@ -239,554 +156,25 @@ pub fn apply_settings_providers(
     providers: &BTreeMap<String, serde_json::Value>,
     routing: Option<&serde_json::Value>,
 ) -> Result<(), LlmError> {
-    for (profile_name, entry) in providers {
-        apply_one_provider(cfg, profile_name, entry)?;
+    for profile_name in providers.keys() {
+        if cfg.providers.iter().any(|p| p.profile_name == *profile_name) {
+            return Err(LlmError::InvalidRequest {
+                message: format!("duplicate provider profile name: {profile_name:?}"),
+            });
+        }
     }
+
+    let parsed = parse_provider_profiles_strict(
+        providers,
+        ProviderParseOptions {
+            credential_mode: ProviderCredentialMode::Env,
+            models_required: true,
+        },
+    )?;
+    cfg.providers
+        .extend(parsed.into_iter().map(|parsed| parsed.profile));
     apply_routing_aliases(cfg, routing)?;
     Ok(())
-}
-
-/// Parse and append one settings provider entry to `cfg`.
-// Each provider type is a large self-contained arm; the line count is inherent.
-#[allow(clippy::too_many_lines)]
-fn apply_one_provider(
-    cfg: &mut ClientConfig,
-    profile_name: &str,
-    entry: &serde_json::Value,
-) -> Result<(), LlmError> {
-    // Duplicate check
-    if cfg.providers.iter().any(|p| p.profile_name == profile_name) {
-        return Err(LlmError::InvalidRequest {
-            message: format!("duplicate provider profile name: {profile_name:?}"),
-        });
-    }
-
-    let type_str = entry
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| LlmError::InvalidRequest {
-            message: format!("provider {profile_name:?}: missing or non-string \"type\""),
-        })?;
-
-    let (provider_id, protocol) = match type_str {
-        "openai" => (
-            ProviderId::OpenAICompatible {
-                name: profile_name.to_string(),
-            },
-            ProtocolFamily::OpenAiChat,
-        ),
-        // OpenAI Responses API (`POST {baseUrl}/responses`); same baseUrl /
-        // apiKeyEnv requirements and ApiKey (Bearer) auth as "openai".
-        "openai-responses" => (
-            ProviderId::OpenAICompatible {
-                name: profile_name.to_string(),
-            },
-            ProtocolFamily::OpenAiResponses,
-        ),
-        "anthropic" => (
-            ProviderId::AnthropicFirstParty,
-            ProtocolFamily::AnthropicMessages,
-        ),
-        "gemini" => (ProviderId::Gemini, ProtocolFamily::GeminiGenerateContent),
-        "azure-openai" => (
-            ProviderId::OpenAICompatible {
-                name: profile_name.to_string(),
-            },
-            ProtocolFamily::AzureOpenAi,
-        ),
-        "bedrock-claude" => (
-            ProviderId::OpenAICompatible {
-                name: profile_name.to_string(),
-            },
-            ProtocolFamily::BedrockClaude,
-        ),
-        // Vertex AI: Claude on Vertex (rawPredict/streamRawPredict SSE)
-        "vertex-claude" => (
-            ProviderId::OpenAICompatible {
-                name: profile_name.to_string(),
-            },
-            ProtocolFamily::VertexClaude,
-        ),
-        // Vertex AI: Gemini on Vertex (generateContent/streamGenerateContent SSE)
-        "vertex-gemini" => (
-            ProviderId::OpenAICompatible {
-                name: profile_name.to_string(),
-            },
-            ProtocolFamily::VertexGemini,
-        ),
-        other => {
-            return Err(LlmError::InvalidRequest {
-                message: format!(
-                    "provider {profile_name:?}: unknown type {other:?} (supported: openai, openai-responses, anthropic, gemini, azure-openai, bedrock-claude, vertex-claude, vertex-gemini)"
-                ),
-            });
-        }
-    };
-
-    // For bedrock-claude, `region` is required and `baseUrl` may be omitted
-    // (defaults to the Bedrock runtime endpoint for the region).
-    // For all other types, `baseUrl` is required.
-    let (base_url, bedrock_signing) = if type_str == "bedrock-claude" {
-        let region = entry
-            .get("region")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if region.is_empty() {
-            return Err(LlmError::InvalidRequest {
-                message: format!(
-                    "provider {profile_name:?}: \"region\" is required for bedrock-claude type"
-                ),
-            });
-        }
-        let base_url = entry
-            .get("baseUrl")
-            .and_then(serde_json::Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map_or_else(
-                || format!("https://bedrock-runtime.{region}.amazonaws.com"),
-                str::to_string,
-            );
-        let signing = SigningConfig {
-            region,
-            service: "bedrock".to_string(),
-        };
-        (base_url, Some(signing))
-    } else {
-        let base_url = entry
-            .get("baseUrl")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if base_url.is_empty() {
-            return Err(LlmError::InvalidRequest {
-                message: format!(
-                    "provider {profile_name:?}: \"baseUrl\" is required and must not be empty"
-                ),
-            });
-        }
-        (base_url, None)
-    };
-
-    // For bedrock-claude, apiKeyEnv is NOT required — SigV4 credentials are
-    // host-managed or loaded via StaticCredentialProvider (three-field AWS
-    // credentials cannot be expressed through a single environment variable).
-    // `CredentialConfig::HostManaged { id: "bedrock_sigv4" }` is used so that
-    // a StaticCredentialProvider (or host-managed store) can supply the three-
-    // field Credential::AwsSigV4 at request time.
-    // Credential errors (missing access key / secret / session token) surface
-    // at request time via LlmError::Authentication.
-    //
-    // For all other types, apiKeyEnv is required.
-    let credential_config = if type_str == "bedrock-claude" {
-        // Use HostManaged so the client's injected CredentialProvider is consulted.
-        CredentialConfig::HostManaged {
-            id: "bedrock_sigv4".to_string(),
-        }
-    } else {
-        let api_key_env = entry
-            .get("apiKeyEnv")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if api_key_env.is_empty() {
-            return Err(LlmError::InvalidRequest {
-                message: format!(
-                    "provider {profile_name:?}: \"apiKeyEnv\" is required and must not be empty"
-                ),
-            });
-        }
-        CredentialConfig::Env { var: api_key_env }
-    };
-
-    // For azure-openai, apiVersion is required.
-    let azure_config = if type_str == "azure-openai" {
-        let api_version = entry
-            .get("apiVersion")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if api_version.is_empty() {
-            return Err(LlmError::InvalidRequest {
-                message: format!(
-                    "provider {profile_name:?}: \"apiVersion\" is required for azure-openai type"
-                ),
-            });
-        }
-        Some(AzureConfig { api_version })
-    } else {
-        None
-    };
-
-    let supports_websockets = entry
-        .get("supportsWebsockets")
-        .map(|value| {
-            value.as_bool().ok_or_else(|| LlmError::InvalidRequest {
-                message: format!(
-                    "provider {profile_name:?}: \"supportsWebsockets\" must be a boolean"
-                ),
-            })
-        })
-        .transpose()?
-        .unwrap_or(false);
-    let supports_websocket_compression = entry
-        .get("supportsWebsocketCompression")
-        .map(|value| {
-            value.as_bool().ok_or_else(|| LlmError::InvalidRequest {
-                message: format!(
-                    "provider {profile_name:?}: \"supportsWebsocketCompression\" must be a boolean"
-                ),
-            })
-        })
-        .transpose()?
-        .unwrap_or(false);
-    let websocket_connect_timeout_ms = entry
-        .get("websocketConnectTimeoutMs")
-        .map(|value| {
-            value
-                .as_u64()
-                .ok_or_else(|| LlmError::InvalidRequest {
-                    message: format!(
-                        "provider {profile_name:?}: \"websocketConnectTimeoutMs\" must be an unsigned integer"
-                    ),
-                })
-        })
-        .transpose()?;
-
-    if supports_websockets && type_str == "bedrock-claude" {
-        return Err(LlmError::InvalidRequest {
-            message: format!(
-                "provider {profile_name:?}: supportsWebsockets is not supported for AWS SigV4/Bedrock providers"
-            ),
-        });
-    }
-    if supports_websockets && !matches!(protocol, ProtocolFamily::OpenAiResponses) {
-        return Err(LlmError::InvalidRequest {
-            message: format!(
-                "provider {profile_name:?}: supportsWebsockets is only valid for openai-responses providers"
-            ),
-        });
-    }
-    if supports_websocket_compression {
-        return Err(LlmError::InvalidRequest {
-            message: format!(
-                "provider {profile_name:?}: supportsWebsocketCompression is not supported by this build"
-            ),
-        });
-    }
-
-    // models is REQUIRED; absent or empty → error.
-    let models_val = entry
-        .get("models")
-        .ok_or_else(|| LlmError::InvalidRequest {
-            message: format!(
-                "provider {profile_name:?}: \"models\" is required (no auto-discovery)"
-            ),
-        })?;
-    let models_arr = models_val
-        .as_array()
-        .ok_or_else(|| LlmError::InvalidRequest {
-            message: format!("provider {profile_name:?}: \"models\" must be an array"),
-        })?;
-    if models_arr.is_empty() {
-        return Err(LlmError::InvalidRequest {
-            message: format!("provider {profile_name:?}: \"models\" must have at least one entry"),
-        });
-    }
-
-    let mut model_profiles = Vec::new();
-    for m in models_arr {
-        model_profiles.push(parse_model_entry(profile_name, m)?);
-    }
-
-    // Parse optional "pricing" block → per-model price overrides.
-    let pricing = if let Some(pricing_val) = entry.get("pricing") {
-        parse_pricing_overrides(profile_name, pricing_val, &model_profiles)?
-    } else {
-        PricingConfig::default()
-    };
-
-    // Auth strategy by type:
-    // - azure-openai: AzureToken (injects `api-key:` header rather than `Authorization: Bearer`)
-    // - bedrock-claude: AwsSigV4 (SigV4 request signing; credentials via StaticCredentialProvider)
-    // - vertex-claude / vertex-gemini: GcpToken (Bearer token; `apiKeyEnv` holds the bearer token
-    //   env var; `EnvCredentialProvider` loads it as `Credential::ApiKey(value)`, and the
-    //   `GcpToken` authenticate arm accepts both `ApiKey` and `BearerToken` via `load_secret`)
-    // - all others: standard ApiKey
-    let auth = if type_str == "azure-openai" {
-        AuthStrategy::AzureToken
-    } else if type_str == "bedrock-claude" {
-        AuthStrategy::AwsSigV4
-    } else if type_str == "vertex-claude" || type_str == "vertex-gemini" {
-        AuthStrategy::GcpToken
-    } else {
-        AuthStrategy::ApiKey
-    };
-
-    cfg.providers.push(ProviderProfile {
-        provider_id,
-        profile_name: profile_name.to_string(),
-        base_url,
-        protocol,
-        auth,
-        credential: credential_config,
-        models: model_profiles,
-        pricing,
-        signing: bedrock_signing,
-        azure: azure_config,
-        supports_websockets,
-        supports_websocket_compression,
-        websocket_connect_timeout_ms,
-    });
-    Ok(())
-}
-
-/// Parse a `providers.<name>.pricing` JSON object into [`PricingConfig::overrides`].
-///
-/// ## Settings shape
-///
-/// ```json
-/// "pricing": {
-///   "<model-id>": {
-///     "inputPerMtok": 1.5,
-///     "outputPerMtok": 6.0,
-///     "cacheWritePerMtok": 1.875,
-///     "cacheReadPerMtok": 0.15,
-///     "reasoningPerMtok": 6.0
-///   }
-/// }
-/// ```
-///
-/// `model-id` is the display model `id` from the `models` array (e.g.
-/// `"gpt-4o"` in `"models": [{"id": "gpt-4o"}]`).  Unknown model ids (not
-/// present in `model_profiles`) are rejected as config bugs.  Negative prices
-/// and non-number values are also rejected.  Unknown keys inside a model's
-/// pricing object are rejected (strict — typos in field names could silently
-/// produce wrong pricing).
-///
-/// # Errors
-///
-/// Returns [`LlmError::InvalidRequest`] for any of the above violations.
-fn parse_pricing_overrides(
-    profile_name: &str,
-    pricing_val: &serde_json::Value,
-    model_profiles: &[ModelProfile],
-) -> Result<PricingConfig, LlmError> {
-    const KNOWN_PRICING_KEYS: &[&str] = &[
-        "inputPerMtok",
-        "outputPerMtok",
-        "cacheWritePerMtok",
-        "cacheReadPerMtok",
-        "reasoningPerMtok",
-    ];
-
-    let pricing_obj = pricing_val
-        .as_object()
-        .ok_or_else(|| LlmError::InvalidRequest {
-            message: format!(
-                "provider {profile_name:?}: \"pricing\" must be an object (got {})",
-                match pricing_val {
-                    serde_json::Value::Array(_) => "array",
-                    serde_json::Value::Bool(_) => "bool",
-                    serde_json::Value::Number(_) => "number",
-                    serde_json::Value::String(_) => "string",
-                    serde_json::Value::Null => "null",
-                    serde_json::Value::Object(_) => "object",
-                }
-            ),
-        })?;
-
-    let mut overrides = Vec::new();
-
-    for (model_id, model_pricing_val) in pricing_obj {
-        // Verify the model id is known in this profile's models list.
-        let is_known = model_profiles.iter().any(|m| m.display_model == *model_id);
-        if !is_known {
-            return Err(LlmError::InvalidRequest {
-                message: format!(
-                    "provider {profile_name:?}: pricing key {model_id:?} is not in the models list — add the model first or remove the override"
-                ),
-            });
-        }
-
-        let model_pricing_obj =
-            model_pricing_val
-                .as_object()
-                .ok_or_else(|| LlmError::InvalidRequest {
-                    message: format!(
-                        "provider {profile_name:?}: pricing[{model_id:?}] must be an object"
-                    ),
-                })?;
-
-        // Validate: no unknown keys.
-        for key in model_pricing_obj.keys() {
-            if !KNOWN_PRICING_KEYS.contains(&key.as_str()) {
-                return Err(LlmError::InvalidRequest {
-                    message: format!(
-                        "provider {profile_name:?}: pricing[{model_id:?}] unknown key {key:?} (known: inputPerMtok, outputPerMtok, cacheWritePerMtok, cacheReadPerMtok, reasoningPerMtok)"
-                    ),
-                });
-            }
-        }
-
-        // Parse required fields.
-        let input_per_million = parse_price_field(
-            profile_name,
-            model_id,
-            model_pricing_obj,
-            "inputPerMtok",
-            true,
-        )?
-        .unwrap_or(0.0);
-        let output_per_million = parse_price_field(
-            profile_name,
-            model_id,
-            model_pricing_obj,
-            "outputPerMtok",
-            true,
-        )?
-        .unwrap_or(0.0);
-        let cache_write_per_million = parse_price_field(
-            profile_name,
-            model_id,
-            model_pricing_obj,
-            "cacheWritePerMtok",
-            false,
-        )?
-        .unwrap_or(0.0);
-        let cache_read_per_million = parse_price_field(
-            profile_name,
-            model_id,
-            model_pricing_obj,
-            "cacheReadPerMtok",
-            false,
-        )?
-        .unwrap_or(0.0);
-        let reasoning_per_million = parse_price_field(
-            profile_name,
-            model_id,
-            model_pricing_obj,
-            "reasoningPerMtok",
-            false,
-        )?
-        .unwrap_or(0.0);
-
-        let pricing = TokenPricing {
-            input_per_million,
-            output_per_million,
-            cache_write_per_million,
-            cache_read_per_million,
-            reasoning_per_million,
-        };
-        overrides.push((model_id.clone(), pricing));
-    }
-
-    Ok(PricingConfig {
-        require_priced: false,
-        overrides,
-    })
-}
-
-/// Parse and validate one price field from a model's pricing object.
-///
-/// Returns `Ok(None)` when `required = false` and the key is absent;
-/// `Ok(Some(v))` when present and valid; `Err` on missing-required, non-number,
-/// or negative.
-fn parse_price_field(
-    profile_name: &str,
-    model_id: &str,
-    obj: &serde_json::Map<String, serde_json::Value>,
-    key: &str,
-    required: bool,
-) -> Result<Option<f64>, LlmError> {
-    match obj.get(key) {
-        None if required => Err(LlmError::InvalidRequest {
-            message: format!(
-                "provider {profile_name:?}: pricing[{model_id:?}] missing required field {key:?}"
-            ),
-        }),
-        None => Ok(None),
-        Some(val) => {
-            let v = val.as_f64().ok_or_else(|| LlmError::InvalidRequest {
-                message: format!(
-                    "provider {profile_name:?}: pricing[{model_id:?}].{key} must be a number, got {val}"
-                ),
-            })?;
-            if v < 0.0 {
-                return Err(LlmError::InvalidRequest {
-                    message: format!(
-                        "provider {profile_name:?}: pricing[{model_id:?}].{key} must be >= 0 (got {v})"
-                    ),
-                });
-            }
-            Ok(Some(v))
-        }
-    }
-}
-
-/// Parse one `models[n]` entry from the settings JSON into a [`ModelProfile`].
-fn parse_model_entry(profile_name: &str, m: &serde_json::Value) -> Result<ModelProfile, LlmError> {
-    let id = m
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| LlmError::InvalidRequest {
-            message: format!("provider {profile_name:?}: each model entry must have an \"id\""),
-        })?
-        .to_string();
-
-    let aliases: Vec<String> = m
-        .get("aliases")
-        .and_then(serde_json::Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|a| a.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let caps = parse_capabilities(m.get("capabilities"));
-
-    Ok(ModelProfile {
-        display_model: id.clone(),
-        request_model: id.clone(),
-        billing_model: id,
-        aliases,
-        capabilities: caps,
-    })
-}
-
-/// Parse a `capabilities` JSON object into a [`Capabilities`] value.
-///
-/// When the object is absent, returns sensible defaults: streaming + tools
-/// enabled; vision, documents, reasoning, and structured-output disabled.
-fn parse_capabilities(caps_val: Option<&serde_json::Value>) -> Capabilities {
-    let Some(caps_val) = caps_val else {
-        // Default: streaming + tools, no vision/documents/reasoning/structured_output.
-        return Capabilities {
-            streaming: true,
-            tools: true,
-            vision: false,
-            documents: false,
-            reasoning: false,
-            structured_output: false,
-        };
-    };
-
-    let flag = |key: &str, default: bool| -> bool {
-        caps_val
-            .get(key)
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(default)
-    };
-
-    Capabilities {
-        streaming: flag("streaming", true),
-        tools: flag("tools", true),
-        vision: flag("vision", false),
-        documents: flag("documents", false),
-        reasoning: flag("reasoning", false),
-        structured_output: flag("structuredOutput", false),
-    }
 }
 
 /// Resolve a display model from `cfg` using the `profile/model` target string.
@@ -1011,7 +399,9 @@ fn apply_routing_aliases(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_client::{DefaultLlmClient, LlmError};
+    use llm_client::{
+        DefaultLlmClient, LlmError, PricingConfig, ProtocolFamily, ProviderId,
+    };
 
     /// Build a test config with `AuthStrategy::None` + `CredentialConfig::None`
     /// so `prepare()` never attempts a credential lookup (no env var needed).
@@ -2933,6 +2323,7 @@ mod tests {
         );
         assert_eq!(by_name("azure-api").protocol, ProtocolFamily::AzureOpenAi);
         assert_eq!(by_name("azure-api").auth, AuthStrategy::AzureToken);
+        assert_eq!(by_name("azure-api").provider_id, ProviderId::AzureOpenAI);
         assert_eq!(
             by_name("azure-api")
                 .azure
@@ -2945,6 +2336,7 @@ mod tests {
             ProtocolFamily::BedrockClaude
         );
         assert_eq!(by_name("bedrock-api").auth, AuthStrategy::AwsSigV4);
+        assert_eq!(by_name("bedrock-api").provider_id, ProviderId::BedrockClaude);
         assert_eq!(
             by_name("bedrock-api")
                 .signing
@@ -2958,9 +2350,17 @@ mod tests {
         );
         assert_eq!(by_name("vertex-claude-api").auth, AuthStrategy::GcpToken);
         assert_eq!(
+            by_name("vertex-claude-api").provider_id,
+            ProviderId::VertexClaude
+        );
+        assert_eq!(
             by_name("vertex-gemini-api").protocol,
             ProtocolFamily::VertexGemini
         );
         assert_eq!(by_name("vertex-gemini-api").auth, AuthStrategy::GcpToken);
+        assert_eq!(
+            by_name("vertex-gemini-api").provider_id,
+            ProviderId::VertexGemini
+        );
     }
 }

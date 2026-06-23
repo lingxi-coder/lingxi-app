@@ -18,6 +18,7 @@ pub mod credentials;
 pub mod error;
 pub mod eventstream;
 pub mod protocol;
+pub mod provider_settings;
 #[allow(missing_docs)]
 pub mod providers;
 pub mod redaction;
@@ -58,6 +59,11 @@ pub use protocol::{
     ProviderResponse, ProviderStreamTransport, RawStreamFrame, ReasoningConfig, RequestMetadata,
     ResponseFormat, StopDetails, StreamDecoder, StreamFraming, SystemBlock, ToolChoice,
     ToolDeclaration, WireCodec,
+};
+pub use provider_settings::{
+    anthropic_model_profiles, anthropic_provider_profile, parse_provider_profiles_lenient,
+    parse_provider_profiles_strict, pricing_provider_id_for_profile, split_profile_model,
+    ParsedUserProvider, ProviderCredentialMode, ProviderKind, ProviderParseOptions,
 };
 pub use providers::{
     AnthropicMessagesCodec, AzureOpenAiCodec, BedrockClaudeCodec, GeminiCodec, GeminiFile,

@@ -10,8 +10,8 @@
 //! 4. `run_device_code_login` orchestrates steps 1-3, then hands off to
 //!    `OpenAiOAuthClient::exchange_code_with_redirect` and returns tokens.
 
-use crate::client::{OAuthError, OpenAiOAuthClient};
-use crate::config::OpenAiOAuthConfig;
+use crate::oauth::openai::client::{OAuthError, OpenAiOAuthClient};
+use crate::oauth::openai::config::OpenAiOAuthConfig;
 use protocol::{HttpMethod, HttpRequest};
 use serde::{de, Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
@@ -206,7 +206,7 @@ pub async fn run_device_code_login(
     cfg: OpenAiOAuthConfig,
     http: Arc<dyn HttpTransport>,
     clock: Arc<dyn Clock>,
-) -> Result<crate::client::ExchangedTokens, OAuthError> {
+) -> Result<crate::oauth::openai::client::ExchangedTokens, OAuthError> {
     let uc = request_device_code(&cfg, http.clone()).await?;
     let interval = Duration::from_secs(if uc.interval == 0 {
         DEFAULT_INTERVAL_SECS
@@ -253,7 +253,7 @@ pub async fn run_device_code_login(
 #[cfg(test)]
 mod device_code_tests {
     use super::*;
-    use crate::testsupport::{Canned, MockHttp, TestClock};
+    use crate::oauth::openai::testsupport::{Canned, MockHttp, TestClock};
 
     // -----------------------------------------------------------------------
     // request_device_code

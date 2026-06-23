@@ -9,13 +9,13 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use llm_client::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
+use crate::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
 use protocol::{HttpMethod, HttpRequest};
 use serde::Deserialize;
 use traits::HttpTransport;
 
-use crate::client::OAuthError;
-use crate::config::OpenAiOAuthConfig;
+use crate::oauth::openai::client::OAuthError;
+use crate::oauth::openai::config::OpenAiOAuthConfig;
 
 /// Account metadata resolved from the PAT `whoami` call.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -125,7 +125,7 @@ impl CredentialProvider for PatCredentialProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testsupport::{Canned, MockHttp};
+    use crate::oauth::openai::testsupport::{Canned, MockHttp};
 
     fn cfg() -> OpenAiOAuthConfig {
         OpenAiOAuthConfig::default()
@@ -162,7 +162,7 @@ mod tests {
             PatMetadata { account_id: Some("acc_7".into()), fedramp: false, ..Default::default() },
         );
         let scope = CredentialScope::new(
-            llm_client::ProviderId::OpenAICompatible { name: "openai-chatgpt".into() },
+            crate::ProviderId::OpenAICompatible { name: "openai-chatgpt".into() },
             "openai-chatgpt",
         );
         let got = p.load(&scope).await.expect("load");

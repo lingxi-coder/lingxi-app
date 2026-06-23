@@ -21,8 +21,8 @@
 //! tier we *have* and conservatively treat an absent / ambiguous tier as
 //! non-enterprise and non-subscriber.
 
-use crate::limits::{ClaudeAiLimitsState, SubscriptionType};
-use crate::profile::OAuthProfileResponse;
+use crate::oauth::anthropic::limits::{ClaudeAiLimitsState, SubscriptionType};
+use crate::oauth::anthropic::profile::OAuthProfileResponse;
 
 /// `CLAUDE_AI_INFERENCE_SCOPE` — `constants/oauth.ts:33`. Locked byte-for-byte.
 /// Presence of this scope is what distinguishes a real Claude.ai login token
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn apply_profile_populates_tier() {
         let profile = OAuthProfileResponse {
-            organization: Some(crate::profile::OAuthOrganization {
+            organization: Some(crate::oauth::anthropic::profile::OAuthOrganization {
                 organization_type: Some("claude_team".into()),
                 ..Default::default()
             }),
@@ -207,7 +207,7 @@ mod tests {
             ..Default::default()
         };
         let unknown = OAuthProfileResponse {
-            organization: Some(crate::profile::OAuthOrganization {
+            organization: Some(crate::oauth::anthropic::profile::OAuthOrganization {
                 organization_type: Some("claude_galaxy".into()),
                 ..Default::default()
             }),

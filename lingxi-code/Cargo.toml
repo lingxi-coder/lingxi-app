@@ -70,8 +70,6 @@ members = [
     "lsp",
     "telemetry",
     "telemetry-macros",
-    "anthropic-oauth",
-    "openai-oauth",
     "bridge",
     "plugin",
     "apps/ios-framework",
@@ -164,8 +162,6 @@ default-members = [
     "lsp",
     "telemetry",
     "telemetry-macros",
-    "anthropic-oauth",
-    "openai-oauth",
     "bridge",
     "plugin",
     "apps/ios-framework",
@@ -243,7 +239,7 @@ tokio-stream = "0.1"
 unsafe_code = "deny"
 missing_docs = "warn"
 # `cfg(loom)` is a custom cfg name set via `RUSTFLAGS="--cfg loom"` for the
-# loom model-checker tests (e.g. `anthropic-oauth/tests/refresh_single_flight_test.rs`).
+# loom model-checker tests (e.g. `llm-client/tests/refresh_single_flight_test.rs`).
 # Declare it so rustc's `unexpected_cfgs` lint doesn't fire under `-D warnings`.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 

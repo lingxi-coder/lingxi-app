@@ -213,7 +213,7 @@ mod tests {
     /// Delegates to the shared guard in `testsupport` so handle tests and
     /// callback tests can't collide with each other.
     async fn port_guard() -> tokio::sync::MutexGuard<'static, ()> {
-        crate::testsupport::port_guard().await
+        crate::oauth::openai::testsupport::port_guard().await
     }
 
     async fn send_get(port: u16, path_and_query: &str) -> String {

@@ -1,7 +1,7 @@
 //! Spec §5 §5: `OAuthError` must extend with `RefreshExpired` / `ScopeRejected` /
 //! `ProactiveFailed`. Display strings are byte-locked.
 
-use anthropic_oauth::OAuthError;
+use llm_client::oauth::anthropic::OAuthError;
 
 #[test]
 fn refresh_expired_display_is_byte_locked() {

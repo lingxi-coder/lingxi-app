@@ -30,9 +30,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anthropic_oauth::client::ClaudeAiOAuthClient;
-use anthropic_oauth::config::ClaudeAiOAuthConfig;
-use anthropic_oauth::handle::OAuthHandle;
+use llm_client::oauth::anthropic::client::ClaudeAiOAuthClient;
+use llm_client::oauth::anthropic::config::ClaudeAiOAuthConfig;
+use llm_client::oauth::anthropic::handle::OAuthHandle;
 use async_trait::async_trait;
 use client_adapter::{
     AdapterOutputStream, AdapterPermissionGate, ClientEventListener, ListenerSink,

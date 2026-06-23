@@ -1,4 +1,4 @@
-//! `llm_client::CredentialProvider` over the `OpenAI` OAuth refresh machinery.
+//! `crate::CredentialProvider` over the `OpenAI` OAuth refresh machinery.
 //!
 //! [`OpenAiOAuthCredentialProvider`] serves the current OAuth access token,
 //! refreshing in place (single-flight via the underlying `refresh_lock`)
@@ -12,9 +12,9 @@
 use std::fmt;
 use std::sync::Arc;
 
-use llm_client::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
+use crate::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
 
-use crate::refresh::RefreshDriver;
+use crate::oauth::openai::refresh::RefreshDriver;
 
 /// Serves the current `OpenAI` OAuth access token, refreshing in place when expired
 /// (single-flight via the underlying refresh lock).
@@ -90,9 +90,9 @@ impl CredentialProvider for OpenAiOAuthCredentialProvider {
 #[cfg(test)]
 mod credential_provider_tests {
     use super::*;
-    use crate::config::OpenAiOAuthConfig;
-    use crate::refresh::AuthState;
-    use crate::testsupport::{Canned, MockHttp, TestClock};
+    use crate::oauth::openai::config::OpenAiOAuthConfig;
+    use crate::oauth::openai::refresh::AuthState;
+    use crate::oauth::openai::testsupport::{Canned, MockHttp, TestClock};
     use protocol::Secret;
     use std::time::{Duration, SystemTime};
 
@@ -117,7 +117,7 @@ mod credential_provider_tests {
         let driver = Arc::new(RefreshDriver::new(state));
         let provider = OpenAiOAuthCredentialProvider::new(driver);
 
-        let scope = CredentialScope::new(llm_client::ProviderId::OpenAI, "default");
+        let scope = CredentialScope::new(crate::ProviderId::OpenAI, "default");
         let cred = provider.load(&scope).await.expect("load ok");
         match cred {
             Credential::ChatGptOAuth { access_token, account_id, fedramp } => {
@@ -155,7 +155,7 @@ mod credential_provider_tests {
         let driver = Arc::new(RefreshDriver::new(state));
         let provider = OpenAiOAuthCredentialProvider::new(driver);
 
-        let scope = CredentialScope::new(llm_client::ProviderId::OpenAI, "default");
+        let scope = CredentialScope::new(crate::ProviderId::OpenAI, "default");
         let cred = provider.load(&scope).await.expect("load ok");
         match cred {
             Credential::ChatGptOAuth { access_token, .. } => {
@@ -191,7 +191,7 @@ mod credential_provider_tests {
         let driver = Arc::new(RefreshDriver::new(state));
         let provider = OpenAiOAuthCredentialProvider::new(driver);
 
-        let scope = CredentialScope::new(llm_client::ProviderId::OpenAI, "default");
+        let scope = CredentialScope::new(crate::ProviderId::OpenAI, "default");
         let err = provider.load(&scope).await.expect_err("should fail");
         assert!(matches!(err, LlmError::Authentication));
     }

@@ -5,8 +5,8 @@
 //! On failure: leave the existing `TokenInfo` untouched (the user isn't logged
 //! out — the next API call retries with the still-valid `refresh_token`).
 
-use crate::client::OAuthError;
-use crate::refresh::{AuthState, TokenInfo};
+use crate::oauth::anthropic::client::OAuthError;
+use crate::oauth::anthropic::refresh::{AuthState, TokenInfo};
 use async_trait::async_trait;
 use protocol::Secret;
 use serde::Deserialize;
@@ -69,7 +69,7 @@ pub trait PkceRunner: Send + Sync {
     /// `OAuthError` if the flow fails (e.g. user closed browser).
     async fn run_pkce(
         &self,
-        config: &crate::config::ClaudeAiOAuthConfig,
+        config: &crate::oauth::anthropic::config::ClaudeAiOAuthConfig,
         required_scopes: &[String],
     ) -> Result<PkceRunResult, OAuthError>;
 }
@@ -196,7 +196,7 @@ pub struct PkceFailingRunner;
 impl PkceRunner for PkceFailingRunner {
     async fn run_pkce(
         &self,
-        _config: &crate::config::ClaudeAiOAuthConfig,
+        _config: &crate::oauth::anthropic::config::ClaudeAiOAuthConfig,
         _required_scopes: &[String],
     ) -> Result<PkceRunResult, OAuthError> {
         Err(OAuthError::Callback("user closed browser".into()))
@@ -233,7 +233,7 @@ impl PkceFakeSuccessRunner {
 impl PkceRunner for PkceFakeSuccessRunner {
     async fn run_pkce(
         &self,
-        _config: &crate::config::ClaudeAiOAuthConfig,
+        _config: &crate::oauth::anthropic::config::ClaudeAiOAuthConfig,
         _required_scopes: &[String],
     ) -> Result<PkceRunResult, OAuthError> {
         Ok(PkceRunResult {

@@ -19,6 +19,7 @@ pub mod credentials;
 pub mod error;
 pub mod eventstream;
 pub mod model;
+pub mod oauth;
 pub mod protocol;
 pub mod provider_settings;
 #[allow(missing_docs)]

@@ -76,6 +76,50 @@ fn wf_throw(message: &str) -> String {
     format!("{WF_THROW_PREFIX}{message}")
 }
 
+/// Normalize the opts object for the resume chain-key (claude-code `ABp`).
+///
+/// The binary projects opts to ONLY `["schema","model","effort","isolation","agentType"]`
+/// (in that order; undefined/function values skipped) then `JSON.stringify` with a
+/// recursive key-sorter. In JSON there are no functions, so we skip null/absent.
+/// We build a `serde_json::Map` (which uses BTreeMap internally → sorted keys) from
+/// exactly those 5 keys, recursively sorting any nested objects via `sort_value`.
+///
+/// This means display-only fields like `phase`, `label`, `stallMs` are stripped,
+/// so annotating a call differently does NOT change the key and does NOT invalidate
+/// the cache on resume.
+fn normalize_opts_for_chain_key(opts: &Value) -> String {
+    const KEYS: &[&str] = &["schema", "model", "effort", "isolation", "agentType"];
+    let mut map = serde_json::Map::new();
+    if let Some(obj) = opts.as_object() {
+        for &k in KEYS {
+            if let Some(v) = obj.get(k) {
+                if !v.is_null() {
+                    map.insert(k.to_string(), sort_value(v.clone()));
+                }
+            }
+        }
+    }
+    serde_json::to_string(&Value::Object(map)).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Recursively sort object keys so the JSON representation is deterministic
+/// regardless of insertion order (mirrors the binary's `JSON.stringify` key-sorter).
+fn sort_value(v: Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            // Collect into a Vec, sort by key, then rebuild a Map (BTreeMap-backed → already sorted,
+            // but we sort explicitly to be clear about the ordering contract).
+            let mut pairs: Vec<(String, Value)> = map.into_iter().collect();
+            pairs.sort_by(|a, b| a.0.cmp(&b.0));
+            let sorted: serde_json::Map<String, Value> =
+                pairs.into_iter().map(|(k, cv)| (k, sort_value(cv))).collect();
+            Value::Object(sorted)
+        }
+        Value::Array(arr) => Value::Array(arr.into_iter().map(sort_value).collect()),
+        other => other,
+    }
+}
+
 /// The chained resume-cache key for an `agent(prompt, opts)` call (claude-code
 /// `qKa(se, te, m)`): a running hash that folds in the PREVIOUS key (`prev`), so
 /// any change in the preceding sequence of agent() calls cascades into every
@@ -587,7 +631,11 @@ pub async fn run_workflow_script(
             }
             // Advance the chained key for this real agent() call (before the
             // cache check, so cached calls also advance the chain — claude `m`).
-            let key = chain_key(&running_key, &prompt, &opts_json);
+            // Normalize opts to the 5 identity keys only (ABp): display-only
+            // fields like `phase`/`label`/`stallMs` are stripped so re-annotating
+            // a call doesn't invalidate the cache on resume.
+            let normalized_opts = normalize_opts_for_chain_key(&opts);
+            let key = chain_key(&running_key, &prompt, &normalized_opts);
             running_key.clone_from(&key);
             if !gone_live {
                 let cached = journal
@@ -1994,6 +2042,63 @@ mod tests {
         assert!(disallowed.contains(&"SendUserMessage".to_string()), "SendUserMessage must be disallowed: {disallowed:?}");
         assert!(disallowed.contains(&"Agent".to_string()), "Agent must be disallowed: {disallowed:?}");
         assert!(disallowed.contains(&"Workflow".to_string()), "Workflow must be disallowed: {disallowed:?}");
+    }
+
+    // ---- chain_key / normalize_opts_for_chain_key ---------------------------
+
+    /// Display-only opts (`phase`, `label`, `stallMs`) must NOT change the chain
+    /// key — they are stripped by `normalize_opts_for_chain_key` (ABp parity).
+    #[test]
+    fn chain_key_ignores_display_only_opts() {
+        let opts_a = r#"{"model":"claude-opus-4","phase":"research","label":"step1"}"#;
+        let opts_b = r#"{"model":"claude-opus-4","phase":"writing","label":"step2","stallMs":5000}"#;
+        let key_a = chain_key(
+            "",
+            "do something",
+            &normalize_opts_for_chain_key(&serde_json::from_str(opts_a).unwrap()),
+        );
+        let key_b = chain_key(
+            "",
+            "do something",
+            &normalize_opts_for_chain_key(&serde_json::from_str(opts_b).unwrap()),
+        );
+        assert_eq!(key_a, key_b, "display-only fields must not affect the chain key");
+    }
+
+    /// Changing `model` (an identity key) MUST produce a different chain key.
+    #[test]
+    fn chain_key_differs_on_model_change() {
+        let opts_a = r#"{"model":"claude-opus-4"}"#;
+        let opts_b = r#"{"model":"claude-sonnet-4"}"#;
+        let key_a = chain_key(
+            "",
+            "do something",
+            &normalize_opts_for_chain_key(&serde_json::from_str(opts_a).unwrap()),
+        );
+        let key_b = chain_key(
+            "",
+            "do something",
+            &normalize_opts_for_chain_key(&serde_json::from_str(opts_b).unwrap()),
+        );
+        assert_ne!(key_a, key_b, "different model must produce different chain key");
+    }
+
+    /// Key order in the raw opts JSON must NOT matter — normalization sorts keys.
+    #[test]
+    fn chain_key_stable_regardless_of_input_key_order() {
+        let opts_a = r#"{"model":"claude-opus-4","schema":{"type":"object"}}"#;
+        let opts_b = r#"{"schema":{"type":"object"},"model":"claude-opus-4"}"#;
+        let key_a = chain_key(
+            "",
+            "do something",
+            &normalize_opts_for_chain_key(&serde_json::from_str(opts_a).unwrap()),
+        );
+        let key_b = chain_key(
+            "",
+            "do something",
+            &normalize_opts_for_chain_key(&serde_json::from_str(opts_b).unwrap()),
+        );
+        assert_eq!(key_a, key_b, "key order in opts JSON must not affect the chain key");
     }
 
     /// Verify the concurrency cap formula: Math.min(16, Math.max(2, cpus-2)).

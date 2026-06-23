@@ -734,6 +734,11 @@ Usage notes:\n\
             // Thread the originating tool_use_id so the backgrounded agent's
             // `<task-notification>` carries `<tool-use-id>` (claude-code parity).
             tool_use_id: ctx.tool_use_id.as_ref().map(std::string::ToString::to_string),
+            // Workflow-only spawn seam (defaults; the Agent tool doesn't use the
+            // workflow-subagent prompt override/addendum or disallow-union).
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
         };
 
         match spawner.spawn_async(request, inherit).await {
@@ -1411,6 +1416,10 @@ Use /mcp to configure and authenticate the required MCP servers.",
             // Sync spawn: no background task / notification, so no tool_use_id
             // to stamp (only the async/background path threads it).
             tool_use_id: None,
+            // Workflow-only spawn seam (defaults; unused by the Agent tool).
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
         };
 
         let outcome = spawner.spawn(request, inherit).await;

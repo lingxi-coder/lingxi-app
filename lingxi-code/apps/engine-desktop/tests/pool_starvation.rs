@@ -220,6 +220,9 @@ fn agent_tool_request() -> SubagentSpawnRequest {
         effort: None,
         run_in_background: false,
         tool_use_id: None,
+        system_prompt_override: None,
+        system_prompt_addendum: None,
+        additional_disallowed_tools: Vec::new(),
     }
 }
 

@@ -83,8 +83,11 @@ fn wf_throw(message: &str) -> String {
 /// The binary projects opts to ONLY `["schema","model","effort","isolation","agentType"]`
 /// (in that order; undefined/function values skipped) then `JSON.stringify` with a
 /// recursive key-sorter. In JSON there are no functions, so we skip null/absent.
-/// We build a `serde_json::Map` (which uses BTreeMap internally → sorted keys) from
-/// exactly those 5 keys, recursively sorting any nested objects via `sort_value`.
+///
+/// IMPORTANT: `serde_json` is compiled with `preserve_order` (IndexMap-backed), so
+/// `serde_json::Map` preserves INSERTION order, NOT alphabetical order. The explicit
+/// sort in `sort_value` (and the fixed `KEYS`-slice iteration order for the outer map)
+/// is therefore REQUIRED for determinism — do not remove it.
 ///
 /// This means display-only fields like `phase`, `label`, `stallMs` are stripped,
 /// so annotating a call differently does NOT change the key and does NOT invalidate
@@ -106,11 +109,17 @@ fn normalize_opts_for_chain_key(opts: &Value) -> String {
 
 /// Recursively sort object keys so the JSON representation is deterministic
 /// regardless of insertion order (mirrors the binary's `JSON.stringify` key-sorter).
+///
+/// IMPORTANT: `serde_json` is compiled with `preserve_order` (IndexMap-backed), so
+/// `serde_json::Map` preserves INSERTION order, NOT alphabetical order. The explicit
+/// sort here is REQUIRED for determinism — do not remove it.
 fn sort_value(v: Value) -> Value {
     match v {
         Value::Object(map) => {
-            // Collect into a Vec, sort by key, then rebuild a Map (BTreeMap-backed → already sorted,
-            // but we sort explicitly to be clear about the ordering contract).
+            // Collect into a Vec, sort by key, then rebuild a Map. Since serde_json
+            // uses IndexMap with preserve_order, the sort is LOAD-BEARING — without
+            // it, insertion order would determine the JSON output, making chain keys
+            // non-deterministic across different construction paths.
             let mut pairs: Vec<(String, Value)> = map.into_iter().collect();
             pairs.sort_by(|a, b| a.0.cmp(&b.0));
             let sorted: serde_json::Map<String, Value> =
@@ -581,6 +590,12 @@ pub struct PhaseTelemetryCtx {
     pub workflow_source: Option<String>,
     /// `meta.name` from the workflow script.
     pub workflow_name: Option<String>,
+    /// How the workflow was invoked: `"scriptPath"` | `"named"` | `"inline"`.
+    ///
+    /// Oracle §7: `tengu_workflow_phase_completed` is gated on `p.source === "built-in"`,
+    /// which corresponds to named/saved workflows only (invocation_mode == `"named"`).
+    /// Inline scripts and arbitrary `scriptPath` invocations do NOT emit this event.
+    pub invocation_mode: Option<String>,
 }
 
 /// Run a workflow `script` to completion, spawning each `agent()` call as a real
@@ -735,6 +750,9 @@ pub async fn run_workflow_script(
             }
             // Extract and strip the phase context injected by the script engine
             // (`__wf_phase: {index, title}`) — display-only, not forwarded to spawner.
+            // This phase_index is 1-based (oracle §8: `workflow_phase` toolUseID uses `Q`
+            // which auto-increments from 1). Contrast with the `phase_index` field in
+            // `tengu_workflow_phase_completed` telemetry, which is 0-based (oracle §7).
             let (phase_index, phase_title) = if let Some(ph) = opts.as_object_mut().and_then(|o| o.remove("__wf_phase")) {
                 let idx = ph.get("index").and_then(Value::as_u64).map(|v| v as u32);
                 let title = ph.get("title").and_then(Value::as_str).map(str::to_string);
@@ -981,41 +999,62 @@ pub async fn run_workflow_script(
 
     // Emit `tengu_workflow_phase_completed` for each Phase in the outcome's
     // progress list (oracle §7 payload).
+    //
+    // Oracle §7 gating condition: `p.source === "built-in"` — this event is emitted
+    // ONLY for named/saved workflows (invocation_mode == "named"). Inline scripts and
+    // arbitrary scriptPath invocations do NOT emit this event. See oracle §7 for the
+    // exact binary gate site.
+    // invocation_mode values that trigger the emit: "named" only.
+    // invocation_mode values that suppress the emit: "inline", "scriptPath", and None.
+    //
     // Per-phase metric fields (`phase_tokens`, `phase_tool_calls`,
     // `phase_agent_duration_ms`, `phase_agent_count`, `phase_error_count`,
     // `phase_skip_count`) are UNAVAILABLE: LingXi's `Progress::Phase` only carries
     // a title; no numeric per-phase aggregation is performed. These fields are
     // omitted rather than emitted as 0 to avoid misleading consumers.
     {
-        let mut phase_idx: i64 = 0;
-        for p in &outcome.progress {
-            if let workflow::Progress::Phase { title, .. } = p {
-                let mut md: LogEventMetadata = HashMap::new();
-                if let Some(ref ctx) = phase_telemetry_ctx {
+        // Gate: only emit for named/saved workflows (p.source === "built-in" in oracle §7).
+        let is_named_source = phase_telemetry_ctx
+            .as_ref()
+            .and_then(|ctx| ctx.invocation_mode.as_deref())
+            .map(|mode| mode == "named")
+            .unwrap_or(false);
+
+        if is_named_source {
+            // phase_index is 0-based in telemetry (oracle §7: `U` starts at 0 and
+            // increments per emitted phase event). Note: Progress::Phase.index and
+            // the phaseIndex field on workflow_agent progress events are 1-based
+            // (oracle §8: `Q` auto-increments from 1 for workflow_phase events).
+            let mut phase_idx: i64 = 0;
+            for p in &outcome.progress {
+                if let workflow::Progress::Phase { title, .. } = p {
+                    let mut md: LogEventMetadata = HashMap::new();
+                    if let Some(ref ctx) = phase_telemetry_ctx {
+                        md.insert(
+                            "workflow_run_id".to_string(),
+                            AnalyticsValue::String(ctx.run_id.clone()),
+                        );
+                        if let Some(ref src) = ctx.workflow_source {
+                            md.insert(
+                                "workflow_source".to_string(),
+                                AnalyticsValue::String(src.clone()),
+                            );
+                        }
+                        if let Some(ref name) = ctx.workflow_name {
+                            md.insert(
+                                "workflow_name".to_string(),
+                                AnalyticsValue::String(name.clone()),
+                            );
+                        }
+                    }
+                    md.insert("phase_index".to_string(), AnalyticsValue::Int(phase_idx));
                     md.insert(
-                        "workflow_run_id".to_string(),
-                        AnalyticsValue::String(ctx.run_id.clone()),
+                        "phase_title".to_string(),
+                        AnalyticsValue::String(title.clone()),
                     );
-                    if let Some(ref src) = ctx.workflow_source {
-                        md.insert(
-                            "workflow_source".to_string(),
-                            AnalyticsValue::String(src.clone()),
-                        );
-                    }
-                    if let Some(ref name) = ctx.workflow_name {
-                        md.insert(
-                            "workflow_name".to_string(),
-                            AnalyticsValue::String(name.clone()),
-                        );
-                    }
+                    bus.log_event(telemetry::tengu::workflow::PHASE_COMPLETED, md).await;
+                    phase_idx += 1;
                 }
-                md.insert("phase_index".to_string(), AnalyticsValue::Int(phase_idx));
-                md.insert(
-                    "phase_title".to_string(),
-                    AnalyticsValue::String(title.clone()),
-                );
-                bus.log_event(telemetry::tengu::workflow::PHASE_COMPLETED, md).await;
-                phase_idx += 1;
             }
         }
     }
@@ -1298,11 +1337,13 @@ impl Task for LocalWorkflowHandler {
                 Some(shared_agent_count.clone()),
                 // Pass the phase telemetry context so run_workflow_script can
                 // emit tengu_workflow_phase_completed with the correct run_id,
-                // workflow_source, and workflow_name (oracle §7).
+                // workflow_source, workflow_name, and the invocation_mode gate
+                // (oracle §7: only "named" sources emit phase_completed).
                 Some(PhaseTelemetryCtx {
                     run_id: run_id.clone(),
                     workflow_source: workflow_source.clone(),
                     workflow_name: meta_name.clone(),
+                    invocation_mode: invocation_mode.clone(),
                 }),
             );
             let (outcome, ()) = tokio::join!(run, drain);
@@ -2598,9 +2639,10 @@ mod tests {
         );
     }
 
-    /// `tengu_workflow_phase_completed` fires once per `phase()` call.
+    /// `tengu_workflow_phase_completed` fires once per `phase()` call for a NAMED
+    /// (built-in source) workflow — oracle §7 gating condition.
     #[tokio::test]
-    async fn telemetry_phase_completed_fires_per_phase() {
+    async fn telemetry_phase_completed_fires_per_phase_for_named_workflow() {
         use telemetry::InMemorySink;
         let sink = Arc::new(InMemorySink::default());
         let bus = Arc::new(AnalyticsBus::new());
@@ -2622,7 +2664,14 @@ mod tests {
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             bus.clone(),
             None,
-            None,
+            // Pass a named invocation_mode — oracle §7: only "named" (built-in source)
+            // emits tengu_workflow_phase_completed.
+            Some(PhaseTelemetryCtx {
+                run_id: "wf_test".to_string(),
+                workflow_source: Some("my-workflow".to_string()),
+                workflow_name: Some("My Workflow".to_string()),
+                invocation_mode: Some("named".to_string()),
+            }),
         )
         .await
         .expect("runs");
@@ -2632,14 +2681,16 @@ mod tests {
             .iter()
             .filter(|e| e.name == telemetry::tengu::workflow::PHASE_COMPLETED)
             .collect();
-        assert_eq!(phase_events.len(), 2, "one event per phase(); got {phase_events:?}");
+        assert_eq!(phase_events.len(), 2, "one event per phase() for named workflow; got {phase_events:?}");
         assert!(
             matches!(phase_events[0].metadata.get("phase_title"), Some(AnalyticsValue::String(s)) if s == "Step 1"),
             "first phase title"
         );
+        // phase_index is 0-based in telemetry (oracle §7). Contrast with workflow_agent
+        // phaseIndex which is 1-based (oracle §8).
         assert!(
             matches!(phase_events[0].metadata.get("phase_index"), Some(AnalyticsValue::Int(0))),
-            "first phase index"
+            "first phase index (0-based in telemetry, oracle §7)"
         );
         assert!(
             matches!(phase_events[1].metadata.get("phase_title"), Some(AnalyticsValue::String(s)) if s == "Step 2"),
@@ -2647,7 +2698,135 @@ mod tests {
         );
         assert!(
             matches!(phase_events[1].metadata.get("phase_index"), Some(AnalyticsValue::Int(1))),
-            "second phase index"
+            "second phase index (0-based in telemetry, oracle §7)"
+        );
+    }
+
+    /// `tengu_workflow_phase_completed` does NOT fire for an INLINE script, even if
+    /// it calls `phase()` — oracle §7 gates this event on `p.source === "built-in"`
+    /// (invocation_mode == "named") only.
+    #[tokio::test]
+    async fn telemetry_phase_completed_suppressed_for_inline_workflow() {
+        use telemetry::InMemorySink;
+        let sink = Arc::new(InMemorySink::default());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+
+        let spawner = Arc::new(EchoSpawner::default());
+        run_workflow_script(
+            "phase('Step 1'); phase('Step 2'); return 'done';",
+            DEFAULT_WORKFLOW_SUBAGENT,
+            spawner,
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            None,
+            None,
+            None,
+            None,
+            0,
+            NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bus.clone(),
+            None,
+            // Inline invocation_mode: oracle §7 suppresses phase_completed for
+            // "inline" (and "scriptPath") — only "named" (built-in source) emits it.
+            Some(PhaseTelemetryCtx {
+                run_id: "wf_test_inline".to_string(),
+                workflow_source: Some("inline".to_string()),
+                workflow_name: None,
+                invocation_mode: Some("inline".to_string()),
+            }),
+        )
+        .await
+        .expect("runs");
+
+        let events = sink.events().await;
+        assert!(
+            !events.iter().any(|e| e.name == telemetry::tengu::workflow::PHASE_COMPLETED),
+            "tengu_workflow_phase_completed must NOT fire for inline workflows (oracle §7); events: {events:?}"
+        );
+    }
+
+    /// `tengu_workflow_phase_completed` does NOT fire for a `scriptPath` workflow,
+    /// even if it calls `phase()` — oracle §7 gates this on `p.source === "built-in"`
+    /// (invocation_mode == "named") only. scriptPath is not a saved/built-in source.
+    #[tokio::test]
+    async fn telemetry_phase_completed_suppressed_for_script_path_workflow() {
+        use telemetry::InMemorySink;
+        let sink = Arc::new(InMemorySink::default());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+
+        let spawner = Arc::new(EchoSpawner::default());
+        run_workflow_script(
+            "phase('Step A'); return 'done';",
+            DEFAULT_WORKFLOW_SUBAGENT,
+            spawner,
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            None,
+            None,
+            None,
+            None,
+            0,
+            NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bus.clone(),
+            None,
+            Some(PhaseTelemetryCtx {
+                run_id: "wf_test_scriptpath".to_string(),
+                workflow_source: Some("/path/to/workflow.js".to_string()),
+                workflow_name: None,
+                invocation_mode: Some("scriptPath".to_string()),
+            }),
+        )
+        .await
+        .expect("runs");
+
+        let events = sink.events().await;
+        assert!(
+            !events.iter().any(|e| e.name == telemetry::tengu::workflow::PHASE_COMPLETED),
+            "tengu_workflow_phase_completed must NOT fire for scriptPath workflows (oracle §7); events: {events:?}"
+        );
+    }
+
+    /// `tengu_workflow_phase_completed` does NOT fire when phase_telemetry_ctx is None
+    /// (the bridge-level path without full context — verifies gating predicate).
+    #[tokio::test]
+    async fn telemetry_phase_completed_suppressed_when_no_telemetry_ctx() {
+        use telemetry::InMemorySink;
+        let sink = Arc::new(InMemorySink::default());
+        let bus = Arc::new(AnalyticsBus::new());
+        bus.attach_sink(sink.clone()).await;
+
+        let spawner = Arc::new(EchoSpawner::default());
+        run_workflow_script(
+            "phase('Step 1'); return 'done';",
+            DEFAULT_WORKFLOW_SUBAGENT,
+            spawner,
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            None,
+            None,
+            None,
+            None,
+            0,
+            NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bus.clone(),
+            None,
+            // No PhaseTelemetryCtx → is_named_source = false → no phase_completed events.
+            // Note: run_bridge() / test helpers typically pass None here; this test
+            // documents that the gate also protects the None case (no ctx = not named).
+            None,
+        )
+        .await
+        .expect("runs");
+
+        let events = sink.events().await;
+        assert!(
+            !events.iter().any(|e| e.name == telemetry::tengu::workflow::PHASE_COMPLETED),
+            "tengu_workflow_phase_completed must NOT fire when phase_telemetry_ctx is None; events: {events:?}"
         );
     }
 

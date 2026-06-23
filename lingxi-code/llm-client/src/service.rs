@@ -1001,6 +1001,42 @@ impl ApiService {
         self.last_rate_limit.lock().unwrap().clone()
     }
 
+    /// The Anthropic `request-id` response header (`req_…`) of the most recently
+    /// recorded response. Backs the `OrchestratorApiClient::last_request_id`
+    /// trait override (used to stamp the persisted assistant line's top-level
+    /// `requestId`). `None` until the first recorded response.
+    #[must_use]
+    pub fn last_request_id(&self) -> Option<String> {
+        self.last_request_id.lock().unwrap().clone()
+    }
+
+    /// Number of budget-consuming retry attempts the most recent drive performed
+    /// before its terminal outcome. Backs the `last_retry_count` trait overrides
+    /// (both `OrchestratorApiClient` and `StreamingApiClient`). `0` until the
+    /// first drive.
+    #[must_use]
+    pub fn last_retry_count(&self) -> u32 {
+        *self.last_retry_count.lock().unwrap()
+    }
+
+    /// The most recently observed RAW per-window utilization snapshot. Backs the
+    /// `OrchestratorApiClient::last_raw_utilization` trait override. `None` until
+    /// the first recorded response.
+    #[must_use]
+    pub fn last_raw_utilization(&self) -> Option<RawUtilization> {
+        *self.last_raw_utilization.lock().unwrap()
+    }
+
+    /// The limits-specific copy composed from the most recent 429 **error**
+    /// response's unified headers. Backs the
+    /// `OrchestratorApiClient::last_rate_limit_error_message` trait override (the
+    /// orchestrator's terminal-429 re-map, claude-code `errors.ts:480-524`).
+    /// `None` when the 429 carried no unified headers.
+    #[must_use]
+    pub fn last_rate_limit_error_message(&self) -> Option<String> {
+        self.last_429_message.lock().unwrap().clone()
+    }
+
     /// Parse rate-limit headers from a 2xx response and update the cached snapshot.
     ///
     /// Emits a `tracing::warn!` when the overage status indicates the account is
@@ -1715,6 +1751,36 @@ impl ApiService {
                 .preconnect_responses_websocket(&model, profile.as_deref())
                 .await;
         });
+    }
+
+    /// Best-effort startup **prewarm** for OpenAI Responses WebSocket providers:
+    /// send the provided (empty-history) request with `generate=false` over the
+    /// session so the handshake + first round-trip are warm. Backs the
+    /// `OrchestratorApiClient::prewarm_responses_websocket` trait override.
+    pub async fn prewarm_responses_websocket(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Result<(), LlmError> {
+        let req = self.build_request(model, profile, system, messages, tools, true, None)?;
+        let mut prepared = self.client.prepare(&req).await?;
+        let request_id = new_request_id();
+        self.inject_stream_headers(&mut prepared, &request_id);
+        let mut session = self.responses_ws_session.lock().await;
+        self.client
+            .prewarm_prepared_websocket(prepared, self.transport.as_ref(), &mut session)
+            .await
+    }
+
+    /// Close any reusable Responses WebSocket session held by this service. Backs
+    /// the `OrchestratorApiClient::close_responses_websocket_session` trait
+    /// override.
+    pub async fn close_responses_websocket_session(&self) -> Result<(), LlmError> {
+        let mut session = self.responses_ws_session.lock().await;
+        session.close().await
     }
 
     // ── Stream drive (Step 2) ─────────────────────────────────────────────────

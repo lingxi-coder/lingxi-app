@@ -80,7 +80,7 @@ pub use redaction::Redactor;
 pub use registry::{ModelListing, ModelRegistry, ResolvedRoute};
 pub use retry::{ResponseMetadata, RetryDecision, RetryPolicy};
 pub use route::Route;
-pub use service::ApiService;
+pub use service::{ApiService, SubscriberState};
 pub use sse::SseFrameSplitter;
 pub use transport::{
     BoxFuture, FrameStream, ResponsesWebSocketTransportSession, StreamingResponse, Transport,

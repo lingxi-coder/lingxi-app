@@ -26,7 +26,7 @@
 //! active. (`ImageUrl` is decode-only on the inbound side.)
 
 use base64::Engine as _;
-use llm_client::{ContentBlock as LlmBlock, LlmError, Message, ToolDeclaration};
+use crate::{ContentBlock as LlmBlock, LlmError, Message, ToolDeclaration};
 use protocol::{ContentBlock as ProtoBlock, ConversationMessage, ImageSource, DocumentSource};
 use serde_json::Value;
 

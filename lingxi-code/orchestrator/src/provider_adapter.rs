@@ -17,7 +17,7 @@ use crate::model::retry::{
 };
 use crate::model::telemetry;
 use crate::model::user_agent::{user_agent, UserAgentEnv};
-use agent::convert::{
+use llm_client::convert::{
     ensure_tool_result_pairing, normalize_messages_for_api, to_llm_messages, to_tool_declarations,
 };
 use async_trait::async_trait;

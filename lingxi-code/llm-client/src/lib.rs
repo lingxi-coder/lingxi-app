@@ -12,11 +12,13 @@ pub mod catalog;
 #[allow(missing_docs)]
 pub mod client;
 pub mod config;
+pub mod convert;
 pub mod copilot;
 pub mod cost;
 pub mod credentials;
 pub mod error;
 pub mod eventstream;
+pub mod model;
 pub mod protocol;
 pub mod provider_settings;
 #[allow(missing_docs)]
@@ -28,7 +30,6 @@ pub mod retry;
 pub mod route;
 pub mod sigv4;
 pub mod sse;
-pub mod model;
 pub mod transport;
 pub mod transport_bridge;
 pub mod types;

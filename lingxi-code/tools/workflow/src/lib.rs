@@ -336,8 +336,8 @@ impl Tool for WorkflowTool {
                     )));
                 }
             }
-        } else if let Some(inline) = script {
-            resolved_script = inline;
+        } else if let Some(ref inline) = script {
+            resolved_script = inline.clone();
         } else if let Some(ref wf_name) = name {
             // Try to resolve from saved workflows (.claude/workflows/<name>{.js,.mjs,.ts,""}).
             let mut found: Option<String> = None;
@@ -378,10 +378,11 @@ impl Tool for WorkflowTool {
         }
 
         // errorCode 4 — determinism violation (inline script only)
-        // Binary: `e.script && HKa(r.scriptBody)`. We apply when scriptPath was
-        // NOT the source (inline `script` or name-resolved) to match the binary's
-        // `e.script` guard; file-sourced scripts skip this gate.
-        if script_path.is_none() {
+        // Binary: `e.script && HKa(r.scriptBody)`. `e.script` is the RAW INLINE
+        // `script` field from the input — it is falsy when `name` or `scriptPath`
+        // is used. Only inline `script` input is checked; `name`-resolved saved
+        // workflows and `scriptPath`-sourced files skip this gate.
+        if script.is_some() {
             if let Err(e) = workflow::check_determinism(&resolved_script) {
                 // The WorkflowError Display wraps the message; we want the raw
                 // NON_DETERMINISTIC_MESSAGE, which lives inside WorkflowError::Script.
@@ -650,6 +651,40 @@ mod tests {
             err.0,
             workflow::NON_DETERMINISTIC_MESSAGE,
             "errorCode 4 message must be byte-exact"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_name_resolved_date_now_passes_determinism_gate() {
+        // Binary parity: errorCode-4 is NOT triggered for `name`-resolved saved
+        // workflows even when the resolved body contains Date.now(). `e.script`
+        // (the raw inline field) is falsy, so the binary skips the determinism
+        // check. LingXi must do the same.
+        let t = tool(None);
+        let ctx = tool_api::test_support::fresh_ctx();
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+
+        // Write a non-deterministic saved workflow to .claude/workflows/.
+        let dir = std::path::Path::new(".claude/workflows");
+        std::fs::create_dir_all(dir).unwrap();
+        let wf_path = dir.join("nondet-wf.js");
+        let nondeterministic_src = concat!(
+            "export const meta = { name: 'nondet-wf', description: 'non-det saved' };\n",
+            "const t = Date.now();\n",
+            "await agent('do something');\n",
+        );
+        std::fs::write(&wf_path, nondeterministic_src).unwrap();
+
+        let result = t
+            .validate_input(&json!({ "name": "nondet-wf" }), &ctx)
+            .await;
+
+        // Clean up before asserting so we don't leave stray files.
+        let _ = std::fs::remove_file(&wf_path);
+
+        result.expect(
+            "name-resolved workflow with Date.now() must NOT be rejected for determinism",
         );
     }
 

@@ -957,10 +957,19 @@ pub(crate) enum PtlCallOutcome {
 ///    and retry once more. If that STILL returns `PromptTooLong`, return
 ///    `PromptTooLong` (the caller ends the turn).
 ///
-/// DIVERGENCE (documented in SPECS §"Non-byte-faithful divergences" #1): TS's
-/// `reactiveCompact.tryReactiveCompact` / `contextCollapse.recoverFromOverflow`
-/// multi-stage drain is absent from this checkout, so the fallback is the
-/// simpler "PTL-truncate ×N → one full compact → error" tail.
+/// DIVERGENCE (documented in SPECS §"Non-byte-faithful divergences" #1): this
+/// tail is the simpler "PTL-truncate ×N → one full compact → error" sequence.
+/// claude-code's fuller recovery is the `contextCollapse` subsystem — verified
+/// against the v2.1.186 binary (2026-06-23) to be a PERSISTED state machine, NOT
+/// a tail tweak: it journals `contextCollapseSnapshot` + `contextCollapseCommits`
+/// into the session JSONL (read/written across ~10 session load/save/fork
+/// functions), records `recordContextCollapseSnapshot` / `…Reset` / `…Commit`
+/// telemetry, and applies staged content collapse with snapshot→commit→reset
+/// (restore) semantics. A faithful port is a dedicated subsystem feature
+/// touching the session-persistence + JSONL-schema + telemetry layers; an ad-hoc
+/// multi-stage loop here would be a guess, not parity, so the simpler tail is
+/// kept deliberately. Scoped plan recorded in the project memory
+/// (`mainloop-parity-2026-06-23`).
 ///
 /// `betas` for the blocking-limit window math is `&[]` (conservative): the
 /// orchestrator does not currently thread the per-request beta set down to this

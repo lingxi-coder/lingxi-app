@@ -583,6 +583,58 @@ async fn emit_message(
         .await;
 }
 
+/// Returns the companion note suffix (`yyo` in the binary, `nke` set) appended
+/// to the allow-list-refusal error when a subagent tries to call a tool from
+/// the "external companion" set that has been stripped from its pool.
+///
+/// Binary anchor: `function yyo(e,t,n,r)` at 203453056 in v2.1.186.
+/// Trigger branch: `if (n && o && nke.has(o.name)) return …` where `n` = inside
+/// a subagent, `o` = the resolved tool, `nke = HDd("external")`.
+///
+/// `HDd("external")` at 198067186:
+/// ```text
+/// new Set([lW, iO, qz, Qp, brt, tke, ...(e!=="ant"?[SI]:[]), Mh])
+/// ```
+/// Resolved (confirmed from binary):
+/// - `lW`  = `"TaskOutput"`
+/// - `iO`  = `"ExitPlanMode"`
+/// - `qz`  = `"EnterPlanMode"`
+/// - `Qp`  = `"AskUserQuestion"`
+/// - `brt` = `"ConnectGitHub"`
+/// - `tke` = `"WaitForMcpServers"`
+/// - `SI`  = `"Workflow"` (non-ant only; `USER_TYPE !== "ant"`)
+/// - `Mh`  = `"ScheduleWakeup"`
+///
+/// All subagent runners are inside a subagent by definition (`n` = true).
+/// `is_ant` gates `Workflow` exactly like `HDd`'s ant-gate.
+///
+/// Returns `Some(note_suffix)` when the tool is in the `nke` set, `None`
+/// otherwise. The note starts with `. ` to append to an in-progress sentence.
+fn companion_note_for_disallowed_tool(tool_name: &str, is_ant: bool) -> Option<String> {
+    // The static nke set elements always present for both ant and non-ant:
+    const NKE_BASE: &[&str] = &[
+        "TaskOutput",
+        "ExitPlanMode",
+        "EnterPlanMode",
+        "AskUserQuestion",
+        "ConnectGitHub",
+        "WaitForMcpServers",
+        "ScheduleWakeup",
+    ];
+    // "Workflow" is added for non-ant (HDd: `...(e!=="ant"?[SI]:[])`).
+    let in_nke = NKE_BASE.contains(&tool_name) || (!is_ant && tool_name == "Workflow");
+    if in_nke {
+        // Binary §7 verbatim (leading `. ` — appended to an in-progress sentence):
+        // `. ${toolName} is not available inside subagents. Complete the task with
+        //  the tools provided and return findings to the orchestrator.`
+        Some(format!(
+            ". {tool_name} is not available inside subagents. Complete the task with the tools provided and return findings to the orchestrator."
+        ))
+    } else {
+        None
+    }
+}
+
 /// Real multi-turn agentic loop.
 ///
 /// Imperative — mirrors `orchestrator::turn_loop::execute_one_turn`: call the
@@ -942,10 +994,17 @@ async fn run_subagent_loop(
                 // so the model sees the refusal and can recover, mirroring how a
                 // tool error is fed back. Empty `allowed_tools` skips the guard.
                 if !allowed_tools.is_empty() && !allowed_tools.iter().any(|t| t == name) {
+                    // yyo companion note (binary v2.1.186 §7): when the blocked tool
+                    // is in the `nke` external companion set, append the byte-exact
+                    // guidance suffix so the model knows the tool is a subagent
+                    // boundary, not a typo. Gate on USER_TYPE like HDd.
+                    let is_ant = std::env::var("USER_TYPE").is_ok_and(|v| v == "ant");
+                    let note = companion_note_for_disallowed_tool(name, is_ant)
+                        .unwrap_or_default();
                     tool_results.push(ContentBlock::ToolResult {
                         tool_use_id: tool_use_id.clone(),
                         content: format!(
-                            "tool {name:?} is not in this agent's allowed tools"
+                            "tool {name:?} is not in this agent's allowed tools{note}"
                         ),
                         is_error: true,
                         provider_tool_use_id: provider_id.clone(),
@@ -2341,6 +2400,157 @@ mod tests {
         );
         let result = one_completed(&evs);
         assert_eq!(result["stop_reason"], "end_turn");
+    }
+
+    // ── companion note (yyo / nke) tests ──────────────────────────────────
+
+    /// Unit test for `companion_note_for_disallowed_tool` (pure function, no
+    /// async). Verifies the `nke` set membership + the exact §7 note text.
+    #[test]
+    fn companion_note_returned_for_nke_tools() {
+        // Non-ant: all base nke tools AND Workflow must return the note.
+        for name in &[
+            "TaskOutput",
+            "ExitPlanMode",
+            "EnterPlanMode",
+            "AskUserQuestion",
+            "ConnectGitHub",
+            "WaitForMcpServers",
+            "ScheduleWakeup",
+            "Workflow",
+        ] {
+            let note = companion_note_for_disallowed_tool(name, /*is_ant=*/ false);
+            assert!(
+                note.is_some(),
+                "expected companion note for {name} (non-ant); got None"
+            );
+            let note = note.unwrap();
+            // Binary §7 verbatim: leading `. `, toolName interpolated.
+            assert!(
+                note.starts_with(". "),
+                "note must start with \". \"; got {note:?}"
+            );
+            assert!(
+                note.contains(name),
+                "note must contain tool name {name:?}; got {note:?}"
+            );
+            assert!(
+                note.contains("not available inside subagents"),
+                "note must contain 'not available inside subagents'; got {note:?}"
+            );
+            assert!(
+                note.contains("return findings to the orchestrator"),
+                "note must contain 'return findings to the orchestrator'; got {note:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn companion_note_absent_for_non_nke_tools() {
+        // Regular tools must NOT get the companion note.
+        for name in &["Read", "Bash", "Grep", "Glob", "Agent"] {
+            assert!(
+                companion_note_for_disallowed_tool(name, false).is_none(),
+                "unexpected companion note for non-nke tool {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn companion_note_workflow_absent_for_ant() {
+        // Workflow is in nke only for non-ant (HDd ant-gate).
+        assert!(
+            companion_note_for_disallowed_tool("Workflow", /*is_ant=*/ true).is_none(),
+            "Workflow must NOT get the companion note for ant users"
+        );
+        // TaskOutput (base set) is still in nke for ant.
+        assert!(
+            companion_note_for_disallowed_tool("TaskOutput", /*is_ant=*/ true).is_some(),
+            "TaskOutput must get the companion note for ant users"
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_nke_tool_refusal_includes_companion_note() {
+        // A non-ant subagent whose pool dropped "Workflow" (allowed_tools = ["Read"])
+        // calls "Workflow" → the refusal ToolResult must contain the §7 companion
+        // note with "Workflow" interpolated. `AskUserQuestion` is verified too.
+        for nke_tool in &["Workflow", "AskUserQuestion"] {
+            let api = StreamingMockApiClient::new(vec![
+                streamed_tool_use_turn(nke_tool, "tool_use"),
+                streamed_text_turn("done", "end_turn"),
+            ]);
+            let invoker = CountingInvoker::new();
+            let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
+            ctx.allowed_tools = vec!["Read".to_string()];
+
+            let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+            let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+            run_subagent(ctx, event_rx, out_tx).await;
+            let evs = drain(out_rx).await;
+
+            let note_present = evs.iter().any(|e| {
+                let SubagentEvent::Message { message, .. } = e else {
+                    return false;
+                };
+                let Ok(ConversationMessage::User { content, .. }) =
+                    serde_json::from_value::<ConversationMessage>(message.clone())
+                else {
+                    return false;
+                };
+                content.iter().any(|b| {
+                    matches!(b,
+                        ContentBlock::ToolResult { is_error: true, content, .. }
+                        if content.contains("not available inside subagents")
+                            && content.contains(nke_tool)
+                            && content.contains("return findings to the orchestrator")
+                    )
+                })
+            });
+            assert!(
+                note_present,
+                "§7 companion note missing from refusal for nke tool {nke_tool}; got {evs:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn loop_non_nke_tool_refusal_has_no_companion_note() {
+        // A non-nke tool (e.g. "Bash") blocked by the allow-list must NOT include
+        // the companion note — the note is nke-specific.
+        let api = StreamingMockApiClient::new(vec![
+            streamed_tool_use_turn("Bash", "tool_use"),
+            streamed_text_turn("done", "end_turn"),
+        ]);
+        let invoker = CountingInvoker::new();
+        let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
+        ctx.allowed_tools = vec!["Read".to_string()];
+
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+
+        let companion_note_absent = evs.iter().all(|e| {
+            let SubagentEvent::Message { message, .. } = e else {
+                return true;
+            };
+            let Ok(ConversationMessage::User { content, .. }) =
+                serde_json::from_value::<ConversationMessage>(message.clone())
+            else {
+                return true;
+            };
+            content.iter().all(|b| {
+                !matches!(b,
+                    ContentBlock::ToolResult { is_error: true, content, .. }
+                    if content.contains("not available inside subagents")
+                )
+            })
+        });
+        assert!(
+            companion_note_absent,
+            "companion note must NOT appear for non-nke tool 'Bash'; got {evs:?}"
+        );
     }
 
     #[tokio::test]

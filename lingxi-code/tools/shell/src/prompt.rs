@@ -47,9 +47,7 @@
 //! `cwd = workspace`, so this sentence is currently ASPIRATIONAL until BASH.4
 //! lands the per-session cwd carry-over.
 
-use crate::bash::{
-    bash_default_timeout_ms, bash_max_timeout_ms, BASH_DEFAULT_TIMEOUT_MS, BASH_MAX_TIMEOUT_MS,
-};
+use crate::bash::{bash_default_timeout_ms, bash_max_timeout_ms};
 use sandbox::runtime_config::SandboxRuntimeConfig;
 
 // ===== Wire tool-name literals (string literals, NOT cross-crate imports) ====
@@ -745,8 +743,8 @@ mod tests {
         let p = simple_prompt(&disabled_sandbox());
         // 120000ms / 600000ms substituted from BASH_DEFAULT_TIMEOUT_MS /
         // BASH_MAX_TIMEOUT_MS — and the minute conversions.
-        assert_eq!(BASH_MAX_TIMEOUT_MS, 600_000);
-        assert_eq!(BASH_DEFAULT_TIMEOUT_MS, 120_000);
+        assert_eq!(crate::bash::BASH_MAX_TIMEOUT_MS, 600_000);
+        assert_eq!(crate::bash::BASH_DEFAULT_TIMEOUT_MS, 120_000);
         assert!(
             p.contains(
                 "You may specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). By default, your command will timeout after 120000ms (2 minutes)."

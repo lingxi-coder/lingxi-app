@@ -1004,9 +1004,9 @@ fn parse_iso8601_utc(s: &str) -> Option<u64> {
 ///
 /// Note: the retry driver sleeps on the `LlmError`'s Duration verbatim; this helper is only for user-facing display.
 #[must_use]
-pub fn retry_secs_from_error(error: &llm_client::LlmError) -> Option<u64> {
+pub fn retry_secs_from_error(error: &crate::LlmError) -> Option<u64> {
     match error {
-        llm_client::LlmError::RateLimited {
+        crate::LlmError::RateLimited {
             retry_after: Some(d),
             ..
         } => Some(d.as_secs().max(1)),
@@ -1152,7 +1152,7 @@ mod tests {
 
     #[test]
     fn retry_secs_from_rate_limited_7s() {
-        let err = llm_client::LlmError::RateLimited {
+        let err = crate::LlmError::RateLimited {
             retry_after: Some(Duration::from_secs(7)),
             scope: None,
         };
@@ -1161,7 +1161,7 @@ mod tests {
 
     #[test]
     fn retry_secs_from_rate_limited_zero_ms_clamps_to_1() {
-        let err = llm_client::LlmError::RateLimited {
+        let err = crate::LlmError::RateLimited {
             retry_after: Some(Duration::from_millis(0)),
             scope: None,
         };
@@ -1171,7 +1171,7 @@ mod tests {
 
     #[test]
     fn retry_secs_from_rate_limited_none_retry_after() {
-        let err = llm_client::LlmError::RateLimited {
+        let err = crate::LlmError::RateLimited {
             retry_after: None,
             scope: None,
         };
@@ -1180,9 +1180,9 @@ mod tests {
 
     #[test]
     fn retry_secs_from_non_rate_limit_error_is_none() {
-        assert_eq!(retry_secs_from_error(&llm_client::LlmError::ProviderInternal), None);
-        assert_eq!(retry_secs_from_error(&llm_client::LlmError::Authentication), None);
-        assert_eq!(retry_secs_from_error(&llm_client::LlmError::Overloaded { repeated: false }), None);
+        assert_eq!(retry_secs_from_error(&crate::LlmError::ProviderInternal), None);
+        assert_eq!(retry_secs_from_error(&crate::LlmError::Authentication), None);
+        assert_eq!(retry_secs_from_error(&crate::LlmError::Overloaded { repeated: false }), None);
     }
 
     #[test]

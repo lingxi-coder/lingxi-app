@@ -28,6 +28,7 @@ pub mod retry;
 pub mod route;
 pub mod sigv4;
 pub mod sse;
+pub mod model;
 pub mod transport;
 pub mod transport_bridge;
 pub mod types;

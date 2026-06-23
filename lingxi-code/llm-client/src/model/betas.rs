@@ -360,7 +360,7 @@ pub fn assemble_beta_header(provider: Provider, endpoint: Endpoint, ctx: &BetaCo
 /// entries not already present are appended in declaration order; duplicates
 /// are dropped. See the auth-layer note on [`apply_beta_header_with_auth`].
 pub fn apply_beta_header(
-    request: &mut llm_client::ProviderRequest,
+    request: &mut crate::ProviderRequest,
     provider: Provider,
     endpoint: Endpoint,
     ctx: &BetaContext,
@@ -393,7 +393,7 @@ pub fn apply_beta_header(
 /// the comma-joined list — never as a clobbering insert; the dedup pass keeps it
 /// at most once. For non-subscriber routes this behaves like [`apply_beta_header`].
 pub fn apply_beta_header_with_auth(
-    request: &mut llm_client::ProviderRequest,
+    request: &mut crate::ProviderRequest,
     provider: Provider,
     endpoint: Endpoint,
     ctx: &BetaContext,
@@ -666,7 +666,7 @@ mod tests {
     /// preserved and the assembled set appended after it (no clobber, no dup).
     #[test]
     fn apply_beta_header_preserves_existing_values() {
-        let mut req = llm_client::ProviderRequest::post_json(
+        let mut req = crate::ProviderRequest::post_json(
             "https://api.anthropic.com/v1/messages",
             serde_json::json!({"model": "claude-opus-4-8", "max_tokens": 1024}),
         );
@@ -688,7 +688,7 @@ mod tests {
     /// Subscriber path appends oauth exactly once alongside the model betas.
     #[test]
     fn oauth_beta_appended_for_subscriber() {
-        let mut req = llm_client::ProviderRequest::post_json(
+        let mut req = crate::ProviderRequest::post_json(
             "https://api.anthropic.com/v1/messages",
             serde_json::json!({"model": "claude-opus-4-8", "max_tokens": 1024}),
         );
@@ -708,7 +708,7 @@ mod tests {
     /// Non-subscriber path does NOT add oauth.
     #[test]
     fn oauth_beta_absent_for_non_subscriber() {
-        let mut req = llm_client::ProviderRequest::post_json(
+        let mut req = crate::ProviderRequest::post_json(
             "https://api.anthropic.com/v1/messages",
             serde_json::json!({"model": "claude-opus-4-8", "max_tokens": 1024}),
         );
@@ -726,7 +726,7 @@ mod tests {
     /// `apply_beta_header` on a clean request equals `assemble_beta_header`.
     #[test]
     fn apply_beta_header_inserts_assembled_header() {
-        let mut req = llm_client::ProviderRequest::post_json(
+        let mut req = crate::ProviderRequest::post_json(
             "https://api.anthropic.com/v1/messages",
             serde_json::json!({"model": "claude-opus-4-8", "max_tokens": 1024}),
         );

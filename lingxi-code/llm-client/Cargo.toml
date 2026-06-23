@@ -19,6 +19,11 @@ traits = { path = "../traits" }
 protocol = { path = "../protocol" }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
+telemetry = { path = "../telemetry" }
+regex = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+iana-time-zone = "0.1"
+rand = "0.8"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

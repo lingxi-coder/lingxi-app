@@ -2,7 +2,7 @@
 //! character-based approximation elsewhere.
 
 use crate::model::betas::{apply_beta_header, BetaContext, Endpoint, Provider};
-use llm_client::{
+use crate::{
     client::DefaultLlmClient, AnthropicMessagesCodec, LlmError, LlmRequest, Transport,
 };
 
@@ -56,7 +56,7 @@ pub fn approximate_tokens(request: &LlmRequest) -> u64 {
     }
     for message in &request.messages {
         for block in &message.content {
-            if let llm_client::ContentBlock::Text { text, .. } = block {
+            if let crate::ContentBlock::Text { text, .. } = block {
                 byte_len += text.len() as u64;
             }
         }
@@ -67,8 +67,8 @@ pub fn approximate_tokens(request: &LlmRequest) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_client::client::DefaultLlmClient;
-    use llm_client::{
+    use crate::client::DefaultLlmClient;
+    use crate::{
         AuthStrategy, BoxFuture, Capabilities, ClientConfig, ContentBlock, CredentialConfig,
         LlmRequest, Message, ModelProfile, PricingConfig, ProtocolFamily, ProviderId,
         ProviderProfile, ProviderRequest, ProviderResponse, StreamingResponse, SystemBlock,

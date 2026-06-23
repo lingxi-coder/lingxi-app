@@ -395,7 +395,7 @@ pub fn resolve_retry_control_with_settings(
 pub fn next_step(
     state: &mut RetryState,
     ctl: &RetryControl,
-    error: &llm_client::LlmError,
+    error: &crate::LlmError,
     thinking_budget: u32,
 ) -> DriveStep {
     next_step_with_backoff(state, ctl, error, thinking_budget, None)
@@ -413,11 +413,11 @@ pub fn next_step(
 pub fn next_step_with_backoff(
     state: &mut RetryState,
     ctl: &RetryControl,
-    error: &llm_client::LlmError,
+    error: &crate::LlmError,
     thinking_budget: u32,
     backoff_ms: Option<u64>,
 ) -> DriveStep {
-    use llm_client::LlmError;
+    use crate::LlmError;
 
     match error {
         LlmError::Overloaded { .. } => {
@@ -675,7 +675,7 @@ mod jittered_delay_tests {
 #[cfg(test)]
 mod next_step_tests {
     use super::*;
-    use llm_client::{LlmError, RetryDecision, RetryPolicy};
+    use crate::{LlmError, RetryDecision, RetryPolicy};
     use std::time::Duration;
 
     /// `state.attempt` value at which the default budget is exhausted (==
@@ -1471,7 +1471,7 @@ mod next_step_tests {
 mod resolve_retry_control_tests {
     //! Env-matrix tests mirroring api-client's `resolve_retry_control` tests.
     use super::*;
-    use llm_client::LlmError;
+    use crate::LlmError;
 
     fn env(fallback_for_all: Option<&str>, user_type: Option<&str>, is_sandbox: bool) -> ResolveRetryEnv {
         ResolveRetryEnv {

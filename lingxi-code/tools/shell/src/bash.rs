@@ -836,8 +836,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             // (the "(max …)" is advisory describe text only). The max is the
             // dynamic `Wdt()`=`j3n()` value, env-overridable via BASH_MAX_TIMEOUT_MS.
             "timeout":           {
-                "type": "integer",
-                "minimum": 1,
+                "type": "number",
                 "description": format!("Optional timeout in milliseconds (max {})", bash_max_timeout_ms())
             },
             "run_in_background": { "type": "boolean", "description": "Set to true to run this command in the background." },
@@ -2168,6 +2167,21 @@ mod tests {
             props["timeout"]["description"],
             "Optional timeout in milliseconds (max 600000)"
         );
+    }
+
+    /// Binary gap #1/#2: timeout type must be `number` (not `integer`), no `minimum`.
+    /// Binary @203768858: `timeout:sB(A.number().optional())` — Zod `.number()` → `{"type":"number"}`.
+    #[test]
+    fn bash_timeout_schema_type_number_no_minimum() {
+        let tool = BashTool::new(tool_api::test_support::shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }));
+        let timeout = &tool.input_schema()["properties"]["timeout"];
+        assert_eq!(timeout["type"], "number", "timeout type must be number not integer");
+        assert!(timeout.get("minimum").is_none(), "timeout must have no minimum constraint");
     }
 
     #[tokio::test]

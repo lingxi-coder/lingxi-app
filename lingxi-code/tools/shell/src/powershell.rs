@@ -94,12 +94,14 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
         "properties": {
-            "command":           { "type": "string" },
-            "timeout_ms":        { "type": "integer", "minimum": 1, "maximum": 600_000 },
-            "run_in_background": { "type": "boolean" },
-            "description":       { "type": "string" }
+            "command":           { "type": "string", "description": "The PowerShell command to execute" },
+            "timeout":           { "type": "number", "description": "Optional timeout in milliseconds (max 600000)" },
+            "run_in_background": { "type": "boolean", "description": "Set to true to run this command in the background." },
+            "description":       { "type": "string", "description": "Clear, concise description of what this command does in active voice." },
+            "dangerouslyDisableSandbox": { "type": "boolean", "description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing." }
         },
-        "required": ["command"]
+        "required": ["command"],
+        "additionalProperties": false
     })
 });
 
@@ -161,10 +163,10 @@ impl Tool for PowerShellTool {
         if cmd.is_empty() {
             return Err(ValidationError("`command` must not be empty".into()));
         }
-        if let Some(t) = input.get("timeout_ms").and_then(Value::as_u64) {
+        if let Some(t) = input.get("timeout").and_then(Value::as_u64) {
             if t > POWERSHELL_MAX_TIMEOUT_MS {
                 return Err(ValidationError(format!(
-                    "timeout_ms {t} exceeds limit {POWERSHELL_MAX_TIMEOUT_MS}"
+                    "timeout {t} exceeds limit {POWERSHELL_MAX_TIMEOUT_MS}"
                 )));
             }
         }
@@ -196,12 +198,12 @@ impl Tool for PowerShellTool {
             .ok_or_else(|| ToolError::InvalidInput("missing command".into()))?
             .to_string();
         let timeout_ms = input
-            .get("timeout_ms")
+            .get("timeout")
             .and_then(Value::as_u64)
             .unwrap_or(POWERSHELL_DEFAULT_TIMEOUT_MS);
         if timeout_ms > POWERSHELL_MAX_TIMEOUT_MS {
             return Err(ToolError::InvalidInput(format!(
-                "timeout_ms {timeout_ms} exceeds limit {POWERSHELL_MAX_TIMEOUT_MS}"
+                "timeout {timeout_ms} exceeds limit {POWERSHELL_MAX_TIMEOUT_MS}"
             )));
         }
 
@@ -426,7 +428,7 @@ mod tests {
         let tool = PowerShellTool::new(ctx);
         let r = tool
             .validate_input(
-                &json!({"command": "Get-Date", "timeout_ms": 600_001}),
+                &json!({"command": "Get-Date", "timeout": 600_001}),
                 &fresh_ctx(),
             )
             .await;
@@ -596,5 +598,48 @@ mod tests {
             1,
             "cleanup_after_command must be invoked once"
         );
+    }
+
+    /// Binary-grounded schema assertions (offset 203601400):
+    /// `A.strictObject({command, timeout:sB(A.number()), run_in_background, description, dangerouslyDisableSandbox})`
+    #[test]
+    fn powershell_input_schema_byte_parity() {
+        let schema = &*INPUT_SCHEMA;
+        let props = &schema["properties"];
+
+        // Field named `timeout` (not `timeout_ms`), type `number` (not integer), no minimum/maximum.
+        assert!(props.get("timeout").is_some(), "schema must expose `timeout`");
+        assert!(props.get("timeout_ms").is_none(), "schema must NOT expose `timeout_ms`");
+        assert_eq!(props["timeout"]["type"], "number", "timeout type must be number");
+        assert!(props["timeout"].get("minimum").is_none(), "timeout must have no minimum");
+        assert!(props["timeout"].get("maximum").is_none(), "timeout must have no maximum");
+
+        // dangerouslyDisableSandbox present with boolean type and byte-exact description.
+        assert!(props.get("dangerouslyDisableSandbox").is_some(), "dangerouslyDisableSandbox must be present");
+        assert_eq!(props["dangerouslyDisableSandbox"]["type"], "boolean");
+        assert_eq!(
+            props["dangerouslyDisableSandbox"]["description"],
+            "Set this to true to dangerously override sandbox mode and run commands without sandboxing."
+        );
+
+        // additionalProperties:false (strictObject).
+        assert_eq!(schema["additionalProperties"], false, "must have additionalProperties:false");
+
+        // Per-field descriptions present.
+        assert_eq!(props["command"]["description"], "The PowerShell command to execute");
+        assert_eq!(props["description"]["description"], "Clear, concise description of what this command does in active voice.");
+        assert_eq!(props["run_in_background"]["description"], "Set to true to run this command in the background.");
+    }
+
+    /// Bash gap: timeout must be type:number (not integer) and have no minimum constraint.
+    #[test]
+    fn bash_timeout_schema_type_number_no_minimum() {
+        // Read the Bash INPUT_SCHEMA via the lazy static exposed in bash.rs via #[cfg(test)] helper.
+        // Instead, use the powershell schema as our target here and let bash.rs tests cover bash.
+        // This test covers the PowerShell side only (bash.rs has its own test module).
+        let schema = &*INPUT_SCHEMA;
+        let timeout = &schema["properties"]["timeout"];
+        assert_eq!(timeout["type"], "number");
+        assert!(timeout.get("minimum").is_none());
     }
 }

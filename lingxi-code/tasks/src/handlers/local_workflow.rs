@@ -448,11 +448,49 @@ fn result_to_string(result: Result<SubagentResult, SubagentSpawnError>) -> Strin
     }
 }
 
-/// Render a live `phase()`/`log()` progress event as a task-output line.
+/// Render a live `phase()`/`log()`/`agent` progress event as a task-output line.
+///
+/// `Phase` and `Log` render as human-readable text lines (back-compat).
+/// `Agent` events serialize as a JSON line prefixed `[workflow_agent] ` —
+/// this provides structured data in the task-output spool while keeping the
+/// format readable (and parseable by consumers looking for `[workflow_agent]`).
 fn format_progress(p: &workflow::Progress) -> String {
     match p {
-        workflow::Progress::Phase(title) => format!("=== {title} ==="),
-        workflow::Progress::Log(message) => message.clone(),
+        workflow::Progress::Phase { index, title } => format!("[{index}] === {title} ==="),
+        workflow::Progress::Log { message } => message.clone(),
+        workflow::Progress::Agent {
+            index,
+            label,
+            phase_index,
+            phase_title,
+            agent_id,
+            model,
+            state,
+            tool_use_id,
+        } => {
+            let mut obj = serde_json::json!({
+                "type": "workflow_agent",
+                "index": index,
+                "label": label,
+                "state": state.as_str(),
+                "toolUseID": tool_use_id,
+            });
+            if let Some(obj_map) = obj.as_object_mut() {
+                if let Some(pi) = phase_index {
+                    obj_map.insert("phaseIndex".to_string(), serde_json::json!(pi));
+                }
+                if let Some(pt) = phase_title {
+                    obj_map.insert("phaseTitle".to_string(), serde_json::json!(pt));
+                }
+                if let Some(id) = agent_id {
+                    obj_map.insert("agentId".to_string(), serde_json::json!(id));
+                }
+                if let Some(m) = model {
+                    obj_map.insert("model".to_string(), serde_json::json!(m));
+                }
+            }
+            format!("[workflow_agent] {}", serde_json::to_string(&obj).unwrap_or_default())
+        }
     }
 }
 
@@ -504,12 +542,31 @@ enum Plan {
     /// `__wf_resolve` — resolve a nested workflow reference to its source.
     Resolve(Value),
     /// Replay a journaled result (prefix hit).
-    Cached(String),
+    Cached {
+        /// The cached result string.
+        result: String,
+        /// 0-based agent call ordinal.
+        call_index: u64,
+        /// The agent's label: `opts.label ?? prompt.slice(0, 60)`.
+        label: String,
+        /// Phase info at dispatch time (extracted from `__wf_phase`).
+        phase_index: Option<u32>,
+        /// Phase title at dispatch time.
+        phase_title: Option<String>,
+    },
     /// Spawn a real subagent; journal the result under `key` (when present).
     Live {
         key: Option<String>,
         prompt: String,
         opts_json: String,
+        /// 0-based agent call ordinal.
+        call_index: u64,
+        /// The agent's label: `opts.label ?? prompt.slice(0, 60)`.
+        label: String,
+        /// Phase info at dispatch time (extracted from `__wf_phase`).
+        phase_index: Option<u32>,
+        /// Phase title at dispatch time.
+        phase_title: Option<String>,
     },
 }
 
@@ -593,6 +650,10 @@ pub async fn run_workflow_script(
     let (outcome_tx, outcome_rx) =
         oneshot::channel::<Result<workflow::RunOutcome, workflow::WorkflowError>>();
     let script_owned = script.to_string();
+    // Clone progress_tx for the async worker loop (agent lifecycle events). The
+    // script thread owns the original for phase()/log() events; the async worker
+    // uses this clone to emit workflow_agent start/done/error/cached events.
+    let progress_tx_for_worker = progress_tx.clone();
 
     // The script runs synchronously on its own OS thread; its batch runner is
     // plain sync code, so `blocking_send`/`blocking_recv` are safe here (this is
@@ -640,6 +701,12 @@ pub async fn run_workflow_script(
     // When agent_count_out is provided by the caller (for tengu_workflow_completed
     // reporting), use that Arc so the caller can read the final count after the run.
     let agent_count = agent_count_out.unwrap_or_else(|| Arc::new(AtomicU64::new(0)));
+    // Per-run agent call ordinal counter (oracle §8: the `index` field on
+    // `workflow_agent` events is monotonically incrementing per call, including
+    // cached replay calls; `__wf_resolve` calls do NOT count).
+    let call_index_counter = Arc::new(AtomicU64::new(0));
+    // Use the pre-cloned progress_tx for the async worker (agent lifecycle events).
+    let worker_progress_tx = progress_tx_for_worker;
     // PREFIX resume cursor (claude-code `m` + gone-live flag `f`): the journal is
     // a longest-unchanged-prefix cache. `running_key` chains each real agent()
     // call into the previous key (so any change cascades to all later keys), and
@@ -660,12 +727,32 @@ pub async fn run_workflow_script(
         // Phase A — sequential, in call order: prefix-cache decision per call.
         let mut plans: Vec<Plan> = Vec::with_capacity(calls.len());
         for (prompt, opts_json) in calls {
-            let opts: Value = serde_json::from_str(&opts_json).unwrap_or(Value::Null);
+            let mut opts: Value = serde_json::from_str(&opts_json).unwrap_or(Value::Null);
             if let Some(spec_json) = opts.get("__wf_resolve").and_then(Value::as_str) {
                 let spec: Value = serde_json::from_str(spec_json).unwrap_or(Value::Null);
                 plans.push(Plan::Resolve(spec));
                 continue;
             }
+            // Extract and strip the phase context injected by the script engine
+            // (`__wf_phase: {index, title}`) — display-only, not forwarded to spawner.
+            let (phase_index, phase_title) = if let Some(ph) = opts.as_object_mut().and_then(|o| o.remove("__wf_phase")) {
+                let idx = ph.get("index").and_then(Value::as_u64).map(|v| v as u32);
+                let title = ph.get("title").and_then(Value::as_str).map(str::to_string);
+                (idx, title)
+            } else {
+                (None, None)
+            };
+            // Compute the clean opts_json (without __wf_phase) for the spawner.
+            let clean_opts_json = serde_json::to_string(&opts).unwrap_or_else(|_| opts_json.clone());
+            // Extract label: `opts.label ?? prompt.slice(0, 60)` (oracle §8).
+            let label = opts.get("label")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    let chars: Vec<char> = prompt.chars().take(60).collect();
+                    chars.iter().collect()
+                });
             // Advance the chained key for this real agent() call (before the
             // cache check, so cached calls also advance the chain — claude `m`).
             // Normalize opts to the 5 identity keys only (ABp): display-only
@@ -674,12 +761,20 @@ pub async fn run_workflow_script(
             let normalized_opts = normalize_opts_for_chain_key(&opts);
             let key = chain_key(&running_key, &prompt, &normalized_opts);
             running_key.clone_from(&key);
+            // Assign a monotonic call index to each real agent() call.
+            let call_index = call_index_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if !gone_live {
                 let cached = journal
                     .as_ref()
                     .and_then(|j| j.lock().unwrap().get(&key).cloned());
                 if let Some(cached) = cached {
-                    plans.push(Plan::Cached(cached));
+                    plans.push(Plan::Cached {
+                        result: cached,
+                        call_index,
+                        label,
+                        phase_index,
+                        phase_title,
+                    });
                     continue;
                 }
                 gone_live = true; // first miss → everything after runs live
@@ -688,7 +783,11 @@ pub async fn run_workflow_script(
             plans.push(Plan::Live {
                 key: journaled_key,
                 prompt,
-                opts_json,
+                opts_json: clean_opts_json,
+                call_index,
+                label,
+                phase_index,
+                phase_title,
             });
         }
 
@@ -705,8 +804,9 @@ pub async fn run_workflow_script(
             let budget_total = token_budget_total;
             let baseline = turn_start_baseline;
             let bus_call = bus.clone();
+            let ptx = worker_progress_tx.clone();
             async move {
-                let (key, prompt, opts_json) = match plan {
+                let (key, prompt, opts_json, call_index, label, phase_index, phase_title) = match plan {
                     // `workflow()` resolution: read + strip the nested source; `""`
                     // ⇒ the runtime throws "could not resolve".
                     Plan::Resolve(spec) => {
@@ -715,14 +815,37 @@ pub async fn run_workflow_script(
                             Err(_) => String::new(),
                         }
                     }
-                    Plan::Cached(result) => return result,
+                    Plan::Cached { result, call_index, label, phase_index, phase_title } => {
+                        // Emit a `cached` workflow_agent event for journal replays.
+                        let tool_use_id = format!("workflow_agent_{call_index}_cached");
+                        let cached_event = workflow::Progress::Agent {
+                            index: call_index,
+                            label: label.clone(),
+                            phase_index,
+                            phase_title,
+                            agent_id: None,
+                            model: None,
+                            state: workflow::AgentState::Cached,
+                            tool_use_id,
+                        };
+                        if let Some(ref tx) = ptx {
+                            let _ = tx.send(format_progress(&cached_event));
+                        }
+                        return result;
+                    }
                     Plan::Live {
                         key,
                         prompt,
                         opts_json,
-                    } => (key, prompt, opts_json),
+                        call_index,
+                        label,
+                        phase_index,
+                        phase_title,
+                    } => (key, prompt, opts_json, call_index, label, phase_index, phase_title),
                 };
                 let opts: Value = serde_json::from_str(&opts_json).unwrap_or(Value::Null);
+                // Extract model from opts for the workflow_agent event.
+                let agent_model = opts.get("model").and_then(Value::as_str).map(str::to_string);
                 // Budget hard ceiling (claude-code `v()` before each spawn): when a
                 // token target is set and the turn-relative spend has reached it,
                 // refuse the spawn → the prelude throws WorkflowBudgetExceededError
@@ -769,6 +892,24 @@ pub async fn run_workflow_script(
                         ));
                     }
                 }
+                // Emit `start` workflow_agent event before spawning (oracle §8).
+                // toolUseID for the in-flight queued emit uses the suffix "queued"
+                // (oracle §8: `workflow_agent_${ne}_queued` for queued/start state).
+                {
+                    let start_event = workflow::Progress::Agent {
+                        index: call_index,
+                        label: label.clone(),
+                        phase_index,
+                        phase_title: phase_title.clone(),
+                        agent_id: None,
+                        model: agent_model.clone(),
+                        state: workflow::AgentState::Start,
+                        tool_use_id: format!("workflow_agent_{call_index}_queued"),
+                    };
+                    if let Some(ref tx) = ptx {
+                        let _ = tx.send(format_progress(&start_event));
+                    }
+                }
                 let inherit = SubagentInheritance {
                     tool_invoker,
                     budget,
@@ -780,6 +921,38 @@ pub async fn run_workflow_script(
                 // pool the main loop feeds when wired.
                 if let Ok(SubagentResult::Completed { usage, .. }) = &raw {
                     spent.fetch_add(usage.output_tokens, Ordering::Relaxed);
+                }
+                // Emit `done` or `error` workflow_agent event after spawning.
+                // For done/error, toolUseID uses the agent_id UUID (oracle §8:
+                // `workflow_agent_${K}_${ct}` where ct is the agentId UUID).
+                {
+                    let (state, agent_id_str) = match &raw {
+                        Ok(SubagentResult::Completed { agent_id, .. }) => {
+                            (workflow::AgentState::Done, Some(agent_id.to_string()))
+                        }
+                        Ok(SubagentResult::Failed { agent_id, .. } | SubagentResult::Killed { agent_id, .. }) => {
+                            (workflow::AgentState::Error, Some(agent_id.to_string()))
+                        }
+                        Err(_) => (workflow::AgentState::Error, None),
+                    };
+                    let tool_use_id = if let Some(ref id) = agent_id_str {
+                        format!("workflow_agent_{call_index}_{id}")
+                    } else {
+                        format!("workflow_agent_{call_index}_error")
+                    };
+                    let lifecycle_event = workflow::Progress::Agent {
+                        index: call_index,
+                        label: label.clone(),
+                        phase_index,
+                        phase_title,
+                        agent_id: agent_id_str,
+                        model: agent_model,
+                        state,
+                        tool_use_id,
+                    };
+                    if let Some(ref tx) = ptx {
+                        let _ = tx.send(format_progress(&lifecycle_event));
+                    }
                 }
                 let result = result_to_string(raw);
                 // Journal only a real result — a dead/skipped agent (NULL sentinel)
@@ -816,7 +989,7 @@ pub async fn run_workflow_script(
     {
         let mut phase_idx: i64 = 0;
         for p in &outcome.progress {
-            if let workflow::Progress::Phase(title) = p {
+            if let workflow::Progress::Phase { title, .. } = p {
                 let mut md: LogEventMetadata = HashMap::new();
                 if let Some(ref ctx) = phase_telemetry_ctx {
                     md.insert(
@@ -1513,8 +1686,8 @@ mod tests {
             .progress
             .iter()
             .filter_map(|p| match p {
-                workflow::Progress::Log(s) => Some(s.clone()),
-                workflow::Progress::Phase(_) => None,
+                workflow::Progress::Log { message: s } => Some(s.clone()),
+                workflow::Progress::Phase { .. } | workflow::Progress::Agent { .. } => None,
             })
             .collect()
     }
@@ -2004,7 +2177,9 @@ mod tests {
             .await
             .unwrap();
         // phase/log were spooled live, followed by the return value.
+        // Phase now renders as "[N] === Title ===" (index-prefixed).
         assert!(read.content.contains("=== Scan ==="), "phase: {}", read.content);
+        assert!(read.content.contains("[1]"), "phase index: {}", read.content);
         assert!(read.content.contains("found 2 things"), "log: {}", read.content);
         assert!(read.content.contains(r#"{"ok":true}"#), "result: {}", read.content);
     }
@@ -2561,5 +2736,304 @@ mod tests {
             matches!(md.get("agentCount"), Some(AnalyticsValue::Int(1000))),
             "agentCount field must be 1000"
         );
+    }
+
+    // ==== Structured progress event tests (Task 10) ==========================
+
+    /// A single-agent script emits `start` then `done` workflow_agent events to
+    /// the progress spool, with the correct index (0-based), label, state, and
+    /// toolUseID format (`workflow_agent_{index}_{suffix}`).
+    #[tokio::test]
+    async fn workflow_agent_progress_start_and_done_emitted() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let spawner = Arc::new(EchoSpawner::default());
+        run_workflow_script(
+            "const r = await agent('analyze the code', { label: 'my-label' }); log('r=' + r);",
+            DEFAULT_WORKFLOW_SUBAGENT,
+            spawner,
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            Some(tx),
+            None,
+            None,
+            None,
+            0,
+            NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(AnalyticsBus::new()),
+            None,
+            None,
+        )
+        .await
+        .expect("runs");
+
+        let mut lines: Vec<String> = Vec::new();
+        while let Ok(line) = rx.try_recv() {
+            lines.push(line);
+        }
+
+        // Must have at least a `start` and a `done` agent event, plus a log.
+        let agent_lines: Vec<&str> = lines.iter().filter(|l| l.starts_with("[workflow_agent]")).map(|l| l.as_str()).collect();
+        assert!(agent_lines.len() >= 2, "expected start+done events; got: {lines:?}");
+
+        // Parse the start event.
+        let start_json_str = agent_lines[0].trim_start_matches("[workflow_agent] ");
+        let start: serde_json::Value = serde_json::from_str(start_json_str).expect("start is JSON");
+        assert_eq!(start["type"], "workflow_agent", "type field");
+        assert_eq!(start["index"], 0, "index is 0 for first agent");
+        assert_eq!(start["label"], "my-label", "label from opts.label");
+        assert_eq!(start["state"], "start", "first event is start");
+        let tool_use_id = start["toolUseID"].as_str().expect("toolUseID present");
+        assert!(tool_use_id.starts_with("workflow_agent_0_"), "toolUseID format: {tool_use_id}");
+
+        // Parse the done event.
+        let done_json_str = agent_lines[1].trim_start_matches("[workflow_agent] ");
+        let done: serde_json::Value = serde_json::from_str(done_json_str).expect("done is JSON");
+        assert_eq!(done["state"], "done", "second event is done");
+        assert_eq!(done["index"], 0, "same agent index");
+        assert!(done.get("agentId").is_some(), "done has agentId");
+    }
+
+    /// `phase()` calls produce `workflow_phase` formatted progress lines with index + title.
+    /// `log()` calls produce bare text lines (workflow_log style).
+    #[tokio::test]
+    async fn workflow_phase_and_log_progress_format() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let spawner = Arc::new(EchoSpawner::default());
+        run_workflow_script(
+            "phase('Analysis'); log('hello world'); phase('Report');",
+            DEFAULT_WORKFLOW_SUBAGENT,
+            spawner,
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            Some(tx),
+            None,
+            None,
+            None,
+            0,
+            NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(AnalyticsBus::new()),
+            None,
+            None,
+        )
+        .await
+        .expect("runs");
+
+        let mut lines: Vec<String> = Vec::new();
+        while let Ok(line) = rx.try_recv() {
+            lines.push(line);
+        }
+
+        // Phase lines render as "[index] === title ===".
+        assert!(
+            lines.iter().any(|l| l.contains("[1]") && l.contains("=== Analysis ===")),
+            "first phase: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("[2]") && l.contains("=== Report ===")),
+            "second phase: {lines:?}"
+        );
+        // Log line renders as bare text.
+        assert!(lines.iter().any(|l| l == "hello world"), "log line: {lines:?}");
+    }
+
+    /// Agent index increments monotonically across sequential agent() calls.
+    #[tokio::test]
+    async fn workflow_agent_index_is_monotonic() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let spawner = Arc::new(EchoSpawner::default());
+        run_workflow_script(
+            "await agent('first'); await agent('second'); await agent('third');",
+            DEFAULT_WORKFLOW_SUBAGENT,
+            spawner,
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            Some(tx),
+            None,
+            None,
+            None,
+            0,
+            NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(AnalyticsBus::new()),
+            None,
+            None,
+        )
+        .await
+        .expect("runs");
+
+        let mut lines: Vec<String> = Vec::new();
+        while let Ok(line) = rx.try_recv() {
+            lines.push(line);
+        }
+
+        // Collect all start events and verify indices 0, 1, 2.
+        let start_events: Vec<serde_json::Value> = lines
+            .iter()
+            .filter(|l| l.starts_with("[workflow_agent]"))
+            .filter_map(|l| {
+                let json_str = l.trim_start_matches("[workflow_agent] ");
+                serde_json::from_str::<serde_json::Value>(json_str).ok()
+            })
+            .filter(|v| v["state"] == "start")
+            .collect();
+        assert_eq!(start_events.len(), 3, "three start events; got: {lines:?}");
+        assert_eq!(start_events[0]["index"], 0);
+        assert_eq!(start_events[1]["index"], 1);
+        assert_eq!(start_events[2]["index"], 2);
+    }
+
+    /// Agent events include phaseIndex/phaseTitle when agent() is dispatched during a phase.
+    #[tokio::test]
+    async fn workflow_agent_carries_phase_context() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let spawner = Arc::new(EchoSpawner::default());
+        run_workflow_script(
+            "phase('MyPhase'); await agent('task1');",
+            DEFAULT_WORKFLOW_SUBAGENT,
+            spawner,
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            Some(tx),
+            None,
+            None,
+            None,
+            0,
+            NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(AnalyticsBus::new()),
+            None,
+            None,
+        )
+        .await
+        .expect("runs");
+
+        let mut lines: Vec<String> = Vec::new();
+        while let Ok(line) = rx.try_recv() {
+            lines.push(line);
+        }
+
+        let start_event = lines
+            .iter()
+            .filter(|l| l.starts_with("[workflow_agent]"))
+            .find_map(|l| {
+                let json_str = l.trim_start_matches("[workflow_agent] ");
+                let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
+                (v["state"] == "start").then_some(v)
+            })
+            .expect("start event present");
+
+        assert_eq!(start_event["phaseIndex"], 1, "phaseIndex = 1 (first phase)");
+        assert_eq!(start_event["phaseTitle"], "MyPhase", "phaseTitle = MyPhase");
+    }
+
+    /// A journal-replayed agent emits a `cached` workflow_agent event.
+    #[tokio::test]
+    async fn workflow_agent_cached_event_on_journal_replay() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let dir = tempdir().unwrap();
+        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+
+        let script = "const r = await agent('task'); log('r=' + r);";
+
+        // Run 1: fresh — journal the result.
+        let spawner1 = Arc::new(EchoSpawner::default());
+        let sink1 = Arc::new(RecordingSink::default());
+        let handle1 = make_handler(spawner1.clone(), mgr.clone(), sink1.clone())
+            .spawn(workflow_input(script), make_ctx(fs.clone()))
+            .await
+            .unwrap();
+        assert_eq!(await_terminal(&sink1).await, TaskStatus::Completed);
+        let spool1 = dir.path().join(format!("{}.output", handle1.task_id));
+        let out1 = mgr.read(&spool1, Default::default()).await.unwrap();
+        let run_id = out1.content.lines().find_map(|l| l.strip_prefix("runId: ")).expect("runId").to_string();
+
+        // Run 2: resume — agent replays from journal, should see `cached` event.
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let journal_path = dir.path().join(format!("workflow-{run_id}.json"));
+        let journal_content = fs.read_file(journal_path.to_str().unwrap(), None, None).await.unwrap().content;
+        let cache: std::collections::HashMap<String, String> = serde_json::from_str(&journal_content).expect("journal JSON");
+        let journal = Arc::new(std::sync::Mutex::new(cache));
+
+        run_workflow_script(
+            script,
+            DEFAULT_WORKFLOW_SUBAGENT,
+            Arc::new(EchoSpawner::default()),
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            Some(tx),
+            Some(journal),
+            None,
+            None,
+            0,
+            NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(AnalyticsBus::new()),
+            None,
+            None,
+        )
+        .await
+        .expect("resume runs");
+
+        let mut lines: Vec<String> = Vec::new();
+        while let Ok(line) = rx.try_recv() {
+            lines.push(line);
+        }
+
+        let cached_event = lines
+            .iter()
+            .filter(|l| l.starts_with("[workflow_agent]"))
+            .find_map(|l| {
+                let json_str = l.trim_start_matches("[workflow_agent] ");
+                let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
+                (v["state"] == "cached").then_some(v)
+            });
+        assert!(cached_event.is_some(), "cached event must be emitted on journal replay; lines: {lines:?}");
+        let ev = cached_event.unwrap();
+        assert_eq!(ev["index"], 0, "cached agent has index 0");
+        let tuid = ev["toolUseID"].as_str().expect("toolUseID");
+        assert_eq!(tuid, "workflow_agent_0_cached", "cached toolUseID format");
+    }
+
+    /// A failed agent emits an `error` workflow_agent event.
+    #[tokio::test]
+    async fn workflow_agent_error_event_on_failure() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let spawner = Arc::new(EchoSpawner { fail: true, ..Default::default() });
+        run_workflow_script(
+            "const r = await agent('task'); log('r=' + r);",
+            DEFAULT_WORKFLOW_SUBAGENT,
+            spawner,
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            Some(tx),
+            None,
+            None,
+            None,
+            0,
+            NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(AnalyticsBus::new()),
+            None,
+            None,
+        )
+        .await
+        .expect("runs (failed agent is not a script error)");
+
+        let mut lines: Vec<String> = Vec::new();
+        while let Ok(line) = rx.try_recv() {
+            lines.push(line);
+        }
+
+        let error_event = lines
+            .iter()
+            .filter(|l| l.starts_with("[workflow_agent]"))
+            .find_map(|l| {
+                let json_str = l.trim_start_matches("[workflow_agent] ");
+                let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
+                (v["state"] == "error").then_some(v)
+            });
+        assert!(error_event.is_some(), "error event must be emitted for failed agent; lines: {lines:?}");
     }
 }

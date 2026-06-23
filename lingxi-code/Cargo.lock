@@ -6519,6 +6519,7 @@ name = "workflow"
 version = "0.12.0"
 dependencies = [
  "rquickjs",
+ "serde_json",
  "tree-sitter",
  "tree-sitter-javascript",
 ]

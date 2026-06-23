@@ -125,13 +125,100 @@ if (!('workflow' in globalThis)) globalThis.workflow = async () => { throw new E
 /// (`String.fromCharCode(1)+"__wf_null__"+String.fromCharCode(1)`).
 pub const WF_NULL_SENTINEL: &str = "\u{1}__wf_null__\u{1}";
 
+/// State of a `workflow_agent` progress event (oracle §8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentState {
+    /// Agent has started execution.
+    Start,
+    /// Agent completed successfully.
+    Done,
+    /// Agent failed (error, stall, abort).
+    Error,
+    /// Agent result served from journal cache (not re-run).
+    Cached,
+}
+
+impl AgentState {
+    /// The state string as used in the serialised progress event.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Done => "done",
+            Self::Error => "error",
+            Self::Cached => "cached",
+        }
+    }
+}
+
 /// A progress event emitted by a running workflow script.
+///
+/// ## Structured shapes (oracle §8)
+///
+/// The three types map to the progress event shapes emitted by claude-code:
+/// - `Phase { index, title }` → `{ type: "workflow_phase", index, title }` (`kind` omitted — always undefined in binary)
+/// - `Log { message }` → `{ type: "workflow_log", message }`
+/// - `Agent { … }` → `{ type: "workflow_agent", … }` with lifecycle state
+///
+/// ## Implementation note — PARTIAL subset
+///
+/// The `Agent` variant carries the MINIMAL FAITHFUL SUBSET:
+/// `index`, `label`, `phase_index`, `phase_title`, `model`, `state`,
+/// `agent_id` (present only for `Done`/`Error`/`Cached`), and
+/// `tool_use_id` (= `workflow_agent_{index}_{agent_id_or_suffix}`).
+///
+/// Timestamp fields (`started_at`, `queued_at`, `last_progress_at`) and the
+/// `progress` intermediate state are NOT emitted:
+/// - `started_at` / `queued_at` / `last_progress_at`: the bridge dispatches
+///   agents via a blocking sync channel on a dedicated thread; `std::time`
+///   timestamps are available but the `Progress` channel is `Send + 'static`
+///   and `SystemTime` is not `Eq`, which would break `#[derive(PartialEq, Eq)]`
+///   on `Progress`. These are omitted to keep the enum `Eq` and the tests
+///   straightforward. A future refactor that drops the `Eq` bound can add them.
+/// - `queued` state: the bridge's `Plan` enum decides cached-vs-live in Phase A
+///   BEFORE Phase B executes the spawns; emitting a per-agent queued event
+///   requires coupling into Phase A, which would require threading the
+///   `progress_tx` into the sequential plan loop on the async worker side.
+///   This is non-trivial (the `on_progress` closure lives on the script thread)
+///   so `queued` is omitted. `start` serves as the first lifecycle event.
+/// - `progress` intermediate state: requires per-subagent progress streams from
+///   the spawner, which are not exposed by the current `SubagentSpawner` trait.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Progress {
     /// `phase(title)` — starts a new progress group.
-    Phase(String),
+    /// Maps to `{ type: "workflow_phase", index, title }`.
+    Phase {
+        /// 1-based sequential phase index (matches oracle §8 `workflow_phase.index`).
+        index: u32,
+        /// The phase title string.
+        title: String,
+    },
     /// `log(message)` — a narrator line.
-    Log(String),
+    /// Maps to `{ type: "workflow_log", message }`.
+    Log {
+        /// The log message string.
+        message: String,
+    },
+    /// Per-agent lifecycle event.
+    /// Maps to `{ type: "workflow_agent", … }`.
+    Agent {
+        /// Monotonically incrementing agent call ordinal (0-based).
+        index: u64,
+        /// Agent label: `opts.label ?? prompt.slice(0, 60)`.
+        label: String,
+        /// The phase index at the time this agent was dispatched (None if no phase set).
+        phase_index: Option<u32>,
+        /// The phase title at the time this agent was dispatched (None if no phase set).
+        phase_title: Option<String>,
+        /// Agent ID (UUID string from `SubagentResult`; None before completion).
+        agent_id: Option<String>,
+        /// Model string from opts or the default.
+        model: Option<String>,
+        /// Lifecycle state.
+        state: AgentState,
+        /// `toolUseID = "workflow_agent_{index}_{agent_id_or_suffix}"`.
+        tool_use_id: String,
+    },
 }
 
 /// Errors from parsing or executing a workflow script.
@@ -645,6 +732,8 @@ pub fn run_sync(script: &str) -> Result<RunOutcome, WorkflowError> {
     let ctx = Context::full(&rt).map_err(|e| WorkflowError::Engine(e.to_string()))?;
 
     let progress: Rc<RefCell<Vec<Progress>>> = Rc::new(RefCell::new(Vec::new()));
+    // Phase index counter: 1-based, incremented on each phase() call.
+    let phase_counter: Rc<RefCell<u32>> = Rc::new(RefCell::new(0));
     let prepared = strip_meta_export(script);
 
     ctx.with(|ctx| -> Result<(), WorkflowError> {
@@ -652,7 +741,7 @@ pub fn run_sync(script: &str) -> Result<RunOutcome, WorkflowError> {
 
         let p_log = progress.clone();
         let log = Function::new(ctx.clone(), move |msg: String| {
-            p_log.borrow_mut().push(Progress::Log(msg));
+            p_log.borrow_mut().push(Progress::Log { message: msg });
         })
         .map_err(|e| WorkflowError::Engine(e.to_string()))?;
         globals
@@ -660,8 +749,12 @@ pub fn run_sync(script: &str) -> Result<RunOutcome, WorkflowError> {
             .map_err(|e| WorkflowError::Engine(e.to_string()))?;
 
         let p_phase = progress.clone();
+        let pc_phase = phase_counter.clone();
         let phase = Function::new(ctx.clone(), move |title: String| {
-            p_phase.borrow_mut().push(Progress::Phase(title));
+            let mut counter = pc_phase.borrow_mut();
+            *counter += 1;
+            let index = *counter;
+            p_phase.borrow_mut().push(Progress::Phase { index, title });
         })
         .map_err(|e| WorkflowError::Engine(e.to_string()))?;
         globals
@@ -756,6 +849,9 @@ where
     let ctx = Context::full(&rt).map_err(|e| WorkflowError::Engine(e.to_string()))?;
 
     let progress: Rc<RefCell<Vec<Progress>>> = Rc::new(RefCell::new(Vec::new()));
+    // Phase state: 1-based index counter + the current phase title.
+    let phase_counter: Rc<RefCell<u32>> = Rc::new(RefCell::new(0));
+    let current_phase: Rc<RefCell<Option<(u32, String)>>> = Rc::new(RefCell::new(None));
     let error: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let result_slot: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let runner = Rc::new(RefCell::new(agent_runner));
@@ -785,7 +881,7 @@ where
             .set(
                 "log",
                 Function::new(ctx.clone(), move |msg: String| {
-                    let prog = Progress::Log(msg);
+                    let prog = Progress::Log { message: msg };
                     (op_log.borrow_mut())(&prog);
                     p_log.borrow_mut().push(prog);
                 })
@@ -795,11 +891,19 @@ where
 
         let p_phase = progress.clone();
         let op_phase = on_progress.clone();
+        let pc_phase = phase_counter.clone();
+        let cp_phase = current_phase.clone();
         globals
             .set(
                 "phase",
                 Function::new(ctx.clone(), move |title: String| {
-                    let prog = Progress::Phase(title);
+                    let mut counter = pc_phase.borrow_mut();
+                    *counter += 1;
+                    let index = *counter;
+                    drop(counter);
+                    // Track the current phase for agent events.
+                    *cp_phase.borrow_mut() = Some((index, title.clone()));
+                    let prog = Progress::Phase { index, title };
                     (op_phase.borrow_mut())(&prog);
                     p_phase.borrow_mut().push(prog);
                 })
@@ -810,14 +914,42 @@ where
         // Native batch dispatcher: the JS `__wf_pump` hands it every concurrently
         // pending agent prompt + its JSON-encoded opts at once; the runner
         // resolves them (the real runtime spawns the subagents in parallel).
+        // We augment each opts_json with `__wf_phase: {index, title}` (current
+        // phase at dispatch time) so the bridge can emit structured
+        // `workflow_agent` progress events with the right phaseIndex/phaseTitle.
+        // The bridge strips `__wf_phase` before forwarding opts to the spawner.
         let r = runner.clone();
+        let cp_dispatch = current_phase.clone();
         globals
             .set(
                 "__wf_dispatch_batch",
                 Function::new(
                     ctx.clone(),
                     move |prompts: Vec<String>, opts_json: Vec<String>| -> Vec<String> {
-                        (r.borrow_mut())(&prompts, &opts_json)
+                        // Augment each opts with the current phase snapshot.
+                        let phase_snapshot = cp_dispatch.borrow().clone();
+                        let augmented: Vec<String> = opts_json
+                            .iter()
+                            .map(|o| {
+                                if let Some((idx, title)) = &phase_snapshot {
+                                    // Inject __wf_phase into the opts object.
+                                    // The opts is always a valid JSON object
+                                    // (the prelude always passes {} for bare agent()).
+                                    let mut v: serde_json::Value =
+                                        serde_json::from_str(o).unwrap_or(serde_json::Value::Object(Default::default()));
+                                    if let Some(obj) = v.as_object_mut() {
+                                        obj.insert(
+                                            "__wf_phase".to_string(),
+                                            serde_json::json!({"index": idx, "title": title}),
+                                        );
+                                    }
+                                    serde_json::to_string(&v).unwrap_or_else(|_| o.clone())
+                                } else {
+                                    o.clone()
+                                }
+                            })
+                            .collect();
+                        (r.borrow_mut())(&prompts, &augmented)
                     },
                 )
                 .map_err(eng)?,
@@ -1140,8 +1272,8 @@ mod tests {
         assert_eq!(
             out.progress,
             vec![
-                Progress::Log("count=2 first=x".into()),
-                Progress::Log("plain=raw text".into()),
+                Progress::Log { message: "count=2 first=x".into() },
+                Progress::Log { message: "plain=raw text".into() },
             ]
         );
     }
@@ -1198,8 +1330,8 @@ mod tests {
         assert_eq!(
             out.progress,
             vec![
-                Progress::Log("isNull=true".into()),
-                Progress::Log("filtered=ok:a".into()),
+                Progress::Log { message: "isNull=true".into() },
+                Progress::Log { message: "filtered=ok:a".into() },
             ]
         );
     }
@@ -1208,7 +1340,7 @@ mod tests {
     fn engine_evaluates_js() {
         // (kept as a fast smoke test of the embedded engine)
         let out = run_sync("log(String(1 + 2 * 3))").unwrap();
-        assert_eq!(out.progress, vec![Progress::Log("7".into())]);
+        assert_eq!(out.progress, vec![Progress::Log { message: "7".into() }]);
     }
 
     #[test]
@@ -1241,10 +1373,10 @@ log(`done: ${items.join(',')}`)
         assert_eq!(
             out.progress,
             vec![
-                Progress::Phase("Scan".into()),
-                Progress::Log("3 items to scan".into()),
-                Progress::Phase("Report".into()),
-                Progress::Log("done: a,b,c".into()),
+                Progress::Phase { index: 1, title: "Scan".into() },
+                Progress::Log { message: "3 items to scan".into() },
+                Progress::Phase { index: 2, title: "Report".into() },
+                Progress::Log { message: "done: a,b,c".into() },
             ]
         );
     }
@@ -1281,9 +1413,9 @@ log('got: ' + b)
         assert_eq!(
             out.progress,
             vec![
-                Progress::Phase("Work".into()),
-                Progress::Log("got: [r1:first]".into()),
-                Progress::Log("got: [r2:second]".into()),
+                Progress::Phase { index: 1, title: "Work".into() },
+                Progress::Log { message: "got: [r1:first]".into() },
+                Progress::Log { message: "got: [r2:second]".into() },
             ]
         );
     }
@@ -1302,9 +1434,9 @@ for (let i = 0; i < n; i++) log('item ' + i)
         assert_eq!(
             out.progress,
             vec![
-                Progress::Log("item 0".into()),
-                Progress::Log("item 1".into()),
-                Progress::Log("item 2".into()),
+                Progress::Log { message: "item 0".into() },
+                Progress::Log { message: "item 1".into() },
+                Progress::Log { message: "item 2".into() },
             ]
         );
     }
@@ -1343,7 +1475,7 @@ log(rs.join('|'))
                 .collect()
         })
         .unwrap();
-        assert_eq!(out.progress, vec![Progress::Log("a1|b2|c3".into())]);
+        assert_eq!(out.progress, vec![Progress::Log { message: "a1|b2|c3".into() }]);
     }
 
     #[test]
@@ -1359,7 +1491,7 @@ log(String(rs[0]) + ',' + String(rs[1]))
             prompts.iter().map(|_| "OK".to_string()).collect()
         })
         .unwrap();
-        assert_eq!(out.progress, vec![Progress::Log("OK,null".into())]);
+        assert_eq!(out.progress, vec![Progress::Log { message: "OK,null".into() }]);
     }
 
     #[test]
@@ -1377,7 +1509,7 @@ log(rs.join('|'))
             prompts.iter().map(|p| format!("R:{p}")).collect()
         })
         .unwrap();
-        assert_eq!(out.progress, vec![Progress::Log("R:a|R:b|R:c".into())]);
+        assert_eq!(out.progress, vec![Progress::Log { message: "R:a|R:b|R:c".into() }]);
         assert_eq!(
             *batches.borrow(),
             vec![3],
@@ -1400,7 +1532,7 @@ log(a + b)
             prompts.iter().map(|p| p.to_uppercase()).collect()
         })
         .unwrap();
-        assert_eq!(out.progress, vec![Progress::Log("AB".into())]);
+        assert_eq!(out.progress, vec![Progress::Log { message: "AB".into() }]);
         assert_eq!(
             *batches.borrow(),
             vec![1, 1],
@@ -1428,7 +1560,7 @@ log(rs.join('|'))
             prompts.iter().map(|p| format!("[{p}]")).collect()
         })
         .unwrap();
-        assert_eq!(out.progress, vec![Progress::Log("[s2:[s1:x]]|[s2:[s1:y]]".into())]);
+        assert_eq!(out.progress, vec![Progress::Log { message: "[s2:[s1:x]]|[s2:[s1:y]]".into() }]);
         assert_eq!(
             *batches.borrow(),
             vec![2, 2],
@@ -1447,7 +1579,7 @@ const rs = await pipeline(
 log(rs.join(','))
 "#;
         let out = run(script, no_agents).unwrap();
-        assert_eq!(out.progress, vec![Progress::Log("20,30,40".into())]);
+        assert_eq!(out.progress, vec![Progress::Log { message: "20,30,40".into() }]);
     }
 
     #[test]
@@ -1487,11 +1619,11 @@ log('wf=' + (typeof workflow))
         assert_eq!(
             out.progress,
             vec![
-                Progress::Log("total=null".into()),
-                Progress::Log("remaining=Infinity".into()),
-                Progress::Log("spent=0".into()),
-                Progress::Log("args=undefined".into()),
-                Progress::Log("wf=function".into()),
+                Progress::Log { message: "total=null".into() },
+                Progress::Log { message: "remaining=Infinity".into() },
+                Progress::Log { message: "spent=0".into() },
+                Progress::Log { message: "args=undefined".into() },
+                Progress::Log { message: "wf=function".into() },
             ]
         );
     }
@@ -1551,7 +1683,7 @@ log('wf=' + (typeof workflow))
     fn no_return_leaves_the_result_unset() {
         let out = run("log('side effect only');", no_agents).unwrap();
         assert_eq!(out.result, None);
-        assert_eq!(out.progress, vec![Progress::Log("side effect only".into())]);
+        assert_eq!(out.progress, vec![Progress::Log { message: "side effect only".into() }]);
     }
 
     #[test]
@@ -1606,8 +1738,9 @@ log('wf=' + (typeof workflow))
             no_agents,
             move |p: &Progress| {
                 s.borrow_mut().push(match p {
-                    Progress::Phase(t) => format!("phase:{t}"),
-                    Progress::Log(m) => format!("log:{m}"),
+                    Progress::Phase { title: t, .. } => format!("phase:{t}"),
+                    Progress::Log { message: m } => format!("log:{m}"),
+                    Progress::Agent { .. } => return,
                 });
             },
             None,
@@ -1654,9 +1787,9 @@ log('wf=' + (typeof workflow))
         assert_eq!(
             out.progress,
             vec![
-                Progress::Log("total=500000".into()),
-                Progress::Log("spent=120000".into()),
-                Progress::Log("remaining=380000".into()),
+                Progress::Log { message: "total=500000".into() },
+                Progress::Log { message: "spent=120000".into() },
+                Progress::Log { message: "remaining=380000".into() },
             ]
         );
     }
@@ -1675,7 +1808,7 @@ log('wf=' + (typeof workflow))
         .unwrap();
         assert_eq!(
             out.progress,
-            vec![Progress::Log("x=7".into()), Progress::Log("len=3".into())]
+            vec![Progress::Log { message: "x=7".into() }, Progress::Log { message: "len=3".into() }]
         );
     }
 
@@ -1710,7 +1843,7 @@ log('wf=' + (typeof workflow))
             None,
         )
         .unwrap();
-        assert_eq!(out.progress, vec![Progress::Log("ok=true n=1".into())]);
+        assert_eq!(out.progress, vec![Progress::Log { message: "ok=true n=1".into() }]);
         assert_eq!(out.result.as_deref(), Some(r#"{"ok":true,"n":1}"#));
     }
 }

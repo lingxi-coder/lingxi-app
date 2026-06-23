@@ -11,6 +11,8 @@ license.workspace = true
 # semantics as claude-code's AsyncFunction-based executor.
 
 [dependencies]
+# JSON parsing for phase-context injection into the batch opts (`__wf_phase`).
+serde_json.workspace = true
 # rquickjs vendors quickjs-ng and compiles it by default (no system lib).
 # NB: the `futures` feature (Rust-future <-> JS-promise bridge) pulls
 # async-lock 3.4.2 which requires rustc 1.85 > the workspace MSRV 1.82, so the

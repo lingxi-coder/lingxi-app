@@ -3129,6 +3129,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "hex",
+ "http-client",
  "platform-android-minijail",
  "platform-common",
  "platform-posix-minimal",
@@ -3194,6 +3195,7 @@ dependencies = [
 name = "platform-ios"
 version = "0.12.0"
 dependencies = [
+ "http-client",
  "platform-common",
  "platform-posix-minimal",
  "traits",
@@ -3211,6 +3213,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "hex",
+ "http-client",
  "jsonrpc",
  "libc",
  "lsp",
@@ -3245,6 +3248,7 @@ dependencies = [
  "fs2",
  "futures-core",
  "futures-util",
+ "http-client",
  "jsonrpc",
  "mcp",
  "protocol",
@@ -3267,13 +3271,13 @@ dependencies = [
  "futures",
  "futures-core",
  "futures-util",
+ "http-client",
  "jsonrpc",
  "lsp",
  "notify",
  "notify-debouncer-mini",
  "platform-common",
  "protocol",
- "reqwest",
  "serde",
  "serde_json",
  "tempfile",

@@ -118,7 +118,7 @@ impl AndroidPlatform {
         };
         Self {
             fs: Arc::new(PosixFileSystem::new(inputs.app_files_root)),
-            http: Arc::new(platform_common::http::ReqwestHttp::new()),
+            http: Arc::new(http_client::ReqwestHttp::new()),
             clock: Arc::new(PosixClock::new()),
             process,
             sandbox,

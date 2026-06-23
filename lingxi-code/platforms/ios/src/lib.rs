@@ -78,7 +78,7 @@ impl IosPlatform {
         };
         Self {
             fs: Arc::new(PosixFileSystem::new(inputs.app_sandbox_root)),
-            http: Arc::new(platform_common::http::ReqwestHttp::new()),
+            http: Arc::new(http_client::ReqwestHttp::new()),
             clock: Arc::new(PosixClock::new()),
             process: Arc::new(PosixProcess::new()),
             sandbox: Arc::new(PosixSandbox::new()),

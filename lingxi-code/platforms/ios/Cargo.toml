@@ -20,6 +20,7 @@ license.workspace = true
 traits = { path = "../../traits" }
 platform-posix-minimal = { path = "../posix-minimal" }
 platform-common = { path = "../common" }
+http-client = { path = "../../http-client" }
 
 [lints]
 workspace = true

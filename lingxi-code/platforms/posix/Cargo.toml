@@ -15,6 +15,7 @@ jsonrpc = { path = "../../jsonrpc" }
 mcp = { path = "../../mcp" }
 lsp = { path = "../../lsp" }
 platform-common = { path = "../common" }
+http-client = { path = "../../http-client" }
 sandbox = { path = "../../sandbox" }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

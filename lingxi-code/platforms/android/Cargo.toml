@@ -18,6 +18,7 @@ license.workspace = true
 traits = { path = "../../traits" }
 platform-posix-minimal = { path = "../posix-minimal" }
 platform-common = { path = "../common" }
+http-client = { path = "../../http-client" }
 async-trait.workspace = true
 tracing.workspace = true
 # `rt` for `tokio::task::spawn_blocking` (the runner wraps the blocking jailed

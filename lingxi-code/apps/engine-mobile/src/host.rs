@@ -578,19 +578,21 @@ pub async fn build_mobile_inner(
     // subscriber (`SubscriberState::default()` — api-key-only inference), and
     // binds no live subscription slot / availability map / CostTracker (out of
     // scope; mobile parity did not).
-    let provider_adapter = Arc::new(ProviderApiAdapter::new_with_routing(
-        llm_client,
-        llm_transport,
-        subscriber_state,
-        UserAgentEnv::from_process_env(),
-        env!("CARGO_PKG_VERSION"),
-        None,
-        None,
-        Some(cost_estimator),
-        fallback_overrides,
-        settings_max_retries,
-        settings_backoff_ms,
-    ));
+    let provider_adapter = Arc::new(ProviderApiAdapter::new(Arc::new(
+        llm_client::ApiService::new_with_routing(
+            llm_client,
+            llm_transport,
+            subscriber_state,
+            UserAgentEnv::from_process_env(),
+            env!("CARGO_PKG_VERSION"),
+            None,
+            None,
+            Some(cost_estimator),
+            fallback_overrides,
+            settings_max_retries,
+            settings_backoff_ms,
+        ),
+    )));
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let streaming_api: Arc<dyn StreamingApiClient> =
         streaming_override.unwrap_or(provider_adapter as Arc<dyn StreamingApiClient>);

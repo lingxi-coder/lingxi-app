@@ -2189,13 +2189,16 @@ pub async fn build(
     // `getOauthAccountInfo()?.accountUuid ?? ''` fallback (the value is per-account
     // and never byte-matches claude-code regardless).
     let request_metadata = llm_client::RequestMetadata {
-        user_id: ProviderApiAdapter::build_api_metadata_user_id(
+        user_id: llm_client::ApiService::build_api_metadata_user_id(
             &migrations::global_config::get_or_create_user_id(),
             "",
             &main_session_uuid,
         ),
     };
-    let provider_adapter_built = ProviderApiAdapter::new_with_routing(
+    // Build the provider-neutral drive service (the retry/rate-limit/betas loop),
+    // then wrap it in the thin `ProviderApiAdapter` that impls the orchestrator +
+    // agent seams. The `with_*` builders live on `ApiService`.
+    let service_built = llm_client::ApiService::new_with_routing(
         llm_client,
         llm_transport,
         subscriber_state,
@@ -2213,14 +2216,14 @@ pub async fn build(
     // `--json-schema` structured output: FORCE the `StructuredOutput` tool so the
     // model returns its final result through it (1:1 with claude-code). Untouched
     // for every normal turn (`json_schema` is `None`).
-    let provider_adapter_built = if cfg.json_schema.is_some() {
-        provider_adapter_built.with_forced_tool_choice(llm_client::ToolChoice::Tool {
+    let service_built = if cfg.json_schema.is_some() {
+        service_built.with_forced_tool_choice(llm_client::ToolChoice::Tool {
             name: orchestrator::structured_output::STRUCTURED_OUTPUT_TOOL_NAME.to_string(),
         })
     } else {
-        provider_adapter_built
+        service_built
     };
-    let provider_adapter = Arc::new(provider_adapter_built);
+    let provider_adapter = Arc::new(ProviderApiAdapter::new(Arc::new(service_built)));
     let provider_adapter_handle = provider_adapter.clone();
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter;

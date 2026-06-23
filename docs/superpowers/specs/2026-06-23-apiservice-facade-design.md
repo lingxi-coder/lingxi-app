@@ -70,9 +70,13 @@ Public surface (inherent, provider-neutral):
 ### 4.3 Thin the trait impls (stay in orchestrator/agent)
 `ProviderApiAdapter` becomes `{ service: Arc<llm_client::ApiService> }`; the 3 trait impls
 (`OrchestratorApiClient`, `StreamingApiClient`, `agent::SubagentApiClient`) delegate 1:1.
-`messages_create_with_fallback` composes `service.messages_create` calls with orchestrator's
-`fallback` policy (already in `llm_client::model::fallback` from Plan B; the *composition* stays
-in the thin adapter).
+`messages_create_with_fallback` composes the fallback chain over `service.messages_create`.
+**As implemented (2026-06-23):** the composition lives **in `ApiService`** (inherent), not the
+thin adapter — the fallback chain-walk is inseparable from the private `drive_non_stream_seeded_with_chain`
+driver, and it reads only `ApiService`-owned state (no orchestrator types). Keeping it in the
+adapter would have forced re-exposing that moved state. Fallback-on-overflow is model-selection
+(provider-protocol), so this does not breach provider-neutrality. (Allowed by the original Plan B
+§7.5 "if splitting proves artificial, the method moves down whole".) The adapter delegates 1:1.
 
 ### 4.4 Test placement
 The provider_adapter tests that use orchestrator-domain helpers (`locked_templates`, `cost_wiring`,

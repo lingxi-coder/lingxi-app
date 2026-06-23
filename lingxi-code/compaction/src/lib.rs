@@ -9,7 +9,7 @@ pub mod boundary;
 pub mod prompt_too_long;
 pub mod cached_microcompact;
 pub mod context_collapse;
-pub mod context_window;
+pub use llm_client::model::context_window;
 pub mod grouping;
 pub mod microcompact;
 pub mod orchestrator;

@@ -20,6 +20,7 @@ pub mod error;
 pub mod eventstream;
 pub mod model;
 pub mod oauth;
+pub mod prompt_format;
 pub mod protocol;
 pub mod provider_settings;
 #[allow(missing_docs)]
@@ -29,6 +30,8 @@ pub mod registry;
 pub mod retry;
 #[allow(missing_docs)]
 pub mod route;
+#[allow(missing_docs)]
+pub mod service;
 pub mod sigv4;
 pub mod sse;
 pub mod transport;
@@ -77,6 +80,7 @@ pub use redaction::Redactor;
 pub use registry::{ModelListing, ModelRegistry, ResolvedRoute};
 pub use retry::{ResponseMetadata, RetryDecision, RetryPolicy};
 pub use route::Route;
+pub use service::{ApiService, SubscriberState};
 pub use sse::SseFrameSplitter;
 pub use transport::{
     BoxFuture, FrameStream, ResponsesWebSocketTransportSession, StreamingResponse, Transport,

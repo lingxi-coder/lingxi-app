@@ -991,6 +991,7 @@ mod tests {
                     script: String::new(),
                     resume_from_run_id: None,
                     args: None,
+                    run_id: None,
                 },
                 make_ctx(fs),
             )

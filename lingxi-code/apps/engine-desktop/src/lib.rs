@@ -666,15 +666,15 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
         spec: tool_workflow::WorkflowLaunchSpec,
     ) -> Result<tool_workflow::WorkflowLaunched, tool_workflow::WorkflowLaunchError> {
         let cwd = self.cwd.clone();
-        let script = tool_workflow::resolve_script(&spec, |p| {
+        let abs = |p: &str| -> std::path::PathBuf {
             let path = std::path::Path::new(p);
-            let full = if path.is_absolute() {
+            if path.is_absolute() {
                 path.to_path_buf()
             } else {
                 cwd.join(path)
-            };
-            std::fs::read_to_string(full)
-        })?;
+            }
+        };
+        let script = tool_workflow::resolve_script(&spec, |p| std::fs::read_to_string(abs(p)))?;
         // Reject a malformed `meta` block at the tool boundary (claude-code parses
         // + validates `meta` when the Workflow tool accepts a script). The
         // byte-exact message surfaces to the model as the tool error.
@@ -685,6 +685,45 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
             };
             tool_workflow::WorkflowLaunchError(msg)
         })?;
+        // Determinism gate (claude-code validateInput `if (e.script && HKa(...))`):
+        // an INLINE `script` may not use Date.now()/Math.random()/new Date()
+        // (breaks resume). Author-controlled `scriptPath`/`name` files are exempt.
+        let is_inline = spec.script.as_deref().is_some_and(|s| !s.is_empty())
+            && spec.script_path.as_deref().filter(|s| !s.is_empty()).is_none();
+        if is_inline {
+            if let Err(workflow::WorkflowError::Script(m)) = workflow::check_determinism(&script) {
+                return Err(tool_workflow::WorkflowLaunchError(m));
+            }
+        }
+        // Mint the run id at launch (fresh) or reuse the resume id — so it can be
+        // returned in the tool result (claude-code `runId`) for `resumeFromRunId`.
+        // A clock-nanos × per-process sequence gives a unique `wf_<16hex>` (host
+        // clock use is fine — only the workflow SCRIPT is barred from the clock).
+        let run_id = spec.resume_from_run_id.clone().unwrap_or_else(|| {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static WF_SEQ: AtomicU64 = AtomicU64::new(0);
+            let seq = WF_SEQ.fetch_add(1, Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            format!("wf_{:016x}", nanos ^ seq.wrapping_mul(0x9e37_79b9_7f4a_7c15))
+        });
+        // Persist the script so it is editable + re-runnable via `scriptPath`
+        // (claude-code persists every invocation's script "under the session
+        // directory"). A `scriptPath` input is already on disk → return it as-is;
+        // an inline/`name` script is written under `<cwd>/.lingxi-scratch/workflows`.
+        let script_path = if let Some(p) = spec.script_path.as_deref().filter(|s| !s.is_empty()) {
+            abs(p).to_str().map(str::to_string)
+        } else {
+            let dir = cwd.join(".lingxi-scratch").join("workflows");
+            let file = dir.join(format!("{run_id}.js"));
+            (std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&file, &script).is_ok())
+                .then(|| file.to_str().map(str::to_string))
+                .flatten()
+        };
+        // `meta.name` → `workflowName` in the result.
+        let workflow_name = workflow::meta_string_value(&script, "name");
         let task_id = self
             .registry
             .spawn(
@@ -698,12 +737,18 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                         .args
                         .as_ref()
                         .map(|v| serde_json::to_string(v).unwrap_or_default()),
+                    run_id: Some(run_id.clone()),
                 },
                 "Workflow".to_string(),
             )
             .await
             .map_err(|e| tool_workflow::WorkflowLaunchError(e.to_string()))?;
-        Ok(tool_workflow::WorkflowLaunched { task_id })
+        Ok(tool_workflow::WorkflowLaunched {
+            task_id,
+            run_id: Some(run_id),
+            script_path,
+            workflow_name,
+        })
     }
 }
 

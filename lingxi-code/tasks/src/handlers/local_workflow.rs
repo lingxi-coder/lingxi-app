@@ -76,6 +76,29 @@ fn wf_throw(message: &str) -> String {
     format!("{WF_THROW_PREFIX}{message}")
 }
 
+/// The chained resume-cache key for an `agent(prompt, opts)` call (claude-code
+/// `qKa(se, te, m)`): a running hash that folds in the PREVIOUS key (`prev`), so
+/// any change in the preceding sequence of agent() calls cascades into every
+/// later key — giving "longest unchanged prefix" replay (a reorder, an inserted
+/// call, or an edited prompt all break the chain from that point on). The exact
+/// hash bytes are private to LingXi (the journal is its own same-session format),
+/// so a stable FNV-1a-64 over `prev | prompt | opts` suffices.
+fn chain_key(prev: &str, prompt: &str, opts_json: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut fold = |bytes: &[u8]| {
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    fold(prev.as_bytes());
+    fold(b"\x1e");
+    fold(prompt.as_bytes());
+    fold(b"\x1f");
+    fold(opts_json.as_bytes());
+    format!("{h:016x}")
+}
+
 /// `WorkflowBudgetExceededError` message (binary `I6a` @201953813), with
 /// thousands-separated counts (`toLocaleString`).
 fn workflow_budget_exceeded_message(spent: u64, total: u64) -> String {
@@ -112,6 +135,10 @@ pub const DEFAULT_WORKFLOW_SUBAGENT: &str = "general-purpose";
 pub struct WorkerCancel {
     handle: BackgroundTaskHandle,
     runtime: Arc<dyn RuntimeSpawner>,
+    /// Cooperative-cancel flag shared with the running script thread's engine
+    /// interrupt handler. Flipped by [`Task::kill`] / cleanup so a runaway
+    /// pure-JS loop aborts instead of leaking the OS thread.
+    cancel: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Background [`Task`] that runs a workflow script and spools its result.
@@ -234,6 +261,7 @@ impl LocalWorkflowHandler {
     pub async fn drain_pending_kills(&self) {
         let pending: Vec<(String, WorkerCancel)> = self.pending_kill.lock().await.drain().collect();
         for (task_id, rec) in pending {
+            rec.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             let _ = rec.runtime.cancel(&rec.handle).await;
             self.status_sink.set_status(&task_id, TaskStatus::Killed).await;
         }
@@ -252,8 +280,12 @@ fn concurrency_cap() -> usize {
 /// Build the `SubagentSpawnRequest` for one `agent(prompt, opts)` call. The
 /// spawn-affecting `agent()` opts are mapped from `opts_json`
 /// (`JSON.stringify(opts)`): `agentType` overrides the default subagent type,
-/// `model` and `isolation` pass through. (`schema` — structured output — and the
-/// display-only `label`/`phase`/`effort` opts are not mapped here.)
+/// `model` and `isolation` pass through, and `label` becomes the subagent's
+/// display name (claude-code `re = opts.label ?? prompt.slice(0,60)`, surfaced
+/// as the agent's progress label). (`schema` is handled below; the `phase` opt
+/// groups the agent in claude's /workflows progress tree, for which LingXi has
+/// no per-agent progress surface — only `phase()`/`log()` lines — so it has no
+/// mapping target here.)
 fn make_request(default_subagent_type: &str, prompt: &str, opts_json: &str) -> SubagentSpawnRequest {
     let opts: Value = serde_json::from_str(opts_json).unwrap_or(Value::Null);
     let opt_str = |k: &str| {
@@ -270,7 +302,8 @@ fn make_request(default_subagent_type: &str, prompt: &str, opts_json: &str) -> S
         description: None,
         model: opt_str("model"),
         run_in_background: false,
-        name: None,
+        // `agent(prompt, { label })` → the subagent's display label.
+        name: opt_str("label"),
         team_name: None,
         mode: None,
         isolation: opt_str("isolation"),
@@ -303,14 +336,16 @@ fn value_to_text(content: Value) -> String {
 }
 
 /// Map a terminal subagent result to the string the runner returns for that
-/// prompt. A failed/killed/errored agent maps to the empty string, which is
-/// falsy in JS and so is dropped by the `.filter(Boolean)` the scripts use —
-/// matching claude-code's `null` return for a skipped/dead agent.
+/// prompt. A failed/killed/errored agent maps to the NULL sentinel, which the
+/// prelude resolves the `agent()` promise with `null` — claude-code's contract
+/// (`if (Be.skipped) return null` / `if (Be.apiError) return null`). `null` is
+/// falsy, so `.filter(Boolean)` still drops it, while explicit `=== null` / `??`
+/// checks now behave correctly. (An empty-but-successful agent still returns "".)
 fn result_to_string(result: Result<SubagentResult, SubagentSpawnError>) -> String {
     match result {
         Ok(SubagentResult::Completed { content, .. }) => value_to_text(content),
         Ok(SubagentResult::Failed { .. } | SubagentResult::Killed { .. }) | Err(_) => {
-            String::new()
+            workflow::WF_NULL_SENTINEL.to_string()
         }
     }
 }
@@ -365,6 +400,21 @@ pub struct NestedConfig {
     pub fs: Option<Arc<dyn FileSystem>>,
 }
 
+/// Per-call plan for one batch: decided sequentially in Phase A (prefix-cache
+/// cursor), executed concurrently in Phase B.
+enum Plan {
+    /// `__wf_resolve` — resolve a nested workflow reference to its source.
+    Resolve(Value),
+    /// Replay a journaled result (prefix hit).
+    Cached(String),
+    /// Spawn a real subagent; journal the result under `key` (when present).
+    Live {
+        key: Option<String>,
+        prompt: String,
+        opts_json: String,
+    },
+}
+
 /// Run a workflow `script` to completion, spawning each `agent()` call as a real
 /// subagent of type `subagent_type` via `spawner`. Returns the script's
 /// [`workflow::RunOutcome`] (its `phase()`/`log()` progress + return value) or a
@@ -392,6 +442,10 @@ pub async fn run_workflow_script(
     shared_pool: Option<Arc<AtomicU64>>,
     turn_start_baseline: u64,
     nested: NestedConfig,
+    // Cooperative-cancel flag (claude-code `abortController`). `Task::kill` flips
+    // it; the embedded engine's interrupt handler then aborts the script thread,
+    // so a runaway pure-JS loop is stopped instead of leaking the OS thread.
+    cancel: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
     let NestedConfig {
         allow_nested,
@@ -453,6 +507,7 @@ pub async fn run_workflow_script(
                 Some(budget_source),
                 allow_nested,
                 nested_args,
+                Some(cancel),
             );
             let _ = outcome_tx.send(outcome);
         })
@@ -463,110 +518,149 @@ pub async fn run_workflow_script(
     // count — replayed (journaled) and `__wf_resolve` calls are exempt, so
     // resuming a >1000-agent workflow never trips the cap on replay.
     let agent_count = Arc::new(AtomicU64::new(0));
-    // Async worker: answer each batch by spawning its subagents concurrently
+    // PREFIX resume cursor (claude-code `m` + gone-live flag `f`): the journal is
+    // a longest-unchanged-prefix cache. `running_key` chains each real agent()
+    // call into the previous key (so any change cascades to all later keys), and
+    // once a lookup MISSES we go live (`gone_live`) for every later call — never
+    // replaying a stale result out of order. Both advance in agent()-CALL order,
+    // which the worker sees batch-by-batch (this loop is sequential) and, within
+    // a batch, in the queue's call order. `__wf_resolve` (nested-workflow source)
+    // calls are not real agents: they neither advance the chain nor touch the
+    // journal.
+    let mut running_key = String::new();
+    let mut gone_live = false;
+
+    // Async worker: answer each batch. Phase A decides cached-vs-live per call in
+    // order (advancing the prefix cursor); Phase B runs the plans concurrently
     // (bounded, order-preserving). The loop ends when the runner's sender is
     // dropped — i.e. when `workflow::run` returns.
     while let Some((calls, reply)) = req_rx.recv().await {
-        let results: Vec<String> =
-            futures::stream::iter(calls.into_iter().map(|(prompt, opts_json)| {
-                let spawner = spawner.clone();
-                let tool_invoker = tool_invoker.clone();
-                let budget = budget.clone();
-                let subagent_type = subagent_type.to_string();
-                let journal = journal.clone();
-                let spent = spent.clone();
-                let agent_count = agent_count.clone();
-                let nested_fs = nested_fs.clone();
-                let budget_total = token_budget_total;
-                let baseline = turn_start_baseline;
-                async move {
-                    // `workflow()` resolution: the runtime asks the host to resolve
-                    // a nested workflow reference to its SOURCE (it then evaluates
-                    // that source inline, in the same runtime, sharing state). We
-                    // read + strip the file and return the source; `""` ⇒ the
-                    // runtime throws "could not resolve".
-                    let opts: Value = serde_json::from_str(&opts_json).unwrap_or(Value::Null);
-                    if let Some(spec_json) = opts.get("__wf_resolve").and_then(Value::as_str) {
-                        let spec: Value = serde_json::from_str(spec_json).unwrap_or(Value::Null);
+        // Phase A — sequential, in call order: prefix-cache decision per call.
+        let mut plans: Vec<Plan> = Vec::with_capacity(calls.len());
+        for (prompt, opts_json) in calls {
+            let opts: Value = serde_json::from_str(&opts_json).unwrap_or(Value::Null);
+            if let Some(spec_json) = opts.get("__wf_resolve").and_then(Value::as_str) {
+                let spec: Value = serde_json::from_str(spec_json).unwrap_or(Value::Null);
+                plans.push(Plan::Resolve(spec));
+                continue;
+            }
+            // Advance the chained key for this real agent() call (before the
+            // cache check, so cached calls also advance the chain — claude `m`).
+            let key = chain_key(&running_key, &prompt, &opts_json);
+            running_key.clone_from(&key);
+            if !gone_live {
+                let cached = journal
+                    .as_ref()
+                    .and_then(|j| j.lock().unwrap().get(&key).cloned());
+                if let Some(cached) = cached {
+                    plans.push(Plan::Cached(cached));
+                    continue;
+                }
+                gone_live = true; // first miss → everything after runs live
+            }
+            let journaled_key = journal.as_ref().map(|_| key);
+            plans.push(Plan::Live {
+                key: journaled_key,
+                prompt,
+                opts_json,
+            });
+        }
+
+        // Phase B — concurrent (bounded, order-preserving).
+        let results: Vec<String> = futures::stream::iter(plans.into_iter().map(|plan| {
+            let spawner = spawner.clone();
+            let tool_invoker = tool_invoker.clone();
+            let budget = budget.clone();
+            let subagent_type = subagent_type.to_string();
+            let journal = journal.clone();
+            let spent = spent.clone();
+            let agent_count = agent_count.clone();
+            let nested_fs = nested_fs.clone();
+            let budget_total = token_budget_total;
+            let baseline = turn_start_baseline;
+            async move {
+                let (key, prompt, opts_json) = match plan {
+                    // `workflow()` resolution: read + strip the nested source; `""`
+                    // ⇒ the runtime throws "could not resolve".
+                    Plan::Resolve(spec) => {
                         return match resolve_nested_script(&spec, nested_fs.as_ref()).await {
                             Ok(src) => workflow::strip_meta_export(&src),
                             Err(_) => String::new(),
-                        };
-                    }
-                    // Resume cache: a journaled result for the same (prompt, opts)
-                    // is replayed instead of re-spawning. The guard is dropped
-                    // before any `.await` (a std Mutex guard is not `Send`).
-                    let key = format!("{prompt}\u{0}{opts_json}");
-                    if let Some(j) = &journal {
-                        if let Some(cached) = j.lock().unwrap().get(&key).cloned() {
-                            return cached;
                         }
                     }
-                    // Budget hard ceiling (claude-code `v()` before each spawn):
-                    // when a token target is set and the turn-relative spend has
-                    // reached it, refuse the spawn → the prelude throws
-                    // WorkflowBudgetExceededError (sequential loops stop; in
-                    // parallel/pipeline the throw is caught → null). Checked
-                    // before the cap so an over-budget run reports the budget error.
-                    if let Some(total) = budget_total.filter(|&t| t > 0) {
-                        let turn_spent = spent.load(Ordering::Relaxed).saturating_sub(baseline);
-                        if turn_spent >= total {
-                            return wf_throw(&workflow_budget_exceeded_message(turn_spent, total));
-                        }
+                    Plan::Cached(result) => return result,
+                    Plan::Live {
+                        key,
+                        prompt,
+                        opts_json,
+                    } => (key, prompt, opts_json),
+                };
+                let opts: Value = serde_json::from_str(&opts_json).unwrap_or(Value::Null);
+                // Budget hard ceiling (claude-code `v()` before each spawn): when a
+                // token target is set and the turn-relative spend has reached it,
+                // refuse the spawn → the prelude throws WorkflowBudgetExceededError
+                // (sequential loops stop; in parallel/pipeline the throw is caught →
+                // null). Checked before the cap so an over-budget run reports it.
+                if let Some(total) = budget_total.filter(|&t| t > 0) {
+                    let turn_spent = spent.load(Ordering::Relaxed).saturating_sub(baseline);
+                    if turn_spent >= total {
+                        return wf_throw(&workflow_budget_exceeded_message(turn_spent, total));
                     }
-                    // 1000-agent lifetime cap (claude-code `S()` before each real
-                    // spawn): this is reached only after the cache-miss + non-resolve
-                    // checks, so replayed/resolve calls are exempt. `fetch_add`
-                    // returns the prior count → spawns 0..999 proceed, the 1001st
-                    // throws WorkflowAgentCapError.
-                    if agent_count.fetch_add(1, Ordering::SeqCst) >= WORKFLOW_AGENT_CAP {
-                        return wf_throw(WORKFLOW_AGENT_CAP_MESSAGE);
-                    }
-                    // agentType validation (binary `F` @202933121): an explicit
-                    // `agentType` must name a known agent, else throw the byte-exact
-                    // not-found error listing the available agents. (LingXi applies
-                    // no `agents()` permission filtering in the workflow path — as
-                    // the AgentTool's own not-found-only check shows — so the
-                    // binary's "denied by permission rule" branch is unreachable.)
-                    if let Some(at) = opts
-                        .get("agentType")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty())
-                    {
-                        let listing = spawner.agent_listing().await;
-                        if !listing.iter().any(|e| e.agent_type == at) {
-                            let available = listing
-                                .iter()
-                                .map(|e| e.agent_type.clone())
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            return wf_throw(&format!(
-                                "agent({{agentType}}): agent type '{at}' not found. Available agents: {available}"
-                            ));
-                        }
-                    }
-                    let inherit = SubagentInheritance {
-                        tool_invoker,
-                        budget,
-                    };
-                    let request = make_request(&subagent_type, &prompt, &opts_json);
-                    let raw = spawner.spawn(request, inherit).await;
-                    // Accumulate this fresh subagent's output tokens into the
-                    // shared `spent` pool (replayed/cached agents above cost
-                    // nothing) — the same pool the main loop feeds when wired.
-                    if let Ok(SubagentResult::Completed { usage, .. }) = &raw {
-                        spent.fetch_add(usage.output_tokens, Ordering::Relaxed);
-                    }
-                    let result = result_to_string(raw);
-                    if let Some(j) = &journal {
-                        j.lock().unwrap().insert(key, result.clone());
-                    }
-                    result
                 }
-            }))
-            .buffered(cap)
-            .collect()
-            .await;
+                // 1000-agent lifetime cap (claude-code `S()` before each real
+                // spawn): replayed/resolve calls are exempt (they never reach here).
+                // `fetch_add` returns the prior count → spawns 0..999 proceed, the
+                // 1001st throws WorkflowAgentCapError.
+                if agent_count.fetch_add(1, Ordering::SeqCst) >= WORKFLOW_AGENT_CAP {
+                    return wf_throw(WORKFLOW_AGENT_CAP_MESSAGE);
+                }
+                // agentType validation (binary `F` @202933121): an explicit
+                // `agentType` must name a known agent, else throw the byte-exact
+                // not-found error listing the available agents.
+                if let Some(at) = opts
+                    .get("agentType")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    let listing = spawner.agent_listing().await;
+                    if !listing.iter().any(|e| e.agent_type == at) {
+                        let available = listing
+                            .iter()
+                            .map(|e| e.agent_type.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        return wf_throw(&format!(
+                            "agent({{agentType}}): agent type '{at}' not found. Available agents: {available}"
+                        ));
+                    }
+                }
+                let inherit = SubagentInheritance {
+                    tool_invoker,
+                    budget,
+                };
+                let request = make_request(&subagent_type, &prompt, &opts_json);
+                let raw = spawner.spawn(request, inherit).await;
+                // Accumulate this fresh subagent's output tokens into the shared
+                // `spent` pool (replayed/cached agents cost nothing) — the same
+                // pool the main loop feeds when wired.
+                if let Ok(SubagentResult::Completed { usage, .. }) = &raw {
+                    spent.fetch_add(usage.output_tokens, Ordering::Relaxed);
+                }
+                let result = result_to_string(raw);
+                // Journal only a real result — a dead/skipped agent (NULL sentinel)
+                // is NOT cached (claude-code `if (a && ie && de !== null) append`),
+                // so a resume re-runs it.
+                if result != workflow::WF_NULL_SENTINEL {
+                    if let (Some(j), Some(k)) = (journal.as_ref(), key) {
+                        j.lock().unwrap().insert(k, result.clone());
+                    }
+                }
+                result
+            }
+        }))
+        .buffered(cap)
+        .collect()
+        .await;
         // Receiver gone only if the script thread vanished; nothing to do.
         let _ = reply.send(results);
     }
@@ -638,6 +732,7 @@ impl Task for LocalWorkflowHandler {
             script,
             resume_from_run_id,
             args: workflow_args,
+            run_id: provided_run_id,
         } = input
         else {
             return Err(TaskError::Internal(
@@ -686,6 +781,11 @@ impl Task for LocalWorkflowHandler {
             .unwrap_or(0);
         let worker_spool_path = spool_path.clone();
         let worker_task_id = task_id.clone();
+        // Cooperative-cancel flag: shared between the script thread's engine
+        // interrupt handler (via `run_workflow_script`) and the `WorkerCancel`
+        // record `kill` flips. `false` until killed.
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
         let worker = Box::pin(async move {
             status_sink
                 .set_status(&worker_task_id, TaskStatus::Running)
@@ -696,8 +796,12 @@ impl Task for LocalWorkflowHandler {
             // caller's id and pre-loads its journal so unchanged agents replay
             // instead of re-spawning. The id is surfaced to the task output so a
             // later call can pass it back as `resumeFromRunId`.
+            // A resume reuses the caller's id; a fresh run uses the
+            // launcher-minted id (so the Workflow tool result can return it)
+            // and only mints one here as a last resort (direct test spawns).
             let run_id = resume_from_run_id
                 .clone()
+                .or(provided_run_id)
                 .unwrap_or_else(|| format!("wf_{:016x}", rand::random::<u64>()));
             let journal_path = worker_spool_path
                 .parent()
@@ -748,6 +852,7 @@ impl Task for LocalWorkflowHandler {
                     args: workflow_args,
                     fs: Some(fs.clone()),
                 },
+                worker_cancel,
             );
             let (outcome, ()) = tokio::join!(run, drain);
 
@@ -788,6 +893,7 @@ impl Task for LocalWorkflowHandler {
             WorkerCancel {
                 handle: bg_handle,
                 runtime: ctx.runtime.clone(),
+                cancel,
             },
         );
 
@@ -819,6 +925,10 @@ impl Task for LocalWorkflowHandler {
         // graceful no-op.
         let rec = self.workers.lock().await.remove(task_id);
         if let Some(rec) = rec {
+            // Flip the cooperative-cancel flag FIRST so the script thread's engine
+            // interrupt handler aborts a runaway pure-JS loop, then cancel the
+            // async worker future (claude-code `abortController.abort()`).
+            rec.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             rec.runtime
                 .cancel(&rec.handle)
                 .await
@@ -1051,6 +1161,7 @@ mod tests {
             script: script.into(),
             resume_from_run_id: None,
             args: None,
+            run_id: None,
         }
     }
 
@@ -1094,6 +1205,7 @@ mod tests {
             None,
             0,
             NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await
         .expect("workflow runs to completion")
@@ -1116,6 +1228,7 @@ mod tests {
             None,
             0,
             NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await;
         let err = result.expect_err("the 1001st agent() must throw the cap error");
@@ -1143,6 +1256,7 @@ mod tests {
             None,
             0,
             NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await;
         let err = result.expect_err("unknown agentType must throw");
@@ -1188,6 +1302,7 @@ mod tests {
             Some(pool),
             500,
             NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await
         .expect("runs");
@@ -1218,6 +1333,7 @@ mod tests {
             Some(pool),
             0,
             NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await;
         let err = result.expect_err("over-budget agent() must throw");
@@ -1249,6 +1365,7 @@ mod tests {
             Some(pool.clone()),
             0,
             NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await
         .expect("workflow runs to completion");
@@ -1399,6 +1516,7 @@ mod tests {
                 args: Some(r#"{"a":5}"#.to_string()),
                 fs: None,
             },
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await
         .unwrap();
@@ -1439,6 +1557,7 @@ mod tests {
                 args: None,
                 fs: Some(fs),
             },
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await
         .unwrap();
@@ -1584,6 +1703,7 @@ mod tests {
             script: script.into(),
             resume_from_run_id: Some(run_id),
             args: None,
+            run_id: None,
         };
         let handle2 = h2.spawn(input2, make_ctx(fs.clone())).await.unwrap();
         assert_eq!(await_terminal(&sink2).await, TaskStatus::Completed);
@@ -1601,6 +1721,75 @@ mod tests {
             out2.content.contains(r#"{"a":"echo:a","b":"echo:b"}"#),
             "rebuilt from cache: {}",
             out2.content
+        );
+    }
+
+    #[tokio::test]
+    async fn label_opt_becomes_the_subagent_display_name() {
+        let spawner = Arc::new(EchoSpawner::default());
+        run_bridge(
+            "await agent('p', { label: 'my-label' }); await agent('q');",
+            spawner.clone(),
+        )
+        .await;
+        let reqs = spawner.seen_reqs.lock().unwrap().clone();
+        assert_eq!(reqs[0].name.as_deref(), Some("my-label"), "label → name");
+        assert_eq!(reqs[1].name, None, "no label → no name");
+    }
+
+    #[tokio::test]
+    async fn resume_with_a_changed_prefix_reruns_from_the_edit_onward() {
+        // PREFIX semantics: editing the FIRST agent's prompt on resume must
+        // re-run it AND every later call (the chained key cascades) — NOT replay
+        // the now-misaligned journaled results by a flat (prompt,opts) match.
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let dir = tempdir().unwrap();
+        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+
+        // Run 1: journal agents 'a' then 'b'.
+        let script1 = "const a = await agent('a'); const b = await agent('b'); return { a, b };";
+        let spawner1 = Arc::new(EchoSpawner::default());
+        let sink1 = Arc::new(RecordingSink::default());
+        let h1 = make_handler(spawner1.clone(), mgr.clone(), sink1.clone());
+        let handle1 = h1
+            .spawn(workflow_input(script1), make_ctx(fs.clone()))
+            .await
+            .unwrap();
+        assert_eq!(await_terminal(&sink1).await, TaskStatus::Completed);
+        let spool1 = dir.path().join(format!("{}.output", handle1.task_id));
+        let out1 = mgr
+            .read(&spool1, crate::output_manager::OutputOptions::default())
+            .await
+            .unwrap();
+        let run_id = out1
+            .content
+            .lines()
+            .find_map(|l| l.strip_prefix("runId: "))
+            .expect("runId")
+            .to_string();
+
+        // Run 2: resume the same id but EDIT the first prompt ('a' → 'a2'). Both
+        // agents must re-spawn — 'b' too, because its key chains off the changed
+        // 'a2'. The flat-map cache would have wrongly replayed 'b' from run 1.
+        let script2 = "const a = await agent('a2'); const b = await agent('b'); return { a, b };";
+        let spawner2 = Arc::new(EchoSpawner::default());
+        let sink2 = Arc::new(RecordingSink::default());
+        let h2 = make_handler(spawner2.clone(), mgr.clone(), sink2.clone());
+        let input2 = TaskSpawnInput::LocalWorkflow {
+            workflow_id: "wf".into(),
+            script: script2.into(),
+            resume_from_run_id: Some(run_id),
+            args: None,
+            run_id: None,
+        };
+        h2.spawn(input2, make_ctx(fs.clone())).await.unwrap();
+        assert_eq!(await_terminal(&sink2).await, TaskStatus::Completed);
+        let mut seen = spawner2.seen.lock().unwrap().clone();
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec!["a2".to_string(), "b".to_string()],
+            "edited prefix re-runs the edit AND everything after it"
         );
     }
 

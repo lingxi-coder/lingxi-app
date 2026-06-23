@@ -41,6 +41,12 @@ globalThis.__wf_queue = [];
 // the throw is caught → null, as claude-code does). The prefix is NUL-free
 // (the eval path uses a C string) and collision-proof via U+0001 framing.
 globalThis.__WF_THROW_PREFIX = String.fromCharCode(1) + "__wf_throw__" + String.fromCharCode(1);
+// NULL sentinel: a skipped / dead (failed/killed/errored) agent maps to this
+// exact marker, which the pump resolves the agent() promise with `null` —
+// claude-code returns `null` for such agents (not "" / not its text), so
+// explicit `=== null` / `??` checks behave the same. Collision-proof, NUL-free,
+// U+0001-framed like the throw prefix.
+globalThis.__WF_NULL = String.fromCharCode(1) + "__wf_null__" + String.fromCharCode(1);
 globalThis.agent = (prompt, opts) => new Promise((res, rej) => { globalThis.__wf_queue.push({ prompt: String(prompt), opts: opts || {}, res, rej }); });
 globalThis.__wf_pump = () => {
   const q = globalThis.__wf_queue;
@@ -53,9 +59,24 @@ globalThis.__wf_pump = () => {
   for (let i = 0; i < q.length; i++) {
     const r = results[i];
     if (typeof r === "string" && r.startsWith(globalThis.__WF_THROW_PREFIX)) {
+      // agent-cap / budget-ceiling → REJECT (claude throws these).
       q[i].rej(new Error(r.slice(globalThis.__WF_THROW_PREFIX.length)));
+    } else if (r === globalThis.__WF_NULL) {
+      // skipped / dead agent → resolve with null (claude-code's contract).
+      q[i].res(null);
     } else {
-      q[i].res(r);
+      // `agent({ schema })` returns the VALIDATED OBJECT, not a JSON string
+      // (claude-code: `if (ne.schema) return p(he)`). The host serialises the
+      // subagent's structured content to JSON; parse it back here so the script
+      // can use `r.bugs` / `.flatMap(r => r.bugs)` directly — no manual parse.
+      // A non-schema agent returns its final text verbatim (a string), even if
+      // that text happens to look like JSON.
+      const o = q[i].opts;
+      if (o && o.schema && typeof r === "string" && r.length > 0) {
+        try { q[i].res(JSON.parse(r)); } catch (e) { q[i].res(r); }
+      } else {
+        q[i].res(r);
+      }
     }
   }
   return true;
@@ -95,6 +116,13 @@ if (!('budget' in globalThis)) globalThis.budget = { total: null, spent: () => 0
 if (!('args' in globalThis)) globalThis.args = undefined;
 if (!('workflow' in globalThis)) globalThis.workflow = async () => { throw new Error("workflow(): nested workflows are not supported (workflow() inside a child)"); };
 "#;
+
+/// The NULL-sentinel result slot: when a batch runner returns this exact string
+/// for an `agent()` call, the prelude resolves that promise with `null` (a
+/// skipped / dead agent — claude-code's contract). MUST stay byte-identical to
+/// the prelude's `globalThis.__WF_NULL`
+/// (`String.fromCharCode(1)+"__wf_null__"+String.fromCharCode(1)`).
+pub const WF_NULL_SENTINEL: &str = "\u{1}__wf_null__\u{1}";
 
 /// A progress event emitted by a running workflow script.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -224,6 +252,122 @@ pub fn validate_meta(script: &str) -> Result<(), WorkflowError> {
 
 fn node_text<'a>(node: tree_sitter::Node, src: &'a [u8]) -> &'a str {
     node.utf8_text(src).unwrap_or("")
+}
+
+/// Extract a `meta.<field>` string-literal value from a workflow script (used
+/// for `meta.name` → claude-code `workflowName`). Returns the cooked string
+/// value when the first statement is `export const meta = { … }` and the field
+/// is a plain / non-interpolated string literal; `None` otherwise.
+#[must_use]
+pub fn meta_string_value(script: &str, field: &str) -> Option<String> {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_javascript::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(script, None)?;
+    let src = script.as_bytes();
+    let obj = first_statement(tree.root_node()).and_then(|s| meta_object(s, src))?;
+    let mut c = obj.walk();
+    for m in obj.named_children(&mut c) {
+        if m.kind() != "pair" {
+            continue;
+        }
+        let Some(key) = m.child_by_field_name("key") else {
+            continue;
+        };
+        let kname = match key.kind() {
+            "property_identifier" => node_text(key, src).to_string(),
+            "string" => string_inner(key, src),
+            _ => continue,
+        };
+        if kname != field {
+            continue;
+        }
+        let value = m.child_by_field_name("value")?;
+        return match value.kind() {
+            "string" => Some(string_inner(value, src)),
+            "template_string" => {
+                let mut cc = value.walk();
+                let has_subst = value
+                    .named_children(&mut cc)
+                    .any(|n| n.kind() == "template_substitution");
+                (!has_subst).then(|| string_inner(value, src))
+            }
+            _ => None,
+        };
+    }
+    None
+}
+
+/// The byte-exact message claude-code returns when an INLINE workflow `script`
+/// uses a non-deterministic API (binary v2.1.186 validateInput, errorCode 4).
+pub const NON_DETERMINISTIC_MESSAGE: &str = "Workflow scripts must be deterministic: Date.now()/Math.random()/new Date() are unavailable (breaks resume). Stamp results after the workflow returns, or pass timestamps via args.";
+
+/// Reject a script that uses a non-deterministic API — `Date.now()`,
+/// `Math.random()`, or a zero-argument `new Date()` — which would break resume
+/// (the journal replays prior `agent()` results, but re-runs the JS body). This
+/// ports the binary's `HKa` AST walk (acorn `MemberExpression` for
+/// `Date.now`/`Math.random` and zero-arg `NewExpression` for `new Date()`) onto
+/// tree-sitter. claude-code applies this ONLY to an inline `script` input (not
+/// to `scriptPath`/`name` files); the caller is responsible for that gating.
+///
+/// # Errors
+/// Returns [`WorkflowError::Script`] with [`NON_DETERMINISTIC_MESSAGE`] when a
+/// non-deterministic API is found.
+pub fn check_determinism(script: &str) -> Result<(), WorkflowError> {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_javascript::LANGUAGE.into())
+        .map_err(|e| WorkflowError::Engine(format!("tree-sitter init: {e}")))?;
+    // A parse failure must NOT block the script (binary `HKa` catches parse
+    // errors and returns `false` = "no non-determinism found").
+    let Some(tree) = parser.parse(script, None) else {
+        return Ok(());
+    };
+    if uses_nondeterministic_api(tree.root_node(), script.as_bytes()) {
+        return Err(WorkflowError::Script(NON_DETERMINISTIC_MESSAGE.to_string()));
+    }
+    Ok(())
+}
+
+/// Walk the tree for `Date.now` / `Math.random` member access (non-computed) or
+/// a zero-argument `new Date()`.
+fn uses_nondeterministic_api(node: tree_sitter::Node, src: &[u8]) -> bool {
+    // `Date.now` / `Math.random` — a `member_expression` with identifier object
+    // and identifier property (NOT a computed `subscript_expression`).
+    if node.kind() == "member_expression" {
+        if let (Some(obj), Some(prop)) = (
+            node.child_by_field_name("object"),
+            node.child_by_field_name("property"),
+        ) {
+            if obj.kind() == "identifier" && prop.kind() == "property_identifier" {
+                let o = node_text(obj, src);
+                let p = node_text(prop, src);
+                if (o == "Date" && p == "now") || (o == "Math" && p == "random") {
+                    return true;
+                }
+            }
+        }
+    }
+    // `new Date()` with no arguments.
+    if node.kind() == "new_expression" {
+        if let Some(ctor) = node.child_by_field_name("constructor") {
+            if ctor.kind() == "identifier" && node_text(ctor, src) == "Date" {
+                let no_args = match node.child_by_field_name("arguments") {
+                    None => true,
+                    Some(args) => args.named_child_count() == 0,
+                };
+                if no_args {
+                    return true;
+                }
+            }
+        }
+    }
+    let mut c = node.walk();
+    let found = node
+        .named_children(&mut c)
+        .any(|child| uses_nondeterministic_api(child, src));
+    found
 }
 
 /// The program's first non-comment statement.
@@ -371,16 +515,82 @@ fn estree_name(kind: &str) -> &str {
     }
 }
 
-/// The inner text of a `string`/`template_string` node (delimiters stripped).
-/// Best-effort cooked value — sufficient for non-emptiness and reserved-key
-/// comparison.
+/// The inner, COOKED text of a `string`/`template_string` node (delimiters
+/// stripped, escape sequences resolved). claude-code reads `meta` via a real JS
+/// parse (acorn), so the key/name/description values it compares are the cooked
+/// string values — e.g. `"constructor"` is the reserved key `constructor`,
+/// and `"x"` is a non-empty `name`. We resolve the standard JS string escapes
+/// (`\n`, `\r`, `\t`, `\b`, `\f`, `\v`, `\0`, `\\`, the escaped quote/backtick,
+/// plus `\xNN` and `\uXXXX` / `\u{...}`) so reserved-key detection and
+/// non-emptiness match the parser.
 fn string_inner(node: tree_sitter::Node, src: &[u8]) -> String {
     let t = node_text(node, src);
     let n = t.len();
-    match t.chars().next() {
-        Some('"' | '\'' | '`') if n >= 2 && t.is_char_boundary(n - 1) => t[1..n - 1].to_string(),
-        _ => t.to_string(),
+    let raw = match t.chars().next() {
+        Some('"' | '\'' | '`') if n >= 2 && t.is_char_boundary(n - 1) => &t[1..n - 1],
+        _ => t,
+    };
+    cook_js_string(raw)
+}
+
+/// Resolve JS string-literal escape sequences in `raw` (delimiters already
+/// stripped). Unknown escapes resolve to the escaped character itself (JS
+/// semantics, e.g. `\q` → `q`).
+fn cook_js_string(raw: &str) -> String {
+    if !raw.contains('\\') {
+        return raw.to_string();
     }
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let Some(e) = chars.next() else {
+            out.push('\\');
+            break;
+        };
+        match e {
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            'b' => out.push('\u{8}'),
+            'f' => out.push('\u{c}'),
+            'v' => out.push('\u{b}'),
+            '0' if !chars.peek().is_some_and(char::is_ascii_digit) => out.push('\0'),
+            'x' => {
+                let h: String = (0..2).filter_map(|_| chars.next()).collect();
+                if let Some(ch) = u32::from_str_radix(&h, 16).ok().and_then(char::from_u32) {
+                    out.push(ch);
+                } else {
+                    out.push('x');
+                    out.push_str(&h);
+                }
+            }
+            'u' => {
+                if chars.peek() == Some(&'{') {
+                    chars.next(); // consume '{'
+                    let hex: String = chars.by_ref().take_while(|&ch| ch != '}').collect();
+                    if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        out.push(ch);
+                    } else {
+                        out.push('u');
+                    }
+                } else {
+                    let h: String = (0..4).filter_map(|_| chars.next()).collect();
+                    if let Some(ch) = u32::from_str_radix(&h, 16).ok().and_then(char::from_u32) {
+                        out.push(ch);
+                    } else {
+                        out.push('u');
+                        out.push_str(&h);
+                    }
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// `TBp`: the object's `field` property exists and is a non-empty string literal
@@ -490,7 +700,7 @@ pub fn run<R>(script: &str, agent_runner: R) -> Result<RunOutcome, WorkflowError
 where
     R: FnMut(&[String], &[String]) -> Vec<String> + 'static,
 {
-    run_with_progress(script, agent_runner, |_: &Progress| {}, None, false, None)
+    run_with_progress(script, agent_runner, |_: &Progress| {}, None, false, None, None)
 }
 
 /// Like [`run`], but also fires `on_progress` for each `phase()`/`log()` event
@@ -514,6 +724,12 @@ pub fn run_with_progress<R, P>(
     // / a `workflow()` call's args). `None` ⇒ `undefined`. JSON is a subset of JS
     // expressions, so it is a valid initializer.
     args: Option<String>,
+    // Cooperative-cancel flag (claude-code's `abortController`). When set and the
+    // host flips it to `true` (e.g. `Task::kill`), the embedded engine's
+    // interrupt handler aborts the running script — including a pure-CPU/JS
+    // infinite loop that never calls `agent()` — so killing a workflow does not
+    // leak the QuickJS OS thread. `None` ⇒ no interrupt handler.
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<RunOutcome, WorkflowError>
 where
     // `(prompts, opts_json) -> results`: the two parallel arrays the pump
@@ -527,6 +743,15 @@ where
     use rquickjs::{Context, Function, Runtime};
 
     let rt = Runtime::new().map_err(|e| WorkflowError::Engine(e.to_string()))?;
+    // Cooperative cancellation: QuickJS calls the interrupt handler periodically
+    // during execution; returning `true` aborts with an uncatchable error. This
+    // is what lets `Task::kill` stop a runaway pure-JS loop (no `agent()` call to
+    // observe a dropped channel) instead of leaking the script thread.
+    if let Some(flag) = cancel.clone() {
+        rt.set_interrupt_handler(Some(Box::new(move || {
+            flag.load(std::sync::atomic::Ordering::Relaxed)
+        })));
+    }
     let ctx = Context::full(&rt).map_err(|e| WorkflowError::Engine(e.to_string()))?;
 
     let progress: Rc<RefCell<Vec<Progress>>> = Rc::new(RefCell::new(Vec::new()));
@@ -822,6 +1047,59 @@ mod meta_validation_tests {
             p("non-literal node type in meta: Identifier")
         );
     }
+
+    #[test]
+    fn string_keys_and_values_are_escape_cooked() {
+        // cook_js_string resolves the standard JS escapes.
+        assert_eq!(cook_js_string(r"constructor"), "constructor");
+        assert_eq!(cook_js_string(r"a\x62c"), "abc");
+        assert_eq!(cook_js_string(r"x\u{1F600}"), "x\u{1F600}");
+        assert_eq!(cook_js_string(r"a\tb\nc"), "a\tb\nc");
+        assert_eq!(cook_js_string("plain"), "plain");
+        // A quoted reserved key is still detected.
+        assert_eq!(
+            err(r#"export const meta = { name: 'x', description: 'd', "constructor": 1 };"#),
+            "meta must be a pure literal: reserved key name not allowed in meta: constructor"
+        );
+        // An escape-bearing name/description cooks to non-empty and passes.
+        validate_meta(r#"export const meta = { name: "abc", description: "d\tx" };"#)
+            .expect("escaped strings cook to non-empty");
+    }
+}
+
+#[cfg(test)]
+mod determinism_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_date_now_math_random_and_bare_new_date() {
+        for s in [
+            "export const meta = { name: 'a', description: 'b' };\nconst t = Date.now();",
+            "log(Math.random());",
+            "const d = new Date();",
+            "const d = new Date;",
+        ] {
+            let err = check_determinism(s).expect_err("should reject");
+            match err {
+                WorkflowError::Script(m) => assert_eq!(m, NON_DETERMINISTIC_MESSAGE),
+                other => panic!("got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn allows_deterministic_scripts_and_dated_new_date() {
+        // `new Date(args.ts)` (with an argument) is allowed — only the zero-arg
+        // form reads the wall clock.
+        for s in [
+            "export const meta = { name: 'a', description: 'b' };\nawait agent('x');",
+            "const d = new Date(args.ts);",
+            "const d = new Date(1700000000000);",
+            "log('date now is fine in a string: Date.now()');",
+        ] {
+            check_determinism(s).unwrap_or_else(|e| panic!("should allow {s:?}: {e:?}"));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -832,6 +1110,97 @@ mod tests {
     /// empty, so this is never actually invoked).
     fn no_agents(prompts: &[String], _opts: &[String]) -> Vec<String> {
         prompts.iter().map(|_| String::new()).collect()
+    }
+
+    #[test]
+    fn schema_agent_result_is_parsed_into_an_object() {
+        // A schema run's result is JSON; agent({schema}) resolves with the parsed
+        // object so the script can use `r.bugs` directly (claude-code contract).
+        let script = r#"
+            const r = await agent('find', { schema: { type: 'object' } });
+            log('count=' + r.bugs.length + ' first=' + r.bugs[0]);
+            const r2 = await agent('plain');
+            log('plain=' + r2);
+        "#;
+        let out = run(script, |prompts: &[String], opts: &[String]| {
+            prompts
+                .iter()
+                .zip(opts)
+                .map(|(_, o)| {
+                    if o.contains("schema") {
+                        r#"{"bugs":["x","y"]}"#.to_string()
+                    } else {
+                        "raw text".to_string()
+                    }
+                })
+                .collect()
+        })
+        .unwrap();
+        assert_eq!(
+            out.progress,
+            vec![
+                Progress::Log("count=2 first=x".into()),
+                Progress::Log("plain=raw text".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn cancel_flag_aborts_a_runaway_loop() {
+        use std::sync::atomic::AtomicBool;
+        // A pure-CPU loop with no agent() calls would never observe a dropped
+        // channel; the interrupt handler (driven by the cancel flag) is what
+        // stops it. Pre-set the flag so the very first interrupt check aborts.
+        let cancel = Arc::new(AtomicBool::new(true));
+        let err = run_with_progress(
+            "let s = 0; for (let i = 0; i < 1e12; i++) { s += i; } log('done');",
+            no_agents,
+            |_: &Progress| {},
+            None,
+            false,
+            None,
+            Some(cancel),
+        )
+        .unwrap_err();
+        // The interrupt aborts the run (the exact phase it fires in — prelude eval
+        // vs. a pumped job — determines Engine vs. Script; both are terminal).
+        let msg = err.to_string();
+        assert!(
+            msg.contains("QuickJS") || msg.contains("nterrupt") || msg.contains("xception"),
+            "expected an interrupt/abort error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn null_sentinel_resolves_agent_to_null() {
+        // A dead/skipped agent (host returns WF_NULL_SENTINEL) resolves to null,
+        // not "" — so `=== null` checks and `??` behave per the contract.
+        let script = r#"
+            const r = await agent('dead');
+            log('isNull=' + (r === null));
+            const rs = await parallel([() => agent('a'), () => agent('dead')]);
+            log('filtered=' + rs.filter(Boolean).join(','));
+        "#;
+        let out = run(script, |prompts: &[String], _opts: &[String]| {
+            prompts
+                .iter()
+                .map(|p| {
+                    if p == "dead" {
+                        WF_NULL_SENTINEL.to_string()
+                    } else {
+                        format!("ok:{p}")
+                    }
+                })
+                .collect()
+        })
+        .unwrap();
+        assert_eq!(
+            out.progress,
+            vec![
+                Progress::Log("isNull=true".into()),
+                Progress::Log("filtered=ok:a".into()),
+            ]
+        );
     }
 
     #[test]
@@ -1210,6 +1579,7 @@ log('wf=' + (typeof workflow))
             None,
             false,
             None,
+            None,
         )
         .unwrap();
         // Callbacks fired live, in emission order.
@@ -1244,6 +1614,7 @@ log('wf=' + (typeof workflow))
             Some(Arc::new(Src) as Arc<dyn WorkflowBudgetSource>),
             false,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1265,6 +1636,7 @@ log('wf=' + (typeof workflow))
             None,
             false,
             Some(r#"{ "x": 7, "items": [1, 2, 3] }"#.to_string()),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1300,6 +1672,7 @@ log('wf=' + (typeof workflow))
             |_: &Progress| {},
             None,
             true,
+            None,
             None,
         )
         .unwrap();

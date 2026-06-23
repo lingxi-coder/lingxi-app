@@ -7,8 +7,9 @@ off `ac46d0c3`.
 
 Codex flagged 7 gaps. **All 7 verified TRUE against the 2.1.186 binary** (each
 was backed by an explicit `// deferred`/`NOTE:` comment in the code AND
-confirmed by binary string/JS extraction). Six are landed; one is
-architectural and specced below.
+confirmed by binary string/JS extraction). **All 7 are now landed** (the last,
+worktree isolation, required a per-agent cwd seam — see below); only sub-parts
+explicitly out of single-process scope remain deferred.
 
 ## Landed this branch (byte-exact, tested, green)
 
@@ -20,6 +21,7 @@ architectural and specced below.
 | P1 | in-process teammate full team-worker parity | `57ab7fda` |
 | P1 | background subagent permission-prompt attribution | `e4c27dc7` |
 | P2 | required-MCP-servers 30s pending-wait | `7933140d` |
+| P2 | subagent `isolation:"worktree"` + `cwd` | `0bfef142` |
 
 Key binary facts captured during the work:
 - **Agent deny**: `o5e(ctx,"Agent",type)` = getDenyRuleForAgent (exact
@@ -104,18 +106,28 @@ required failed; break if none required pending }`. Fixed:
 - `tools/agent` gate runs the 30s/500ms poll-wait (case-insensitive substring
   match `name.includes(pattern)`) before the existing servers-with-tools check.
 
-### P2 — isolation / cwd / worktree / remote: schema-exposed, behavior deferred
-The Agent prompt advertises `isolation: "worktree"` (agent.rs:435) and the spawn
-request carries `isolation`/`cwd`/`remote` (subagent_spawn.rs:69, agent.rs:1249)
-but the behavior is a NO-OP. (The binary also appends an `N4l(t)` bg/worktree
-session notice after the `<env>` block — `sIm()` keyed on
-`CLAUDE_CODE_SESSION_KIND==="bg"` — which LingXi likewise doesn't emit.)
+### P2 — subagent `isolation:"worktree"` + `cwd` ✅ LANDED `0bfef142`
+(Was: schema-advertised, behavior a NO-OP.) The blocker — no per-agent cwd seam
+(cwd baked into the shared `BuiltinToolContext.workspace` + one shared
+`Arc<BashTool>`) — was resolved by a new per-call cwd:
+- `ToolUseContext.cwd` (claude's `agentWorktree` AsyncLocalStorage cwd), threaded
+  via `SubagentInvocationContext.cwd` ← `SubagentContext.cwd` ← `request.cwd`.
+- `BashTool` runs an isolated subagent's commands in `ctx.cwd`, RESET per call
+  (claude's "cwd reset between bash calls"), without touching the shared
+  persistent shell (main loop unchanged).
+- `AgentTool`: `isolation:"worktree"` → create worktree (slug `agent-<id>` →
+  branch `worktree-agent-<id>` under `.claude/worktrees/`, claude's scheme) via
+  the existing `WorktreeManager`; explicit `cwd` honoured directly; on completion
+  keep + return `worktreePath`/`worktreeBranch` (trailer + `data`) if dirty, else
+  auto-remove (runs for any outcome — no leak).
+- subagent `<env>`: worktree agent's `Working directory` = the worktree + the
+  byte-exact "This is a git worktree — …" notice.
 
-Plan: a dedicated feature — create a git worktree per `isolation:"worktree"`
-spawn (the `EnterWorktree` machinery already exists), run the agent in it, return
-the worktree path+branch in the result if changes were made (auto-clean
-otherwise); honor `cwd`. `remote` is the CCR/remote path (out of single-process
-scope). Large, hence deferred.
+DEFERRED sub-parts (out of single-process scope): `def.isolation` frontmatter as
+a secondary source (model-facing `isolation` arg is supported); the keep test is
+dirty-tree-only (no base-commit for the commits-ahead half); async/background
+worktree cleanup (lands with async-bg); `remote` isolation (CCR); the `sIm()`
+bg-session notice (`CLAUDE_CODE_SESSION_KIND==="bg"`).
 
 ## Notes
 - The uncommitted WIP on `main` (Workflow result-shape: runId/scriptPath/

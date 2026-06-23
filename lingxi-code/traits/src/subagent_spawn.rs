@@ -117,6 +117,25 @@ pub struct SubagentSpawnRequest {
     /// `None` for sync spawns / call sites that don't carry it.
     #[serde(default)]
     pub tool_use_id: Option<String>,
+    /// Per-spawn system-prompt override: replaces the resolved `AgentDefinition`'s
+    /// `system_prompt` field before the `Notes:` trailer is appended. Used by the
+    /// workflow runtime to substitute the schema-variant xBp prompt when
+    /// `agent({schema})` is called without an explicit `agentType`
+    /// (claude-code `DBp.getSystemPrompt => xBp`). `None` ⇒ use the definition's own body.
+    #[serde(default)]
+    pub system_prompt_override: Option<String>,
+    /// Per-spawn system-prompt addendum: appended to the fully-rendered system
+    /// prompt (after Notes + env block). Used by the workflow runtime to inject
+    /// the HBp/IBp NOTE addendum when the caller specifies an explicit `agentType`
+    /// (claude-code's appended NOTE for workflow-context agents). `None` ⇒ no addendum.
+    #[serde(default)]
+    pub system_prompt_addendum: Option<String>,
+    /// Per-spawn additional disallowed tools: unioned with the resolved
+    /// `AgentDefinition`'s `disallowed_tools` before tool resolution. Used by
+    /// the workflow runtime to enforce `{SendUserMessage, Agent, Workflow}` on
+    /// user-specified agentType spawns (claude-code's disallow union, §6). Empty ⇒ no extra tools denied.
+    #[serde(default)]
+    pub additional_disallowed_tools: Vec<String>,
 }
 
 /// Token-usage rollup returned at the end of a successful spawn.

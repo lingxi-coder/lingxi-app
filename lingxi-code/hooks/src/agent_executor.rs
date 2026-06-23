@@ -123,6 +123,9 @@ impl AgentExecutor {
             schema: None,
             effort: None,
             tool_use_id: None,
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
         };
 
         let fut = spawner.spawn(req, inherit);

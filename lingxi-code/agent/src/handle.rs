@@ -690,6 +690,22 @@ impl PoolSubagentSpawner {
         persistent: bool,
     ) -> SubagentContext {
         let mut def = self.resolve_definition(&request.subagent_type).await;
+        // Per-spawn system-prompt override (workflow xBp / DBp): replace the
+        // resolved definition's body with the caller's override BEFORE the Notes
+        // trailer is appended by `make_subagent_context`.
+        if let Some(override_prompt) = &request.system_prompt_override {
+            def.system_prompt = Some(override_prompt.clone());
+        }
+        // Per-spawn disallowed-tools union (workflow §6): augment the resolved
+        // definition's deny list with the caller's additional names. Dedup so a
+        // builtin that already has "SendUserMessage" doesn't double-list it.
+        if !request.additional_disallowed_tools.is_empty() {
+            for name in &request.additional_disallowed_tools {
+                if !def.disallowed_tools.contains(name) {
+                    def.disallowed_tools.push(name.clone());
+                }
+            }
+        }
         // AgentTool spawn-surface parity: an explicit `model` from the caller
         // (TS schema `model: 'sonnet' | 'opus' | 'haiku'`) takes precedence over
         // the definition's model frontmatter (AgentTool.tsx:86).
@@ -743,6 +759,15 @@ impl PoolSubagentSpawner {
                 let cwd_override = request.cwd.as_deref().map(std::path::Path::new);
                 let env = render(&model_id, cwd_override);
                 ctx.rendered_system_prompt = Some(Arc::from(format!("{body}\n\n{env}")));
+            }
+        }
+        // Per-spawn system-prompt addendum (workflow HBp/IBp NOTE): appended
+        // AFTER the Notes trailer + env block so it is the final content the model
+        // sees. Used when the caller specifies an explicit agentType in a workflow
+        // agent() call.
+        if let Some(addendum) = &request.system_prompt_addendum {
+            if let Some(body) = ctx.rendered_system_prompt.as_ref() {
+                ctx.rendered_system_prompt = Some(Arc::from(format!("{body}{addendum}")));
             }
         }
         // Hand the child the parent's tool invoker + budget enforcer + our model
@@ -1929,6 +1954,9 @@ mod tests {
             schema: None,
             effort: None,
             tool_use_id: None,
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
         };
         // Drive resolve_definition + the override branch directly by replicating
         // the spawn-path logic (spawn() would require a live runner).
@@ -2027,6 +2055,9 @@ mod tests {
             schema: None,
             effort: None,
             tool_use_id: None,
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
         };
         let mk_inherit = || SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
@@ -2080,6 +2111,9 @@ mod tests {
             schema: None,
             effort: None,
             tool_use_id: None,
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
         };
 
         // Non-fork: env block appended after the body, joined by a blank line,
@@ -2210,6 +2244,9 @@ mod tests {
             schema: None,
             effort: None,
             tool_use_id: None,
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
         };
         let err = spawner
             .spawn_async(req, SubagentInheritance { tool_invoker: invoker, budget })

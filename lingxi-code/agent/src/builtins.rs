@@ -326,6 +326,17 @@ pub const WORKFLOW_SUBAGENT_SCHEMA_PROMPT_TEMPLATE: &str = "You are a subagent s
 /// string the model sees.
 pub const WORKFLOW_SUBAGENT_SCHEMA_PROMPT: &str = "You are a subagent spawned by a workflow orchestration script. Use the tools available to complete the task.\n\nCRITICAL: You MUST call the StructuredOutput tool exactly once to return your final answer. The tool's input schema defines the required shape.\n- Do your work (Read files, run commands, etc.), then call StructuredOutput with your answer.\n- Do NOT put your answer in a text response. The script reads ONLY the StructuredOutput tool call.\n- If the schema validation fails, read the error and call StructuredOutput again with a corrected shape.\n- After calling StructuredOutput successfully, end your turn. No acknowledgment needed.";
 
+/// HBp — non-schema subagent NOTE addendum (§3).
+/// Appended to a user-specified agentType's system prompt for non-schema runs.
+/// Byte offset 202947689 in v2.1.186 binary.
+pub const WORKFLOW_SUBAGENT_NON_SCHEMA_ADDENDUM: &str = "\n\n---\n\nNOTE: You are running inside a workflow script. Your final text response is returned verbatim as a string to the calling script \u{2014} it is your return value, not a message to a human. Output the literal result; do not output confirmations like \"Done.\" Be concise \u{2014} the script will parse your output.";
+
+/// IBp — schema subagent NOTE addendum (§4).
+/// Appended to a user-specified agentType's system prompt for schema runs.
+/// Byte offset 202948991 in v2.1.186 binary.
+/// `${Lp}` is resolved to `StructuredOutput`.
+pub const WORKFLOW_SUBAGENT_SCHEMA_ADDENDUM: &str = "\n\n---\n\nNOTE: You are running inside a workflow script. You MUST return your final answer by calling the StructuredOutput tool exactly once \u{2014} the tool's input schema defines the required shape. Do your work, then call StructuredOutput; do NOT put your answer in a text response (the script reads ONLY the tool call). If validation fails, read the error and call StructuredOutput again with a corrected shape.";
+
 /// Tools disallowed for the workflow-subagent (Oho.disallowedTools, v2.1.186).
 ///
 /// Resolves: `i1` → `"SendUserMessage"`, `ns` → `"Agent"`, `SI` → `"Workflow"`.

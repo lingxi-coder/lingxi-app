@@ -126,7 +126,7 @@ fn group_en_us(n: u64) -> String {
 
 /// The subagent type spawned for a bare `agent(prompt)` call — claude-code's
 /// default workflow subagent.
-pub const DEFAULT_WORKFLOW_SUBAGENT: &str = "general-purpose";
+pub const DEFAULT_WORKFLOW_SUBAGENT: &str = "workflow-subagent";
 
 /// A live worker-cancel record: the background-task handle plus the runtime that
 /// minted it, so [`Task::kill`] / cleanup can cancel the in-flight worker without
@@ -295,6 +295,42 @@ fn make_request(default_subagent_type: &str, prompt: &str, opts_json: &str) -> S
             .map(str::to_string)
     };
     let subagent_type = opt_str("agentType").unwrap_or_else(|| default_subagent_type.to_string());
+
+    // Workflow agent() routing (binary §§1-4 + §6):
+    // Case 1: bare agent(prompt) → workflow-subagent + kBp (subagent_type already =
+    //   "workflow-subagent" from DEFAULT_WORKFLOW_SUBAGENT; no override needed)
+    // Case 2: agent(prompt, {schema}) only → workflow-subagent + xBp (override kBp prompt)
+    // Case 3: agent(prompt, {agentType}) → that type + HBp addendum + disallow union
+    // Case 4: agent(prompt, {agentType, schema}) → that type + IBp addendum + disallow union
+    let has_agent_type = opt_str("agentType").is_some();
+    let has_schema = opts.get("schema").filter(|v| !v.is_null()).is_some();
+
+    let system_prompt_override = if !has_agent_type && has_schema {
+        // Case 2: bare schema call → xBp replaces kBp
+        Some(agent::builtins::WORKFLOW_SUBAGENT_SCHEMA_PROMPT.to_string())
+    } else {
+        None
+    };
+
+    let system_prompt_addendum = if has_agent_type {
+        if has_schema {
+            // Case 4: user agentType + schema → IBp addendum
+            Some(agent::builtins::WORKFLOW_SUBAGENT_SCHEMA_ADDENDUM.to_string())
+        } else {
+            // Case 3: user agentType no schema → HBp addendum
+            Some(agent::builtins::WORKFLOW_SUBAGENT_NON_SCHEMA_ADDENDUM.to_string())
+        }
+    } else {
+        None
+    };
+
+    let additional_disallowed_tools = if has_agent_type {
+        // Cases 3/4: union disallowed with {SendUserMessage, Agent, Workflow}
+        agent::builtins::workflow_subagent_disallowed()
+    } else {
+        vec![]
+    };
+
     SubagentSpawnRequest {
         subagent_type,
         prompt: prompt.to_string(),
@@ -322,6 +358,9 @@ fn make_request(default_subagent_type: &str, prompt: &str, opts_json: &str) -> S
         effort: opts.get("effort").filter(|v| !v.is_null()).cloned(),
         // Workflow `agent()` spawns are not tool-call-originated background tasks.
         tool_use_id: None,
+        system_prompt_override,
+        system_prompt_addendum,
+        additional_disallowed_tools,
     }
 }
 
@@ -969,7 +1008,7 @@ mod tests {
     #[async_trait]
     impl SubagentSpawner for EchoSpawner {
         async fn agent_listing(&self) -> Vec<traits::subagent_spawn::SubagentListingEntry> {
-            ["general-purpose", "Explore", "code-reviewer"]
+            ["general-purpose", "Explore", "code-reviewer", "workflow-subagent"]
                 .iter()
                 .map(|t| traits::subagent_spawn::SubagentListingEntry {
                     agent_type: (*t).to_string(),
@@ -1492,8 +1531,8 @@ mod tests {
         assert_eq!(reqs[0].model.as_deref(), Some("opus"));
         assert_eq!(reqs[0].isolation.as_deref(), Some("worktree"));
         assert_eq!(reqs[0].schema.as_deref(), Some(r#"{"type":"object"}"#));
-        // A bare agent(prompt) → default type, no overrides.
-        assert_eq!(reqs[1].subagent_type, "general-purpose");
+        // A bare agent(prompt) → default type (workflow-subagent), no overrides.
+        assert_eq!(reqs[1].subagent_type, "workflow-subagent");
         assert_eq!(reqs[1].model, None);
         assert_eq!(reqs[1].isolation, None);
         assert_eq!(reqs[1].schema, None);
@@ -1884,5 +1923,76 @@ mod tests {
         );
         assert_eq!(handler.name(), "local_workflow");
         assert_eq!(handler.task_type(), TaskType::LocalWorkflow);
+    }
+
+    // ==== agent() routing tests (Cases 1-4 + §6) ============================
+
+    /// Case 1: bare `agent(prompt)` → subagent_type = "workflow-subagent",
+    /// no system_prompt_override, no addendum, no additional disallowed tools
+    /// (the builtin def already has {SendUserMessage, Agent, Workflow}).
+    #[test]
+    fn bare_agent_routes_to_workflow_subagent_with_kbp() {
+        let req = make_request(DEFAULT_WORKFLOW_SUBAGENT, "do something", "{}");
+        assert_eq!(req.subagent_type, "workflow-subagent");
+        assert!(req.system_prompt_override.is_none(), "no prompt override for bare agent()");
+        assert!(req.system_prompt_addendum.is_none(), "no addendum for bare agent()");
+        assert!(req.additional_disallowed_tools.is_empty(), "no extra disallowed for bare agent()");
+    }
+
+    /// Case 2: `agent(prompt, {schema})` (no agentType) → workflow-subagent +
+    /// system_prompt_override = xBp.
+    #[test]
+    fn bare_schema_agent_uses_xbp() {
+        let req = make_request(
+            DEFAULT_WORKFLOW_SUBAGENT,
+            "return structured",
+            r#"{"schema":{"type":"object","properties":{"count":{"type":"number"}}}}"#,
+        );
+        assert_eq!(req.subagent_type, "workflow-subagent");
+        // Override must be the xBp string (WORKFLOW_SUBAGENT_SCHEMA_PROMPT).
+        let override_prompt = req.system_prompt_override.as_deref().expect("override must be set for schema agent()");
+        assert_eq!(override_prompt, agent::builtins::WORKFLOW_SUBAGENT_SCHEMA_PROMPT);
+        assert!(req.system_prompt_addendum.is_none(), "no addendum when no explicit agentType");
+        assert!(req.additional_disallowed_tools.is_empty(), "no extra disallowed for bare schema agent()");
+    }
+
+    /// Case 3: `agent(prompt, {agentType})` (no schema) → that agentType, HBp
+    /// addendum appended, disallow union {SendUserMessage, Agent, Workflow}.
+    #[test]
+    fn user_agenttype_gets_hbp_addendum_and_disallow_union() {
+        let req = make_request(
+            DEFAULT_WORKFLOW_SUBAGENT,
+            "analyze code",
+            r#"{"agentType":"general-purpose"}"#,
+        );
+        assert_eq!(req.subagent_type, "general-purpose");
+        assert!(req.system_prompt_override.is_none(), "no prompt override for user agentType");
+        let addendum = req.system_prompt_addendum.as_deref().expect("HBp addendum must be set");
+        assert_eq!(addendum, agent::builtins::WORKFLOW_SUBAGENT_NON_SCHEMA_ADDENDUM);
+        // Must request union with {SendUserMessage, Agent, Workflow}.
+        let disallowed = &req.additional_disallowed_tools;
+        assert!(disallowed.contains(&"SendUserMessage".to_string()), "SendUserMessage must be disallowed: {disallowed:?}");
+        assert!(disallowed.contains(&"Agent".to_string()), "Agent must be disallowed: {disallowed:?}");
+        assert!(disallowed.contains(&"Workflow".to_string()), "Workflow must be disallowed: {disallowed:?}");
+    }
+
+    /// Case 4: `agent(prompt, {agentType, schema})` → that agentType, IBp
+    /// addendum appended, disallow union set.
+    #[test]
+    fn user_agenttype_with_schema_gets_ibp_and_disallow_union() {
+        let req = make_request(
+            DEFAULT_WORKFLOW_SUBAGENT,
+            "return structured",
+            r#"{"agentType":"code-reviewer","schema":{"type":"object"}}"#,
+        );
+        assert_eq!(req.subagent_type, "code-reviewer");
+        assert!(req.system_prompt_override.is_none(), "no prompt override for user agentType");
+        let addendum = req.system_prompt_addendum.as_deref().expect("IBp addendum must be set");
+        assert_eq!(addendum, agent::builtins::WORKFLOW_SUBAGENT_SCHEMA_ADDENDUM);
+        // Must request union with {SendUserMessage, Agent, Workflow}.
+        let disallowed = &req.additional_disallowed_tools;
+        assert!(disallowed.contains(&"SendUserMessage".to_string()), "SendUserMessage must be disallowed: {disallowed:?}");
+        assert!(disallowed.contains(&"Agent".to_string()), "Agent must be disallowed: {disallowed:?}");
+        assert!(disallowed.contains(&"Workflow".to_string()), "Workflow must be disallowed: {disallowed:?}");
     }
 }

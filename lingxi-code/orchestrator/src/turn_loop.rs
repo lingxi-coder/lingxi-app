@@ -508,6 +508,18 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         history_snapshot.push(reminder);
     }
 
+    // T35 (batched twin — #3 main-loop parity): fold the terminal background
+    // tasks finished since the last turn into THIS call's OUTGOING snapshot only
+    // (never `session.history` / JSONL), drained consume-once so each completion
+    // surfaces exactly one `<task-notification>`. Placed after the async-hook
+    // reminder and before the relevant-memory reminder, identical to the
+    // streaming twin — claude-code has ONE main loop, so both LingXi twins must
+    // inject this reminder. `None` when no registry is wired / nothing finished.
+    // See [`ConversationOrchestrator::task_notification_reminder_message`].
+    if let Some(reminder) = orch.task_notification_reminder_message().await {
+        history_snapshot.push(reminder);
+    }
+
     // P0.1 (batched twin): per-turn, transient `relevant_memories` SURFACING
     // reminder — the memory-selector/prefetch result rendered as one
     // `<system-reminder>` meta user message. Appended to THIS call's OUTGOING

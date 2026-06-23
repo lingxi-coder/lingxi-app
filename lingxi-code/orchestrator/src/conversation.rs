@@ -3918,6 +3918,21 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 snapshot.push(reminder);
             }
 
+            // `<new-diagnostics>` (streaming twin — #3 main-loop parity):
+            // per-turn, transient reminder of newly-reported LSP diagnostics not
+            // yet surfaced (claude-code `formatDiagnosticsBlock`). Appended to
+            // THIS turn's OUTGOING snapshot only (never `session.history` /
+            // JSONL), after the conditional-rules reminder and before the
+            // agent-listing reminder — identical position to the batched twin
+            // (`turn_loop.rs`). claude-code has ONE main loop, so both LingXi
+            // twins must inject this reminder. `None` when no LSP source is wired
+            // (no servers) or no new diagnostics, keeping the locked streaming
+            // fixtures byte-identical. See
+            // [`Self::new_diagnostics_reminder_message`].
+            if let Some(reminder) = self.new_diagnostics_reminder_message().await {
+                snapshot.push(reminder);
+            }
+
             // `agent_listing_delta` (streaming twin): per-turn, transient agent
             // catalog reminder, emitted ONLY when the
             // `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES` gate is ON (default OFF ⇒

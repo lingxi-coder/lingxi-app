@@ -173,9 +173,6 @@ pub struct ApiService {
     analytics: Option<Arc<::telemetry::AnalyticsBus>>,
     /// Global fallback model, if configured (used by `messages_create_with_fallback`
     /// when no per-model entry exists in `fallback_overrides`).
-    // Read only by the fallback / available-models entry points, which still
-    // live in the orchestrator's trait impls until Task 3 delegates them here.
-    #[allow(dead_code)]
     fallback_model: Option<String>,
     /// Per-model fallback chains from `routing.fallback`.
     ///
@@ -183,16 +180,12 @@ pub struct ApiService {
     /// of fallback target display models.  A per-model entry **wins** over
     /// `fallback_model` (global).  The adapter walks the chain in order on
     /// consecutive overload events: chain[0] fires first, chain[1] next, etc.
-    // Read only by the fallback entry point (orchestrator trait impl until Task 3).
-    #[allow(dead_code)]
     fallback_overrides: std::collections::BTreeMap<String, Vec<String>>,
     /// Alias → display-model map built at construction from
     /// `client.available_models()`. Used by `messages_create_with_fallback`
     /// to normalize an alias request string to the display model before
     /// probing `fallback_overrides` (whose keys are display-normalized at
     /// parse time).
-    // Read only by the fallback entry point (orchestrator trait impl until Task 3).
-    #[allow(dead_code)]
     alias_to_display: std::collections::BTreeMap<String, String>,
     /// `routing.retry.maxAttempts` override.
     ///
@@ -205,8 +198,6 @@ pub struct ApiService {
     /// Jitter ±20% still applies.
     settings_backoff_ms: Option<u64>,
     /// Available model ids from the client registry (for `available_models`).
-    // Read only by the available-models entry point (orchestrator trait impl until Task 3).
-    #[allow(dead_code)]
     available_model_ids: Vec<String>,
     /// Optional cost estimator for populating `LlmResponse.cost`.
     ///
@@ -1510,16 +1501,18 @@ impl ApiService {
     // ── Inherent provider-neutral entry points ───────────────────────────────
 
     /// Non-streaming call (provider-neutral). The drive logic of the
-    /// orchestrator's `OrchestratorApiClient::messages_create`, minus the
-    /// provider `profile` (subagent/streaming callers pass `None`).
+    /// orchestrator's `OrchestratorApiClient::messages_create`. `profile` is the
+    /// optional provider profile (the orchestrator threads `SessionState`'s; the
+    /// subagent seam passes `None`).
     pub async fn messages_create(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<LlmResponse, LlmError> {
-        let req = self.build_request(model, None, system, messages, tools, false, None)?;
+        let req = self.build_request(model, profile, system, messages, tools, false, None)?;
         let ctl = resolve_retry_control_with_settings(
             model,
             None,
@@ -1532,18 +1525,19 @@ impl ApiService {
 
     /// Non-streaming call with an explicit `max_tokens` escalation override
     /// (provider-neutral). The drive logic of the orchestrator's
-    /// `OrchestratorApiClient::messages_create_with_opts`, minus the provider
-    /// `profile`.
+    /// `OrchestratorApiClient::messages_create_with_opts`. `profile` is the
+    /// optional provider profile.
     pub async fn messages_create_with_opts(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         max_tokens: u32,
     ) -> Result<LlmResponse, LlmError> {
         let req =
-            self.build_request(model, None, system, messages, tools, false, Some(max_tokens))?;
+            self.build_request(model, profile, system, messages, tools, false, Some(max_tokens))?;
         let ctl = resolve_retry_control_with_settings(
             model,
             None,
@@ -1552,6 +1546,138 @@ impl ApiService {
             self.settings_max_retries,
         );
         self.drive_non_stream(req, ctl).await
+    }
+
+    /// Non-streaming call with the **Opus-fallback** policy wired
+    /// (provider-neutral). The drive logic of the orchestrator's
+    /// `OrchestratorApiClient::messages_create_with_fallback`.
+    ///
+    /// Routes through [`resolve_retry_control_with_settings`] which computes
+    /// `allow_fallback` from the env + subscriber state. The
+    /// `_is_subscriber` / `_is_enterprise` parameters are **ignored** — the
+    /// service always reads subscriber state via [`Self::effective_subscriber`]
+    /// (the live shared snapshot when attached, else the construction-time copy).
+    /// The underscore prefix signals that these call-site values are not used;
+    /// the parameters are kept for API compatibility.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn messages_create_with_fallback(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        fallback_model: Option<&str>,
+        _is_subscriber: bool,
+        _is_enterprise: bool,
+    ) -> Result<LlmResponse, LlmError> {
+        // Per-model settings fallback wins over global fallback_model.
+        // Call-site fallback_model (from OrchestratorApiClient) wins over both when
+        // it's explicitly passed.
+        //
+        // Normalize the request model via alias_to_display so that an alias
+        // request (e.g. "claude-3-5-sonnet" → display "claude-sonnet-4-5")
+        // still finds the per-model fallback entry whose key is the display model.
+        let display_model = self
+            .alias_to_display
+            .get(model)
+            .map_or(model, String::as_str);
+
+        // Build the effective chain:
+        //   1. explicit call-site fallback_model → single-entry chain (legacy path)
+        //   2. per-model settings chain          → full multi-entry chain
+        //   3. global fallback_model             → single-entry chain
+        // The chain is walked entry-by-entry in the drive loop.
+        let effective_chain: Vec<String> = if let Some(fb) = fallback_model {
+            // Explicit call-site model → single-entry chain (preserves pre-Task-8 contract).
+            vec![fb.to_string()]
+        } else if let Some(chain) = self.fallback_overrides.get(display_model) {
+            chain.clone()
+        } else if let Some(global) = &self.fallback_model {
+            vec![global.clone()]
+        } else {
+            vec![]
+        };
+
+        // Primary request uses the passed profile; fallback requests use None
+        // (the fallback config string has no associated profile).
+        let req = self.build_request(model, profile, system, messages, tools, false, None)?;
+        // Initial ctl: chain[0] as fallback_model (None when chain is empty).
+        let mut ctl = resolve_retry_control_with_settings(
+            model,
+            effective_chain.first().cloned(),
+            self.effective_subscriber().is_subscriber,
+            &ResolveRetryEnv::from_process_env(),
+            self.settings_max_retries,
+        );
+        // If any fallback is configured, honour allow_fallback regardless of
+        // the model-type heuristic (preserves the pre-Task-8 contract: an
+        // explicit or configured fallback always enables the gate).
+        if !effective_chain.is_empty() {
+            ctl.allow_fallback = true;
+        }
+        self.drive_non_stream_seeded_with_chain(req, ctl, 0, &effective_chain)
+            .await
+    }
+
+    /// Count the input tokens a non-streaming `messages.create` for
+    /// `(model, profile, system, messages, tools)` would consume on its resolved
+    /// route. The drive logic of the orchestrator's
+    /// `OrchestratorApiClient::count_tokens`: build the same non-streaming request
+    /// shape `messages_create` sends, then delegate to the count_tokens facade —
+    /// the real `/v1/messages/count_tokens` endpoint (with the `count_tokens`
+    /// beta) on Anthropic routes, byte-length/4 approximation elsewhere.
+    pub async fn count_tokens(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Result<u64, LlmError> {
+        let req = self.build_request(model, profile, system, messages, tools, false, None)?;
+        crate::model::count_tokens::count_tokens(
+            self.client.as_ref(),
+            self.transport.as_ref(),
+            &req,
+        )
+        .await
+    }
+
+    /// Non-streaming call seeded with a pre-counted consecutive-529 value
+    /// (provider-neutral). The drive logic of the orchestrator's
+    /// `OrchestratorApiClient::messages_create_seeded`: used by the mid-stream 529
+    /// fallback (Task 7) so the streaming 529 that triggered the fallback is
+    /// pre-counted into the retry budget. Mirrors TS `claude.ts:2559`
+    /// (`initialConsecutive529Errors: is529Error(streamingError) ? 1 : 0`).
+    pub async fn messages_create_seeded(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        initial_consecutive_overloaded: u8,
+    ) -> Result<LlmResponse, LlmError> {
+        let req = self.build_request(model, profile, system, messages, tools, false, None)?;
+        let ctl = resolve_retry_control_with_settings(
+            model,
+            None,
+            self.effective_subscriber().is_subscriber,
+            &ResolveRetryEnv::from_process_env(),
+            self.settings_max_retries,
+        );
+        self.drive_non_stream_seeded_with_chain(req, ctl, initial_consecutive_overloaded, &[])
+            .await
+    }
+
+    /// Enumerate available `provider/model` ids + `@aliases` for `/model`'s list
+    /// mode — the available-model ids captured from the client registry at
+    /// construction. Backs the orchestrator's
+    /// `OrchestratorApiClient::available_models`.
+    #[must_use]
+    pub fn available_models(&self) -> Vec<String> {
+        self.available_model_ids.clone()
     }
 
     // ── OpenAI Responses WebSocket preconnect ────────────────────────────────

@@ -317,12 +317,20 @@ fn should_enforce_permissions(
     if mode == permission::PermissionMode::BypassPermissions {
         return false;
     }
+    // `use_noop_inner` no longer gates the default: claude-code enforces ONE core
+    // policy on every host, so transport hosts (the bridge-server's
+    // AdapterPermissionGate) ALSO wrap with the local PolicyPermissionGate by
+    // default — the adapter gate becomes the Ask-delegation transport (an
+    // unresolved mutating Ask still forwards to the remote client), but local
+    // deny/allow rules + defaultMode now bind regardless of what the client
+    // replicates. The explicit env escape hatch + BypassPermissions still opt out.
+    let _ = use_noop_inner;
     match env_value {
         Some(v) => !matches!(
             v.trim().to_ascii_lowercase().as_str(),
             "" | "0" | "off" | "false" | "no"
         ),
-        None => use_noop_inner,
+        None => true,
     }
 }
 
@@ -2546,12 +2554,13 @@ pub async fn build(
     // (`0|off|false|no|""`), or (b) the session is in BypassPermissions mode
     // (already root/Docker-guarded upstream by `enforce_bypass_safety`).
     //
-    // Scope: when the env var is UNSET, default-on applies only to the
-    // `NoOpPermissionGate` (CLI/desktop) inner — the path finding §0.1 is about
-    // (allow-all). Transport hosts (the bridge-server, `use_noop=false`) bind the
-    // connection-scoped `AdapterPermissionGate`, whose remote client IS the
-    // enforcement; they keep the prior env-opt-in behavior so their transport-driven
-    // semantics are unchanged. An explicit env value still overrides either way.
+    // Scope: when the env var is UNSET, default-on applies to BOTH inners — the
+    // `NoOpPermissionGate` (CLI/desktop, allow-all) AND the connection-scoped
+    // `AdapterPermissionGate` (transport hosts). claude-code enforces ONE core
+    // policy on every host; wrapping the adapter gate with `PolicyPermissionGate`
+    // makes local deny/allow rules + defaultMode bind on the bridge too, while the
+    // adapter gate stays the Ask-delegation transport (an unresolved mutating Ask
+    // still forwards to the remote client). An explicit env value still overrides.
     //
     // Inner-gate selection (the `(perms, adapter_gate)` match at :1836):
     // - INTERACTIVE TUI sessions inject `tui::permission_bridge::TuiPermissionGate`
@@ -5876,11 +5885,11 @@ mod tests {
         use super::should_enforce_permissions;
         use permission::PermissionMode;
 
-        // Unset env: default-ON for the CLI/desktop NoOp inner; OFF for transport
-        // (AdapterPermissionGate) so the bridge-server's remote-driven gate is
-        // unchanged.
+        // Unset env: default-ON for BOTH the CLI/desktop NoOp inner AND transport
+        // (AdapterPermissionGate) — claude-code enforces one core policy on every
+        // host, so the bridge wraps its remote-driven gate with the local policy.
         assert!(should_enforce_permissions(None, true, PermissionMode::Default));
-        assert!(!should_enforce_permissions(None, false, PermissionMode::Default));
+        assert!(should_enforce_permissions(None, false, PermissionMode::Default));
 
         // An explicit env value wins for BOTH inners.
         assert!(should_enforce_permissions(Some("1"), false, PermissionMode::Default));

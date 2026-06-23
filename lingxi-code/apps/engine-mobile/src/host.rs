@@ -623,7 +623,8 @@ pub async fn build_mobile_inner(
     //     - the `listener` becomes the `ClientEventSink` (via `ListenerSink`)
     //       the `AdapterOutputStream` pushes turn events to;
     //     - the `permission_sink` receives the gate's outbound requests.
-    //     Mobile ALWAYS binds the `AdapterPermissionGate` (no always-allow mode).
+    //     Mobile binds the `AdapterPermissionGate` (no always-allow mode), then
+    //     wraps it with a local `PolicyPermissionGate` so the core policy binds.
     let event_sink = ListenerSink::arc(listener.clone());
     let output: Arc<dyn OutputStream> = Arc::new(AdapterOutputStream::new(event_sink.clone()));
 
@@ -631,7 +632,60 @@ pub async fn build_mobile_inner(
     // `.claude/settings.local.json` convention to write back to, so AllowAlways
     // stays session-only here (the desktop transport gate persists; this does not).
     let adapter_gate = Arc::new(AdapterPermissionGate::new(permission_sink));
-    let perms: Arc<dyn PermissionGate> = adapter_gate.clone();
+    // Wrap the adapter gate with a local `PolicyPermissionGate` so the CORE
+    // allow/deny/ask/defaultMode semantics bind on mobile too — claude-code
+    // enforces ONE core policy on every host, not "the remote client is the
+    // enforcement". The adapter gate stays the Ask-delegation transport: an
+    // unresolved mutating Ask still forwards to the remote client, but local deny/
+    // allow rules + defaultMode are honored regardless of what the client
+    // replicates. Rules are loaded from the SAME project + user settings.json the
+    // hook loader reads below (dedup-aware: on mobile `claude_home` can equal
+    // `<cwd>/.claude`, so a colliding path is read once to avoid doubling rules).
+    // Read(deny) → Grep/Glob search-exclude globs, resolved from the policy below
+    // (empty when no Read-deny rule ⇒ unchanged default).
+    let mut read_deny_exclude_globs: Vec<String> = Vec::new();
+    let perms: Arc<dyn PermissionGate> = {
+        let mut rules = Vec::new();
+        let mut mode = PermissionMode::Default;
+        let proj = cwd.join(".claude").join("settings.json");
+        let user = cfg.claude_home.join("settings.json");
+        let mut sources: Vec<(std::path::PathBuf, permission::PermissionRuleSource)> = Vec::new();
+        if user != proj {
+            sources.push((user, permission::PermissionRuleSource::UserSettings));
+        }
+        sources.push((proj, permission::PermissionRuleSource::ProjectSettings));
+        for (path, source) in sources {
+            if let Ok(raw) = tokio::fs::read_to_string(&path).await {
+                match permission::permission_rules_from_settings_json(&raw, source) {
+                    Ok(mut r) => rules.append(&mut r),
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        path = %path.display(),
+                        "engine-mobile: skipping malformed settings permissions"
+                    ),
+                }
+                if let Some(m) = permission::default_mode_from_settings_json(&raw) {
+                    mode = m; // project read last → its defaultMode wins
+                }
+            }
+        }
+        // Filesystem roots so file-path CONTENT rules (`Edit(src/**)`,
+        // `Read(./secrets/**)`) match the call's path. `dirs` is not a mobile dep,
+        // so HOME comes from the env (absent on a sandboxed device ⇒ `None`).
+        let roots = permission::FsRoots {
+            cwd: cwd.clone(),
+            home: std::env::var_os("HOME").map(std::path::PathBuf::from),
+            claude_home: cfg.claude_home.clone(),
+        };
+        let policy = Arc::new(permission::PermissionPolicy::from_rules(mode, rules).with_roots(roots));
+        // Resolve active Read(deny) rules to search-exclude globs before the
+        // policy moves into the gate (same as the desktop composition root).
+        read_deny_exclude_globs = permission::read_deny_exclude_globs(&policy, &cwd);
+        Arc::new(permission::PolicyPermissionGate::new(
+            policy,
+            adapter_gate.clone(),
+        ))
+    };
 
     // (6) Hook executor + memory provider.
     //
@@ -734,11 +788,10 @@ pub async fn build_mobile_inner(
     let tool_ctx = BuiltinToolContext {
         // FILE.B: file tools share one read-state map (see engine-desktop note).
         read_file_state: tool_api::read_file_state::new_read_file_state_map(),
-        // Read(deny) → Grep/Glob search excludes. Mobile binds an
-        // `AdapterPermissionGate` (enforcement is remote) and builds NO local
-        // `PermissionPolicy`, so there are no resident Read-deny rules to resolve
-        // here — empty, matching the "no rule ⇒ unchanged" default.
-        read_deny_exclude_globs: Vec::new(),
+        // Read(deny) → Grep/Glob search excludes, resolved from the local
+        // `PermissionPolicy` built above (empty when no Read-deny rule ⇒
+        // unchanged default).
+        read_deny_exclude_globs,
         fs,
         bus: Arc::new(telemetry::AnalyticsBus::new()),
         trusted_dirs: vec![cwd.clone()],

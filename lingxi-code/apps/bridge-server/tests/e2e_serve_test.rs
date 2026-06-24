@@ -62,6 +62,9 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         max_turns: None,
         max_budget_usd: None,
         json_schema: None,
+        // CLI headless system-prompt flags (715adc4e); None for this e2e fixture.
+        system_prompt_override: None,
+        append_system_prompt: None,
     };
     (tmp, cfg)
 }

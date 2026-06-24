@@ -358,6 +358,16 @@ async fn dispatch_control_request(
             }
             writer.reply_success(request_id, Some(json!({})));
         }
+        "set_permission_mode" => {
+            // §2.2 #4: the net-new runtime mode-mutation surface. The gate
+            // parses + validates the wire mode and applies it live; success
+            // echoes `{mode}`, an invalid/disallowed mode returns an error frame.
+            let mode = field("mode").and_then(|v| v.as_str()).unwrap_or("default");
+            match orchestrator.set_permission_mode(mode).await {
+                Ok(()) => writer.reply_success(request_id, Some(json!({"mode": mode}))),
+                Err(e) => writer.reply_error(request_id, &e),
+            }
+        }
         "end_session" => {
             // §2.2 #2: abort the in-flight turn, ack, then break the loop.
             let _ = cancel_tx.send(true);

@@ -275,4 +275,24 @@ pub trait PermissionGate: Send + Sync {
     async fn agent_deny_content_types(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// Set the LIVE session permission mode (claude-code `set_permission_mode`
+    /// control_request / `handleSetPermissionMode`). `mode` is the wire string
+    /// (`default`/`plan`/`acceptEdits`/`bypassPermissions`/`dontAsk`/`auto`); the
+    /// gate parses + validates it and applies it to subsequent checks.
+    ///
+    /// Returns `Ok(())` on success, `Err(msg)` for an invalid or disallowed mode
+    /// (e.g. `bypassPermissions` disabled by settings). The mode is passed as a
+    /// `&str` rather than a `PermissionMode` because this crate is below
+    /// `lingxi-permission` in the dependency graph and cannot name that enum.
+    ///
+    /// The default is a no-op `Ok(())`: a gate with no rule/mode layer (the
+    /// interactive / no-op / adapter prompt transports) has no mode to mutate.
+    /// Only the rule-evaluating `PolicyPermissionGate` OVERRIDES this with an
+    /// interior-mutable mode cell read per check. Additive DEFAULTED
+    /// (frozen-trait safe).
+    async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {
+        let _ = mode;
+        Ok(())
+    }
 }

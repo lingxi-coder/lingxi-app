@@ -6057,6 +6057,15 @@ As you answer the user's questions, you can use the following context:\n\
     pub fn tool_names(&self) -> Vec<String> {
         self.tools.all_names()
     }
+
+    /// Apply a LIVE session permission-mode change (stream-json
+    /// `set_permission_mode` control_request). Delegates to the gate's
+    /// [`traits::PermissionGate::set_permission_mode`]; only the enforcing
+    /// `PolicyPermissionGate` actually mutates (other gates no-op). Returns the
+    /// gate's validation error string on an invalid / disallowed mode.
+    pub async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {
+        self.perms.set_permission_mode(mode).await
+    }
 }
 
 // ── Task 7 helpers ──────────────────────────────────────────────────────────

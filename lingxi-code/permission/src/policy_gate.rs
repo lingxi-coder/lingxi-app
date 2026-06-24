@@ -58,13 +58,33 @@ pub struct PolicyPermissionGate {
     /// non-read-only tool. Reusing an existing `PermissionGate` keeps all the
     /// parking/oneshot machinery in one place.
     inner: Arc<dyn PermissionGate>,
+    /// LIVE mode override set by [`PermissionGate::set_permission_mode`]
+    /// (the `set_permission_mode` control_request). `None` ⇒ use the policy's
+    /// boot mode (`authorize`); `Some(mode)` ⇒ authorize under that mode on every
+    /// check, mirroring claude-code reading `toolPermissionContext.mode` LIVE.
+    /// Read briefly per check (the value is `Copy`, never held across an `await`).
+    mode_override: std::sync::RwLock<Option<PermissionMode>>,
 }
 
 impl PolicyPermissionGate {
     /// Wrap `policy` with `inner` as the `Ask`-delegation prompt transport.
     #[must_use]
     pub fn new(policy: Arc<PermissionPolicy>, inner: Arc<dyn PermissionGate>) -> Self {
-        Self { policy, inner }
+        Self {
+            policy,
+            inner,
+            mode_override: std::sync::RwLock::new(None),
+        }
+    }
+
+    /// Authorize under the LIVE mode: the `set_permission_mode` override when
+    /// set, else the policy's boot mode. Shared by every non-plan check path so a
+    /// runtime mode change takes effect everywhere at once.
+    fn effective_authorize(&self, name: &str, input: &Value) -> PermissionResult {
+        match *self.mode_override.read().unwrap_or_else(|e| e.into_inner()) {
+            Some(mode) => self.policy.authorize_with_mode(name, input, mode),
+            None => self.policy.authorize(name, input),
+        }
     }
 
     /// Map a 3-valued [`PermissionResult`] onto the 2-valued
@@ -178,9 +198,10 @@ fn read_only_default_auto_allows(name: &str, reason: &PermissionDecisionReason) 
 #[async_trait]
 impl PermissionGate for PolicyPermissionGate {
     async fn check(&self, name: &str, input: &Value) -> PermissionDecision {
-        // Authorize under the policy's boot mode, then map the 3-valued result
-        // (an `Ask` auto-allows read-only tools or delegates to the prompt).
-        self.decide(self.policy.authorize(name, input), name, input)
+        // Authorize under the LIVE mode (boot mode or a set_permission_mode
+        // override), then map the 3-valued result (an `Ask` auto-allows read-only
+        // tools or delegates to the prompt).
+        self.decide(self.effective_authorize(name, input), name, input)
             .await
     }
 
@@ -194,7 +215,7 @@ impl PermissionGate for PolicyPermissionGate {
         input: &Value,
         worker: Option<crate::gate::PromptWorker>,
     ) -> PermissionDecision {
-        self.decide_with_worker(self.policy.authorize(name, input), name, input, worker)
+        self.decide_with_worker(self.effective_authorize(name, input), name, input, worker)
             .await
     }
 
@@ -207,7 +228,7 @@ impl PermissionGate for PolicyPermissionGate {
     /// `check`, an `Ask` NEVER delegates to the inner prompt transport here — the
     /// hook already resolved the prompt.
     async fn check_after_hook_allow(&self, name: &str, input: &Value) -> PermissionDecision {
-        match self.policy.authorize(name, input) {
+        match self.effective_authorize(name, input) {
             PermissionResult::Allow { .. } | PermissionResult::Ask { .. } => {
                 PermissionDecision::Allow
             }
@@ -241,10 +262,10 @@ impl PermissionGate for PolicyPermissionGate {
     }
 
     async fn resolve_detailed(&self, name: &str, input: &Value) -> PermissionResolution {
-        // Authorize under the boot mode WITHOUT delegating to the inner prompt,
+        // Authorize under the LIVE mode WITHOUT delegating to the inner prompt,
         // so the turn loop can read the decision source (and an about-to-ask) and
         // fire PermissionRequest / PermissionDenied before the prompt resolves.
-        self.resolve(self.policy.authorize(name, input), name)
+        self.resolve(self.effective_authorize(name, input), name)
     }
 
     /// Surface the wrapped policy's TOOL-WIDE deny-rule names so the orchestrator
@@ -273,6 +294,38 @@ impl PermissionGate for PolicyPermissionGate {
     /// types (claude-code `Pxe`).
     async fn agent_deny_content_types(&self) -> Vec<String> {
         self.policy.agent_deny_content_types()
+    }
+
+    /// Apply a LIVE `set_permission_mode` override (claude-code
+    /// `handleSetPermissionMode`). Parses the wire string, rejects an unknown
+    /// mode and a `bypassPermissions` request when the killswitch is active, and
+    /// stores the override read by [`Self::effective_authorize`].
+    async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {
+        let parsed = parse_settable_mode(mode)?;
+        if parsed == PermissionMode::BypassPermissions && self.policy.bypass_killswitch_active {
+            return Err("Bypass permissions mode was disabled by settings".to_string());
+        }
+        *self.mode_override.write().unwrap_or_else(|e| e.into_inner()) = Some(parsed);
+        Ok(())
+    }
+}
+
+/// Parse a `set_permission_mode` wire string into a [`PermissionMode`].
+///
+/// Accepts the five external modes plus the internal `auto` (the binary's
+/// settable set is `default`/`plan`/`acceptEdits`/`bypassPermissions`/`dontAsk`/
+/// `auto`). Unlike [`crate::cli_mode::permission_mode_from_cli_string`] (which
+/// silently coerces unknown → `Default` for settings/CLI parsing), this REJECTS
+/// an unknown mode so the control handler can return an error frame.
+fn parse_settable_mode(s: &str) -> Result<PermissionMode, String> {
+    match s {
+        "default" => Ok(PermissionMode::Default),
+        "plan" => Ok(PermissionMode::Plan),
+        "acceptEdits" => Ok(PermissionMode::AcceptEdits),
+        "bypassPermissions" => Ok(PermissionMode::BypassPermissions),
+        "dontAsk" => Ok(PermissionMode::DontAsk),
+        "auto" => Ok(PermissionMode::Auto),
+        other => Err(format!("Invalid permission mode: {other}")),
     }
 }
 
@@ -874,5 +927,77 @@ mod tests {
             }),
             PermissionDecisionSource::Classifier
         );
+    }
+
+    // ── set_permission_mode (live mode override) ─────────────────────────────
+
+    #[tokio::test]
+    async fn set_permission_mode_override_changes_authorize_outcome() {
+        // No rules, boot mode Default: a mutating tool with no allow rule is an
+        // Ask → delegates to the inner prompt transport (here: Deny).
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "prompt-denied".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        assert!(matches!(
+            gate.check("Write", &serde_json::json!({})).await,
+            PermissionDecision::Deny { .. }
+        ));
+
+        // Switch to bypassPermissions LIVE: everything now allows, the inner
+        // prompt is never consulted again.
+        gate.set_permission_mode("bypassPermissions").await.unwrap();
+        let calls_before = inner.calls();
+        assert_eq!(
+            gate.check("Write", &serde_json::json!({})).await,
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            inner.calls(),
+            calls_before,
+            "bypass mode must not delegate to the prompt transport"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_permission_mode_rejects_unknown_mode() {
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let gate = PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        assert_eq!(
+            gate.set_permission_mode("nonsense").await.unwrap_err(),
+            "Invalid permission mode: nonsense"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_permission_mode_rejects_bypass_when_killswitch_active() {
+        let mut policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        policy.bypass_killswitch_active = true;
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        assert_eq!(
+            gate.set_permission_mode("bypassPermissions").await.unwrap_err(),
+            "Bypass permissions mode was disabled by settings"
+        );
+    }
+
+    #[test]
+    fn parse_settable_mode_accepts_six_modes_rejects_unknown() {
+        assert_eq!(parse_settable_mode("default"), Ok(PermissionMode::Default));
+        assert_eq!(parse_settable_mode("plan"), Ok(PermissionMode::Plan));
+        assert_eq!(
+            parse_settable_mode("acceptEdits"),
+            Ok(PermissionMode::AcceptEdits)
+        );
+        assert_eq!(
+            parse_settable_mode("bypassPermissions"),
+            Ok(PermissionMode::BypassPermissions)
+        );
+        assert_eq!(parse_settable_mode("dontAsk"), Ok(PermissionMode::DontAsk));
+        assert_eq!(parse_settable_mode("auto"), Ok(PermissionMode::Auto));
+        assert!(parse_settable_mode("bubble").is_err());
     }
 }

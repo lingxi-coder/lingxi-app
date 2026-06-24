@@ -8,7 +8,9 @@
 //! shown (claude-code `showHint = !suppressHint && !showVim`, with
 //! `suppressHint = input.length > 0`). The `shift + ⏎ for newline` text lives
 //! ONLY on the `?` help surface (`PromptInputHelpMenu`), never in the resting
-//! footer.
+//! footer. (PIC-07) When a turn is in flight, the SAME hint slot shows `esc
+//! to interrupt` instead (claude-code `getSpinnerHintParts`'s `isLoading`
+//! branch).
 
 use iocraft::prelude::*;
 use permission::PermissionMode;
@@ -112,6 +114,10 @@ pub struct PromptInputFooterProps {
     /// (PIC-10) Active permission mode — a non-default mode renders the
     /// `{symbol} {mode} on (shift+tab to cycle)` indicator in the footer.
     pub permission_mode: PermissionMode,
+    /// (PIC-07) A turn is in flight — when the hint isn't otherwise
+    /// suppressed, shows `esc to interrupt` in place of `? for shortcuts`
+    /// (claude-code `getSpinnerHintParts`'s `isLoading` branch).
+    pub is_loading: bool,
 }
 
 impl Default for PromptInputFooterProps {
@@ -124,6 +130,7 @@ impl Default for PromptInputFooterProps {
             vim_mode: VimMode::Insert,
             vim_visual_linewise: false,
             permission_mode: PermissionMode::Default,
+            is_loading: false,
         }
     }
 }
@@ -153,6 +160,13 @@ pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement
     // hint (claude-code: `modePart` present → hint not pushed).
     let perm_part = perm_mode_label(props.permission_mode);
     let show_hint = props.is_empty && mode_label.is_none() && perm_part.is_none();
+    // (PIC-07) Same gate as the default hint (claude-code's hintParts are
+    // computed behind the identical showHint check); isLoading swaps the text.
+    let hint_text = if props.is_loading {
+        "esc to interrupt"
+    } else {
+        "? for shortcuts"
+    };
     element! {
         View(flex_direction: FlexDirection::Column) {
             #(mode_label.map(|label| element! {
@@ -171,7 +185,7 @@ pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement
             }))
             #(show_hint.then(|| element! {
                 View(flex_direction: FlexDirection::Row) {
-                    Text(content: "? for shortcuts".to_string(), color: TuiTheme::DIM)
+                    Text(content: hint_text.to_string(), color: TuiTheme::DIM)
                 }
             }))
         }

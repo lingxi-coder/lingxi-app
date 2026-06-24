@@ -323,6 +323,9 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 // (PIC-10) Surface the active permission mode in the footer
                 // (the only place it shows after SS-01 removed the status line).
                 permission_mode: permission_mode,
+                // (PIC-07) A turn in flight swaps the hint to "esc to
+                // interrupt" — same signal that gates the spinner row.
+                is_loading: show_spinner,
             )
             // (M9-05) Background-task footer pill, drawn bottom-most when present
             // (claude-code `BackgroundTaskStatus`). Hidden (no row) when `None`.

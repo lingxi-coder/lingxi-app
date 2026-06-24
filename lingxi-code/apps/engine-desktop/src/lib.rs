@@ -763,6 +763,19 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                 return Err(tool_workflow::WorkflowLaunchError(m));
             }
         }
+        // Resume gate (claude-code validateInput errorCode 3): a `resumeFromRunId`
+        // that names a STILL-RUNNING workflow is rejected — two runs sharing a run
+        // id would race on the same journal. The WorkflowTool can't reach the task
+        // registry from its `ToolUseContext`, so the gate lives here in the
+        // launcher (which owns the registry). Message byte-exact (`ED` = TaskStop).
+        if let Some(rid) = spec.resume_from_run_id.as_deref().filter(|s| !s.is_empty()) {
+            if let Some(task_id) = self.registry.find_running_workflow_by_run_id(rid).await {
+                return Err(tool_workflow::WorkflowLaunchError(format!(
+                    "Workflow {rid} is still running (task {task_id}). Stop it first with \
+                     TaskStop({{taskId: \"{task_id}\"}}) before resuming."
+                )));
+            }
+        }
         // Mint the run id at launch (fresh) or reuse the resume id — so it can be
         // returned in the tool result (claude-code `runId`) for `resumeFromRunId`.
         // A clock-nanos × per-process sequence gives a unique `wf_<16hex>` (host

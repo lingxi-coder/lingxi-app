@@ -161,6 +161,13 @@ pub struct UserToolResultProps {
 ///   any other shape                            — fall back to pretty-printed JSON
 #[must_use]
 pub fn body_text(result: &serde_json::Value) -> String {
+    // The replay/resume path wraps a persisted tool_result as a bare JSON
+    // string (`replay.rs` `Value::String(content)`); return it directly so the
+    // content renders WITHOUT the pretty-printer's surrounding quotes (and so
+    // the marker/tag detectors below see the raw content).
+    if let Some(s) = result.as_str() {
+        return s.to_string();
+    }
     if let Some(s) = result.get("content").and_then(|c| c.as_str()) {
         return s.to_string();
     }
@@ -179,6 +186,34 @@ pub fn body_text(result: &serde_json::Value) -> String {
         }
     }
     serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string())
+}
+
+/// claude-code `CANCEL_MESSAGE` (utils/messages.ts:210) — the user clicked
+/// "No" on a permission prompt. Byte-for-byte.
+const CANCEL_MESSAGE: &str = "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed.";
+/// claude-code `REJECT_MESSAGE` (utils/messages.ts:212) — a tool use was
+/// rejected. Byte-for-byte; matches `orchestrator` `synthetic_error_block`.
+const REJECT_MESSAGE: &str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
+/// claude-code `INTERRUPT_MESSAGE_FOR_TOOL_USE` (utils/messages.ts:208).
+const INTERRUPT_MESSAGE_FOR_TOOL_USE: &str = "[Request interrupted by user for tool use]";
+/// The single dim line `InterruptedByUser` renders for a canceled / rejected /
+/// interrupted tool result (claude-code `InterruptedByUser.tsx`:
+/// `Interrupted ` + `· What should Claude do instead?`).
+pub const INTERRUPTED_LINE: &str = "Interrupted \u{00b7} What should Claude do instead?";
+
+/// True when `result` is a canceled / rejected / interrupted tool result
+/// (claude-code `UserToolResultMessage` dispatch: `startsWith(CANCEL_MESSAGE)`,
+/// `startsWith(REJECT_MESSAGE)`, or `=== INTERRUPT_MESSAGE_FOR_TOOL_USE`). These
+/// take precedence over the `is_error` branch, so a persisted REJECT_MESSAGE
+/// result renders the terse `Interrupted · …` line instead of the verbose
+/// model-facing string (mainly the resume/replay path — the live REPL shows an
+/// `Interrupted by user` system message instead).
+#[must_use]
+pub fn tool_result_interrupted(result: &serde_json::Value) -> bool {
+    let body = body_text(result);
+    body.starts_with(CANCEL_MESSAGE)
+        || body.starts_with(REJECT_MESSAGE)
+        || body == INTERRUPT_MESSAGE_FOR_TOOL_USE
 }
 
 /// True for tools whose result is shown as a `StructuredDiff` (claude-code
@@ -247,6 +282,14 @@ pub fn truncate(body: &str) -> (String, usize) {
 #[must_use]
 pub fn render_user_tool_result_to_string(props: UserToolResultProps) -> String {
     let prefix = if props.focused { FOCUS_PREFIX } else { "" };
+
+    // (tool-reject-cancel-interrupted) Canceled / rejected / interrupted results
+    // collapse to the single dim `Interrupted · What should Claude do instead?`
+    // line (claude-code `InterruptedByUser`). Checked BEFORE the error branch
+    // (claude-code dispatch order: CANCEL/REJECT/INTERRUPT precede `is_error`).
+    if tool_result_interrupted(&props.result) {
+        return format!("{prefix}{MARKER}{INTERRUPTED_LINE}");
+    }
 
     // (tool-error) Errored results render as red `Error: …` with
     // `<tool_use_error>` / `<error>` / sandbox-violation tags stripped, capped
@@ -351,6 +394,19 @@ pub fn render_user_tool_result_body_spans(props: &UserToolResultProps) -> Vec<St
 /// rendered as a child `Text` element with the mapped color.
 #[component]
 pub fn UserToolResultMessage(props: &UserToolResultProps) -> impl Into<AnyElement<'static>> {
+    // (tool-reject-cancel-interrupted) A canceled / rejected / interrupted
+    // result renders the single dim `Interrupted · …` line (claude-code
+    // `InterruptedByUser`), ahead of every other branch.
+    if tool_result_interrupted(&props.result) {
+        let prefix = if props.focused { FOCUS_PREFIX } else { "" };
+        return element! {
+            View(flex_direction: FlexDirection::Row) {
+                Text(content: format!("{prefix}{MARKER}"), color: TuiTheme::DIM)
+                Text(content: INTERRUPTED_LINE.to_string(), color: TuiTheme::DIM)
+            }
+        };
+    }
+
     // (tool-error) Errored results take precedence over the diff/Bash render
     // paths (claude-code checks `param.is_error` before the success branch):
     // the dim gutter sits beside a RED error body, stripped + prefixed by
@@ -635,5 +691,43 @@ mod tests {
             extract_tag("<tool_use_error>y</tool_use_error>", "tool_use_error").as_deref(),
             Some("y")
         );
+    }
+
+    #[test]
+    fn body_text_unwraps_bare_string_value() {
+        // Replay path wraps content as a bare JSON string — no surrounding quotes.
+        let v = serde_json::Value::String("hello\nworld".to_string());
+        assert_eq!(body_text(&v), "hello\nworld");
+    }
+
+    #[test]
+    fn tool_result_interrupted_detects_all_three_markers() {
+        // REJECT_MESSAGE (bare string, the replay shape).
+        let v = serde_json::Value::String(REJECT_MESSAGE.to_string());
+        assert!(tool_result_interrupted(&v));
+        // CANCEL_MESSAGE via the live `{"content": …}` shape.
+        let v = serde_json::json!({ "content": CANCEL_MESSAGE });
+        assert!(tool_result_interrupted(&v));
+        // INTERRUPT_MESSAGE_FOR_TOOL_USE exact match.
+        let v = serde_json::Value::String(INTERRUPT_MESSAGE_FOR_TOOL_USE.to_string());
+        assert!(tool_result_interrupted(&v));
+        // A normal result is not interrupted.
+        let v = serde_json::json!({ "content": "ok" });
+        assert!(!tool_result_interrupted(&v));
+    }
+
+    #[test]
+    fn render_interrupted_is_dim_one_liner() {
+        let props = UserToolResultProps {
+            id: ToolUseId::from("t"),
+            tool: "Bash".into(),
+            result: serde_json::Value::String(REJECT_MESSAGE.to_string()),
+            expanded: true, // even expanded, it stays the one-line interrupt notice
+            ..Default::default()
+        };
+        let s = render_user_tool_result_to_string(props);
+        assert_eq!(s, format!("{MARKER}Interrupted \u{00b7} What should Claude do instead?"));
+        // The verbose REJECT_MESSAGE body must NOT leak through.
+        assert!(!s.contains("STOP what you are doing"), "got: {s}");
     }
 }

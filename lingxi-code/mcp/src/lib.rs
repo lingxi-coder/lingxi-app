@@ -36,7 +36,8 @@ pub use hook_dispatch::{
     ElicitationHookOutcome, ElicitationHookRequest, HookDispatcher,
 };
 pub use identity::{
-    ClientInfo, CLIENT_INFO, CLIENT_NAME, CLIENT_TITLE, CLIENT_VERSION, MCP_WEBSITE_URL,
+    ClientInfo, CLIENT_DESCRIPTION, CLIENT_INFO, CLIENT_NAME, CLIENT_TITLE, CLIENT_VERSION,
+    MCP_WEBSITE_URL,
 };
 pub use inbound::{ElicitationCreateHandler, RootsListHandler};
 pub use initialize_params::{ClientCapabilities, InitializeParams};

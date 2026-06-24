@@ -34,7 +34,11 @@ impl BuiltinCommandHandler for McpHandler {
         telemetry::emit_command_started(cmd_evt::MCP_STARTED);
         let servers = self.handle.list_mcp_servers().await;
         let rows: Vec<String> = servers.iter().map(format_row).collect();
-        let s = render_list("MCP servers", rows, "No MCP servers configured");
+        let s = render_list(
+            "MCP servers",
+            rows,
+            "No MCP servers configured. Use `claude mcp add` to add a server.",
+        );
         telemetry::emit_command_completed(cmd_evt::MCP_COMPLETED, "");
         CommandResult::Done { display: Some(s) }
     }
@@ -73,7 +77,10 @@ mod tests {
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = McpHandler::new(mock);
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
-            assert_eq!(s, "No MCP servers configured\n");
+            assert_eq!(
+                s,
+                "No MCP servers configured. Use `claude mcp add` to add a server.\n"
+            );
         } else {
             panic!();
         }

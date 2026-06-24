@@ -131,6 +131,8 @@ impl MockMcpTransport {
             description: format!("{name} test tool"),
             input_schema: serde_json::json!({"type": "object"}),
             full_name: format!("mcp__mock__{name}"),
+            search_hint: None,
+            always_load: None,
         });
     }
 }

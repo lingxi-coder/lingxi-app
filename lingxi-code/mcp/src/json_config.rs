@@ -198,6 +198,27 @@ fn build_servers_from_map(
                     headers_helper: None,
                     oauth: None,
                 },
+                // `claudeai-proxy`: binary-confirmed at offsets 74175408 and
+                // 81811504. Used for claude.ai hosted MCP servers; the proxy
+                // URL + OAuth handling are resolved by the platform layer.
+                // Parsed as Http so the transport chain receives the URL —
+                // the platform recognises the `claudeai-proxy` discriminator
+                // via the `type` tag when it serializes the spec.
+                Some("claudeai-proxy") => McpTransportSpec::Http {
+                    url,
+                    headers,
+                    oauth: None,
+                },
+                // `sdk`: binary-confirmed at offsets 194710219 and 196781049.
+                // Used by Agent SDK embedded servers. When the type is "sdk"
+                // the URL is a control-channel identifier; wire it into
+                // `SdkControl` so the platform can distinguish it from a plain
+                // HTTP endpoint. The `CLAUDE_AGENT_SDK_MCP_NO_PREFIX` gate
+                // (handled in `McpClient::list_tools`) then skips the `mcp__`
+                // prefix for tools from this transport.
+                Some("sdk") => McpTransportSpec::SdkControl {
+                    control_channel_id: url,
+                },
                 _ => McpTransportSpec::Http {
                     url,
                     headers,

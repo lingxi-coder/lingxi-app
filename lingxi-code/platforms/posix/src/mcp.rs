@@ -450,6 +450,8 @@ impl McpTransport for PosixMcpTransport {
                 tool_name: t.name,
                 description: t.description,
                 input_schema: t.input_schema,
+                search_hint: None,
+                always_load: None,
             })
             .collect())
     }

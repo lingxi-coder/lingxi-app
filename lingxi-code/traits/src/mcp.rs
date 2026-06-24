@@ -186,6 +186,18 @@ pub struct McpToolDto {
     pub input_schema: Value,
     /// Engine-side fully-qualified identifier (`mcp__<server>__<tool>`).
     pub full_name: String,
+    /// Retrieval prefilter hint from `tool._meta['anthropic/searchHint']`
+    /// (e.g. `"shell"`, `"editor"`). `None` when absent or when the server
+    /// did not set `_meta`. Forwarded from [`mcp::client::ToolMeta`] per
+    /// `client.ts:1777-1778`. Used by tool-search ranking to prefer tools
+    /// whose `searchHint` matches the current task description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_hint: Option<String>,
+    /// Force-include flag from `tool._meta['anthropic/alwaysLoad']`. When
+    /// `true`, the tool is included in the agent prompt regardless of whether
+    /// the `searchHint` matches. Forwarded from `client.ts:1779-1780`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_load: Option<bool>,
 }
 
 /// One resource advertised by an MCP server.

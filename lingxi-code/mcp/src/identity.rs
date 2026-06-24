@@ -10,14 +10,17 @@ pub const CLIENT_NAME: &str = "claude-code";
 pub const CLIENT_TITLE: &str = "Claude Code";
 /// Wire-literal `clientInfo.version` — sourced from this crate's `Cargo.toml`.
 pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Wire-literal `clientInfo.description` value. Binary-confirmed at offset 84000384:
+/// `description:"Anthropic's agentic coding tool"` in the `new Client(...)` call.
+pub const CLIENT_DESCRIPTION: &str = "Anthropic's agentic coding tool";
 /// Public-facing website URL emitted in `clientInfo.websiteUrl` (matches
-/// claude-code). TODO: confirm against claude-code source before release —
-/// placeholder uses the marketing landing page.
+/// claude-code). Confirmed against binary at offset 200376067.
 pub const MCP_WEBSITE_URL: &str = "https://claude.com/claude-code";
 
 /// `clientInfo` payload sent during MCP `initialize`.
 ///
-/// Wire shape: `{"name": "...", "title": "...", "version": "...", "websiteUrl": "..."}`.
+/// Wire shape: `{"name": "...", "title": "...", "version": "...",
+/// "description": "...", "websiteUrl": "..."}`.
 /// The `websiteUrl` key is camelCase per claude-code; serde rename is
 /// applied explicitly on that single field.
 #[derive(Debug, Clone, Serialize)]
@@ -28,6 +31,10 @@ pub struct ClientInfo {
     pub title: &'static str,
     /// Semver-compatible version string (= [`CLIENT_VERSION`]).
     pub version: &'static str,
+    /// Free-form description of the client (= [`CLIENT_DESCRIPTION`]).
+    /// Binary-confirmed at offset 84000384; both initialize blocks send it
+    /// (TS `client.ts:985,3280`).
+    pub description: &'static str,
     /// Public marketing/landing-page URL (= [`MCP_WEBSITE_URL`]).
     #[serde(rename = "websiteUrl")]
     pub website_url: &'static str,
@@ -39,6 +46,7 @@ impl Default for ClientInfo {
             name: CLIENT_NAME,
             title: CLIENT_TITLE,
             version: CLIENT_VERSION,
+            description: CLIENT_DESCRIPTION,
             website_url: MCP_WEBSITE_URL,
         }
     }
@@ -51,6 +59,7 @@ pub const CLIENT_INFO: ClientInfo = ClientInfo {
     name: CLIENT_NAME,
     title: CLIENT_TITLE,
     version: CLIENT_VERSION,
+    description: CLIENT_DESCRIPTION,
     website_url: MCP_WEBSITE_URL,
 };
 
@@ -66,6 +75,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["name"], "claude-code");
         assert_eq!(parsed["title"], "Claude Code");
+        assert_eq!(parsed["description"], "Anthropic's agentic coding tool");
         assert_eq!(parsed["websiteUrl"], "https://claude.com/claude-code");
         // CARGO_PKG_VERSION must be present and look like a semver triple.
         let version = parsed["version"].as_str().expect("version");
@@ -96,6 +106,7 @@ mod tests {
         // Lock the wire constant against accidental renames.
         assert_eq!(CLIENT_NAME, "claude-code");
         assert_eq!(CLIENT_TITLE, "Claude Code");
+        assert_eq!(CLIENT_DESCRIPTION, "Anthropic's agentic coding tool");
         assert_eq!(MCP_WEBSITE_URL, "https://claude.com/claude-code");
     }
 }

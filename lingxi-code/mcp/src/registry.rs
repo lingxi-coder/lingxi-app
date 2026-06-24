@@ -1540,6 +1540,8 @@ mod tests {
                     tool_name: (*t).to_string(),
                     description: format!("{t} tool"),
                     input_schema: serde_json::json!({"type": "object"}),
+                    search_hint: None,
+                    always_load: None,
                 })
                 .collect();
             Self {

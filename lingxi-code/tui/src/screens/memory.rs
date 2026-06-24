@@ -88,7 +88,12 @@ pub fn memory_tiers(cwd: &Path, home: &Path) -> Vec<MemoryTierEntry> {
         let display = entry.path.display().to_string();
         tiers.push(MemoryTierEntry {
             label: display.clone(),
-            description: "@-imported".to_string(),
+            // (MEM-2) These are nested-directory discoveries (claude-code
+            // `getMemoryFilesForNestedDirectory`'s walk, `file.isNested`),
+            // not `@import`-following (`file.parent`) — so the description
+            // is "dynamically loaded", not "@-imported" (MemoryFileSelector
+            // .tsx:91-99 picks `@-imported` only when `file.parent` is set).
+            description: "dynamically loaded".to_string(),
             exists: true,
             path: entry.path,
         });
@@ -347,6 +352,28 @@ mod tests {
         let user = tiers.iter().find(|t| t.label == "User memory").unwrap();
         assert!(!user.exists);
         assert_eq!(user.path, home.join(".claude").join("CLAUDE.md"));
+    }
+
+    #[test]
+    fn discovered_parent_claude_md_says_dynamically_loaded_not_imported() {
+        // (MEM-2) An ancestor-directory CLAUDE.md (not cwd's own, not an
+        // `@import`) gets claude-code's "dynamically loaded" description —
+        // "@-imported" is reserved for `@import`-following (file.parent set).
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let cwd = tmp.path().join("repo").join("sub");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        let ancestor_md = tmp.path().join("repo").join("CLAUDE.md");
+        fs::write(&ancestor_md, b"# ancestor notes\n").unwrap();
+        fs::write(cwd.join("CLAUDE.md"), b"# project notes\n").unwrap();
+
+        let tiers = memory_tiers(&cwd, &home);
+        let discovered = tiers
+            .iter()
+            .find(|t| t.path == ancestor_md)
+            .expect("ancestor CLAUDE.md discovered as its own tier row");
+        assert_eq!(discovered.description, "dynamically loaded");
     }
 
     #[test]

@@ -82,12 +82,65 @@ pub fn ToolUseConfirm(props: &ToolUseConfirmProps) -> impl Into<AnyElement<'stat
     use crate::components::messages::assistant_tool_use::{
         render_tool_use_message, user_facing_name,
     };
+    use crate::components::messages::user_tool_result::{
+        is_diff_tool, render_edit_write_diff_lines,
+    };
     let name = user_facing_name(&props.tool_name).to_string();
     // The tool-use preview body, e.g. `Read(src/x.rs)` / `Bash(npm test)`.
     let body = match render_tool_use_message(&props.tool_name, &props.tool_input, &props.cwd) {
         Some(s) if s.is_empty() => name.clone(),
         Some(s) => format!("{name}({s})"),
         None => format!("{name}({})", props.tool_input),
+    };
+    // (perm-02) File-edit tools render the structured diff inside the dialog so
+    // the user sees the exact change before approving (claude-code's per-tool
+    // permission confirmation shows the FileEdit diff, not just the tool name).
+    let diff_rows: Vec<AnyElement<'static>> = if is_diff_tool(&props.tool_name) {
+        let inp = &props.tool_input;
+        let s = |k: &str| inp.get(k).and_then(serde_json::Value::as_str);
+        let path = s("file_path");
+        let (old, new) = if props.tool_name == "Write" {
+            (None, s("content"))
+        } else {
+            (s("old_string"), s("new_string"))
+        };
+        if old.is_some() || new.is_some() {
+            render_edit_write_diff_lines(
+                &props.tool_name,
+                old,
+                new,
+                path,
+                crate::theme::ThemeName::Dark,
+            )
+            .into_iter()
+            .map(|line| {
+                let spans: Vec<AnyElement<'static>> = line
+                    .spans
+                    .into_iter()
+                    .map(|sp| {
+                        let color = sp.style.fg.to_iocraft();
+                        let bg = sp.style.bg.to_iocraft();
+                        let weight = if sp.style.bold {
+                            Weight::Bold
+                        } else {
+                            Weight::Normal
+                        };
+                        element! {
+                            View(background_color: bg) {
+                                Text(content: sp.text, color: color, weight: weight)
+                            }
+                        }
+                        .into_any()
+                    })
+                    .collect();
+                element! { View(flex_direction: FlexDirection::Row) { #(spans) } }.into_any()
+            })
+            .collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
     };
     let cwd_disp = props.cwd.display().to_string();
     let focus = props.focus;
@@ -116,6 +169,7 @@ pub fn ToolUseConfirm(props: &ToolUseConfirmProps) -> impl Into<AnyElement<'stat
             }))
             Text(content: "Tool use".to_string(), weight: Weight::Bold)
             Text(content: body)
+            #(diff_rows)
             Text(content: "Do you want to proceed?".to_string())
             View(flex_direction: FlexDirection::Column, padding_top: 1) {
                 Text(content: allow_once)

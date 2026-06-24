@@ -1,0 +1,18 @@
+---
+source: tui/tests/snapshot_permission_dialogs.rs
+assertion_line: 56
+expression: "&frame"
+---
+╭───────────────────────────────────────────────────────╮
+│                                                       │
+│ Tool use                                              │
+│ Edit(src/main.rs)                                     │
+│ 1 - let x = 1;                                        │
+│ 1 + let x = 2;                                        │
+│ Do you want to proceed?                               │
+│                                                       │
+│ > Yes                                                 │
+│   Yes, and don't ask again for Edit commands in /work │
+│   No                                                  │
+│                                                       │
+╰───────────────────────────────────────────────────────╯

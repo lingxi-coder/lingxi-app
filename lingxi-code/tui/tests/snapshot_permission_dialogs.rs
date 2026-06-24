@@ -37,6 +37,32 @@ fn snapshot_tool_use_confirm_default_state() {
 }
 
 #[test]
+fn snapshot_tool_use_confirm_edit_shows_diff() {
+    // (perm-02) An Edit permission request renders the structured diff inside
+    // the dialog so the user sees the change before approving.
+    let mut element = element! {
+        ToolUseConfirm(
+            tool_name: "Edit".to_string(),
+            tool_input: serde_json::json!({
+                "file_path": "/work/src/main.rs",
+                "old_string": "let x = 1;",
+                "new_string": "let x = 2;",
+            }),
+            cwd: std::path::PathBuf::from("/work"),
+            focus: DialogFocus::AllowOnce,
+        )
+    };
+    let frame = element.to_string();
+    insta::assert_snapshot!("tool_use_confirm_edit_shows_diff", &frame);
+    assert!(frame.contains("Tool use"), "got: {frame}");
+    assert!(frame.contains("Edit(src/main.rs)"), "got: {frame}");
+    // The diff body shows both the removed and added line content.
+    assert!(frame.contains("let x = 1;"), "old line in diff: {frame}");
+    assert!(frame.contains("let x = 2;"), "new line in diff: {frame}");
+    assert!(frame.contains("Do you want to proceed?"), "got: {frame}");
+}
+
+#[test]
 fn snapshot_exit_plan_mode_with_5_line_plan() {
     let plan =
         "1. Read foo.rs\n2. Refactor bar()\n3. Add tests\n4. Run cargo test\n5. Commit".to_string();

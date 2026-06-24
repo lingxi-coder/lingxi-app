@@ -25,6 +25,7 @@ import com.lingxi.code.vision.AndroidCameraAdapter
 import com.lingxi.code.share.AndroidShareAdapter
 import com.lingxi.code.notify.AndroidNotificationAdapter
 import com.lingxi.code.clipboard.AndroidClipboardAdapter
+import com.lingxi.code.secure.AndroidSecureStorageAdapter
 import com.lingxi.code.voice.recorder.AndroidVoiceAdapter
 import kotlinx.coroutines.launch
 
@@ -153,6 +154,10 @@ fun buildVoiceEngine(
             // Per-op credential provider not surfaced in the app UI yet — null
             // means no Git secrets are available (anonymous/public remotes only).
             gitCredentialProvider = null,
+            // Native Android Keystore secure store — enables OAuth /login token
+            // persist (flips the engine's oauth_supported true). Rooted under the
+            // app-private filesDir.
+            secureStorage = AndroidSecureStorageAdapter(appContext),
         )
     } catch (t: Throwable) {
         // PlatformUnavailable on a host build, or UnsatisfiedLinkError when the

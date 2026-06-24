@@ -609,7 +609,10 @@ final class MockConversationSource: ConversationSource {
                 voice: VoiceImpl(),
                 notifications: NotificationImpl(),
                 clipboard: ClipboardImpl(),
-                permissions: permissionSink)
+                permissions: permissionSink,
+                // Native Keychain secure store — enables OAuth /login token persist
+                // (flips the engine's oauth_supported true).
+                secureStorage: SecureStorageImpl())
             self.handle = handle
             // SHIP-BLOCKER #2: ask the engine for its real model catalog the moment
             // the handle exists. The reply (`ModelList`) arrives out-of-band on the

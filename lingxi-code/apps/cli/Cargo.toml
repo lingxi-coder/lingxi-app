@@ -38,6 +38,8 @@ traits = { path = "../../traits" }
 command-api = { path = "../../command-api" }
 orchestrator = { path = "../../orchestrator" }
 engine = { path = "../../engine" }
+# stream-json P2b: contextWindow/maxOutputTokens per model from the llm-client catalog.
+llm-client = { path = "../../llm-client" }
 dirs = "5"
 tui = { path = "../../tui" }
 session = { path = "../../session" }

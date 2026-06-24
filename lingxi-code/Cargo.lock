@@ -695,6 +695,7 @@ dependencies = [
  "filetime",
  "futures",
  "libc",
+ "llm-client",
  "migrations",
  "nix",
  "orchestrator",

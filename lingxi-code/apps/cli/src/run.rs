@@ -20,7 +20,7 @@ use session::jsonl::loader::{
 use session::jsonl::JsonlMessage;
 use std::path::PathBuf;
 use std::sync::Arc;
-use traits::{FileSystem, OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
+use traits::{FileSystem, McpStatus, OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
 
 /// Drive a one-shot conversation: either a `/slash-command` or a normal
 /// prompt that runs through the orchestrator turn loop.
@@ -95,17 +95,76 @@ pub async fn run_stream_json_print(
     // Collect tool names (Agent → Task SDK rename handled inside build_init_params).
     let tool_names = runtime.orchestrator.tool_names();
 
+    // ── P2b: real init-frame population ─────────────────────────────────────
+
+    // MCP servers: name + status string from the live orchestrator registry.
+    let mcp_servers: Vec<(String, String)> = runtime
+        .orchestrator
+        .list_mcp_servers()
+        .await
+        .into_iter()
+        .map(|s| {
+            let status_str = match s.status {
+                McpStatus::Connected => "connected".to_string(),
+                McpStatus::Disconnected => "disconnected".to_string(),
+                McpStatus::Error(_) => "error".to_string(),
+            };
+            (s.name, status_str)
+        })
+        .collect();
+
+    // Slash commands + skills: read from the shared command registry.
+    // slash_commands = all registered commands (sorted by name).
+    // skills = commands loaded_from=="skills" (the model-invocable subset
+    //          contributed by plugin skill files).
+    let (slash_commands, skills) = {
+        let reg = runtime.dispatcher.registry();
+        let reg_guard = reg.read().await;
+        let mut all_cmds: Vec<String> = reg_guard
+            .list_all()
+            .into_iter()
+            .map(|c| c.name.clone())
+            .collect();
+        all_cmds.sort();
+        let mut skill_names: Vec<String> = reg_guard
+            .list_all()
+            .into_iter()
+            .filter(|c| c.loaded_from.as_deref() == Some("skills"))
+            .map(|c| c.name.clone())
+            .collect();
+        // sort for determinism.
+        skill_names.sort();
+        drop(reg_guard);
+        (all_cmds, skill_names)
+    };
+
+    // Agents: names from the agent catalog via the orchestrator handle.
+    let agents: Vec<String> = runtime
+        .orchestrator
+        .list_agents()
+        .await
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+    // list_agents already sorts; no re-sort needed.
+
+    // Plugins: no clean surface from the CLI Runtime — the PluginManager is
+    // local to engine-desktop and not re-exported. Stays [] with this note.
+    // The plugin name/path/source would need engine_desktop::DesktopRuntime
+    // to expose a `loaded_plugins()` accessor (follow-up).
+    let plugins: Vec<(String, String, String)> = vec![];
+
     // Build the init parameters now that the runtime is available.
     let init_params = build_init_params(
         &session_id_str,
         tool_names,
-        vec![], // MCP servers: P1 placeholder; real population is a follow-up
+        mcp_servers,
         &model_str,
         permission_mode_str(permission_mode),
-        vec![], // slash_commands: P1 placeholder
-        vec![], // agents
-        vec![], // skills
-        vec![], // plugins
+        slash_commands,
+        agents,
+        skills,
+        plugins,
         "default", // output_style
         None,   // memory_auto_path
         "off",  // fast_mode_state
@@ -133,6 +192,13 @@ pub async fn run_stream_json_print(
         session.model.clone()
     };
 
+    // Betas: LingXi doesn't yet track active betas in SessionState, so we
+    // infer from the model string itself: if the model carries "[1m]" the
+    // 1M context beta is effectively active and the modelUsage key should
+    // reflect the real contextWindow = 1_000_000. The `context_window_for_model`
+    // helper already handles the "[1m]" substring check — no beta list needed.
+    let betas: Vec<String> = vec![];
+
     if turn_result.is_err() {
         let err_msg = turn_result.unwrap_err().to_string();
         stream
@@ -142,12 +208,13 @@ pub async fn run_stream_json_print(
                 &cost,
                 &model,
                 "off",
+                &betas,
             )
             .await;
         exit_codes::RUNTIME_ERROR
     } else {
         stream
-            .emit_result_success(&result_text, "end_turn", &cost, &model, "off")
+            .emit_result_success(&result_text, "end_turn", &cost, &model, "off", &betas)
             .await;
         exit_codes::SUCCESS
     }

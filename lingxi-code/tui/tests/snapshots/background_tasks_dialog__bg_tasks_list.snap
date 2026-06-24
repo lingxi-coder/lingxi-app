@@ -1,9 +1,9 @@
 ---
 source: tui/tests/background_tasks_dialog.rs
-assertion_line: 20
+assertion_line: 29
 expression: "render_background_tasks_to_string(&state, &rows())"
 ---
 Background tasks
-> cargo build (running)
+❯ cargo build (running)
   review (done, unread)
-↑↓ move · enter open · esc close
+↑/↓ select · Enter view · ←/Esc close

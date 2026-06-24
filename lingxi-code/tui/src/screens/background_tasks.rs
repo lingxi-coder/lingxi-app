@@ -74,7 +74,9 @@ pub fn handle_background_tasks_key(
                 }
                 None => TaskDialogOutcome::Stay,
             },
-            KeyCode::Esc | KeyCode::Char('q') => TaskDialogOutcome::Close,
+            // claude-code list hint is `←/Esc close` — both keys close the
+            // dialog from the top-level list (TASKS-DIALOG-KEYHINTS).
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => TaskDialogOutcome::Close,
             _ => TaskDialogOutcome::Stay,
         },
         TaskDialogMode::Detail => match key {
@@ -104,16 +106,23 @@ pub fn render_background_tasks_to_string(
         TaskDialogMode::List => {
             let mut out = String::from("Background tasks\n");
             if tasks.is_empty() {
-                out.push_str("(no background tasks)");
+                // (TASKS-DIALOG-EMPTY-TEXT) claude-code dimmed empty state.
+                out.push_str("No tasks currently running");
                 return out;
             }
             for (i, row) in tasks.iter().enumerate() {
-                let marker = if i == state.selected { "> " } else { "  " };
+                // (TASKS-DIALOG-SELECTION-MARKER) figures.pointer `❯ ` on the
+                // selected row, matching the other LingXi list screens.
+                let marker = if i == state.selected { "\u{276F} " } else { "  " };
                 out.push_str(marker);
                 out.push_str(&render_task_row(row));
                 out.push('\n');
             }
-            out.push_str("\u{2191}\u{2193} move \u{00B7} enter open \u{00B7} esc close");
+            // (TASKS-DIALOG-KEYHINTS) `↑/↓ select · Enter view · ←/Esc close`.
+            // The conditional `x stop` hint is omitted: LingXi tasks are not
+            // killable (no stop action), so claude-code's killable-gate would
+            // never surface it either.
+            out.push_str("\u{2191}/\u{2193} select \u{00B7} Enter view \u{00B7} \u{2190}/Esc close");
             out
         }
         TaskDialogMode::Detail => {

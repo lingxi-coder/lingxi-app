@@ -1,9 +1,10 @@
 ---
 source: tui/tests/worker_permission.rs
+assertion_line: 12
 expression: "render_worker_pending_to_string(\"Bash\", \"run mkdir /tmp/x\", Some(\"alice\"),\nSome(\"my-team\"))"
 ---
 Waiting for team lead approval
-● @alice
+⏺ @alice
 Tool: Bash
 Action: run mkdir /tmp/x
 Permission request sent to team "my-team" leader

@@ -13,7 +13,10 @@ use crate::exit_codes;
 use crate::init::Runtime;
 use crate::output::OutputSink;
 use crate::stream_json::{build_init_params, permission_mode_str, StreamJsonStream};
-use crate::stream_json_input::{content_to_prompt, emit_replay_ack, read_input_turns};
+use crate::stream_json_input::{
+    build_control_response_error, content_to_prompt, control_frame_request_id,
+    control_request_subtype, emit_replay_ack, spawn_stdin_router,
+};
 use permission;
 use session::jsonl::loader::{
     list_recent_sessions, load_session, select_session_interactive, LoaderError, SessionMetadata,
@@ -174,6 +177,11 @@ pub async fn run_stream_json_print(
     // Thread the real params + session_id into the stream.
     stream.set_init_params(init_params).await;
 
+    // Phase 0 (0a): start the single-writer stdout drain task before any frames
+    // are emitted. All subsequent emit_* calls push onto the mpsc channel;
+    // the drain task is the sole stdout writer.
+    stream.ensure_drain_started().await;
+
     // ① system/init frame
     stream.emit_init().await;
 
@@ -309,49 +317,62 @@ pub async fn run_stream_json_input_loop(
 
     stream.set_init_params(init_params).await;
 
+    // Phase 0 (0a): start the single-writer stdout drain task before any frames
+    // are emitted. All subsequent emit_* calls push onto the mpsc channel;
+    // the drain task is the sole stdout writer.
+    stream.ensure_drain_started().await;
+
     // ① system/init frame (emitted once before any turns).
     stream.emit_init().await;
 
     // ② system/status frame (the init "requesting" handshake).
     stream.emit_status().await;
 
-    // ③ Read all stdin turns synchronously (blocking stdin read).
-    //    We use a blocking task so we don't block the async runtime.
-    let replay = argv.replay_user_messages;
-    let session_id_for_replay = session_id_str.clone();
-    let turns = tokio::task::spawn_blocking(move || {
-        let stdin = std::io::stdin();
-        read_input_turns(stdin.lock(), replay, &session_id_for_replay)
-    })
-    .await;
+    // Phase 0 (0b): spawn the streaming stdin router. Frames arrive AS THEY
+    // ARE SENT (not buffered to EOF), routed by type onto three channels:
+    // - turn_rx     → user turns consumed sequentially below.
+    // - control_req_rx → control_request frames (Phase 0 stub: reply Unsupported).
+    // - control_resp_rx → control_response frames (Phase 0 stub: ignored).
+    //
+    // The reader runs in a spawn_blocking thread so stdin I/O doesn't block
+    // the async runtime. When stdin closes or a fatal error occurs all senders
+    // drop, signalling EOF to all receivers.
+    let mut channels = spawn_stdin_router(argv.replay_user_messages, session_id_str.clone());
 
-    let turns = match turns {
-        Ok(Ok(turns)) => turns,
-        Ok(Err(_input_err)) => {
-            // Fatal parse error — already printed to stderr. Exit 1.
-            return exit_codes::RUNTIME_ERROR;
+    // ③ Drain control_request and control_response channels concurrently with
+    //    the turn loop.
+    //
+    // Phase 0 stub: for each control_request, immediately reply with the
+    // byte-exact binary fallthrough error `"Unsupported control request subtype: <subtype>"`.
+    // Phase 1 replaces this with the full switch body.
+    //
+    // We use a separate task for the control dispatcher so it can handle frames
+    // that arrive while a turn is running (the key Phase 0 concurrency property).
+    let outbound_tx = stream.outbound_tx();
+    let ctrl_req_task = tokio::spawn(async move {
+        while let Some(frame) = channels.control_req_rx.recv().await {
+            let subtype = control_request_subtype(&frame).to_string();
+            let request_id = control_frame_request_id(&frame).to_string();
+            let error_msg = format!("Unsupported control request subtype: {subtype}");
+            let resp = build_control_response_error(&request_id, &error_msg);
+            let line = crate::stream_json::serialize_ndjson_line(&resp);
+            let _ = outbound_tx.send(line);
         }
-        Err(join_err) => {
-            eprintln!("lingxi-cli: stdin reader task panicked: {join_err}");
-            return exit_codes::RUNTIME_ERROR;
-        }
-    };
+        // control_resp_rx is dropped here — Phase 0: ignore all control_response frames.
+        drop(channels.control_resp_rx);
+    });
 
-    if turns.is_empty() {
-        // No user turns received — emit an empty-result envelope.
-        let cost = runtime.orchestrator.snapshot_cost().await;
-        let betas: Vec<String> = vec![];
-        stream
-            .emit_result_success("", "end_turn", &cost, &model_str, "off", &betas)
-            .await;
-        return exit_codes::SUCCESS;
-    }
-
-    // ④ Run each turn sequentially through the orchestrator.
+    // ④ Consume user turns sequentially through the orchestrator.
     let betas: Vec<String> = vec![];
     let mut last_turn_err: Option<String> = None;
+    let mut had_any_turn = false;
 
-    for turn in &turns {
+    loop {
+        let turn = match channels.turn_rx.recv().await {
+            Some(t) => t,
+            None => break, // stdin closed or fatal error — exit the loop.
+        };
+        had_any_turn = true;
         let prompt = content_to_prompt(&turn.content);
 
         // Under --replay-user-messages, re-emit the inbound user frame as
@@ -373,6 +394,19 @@ pub async fn run_stream_json_input_loop(
                 break;
             }
         }
+    }
+
+    // Wait for the control dispatcher to finish (it exits when control_req_rx closes,
+    // which happens when the stdin reader task finishes or drops the sender).
+    let _ = ctrl_req_task.await;
+
+    if !had_any_turn {
+        // No user turns received — emit an empty-result envelope.
+        let cost = runtime.orchestrator.snapshot_cost().await;
+        stream
+            .emit_result_success("", "end_turn", &cost, &model_str, "off", &betas)
+            .await;
+        return exit_codes::SUCCESS;
     }
 
     // ⑤ Emit the result frame.

@@ -13,7 +13,22 @@
 //! - Compact JSON + `\n` (LF only).
 //! - U+2028 → ` `, U+2029 → ` ` (line-splitter safety).
 //! - Every frame carries `session_id` + `uuid` (random v4).
-//! - Atomic per-line stdout writes (Mutex-locked).
+//! - Single-writer stdout drain: all frame emitters push pre-serialised NDJSON
+//!   lines onto an unbounded mpsc channel; one drain task is the sole stdout
+//!   writer, guaranteeing strict FIFO order (no control-frame overtake).
+//!   This mirrors the TS `outbound = Stream<StdoutMessage>` + single drain loop
+//!   (`structuredIO.ts:160-162`, Phase 0 prerequisite for the control plane).
+//!
+//! ## Phase 0 note (single-writer stdout drain)
+//!
+//! The previous `Arc<Mutex<Stdout>>` approach guaranteed per-line atomicity but
+//! allowed two racing tasks to interleave at line granularity when the mutex
+//! was released between frames. The mpsc + drain task gives strict FIFO at the
+//! frame level (not just per-line), which is required by the control protocol
+//! (§1.5 of the SPEC: "Control plane NEVER overtakes the data plane").
+//!
+//! The drain task is spawned lazily on the first `emit_*` call (or explicitly
+//! via `ensure_drain_started`). In tests the channel is unbounded so no blocking.
 
 #![forbid(unsafe_code)]
 
@@ -21,8 +36,9 @@ use async_trait::async_trait;
 use llm_client::model::context_window::{context_window_for_model, max_output_tokens_for_model};
 use serde_json::{json, Value};
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use traits::{CostSnapshot, OutputStream};
 
@@ -34,13 +50,46 @@ fn escape_line_terminators(s: &str) -> String {
     s.replace('\u{2028}', "\\u2028").replace('\u{2029}', "\\u2029")
 }
 
-/// Emit a compact JSON line, escaped, to the locked stdout.
-fn emit_line(out: &mut std::io::Stdout, v: &Value) {
+/// Serialize a JSON value to an escaped NDJSON line (compact + LF).
+/// This is the canonical wire-format serialiser for both the drain task
+/// and any caller that needs to bypass the channel (e.g. `emit_replay_ack`).
+pub fn serialize_ndjson_line(v: &Value) -> String {
     let s = serde_json::to_string(v).unwrap_or_default();
-    let s = escape_line_terminators(&s);
-    let _ = out.write_all(s.as_bytes());
-    let _ = out.write_all(b"\n");
+    let mut line = escape_line_terminators(&s);
+    line.push('\n');
+    line
+}
+
+/// Emit a compact JSON line, escaped, to the locked stdout.
+/// Used only by the drain task — NOT called directly by emit_* methods.
+fn emit_line_to_stdout(out: &mut std::io::Stdout, line: &str) {
+    let _ = out.write_all(line.as_bytes());
     let _ = out.flush();
+}
+
+// ── Drain task ──────────────────────────────────────────────────────────────
+
+/// Spawn the single-writer drain task: the sole consumer of the outbound mpsc
+/// channel that writes serialised NDJSON lines to stdout in FIFO order.
+///
+/// `rx` is the receiving end of the channel. The task runs until the sender
+/// side is dropped (all `StreamJsonStream` clones and ControlPlaneWriter clones
+/// are gone), then it flushes and exits.
+///
+/// Stdout ordering: the drain task is the only thing that calls `write_all`
+/// on stdout. No other code touches stdout after this task starts (except
+/// `emit_replay_ack` in stream_json_input, which has its own direct-write
+/// — that pre-Phase-0 path is safe because replay_ack is only called from
+/// the stdin-reader task, which runs before any turn starts).
+fn spawn_drain_task(mut rx: mpsc::UnboundedReceiver<String>) {
+    tokio::spawn(async move {
+        let mut stdout = std::io::stdout();
+        while let Some(line) = rx.recv().await {
+            emit_line_to_stdout(&mut stdout, &line);
+        }
+        // Channel closed (all senders dropped) — flush any buffered output.
+        let _ = stdout.flush();
+    });
 }
 
 // ── Content block accumulator ────────────────────────────────────────────────
@@ -175,9 +224,38 @@ pub struct StreamJsonInitParams {
     pub fast_mode_state: String,
 }
 
+/// Shared outbound queue: sender half for the single-writer drain task.
+///
+/// Phase 0: each `StreamJsonStream` instance holds a clone of this sender.
+/// The drain task (spawned once per process) is the sole stdout writer.
+/// For Phase 1+ the `ControlPlaneWriter` also holds a clone so control
+/// frames share the same queue and cannot overtake data frames.
+pub type OutboundTx = mpsc::UnboundedSender<String>;
+
 /// A 4th `OutputStream` impl that writes NDJSON frames to stdout.
+///
+/// ## Phase 0 stdout drain
+///
+/// All `emit_*` methods serialise the frame to a single-line string (via
+/// `serialize_ndjson_line`) and push it onto an unbounded mpsc channel.
+/// A single drain task (`spawn_drain_task`) is the sole stdout writer.
+/// This matches the TS `outbound = Stream<StdoutMessage>` + drain loop
+/// (structuredIO.ts:160-162) and eliminates the per-frame mutex race that
+/// the old `Arc<Mutex<Stdout>>` approach had.
+///
+/// The sender is `Arc`-wrapped so it can be shared with a future
+/// `ControlPlaneWriter` without extra plumbing.
 pub struct StreamJsonStream {
-    out: Arc<Mutex<std::io::Stdout>>,
+    /// Sender half of the outbound NDJSON queue (the drain task holds the Rx).
+    out_tx: Arc<OutboundTx>,
+    /// Tracks how many drain tasks have been spawned for this stream (should be 0 or 1).
+    /// We use an AtomicUsize as a once-flag: 0 = not spawned, 1 = spawned.
+    /// The receiver is stored only until the drain task consumes it; after spawn
+    /// it lives inside the task. We can't store it here because tokio mpsc receivers
+    /// are not Clone — so we use a Mutex<Option<Rx>> to hand it off.
+    drain_rx: Mutex<Option<mpsc::UnboundedReceiver<String>>>,
+    /// 0 = drain not yet spawned, 1 = spawned (use AtomicUsize as a flag).
+    drain_started: AtomicUsize,
     /// Session id threaded in from the orchestrator after build. `Mutex`
     /// so the caller can set it post-construction (before emit_init).
     session_id: Mutex<String>,
@@ -206,69 +284,97 @@ pub struct StreamJsonStream {
 }
 
 impl StreamJsonStream {
+    /// Internal constructor — builds the struct with a fresh unbounded mpsc channel.
+    /// The drain task is NOT started here; call `ensure_drain_started()` before
+    /// the first emit, or call it lazily from `enqueue_line`.
+    fn new_inner(init_params: Option<StreamJsonInitParams>, suppress_frames: bool) -> Self {
+        let session_id = init_params
+            .as_ref()
+            .map(|p| p.session_id.clone())
+            .unwrap_or_default();
+        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        Self {
+            out_tx: Arc::new(tx),
+            drain_rx: Mutex::new(Some(rx)),
+            drain_started: AtomicUsize::new(0),
+            session_id: Mutex::new(session_id),
+            init_params: Mutex::new(init_params),
+            accum: Arc::new(Mutex::new(MessageAccum::default())),
+            suppress_frames,
+            last_result_text: Mutex::new(String::new()),
+            include_partial_messages: AtomicBool::new(false),
+            include_hook_events: AtomicBool::new(false),
+        }
+    }
+
+    /// Ensure the single-writer drain task is running. Idempotent — safe to
+    /// call multiple times; only the first call spawns the task.
+    ///
+    /// In production, call this once before `emit_init`. In unit tests this is
+    /// called implicitly on the first `enqueue_line` so that test output goes
+    /// to stdout without needing explicit setup.
+    pub async fn ensure_drain_started(&self) {
+        // Fast-path: already started.
+        if self.drain_started.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        // Take the Rx out of the option — this can only succeed once.
+        let mut guard = self.drain_rx.lock().await;
+        if let Some(rx) = guard.take() {
+            spawn_drain_task(rx);
+            self.drain_started.store(1, Ordering::Release);
+        }
+        // If guard.take() returned None another caller raced us and already
+        // spawned — that's fine, we just skip.
+    }
+
+    /// Push a pre-serialised NDJSON line onto the outbound queue.
+    ///
+    /// This is the only place `emit_*` methods write to stdout (via the drain
+    /// task). Sending to an unbounded channel is infallible unless the receiver
+    /// is dropped (i.e. the drain task panicked — in that case we silently drop
+    /// the frame rather than panicking the caller).
+    fn enqueue_line(&self, line: String) {
+        let _ = self.out_tx.send(line);
+    }
+
+    /// Serialise `v` to an escaped NDJSON line and enqueue it.
+    fn enqueue(&self, v: &Value) {
+        let line = serialize_ndjson_line(v);
+        self.enqueue_line(line);
+    }
+
+    /// Return a clone of the outbound sender so the ControlPlaneWriter
+    /// (Phase 1+) can share the same drain queue without extra plumbing.
+    pub fn outbound_tx(&self) -> Arc<OutboundTx> {
+        Arc::clone(&self.out_tx)
+    }
+
     /// Construct a placeholder stream: the streaming callbacks (emit_text,
     /// emit_tool_call, etc.) are fully wired.  Call [`set_init_params`]
     /// before [`emit_init`] / [`emit_status`] to fill in the session-level
     /// metadata that only becomes available after `build_runtime` completes.
     pub fn new_placeholder() -> Self {
-        Self {
-            out: Arc::new(Mutex::new(std::io::stdout())),
-            session_id: Mutex::new(String::new()),
-            init_params: Mutex::new(None),
-            accum: Arc::new(Mutex::new(MessageAccum::default())),
-            suppress_frames: false,
-            last_result_text: Mutex::new(String::new()),
-            include_partial_messages: AtomicBool::new(false),
-            include_hook_events: AtomicBool::new(false),
-        }
+        Self::new_inner(None, false)
     }
 
     /// Construct a json-mode placeholder: same as `new_placeholder()` but
     /// with `suppress_frames = true`. All frames EXCEPT the final result
     /// frame are suppressed. Used by `--output-format json` / `--json`.
     pub fn new_json_mode_placeholder() -> Self {
-        Self {
-            out: Arc::new(Mutex::new(std::io::stdout())),
-            session_id: Mutex::new(String::new()),
-            init_params: Mutex::new(None),
-            accum: Arc::new(Mutex::new(MessageAccum::default())),
-            suppress_frames: true,
-            last_result_text: Mutex::new(String::new()),
-            include_partial_messages: AtomicBool::new(false),
-            include_hook_events: AtomicBool::new(false),
-        }
+        Self::new_inner(None, true)
     }
 
     /// Convenience constructor used in unit tests where all params are known
     /// upfront.
     pub fn new(init_params: StreamJsonInitParams) -> Self {
-        let session_id = init_params.session_id.clone();
-        Self {
-            out: Arc::new(Mutex::new(std::io::stdout())),
-            session_id: Mutex::new(session_id),
-            init_params: Mutex::new(Some(init_params)),
-            accum: Arc::new(Mutex::new(MessageAccum::default())),
-            suppress_frames: false,
-            last_result_text: Mutex::new(String::new()),
-            include_partial_messages: AtomicBool::new(false),
-            include_hook_events: AtomicBool::new(false),
-        }
+        Self::new_inner(Some(init_params), false)
     }
 
     /// Convenience constructor for json-mode tests where all params are known
     /// upfront.
     pub fn new_json_mode(init_params: StreamJsonInitParams) -> Self {
-        let session_id = init_params.session_id.clone();
-        Self {
-            out: Arc::new(Mutex::new(std::io::stdout())),
-            session_id: Mutex::new(session_id),
-            init_params: Mutex::new(Some(init_params)),
-            accum: Arc::new(Mutex::new(MessageAccum::default())),
-            suppress_frames: true,
-            last_result_text: Mutex::new(String::new()),
-            include_partial_messages: AtomicBool::new(false),
-            include_hook_events: AtomicBool::new(false),
-        }
+        Self::new_inner(Some(init_params), true)
     }
 
     /// Set the `--include-partial-messages` and `--include-hook-events` flags.
@@ -326,8 +432,7 @@ impl StreamJsonStream {
             "fast_mode_state": p.fast_mode_state
         });
         drop(params_guard);
-        let mut out = self.out.lock().await;
-        emit_line(&mut out, &frame);
+        self.enqueue(&frame);
     }
 
     /// Emit the `system/status` frame (status: "requesting"). Called just
@@ -346,8 +451,7 @@ impl StreamJsonStream {
             "uuid": uuid,
             "session_id": session_id
         });
-        let mut out = self.out.lock().await;
-        emit_line(&mut out, &frame);
+        self.enqueue(&frame);
     }
 
     /// Build the success result frame Value (exact 20-key golden order).
@@ -420,8 +524,7 @@ impl StreamJsonStream {
                 betas,
             )
             .await;
-        let mut out = self.out.lock().await;
-        emit_line(&mut out, &frame);
+        self.enqueue(&frame);
         frame
     }
 
@@ -496,8 +599,7 @@ impl StreamJsonStream {
         let frame = self
             .build_result_error_frame(subtype, errors, cost, model_id, fast_mode_state, betas)
             .await;
-        let mut out = self.out.lock().await;
-        emit_line(&mut out, &frame);
+        self.enqueue(&frame);
         frame
     }
 
@@ -547,8 +649,7 @@ impl StreamJsonStream {
             "uuid": uuid,
             "session_id": session_id
         });
-        let mut out = self.out.lock().await;
-        emit_line(&mut out, &frame);
+        self.enqueue(&frame);
     }
 
     /// Build the `usage` sub-block (snake_case per GROUND-TRUTH).
@@ -661,8 +762,7 @@ impl OutputStream for StreamJsonStream {
             "uuid": uuid,
             "timestamp": timestamp
         });
-        let mut out = self.out.lock().await;
-        emit_line(&mut out, &frame);
+        self.enqueue(&frame);
     }
 
     async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {
@@ -799,8 +899,7 @@ impl OutputStream for StreamJsonStream {
             let mut acc = self.accum.lock().await;
             acc.reset();
         }
-        let mut out = self.out.lock().await;
-        emit_line(&mut out, &frame);
+        self.enqueue(&frame);
     }
 
     /// Emit a `stream_event` NDJSON frame for `--include-partial-messages`.
@@ -835,8 +934,7 @@ impl OutputStream for StreamJsonStream {
             obj.insert("ttft_ms".into(), serde_json::Value::Null);
         }
         let frame = serde_json::Value::Object(obj);
-        let mut out = self.out.lock().await;
-        emit_line(&mut out, &frame);
+        self.enqueue(&frame);
     }
 
     /// Emit a `system/hook_started` NDJSON frame for `--include-hook-events`.
@@ -868,8 +966,7 @@ impl OutputStream for StreamJsonStream {
             "uuid": uuid,
             "session_id": session_id
         });
-        let mut out = self.out.lock().await;
-        emit_line(&mut out, &frame);
+        self.enqueue(&frame);
     }
 
     /// Emit a `system/hook_response` NDJSON frame for `--include-hook-events`.
@@ -911,8 +1008,7 @@ impl OutputStream for StreamJsonStream {
             "uuid": uuid,
             "session_id": session_id
         });
-        let mut out = self.out.lock().await;
-        emit_line(&mut out, &frame);
+        self.enqueue(&frame);
     }
 }
 

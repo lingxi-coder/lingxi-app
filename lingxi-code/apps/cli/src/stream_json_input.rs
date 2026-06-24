@@ -8,8 +8,10 @@
 //!              orchestrator's sequential turn loop.
 //! - `keep_alive` → silently ignored.
 //! - `update_environment_variables` → recognized (allowlist handling deferred P5).
-//! - `control_request` → `request` field required (full control protocol deferred P5).
-//! - `control_response` → silently accepted (P5 handles routing).
+//! - `control_request` → `request` field required; routed onto the control channel.
+//!   Phase 0 stub: replies with `control_response` error
+//!   `"Unsupported control request subtype: <subtype>"` for every subtype.
+//! - `control_response` → routed onto the pending-resolver channel (Phase 0: stub/ignored).
 //! - unknown  → warn to stderr, drop.
 //!
 //! ## Dedup + replay (`--replay-user-messages`)
@@ -28,7 +30,8 @@
 //! ## P5 / deferred gaps (see .gap-notes/stream-json-p3.md)
 //! - `bash_command` frame
 //! - full `update_environment_variables` allowlist
-//! - `control_request`/`control_response` full protocol
+//! - `control_request` full protocol (Phase 1+)
+//! - `control_response` pending-request resolution (Phase 2+)
 //! - inbound `assistant`/`system` history seeding
 
 #![forbid(unsafe_code)]
@@ -36,6 +39,7 @@
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
+use tokio::sync::mpsc;
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -108,8 +112,17 @@ pub enum FrameAction {
     UserTurn(UserTurn),
     /// A duplicate `user` frame (same uuid). Payload is the uuid for replay ack.
     DuplicateUser { uuid: String },
+    /// A `control_request` frame — routed to the control dispatcher.
+    /// Carries the full parsed (normalised) frame value including `request_id`
+    /// and `request` sub-object. The `request` field is guaranteed present
+    /// (missing-request is validated and fatal before this variant is returned).
+    ControlRequest(Value),
+    /// A `control_response` frame — routed to the pending-request resolver.
+    /// Carries the full parsed (normalised) frame. Phase 0: stub/ignored;
+    /// Phase 2 resolves pending `send_request` futures from this.
+    ControlResponse(Value),
     /// The frame was silently consumed (keep_alive, update_environment_variables,
-    /// control_response, assistant/system, unknown with warning).
+    /// assistant/system, unknown with warning).
     Consumed,
 }
 
@@ -157,19 +170,21 @@ pub fn process_line(
         }
 
         "control_request" => {
-            // require `request` field.
+            // require `request` field (byte-exact error matches binary).
             if frame.get("request").is_none() {
                 eprintln!("Error: Missing request on control_request");
                 return Err(InputError::MissingRequest);
             }
-            // P3: reject-unsupported; full protocol is P5.
-            eprintln!("control_request received but full control protocol is not yet implemented (P5 deferred)");
-            Ok(FrameAction::Consumed)
+            // Route to the control dispatcher. Phase 0: the caller's stub
+            // replies with `Unsupported control request subtype: <subtype>`.
+            // Phase 1+ replaces the stub with the real switch.
+            Ok(FrameAction::ControlRequest(frame))
         }
 
         "control_response" => {
-            // P5 handles resolution of pending requests; silently accept for now.
-            Ok(FrameAction::Consumed)
+            // Route to the pending-request resolver. Phase 0: stub/ignored.
+            // Phase 2 resolves in-flight send_request futures from this.
+            Ok(FrameAction::ControlResponse(frame))
         }
 
         "user" => {
@@ -312,11 +327,183 @@ pub fn read_input_turns(
                 }
                 // Duplicate turns are skipped — do NOT push.
             }
-            FrameAction::Consumed => {}
+            // Control frames are silently dropped in the legacy batch reader
+            // (used only by tests and non-streaming callers). The streaming
+            // reader `spawn_stdin_router` routes them to their channels instead.
+            FrameAction::ControlRequest(_) | FrameAction::ControlResponse(_) | FrameAction::Consumed => {}
         }
     }
 
     Ok(turns)
+}
+
+// ── Streaming stdin router (Phase 0 — async, concurrent) ─────────────────────
+
+/// Channels produced by [`spawn_stdin_router`].
+pub struct StdinChannels {
+    /// Receiver for validated `user` turns (consumed sequentially by the turn driver).
+    pub turn_rx: mpsc::Receiver<UserTurn>,
+    /// Receiver for `control_request` frames (consumed by the control dispatcher).
+    /// Phase 0: stub consumer replies with `Unsupported control request subtype: <subtype>`.
+    /// Phase 1+: replaced with the full switch.
+    pub control_req_rx: mpsc::Receiver<Value>,
+    /// Receiver for `control_response` frames (consumed by the pending-request resolver).
+    /// Phase 0: stub/empty — ignored. Phase 2+: resolves in-flight `send_request` futures.
+    pub control_resp_rx: mpsc::Receiver<Value>,
+}
+
+/// Spawn a background task that reads stdin line-by-line, routes each frame,
+/// and returns the three receiver channels.
+///
+/// The stdin reader runs in a `spawn_blocking` thread (stdin is blocking I/O)
+/// forwarding frames onto bounded tokio mpsc channels. When stdin closes (EOF)
+/// or a fatal error occurs, all three channel senders are dropped, which signals
+/// EOF to every consumer.
+///
+/// `replay_user_messages` + `session_id` control replay-ack emission (same
+/// semantics as `read_input_turns`). Dedup (`seen_uuids`) is maintained inside
+/// the reader thread.
+///
+/// ## Phase 0 stub: `control_request` handling
+///
+/// The caller MUST consume `control_req_rx`. For each `control_request` received,
+/// call [`send_control_response_error`] with the subtype to emit the byte-exact
+/// fallthrough error `"Unsupported control request subtype: <subtype>"`.
+/// Phase 1 replaces this with the full switch.
+///
+/// ## Deadlock risk
+///
+/// The mpsc senders are bounded (capacity 64). If the consumer tasks stall
+/// (e.g. turn processing blocks while stdin pours in), the reader thread will
+/// block on `send`. This is intentional backpressure — the TS model also
+/// processes turns sequentially. Choose capacity > 1 so a burst of frames
+/// doesn't immediately stall, but < ∞ so a rogue flood can't OOM.
+pub fn spawn_stdin_router(
+    replay_user_messages: bool,
+    session_id: String,
+) -> StdinChannels {
+    // Bounded channels: 64 buffered frames each. Turn channel is 64 (max burst
+    // before the turn loop catches up). Control channels are 64 each.
+    let (turn_tx, turn_rx) = mpsc::channel::<UserTurn>(64);
+    let (control_req_tx, control_req_rx) = mpsc::channel::<Value>(64);
+    let (control_resp_tx, control_resp_rx) = mpsc::channel::<Value>(64);
+
+    tokio::task::spawn_blocking(move || {
+        let stdin = std::io::stdin();
+        let reader = std::io::BufReader::new(stdin.lock());
+        let mut seen_uuids: HashSet<String> = HashSet::new();
+
+        for line_result in reader.lines() {
+            let line = match line_result {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("Error reading stdin: {e}");
+                    break;
+                }
+            };
+            let line = line.trim_end_matches('\r').to_string();
+            if line.is_empty() {
+                continue;
+            }
+
+            match process_line(&line, &mut seen_uuids) {
+                Ok(FrameAction::UserTurn(turn)) => {
+                    // Block if the channel is full (backpressure).
+                    if turn_tx.blocking_send(turn).is_err() {
+                        // Receiver dropped — turn driver has stopped; exit.
+                        break;
+                    }
+                }
+                Ok(FrameAction::DuplicateUser { uuid }) => {
+                    eprintln!("Sending acknowledgment for duplicate user message: {uuid}");
+                    if replay_user_messages {
+                        emit_replay_ack(&uuid, &session_id);
+                    }
+                    // Duplicate — do NOT forward as a turn.
+                }
+                Ok(FrameAction::ControlRequest(frame)) => {
+                    if control_req_tx.blocking_send(frame).is_err() {
+                        // Control dispatcher stopped; keep reading (don't break —
+                        // still need to drain stdin for user turns).
+                    }
+                }
+                Ok(FrameAction::ControlResponse(frame)) => {
+                    if control_resp_tx.blocking_send(frame).is_err() {
+                        // Pending resolver stopped; keep reading.
+                    }
+                }
+                Ok(FrameAction::Consumed) => {}
+                Err(_input_err) => {
+                    // Fatal parse/role/missing-request error — already printed
+                    // to stderr. Break so all senders drop (signals EOF to consumers).
+                    break;
+                }
+            }
+        }
+        // All senders dropped here → all receiver channels close.
+    });
+
+    StdinChannels { turn_rx, control_req_rx, control_resp_rx }
+}
+
+// ── Control-response frame builder ───────────────────────────────────────────
+
+/// Build the byte-exact `control_response` error envelope.
+///
+/// Shape (from GROUND-TRUTH-init.md §2.2 fallthrough):
+/// ```json
+/// {"type":"control_response","response":{"subtype":"error","request_id":"<id>","error":"<msg>"}}
+/// ```
+///
+/// The error string for unsupported subtypes is:
+/// `"Unsupported control request subtype: <subtype>"` (binary-confirmed).
+pub fn build_control_response_error(request_id: &str, error_msg: &str) -> Value {
+    json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "error",
+            "request_id": request_id,
+            "error": error_msg
+        }
+    })
+}
+
+/// Build the byte-exact `control_response` success envelope.
+///
+/// Shape:
+/// ```json
+/// {"type":"control_response","response":{"subtype":"success","request_id":"<id>","response":{...}}}
+/// ```
+/// When `payload` is `None`, the `"response"` key is OMITTED (not `null`).
+pub fn build_control_response_success(request_id: &str, payload: Option<Value>) -> Value {
+    let mut inner = serde_json::Map::new();
+    inner.insert("subtype".into(), json!("success"));
+    inner.insert("request_id".into(), json!(request_id));
+    if let Some(p) = payload {
+        inner.insert("response".into(), p);
+    }
+    json!({
+        "type": "control_response",
+        "response": Value::Object(inner)
+    })
+}
+
+/// Extract the `subtype` string from a `control_request` frame's `request` object,
+/// returning `""` if absent (for the fallthrough error path).
+pub fn control_request_subtype(frame: &Value) -> &str {
+    frame
+        .get("request")
+        .and_then(|r| r.get("subtype"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+}
+
+/// Extract the `request_id` string from a `control_request` or `control_response` frame.
+pub fn control_frame_request_id(frame: &Value) -> &str {
+    frame
+        .get("request_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
@@ -471,15 +658,74 @@ mod tests {
     }
 
     #[test]
-    fn control_request_with_request_field_is_consumed() {
-        let line = r#"{"type":"control_request","request":{"type":"get_status"}}"#;
+    fn control_request_with_request_field_routes_to_control_request() {
+        // Phase 0: control_request frames are now routed to ControlRequest(frame)
+        // rather than silently consumed. The caller's dispatcher stub sends the
+        // byte-exact "Unsupported control request subtype: <subtype>" error.
+        let line = r#"{"type":"control_request","request":{"subtype":"get_status"}}"#;
         let result = process_line(line, &mut fresh_seen()).unwrap();
-        assert!(matches!(result, FrameAction::Consumed));
+        assert!(matches!(result, FrameAction::ControlRequest(_)));
+        // Verify the frame carries the request field.
+        if let FrameAction::ControlRequest(frame) = result {
+            assert!(frame.get("request").is_some(), "ControlRequest frame must carry the request field");
+        }
     }
 
     #[test]
     fn missing_request_error_string() {
         assert_eq!(InputError::MissingRequest.to_string(), "Error: Missing request on control_request");
+    }
+
+    // ── Phase 0: control_response_error builder ───────────────────────────────
+
+    #[test]
+    fn build_control_response_error_has_correct_shape() {
+        let resp = build_control_response_error("req_abc", "Unsupported control request subtype: get_status");
+        assert_eq!(resp["type"], "control_response");
+        let inner = &resp["response"];
+        assert_eq!(inner["subtype"], "error");
+        assert_eq!(inner["request_id"], "req_abc");
+        assert_eq!(inner["error"], "Unsupported control request subtype: get_status");
+    }
+
+    #[test]
+    fn build_control_response_success_with_payload() {
+        let payload = json!({"pid": 42});
+        let resp = build_control_response_success("req_xyz", Some(payload.clone()));
+        assert_eq!(resp["type"], "control_response");
+        let inner = &resp["response"];
+        assert_eq!(inner["subtype"], "success");
+        assert_eq!(inner["request_id"], "req_xyz");
+        assert_eq!(inner["response"], payload);
+    }
+
+    #[test]
+    fn build_control_response_success_without_payload_omits_response_key() {
+        let resp = build_control_response_success("req_xyz", None);
+        let inner = &resp["response"];
+        // When no payload, the "response" key must be ABSENT (not null).
+        assert!(inner.get("response").is_none(), "response key must be absent when payload is None");
+    }
+
+    #[test]
+    fn control_request_subtype_extracts_subtype() {
+        let frame = json!({"type": "control_request", "request_id": "r1", "request": {"subtype": "initialize"}});
+        assert_eq!(control_request_subtype(&frame), "initialize");
+    }
+
+    #[test]
+    fn control_frame_request_id_extracts_id() {
+        let frame = json!({"type": "control_request", "request_id": "req-123", "request": {"subtype": "x"}});
+        assert_eq!(control_frame_request_id(&frame), "req-123");
+    }
+
+    // ── Phase 0: control_response frame routes to ControlResponse variant ─────
+
+    #[test]
+    fn control_response_routes_to_control_response_variant() {
+        let line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"r1","response":{}}}"#;
+        let result = process_line(line, &mut fresh_seen()).unwrap();
+        assert!(matches!(result, FrameAction::ControlResponse(_)));
     }
 
     // ── content_to_prompt ────────────────────────────────────────────────────

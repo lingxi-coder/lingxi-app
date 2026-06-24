@@ -10,8 +10,19 @@
 //! worst case is a confusing EPERM instead of a clean advisory.
 
 /// Shell command heads that always imply network use.
+///
+/// Includes the classic external clients (curl/ssh/…) AND the network-capable
+/// applets in the bundled toybox inventory (advertised to the model as
+/// available), so an egress attempt gets this clean advisory instead of a
+/// confusing mid-run seccomp EPERM. Local-only network *introspection* applets
+/// (ifconfig/netstat) are deliberately excluded — they query the local
+/// interface and are not egress.
 const NET_HEADS: &[&str] = &[
+    // External clients.
     "curl", "wget", "nc", "ncat", "ssh", "scp", "sftp", "rsync", "telnet", "ftp",
+    // Bundled toybox networking applets.
+    "netcat", "ping", "ping6", "ftpget", "ftpput", "httpd", "host", "sntp", "nbd_client",
+    "nbd_server",
 ];
 
 /// `git` subcommands that always hit the network.

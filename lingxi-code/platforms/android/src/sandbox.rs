@@ -52,6 +52,54 @@ impl AndroidMinijailSandbox {
         }
         Ok((root, canon))
     }
+
+    /// Enforce W^X on a bundled-helper exec target, fail-closed.
+    ///
+    /// Android only permits `execve` of files under `nativeLibraryDir` (the
+    /// installer-extracted, app-read-only native-lib root); `filesDir`/`cacheDir`
+    /// and friends are no-exec / app-writable. This makes the exec target's
+    /// LOCATION a security property — and the content-hash identity check in the
+    /// runner pins bytes, NOT location, so it cannot substitute for it.
+    ///
+    /// Until now the invariant was only an implicit convention (the android-aar
+    /// bootstrap derives the path from `nativeLibraryDir`). This turns it into an
+    /// enforced check so a refactor / alternate caller that puts
+    /// `bundled_mksh_path` under a writable root cannot reach `execve`: the path
+    /// must canonicalize under `native_library_dir` and must NOT fall under any
+    /// `app_writable_roots` entry. Gives the previously-dead `app_writable_roots`
+    /// field a real consumer.
+    fn validate_bundled_exec_path(&self, path: &std::path::Path) -> Result<(), SandboxError> {
+        let nativelib = self.cfg.native_library_dir.canonicalize().map_err(|e| {
+            SandboxError::PathCanonicalize(format!(
+                "native_library_dir {}: {e}",
+                self.cfg.native_library_dir.display()
+            ))
+        })?;
+        let canon = path.canonicalize().map_err(|e| {
+            SandboxError::PathCanonicalize(format!("bundled exec target {}: {e}", path.display()))
+        })?;
+        if !canon.starts_with(&nativelib) {
+            return Err(SandboxError::Unavailable(format!(
+                "bundled exec target {} is not under nativeLibraryDir {} (W^X)",
+                canon.display(),
+                nativelib.display()
+            )));
+        }
+        for root in &self.cfg.app_writable_roots {
+            // A non-canonicalizable writable root cannot contain the (already
+            // canonicalized) target, so skip it rather than fail the whole run.
+            if let Ok(wr) = root.canonicalize() {
+                if canon.starts_with(&wr) {
+                    return Err(SandboxError::Unavailable(format!(
+                        "bundled exec target {} is under app-writable root {} (W^X violation)",
+                        canon.display(),
+                        wr.display()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -103,6 +151,10 @@ impl Sandbox for AndroidMinijailSandbox {
                 .bundled_mksh_hash
                 .clone()
                 .expect("bundled_ready() guarantees mksh hash");
+            // W^X: the bundled exec target must live under nativeLibraryDir and
+            // outside every app-writable root, or we fall closed (never execve a
+            // writable/illegal path — the hash check pins bytes, not location).
+            self.validate_bundled_exec_path(&path)?;
             (
                 ExecTarget::BundledHelper {
                     name: "mksh".into(),
@@ -219,14 +271,27 @@ mod tests {
     }
 
     /// `shell_cfg(ws)` with the three bundled fields populated → `bundled_ready()`.
+    /// Creates a REALISTIC W^X layout under `ws`: a read-only `native-lib/`
+    /// (disjoint from the app-writable roots) holding a real `libmksh.so`, so the
+    /// W^X exec-path containment check in `prepare()` passes.
     fn config_with_bundled(
         ws: &std::path::Path,
-        mksh_path: &str,
+        _mksh_path: &str,
         applet_dir: &str,
         hash: &str,
     ) -> AndroidShellConfig {
+        let nativelib = ws.join("native-lib");
+        std::fs::create_dir_all(&nativelib).expect("native-lib dir");
+        let mksh = nativelib.join("libmksh.so");
+        std::fs::write(&mksh, b"#!stub mksh\n").expect("libmksh.so");
+        let writable = ws.join("files");
+        std::fs::create_dir_all(&writable).expect("writable dir");
         let mut cfg = shell_cfg(ws);
-        cfg.bundled_mksh_path = Some(std::path::PathBuf::from(mksh_path));
+        cfg.native_library_dir = nativelib;
+        // app-writable roots are DISJOINT from native-lib (as on a real device:
+        // filesDir/cacheDir vs the installer-extracted lib dir).
+        cfg.app_writable_roots = vec![writable];
+        cfg.bundled_mksh_path = Some(mksh);
         cfg.bundled_applet_dir = Some(std::path::PathBuf::from(applet_dir));
         cfg.bundled_mksh_hash = Some(hash.to_string());
         cfg
@@ -286,6 +351,7 @@ mod tests {
     fn prepare_targets_bundled_mksh_when_ready() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cfg = config_with_bundled(tmp.path(), "/nl/libmksh.so", "/app/applet-bin", "deadbeef");
+        let expected_path = cfg.bundled_mksh_path.clone().unwrap();
         let sb = sandbox_with_cfg(cfg, ready_caps());
         let sc = sb.prepare(cmd(None), &deny_net_policy()).expect("prepare");
         let plan = sc
@@ -296,7 +362,7 @@ mod tests {
         match &plan.target {
             ExecTarget::BundledHelper { name, path, hash } => {
                 assert_eq!(name, "mksh");
-                assert_eq!(path, std::path::Path::new("/nl/libmksh.so"));
+                assert_eq!(path, &expected_path);
                 assert_eq!(hash, "deadbeef");
             }
             other @ ExecTarget::SystemShell => panic!("expected BundledHelper, got {other:?}"),
@@ -305,6 +371,27 @@ mod tests {
         assert!(
             env["PATH"].starts_with("/app/applet-bin:"),
             "applet dir leads PATH"
+        );
+    }
+
+    #[test]
+    fn prepare_rejects_bundled_exec_outside_native_lib() {
+        // W^X: a bundled exec target that exists but lives OUTSIDE nativeLibraryDir
+        // (e.g. under an app-writable root) must fail closed, never reach execve.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut cfg = config_with_bundled(tmp.path(), "/nl/libmksh.so", "/app/applet-bin", "deadbeef");
+        // Point the exec target at a real file under the app-writable root.
+        let writable = tmp.path().join("files");
+        let rogue = writable.join("evil-mksh.so");
+        std::fs::write(&rogue, b"#!rogue\n").expect("rogue file");
+        cfg.bundled_mksh_path = Some(rogue);
+        let sb = sandbox_with_cfg(cfg, ready_caps());
+        let err = sb
+            .prepare(cmd(None), &deny_net_policy())
+            .expect_err("must reject exec target outside nativeLibraryDir");
+        assert!(
+            matches!(err, SandboxError::Unavailable(ref m) if m.contains("W^X") || m.to_lowercase().contains("nativelibrary")),
+            "expected a W^X fail-closed error, got {err:?}"
         );
     }
 

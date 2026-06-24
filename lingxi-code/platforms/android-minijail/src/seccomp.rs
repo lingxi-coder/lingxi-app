@@ -34,8 +34,14 @@ const SECCOMP_DATA_NR_OFF: u32 = 0;
 const SECCOMP_DATA_ARCH_OFF: u32 = 4;
 /// `SECCOMP_RET_ALLOW`.
 pub const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
-/// `SECCOMP_RET_KILL` (== `SECCOMP_RET_KILL_THREAD` `0x0000_0000`).
+/// `SECCOMP_RET_KILL_THREAD` (`0x0000_0000`, the legacy bare `SECCOMP_RET_KILL`).
 pub const SECCOMP_RET_KILL: u32 = 0x0000_0000;
+/// `SECCOMP_RET_KILL_PROCESS` (`0x8000_0000`). Kills the WHOLE process on a
+/// disallowed syscall, not just the offending thread — the correct fatal action
+/// for the arch-mismatch guard. Available since Linux 4.14 (all Android 10+);
+/// on older kernels an unrecognized RET action is masked down to KILL_THREAD, so
+/// this degrades gracefully to the legacy behavior with no regression.
+pub const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
 const SECCOMP_RET_ERRNO_BASE: u32 = 0x0005_0000;
 const SECCOMP_RET_DATA: u32 = 0x0000_ffff;
 
@@ -215,8 +221,10 @@ pub fn build_net_deny_bpf(socket_nrs: &[u32], audit_arch: u32) -> Vec<BpfInsn> {
     // [0] Load arch from seccomp_data (offset 4).
     // [1] If arch == audit_arch, jump over the KILL (jt=1 skips insn [2]);
     //     otherwise fall to [2] (jf=0 → next insn).
-    // [2] Arch mismatch guard — KILL (not EPERM: wrong-arch invocation is not
-    //     a graceful deny, it indicates a kernel/process mismatch).
+    // [2] Arch mismatch guard — KILL_PROCESS (not EPERM: a wrong-arch
+    //     invocation is not a graceful deny, it indicates a kernel/process
+    //     mismatch; kill the whole process — not just the thread — so the
+    //     AArch32 compat ABI can never be used to slip past net-deny).
     // [3] Load syscall nr from seccomp_data (offset 0).
     let mut prog = vec![
         BpfInsn {
@@ -235,7 +243,7 @@ pub fn build_net_deny_bpf(socket_nrs: &[u32], audit_arch: u32) -> Vec<BpfInsn> {
             code: BPF_RET_K,
             jt: 0,
             jf: 0,
-            k: SECCOMP_RET_KILL,
+            k: SECCOMP_RET_KILL_PROCESS,
         },
         BpfInsn {
             code: BPF_LD_W_ABS,
@@ -333,13 +341,24 @@ mod tests {
                 .any(|i| i.code == BPF_RET_K && i.k == seccomp_ret_errno(1)),
             "denied syscalls return EPERM(1)"
         );
-        // A RET KILL appears ONLY in the arch-mismatch guard (exactly once),
-        // not as the net-deny action — net denial is graceful EPERM, not fatal.
+        // A RET KILL_PROCESS appears ONLY in the arch-mismatch guard (exactly
+        // once), not as the net-deny action — net denial is graceful EPERM, not
+        // fatal. The guard kills the whole process (not just the thread).
         let kill_count = prog
             .iter()
-            .filter(|i| i.code == BPF_RET_K && i.k == SECCOMP_RET_KILL)
+            .filter(|i| i.code == BPF_RET_K && i.k == SECCOMP_RET_KILL_PROCESS)
             .count();
-        assert_eq!(kill_count, 1, "exactly one KILL insn (arch-mismatch guard)");
+        assert_eq!(
+            kill_count, 1,
+            "exactly one KILL_PROCESS insn (arch-mismatch guard)"
+        );
+        // And no legacy bare KILL_THREAD return is emitted.
+        assert!(
+            !prog
+                .iter()
+                .any(|i| i.code == BPF_RET_K && i.k == SECCOMP_RET_KILL),
+            "arch guard must use KILL_PROCESS, not KILL_THREAD"
+        );
     }
 
     #[test]
@@ -453,6 +472,6 @@ mod tests {
         let prog = build_net_deny_bpf(ARM64_SOCKET_NRS, AUDIT_ARCH_AARCH64);
         // If the arch tag is wrong, the arch guard fires.
         let ret = simulate(&prog, 63, 0xC000_003E /* x86_64 AUDIT_ARCH */);
-        assert_eq!(ret, SECCOMP_RET_KILL, "wrong arch must reach KILL");
+        assert_eq!(ret, SECCOMP_RET_KILL_PROCESS, "wrong arch must reach KILL_PROCESS");
     }
 }

@@ -38,6 +38,14 @@ pub struct MemoryTierEntry {
 ///
 /// Mirrors `claude-code/src/components/memory/MemoryFileSelector.tsx`
 /// (single-user subset: auto-memory / team / agent folders are M8).
+/// `true` when `cwd` or any ancestor contains a `.git` entry (dir for a normal
+/// repo, file for a worktree/submodule) — the nearest-`.git`-ancestor scan used
+/// across the TUI (mirrors `skills.rs`). Drives the MEM-1 git-conditional
+/// project-memory description.
+fn cwd_is_in_git_repo(cwd: &Path) -> bool {
+    cwd.ancestors().any(|dir| dir.join(".git").exists())
+}
+
 #[must_use]
 pub fn memory_tiers(cwd: &Path, home: &Path) -> Vec<MemoryTierEntry> {
     let project_path = cwd.join(FILE_NAME);
@@ -50,7 +58,13 @@ pub fn memory_tiers(cwd: &Path, home: &Path) -> Vec<MemoryTierEntry> {
     let mut tiers = vec![
         MemoryTierEntry {
             label: "Project memory".to_string(),
-            description: "Checked in at ./CLAUDE.md".to_string(),
+            // (MEM-1) git-conditional, matching MemoryFileSelector.tsx:88,93:
+            // "Checked in at ./CLAUDE.md" inside a git repo, else "Saved in …".
+            description: if cwd_is_in_git_repo(cwd) {
+                "Checked in at ./CLAUDE.md".to_string()
+            } else {
+                "Saved in ./CLAUDE.md".to_string()
+            },
             exists: project_path.is_file(),
             path: project_path.clone(),
         },
@@ -333,6 +347,31 @@ mod tests {
         let user = tiers.iter().find(|t| t.label == "User memory").unwrap();
         assert!(!user.exists);
         assert_eq!(user.path, home.join(".claude").join("CLAUDE.md"));
+    }
+
+    #[test]
+    fn project_description_is_git_conditional() {
+        // (MEM-1) `.git` present at cwd → "Checked in at"; absent → "Saved in".
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let cwd = tmp.path().join("repo");
+        fs::create_dir_all(&cwd).unwrap();
+        let proj_desc = |tiers: &[MemoryTierEntry]| {
+            tiers
+                .iter()
+                .find(|t| t.label == "Project memory")
+                .unwrap()
+                .description
+                .clone()
+        };
+        // No `.git` anywhere under the fresh tempdir → "Saved in".
+        assert_eq!(proj_desc(&memory_tiers(&cwd, &home)), "Saved in ./CLAUDE.md");
+        // Add a `.git` dir at cwd → "Checked in at".
+        fs::create_dir_all(cwd.join(".git")).unwrap();
+        assert_eq!(
+            proj_desc(&memory_tiers(&cwd, &home)),
+            "Checked in at ./CLAUDE.md"
+        );
     }
 
     #[test]

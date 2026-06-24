@@ -13,7 +13,10 @@ const DETAIL_TAIL_LINES: usize = 200;
 #[must_use]
 pub fn detail_header(row: &TaskRow) -> String {
     match row.task_type.as_str() {
-        "local_bash" | "monitor_mcp" => "Shell details".to_string(),
+        // (BGTASK-5) monitor_mcp gets its own "Monitor details" header
+        // (claude-code `MonitorMcpDetailDialog` vs `ShellDetailDialog`).
+        "local_bash" => "Shell details".to_string(),
+        "monitor_mcp" => "Monitor details".to_string(),
         "in_process_teammate" => format!("@{}", row.description),
         "local_agent" | "local_workflow" => format!("agent \u{203A} {}", row.description),
         _ => "Detail not available in this build".to_string(),
@@ -51,6 +54,11 @@ mod tests {
         assert_eq!(
             detail_header(&row("local_bash", "running", "cargo build")),
             "Shell details"
+        );
+        // (BGTASK-5) monitor_mcp gets its own header, distinct from local_bash.
+        assert_eq!(
+            detail_header(&row("monitor_mcp", "running", "watching logs")),
+            "Monitor details"
         );
         assert_eq!(
             detail_header(&row("in_process_teammate", "running", "alice")),

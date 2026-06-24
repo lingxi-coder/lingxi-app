@@ -1,34 +1,38 @@
 //! Forked-agent runner: full agent loop rooted at the parent's cache-safe
 //! prompt prefix.
 //!
-//! Unlike [`crate::side_query::SideQueryClient`] (stateless one-shot), a
-//! forked agent runs the complete subagent loop in a borrowed slot from
-//! the host's state-machine pool. It serializes its prompt with the same
-//! byte layout as the parent (via [`CacheSafeParams`]) so Anthropic's
-//! prompt cache hits on the shared prefix.
+//! **The multi-turn, tool-using fork lives elsewhere — by design.** The full
+//! parent-prefix-rooted, tool-iterating forked subagent loop is implemented and
+//! wired via the `Agent` tool's fork path, NOT through this runner:
+//! `tool_agent::AgentTool::call` (`subagent_type == "fork"`) → `SubagentSpawner`
+//! → `agent::PoolSubagentSpawner::spawn` → `StateMachinePool::allocate` →
+//! `agent::runner::run_subagent_loop` (the real `loop` to `end_turn`/`max_turns`).
+//! All the claude-code fork parity bits are there: the `FORK_AGENT` builtin with
+//! `use_exact_tools`, `traits::fork_subagent::build_forked_messages` for the
+//! cache-safe prefix, the verbatim parent system prompt, and the
+//! `is_in_fork_child` recursion guard. A forked agent that runs tools therefore
+//! goes through `AgentTool`, where that guard and the exact-tools pool apply.
 //!
-//! **Architectural note (M1):** `lingxi-sidequery` deliberately does not
-//! depend on `lingxi-agent` — the agent crate already depends on
-//! `lingxi-memory`, and `lingxi-memory` depends on this crate (for the
-//! refactored selector in Task 5). To avoid the dependency cycle, the
-//! runner accepts a `SubagentSlotProvider` trait object that the agent
-//! crate implements on `StateMachinePool` in a later wiring plan. The
-//! field is unused while only the single-turn path is wired.
+//! **This runner is the SINGLE-TURN summarization helper.** It is intentionally
+//! one-shot: when a [`SideQueryClient`] is wired via
+//! [`ForkedAgentRunner::with_side_query_client`], [`ForkedAgentRunner::run`]
+//! replays the parent's cache-safe prefix
+//! (`cache_safe_params.fork_context_messages`) ahead of the fork's own
+//! `prompt_messages` so Anthropic's prompt cache hits the shared prefix, then
+//! issues ONE stateless LLM call and returns the assistant text + usage. No tool
+//! loop runs here — its consumers are summarization-shaped (autocompaction and
+//! the post-session memory extraction). When no client is wired, [`run`] returns
+//! the legacy `"[forked-agent-stub]"` sentinel.
 //!
-//! **Single-turn path (this revision):** when a [`SideQueryClient`] is wired
-//! via [`ForkedAgentRunner::with_side_query_client`], [`ForkedAgentRunner::run`]
-//! performs a real, *single-turn* forked call: it replays the parent's
-//! cache-safe prefix (`cache_safe_params.fork_context_messages`) ahead of the
-//! fork's own `prompt_messages` so Anthropic's prompt cache hits on the shared
-//! prefix, then issues one stateless LLM call through the client and returns
-//! the assistant text + usage. No tool loop runs on this path.
+//! **Cycle note:** `lingxi-sidequery` deliberately does not depend on
+//! `lingxi-agent` (the cycle would be `agent → memory → sidequery`). The
+//! [`SubagentSlotProvider`] seam below was a placeholder for routing a multi-turn
+//! loop *through this runner*; since that loop already exists in `AgentTool`, the
+//! seam is currently unused. A future *sidequery-level* multi-turn consumer (one
+//! that genuinely cannot reach `AgentTool`) could give it real "drive a fork to
+//! completion" methods backed by `StateMachinePool`; otherwise it can be removed.
 //!
-//! **Still future work:** the FULL multi-turn, tool-using subagent loop
-//! (the §10 `runner.rs` `run_subagent` driver that borrows a slot from
-//! [`SubagentSlotProvider`] and iterates tool calls) is not implemented here.
-//! When no client is wired, [`ForkedAgentRunner::run`] returns the legacy
-//! `"[forked-agent-stub]"` sentinel so existing callers keep building against
-//! the final shape.
+//! [`run`]: ForkedAgentRunner::run
 
 use crate::cache_safe_params::CacheSafeParams;
 use crate::purposes::QuerySource;
@@ -43,20 +47,19 @@ use thiserror::Error;
 /// path — single-turn forks today are summarization-shaped.
 const DEFAULT_FORK_MAX_TOKENS: u32 = 20_000;
 
-/// Pool-shaped abstraction that lets the runner allocate forked slots
-/// without depending on `lingxi-agent`. Implemented by
-/// `agent::StateMachinePool` in the wiring layer (later plan).
+/// Placeholder seam for routing a multi-turn fork *through this runner*.
 ///
-/// M1.14 only requires `Send + Sync` so the runner can hold an `Arc`.
+/// It is currently an empty marker and UNUSED: the multi-turn, tool-using fork
+/// already runs through `AgentTool` → `StateMachinePool::run_subagent_loop` (see
+/// the module docs), so this runner never allocates a slot. A future
+/// sidequery-level multi-turn consumer could give this real "drive a fork to
+/// completion" methods backed by `agent::StateMachinePool`; otherwise the trait
+/// + the `pool` field can be removed.
 pub trait SubagentSlotProvider: Send + Sync {}
 
-/// A [`SubagentSlotProvider`] that never allocates a slot.
-///
-/// The single-turn side-query path (`with_side_query_client` → [`ForkedAgentRunner::run`])
-/// does not touch `pool` — slot allocation is the future multi-turn runner's
-/// job — so a composition root that wires the forked autocompact summarizer
-/// (In-Loop Compaction Batch 6) can pass this no-op provider. Replace it with
-/// the real `agent::StateMachinePool` once the multi-turn fork path lands.
+/// The no-op [`SubagentSlotProvider`] every current caller passes: this runner
+/// is single-turn (summarization), so it never touches `pool`. Wired by the
+/// autocompaction / memory-extraction composition roots.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoopSubagentSlotProvider;
 

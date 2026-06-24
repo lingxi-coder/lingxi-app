@@ -1127,6 +1127,31 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
     }
     // === end Esc-interrupt ===
 
+    // === (RRS-07) Ctrl+D double-press exit (claude-code `app:exit`), only when
+    // the prompt is empty. First press arms the window + shows a hint; a second
+    // press within the window quits. Shares the `sigint_armed_at` window with
+    // Ctrl+C. A non-empty prompt leaves Ctrl+D unbound (falls through). ===
+    if k.code == KeyCode::Char('d')
+        && k.modifiers.contains(KeyModifiers::CONTROL)
+        && st.prompt_text.is_empty()
+    {
+        match st.sigint_armed_at {
+            Some(t) if t.elapsed().as_secs() < crate::app::SIGINT_WINDOW_SECS => {
+                st.should_exit = true;
+            }
+            _ => {
+                st.sigint_armed_at = Some(std::time::Instant::now());
+                st.push_message(crate::state::RenderedMessage::SystemText {
+                    body: "Press Ctrl-D again to exit".into(),
+                    timestamp: chrono::Utc::now().timestamp(),
+                    is_error: false,
+                });
+            }
+        }
+        return;
+    }
+    // === end Ctrl+D exit ===
+
     // === PRIORITY 3.5: vim toggle (M7-08 review). The Ctrl-Alt-V binding must
     // be modal-independent — it flips `vim_enabled` from ANY vim mode (Normal or
     // Insert) or when vim is off. It sits AFTER the permission (1) and overlay
@@ -3365,6 +3390,37 @@ mod tests {
             )),
             "no interrupt marker when no turn is in flight"
         );
+    }
+
+    /// (RRS-07) Ctrl+D on an empty prompt arms, then exits on a second press.
+    #[test]
+    fn ctrl_d_double_press_exits_on_empty_prompt() {
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        let ctrl_d = {
+            let mut e = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('d'));
+            e.modifiers = KeyModifiers::CONTROL;
+            e
+        };
+        handle_live_key(&mut st, &ctrl_d, 24);
+        assert!(!st.should_exit, "first Ctrl+D only arms");
+        assert!(st.messages.iter().any(|m| matches!(
+            m,
+            crate::state::RenderedMessage::SystemText { body, .. } if body == "Press Ctrl-D again to exit"
+        )));
+        handle_live_key(&mut st, &ctrl_d, 24);
+        assert!(st.should_exit, "second Ctrl+D within the window exits");
+    }
+
+    /// (RRS-07) Ctrl+D with a non-empty prompt does NOT exit (falls through).
+    #[test]
+    fn ctrl_d_with_text_does_not_exit() {
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.prompt_text = "hi".into();
+        st.prompt_cursor = 2;
+        let mut ctrl_d = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('d'));
+        ctrl_d.modifiers = KeyModifiers::CONTROL;
+        handle_live_key(&mut st, &ctrl_d, 24);
+        assert!(!st.should_exit, "Ctrl+D with text must not exit");
     }
 
     /// (GAP D fix — tab navigators, TDD) The Stats screen is a TAB NAVIGATOR

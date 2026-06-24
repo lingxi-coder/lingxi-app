@@ -11,11 +11,15 @@
 //! Differences from codex (documented, behavior-preserving):
 //! - Git info collection is omitted (LingXi has no `git-utils` dep), so the
 //!   session-meta line's `git` field is always `None` — same on-disk shape.
-//! - Compression / `.jsonl.zst` materialization is omitted; paths are always
-//!   plain `.jsonl`. `materialize_*` collapses to a plain-path passthrough.
 //! - State-DB listing / pagination is out of scope (LingXi has no SQLite
 //!   `state_db`); only the record/append/load surface is ported.
+//!
+//! Compression: the read/append paths go through the [`compression`] module so
+//! a cold rollout that was compressed to `.jsonl.zst` is read transparently
+//! (`load_rollout_items` via [`open_rollout_line_reader`]) and materialized
+//! back to plain `.jsonl` before any append (`materialize_rollout_for_append`).
 
+use crate::rollout::compression::{materialize_rollout_for_append, open_rollout_line_reader};
 use crate::rollout::initial_history::{InitialHistory, ResumedHistory};
 use crate::rollout::metadata::plain_rollout_path;
 use crate::rollout::record::{
@@ -244,7 +248,7 @@ impl RolloutRecorder {
                 (None, Some(log_file_info), path, Some(session_meta))
             }
             RolloutRecorderParams::Resume { path } => {
-                let path = materialize_rollout_for_append(path.as_path());
+                let path = materialize_rollout_for_append(path.as_path()).await?;
                 (
                     Some(
                         tokio::fs::OpenOptions::new()
@@ -362,14 +366,16 @@ impl RolloutRecorder {
         let mut items: Vec<RolloutItem> = Vec::new();
         let mut thread_id: Option<ThreadId> = None;
         let mut parse_errors = 0usize;
-        let contents = tokio::fs::read_to_string(path).await?;
+        // Read through the compression-aware line reader so a rollout that was
+        // compressed to `.jsonl.zst` is decoded transparently (matches codex).
+        let mut reader = open_rollout_line_reader(path).await?;
         let mut saw_non_empty_line = false;
-        for line in contents.lines() {
+        while let Some(line) = reader.next_line().await? {
             if line.trim().is_empty() {
                 continue;
             }
             saw_non_empty_line = true;
-            let mut v: Value = match serde_json::from_str(line) {
+            let mut v: Value = match serde_json::from_str(&line) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!("failed to parse line as JSON: {line:?}, error: {e}");
@@ -457,12 +463,6 @@ impl RolloutRecorder {
         };
         Ok(())
     }
-}
-
-/// Plain-path passthrough (no compression in LingXi). Faithful in shape to
-/// codex's `materialize_rollout_for_append` minus zstd decode.
-fn materialize_rollout_for_append(path: &Path) -> PathBuf {
-    plain_rollout_path(path)
 }
 
 fn strip_legacy_ghost_snapshot_rollout_line(value: &mut Value) -> bool {
@@ -805,7 +805,7 @@ pub async fn append_rollout_item_to_path(
     rollout_path: &Path,
     item: &RolloutItem,
 ) -> std::io::Result<()> {
-    let rollout_path = materialize_rollout_for_append(rollout_path);
+    let rollout_path = materialize_rollout_for_append(rollout_path).await?;
     let file = tokio::fs::OpenOptions::new()
         .append(true)
         .open(rollout_path)

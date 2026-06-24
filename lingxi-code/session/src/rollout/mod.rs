@@ -29,6 +29,7 @@
 //! line, the legacy ghost-snapshot stripping, and the persist/flush/recovery
 //! mechanics are reproduced exactly.
 
+pub mod compression;
 pub mod initial_history;
 pub mod metadata;
 pub mod policy;
@@ -36,6 +37,10 @@ pub mod record;
 pub mod recorder;
 pub mod session_index;
 
+pub use compression::{
+    existing_rollout_path, open_rollout_line_reader, spawn_rollout_compression_worker,
+    RolloutLineReader, COMPRESSION_LEVEL,
+};
 pub use initial_history::{InitialHistory, ResumedHistory};
 pub use metadata::{
     builder_from_items, parse_timestamp_uuid_from_filename, plain_rollout_path,

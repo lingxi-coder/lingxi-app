@@ -142,3 +142,50 @@ impl SkillLoader for MobileDiskSkillLoader {
             .map(|cmd| to_descriptor(cmd, self.session_id.as_deref())))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The deferred #14 test: a disk-authored `.claude/commands/*.md` under the
+    /// app-private root resolves through the loader as a prompt skill (proving the
+    /// mobile Skill tool is no longer inert), and an unknown name resolves to None.
+    #[tokio::test]
+    async fn resolves_on_disk_command_as_prompt_skill() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cmd_dir = root.join(".claude").join("commands");
+        tokio::fs::create_dir_all(&cmd_dir).await.unwrap();
+        tokio::fs::write(
+            cmd_dir.join("review-pr.md"),
+            "---\ndescription: Review a PR\n---\nReview $ARGUMENTS\n",
+        )
+        .await
+        .unwrap();
+
+        // Mirror the mobile host wiring: claude_home = <root>/.claude, home = root
+        // (so home/.claude == claude_home; the loaders dedup by name across layers).
+        let loader =
+            MobileDiskSkillLoader::load_from_disk(root, &root.join(".claude"), root, None).await;
+
+        let desc = loader
+            .load("review-pr")
+            .await
+            .expect("load ok")
+            .expect("disk command resolves as a skill");
+        assert_eq!(desc.name, "review-pr");
+        assert_eq!(desc.command_type, SkillCommandType::Prompt);
+        assert!(
+            desc.body.contains("Review $ARGUMENTS"),
+            "body carries the markdown prompt template: {:?}",
+            desc.body
+        );
+
+        // Unknown skill → None (would surface as "Unknown skill" at the tool).
+        assert!(loader
+            .load("does-not-exist")
+            .await
+            .expect("load ok")
+            .is_none());
+    }
+}

@@ -558,6 +558,24 @@ pub async fn build_mobile_inner(
         Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated))
     };
 
+    // Audit #15: session CostTracker (desktop parity). The `cost_estimator` above
+    // populates per-response `LlmResponse.cost`; the CostTracker accumulates the
+    // running SESSION total the orchestrator records each turn. The persist
+    // channel is DRAINED by a spawned recv-loop that discards each `CostState` —
+    // byte-for-byte mirroring engine-desktop (which also just drains it): mobile
+    // has no on-disk cost persistence / `/cost` UI consumer yet, but wiring the
+    // tracker keeps the accounting path 1:1 with desktop. A fresh build-time
+    // SessionId is used (the per-connection session swaps in later, as on desktop).
+    let cost_tracker = {
+        let (cost_persist_tx, mut cost_persist_rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move { while cost_persist_rx.recv().await.is_some() {} });
+        Arc::new(cost::CostTracker::new(
+            protocol::SessionId::new(),
+            Arc::new(assembled.pricing),
+            cost_persist_tx,
+        ))
+    };
+
     // Phase 2a-mobile CHAINS BRIDGE: translate the assembled `ChainConfig` into
     // main's richer adapter's `fallback_overrides` shape (same as engine-desktop —
     // we reuse main's `ProviderApiAdapter::new_with_routing`, NOT parity's leaner
@@ -1010,8 +1028,10 @@ pub async fn build_mobile_inner(
     // mobile sibling of desktop's `.with_config_home(cfg.claude_home.clone())`.
     .with_config_home(cfg.claude_home.clone())
     // Audit fix (#15): the orchestrator shares the ONE AnalyticsBus (so its
-    // events ride the same sink as the ApiService + tools).
+    // events ride the same sink as the ApiService + tools) + the session
+    // CostTracker (desktop parity; accumulates the running session cost total).
     .with_analytics_bus(analytics_bus)
+    .with_cost_tracker(cost_tracker)
     // Audit fix (#3): attach the compactor + the shared cache-safe slot so the
     // turn loop autocompacts before context-window overflow (desktop parity).
     .with_compaction(compactor)

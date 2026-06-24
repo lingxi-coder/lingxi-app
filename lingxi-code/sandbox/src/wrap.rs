@@ -13,6 +13,10 @@
 //!   refusal path before this dispatcher runs).
 
 use crate::runtime_config::{Platform, SandboxRuntimeConfig};
+use sandbox_runtime::fs_args::{ReadConfig, WriteConfig};
+use sandbox_runtime::macos::{generate_sandbox_profile, ProfileParams};
+use sandbox_runtime::path_utils::remove_trailing_glob_suffix;
+use sandbox_runtime::get_default_write_paths;
 use thiserror::Error;
 
 /// Errors produced by [`wrap_with_sandbox`].
@@ -156,7 +160,13 @@ fn wrap_macos_sbpl(
     command: &str,
     policy: &SandboxRuntimeConfig,
 ) -> Result<String, SandboxWrapError> {
-    let profile = generate_sbpl_profile(policy);
+    // Derive a per-command log tag (claude-code `R0d`/`generateLogTag`) so the
+    // `log stream` violation monitor can correlate this run's denials — matching
+    // claude-code semantics (and what the live `sandbox-runtime` runner already
+    // does). The profile content is now byte-identical to claude-code's k0d; only
+    // the invocation form stays Generator-A-shaped (`sandbox-exec -f <tempfile>`).
+    let log_tag = sandbox_runtime::macos::generate_log_tag(command);
+    let profile = generate_sbpl_profile_with(policy, &log_tag);
     let profile_path = write_sbpl_tempfile(&profile)?;
     let quoted = shell_escape_single(command);
     Ok(format!(
@@ -164,79 +174,116 @@ fn wrap_macos_sbpl(
     ))
 }
 
-/// Generate a minimal-but-valid SBPL profile string.
+/// Generate the macOS SBPL profile, byte-identical to claude-code's profile
+/// builder (`k0d`/`generateSandboxProfile`). Rather than duplicate the ~300-line
+/// template here, this delegates to the already byte-faithful, unit-tested
+/// builder in `sandbox-runtime` ([`generate_sandbox_profile`]); this function is
+/// the *config bridge* that maps this crate's [`SandboxRuntimeConfig`] onto the
+/// builder's [`ProfileParams`].
 ///
-/// Source-of-truth structure (claude-code's `getSandboxProfile()`):
-/// ```sbpl
-/// (version 1)
-/// (deny default)
-/// (allow process-exec)
-/// (allow process-fork)
-/// (allow signal (target self))
-/// (allow sysctl-read)
-/// (allow file-read*)
-/// (allow file-write*  (regex "^/private/tmp"))
-/// (allow file-write*  (regex "^<allow_write_path>"))
-/// (allow network*)            ;; only if domains/local_binding allowed
-/// ```
-///
-/// TODO(M2-followup): expand SBPL coverage to include
-/// `allowManagedReadPathsOnly`, `ignoreViolations`, `enableWeakerNestedSandbox`
-/// trustd allowance, and the full claude-code template. Current template is
-/// the minimal subset that produces a valid `sandbox-exec` profile and covers
-/// `filesystem.allow_write` + `denyWrite` + `denyRead` + network on/off.
-pub(crate) fn generate_sbpl_profile(policy: &SandboxRuntimeConfig) -> String {
-    let mut out = String::new();
-    out.push_str("(version 1)\n");
-    out.push_str("(deny default)\n");
-    out.push_str("(allow process-exec)\n");
-    out.push_str("(allow process-fork)\n");
-    out.push_str("(allow signal (target self))\n");
-    out.push_str("(allow sysctl-read)\n");
-    out.push_str("(allow file-read*)\n");
-    // Always allow /private/tmp (claude-code parity).
-    out.push_str("(allow file-write* (regex \"^/private/tmp\"))\n");
-    for p in &policy.filesystem.allow_write {
-        let escaped = sbpl_regex_escape(p);
-        out.push_str(&format!("(allow file-write* (regex \"^{escaped}\"))\n"));
-    }
-    for p in &policy.filesystem.deny_write {
-        let escaped = sbpl_regex_escape(p);
-        out.push_str(&format!("(deny file-write* (regex \"^{escaped}\"))\n"));
-    }
-    for p in &policy.filesystem.deny_read {
-        let escaped = sbpl_regex_escape(p);
-        out.push_str(&format!("(deny file-read* (regex \"^{escaped}\"))\n"));
-    }
-    // Conservative network posture (same keying as the bwrap path, finding 2):
-    // emit full `(allow network*)` ONLY for a full-allow policy (allowed_domains
-    // non-empty == NetworkPolicy::Allowed). LoopbackOnly/Disabled get NO network
-    // rule (default-deny) so a loopback policy can never leak external egress.
-    // `allow_local_binding`/unix-socket fields no longer widen this to full net.
-    // REFINEMENT (follow-up): macOS SBPL can express loopback-only via
-    // `(allow network* (local ...))`; until then LoopbackOnly is stricter on
-    // macOS (no loopback) than on Linux (--unshare-net keeps loopback) — safe,
-    // errs restrictive.
-    if !policy.network.allowed_domains.is_empty() {
-        out.push_str("(allow network*)\n");
-    }
-    out
+/// `log_tag` is interpolated into `(deny default (with message "<tag>"))` and
+/// every rule's `(with message …)` (the builder's `m`). Callers without a real
+/// command-derived tag pass [`DEFAULT_SBPL_LOG_TAG`] (see [`generate_sbpl_profile`]).
+pub(crate) fn generate_sbpl_profile_with(policy: &SandboxRuntimeConfig, log_tag: &str) -> String {
+    let read_config = build_read_config(policy);
+    let write_config = build_write_config(policy);
+    generate_sandbox_profile(&ProfileParams {
+        read_config: read_config.as_ref(),
+        write_config: write_config.as_ref(),
+        http_proxy_port: policy.network.http_proxy_port,
+        socks_proxy_port: policy.network.socks_proxy_port,
+        needs_network_restriction: needs_network_restriction(policy),
+        allow_unix_sockets: opt_slice(&policy.network.allow_unix_sockets),
+        allow_all_unix_sockets: policy.network.allow_all_unix_sockets,
+        allow_local_binding: policy.network.allow_local_binding,
+        allow_mach_lookup: opt_slice(&policy.network.allow_mach_lookup),
+        allow_pty: policy.allow_pty,
+        allow_git_config: policy.filesystem.allow_git_config,
+        enable_weaker_network_isolation: policy.enable_weaker_network_isolation,
+        allow_apple_events: policy.allow_apple_events,
+        log_tag,
+    })
 }
 
-/// Escape `path` for inclusion inside an SBPL regex literal. Replaces the
-/// regex metacharacters `. * + ? ( ) [ ] { } ^ $ |` with `\\<ch>`.
-fn sbpl_regex_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 2);
-    for ch in s.chars() {
-        if matches!(
-            ch,
-            '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\'
-        ) {
-            out.push('\\');
-        }
-        out.push(ch);
+/// Back-compat shim: the old 1-arg signature, defaulting to the canonical static
+/// log tag (used by tests / any caller that has no command-derived tag).
+#[cfg(test)]
+pub(crate) fn generate_sbpl_profile(policy: &SandboxRuntimeConfig) -> String {
+    generate_sbpl_profile_with(policy, DEFAULT_SBPL_LOG_TAG)
+}
+
+/// The log tag used when there is no command-derived tag. claude-code's
+/// `generateSandboxProfile` interpolates the tag raw; an empty tag yields the
+/// canonical `(deny default (with message ""))` form.
+#[cfg(test)]
+const DEFAULT_SBPL_LOG_TAG: &str = "";
+
+/// `removeTrailingGlobSuffix` (`zhe`) normalisation the binary's upstream config
+/// builder applies to every user-supplied read/write path before handing it to
+/// the profile builder.
+fn normalize(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|p| remove_trailing_glob_suffix(p))
+        .collect()
+}
+
+/// Map this crate's read restrictions onto the builder's [`ReadConfig`]
+/// (`denyOnly` / `allowWithinDeny`), normalising each path as the binary's `W2i`
+/// does. `None` ⇒ the builder emits the bare `(allow file-read*)` — emitted only
+/// when there is nothing to deny/re-allow (byte-identical to a `Some` with empty
+/// vectors, which `v0d` also renders as just `(allow file-read*)`).
+fn build_read_config(policy: &SandboxRuntimeConfig) -> Option<ReadConfig> {
+    if policy.filesystem.deny_read.is_empty() && policy.filesystem.allow_read.is_empty() {
+        return None;
     }
-    out
+    Some(ReadConfig {
+        deny_only: normalize(&policy.filesystem.deny_read),
+        allow_within_deny: normalize(&policy.filesystem.allow_read),
+    })
+}
+
+/// Map this crate's write restrictions onto the builder's [`WriteConfig`]. The
+/// binary's `W2i` ALWAYS produces a defined writeConfig with `allowOnly =
+/// [...get_default_write_paths(), ...allowWrite]` — the base set
+/// (`/dev/stdout`, `/dev/null`, `/tmp/claude`, …) is unconditionally writable so
+/// ordinary shell commands work, and writes are otherwise restricted to the
+/// allow list (NOT wide open). We therefore ALWAYS return `Some` (never the bare
+/// `(allow file-write*)` fallback) and prepend the base paths, matching the
+/// faithful `sandbox-runtime` runner (`manager::build_fs_configs_macos`).
+fn build_write_config(policy: &SandboxRuntimeConfig) -> Option<WriteConfig> {
+    let mut allow_only = get_default_write_paths();
+    allow_only.extend(normalize(&policy.filesystem.allow_write));
+    Some(WriteConfig {
+        allow_only,
+        deny_within_allow: normalize(&policy.filesystem.deny_write),
+    })
+}
+
+/// The builder's `needsNetworkRestriction`. The binary restricts whenever an
+/// `allowedDomains` allow-list is configured (then enforces it via the filtering
+/// proxy). This crate uses the wildcard `"*"` as its "no restriction" sentinel
+/// (matching the bwrap path), so full network (`(allow network*)`) is emitted
+/// ONLY for a wildcard-all policy; a specific allow-list (or empty) restricts —
+/// a non-wildcard list must never silently grant full egress.
+///
+/// NOTE: the legacy `sandbox-exec -f` path has no filtering proxy, so a specific
+/// allow-list yields the restricted branch (no general egress) rather than
+/// proxy-enforced domain filtering — the proxy model lives in the
+/// `sandbox-runtime` live runner. This is the safe (more-restrictive) direction.
+fn needs_network_restriction(policy: &SandboxRuntimeConfig) -> bool {
+    !policy.network.allowed_domains.iter().any(|d| d == "*")
+}
+
+/// `&[]` ⇒ `None` — the builder omits the `allowMachLookup` / `allowUnixSockets`
+/// sections on an empty/undefined list (its `l && l.length > 0` guards), rather
+/// than emitting an empty section.
+fn opt_slice(v: &[String]) -> Option<&[String]> {
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
 }
 
 fn write_sbpl_tempfile(profile: &str) -> Result<String, SandboxWrapError> {
@@ -259,8 +306,143 @@ fn write_sbpl_tempfile(profile: &str) -> Result<String, SandboxWrapError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{generate_sbpl_profile, wrap_linux_bwrap};
+    use super::{generate_sbpl_profile, generate_sbpl_profile_with, wrap_linux_bwrap};
     use crate::runtime_config::SandboxRuntimeConfig;
+
+    // ── k0d-parity bridge tests: pin the section boundaries the config→params
+    // mapping controls. The exhaustive per-rule byte-pinning lives in
+    // `sandbox-runtime`'s `macos` tests; these prove SandboxRuntimeConfig maps
+    // onto the k0d builder faithfully. All use a fixed log tag for determinism.
+
+    #[test]
+    fn sbpl_header_block_is_byte_exact() {
+        let p = generate_sbpl_profile_with(&SandboxRuntimeConfig::default(), "TAG");
+        assert!(
+            p.starts_with(
+                "(version 1)\n(deny default (with message \"TAG\"))\n\n; LogTag: TAG\n\n\
+                 ; Essential permissions - based on Chrome sandbox policy\n\
+                 ; Process permissions\n(allow process-exec)\n(allow process-fork)\n\
+                 (allow process-info* (target same-sandbox))\n\
+                 (allow signal (target same-sandbox))\n\
+                 (allow mach-priv-task-port (target same-sandbox))"
+            ),
+            "header mismatch:\n{p}"
+        );
+    }
+
+    #[test]
+    fn sbpl_mach_allowlist_is_present() {
+        let p = generate_sbpl_profile_with(&SandboxRuntimeConfig::default(), "TAG");
+        assert!(p.contains(
+            "(allow mach-lookup\n  (global-name \"com.apple.audio.systemsoundserver\")"
+        ));
+        assert!(p.contains("(global-name \"com.apple.coreservices.launchservicesd\")\n)"));
+    }
+
+    #[test]
+    fn sbpl_network_unrestricted_when_domains_present() {
+        let mut cfg = SandboxRuntimeConfig::default();
+        cfg.network.allowed_domains = vec!["*".into()];
+        let p = generate_sbpl_profile_with(&cfg, "TAG");
+        assert!(p.contains("; Network\n(allow network*)\n"), "{p}");
+    }
+
+    #[test]
+    fn sbpl_network_restricted_proxy_and_local_binding() {
+        let mut cfg = SandboxRuntimeConfig::default(); // domains empty ⇒ restricted
+        cfg.network.allow_local_binding = true;
+        cfg.network.http_proxy_port = Some(8080);
+        let p = generate_sbpl_profile_with(&cfg, "TAG");
+        assert!(!p.contains("(allow network*)"), "{p}");
+        assert!(p.contains("(allow network-bind (local ip \"*:*\"))"), "{p}");
+        assert!(
+            p.contains("(allow network-bind (local ip \"localhost:8080\"))"),
+            "{p}"
+        );
+        assert!(
+            p.contains("(allow network-outbound (remote ip \"localhost:8080\"))"),
+            "{p}"
+        );
+    }
+
+    #[test]
+    fn sbpl_file_read_default_allow_all() {
+        let p = generate_sbpl_profile_with(&SandboxRuntimeConfig::default(), "TAG");
+        assert!(p.contains("; File read\n(allow file-read*)\n"), "{p}");
+    }
+
+    #[test]
+    fn sbpl_file_read_deny_then_reallow_in_order() {
+        let mut cfg = SandboxRuntimeConfig::default();
+        cfg.filesystem.deny_read = vec!["/x".into()];
+        cfg.filesystem.allow_read = vec!["/x/y".into()];
+        let p = generate_sbpl_profile_with(&cfg, "TAG");
+        let deny = p.find("(deny file-read*\n  (subpath \"/x\")").expect("deny present");
+        let allow = p
+            .find("(allow file-read*\n  (subpath \"/x/y\")")
+            .expect("re-allow present");
+        assert!(deny < allow, "deny must precede re-allow");
+        // directory-metadata allow appears once a read deny exists (k0d).
+        assert!(p.contains("(allow file-read-metadata\n  (vnode-type DIRECTORY))"), "{p}");
+    }
+
+    #[test]
+    fn sbpl_file_write_base_paths_then_allowonly_then_mandatory_denies() {
+        let mut cfg = SandboxRuntimeConfig::default();
+        cfg.filesystem.allow_write = vec!["/work".into()];
+        let p = generate_sbpl_profile_with(&cfg, "TAG");
+        // The base writable set (claude-code TLt) is ALWAYS prepended so ordinary
+        // shell I/O works — `/dev/null`, `/dev/stdout`, `/tmp/claude`, …
+        assert!(p.contains("(allow file-write*\n  (subpath \"/dev/null\")"), "{p}");
+        assert!(p.contains("(allow file-write*\n  (subpath \"/dev/stdout\")"), "{p}");
+        // The user allow path is present too.
+        assert!(p.contains("(allow file-write*\n  (subpath \"/work\")"), "{p}");
+        // mandatory git-config write-deny present by default; move-blocking pairs.
+        assert!(p.contains(".git/config"), "git-config must be denied by default:\n{p}");
+        assert!(p.contains("(deny file-write-unlink"), "{p}");
+        assert!(p.contains("(deny file-write-create"), "{p}");
+    }
+
+    #[test]
+    fn sbpl_default_config_is_not_write_open() {
+        // REGRESSION GUARD: an empty/default config must NOT yield bare
+        // `(allow file-write*)` (writes everywhere). It restricts to the base set.
+        let p = generate_sbpl_profile_with(&SandboxRuntimeConfig::default(), "TAG");
+        assert!(!p.contains("; File write\n(allow file-write*)\n"), "default must not be write-open:\n{p}");
+        assert!(p.contains("(allow file-write*\n  (subpath \"/dev/null\")"), "{p}");
+    }
+
+    #[test]
+    fn sbpl_allow_git_config_drops_the_config_deny() {
+        let mut deny = SandboxRuntimeConfig::default();
+        deny.filesystem.allow_write = vec!["/work".into()];
+        let mut allow = deny.clone();
+        allow.filesystem.allow_git_config = true;
+        assert!(generate_sbpl_profile_with(&deny, "TAG").contains(".git/config"));
+        assert!(!generate_sbpl_profile_with(&allow, "TAG").contains(".git/config"));
+    }
+
+    #[test]
+    fn sbpl_pty_block_only_when_enabled() {
+        let mut cfg = SandboxRuntimeConfig::default();
+        assert!(!generate_sbpl_profile_with(&cfg, "TAG").contains("pseudo-tty"));
+        cfg.allow_pty = true;
+        let p = generate_sbpl_profile_with(&cfg, "TAG");
+        assert!(p.contains("(allow pseudo-tty)"), "{p}");
+        assert!(p.contains("(literal \"/dev/ptmx\")"), "{p}");
+    }
+
+    #[test]
+    fn sbpl_user_mach_lookup_prefix_and_exact() {
+        let mut cfg = SandboxRuntimeConfig::default();
+        cfg.network.allow_mach_lookup = vec!["com.foo.bar".into(), "com.foo.*".into()];
+        let p = generate_sbpl_profile_with(&cfg, "TAG");
+        assert!(p.contains("(allow mach-lookup (global-name \"com.foo.bar\"))"), "{p}");
+        assert!(
+            p.contains("(allow mach-lookup (global-name-prefix \"com.foo.\"))"),
+            "{p}"
+        );
+    }
 
     #[test]
     fn macos_sbpl_loopback_does_not_grant_full_network() {

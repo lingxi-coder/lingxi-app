@@ -27,6 +27,14 @@
 //! - `escapePath` is `JSON.stringify(pathStr)` (`macos-sandbox-utils.js:518-520`);
 //!   [`escape_path`] uses `serde_json::to_string`, which produces the identical
 //!   JSON string-escaping (`"` → `\"`, `\` → `\\`, control chars → `\uXXXX`).
+//! - [`generate_read_rules`] additionally emits a "re-deny a nested deny inside
+//!   a re-allowed subpath" pass — the second `denyOnly` loop of the LATEST
+//!   claude-code binary's `v0d` (v2.1.186). The pinned `0.0.54` reference does
+//!   NOT have this pass; this is a deliberate SECURITY-tracking divergence toward
+//!   the newer oracle. Without it a broad `allowWithinDeny` re-allow would win
+//!   (Seatbelt is last-rule-wins) over a nested `denyOnly`, silently leaking read
+//!   access to the nested deny. It re-denies only non-glob deny paths STRICTLY
+//!   inside a re-allowed subpath, so it never over-denies.
 
 use crate::env::{encode_sandboxed_command, generate_proxy_env_vars, Platform};
 use crate::fs_args::{ReadConfig, WriteConfig};
@@ -327,7 +335,10 @@ fn generate_read_rules(
         rules.push("(allow file-read* (literal \"/\"))".to_string());
     }
 
-    // Re-allow specific paths within denied regions.
+    // Re-allow specific paths within denied regions, tracking the non-glob
+    // re-allowed subpaths so nested denies inside them can be re-applied below
+    // (v0d's `s` set).
+    let mut reallowed_subpaths: Vec<String> = Vec::new();
     for path_pattern in &config.allow_within_deny {
         let normalized_path = normalize_path_for_sandbox(path_pattern);
         if contains_glob_chars(&normalized_path) {
@@ -336,7 +347,28 @@ fn generate_read_rules(
             rules.push(format!("  (regex {})", escape_path(&regex_pattern)));
             rules.push(format!("  (with message \"{log_tag}\"))"));
         } else {
+            reallowed_subpaths.push(normalized_path.clone());
             rules.push("(allow file-read*".to_string());
+            rules.push(format!("  (subpath {})", escape_path(&normalized_path)));
+            rules.push(format!("  (with message \"{log_tag}\"))"));
+        }
+    }
+
+    // Re-deny nested deny paths that fall INSIDE a re-allowed subpath (v0d's
+    // second `denyOnly` pass): a broader re-allow above would otherwise win
+    // (Seatbelt is last-rule-wins), silently leaking read access to a nested
+    // deny. Only non-glob deny paths strictly within a re-allowed subpath are
+    // re-emitted.
+    for path_pattern in &config.deny_only {
+        if contains_glob_chars(path_pattern) {
+            continue;
+        }
+        let normalized_path = normalize_path_for_sandbox(path_pattern);
+        if reallowed_subpaths
+            .iter()
+            .any(|allowed| normalized_path.starts_with(&format!("{allowed}/")))
+        {
+            rules.push("(deny file-read*".to_string());
             rules.push(format!("  (subpath {})", escape_path(&normalized_path)));
             rules.push(format!("  (with message \"{log_tag}\"))"));
         }
@@ -1237,6 +1269,26 @@ mod profile_text_tests {
         assert!(deny_pos < allow_pos, "deny must precede the re-allow");
         // Directory metadata rule emitted because deny_only is non-empty.
         assert!(joined.contains("(allow file-read-metadata\n  (vnode-type DIRECTORY))"));
+    }
+
+    #[test]
+    fn read_rules_redeny_nested_path_inside_reallow() {
+        // v0d's second deny pass: a nested deny under a re-allowed subpath must be
+        // RE-DENIED after the broader re-allow, or Seatbelt's last-rule-wins would
+        // leak read access to the nested deny. Order: deny /x, deny /x/secret,
+        // allow /x, deny /x/secret (again).
+        let config = rc(&["/x", "/x/secret"], &["/x"]);
+        let rules = generate_read_rules(Some(&config), "TAG", None);
+        let joined = rules.join("\n");
+        let reallow = joined.find("(allow file-read*\n  (subpath \"/x\")").unwrap();
+        let redeny = joined.rfind("(deny file-read*\n  (subpath \"/x/secret\")").unwrap();
+        assert!(
+            redeny > reallow,
+            "the nested deny must be re-applied AFTER the re-allow:\n{joined}"
+        );
+        // A non-nested deny (/x itself) is NOT re-denied (it is not inside /x/).
+        let x_denies = joined.matches("(deny file-read*\n  (subpath \"/x\")\n").count();
+        assert_eq!(x_denies, 1, "/x should be denied once, not re-denied:\n{joined}");
     }
 
     #[test]

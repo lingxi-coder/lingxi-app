@@ -3952,6 +3952,7 @@ dependencies = [
  "async-trait",
  "permission",
  "protocol",
+ "sandbox-runtime",
  "serde",
  "serde_json",
  "tempfile",

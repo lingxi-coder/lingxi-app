@@ -279,6 +279,12 @@ pub fn convert_settings_to_runtime_config(
         if let Some(v) = s.enable_weaker_network_isolation {
             cfg.enable_weaker_network_isolation = v;
         }
+        if let Some(v) = s.allow_pty {
+            cfg.allow_pty = v;
+        }
+        if let Some(v) = s.allow_apple_events {
+            cfg.allow_apple_events = v;
+        }
         if let Some(v) = &s.excluded_commands {
             cfg.excluded_commands.clone_from(v);
         }

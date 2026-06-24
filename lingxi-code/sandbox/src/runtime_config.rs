@@ -125,6 +125,12 @@ pub struct NetworkRestrictionConfig {
     /// SOCKS5 egress.
     #[serde(default)]
     pub socks_proxy_port: Option<u16>,
+    /// User-specified XPC/Mach service names the sandbox may `mach-lookup`
+    /// (claude-code k0d's `allowMachLookup`). A trailing `*` is emitted as a
+    /// `global-name-prefix`. Empty ⇒ the "User-specified XPC/Mach services"
+    /// section is omitted, so existing callers are byte-stable.
+    #[serde(default)]
+    pub allow_mach_lookup: Vec<String>,
 }
 
 /// Filesystem restriction subsection.
@@ -148,6 +154,11 @@ pub struct FilesystemRestrictionConfig {
     /// settings are honored. Mirrors zod `allowManagedReadPathsOnly`.
     #[serde(default)]
     pub allow_managed_read_paths_only: bool,
+    /// When `true`, `.git/config` is NOT added to the mandatory write-deny list
+    /// (claude-code k0d's `allowGitConfig`, default `false`). Default `false`
+    /// ⇒ `.git/config` IS denied, matching claude-code's default.
+    #[serde(default)]
+    pub allow_git_config: bool,
 }
 
 /// Ripgrep override block. Bundled ripgrep path + extra args.
@@ -230,6 +241,15 @@ pub struct SandboxRuntimeConfig {
     /// When `true`, relax network isolation (used for certain proxy stacks).
     #[serde(default)]
     pub enable_weaker_network_isolation: bool,
+    /// When `true`, emit the pseudo-terminal (pty) block in the macOS profile
+    /// (claude-code k0d's `allowPty`). Default `false` ⇒ no pty block.
+    #[serde(default)]
+    pub allow_pty: bool,
+    /// When `true`, emit the Apple Events block (appleeventsd / Launch Services)
+    /// in the macOS profile (claude-code k0d's `allowAppleEvents`). Default
+    /// `false` ⇒ no block.
+    #[serde(default)]
+    pub allow_apple_events: bool,
     /// Commands that bypass the sandbox decision (e.g. `bazel`, `make`).
     #[serde(default)]
     pub excluded_commands: Vec<String>,
@@ -269,6 +289,8 @@ impl Default for SandboxRuntimeConfig {
             ignore_violations: HashMap::new(),
             enable_weaker_nested_sandbox: false,
             enable_weaker_network_isolation: false,
+            allow_pty: false,
+            allow_apple_events: false,
             excluded_commands: Vec::new(),
             ripgrep: RipgrepConfig::default(),
             ro_bind_in_place: Vec::new(),
@@ -362,6 +384,10 @@ pub struct SandboxSettingsJson {
     pub enable_weaker_nested_sandbox: Option<bool>,
     /// Override `SandboxRuntimeConfig::enable_weaker_network_isolation`.
     pub enable_weaker_network_isolation: Option<bool>,
+    /// Override `SandboxRuntimeConfig::allow_pty`.
+    pub allow_pty: Option<bool>,
+    /// Override `SandboxRuntimeConfig::allow_apple_events`.
+    pub allow_apple_events: Option<bool>,
     /// Override `SandboxRuntimeConfig::excluded_commands`.
     pub excluded_commands: Option<Vec<String>>,
     /// Override `SandboxRuntimeConfig::ripgrep`.

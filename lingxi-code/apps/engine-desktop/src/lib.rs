@@ -1023,6 +1023,8 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     memory_provider: None,
 ///     permission_mode: permission::PermissionMode::Default,
 ///     connect_prompt: None,
+///     system_prompt_override: None,
+///     append_system_prompt: None,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));

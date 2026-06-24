@@ -3,7 +3,7 @@
   "milestone": "M6-07",
   "description": "Locks the empty-state literals for /mcp, /hooks, /agents and one non-empty sample per command.",
   "empty_states": {
-    "mcp":    "No MCP servers configured\n",
+    "mcp":    "No MCP servers configured. Use `claude mcp add` to add a server.\n",
     "hooks":  "No hooks configured\n",
     "agents": "No subagents configured\n"
   },

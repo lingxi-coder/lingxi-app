@@ -21,6 +21,7 @@ expression: names
 - ListMcpResourcesTool
 - MCP
 - McpAuth
+- MultiEdit
 - NotebookEdit
 - PowerShell
 - REPL

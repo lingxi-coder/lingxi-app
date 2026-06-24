@@ -5244,6 +5244,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             }
         };
 
+        // DIV-1: worktree detection — `hf()!==null` in claude-code. Detect a
+        // worktree by checking for the `gitdir` file that git creates in worktree
+        // checkouts (a file rather than a directory at .git). Computed before `cwd`
+        // is moved into the context struct below.
+        let in_worktree = cwd.join(".git").is_file();
+
         let ctx = SystemPromptContext {
             cwd,
             // `Platform: ${je.platform}` — claude-code emits the node
@@ -5269,6 +5275,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // falling back to "<os> <arch>" on Windows / spawn failure.
             os_version: crate::prompt::env_meta::os_version_string(),
             git_status: git,
+            in_worktree,
             file_tree: tree,
             memory_files,
             tool_names,

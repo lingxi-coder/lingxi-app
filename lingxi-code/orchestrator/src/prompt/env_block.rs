@@ -70,6 +70,14 @@ pub fn format(ctx: &SystemPromptContext) -> String {
     // (claude-code is JS, always UTF-8).
     write!(&mut s, "\n - Primary working directory: {}", ctx.cwd.display()).unwrap();
 
+    // Worktree notice: present when `hf()!==null` (cwd is a git worktree).
+    // Binary `c?"This is a git worktree — an isolated copy…":null` (offset 206671709).
+    // Emitted between `Primary working directory:` and `Is a git repository:`.
+    // The em-dash is U+2014.
+    if ctx.in_worktree {
+        s.push_str("\n - This is a git worktree \u{2014} an isolated copy of the repository. Run all commands from this directory. Do NOT `cd` to the original repository root.");
+    }
+
     // `Is a git repository: ${r}` — `r` is the boolean from `vy()`, rendered by
     // JS template interpolation as `true`/`false` (lowercase).
     let is_git = ctx.git_status.is_some();
@@ -157,6 +165,7 @@ mod tests {
             shell: "bash".into(),
             os_version: "Linux 6.6".into(),
             git_status: None,
+            in_worktree: false,
             file_tree: FileTree::default(),
             memory_files: Vec::new(),
             tool_names: Vec::new(),
@@ -196,6 +205,47 @@ The exact model ID is claude-opus-4-8[1m]."
         // Cutoff is a SEPARATE bullet immediately after the model line.
         assert!(out.contains(
             "claude-opus-4-8[1m].\n - Assistant knowledge cutoff is January 2026."
+        ));
+    }
+
+    #[test]
+    fn worktree_notice_emitted_when_in_worktree_true() {
+        // DIV-1: `c?"This is a git worktree \u{2014} an isolated copy…":null`
+        // (binary offset 206671709). When `in_worktree=true` the notice appears
+        // between the `Primary working directory:` and `Is a git repository:` lines.
+        let mut c = ctx();
+        c.in_worktree = true;
+        let out = format(&c);
+        // Notice is present with the em-dash (U+2014).
+        assert!(
+            out.contains(
+                "\n - This is a git worktree \u{2014} an isolated copy of the repository. \
+Run all commands from this directory. Do NOT `cd` to the original repository root."
+            ),
+            "worktree notice missing"
+        );
+        // Notice sits between the two fixed lines.
+        let i_pwd = out.find("Primary working directory:").expect("pwd line");
+        let i_notice = out
+            .find("This is a git worktree")
+            .expect("notice present");
+        let i_git = out.find("Is a git repository:").expect("git line");
+        assert!(i_pwd < i_notice);
+        assert!(i_notice < i_git);
+    }
+
+    #[test]
+    fn worktree_notice_absent_when_in_worktree_false() {
+        let c = ctx(); // in_worktree: false by default
+        let out = format(&c);
+        assert!(
+            !out.contains("This is a git worktree"),
+            "worktree notice must be absent when not in a worktree"
+        );
+        // The `Primary working directory:` and `Is a git repository:` lines are
+        // still present and adjacent (no inserted line between them).
+        assert!(out.contains(
+            "\n - Primary working directory: /x\n - Is a git repository: false"
         ));
     }
 }

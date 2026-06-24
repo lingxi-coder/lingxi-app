@@ -12,6 +12,7 @@ fn ctx_minimal() -> SystemPromptContext {
         shell: "zsh".into(),
         os_version: "Darwin 25.3.0".into(),
         git_status: None,
+        in_worktree: false,
         file_tree: FileTree::default(),
         memory_files: Vec::new(),
         tool_names: Vec::new(),
@@ -35,8 +36,9 @@ fn minimal_assembly_no_memory_no_tools_no_footer() {
     assert!(!out.contains("Contents of "));
     assert!(!out.contains("<tools>"));
     assert!(!out.contains("Notes:"));
-    // Ends with the env block's last line (no FOOTER).
-    assert!(out.ends_with("available on Opus 4.8/4.7/4.6."));
+    // GAP-2: # Context management is the last body section; it follows env block.
+    assert!(out.contains("# Context management"));
+    assert!(out.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
 }
 
 #[test]
@@ -57,7 +59,7 @@ fn memory_files_are_not_spliced_into_the_prompt() {
     assert!(!out.contains("Contents of /proj/CLAUDE.md"));
     assert!(!out.contains("<tools>"));
     assert!(!out.contains("Notes:"));
-    assert!(out.ends_with("available on Opus 4.8/4.7/4.6."));
+    assert!(out.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
 }
 
 #[test]
@@ -105,8 +107,8 @@ fn footer_literal_still_exported_for_subagent() {
 
 #[test]
 fn static_body_sections_present_and_ordered_between_header_and_env() {
-    // claude-code v2.1.183 `J0` emits these six STATIC sections, in this order,
-    // immediately after the `DEFAULT_PREFIX` header and before the env block.
+    // claude-code `J0` emits 6 static sections + 2 dynamic before the env block
+    // (text output, session guidance), plus context management AFTER the env block.
     let mut ctx = ctx_minimal();
     ctx.tool_names = vec![
         "Read".into(),
@@ -115,6 +117,7 @@ fn static_body_sections_present_and_ordered_between_header_and_env() {
         "Glob".into(),
         "Grep".into(),
         "Bash".into(),
+        "Agent".into(),
         "TodoWrite".into(),
     ];
     let out = assemble_system_prompt(&ctx);
@@ -134,13 +137,20 @@ fn static_body_sections_present_and_ordered_between_header_and_env() {
     let i_exec = out
         .find("\n# Executing actions with care\n\nCarefully consider the reversibility")
         .unwrap();
+    // DIV-2: posix+Bash → Glob/Grep EXCLUDED from the dedicated list.
     let i_tools = out
-        .find("\n# Using your tools\n - Prefer dedicated tools over Bash when one fits (Read, Edit, Write, Glob, Grep)")
-        .unwrap();
+        .find("\n# Using your tools\n - Prefer dedicated tools over Bash when one fits (Read, Edit, Write) \u{2014} reserve Bash for shell-only operations.")
+        .expect("tools section with Read, Edit, Write (no Glob/Grep when Bash present)");
     let i_tone = out
         .find("\n# Tone and style\n - Only use emojis if the user explicitly requests it.")
         .unwrap();
-    let i_env = out.find("# Environment").unwrap();
+    // GAP-1: # Text output present after # Tone and style, before env.
+    let i_text_output = out.find("\n# Text output").expect("text output section present");
+    // GAP-3: # Session-specific guidance present (Agent tool present + interactive).
+    let i_session = out.find("\n# Session-specific guidance").expect("session guidance present");
+    let i_env = out.find("\n# Environment").unwrap();
+    // GAP-2: # Context management present AFTER env (binary cx() ordering).
+    let i_ctx_mgmt = out.find("\n# Context management").expect("context management present");
 
     assert!(i_header < i_open);
     assert!(i_open < i_zho);
@@ -150,8 +160,14 @@ fn static_body_sections_present_and_ordered_between_header_and_env() {
     assert!(i_doing < i_exec);
     assert!(i_exec < i_tools);
     assert!(i_tools < i_tone);
-    assert!(i_tone < i_env, "static body must precede the env block");
+    assert!(i_tone < i_text_output, "# Text output must follow # Tone and style");
+    assert!(i_text_output < i_session, "# Session-specific guidance must follow # Text output");
+    assert!(i_session < i_env, "# Session-specific guidance must precede the env block");
+    assert!(i_env < i_ctx_mgmt, "# Context management must follow the env block (binary cx() order)");
 
     assert!(out.contains(" - Users may configure 'hooks', shell commands that execute"));
     assert!(out.contains("\n  - /help: Get help with using Claude Code"));
+    // Agent tool bullet in session guidance.
+    assert!(out.contains("Use the Agent tool with specialized agents"));
+    assert!(out.contains("suggest they type `! <command>`"));
 }

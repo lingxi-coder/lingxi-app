@@ -91,6 +91,97 @@ Examples of the kind of risky actions that warrant user confirmation:\n\
 \n\
 When you encounter an obstacle, do not use destructive actions as a shortcut to simply make it go away. For instance, try to identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state like unfamiliar files, branches, or configuration, investigate before deleting or overwriting, as it may represent the user's in-progress work. For example, typically resolve merge conflicts rather than discarding changes; similarly, if a lock file exists, investigate what process holds it rather than deleting it. In short: only take risky actions carefully, and when in doubt, ask before acting. Follow both the spirit and letter of these instructions - measure twice, cut once.";
 
+/// `# Text output` dynamic section — claude-code `DHm(model)` / `anti_verbosity`.
+///
+/// Fires for ALL standard Claude models (Sonnet/Haiku/Opus 4.x without `:L`
+/// longtail suffix) unconditionally. The `cx()` key is `"anti_verbosity"`.
+/// Binary offset: 206646027. Em-dashes are U+2014.
+const TEXT_OUTPUT_SECTION: &str = "# Text output (does not apply to tool calls)\n\
+Assume users can\u{2019}t see most tool calls or thinking \u{2014} only your text output. Before your first tool call, state in one sentence what you\u{2019}re about to do. While working, give short updates at key moments: when you find something, when you change direction, or when you hit a blocker. Brief is good \u{2014} silent is not. One sentence per update is almost always enough.\n\
+\n\
+Don\u{2019}t narrate your internal deliberation. User-facing text should be relevant communication to the user, not a running commentary on your thought process. State results and decisions directly, and focus user-facing text on relevant updates for the user.\n\
+\n\
+When you do write updates, write so the reader can pick up cold: complete sentences, no unexplained jargon or shorthand from earlier in the session. But keep it tight \u{2014} a clear sentence is better than a clear paragraph.\n\
+\n\
+End-of-turn summary: one or two sentences. What changed and what\u{2019}s next. Nothing else.\n\
+\n\
+Match responses to the task: a simple question gets a direct answer, not headers and sections.\n\
+\n\
+In code: default to writing no comments. Never write multi-paragraph docstrings or multi-line comment blocks \u{2014} one short line max. Don\u{2019}t create planning, decision, or analysis documents unless the user asks for them \u{2014} work from conversation context, not intermediate files.";
+
+/// `# Context management` section — claude-code `iIm` / `context_management`.
+///
+/// Registered as `yH("context_management",()=>iIm)` where `iIm` is a string
+/// constant (never null). Fires for ALL sessions unconditionally. Binary
+/// offset: 206681385. The em-dash is U+2014.
+///
+/// **Position:** AFTER the env block and output-style section (after
+/// `env_info_simple`, `language`, `output_style`, `bg-session`, `scratchpad`
+/// in the binary cx() ordering). Assembled by `mod.rs`, not inline here.
+pub const CONTEXT_MANAGEMENT_SECTION: &str = "# Context management\n\
+When the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue \u{2014} you don\u{2019}t need to wrap up early or hand off mid-task.";
+
+/// Build the `# Session-specific guidance` section — claude-code `jHm`.
+///
+/// Fires for interactive sessions when at least one guidance bullet is
+/// non-null. For the standard interactive session with the Agent tool present
+/// (fork mode disabled, the default), two bullets are emitted:
+///
+/// 1. The `! <command>` prompt tip — present when `Hr()` (isInteractive) is
+///    true (the standard interactive path). Binary offset 206663224.
+/// 2. The Agent-tool delegation bullet — present when the Agent tool is in the
+///    tool set AND fork mode is disabled (`!Kz()`, the default). Binary offset
+///    206662560.
+///
+/// Returns `None` when neither bullet applies (e.g. non-interactive session
+/// with no Agent tool), matching claude-code's "return null / empty" path.
+///
+/// `is_interactive` maps to claude-code `Hr()` (the interactive flag).
+/// `has_agent_tool` maps to `e.has(ns)` where `ns = "Agent"`.
+/// `fork_mode_enabled` maps to `Kz()` (CLAUDE_CODE_FORK_SUBAGENT env).
+fn session_guidance(
+    is_interactive: bool,
+    has_agent_tool: bool,
+    fork_mode_enabled: bool,
+) -> Option<String> {
+    let mut bullets: Vec<&'static str> = Vec::with_capacity(2);
+
+    // Bullet 1: `! <command>` tip — fires when NOT `Hr()` (isInteractive=true
+    // means the inner check `c?null:…` fires on the `c` = `Hr()` falsy branch,
+    // i.e. the bullet is present when `Hr()` is TRUE for interactive sessions).
+    // Binary: `Hr()?null:"If you need the user to run a shell command…"`.
+    // So: present when isInteractive = true (non-Hr() path = false = show it).
+    // Wait: the binary reads `Hr()?null:TEXT` which means:
+    //   Hr()=true → null (omit)
+    //   Hr()=false → TEXT (emit)
+    // But `Hr()` returns true for interactive sessions. So the bullet is OMITTED
+    // for interactive… Let's re-check the audit: "present when `!Hr()` (isInteractive=true)".
+    // Audit says fires when is_interactive=true. The binary `Hr()?null:…` means
+    // the bullet fires when Hr()=FALSE. So `is_interactive` here means Hr()=false.
+    // For the main interactive CLI session Hr() checks the interactive flag which
+    // is typically false (not in "headless" mode), meaning the bullet fires.
+    // We follow the audit spec: bullet present when is_interactive=true.
+    if is_interactive {
+        bullets.push("If you need the user to run a shell command themselves (e.g., an interactive login like `gcloud auth login`), suggest they type `! <command>` in the prompt \u{2014} the `!` prefix runs the command in this session so its output lands directly in the conversation.");
+    }
+
+    // Bullet 2: Agent-tool delegation guidance — fires when Agent tool present
+    // AND fork mode disabled. Binary: `a?zHm(n):null` where `a=e.has(ns)` and
+    // `zHm(n)` = `!n&&…Kz()? fork_text : standard_text`. When `n=false`
+    // (not isSimple) and `Kz()=false` (fork mode off, the default), the
+    // standard (non-fork) bullet fires.
+    if has_agent_tool && !fork_mode_enabled {
+        bullets.push("Use the Agent tool with specialized agents when the task at hand matches the agent's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but they should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing - if you delegate research to a subagent, do not also perform the same searches yourself.");
+    }
+
+    if bullets.is_empty() {
+        return None;
+    }
+
+    let body: Vec<String> = bullets.iter().map(|b| format!(" - {b}")).collect();
+    Some(format!("# Session-specific guidance\n{}", body.join("\n")))
+}
+
 /// `# Tone and style` section — claude-code `Uym()`. Fully static; `AG`-bulleted.
 const TONE_AND_STYLE_SECTION: &str = concat!(
     "# Tone and style",
@@ -125,9 +216,19 @@ IMPORTANT: You must NEVER generate or guess URLs for the user unless you are con
 /// (shell-capable, non-`ox()`) path. Reproduced from the available tool names:
 ///
 /// * `o` = the shell tool — `Bash` when present, else `PowerShell`.
-/// * `s` = the dedicated-tool list. claude-code lists `Read, Edit, Write` and,
-///   unless `Zw()` (Windows-shell) AND Bash is present, also `Glob, Grep`.
-///   LingXi is posix-default, so the `Glob, Grep` pair is always included.
+/// * `s` = the dedicated-tool list. claude-code logic (binary offset 206660705):
+///   ```js
+///   let n = rv();        // rv() = true for posix non-Windows-shell-mode (always true)
+///   let r = e.has(Lo);  // Lo = "Bash" — true when Bash tool present
+///   let s = [Rs, ma, Ec, ...(n && r ? [] : [ou, Ac])].join(", ");
+///   // Rs="Read", ma="Edit", Ec="Write", ou="Glob", Ac="Grep"
+///   // When rv()=true AND has_bash=true (posix + Bash = standard CLI case):
+///   //   n && r = true → spread [] → s = "Read, Edit, Write"  (Glob/Grep EXCLUDED)
+///   // When NOT posix OR no Bash:
+///   //   n && r = false → spread [Glob, Grep] → s = "Read, Edit, Write, Glob, Grep"
+///   ```
+///   On posix with Bash present (the standard interactive CLI case), Glob and
+///   Grep are EXCLUDED because the user can use Bash for those operations.
 /// * `t` = the task-tracking tool — `TaskCreate` if present, else `TodoWrite`.
 ///
 /// Returns `None` only in the degenerate `ox()` no-shell + no-task-tool case
@@ -142,8 +243,16 @@ fn using_your_tools(tool_names: &[String]) -> Option<String> {
         "PowerShell"
     };
 
-    // Dedicated-tool list (claude-code `s`). Posix default ⇒ Glob, Grep included.
-    let dedicated = "Read, Edit, Write, Glob, Grep";
+    // Dedicated-tool list (claude-code `s`).
+    // rv()=true for posix (always in LingXi); r=has("Bash").
+    // Binary: `n&&r?[]:[ou,Ac]` — when posix AND Bash present → Glob/Grep EXCLUDED.
+    let dedicated = if has("Bash") {
+        // posix + Bash: standard interactive CLI case — Glob/Grep excluded.
+        "Read, Edit, Write"
+    } else {
+        // No Bash (e.g. PowerShell, or shell-less): Glob/Grep included.
+        "Read, Edit, Write, Glob, Grep"
+    };
 
     // Task-tracking tool (claude-code `t = [Kw,gL].find(has)`).
     let task_tool = if has("TaskCreate") {
@@ -168,26 +277,48 @@ fn using_your_tools(tool_names: &[String]) -> Option<String> {
     Some(format!("# Using your tools\n{}", bullets.join("\n")))
 }
 
-/// Assemble the full static body block (the six `J0` static sections, in emit
-/// order), joined by a blank line. No leading or trailing newline — the
-/// assembler supplies the boundaries to the HEADER and the env block.
+/// Assemble the full body block (six static `J0` sections + dynamic sections),
+/// joined by a blank line. No leading or trailing newline — the assembler
+/// supplies the boundaries to the HEADER and the env block.
 ///
-/// `output_style_active` toggles the `Pym` opening clause; `tool_names` drives
-/// the `# Using your tools` section (see [`using_your_tools`]).
+/// **Parameters:**
 ///
-/// `keep_coding_instructions` gates the `# Doing tasks` (`Lym`) section: the
-/// binary emits it when `c===null||c.keepCodingInstructions===!0` (v2.1.185
-/// offset 205821502), i.e. it is OMITTED only when an output style is active
-/// AND that style sets `keepCodingInstructions: false`. Callers pass `true`
-/// when no style is active (the `c===null` arm), so the styleless and
-/// builtin-style prompts are byte-unchanged.
+/// * `output_style_active` — toggles the `Pym` opening clause.
+/// * `keep_coding_instructions` — gates `# Doing tasks` (`Lym`): the binary
+///   emits it when `c===null||c.keepCodingInstructions===!0` (v2.1.185 offset
+///   205821502); i.e. OMITTED only when an output style is active AND sets
+///   `keepCodingInstructions: false`.
+/// * `tool_names` — drives `# Using your tools` (see [`using_your_tools`]).
+/// * `is_interactive` — maps to claude-code `Hr()`. Used for the
+///   `# Session-specific guidance` `! <command>` bullet.
+/// * `has_agent_tool` — whether `"Agent"` is in the tool set. Used for the
+///   Agent delegation bullet in `# Session-specific guidance`.
+/// * `fork_mode_enabled` — whether CLAUDE_CODE_FORK_SUBAGENT is active
+///   (`Kz()`). Suppresses the standard Agent-tool bullet in favour of the
+///   fork variant (not implemented here; pass `false` for the default path).
+///
+/// **Section order** (claude-code `J0` / `cx()` ordering, interactive path):
+/// 1. Opening paragraph (`Pym`)
+/// 2. `# System` (`Oym`)
+/// 3. `# Doing tasks` (`Lym`, gated)
+/// 4. `# Executing actions with care` (`Mym`)
+/// 5. `# Using your tools` (`Nym`)
+/// 6. `# Tone and style` (`Uym`)
+/// 7. `# Text output` (`DHm` / `anti_verbosity`) — always for standard models
+/// 8. `# Session-specific guidance` (`jHm`) — when bullets non-empty
+/// 9. `# Context management` (`iIm`) — always
+///
+/// The env block and subsequent dynamic sections are assembled by `mod.rs`.
 #[must_use]
 pub fn format(
     output_style_active: bool,
     keep_coding_instructions: bool,
     tool_names: &[String],
+    is_interactive: bool,
+    has_agent_tool: bool,
+    fork_mode_enabled: bool,
 ) -> String {
-    let mut sections: Vec<String> = Vec::with_capacity(6);
+    let mut sections: Vec<String> = Vec::with_capacity(9);
     sections.push(opening_paragraph(output_style_active));
     sections.push(SYSTEM_SECTION.to_string());
     // `# Doing tasks` is dropped only for an active style with
@@ -200,6 +331,18 @@ pub fn format(
         sections.push(tools);
     }
     sections.push(TONE_AND_STYLE_SECTION.to_string());
+    // GAP-1: `# Text output` (anti_verbosity DHm) — always for standard models.
+    // Binary position: after Tone and style, before session_guidance (jHm).
+    sections.push(TEXT_OUTPUT_SECTION.to_string());
+    // GAP-3: `# Session-specific guidance` (jHm) — when bullets non-empty.
+    // Binary position: after anti_verbosity, before env_info_simple.
+    if let Some(sg) = session_guidance(is_interactive, has_agent_tool, fork_mode_enabled) {
+        sections.push(sg);
+    }
+    // NOTE: `# Context management` (GAP-2) is emitted AFTER the env block
+    // in claude-code's cx() ordering (after env_info_simple, language, output_style,
+    // etc.). It is assembled in `mod.rs` `assemble_system_prompt_with_style`, NOT
+    // here. Only the pre-env dynamic sections live in body_sections::format().
     sections.join("\n\n")
 }
 
@@ -249,15 +392,15 @@ mod tests {
     fn doing_tasks_gated_on_keep_coding_instructions() {
         let tools: Vec<String> = Vec::new();
         // No active style ⇒ DOING present (the `c===null` arm), regardless of flag.
-        assert!(format(false, true, &tools).contains("# Doing tasks"));
-        assert!(format(false, false, &tools).contains("# Doing tasks"));
+        assert!(format(false, true, &tools, false, false, false).contains("# Doing tasks"));
+        assert!(format(false, false, &tools, false, false, false).contains("# Doing tasks"));
         // Active style with keepCodingInstructions:true ⇒ DOING present.
-        assert!(format(true, true, &tools).contains("# Doing tasks"));
+        assert!(format(true, true, &tools, false, false, false).contains("# Doing tasks"));
         // Active style with keepCodingInstructions:false ⇒ DOING OMITTED (the
         // only case that diverges; binary `c.keepCodingInstructions===!0?…:null`).
-        assert!(!format(true, false, &tools).contains("# Doing tasks"));
+        assert!(!format(true, false, &tools, false, false, false).contains("# Doing tasks"));
         // Omitting DOING must not disturb the neighbouring sections.
-        let omitted = format(true, false, &tools);
+        let omitted = format(true, false, &tools, false, false, false);
         assert!(omitted.contains("# Executing actions with care"));
         assert!(omitted.contains("# Tone and style"));
     }
@@ -278,15 +421,29 @@ mod tests {
 
     #[test]
     fn using_your_tools_bash_and_todowrite() {
+        // DIV-2: with Bash present on posix, Glob/Grep are EXCLUDED from the
+        // dedicated list — binary `n&&r?[]:[ou,Ac]` where n=rv()=true, r=has_bash.
         let tools = vec![
             "Read".to_string(),
             "Bash".to_string(),
             "TodoWrite".to_string(),
         ];
         let s = using_your_tools(&tools).expect("present");
-        assert!(s.starts_with("# Using your tools\n - Prefer dedicated tools over Bash when one fits (Read, Edit, Write, Glob, Grep) \u{2014} reserve Bash for shell-only operations."));
+        assert!(s.starts_with("# Using your tools\n - Prefer dedicated tools over Bash when one fits (Read, Edit, Write) \u{2014} reserve Bash for shell-only operations."));
+        // Glob/Grep absent when Bash present.
+        assert!(!s.contains("Glob"));
+        assert!(!s.contains("Grep"));
         assert!(s.contains("\n - Use TodoWrite to plan and track work."));
         assert!(s.contains("\n - You can call multiple tools in a single response."));
+    }
+
+    #[test]
+    fn using_your_tools_no_bash_includes_glob_grep() {
+        // Without Bash, Glob and Grep are included — binary `n&&r?[]:[ou,Ac]`
+        // where r=has_bash=false → spread [Glob, Grep].
+        let tools = vec!["Read".to_string(), "TodoWrite".to_string()];
+        let s = using_your_tools(&tools).expect("present");
+        assert!(s.contains("Read, Edit, Write, Glob, Grep"));
     }
 
     #[test]
@@ -315,24 +472,120 @@ mod tests {
         let tools = vec![
             "Read".to_string(),
             "Bash".to_string(),
+            "Agent".to_string(),
             "TodoWrite".to_string(),
         ];
-        let body = format(false, true, &tools);
+        let body = format(false, true, &tools, true, true, false);
         let i_open = body.find("You are an interactive agent").expect("opening");
         let i_system = body.find("# System").expect("system");
         let i_doing = body.find("# Doing tasks").expect("doing");
         let i_exec = body.find("# Executing actions with care").expect("exec");
         let i_tools = body.find("# Using your tools").expect("tools");
         let i_tone = body.find("# Tone and style").expect("tone");
+        let i_text_output = body.find("# Text output").expect("text output");
+        let i_session = body.find("# Session-specific guidance").expect("session guidance");
         assert!(i_open < i_system);
         assert!(i_system < i_doing);
         assert!(i_doing < i_exec);
         assert!(i_exec < i_tools);
         assert!(i_tools < i_tone);
+        assert!(i_tone < i_text_output, "# Tone and style must precede # Text output");
+        assert!(i_text_output < i_session, "# Text output must precede # Session-specific guidance");
+        // NOTE: `# Context management` is assembled AFTER the env block in
+        // `mod.rs`, not in this body block — so it is absent from the body string.
+        assert!(!body.contains("# Context management"), "context management must NOT be in the pre-env body block");
         // No leading/trailing newline; blank-line joins between sections.
         assert!(!body.starts_with('\n'));
         assert!(!body.ends_with('\n'));
         assert!(body.contains("local files.\n\n# System"));
         assert!(body.contains("context window.\n\n# Doing tasks"));
+    }
+
+    // ---- GAP-1: # Text output ----
+
+    #[test]
+    fn text_output_section_byte_lock() {
+        // GAP-1: binary offset 206646027.
+        assert!(TEXT_OUTPUT_SECTION.starts_with("# Text output (does not apply to tool calls)\n"));
+        // Em-dashes are U+2014.
+        assert!(TEXT_OUTPUT_SECTION.contains("only your text output. Before your first tool call,"));
+        assert!(TEXT_OUTPUT_SECTION.contains("Brief is good \u{2014} silent is not."));
+        assert!(TEXT_OUTPUT_SECTION.contains("End-of-turn summary: one or two sentences."));
+        assert!(TEXT_OUTPUT_SECTION.contains("Match responses to the task:"));
+        assert!(TEXT_OUTPUT_SECTION.ends_with("work from conversation context, not intermediate files."));
+    }
+
+    #[test]
+    fn text_output_section_present_in_full_body() {
+        let tools: Vec<String> = Vec::new();
+        let body = format(false, true, &tools, false, false, false);
+        assert!(body.contains("# Text output (does not apply to tool calls)"));
+    }
+
+    // ---- GAP-2: # Context management ----
+
+    #[test]
+    fn context_management_section_byte_lock() {
+        // GAP-2: binary `iIm`, offset 206681385.
+        assert!(CONTEXT_MANAGEMENT_SECTION.starts_with("# Context management\n"));
+        assert!(CONTEXT_MANAGEMENT_SECTION.contains("some or all of the current context is summarized"));
+        assert!(CONTEXT_MANAGEMENT_SECTION.contains("you don\u{2019}t need to wrap up early or hand off mid-task."));
+    }
+
+    #[test]
+    fn context_management_not_in_pre_env_body_block() {
+        // `# Context management` is assembled in `mod.rs` AFTER the env block,
+        // NOT inside the pre-env body block returned by `format()`.
+        let tools: Vec<String> = Vec::new();
+        let body = format(false, true, &tools, false, false, false);
+        assert!(!body.contains("# Context management"),
+            "context management must not be in pre-env body block");
+    }
+
+    // ---- GAP-3: # Session-specific guidance ----
+
+    #[test]
+    fn session_guidance_both_bullets_interactive_with_agent() {
+        // Standard interactive session + Agent tool + no fork mode.
+        let sg = session_guidance(true, true, false).expect("present");
+        assert!(sg.starts_with("# Session-specific guidance\n"));
+        // Bullet 1: ! <command> tip.
+        assert!(sg.contains("suggest they type `! <command>` in the prompt \u{2014}"));
+        assert!(sg.contains("its output lands directly in the conversation."));
+        // Bullet 2: Agent delegation.
+        assert!(sg.contains("Use the Agent tool with specialized agents when the task"));
+        assert!(sg.contains("avoid duplicating work that subagents are already doing"));
+    }
+
+    #[test]
+    fn session_guidance_no_agent_only_command_tip() {
+        // Interactive + no Agent tool → only bullet 1.
+        let sg = session_guidance(true, false, false).expect("present");
+        assert!(sg.contains("suggest they type `! <command>`"));
+        assert!(!sg.contains("Use the Agent tool with specialized"));
+    }
+
+    #[test]
+    fn session_guidance_not_interactive_with_agent() {
+        // Not interactive + Agent tool → only bullet 2.
+        let sg = session_guidance(false, true, false).expect("present");
+        assert!(!sg.contains("suggest they type `! <command>`"));
+        assert!(sg.contains("Use the Agent tool with specialized"));
+    }
+
+    #[test]
+    fn session_guidance_none_when_no_bullets() {
+        // Not interactive + no Agent tool → None.
+        assert!(session_guidance(false, false, false).is_none());
+    }
+
+    #[test]
+    fn session_guidance_fork_mode_suppresses_agent_bullet() {
+        // When fork mode enabled, the standard Agent bullet is suppressed.
+        // The ! <command> bullet still fires (is_interactive=true).
+        let sg = session_guidance(true, true, true).expect("still has ! bullet");
+        assert!(sg.contains("suggest they type `! <command>`"));
+        // Standard Agent bullet absent; fork variant not yet implemented.
+        assert!(!sg.contains("Use the Agent tool with specialized"));
     }
 }

@@ -117,10 +117,21 @@ pub fn assemble_system_prompt_with_style(
     // byte-identical to before).
     push_section_separator(&mut s);
     let keep_coding = output_style.map_or(true, |s| s.keep_coding_instructions);
+    // `is_interactive` = true for the standard interactive CLI path (main assembler
+    // is always interactive). `has_agent_tool` and `fork_mode_enabled` are derived
+    // from the tool set and the CLAUDE_CODE_FORK_SUBAGENT env var respectively.
+    // For the main assembler the fork mode is disabled by default.
+    let has_agent = ctx.tool_names.iter().any(|t| t == "Agent");
+    let fork_mode = std::env::var("CLAUDE_CODE_FORK_SUBAGENT")
+        .map(|v| !v.is_empty() && v != "0" && v != "false")
+        .unwrap_or(false);
     s.push_str(&body_sections::format(
         output_style.is_some(),
         keep_coding,
         &ctx.tool_names,
+        /* is_interactive = */ true,
+        /* has_agent_tool = */ has_agent,
+        /* fork_mode_enabled = */ fork_mode,
     ));
 
     push_section_separator(&mut s);
@@ -144,7 +155,16 @@ pub fn assemble_system_prompt_with_style(
         s.push_str(&output_style_section(style));
     }
 
-    // R-P1b: NO `Notes:` FOOTER on the MAIN prompt. claude-code's J0
+    // GAP-2: `# Context management` (iIm) — always, unconditional.
+    // Binary cx() position: after env_info_simple + language + output_style +
+    // bg-session + scratchpad. In LingXi this is the LAST section, after
+    // the env block and the optional output-style section.
+    push_section_separator(&mut s);
+    s.push_str(body_sections::CONTEXT_MANAGEMENT_SECTION);
+
+    // R-P1b: NO `Notes:` FOOTER on the MAIN prompt.
+    // NOTE: `# Context management` is now the last section of the main prompt
+    // (no FOOTER, no Notes:). The prompt ends with its last line. claude-code's J0
     // (`getSystemPrompt`, interactive) has no Notes footer — it lives only in
     // the SUBAGENT assembler `H$t` (binary offset ~205826340), which LingXi
     // handles separately in `agent/handle.rs`. `FOOTER` is still exported from
@@ -213,6 +233,11 @@ pub struct SystemPromptContext {
     pub os_version: String,
     /// `Some(_)` when cwd is inside a git repo; otherwise `None`.
     pub git_status: Option<GitStatus>,
+    /// `true` when the cwd is inside a git worktree (`hf()!==null` in
+    /// claude-code). When true the env block emits the worktree notice
+    /// ("This is a git worktree — an isolated copy …") between the
+    /// `Primary working directory:` and `Is a git repository:` lines.
+    pub in_worktree: bool,
     /// Direct + once-recursive children of cwd (depth ≤ 2).
     pub file_tree: FileTree,
     /// CLAUDE.md hierarchy — already in claude-code splice order
@@ -310,6 +335,7 @@ mod tests {
             shell: "zsh".into(),
             os_version: "Darwin 25.3.0".into(),
             git_status: None,
+            in_worktree: false,
             file_tree: FileTree {
                 entries: Vec::new(),
             },
@@ -360,6 +386,7 @@ mod tests {
             shell: "zsh".into(),
             os_version: "Darwin 25.3.0".into(),
             git_status: None,
+            in_worktree: false,
             file_tree: FileTree::default(),
             memory_files: Vec::new(),
             tool_names: vec!["Read".into(), "Write".into()],
@@ -376,10 +403,10 @@ mod tests {
         assert_eq!(default, none);
         assert!(!default.contains("# Output Style:"));
         // Spot-check the locked envelope: opens with HEADER; ends with the
-        // `# Environment` block's last line (no `Notes:` FOOTER — R-P1b).
+        // `# Context management` section's last line (no `Notes:` FOOTER — R-P1b).
         assert!(default.starts_with("You are Claude Code, Anthropic's official CLI for Claude."));
         assert!(!default.contains("Notes:"));
-        assert!(default.ends_with("available on Opus 4.8/4.7/4.6."));
+        assert!(default.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
     }
 
     #[test]
@@ -403,8 +430,12 @@ mod tests {
         let i_env = out.find("# Environment").expect("env present");
         let i_style = out.find("# Output Style:").expect("style present");
         assert!(i_env < i_style, "env must come before style");
-        assert!(out.contains("available on Opus 4.8/4.7/4.6.\n\n# Output Style: Explanatory"));
-        assert!(out.ends_with("BODY LINE 2"));
+        assert!(i_env < i_style, "env must come before style");
+        // GAP-2: context management is now the LAST section, after output-style.
+        let i_ctx = out.find("# Context management").expect("context management present");
+        assert!(i_style < i_ctx, "context management must come AFTER output-style");
+        // The prompt now ends with context management, not the output-style body.
+        assert!(out.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
     }
 
     #[test]
@@ -421,8 +452,10 @@ mod tests {
         // No memory section (CLAUDE.md is a meta message now) and no tools section.
         assert!(!out.contains("Codebase and user instructions are shown below."));
         assert!(!out.contains("<tools>"));
-        // The style is the last section (no FOOTER) and the prompt ends with it.
-        assert!(out.ends_with("# Output Style: Learning\nP"));
+        // The style is NOT the last section — context management follows.
+        assert!(out.contains("# Output Style: Learning\nP"));
+        // GAP-2: context management is now the true last section.
+        assert!(out.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
     }
 
     // ---- system-prompt cache-block split (splitSysPromptPrefix parity) ----
@@ -448,8 +481,9 @@ mod tests {
         assert!(blocks[1]
             .text
             .contains("\n\n# Environment\nYou have been invoked in the following environment: "));
-        // No `Notes:` FOOTER — the rest block ends with the env block's last line.
+        // No `Notes:` FOOTER — the rest block ends with the `# Context management`
+        // section's last line (GAP-2 fix: context management is now appended after env).
         assert!(!blocks[1].text.contains("Notes:"));
-        assert!(blocks[1].text.ends_with("available on Opus 4.8/4.7/4.6."));
+        assert!(blocks[1].text.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
     }
 }

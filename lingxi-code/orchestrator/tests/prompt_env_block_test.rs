@@ -14,6 +14,7 @@ fn ctx_minimal() -> SystemPromptContext {
         shell: "zsh".into(),
         os_version: "Darwin 25.3.0".into(),
         git_status: None,
+        in_worktree: false,
         file_tree: FileTree::default(),
         memory_files: Vec::new(),
         tool_names: Vec::new(),

@@ -40,12 +40,14 @@ async fn run_turn_passes_assembled_system_prompt_to_api_client() {
     assert_eq!(systems.len(), 1, "exactly one API call");
     let s = systems[0].as_deref().expect("system prompt threaded");
     // Assembler always opens with HEADER and carries the `# Environment` block.
-    // There is NO `Notes:` FOOTER on the MAIN prompt (R-P1b). With a tempdir cwd
-    // that is not a git repo, no `gitStatus:` block is appended, so the prompt
-    // ends with the env block's last line.
+    // There is NO `Notes:` FOOTER on the MAIN prompt (R-P1b).
+    // GAP-2: `# Context management` is now the last section (after env block).
     assert!(s.starts_with("You are Claude Code"));
     assert!(s.contains("# Environment"));
     assert!(!s.contains("<env>"));
     assert!(!s.contains("Notes:"));
-    assert!(s.ends_with("available on Opus 4.8/4.7/4.6."));
+    // The env block is still present; context management follows it.
+    assert!(s.contains("available on Opus 4.8/4.7/4.6."));
+    assert!(s.contains("# Context management"));
+    assert!(s.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
 }

@@ -4487,6 +4487,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // as `self.streaming_api` in production; the fallback non-stream call
             // records it on `self.api` too.
             let request_id = self.api.last_request_id();
+            // stream-json P1: signal the message boundary to the output sink so
+            // `StreamJsonStream` can flush its accumulated assistant frame.
+            self.output
+                .emit_message_boundary(
+                    pumped.stop_reason.as_deref(),
+                    request_id.as_deref(),
+                )
+                .await;
             let tool_use_parent_uuids = self
                 .persist_assistant_per_block(
                     &assistant_msg,
@@ -6035,6 +6043,15 @@ As you answer the user's questions, you can use the following context:\n\
     #[must_use]
     pub fn session(&self) -> Arc<Mutex<SessionState>> {
         self.session.clone()
+    }
+
+    /// Return all registered tool names (alphabetical, same order as the
+    /// system-prompt listing). Used by stream-json `system/init` to populate
+    /// the `tools` array — mirrors `self.tools.all_names()` but through a
+    /// public seam that does not expose the `ToolRegistry` internals.
+    #[must_use]
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tools.all_names()
     }
 }
 

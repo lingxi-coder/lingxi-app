@@ -335,16 +335,22 @@ impl Argv {
     /// Resolve whether the JSON output mode is active.
     ///
     /// `--json` (LingXi-specific) OR `--output-format json` both activate JSON
-    /// NDJSON output. `--output-format stream-json` is parsed but the full
-    /// stream-json I/O subsystem is not yet implemented; it falls back to `json`
-    /// for now (same NDJSON format, missing bidirectional protocol).
+    /// NDJSON output. `--output-format stream-json` is handled separately via
+    /// [`Self::is_stream_json`] and does NOT fall through here.
     #[must_use]
     pub fn is_json_output(&self) -> bool {
-        self.json
-            || matches!(
-                self.output_format.as_deref(),
-                Some("json") | Some("stream-json")
-            )
+        self.json || matches!(self.output_format.as_deref(), Some("json"))
+    }
+
+    /// True iff `--output-format stream-json` is set (the realtime SDK output
+    /// protocol). This is distinct from `--output-format json` (which emits a
+    /// single result object) and from `--json` (LingXi legacy NDJSON).
+    ///
+    /// Note: the spec requires `--verbose` to accompany `--print +
+    /// stream-json`; that validation is enforced in `run_cli` / `run_oneshot`.
+    #[must_use]
+    pub fn is_stream_json(&self) -> bool {
+        matches!(self.output_format.as_deref(), Some("stream-json"))
     }
 
     /// Resolve the effective system-prompt override from `--system-prompt` /
@@ -678,11 +684,12 @@ mod tests {
     }
 
     #[test]
-    fn output_format_stream_json_parses_and_activates_json_output() {
+    fn output_format_stream_json_parses_and_activates_stream_json() {
         let a = Argv::from_iter(["lingxi-cli", "--print", "--output-format", "stream-json", "hi"]).unwrap();
         assert_eq!(a.output_format.as_deref(), Some("stream-json"));
-        // stream-json maps to json output for now (TODO: bidirectional subsystem)
-        assert!(a.is_json_output());
+        // stream-json routes through StreamJsonStream, NOT the SinkAdapter/JsonSink path.
+        assert!(a.is_stream_json(), "is_stream_json() must be true for stream-json");
+        assert!(!a.is_json_output(), "is_json_output() must be false for stream-json (it has its own path)");
     }
 
     #[test]

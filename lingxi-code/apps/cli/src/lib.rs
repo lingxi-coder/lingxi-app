@@ -68,6 +68,7 @@ pub mod repl;
 pub mod repl_loop;
 pub mod run;
 pub mod sigint;
+pub mod stream_json;
 pub mod structured_output;
 
 use crate::argv::Argv;
@@ -120,6 +121,36 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             eprintln!("{msg}");
             return exit_codes::RUNTIME_ERROR; // TS process.exit(1)
         }
+    }
+
+    // stream-json: `--output-format stream-json --verbose` (print-only, no
+    // SinkAdapter/OutputSink layer — the StreamJsonStream IS the OutputStream).
+    //
+    // Gate: when `--print`/`-p` is combined with `stream-json` the caller MUST
+    // also pass `--verbose` (mirrors claude-code's argv validation:
+    // `main.tsx printMode && !verbose && outputFormat=="stream-json"` →
+    // "When using --print, --output-format=stream-json requires --verbose").
+    if parsed.is_stream_json() {
+        if parsed.print && !parsed.verbose {
+            eprintln!("Error: When using --print, --output-format=stream-json requires --verbose");
+            return exit_codes::ARGV_ERROR;
+        }
+        let stream = Arc::new(stream_json::StreamJsonStream::new_placeholder());
+        let adapter: Arc<dyn traits::OutputStream> = stream.clone();
+        let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("lingxi-cli: {e}");
+                return exit_codes::RUNTIME_ERROR;
+            }
+        };
+        if let Some(notice) = startup_deprecation_notice(&parsed) {
+            eprintln!("{notice}");
+        }
+        if let Some(notice) = &permission_notice {
+            eprintln!("{notice}");
+        }
+        return run::run_stream_json_print(&parsed, &runtime, stream, permission_mode).await;
     }
 
     // Pick the sink first so we can install it on the orchestrator at

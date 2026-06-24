@@ -918,6 +918,40 @@ pub trait OutputStream: Send + Sync {
     /// and any host without a controlling terminal ignore it, and every
     /// pre-existing sink keeps compiling unchanged.
     async fn emit_terminal_sequence(&self, _seq: &str) {}
+
+    /// Signal that an Anthropic API message has begun streaming (i.e. on
+    /// `message_start`). Passes the API-assigned message id and model so sinks
+    /// that accumulate per-message blocks can record them before any deltas arrive.
+    ///
+    /// **Default no-op**: every pre-existing `OutputStream` impl keeps compiling
+    /// unchanged.
+    ///
+    /// # Arguments
+    /// * `message_id` — the provider-assigned message id (e.g. `msg_01…`).
+    /// * `model` — the model id that produced this message.
+    async fn emit_message_start(&self, _message_id: &str, _model: &str) {}
+
+    /// Signal that one Anthropic API message has completed streaming.
+    ///
+    /// Called by the streaming loop immediately after [`RouterAction::EndOfStream`]
+    /// (i.e. when the `message_stop` SSE event arrives). Consumers that need to
+    /// batch text+thinking+tool_use blocks into a single `assistant` frame
+    /// (stream-json output) flush their accumulator here.
+    ///
+    /// **Default no-op**: every pre-existing `OutputStream` impl (TUI,
+    /// CLI `SinkAdapter`, `MockOutputStream`) keeps compiling unchanged.
+    ///
+    /// # Arguments
+    /// * `stop_reason` — the `stop_reason` from the final `message_delta` (e.g.
+    ///   `"end_turn"`), or `None` if the delta carried no stop reason.
+    /// * `request_id` — the HTTP `request-id` header from the API response, when
+    ///   available (used by stream-json's `assistant.request_id` field).
+    async fn emit_message_boundary(
+        &self,
+        _stop_reason: Option<&str>,
+        _request_id: Option<&str>,
+    ) {
+    }
 }
 
 #[cfg(test)]

@@ -88,6 +88,12 @@ pub async fn dispatch_event(
             // initial usage snapshot (input + cache-read tokens). Surface
             // it to the output sink so consumers see an early token count;
             // the final `message_delta` usage supersedes it.
+            //
+            // stream-json P1: notify the sink of the message id + model so
+            // it can record them before accumulating per-delta blocks.
+            output
+                .emit_message_start(&response.id, &response.model)
+                .await;
             emit_usage_if_present(output, &response.usage).await;
             Ok(RouterAction::Continue)
         }

@@ -12,6 +12,8 @@ use crate::argv::Argv;
 use crate::exit_codes;
 use crate::init::Runtime;
 use crate::output::OutputSink;
+use crate::stream_json::{build_init_params, permission_mode_str, StreamJsonStream};
+use permission;
 use session::jsonl::loader::{
     list_recent_sessions, load_session, select_session_interactive, LoaderError, SessionMetadata,
 };
@@ -55,6 +57,75 @@ pub async fn run_oneshot(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) 
         Ok(_outcome) => exit_codes::SUCCESS,
         Err(e) => {
             sink.error("runtime", &e.to_string()).await;
+            exit_codes::RUNTIME_ERROR
+        }
+    }
+}
+
+/// Drive a one-shot `--output-format stream-json` conversation.
+///
+/// Emits `system/init` → `system/status` → [streaming frames via the trait
+/// impls on `stream`] → exit.  The `stream` is already installed as the
+/// orchestrator's output sink (set up in `lib.rs`).
+pub async fn run_stream_json_print(
+    argv: &Argv,
+    runtime: &Runtime,
+    stream: Arc<StreamJsonStream>,
+    permission_mode: permission::PermissionMode,
+) -> i32 {
+    let prompt = argv.prompt.clone().unwrap_or_default();
+    if prompt.trim().is_empty() {
+        eprintln!("lingxi-cli: empty prompt");
+        return exit_codes::ARGV_ERROR;
+    }
+
+    // Slash commands bypass the API; stream-json doesn't apply.
+    if prompt.starts_with('/') {
+        eprintln!("lingxi-cli: slash commands not supported in stream-json mode");
+        return exit_codes::ARGV_ERROR;
+    }
+
+    // Collect the real session_id and model from the orchestrator after build.
+    let (session_id_str, model_str) = {
+        let session_handle = runtime.orchestrator.session();
+        let session = session_handle.lock().await;
+        (session.session_id.to_string(), session.model.clone())
+    };
+
+    // Collect tool names (Agent → Task SDK rename handled inside build_init_params).
+    let tool_names = runtime.orchestrator.tool_names();
+
+    // Build the init parameters now that the runtime is available.
+    let init_params = build_init_params(
+        &session_id_str,
+        tool_names,
+        vec![], // MCP servers: P1 placeholder; real population is a follow-up
+        &model_str,
+        permission_mode_str(permission_mode),
+        vec![], // slash_commands: P1 placeholder
+        vec![], // agents
+        vec![], // skills
+        vec![], // plugins
+        "default", // output_style
+        None,   // memory_auto_path
+        "off",  // fast_mode_state
+    );
+
+    // Thread the real params + session_id into the stream.
+    stream.set_init_params(init_params).await;
+
+    // ① system/init frame
+    stream.emit_init().await;
+
+    // ② system/status frame (status: "requesting")
+    stream.emit_status().await;
+
+    // ③ Run the turn — streaming callbacks (emit_text / emit_tool_call /
+    //    emit_message_start / emit_message_boundary) fire on the stream.
+    match runtime.orchestrator.run_turn(&prompt).await {
+        Ok(_outcome) => exit_codes::SUCCESS,
+        Err(e) => {
+            eprintln!("lingxi-cli: {e}");
             exit_codes::RUNTIME_ERROR
         }
     }

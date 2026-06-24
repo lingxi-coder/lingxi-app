@@ -23,7 +23,7 @@
     "heading":     { "input": "# Title",          "expected_structure": ["Title"] },
     "bold_italic": { "input": "**b** _i_",         "expected_structure": ["b i"] },
     "list":        { "input": "- a\n- b",          "expected_structure": ["- a", "- b"] },
-    "blockquote":  { "input": "> q",               "expected_structure": ["│ q"] },
+    "blockquote":  { "input": "> q",               "expected_structure": ["▎ q"] },
     "inline_code": { "input": "`x`",               "expected_structure": ["x"] },
     "fenced_block":{ "input": "```rust\nfn f(){}\n```", "expected_fence_lang": "rust", "expected_line_count": 1, "expected_lines": ["fn f(){}"] }
   },

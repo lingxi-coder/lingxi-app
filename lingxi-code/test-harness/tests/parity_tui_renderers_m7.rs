@@ -170,7 +170,7 @@ fn syntax_highlight_locks_line_count_and_first_line_text() {
 // ---- diff layout ------------------------------------------------------------
 
 #[test]
-fn diff_add_remove_modify_has_locked_markers_and_hunk_header() {
+fn diff_add_remove_modify_has_locked_markers_no_hunk_header() {
     let f = load();
     let d = &f["diff"]["add_remove_modify"];
     let lines = diff::render(
@@ -181,17 +181,12 @@ fn diff_add_remove_modify_has_locked_markers_and_hunk_header() {
     );
     let text = plain(&lines);
 
-    // Hunk header present with the locked `@@ ... @@` shape.
+    // (diff-05) claude-code NEVER renders a `@@ ... @@` unified-diff hunk header —
+    // assert none appears (it uses a dim `...` separator between hunks instead).
     let prefix = d["expected_hunk_header_prefix"].as_str().unwrap();
     assert!(
-        text.iter().any(|l| l.trim_start().starts_with(prefix)),
-        "no hunk header line starting with `{prefix}` in {text:?}"
-    );
-    assert!(
-        text.iter()
-            .any(|l| l == d["expected_hunk_header"].as_str().unwrap()),
-        "exact hunk header `{}` missing in {text:?}",
-        d["expected_hunk_header"].as_str().unwrap()
+        !text.iter().any(|l| l.trim_start().starts_with(prefix)),
+        "diff must NOT render a `{prefix}` hunk header (diff-05) but did in {text:?}"
     );
 
     // Every expected minus line appears on a `-`-marked gutter row.

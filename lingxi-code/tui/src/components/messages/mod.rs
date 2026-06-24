@@ -53,6 +53,10 @@ use user_tool_result::{render_user_tool_result_to_string, UserToolResultProps};
 #[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (28 variants)
 pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: bool) -> String {
     match entry {
+        // (RRS-08) The interrupt marker renders the InterruptedByUser line.
+        RenderedMessage::UserText { body, .. } if body == user_tool_result::INTERRUPT_MESSAGE => {
+            format!("{}{}", user_tool_result::MARKER, user_tool_result::INTERRUPTED_LINE)
+        }
         // §A4 empty-message guard: a body that is only stripped prompt-XML
         // tags (or `(no content)`) is suppressed entirely — the component
         // returns an empty View, so the string oracle returns "" (no `"> "`

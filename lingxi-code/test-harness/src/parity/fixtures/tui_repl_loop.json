@@ -35,7 +35,7 @@
       "keys": ["l", "o", "n", "g", " ", "t", "a", "s", "k", "Enter"],
       "submitted_line": "long task",
       "cancel_key": "C-c",
-      "expected_system_text_contains": "interrupted by user",
+      "expected_user_text_contains": "interrupted by user",
       "expected_cancel_token_cancelled": true
     }
   ]

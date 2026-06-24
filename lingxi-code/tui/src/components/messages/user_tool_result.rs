@@ -196,6 +196,12 @@ const CANCEL_MESSAGE: &str = "The user doesn't want to take this action right no
 const REJECT_MESSAGE: &str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
 /// claude-code `INTERRUPT_MESSAGE_FOR_TOOL_USE` (utils/messages.ts:208).
 const INTERRUPT_MESSAGE_FOR_TOOL_USE: &str = "[Request interrupted by user for tool use]";
+/// (RRS-08) claude-code `INTERRUPT_MESSAGE` (utils/messages.ts:207) — pushed
+/// as the `UserText` turn content when a streaming turn is interrupted
+/// (Ctrl+C / Esc), not a tool result. `UserTextMessage.tsx` special-cases
+/// this exact body to render the SAME `InterruptedByUser` line as a
+/// canceled/rejected tool result, instead of the normal `"> "`-prefixed text.
+pub const INTERRUPT_MESSAGE: &str = "[Request interrupted by user]";
 /// The single dim line `InterruptedByUser` renders for a canceled / rejected /
 /// interrupted tool result (claude-code `InterruptedByUser.tsx`:
 /// `Interrupted ` + `· What should Claude do instead?`).

@@ -1132,10 +1132,13 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
     if k.code == KeyCode::Esc {
         if let Some(tif) = &st.in_flight_turn {
             tif.cancel.cancel();
-            st.push_message(crate::state::RenderedMessage::SystemText {
-                body: "Interrupted by user".into(),
+            // (RRS-08) claude-code's INTERRUPT_MESSAGE — a UserText body, not
+            // a SystemText line; UserTextMessage special-cases it to render
+            // the InterruptedByUser line. Mirrors the Ctrl+C branch (app.rs).
+            st.push_message(crate::state::RenderedMessage::UserText {
+                body: crate::components::messages::user_tool_result::INTERRUPT_MESSAGE
+                    .to_string(),
                 timestamp: chrono::Utc::now().timestamp(),
-                is_error: false,
             });
             return;
         }
@@ -3513,9 +3516,10 @@ mod tests {
         assert!(
             st.messages.iter().any(|m| matches!(
                 m,
-                crate::state::RenderedMessage::SystemText { body, .. } if body == "Interrupted by user"
+                crate::state::RenderedMessage::UserText { body, .. }
+                    if body == crate::components::messages::user_tool_result::INTERRUPT_MESSAGE
             )),
-            "Esc must push the 'Interrupted by user' interrupt marker"
+            "Esc must push the INTERRUPT_MESSAGE marker (RRS-08)"
         );
     }
 
@@ -3530,7 +3534,8 @@ mod tests {
         assert!(
             !st.messages.iter().any(|m| matches!(
                 m,
-                crate::state::RenderedMessage::SystemText { body, .. } if body == "Interrupted by user"
+                crate::state::RenderedMessage::UserText { body, .. }
+                    if body == crate::components::messages::user_tool_result::INTERRUPT_MESSAGE
             )),
             "no interrupt marker when no turn is in flight"
         );

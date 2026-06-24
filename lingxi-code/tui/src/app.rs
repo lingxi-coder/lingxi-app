@@ -496,10 +496,14 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 if let Some(tif) = &st.in_flight_turn {
                     tif.cancel.cancel();
                 }
-                st.push_message(RenderedMessage::SystemText {
-                    body: "^C interrupted by user".into(),
+                // (RRS-08) claude-code's INTERRUPT_MESSAGE — a UserText body,
+                // not a SystemText line; UserTextMessage special-cases it to
+                // render the InterruptedByUser line. Mirrors the Esc-interrupt
+                // branch (root.rs).
+                st.push_message(RenderedMessage::UserText {
+                    body: crate::components::messages::user_tool_result::INTERRUPT_MESSAGE
+                        .to_string(),
                     timestamp: chrono::Utc::now().timestamp(),
-                    is_error: false,
                 });
             } else if !st.prompt_text.is_empty() {
                 st.prompt_text.clear();
@@ -1457,6 +1461,28 @@ mod dispatch_tests {
         dispatch(KeyAction::Cancel, &mut st);
         assert_eq!(st.prompt_text, "");
         assert!(st.sigint_armed_at.is_none());
+    }
+
+    /// (RRS-08) Ctrl+C on an in-flight turn cancels the token and pushes
+    /// claude-code's INTERRUPT_MESSAGE as a UserText body (not the old
+    /// invented "^C interrupted by user" SystemText), mirroring the Esc
+    /// branch (root.rs).
+    #[test]
+    fn ctrl_c_interrupts_in_flight_turn_with_claude_code_marker() {
+        let mut st = s();
+        let token = tokio_util::sync::CancellationToken::new();
+        st.in_flight_turn = Some(crate::state::TurnInFlight { turn_id: 1, cancel: token.clone() });
+        dispatch(KeyAction::Cancel, &mut st);
+        assert!(token.is_cancelled(), "Ctrl+C must cancel the in-flight turn token");
+        assert!(
+            st.messages.iter().any(|m| matches!(
+                m,
+                RenderedMessage::UserText { body, .. }
+                    if body == crate::components::messages::user_tool_result::INTERRUPT_MESSAGE
+            )),
+            "Ctrl+C must push the INTERRUPT_MESSAGE marker, got: {:?}",
+            st.messages
+        );
     }
 
     #[test]

@@ -97,11 +97,15 @@ pub fn handle_hooks_key(
 pub fn render_hooks_to_string(state: &HooksScreenState) -> String {
     match state.mode {
         HooksDialogMode::List => {
-            let mut out = String::from("Hooks\n");
             if state.rows.is_empty() {
-                out.push_str("No hooks configured.");
-                return out;
+                return "Hooks\nNo hooks configured.".to_string();
             }
+            let n = state.rows.len();
+            // Title + `{N} hook(s) configured` subtitle + dim read-only banner.
+            let mut out = format!(
+                "Hooks\n{n} {} configured\n\u{24d8} This menu is read-only. To add or modify hooks, edit settings.json directly or ask Claude to help.\n",
+                if n == 1 { "hook" } else { "hooks" }
+            );
             for (i, row) in state.rows.iter().enumerate() {
                 let marker = if i == state.selected {
                     "\u{276F} "
@@ -123,16 +127,16 @@ pub fn render_hooks_to_string(state: &HooksScreenState) -> String {
     }
 }
 
-/// The detail body for one hook.
+/// The detail body for one hook. claude-code titles it `Hook details` (not the
+/// synthetic hook name), shows Event + Matcher, and uses `(all)` for an empty
+/// matcher. (Type/Source aren't carried on `HookRow`; Timeout is dropped — TS
+/// shows neither in the detail view.)
 fn render_hook_detail(row: &HookRow) -> String {
-    let mut out = String::new();
-    out.push_str(&row.name);
-    out.push('\n');
+    let mut out = String::from("Hook details\n");
     out.push_str(&format!("Event: {}\n", row.event));
-    let matcher = row.matcher.as_deref().unwrap_or("(any tool)");
-    out.push_str(&format!("Matcher: {matcher}\n"));
-    out.push_str(&format!("Timeout: {}ms", row.timeout_ms));
-    out.push_str("\nesc to go back");
+    let matcher = row.matcher.as_deref().unwrap_or("(all)");
+    out.push_str(&format!("Matcher: {matcher}"));
+    out.push_str("\nEsc to go back");
     out
 }
 
@@ -173,8 +177,9 @@ mod tests {
             mode: HooksDialogMode::List,
         };
         let out = render_hooks_to_string(&s);
-        assert!(out
-            .starts_with("Hooks\n  fmt \u{00B7} PreToolUse\n\u{276F} lint \u{00B7} PostToolUse\n"));
+        assert!(out.starts_with(
+            "Hooks\n2 hooks configured\n\u{24d8} This menu is read-only. To add or modify hooks, edit settings.json directly or ask Claude to help.\n  fmt \u{00B7} PreToolUse\n\u{276F} lint \u{00B7} PostToolUse\n"
+        ));
         assert!(out.ends_with(
             "Press \u{2191}\u{2193} to navigate \u{00B7} Enter to select \u{00B7} Esc to go back"
         ));
@@ -196,10 +201,10 @@ mod tests {
         };
         assert_eq!(
             render_hook_detail(&r),
-            "fmt\nEvent: PreToolUse\nMatcher: Edit|Write\nTimeout: 30000ms\nesc to go back"
+            "Hook details\nEvent: PreToolUse\nMatcher: Edit|Write\nEsc to go back"
         );
-        // None matcher renders the "(any tool)" placeholder.
+        // None matcher renders the "(all)" placeholder.
         let any = render_hook_detail(&row("x", "Stop"));
-        assert!(any.contains("Matcher: (any tool)"));
+        assert!(any.contains("Matcher: (all)"));
     }
 }

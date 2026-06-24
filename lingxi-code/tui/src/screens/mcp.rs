@@ -94,11 +94,16 @@ pub fn handle_mcp_key(state: &mut McpScreenState, key: crossterm::event::KeyCode
 pub fn render_mcp_to_string(state: &McpScreenState) -> String {
     match state.mode {
         McpDialogMode::List => {
-            let mut out = String::from("MCP Servers\n");
             if state.rows.is_empty() {
-                out.push_str("No MCP servers configured.");
-                return out;
+                // claude-code `MCPSettings` empty-state guidance (verbatim).
+                return "Manage MCP servers\nNo MCP servers configured. Please run /doctor if this is unexpected. Otherwise, run `claude mcp --help` or visit https://code.claude.com/docs/en/mcp to learn more.".to_string();
             }
+            let n = state.rows.len();
+            // Title + `{N} server(s)` count subtitle (claude-code MCP list).
+            let mut out = format!(
+                "Manage MCP servers\n{n} {}\n",
+                if n == 1 { "server" } else { "servers" }
+            );
             for (i, row) in state.rows.iter().enumerate() {
                 let marker = if i == state.selected {
                     "\u{276F} "
@@ -110,7 +115,7 @@ pub fn render_mcp_to_string(state: &McpScreenState) -> String {
                 out.push_str(&format!(" \u{00B7} {}", row.status));
                 out.push('\n');
             }
-            out.push_str("Press \u{2191}\u{2193} to navigate \u{00B7} Enter to select \u{00B7} Esc to go back");
+            out.push_str("\u{2191}\u{2193} to navigate \u{00B7} Enter to confirm \u{00B7} Esc to cancel");
             out
         }
         McpDialogMode::Detail => match state.rows.get(state.selected) {
@@ -127,7 +132,7 @@ fn render_mcp_detail(row: &McpRow) -> String {
     out.push('\n');
     out.push_str(&format!("Status: {}\n", row.status));
     out.push_str(&format!("Transport: {}", row.transport));
-    out.push_str("\nesc to go back");
+    out.push_str("\nEsc to go back");
     out
 }
 
@@ -180,17 +185,17 @@ mod tests {
         };
         let out = render_mcp_to_string(&s);
         assert!(out.starts_with(
-            "MCP Servers\n\u{276F} alpha \u{00B7} connected\n  beta \u{00B7} error: boom\n"
+            "Manage MCP servers\n2 servers\n\u{276F} alpha \u{00B7} connected\n  beta \u{00B7} error: boom\n"
         ));
         assert!(out.ends_with(
-            "Press \u{2191}\u{2193} to navigate \u{00B7} Enter to select \u{00B7} Esc to go back"
+            "\u{2191}\u{2193} to navigate \u{00B7} Enter to confirm \u{00B7} Esc to cancel"
         ));
     }
 
     #[test]
     fn empty_list_shows_locked_empty_state() {
         let out = render_mcp_to_string(&McpScreenState::default());
-        assert_eq!(out, "MCP Servers\nNo MCP servers configured.");
+        assert_eq!(out, "Manage MCP servers\nNo MCP servers configured. Please run /doctor if this is unexpected. Otherwise, run `claude mcp --help` or visit https://code.claude.com/docs/en/mcp to learn more.");
     }
 
     #[test]
@@ -202,7 +207,7 @@ mod tests {
         };
         assert_eq!(
             render_mcp_detail(&r),
-            "fs\nStatus: connected\nTransport: stdio\nesc to go back"
+            "fs\nStatus: connected\nTransport: stdio\nEsc to go back"
         );
     }
 }

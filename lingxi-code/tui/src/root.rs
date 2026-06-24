@@ -1515,10 +1515,12 @@ pub async fn pump_open_mcp(
     let rows: Vec<crate::screens::mcp::McpRow> = infos
         .into_iter()
         .map(|i| {
+            // (mcp-status-vocabulary) claude-code shows "failed" for both the
+            // not-connected and errored states (MCPListPanel `statusText`).
             let status = match i.status {
                 traits::orchestrator::McpStatus::Connected => "connected".to_string(),
-                traits::orchestrator::McpStatus::Disconnected => "disconnected".to_string(),
-                traits::orchestrator::McpStatus::Error(e) => format!("error: {e}"),
+                traits::orchestrator::McpStatus::Disconnected
+                | traits::orchestrator::McpStatus::Error(_) => "failed".to_string(),
             };
             crate::screens::mcp::McpRow {
                 name: i.name,

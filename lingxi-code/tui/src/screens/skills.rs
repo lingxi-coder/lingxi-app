@@ -246,10 +246,17 @@ fn render_skill_row(row: &SkillRow) -> String {
 /// This is the list the embedded [`ScrollState`] scrolls over.
 fn content_lines(sections: &[SkillSection]) -> Vec<String> {
     let mut out = Vec::new();
+    let mut first = true;
     for section in sections {
         if section.rows.is_empty() {
             continue;
         }
+        // (skills-gap-between-sections) blank line between consecutive non-empty
+        // groups (not before the first).
+        if !first {
+            out.push(String::new());
+        }
+        first = false;
         out.push(section.title.clone());
         for row in &section.rows {
             out.push(render_skill_row(row));

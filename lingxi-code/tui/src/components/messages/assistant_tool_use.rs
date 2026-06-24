@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use iocraft::prelude::*;
 use protocol::ToolUseId;
 
+use crate::theme::TuiTheme;
+
 /// Marker glyph. 3-byte UTF-8.
 pub const MARKER: &str = "●";
 /// Focus prefix prepended when this block is the focused one.
@@ -184,14 +186,34 @@ fn single_line_json_preview(input: &serde_json::Value) -> String {
     out
 }
 
-/// iocraft component — wraps [`render_assistant_tool_use_to_string`] in a
-/// cyan `Text` element (assistant theme).
+/// iocraft component. (ma-02) The header is split into per-segment styling
+/// rather than one blanket cyan `Text`: the `●` dot is dim (claude-code's
+/// unresolved `ToolUseLoader` state — resolution-state green/error-red needs
+/// the errored-tool-id lookup, deferred), the tool NAME is bold in the default
+/// text color, and the `(preview)` is the default color too.
 #[component]
 pub fn AssistantToolUseMessage(props: &AssistantToolUseProps) -> impl Into<AnyElement<'static>> {
-    let body = render_assistant_tool_use_to_string(props.clone());
+    let prefix = if props.focused { FOCUS_PREFIX } else { "" };
+    let name = user_facing_name(&props.tool).to_string();
+    let preview = match render_tool_use_message(&props.tool, &props.input, &props.cwd) {
+        Some(s) if s.is_empty() => None,
+        Some(s) => Some(s),
+        None => Some(single_line_json_preview(&props.input)),
+    };
+    let pretty = props
+        .expanded
+        .then(|| serde_json::to_string_pretty(&props.input).unwrap_or_else(|_| props.input.to_string()));
     element! {
         View(flex_direction: FlexDirection::Column) {
-            Text(content: body, color: Color::Cyan)
+            View(flex_direction: FlexDirection::Row) {
+                #((!prefix.is_empty()).then(|| element! {
+                    Text(content: prefix.to_string(), color: TuiTheme::DIM)
+                }))
+                Text(content: MARKER.to_string(), color: TuiTheme::DIM)
+                Text(content: format!(" {name}"), weight: Weight::Bold)
+                #(preview.map(|p| element! { Text(content: format!("({p})")) }))
+            }
+            #(pretty.map(|p| element! { Text(content: p, color: TuiTheme::DIM) }))
         }
     }
 }

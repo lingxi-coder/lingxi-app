@@ -56,6 +56,7 @@
 
 pub mod argv;
 mod bypass_env;
+pub mod control_plane;
 pub mod cwd;
 pub mod exit_codes;
 pub mod idle_notify;
@@ -149,11 +150,40 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         // hook or SSE events flow through it.
         stream.set_flags(parsed.include_partial_messages, parsed.include_hook_events);
         let adapter: Arc<dyn traits::OutputStream> = stream.clone();
-        let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("lingxi-cli: {e}");
-                return exit_codes::RUNTIME_ERROR;
+
+        // P5 Phase 2: for the bidirectional `--input-format stream-json` path,
+        // build the shared control plane BEFORE `build_runtime` (its outbound
+        // handle comes from the stream, available now) and inject the
+        // `can_use_tool` permission decider as the inner transport. The
+        // `PolicyPermissionGate` (enforcement default on) wraps it as the OUTER
+        // local pre-check, so only an unresolved `Ask` round-trips over stdio.
+        // The output-only print path keeps the headless deny-on-ask default
+        // (no stdin reader to answer a control_response).
+        let control_plane = if parsed.is_stream_json_input() {
+            Some(control_plane::StdioControlPlane::new(stream.outbound_tx()))
+        } else {
+            None
+        };
+
+        let runtime = if let Some(plane) = &control_plane {
+            let mut cfg = init::resolve_desktop_config(&parsed, permission_mode);
+            let gate = Arc::new(control_plane::StdioControlPermissionGate::new(plane.clone()));
+            cfg.injected_permission_gate =
+                Some(gate as Arc<dyn permission::gate::PermissionGate>);
+            match init::build_runtime_from_config(cfg, adapter).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("lingxi-cli: {e}");
+                    return exit_codes::RUNTIME_ERROR;
+                }
+            }
+        } else {
+            match init::build_runtime(&parsed, adapter, permission_mode).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("lingxi-cli: {e}");
+                    return exit_codes::RUNTIME_ERROR;
+                }
             }
         };
         if let Some(notice) = startup_deprecation_notice(&parsed) {
@@ -164,8 +194,15 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         }
         // P3: when --input-format=stream-json is also set, use the multi-turn
         // stdin loop instead of the single-prompt one-shot path.
-        if parsed.is_stream_json_input() {
-            return run::run_stream_json_input_loop(&parsed, &runtime, stream, permission_mode).await;
+        if let Some(plane) = control_plane {
+            return run::run_stream_json_input_loop(
+                &parsed,
+                &runtime,
+                stream,
+                permission_mode,
+                plane,
+            )
+            .await;
         }
         return run::run_stream_json_print(&parsed, &runtime, stream, permission_mode).await;
     }

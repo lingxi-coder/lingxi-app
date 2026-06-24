@@ -1,0 +1,504 @@
+//! Bidirectional control-plane state for the stream-json `--input-format
+//! stream-json` path (P5 Phase 2+).
+//!
+//! Mirrors `StructuredIO.pendingRequests` + `sendRequest`/`processLine` from
+//! claude-code's `cli/structuredIO.ts`. Holds:
+//!  - the shared single-writer outbound channel (so a CLI-originated
+//!    `control_request` never overtakes a queued data frame — the
+//!    structuredIO.ts:160-162 design lock),
+//!  - the `pendingRequests` map keyed by `request_id` (for the `can_use_tool`
+//!    permission round-trip — the ONE subtype the CLI originates),
+//!  - the resolved-tool-use-id dedup ring (`MAX_RESOLVED_TOOL_USE_IDS`,
+//!    oldest-evicted — duplicate-response drop is wired in Phase 4),
+//!  - the active turn's `CancellationToken`, so a `deny+interrupt` permission
+//!    response can abort the whole turn (§3.4).
+//!
+//! The plane is created in the CLI BEFORE `build_runtime` (its outbound handle
+//! comes from `StreamJsonStream::outbound_tx()`, available pre-build) and shared
+//! with the injected [`StdioControlPermissionGate`] and the run loop's resolver.
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use serde_json::{json, Value};
+use tokio::sync::{oneshot, Mutex};
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+use permission::gate::{PermissionDecision, PermissionGate, PromptWorker};
+
+use crate::stream_json::{serialize_ndjson_line, OutboundTx};
+
+/// Cap on the resolved-tool-use dedup ring (claude-code
+/// `MAX_RESOLVED_TOOL_USE_IDS`, oldest-evicted).
+const MAX_RESOLVED_TOOL_USE_IDS: usize = 1000;
+
+/// A registered outbound `control_request` awaiting its `control_response`.
+struct PendingControlRequest {
+    /// Resolved by [`StdioControlPlane::resolve_response`] with the inner
+    /// `response.response` payload (`Ok`) or the `response.error` string (`Err`).
+    responder: oneshot::Sender<Result<Value, String>>,
+    /// The `tool_use_id` this request carried, tracked on resolve so a late /
+    /// duplicate response can be deduped (§1.5).
+    tool_use_id: Option<String>,
+}
+
+/// Shared bidirectional control-plane state (see module docs).
+pub struct StdioControlPlane {
+    /// The single-writer outbound NDJSON channel shared with `StreamJsonStream`
+    /// (every producer enqueues here; one drain task is the sole stdout writer).
+    outbound_tx: Arc<OutboundTx>,
+    /// CLI-originated requests awaiting a response, keyed by `request_id`.
+    pending: Mutex<HashMap<String, PendingControlRequest>>,
+    /// Resolved tool_use_ids, for duplicate-response dedup (Phase 4).
+    resolved_tool_use_ids: Mutex<VecDeque<String>>,
+    /// The in-flight turn's cancellation token (for `deny+interrupt`).
+    active_turn_cancel: Mutex<Option<CancellationToken>>,
+}
+
+impl StdioControlPlane {
+    /// Build the plane over the stream's shared outbound channel.
+    #[must_use]
+    pub fn new(outbound_tx: Arc<OutboundTx>) -> Arc<Self> {
+        Arc::new(Self {
+            outbound_tx,
+            pending: Mutex::new(HashMap::new()),
+            resolved_tool_use_ids: Mutex::new(VecDeque::new()),
+            active_turn_cancel: Mutex::new(None),
+        })
+    }
+
+    /// Register the current turn's cancellation token so a `deny+interrupt`
+    /// permission response can abort the whole turn (§3.4). Called by the turn
+    /// loop before each turn.
+    pub async fn set_active_turn(&self, token: CancellationToken) {
+        *self.active_turn_cancel.lock().await = Some(token);
+    }
+
+    /// Clear the active-turn token between turns.
+    pub async fn clear_active_turn(&self) {
+        *self.active_turn_cancel.lock().await = None;
+    }
+
+    /// Cancel the active turn (the `deny+interrupt` path).
+    async fn cancel_active_turn(&self) {
+        if let Some(tok) = self.active_turn_cancel.lock().await.as_ref() {
+            tok.cancel();
+        }
+    }
+
+    /// Emit a CLI-originated `control_request` and return a receiver resolved
+    /// when the matching `control_response` arrives (`sendRequest`,
+    /// structuredIO.ts:469). Mints a `request_id`, enqueues the frame on the
+    /// shared outbound channel (FIFO — no overtaking data frames), and registers
+    /// the pending entry.
+    pub async fn send_request(
+        &self,
+        request: Value,
+        tool_use_id: Option<String>,
+    ) -> oneshot::Receiver<Result<Value, String>> {
+        let request_id = Uuid::new_v4().to_string();
+        let frame = json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": request,
+        });
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut pending = self.pending.lock().await;
+            pending.insert(
+                request_id,
+                PendingControlRequest {
+                    responder: tx,
+                    tool_use_id,
+                },
+            );
+        }
+        // Enqueue AFTER registering so a (theoretically) instant response can't
+        // race the insert. The drain task serializes to stdout.
+        let _ = self.outbound_tx.send(serialize_ndjson_line(&frame));
+        rx
+    }
+
+    /// Resolve an inbound `control_response` against `pendingRequests`
+    /// (`processLine`, structuredIO.ts:362). Frame keys are already
+    /// snake_case-normalized by the router (`normalize_control_message_keys`),
+    /// so the join key is the inner `response.request_id` and the payload is the
+    /// inner `response.response` (the load-bearing double nesting).
+    pub async fn resolve_response(&self, frame: &Value) {
+        let Some(response) = frame.get("response") else {
+            return;
+        };
+        let request_id = response
+            .get("request_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let entry = {
+            let mut pending = self.pending.lock().await;
+            pending.remove(&request_id)
+        };
+        let Some(entry) = entry else {
+            // Orphan / duplicate `control_response`: no matching pending entry.
+            // Phase 4 adds the resolved-tool-use dedup drop + log line; here it
+            // is simply ignored (inline, never surfaced to the turn loop).
+            return;
+        };
+        if let Some(tuid) = entry.tool_use_id.clone() {
+            self.track_resolved(tuid).await;
+        }
+        let subtype = response.get("subtype").and_then(Value::as_str).unwrap_or("");
+        let result = if subtype == "error" {
+            Err(response
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("control_response error")
+                .to_string())
+        } else {
+            // SUCCESS: payload at `response.response`; absent ⇒ `{}` (the
+            // `rn(gt)` no-payload case omits the key, parsed as empty).
+            Ok(response.get("response").cloned().unwrap_or_else(|| json!({})))
+        };
+        let _ = entry.responder.send(result);
+    }
+
+    /// Mark a tool_use_id resolved (oldest-evicted ring, cap
+    /// `MAX_RESOLVED_TOOL_USE_IDS`). The duplicate-drop check that consults this
+    /// ring lands in Phase 4.
+    async fn track_resolved(&self, tool_use_id: String) {
+        let mut ring = self.resolved_tool_use_ids.lock().await;
+        if ring.iter().any(|id| id == &tool_use_id) {
+            return;
+        }
+        ring.push_back(tool_use_id);
+        while ring.len() > MAX_RESOLVED_TOOL_USE_IDS {
+            ring.pop_front();
+        }
+    }
+}
+
+/// Inner-transport `PermissionGate` that resolves an unresolved `Ask` by
+/// emitting a `can_use_tool` control_request and awaiting the host's
+/// `control_response` (§3).
+///
+/// Sits BEHIND `PolicyPermissionGate` (the outer local pre-check), substituted
+/// via `cfg.injected_permission_gate`. Mirrors `StructuredIO.createCanUseTool`,
+/// but the local allow/deny pre-gate already ran in the outer policy gate, so
+/// only an `ask` reaches here. Deferred (per spec §3.5): the local
+/// PermissionRequest-hook race, the `updatedInput` rewrite, and the sandbox-ask
+/// piggyback.
+pub struct StdioControlPermissionGate {
+    plane: Arc<StdioControlPlane>,
+}
+
+impl StdioControlPermissionGate {
+    /// Build the decider over the shared control plane.
+    #[must_use]
+    pub fn new(plane: Arc<StdioControlPlane>) -> Self {
+        Self { plane }
+    }
+
+    /// Run the `can_use_tool` round-trip and map the host's decision.
+    async fn decide(
+        &self,
+        name: &str,
+        input: &Value,
+        worker: Option<PromptWorker>,
+    ) -> PermissionDecision {
+        // §3.2 outbound request: emit `tool_name, input, tool_use_id` (+ agent_id
+        // when a worker is present); the rest of the schema superset is absent.
+        let tool_use_id = Uuid::new_v4().to_string();
+        let mut request = json!({
+            "subtype": "can_use_tool",
+            "tool_name": name,
+            "input": input,
+            "tool_use_id": tool_use_id,
+        });
+        if let Some(w) = worker {
+            request["agent_id"] = json!(w.name);
+        }
+        let rx = self
+            .plane
+            .send_request(request, Some(tool_use_id))
+            .await;
+        // There is NO timeout on the can_use_tool request (§3.1): block until a
+        // control_response arrives or the channel drops (host gone / turn end).
+        match rx.await {
+            Ok(Ok(payload)) => self.map_payload(payload).await,
+            Ok(Err(err)) => PermissionDecision::Deny {
+                reason: format!("Tool permission request failed: {err}"),
+            },
+            Err(_) => PermissionDecision::Deny {
+                reason: "Tool permission request failed: control channel closed".to_string(),
+            },
+        }
+    }
+
+    /// Map a `PermissionToolOutput` payload onto a [`PermissionDecision`] (§3.3).
+    async fn map_payload(&self, payload: Value) -> PermissionDecision {
+        match payload.get("behavior").and_then(Value::as_str) {
+            Some("allow") => {
+                // `updatedInput` rewrite is deferred (§3.5 gap): LingXi's
+                // `PermissionDecision::Allow` cannot carry a rewritten input, so
+                // allow with the ORIGINAL input. `updatedPermissions` persistence
+                // is likewise deferred.
+                PermissionDecision::Allow
+            }
+            Some("deny") => {
+                let message = payload
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Permission denied")
+                    .to_string();
+                if payload
+                    .get("interrupt")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    // deny+interrupt: abort the whole turn, not just this tool
+                    // (§3.4 — the binary calls `ctx.abortController.abort()`).
+                    self.plane.cancel_active_turn().await;
+                }
+                PermissionDecision::Deny { reason: message }
+            }
+            _ => PermissionDecision::Deny {
+                reason: "Tool permission request returned an unknown behavior".to_string(),
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl PermissionGate for StdioControlPermissionGate {
+    async fn check(&self, name: &str, input: &Value) -> PermissionDecision {
+        self.decide(name, input, None).await
+    }
+
+    async fn check_with_worker(
+        &self,
+        name: &str,
+        input: &Value,
+        worker: Option<PromptWorker>,
+    ) -> PermissionDecision {
+        self.decide(name, input, worker).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    /// Build a plane wired to an in-memory outbound channel; the receiver lets a
+    /// test read the frames the plane emits (simulating the host on stdin).
+    fn plane_with_channel() -> (Arc<StdioControlPlane>, mpsc::UnboundedReceiver<String>) {
+        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        (StdioControlPlane::new(Arc::new(tx)), rx)
+    }
+
+    fn success_response(request_id: &str, payload: Value) -> Value {
+        json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request_id,
+                "response": payload,
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn send_request_emits_frame_and_resolves_success() {
+        let (plane, mut rx) = plane_with_channel();
+        let fut = plane
+            .send_request(
+                json!({"subtype": "can_use_tool", "tool_name": "Bash"}),
+                Some("tu1".to_string()),
+            )
+            .await;
+
+        let line = rx.recv().await.expect("frame emitted");
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame["type"], "control_request");
+        assert_eq!(frame["request"]["tool_name"], "Bash");
+        let req_id = frame["request_id"].as_str().unwrap().to_string();
+
+        plane
+            .resolve_response(&success_response(&req_id, json!({"behavior": "allow"})))
+            .await;
+        let payload = fut.await.unwrap().unwrap();
+        assert_eq!(payload["behavior"], "allow");
+    }
+
+    #[tokio::test]
+    async fn resolve_response_error_subtype_rejects() {
+        let (plane, mut rx) = plane_with_channel();
+        let fut = plane
+            .send_request(json!({"subtype": "can_use_tool"}), None)
+            .await;
+        let line = rx.recv().await.unwrap();
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        let req_id = frame["request_id"].as_str().unwrap().to_string();
+
+        let resp = json!({
+            "type": "control_response",
+            "response": {"subtype": "error", "request_id": req_id, "error": "boom"}
+        });
+        plane.resolve_response(&resp).await;
+        assert_eq!(fut.await.unwrap().unwrap_err(), "boom");
+    }
+
+    #[tokio::test]
+    async fn success_with_no_inner_payload_resolves_empty_object() {
+        let (plane, mut rx) = plane_with_channel();
+        let fut = plane.send_request(json!({"subtype": "x"}), None).await;
+        let line = rx.recv().await.unwrap();
+        let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // `response` key absent (the `rn(gt)` no-payload case).
+        let resp = json!({
+            "type": "control_response",
+            "response": {"subtype": "success", "request_id": req_id}
+        });
+        plane.resolve_response(&resp).await;
+        assert_eq!(fut.await.unwrap().unwrap(), json!({}));
+    }
+
+    #[tokio::test]
+    async fn orphan_response_is_dropped_without_panic() {
+        let (plane, _rx) = plane_with_channel();
+        plane
+            .resolve_response(&success_response("does-not-exist", json!({})))
+            .await;
+        // No pending entry to resolve — silently ignored.
+    }
+
+    #[tokio::test]
+    async fn gate_allow_maps_to_allow() {
+        let (plane, mut rx) = plane_with_channel();
+        let gate = StdioControlPermissionGate::new(plane.clone());
+        let input = json!({"command": "ls"});
+        let check = tokio::spawn(async move { gate.check("Bash", &input).await });
+
+        let line = rx.recv().await.unwrap();
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame["request"]["subtype"], "can_use_tool");
+        assert_eq!(frame["request"]["tool_name"], "Bash");
+        assert!(frame["request"]["tool_use_id"].is_string());
+        let req_id = frame["request_id"].as_str().unwrap().to_string();
+
+        plane
+            .resolve_response(&success_response(
+                &req_id,
+                json!({"behavior": "allow", "updatedInput": {}}),
+            ))
+            .await;
+        assert_eq!(check.await.unwrap(), PermissionDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn gate_deny_maps_to_deny_with_message() {
+        let (plane, mut rx) = plane_with_channel();
+        let gate = StdioControlPermissionGate::new(plane.clone());
+        let input = json!({});
+        let check = tokio::spawn(async move { gate.check("Write", &input).await });
+
+        let line = rx.recv().await.unwrap();
+        let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        plane
+            .resolve_response(&success_response(
+                &req_id,
+                json!({"behavior": "deny", "message": "not allowed"}),
+            ))
+            .await;
+        assert_eq!(
+            check.await.unwrap(),
+            PermissionDecision::Deny {
+                reason: "not allowed".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_deny_interrupt_cancels_active_turn() {
+        let (plane, mut rx) = plane_with_channel();
+        let token = CancellationToken::new();
+        plane.set_active_turn(token.clone()).await;
+        let gate = StdioControlPermissionGate::new(plane.clone());
+        let input = json!({});
+        let check = tokio::spawn(async move { gate.check("Bash", &input).await });
+
+        let line = rx.recv().await.unwrap();
+        let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        plane
+            .resolve_response(&success_response(
+                &req_id,
+                json!({"behavior": "deny", "message": "stop", "interrupt": true}),
+            ))
+            .await;
+        assert_eq!(
+            check.await.unwrap(),
+            PermissionDecision::Deny {
+                reason: "stop".to_string()
+            }
+        );
+        assert!(token.is_cancelled(), "deny+interrupt must cancel the turn");
+    }
+
+    #[tokio::test]
+    async fn gate_error_response_maps_to_deny() {
+        let (plane, mut rx) = plane_with_channel();
+        let gate = StdioControlPermissionGate::new(plane.clone());
+        let input = json!({});
+        let check = tokio::spawn(async move { gate.check("Bash", &input).await });
+
+        let line = rx.recv().await.unwrap();
+        let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let resp = json!({
+            "type": "control_response",
+            "response": {"subtype": "error", "request_id": req_id, "error": "host failure"}
+        });
+        plane.resolve_response(&resp).await;
+        assert_eq!(
+            check.await.unwrap(),
+            PermissionDecision::Deny {
+                reason: "Tool permission request failed: host failure".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_check_with_worker_sets_agent_id() {
+        let (plane, mut rx) = plane_with_channel();
+        let gate = StdioControlPermissionGate::new(plane.clone());
+        let input = json!({});
+        let worker = PromptWorker {
+            name: "researcher".to_string(),
+            team: None,
+            is_async: false,
+        };
+        let check =
+            tokio::spawn(async move { gate.check_with_worker("Bash", &input, Some(worker)).await });
+
+        let line = rx.recv().await.unwrap();
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame["request"]["agent_id"], "researcher");
+        let req_id = frame["request_id"].as_str().unwrap().to_string();
+        plane
+            .resolve_response(&success_response(&req_id, json!({"behavior": "allow"})))
+            .await;
+        assert_eq!(check.await.unwrap(), PermissionDecision::Allow);
+    }
+}

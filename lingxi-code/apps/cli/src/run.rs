@@ -13,9 +13,10 @@ use crate::exit_codes;
 use crate::init::Runtime;
 use crate::output::OutputSink;
 use crate::stream_json::{build_init_params, permission_mode_str, StreamJsonStream};
+use crate::control_plane::StdioControlPlane;
 use crate::stream_json_input::{
     content_to_prompt, control_frame_request_id, control_request_subtype, emit_replay_ack,
-    spawn_stdin_router, ControlPlaneWriter,
+    spawn_stdin_router, ControlPlaneWriter, StdinChannels,
 };
 use command_api::format_description_with_source;
 use permission;
@@ -301,6 +302,7 @@ pub async fn run_stream_json_input_loop(
     runtime: &Runtime,
     stream: Arc<StreamJsonStream>,
     permission_mode: permission::PermissionMode,
+    control_plane: Arc<StdioControlPlane>,
 ) -> i32 {
     // Collect the real session_id and model from the orchestrator after build.
     let (session_id_str, model_str) = {
@@ -392,7 +394,22 @@ pub async fn run_stream_json_input_loop(
     // The reader runs in a spawn_blocking thread so stdin I/O doesn't block
     // the async runtime. When stdin closes or a fatal error occurs all senders
     // drop, signalling EOF to all receivers.
-    let mut channels = spawn_stdin_router(argv.replay_user_messages, session_id_str.clone());
+    let StdinChannels {
+        mut turn_rx,
+        mut control_req_rx,
+        mut control_resp_rx,
+    } = spawn_stdin_router(argv.replay_user_messages, session_id_str.clone());
+
+    // P5 Phase 2: a dedicated resolver task drains `control_response` frames and
+    // resolves the matching pending `send_request` future (the `can_use_tool`
+    // round-trip). It runs concurrently with the turn loop so a host's
+    // permission answer can arrive mid-turn while the gate awaits.
+    let resolver_plane = control_plane.clone();
+    let resolver_task = tokio::spawn(async move {
+        while let Some(frame) = control_resp_rx.recv().await {
+            resolver_plane.resolve_response(&frame).await;
+        }
+    });
 
     // ③ Phase 1: pre-collect initialization data for the `initialize` handler.
     // These require async access to runtime — must be collected here before the
@@ -492,7 +509,7 @@ pub async fn run_stream_json_input_loop(
     let outbound_tx = stream.outbound_tx();
     let ctrl_plane = ControlPlaneWriter::new(outbound_tx.clone());
     let ctrl_req_task = tokio::spawn(async move {
-        while let Some(frame) = channels.control_req_rx.recv().await {
+        while let Some(frame) = control_req_rx.recv().await {
             let subtype = control_request_subtype(&frame).to_string();
             let request_id = control_frame_request_id(&frame).to_string();
             dispatch_control_request(
@@ -506,8 +523,6 @@ pub async fn run_stream_json_input_loop(
                 &init_account,
             );
         }
-        // control_resp_rx is dropped here — Phase 1: ignore control_response frames.
-        drop(channels.control_resp_rx);
     });
 
     // ④ Consume user turns sequentially through the orchestrator.
@@ -516,7 +531,7 @@ pub async fn run_stream_json_input_loop(
     let mut had_any_turn = false;
 
     loop {
-        let turn = match channels.turn_rx.recv().await {
+        let turn = match turn_rx.recv().await {
             Some(t) => t,
             None => break, // stdin closed or fatal error — exit the loop.
         };
@@ -545,6 +560,10 @@ pub async fn run_stream_json_input_loop(
             }
         });
 
+        // P5 Phase 2: register this turn's token so a `can_use_tool`
+        // `deny+interrupt` response (§3.4) can abort the whole turn.
+        control_plane.set_active_turn(cancel.clone()).await;
+
         match runtime
             .orchestrator
             .run_turn_streaming_with_cancel(&prompt, cancel)
@@ -564,9 +583,11 @@ pub async fn run_stream_json_input_loop(
         }
     }
 
-    // Wait for the control dispatcher to finish (it exits when control_req_rx closes,
-    // which happens when the stdin reader task finishes or drops the sender).
+    // Wait for the control dispatcher + response resolver to finish (they exit
+    // when their channels close, which happens when the stdin reader task
+    // finishes or drops the senders).
     let _ = ctrl_req_task.await;
+    let _ = resolver_task.await;
 
     if !had_any_turn {
         // No user turns received — emit an empty-result envelope.

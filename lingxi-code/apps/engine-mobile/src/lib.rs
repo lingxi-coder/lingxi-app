@@ -105,8 +105,21 @@ pub fn register_mobile_tools(reg: &mut ToolRegistry, ctx: BuiltinToolContext) {
     tool_web::register_all(reg, ctx.clone(), None);
     tool_plan::register_all(reg, ctx.clone());
     tool_meta::register_all(reg, ctx.clone());
+    // Audit fix (#7): the cron tools (Create/List/Delete/RemoteTrigger) are
+    // registered, but mobile starts NO `cron::CronScheduler` (the desktop root is
+    // the only place one runs) and wires no `task_registry` for it to fire into —
+    // a backgrounded app has no long-running daemon. So a created cron job is
+    // saved/listed/deletable but does NOT auto-fire on this platform; CronCreate's
+    // result text says so (see schedule_cron.rs `scheduler_active`). RemoteTrigger
+    // is independent of the local scheduler (it triggers a cloud-side run).
     tool_cron::register_all(reg, ctx.clone());
     tool_ui::register_all(reg, ctx.clone());
+    // Audit fix (#14): the Skill tool is registered but currently INERT on mobile
+    // — `tool_skill::register_all` constructs it with the `EmptySkillLoader`, and
+    // mobile loads no on-disk `.claude/commands` / `.claude/agents`, so every
+    // Skill call returns "Unknown skill". Making it functional needs on-disk
+    // command/skill discovery on the device (a larger follow-up feature); until
+    // then it is deliberately a no-op here, NOT silently assumed wired.
     tool_skill::register_all(reg, ctx.clone());
     // ----- mobile-exclusive tools ------------------------------------------
     tool_camera::register_all(reg, ctx.clone());

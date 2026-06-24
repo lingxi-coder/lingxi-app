@@ -18,9 +18,15 @@
 //!
 //! ## Off-device determinism
 //!
-//! `build_mobile` reads **nothing** from `std::env` / argv: every input arrives
-//! through [`MobileConfig`] and the OS handles arrive through `Arc<dyn
-//! Platform>`. On the host (CI) a fake `Platform` shim (see the `tests` module)
+//! `build_mobile` takes every functional input through [`MobileConfig`] and the
+//! OS handles through `Arc<dyn Platform>`. It reads a SMALL, fixed set of
+//! `std::env` vars purely to mirror desktop parity behavior — the
+//! `CLAUDE_CODE_MEMDIR_PREFETCH` activation gate, the `ANTHROPIC_SMALL_FAST_MODEL`
+//! / `ANTHROPIC_DEFAULT_HAIKU_MODEL` model ids a `prompt` hook may resolve to, and
+//! `HOME` for the permission `FsRoots` (absent on a sandboxed device ⇒ `None`).
+//! These are all unset on a real device, so on-device behavior stays
+//! deterministic (prefetch off, no model override, no home root). No other env /
+//! argv is read. On the host (CI) a fake `Platform` shim (see the `tests` module)
 //! supplies portable handles so the orchestrator is constructed and the adapter
 //! sinks are exercised without a device — exactly the spec §8 "prove from a
 //! Swift/Kotlin unit test" smoke path, runnable on the host. The real device
@@ -452,6 +458,13 @@ pub async fn build_mobile_inner(
     let worktree = platform.worktree();
     let storage = Arc::new(platform_posix_minimal::PlainTextSecureStorage::new());
 
+    // Audit fix (telemetry parity): ONE shared AnalyticsBus drives the whole
+    // pipeline — the `ApiService` (so `tengu_api_*` events are not dropped), the
+    // tool context (`tool_ctx.bus`), and the orchestrator (`.with_analytics_bus`)
+    // — instead of the prior split where a private bus served only the tools and
+    // the ApiService got `None`. Mirrors the desktop root's single logEvent sink.
+    let analytics_bus = Arc::new(telemetry::AnalyticsBus::new());
+
     // (2a) Task 10: DefaultLlmClient over LlmTransportBridge.
     //      Mobile uses the platform's `Arc<dyn HttpTransport>` wrapped in `DynHttp`
     //      so the device backend is preserved; no desktop-only deps are pulled.
@@ -585,7 +598,7 @@ pub async fn build_mobile_inner(
             subscriber_state,
             UserAgentEnv::from_process_env(),
             env!("CARGO_PKG_VERSION"),
-            None,
+            Some(analytics_bus.clone()), // audit fix: API events share the one bus
             None,
             Some(cost_estimator),
             fallback_overrides,
@@ -649,13 +662,31 @@ pub async fn build_mobile_inner(
     let perms: Arc<dyn PermissionGate> = {
         let mut rules = Vec::new();
         let mut mode = PermissionMode::Default;
+        // Audit fix (#1): the project/enterprise bypassPermissions KILLSWITCH
+        // (`disableBypassPermissionsMode`), sticky across tiers — mirrors desktop
+        // (engine-desktop sets `policy.bypass_killswitch_active`). Without it a
+        // settings `defaultMode:bypassPermissions` becomes an unguarded allow-all
+        // on mobile, which has no interactive bypass-safety guard either.
+        let mut bypass_disabled = false;
+        // Audit fix (#12): `permissions.additionalDirectories`, unioned across
+        // tiers, so an AcceptEdits write under a settings-declared extra dir
+        // auto-allows (mirrors desktop's `.with_working_dirs`); empty ⇒ unchanged.
+        let mut additional_working_dirs: Vec<std::path::PathBuf> = Vec::new();
         let proj = cwd.join(".claude").join("settings.json");
         let user = cfg.claude_home.join("settings.json");
+        // Audit fix (#6): also read the LocalSettings tier (`settings.local.json`),
+        // LAST so its rules/defaultMode win — mirrors desktop. Mobile does not
+        // PERSIST to it (no `.with_persist`), but a synced/checked-in
+        // settings.local.json's deny/allow rules + defaultMode are now honored.
+        let local = cwd.join(".claude").join("settings.local.json");
         let mut sources: Vec<(std::path::PathBuf, permission::PermissionRuleSource)> = Vec::new();
         if user != proj {
             sources.push((user, permission::PermissionRuleSource::UserSettings));
         }
         sources.push((proj, permission::PermissionRuleSource::ProjectSettings));
+        // `settings.local.json` is a distinct filename from both `settings.json`
+        // paths, so it never collides with the dedup above — always read it last.
+        sources.push((local, permission::PermissionRuleSource::LocalSettings));
         for (path, source) in sources {
             if let Ok(raw) = tokio::fs::read_to_string(&path).await {
                 match permission::permission_rules_from_settings_json(&raw, source) {
@@ -667,8 +698,13 @@ pub async fn build_mobile_inner(
                     ),
                 }
                 if let Some(m) = permission::default_mode_from_settings_json(&raw) {
-                    mode = m; // project read last → its defaultMode wins
+                    mode = m; // local settings read last → its defaultMode wins
                 }
+                if permission::bypass_permissions_disabled_from_settings_json(&raw) {
+                    bypass_disabled = true; // sticky: any tier disabling wins
+                }
+                additional_working_dirs
+                    .extend(permission::additional_directories_from_settings_json(&raw));
             }
         }
         // Filesystem roots so file-path CONTENT rules (`Edit(src/**)`,
@@ -679,7 +715,12 @@ pub async fn build_mobile_inner(
             home: std::env::var_os("HOME").map(std::path::PathBuf::from),
             claude_home: cfg.claude_home.clone(),
         };
-        let policy = Arc::new(permission::PermissionPolicy::from_rules(mode, rules).with_roots(roots));
+        let mut policy = permission::PermissionPolicy::from_rules(mode, rules)
+            .with_roots(roots)
+            .with_working_dirs(additional_working_dirs);
+        // Audit fix (#1): honor the bypassPermissions killswitch resolved above.
+        policy.bypass_killswitch_active = bypass_disabled;
+        let policy = Arc::new(policy);
         // Resolve active Read(deny) rules to search-exclude globs before the
         // policy moves into the gate (same as the desktop composition root).
         read_deny_exclude_globs = permission::read_deny_exclude_globs(&policy, &cwd);
@@ -795,7 +836,7 @@ pub async fn build_mobile_inner(
         // unchanged default).
         read_deny_exclude_globs,
         fs,
-        bus: Arc::new(telemetry::AnalyticsBus::new()),
+        bus: analytics_bus.clone(),
         trusted_dirs: vec![cwd.clone()],
         process,
         sandbox,
@@ -901,6 +942,34 @@ pub async fn build_mobile_inner(
             None
         };
 
+    // Audit fix (#3): autocompaction parity with desktop. Build the real
+    // CompactionOrchestrator (threshold 150_000 tokens — the M3 Anthropic prod
+    // context lock) backed by a forked summary side-query over the SAME device
+    // HTTP transport + cfg.api_key the memdir-prefetch uses; nothing here needs a
+    // desktop-only primitive. Without this the orchestrator's compaction stays
+    // None, the proactive `maybe_compact_before_call` is a strict no-op, and a
+    // long mobile session fails at the wire on context-window overflow with no
+    // summary recovery. The same `cache_safe_slot` is handed to BOTH the forked
+    // summarizer and the orchestrator so the turn loop's per-call snapshot is what
+    // the summary call replays. (This is the ordinary M3 autocompaction layer, NOT
+    // the flag-gated CONTEXT_COLLAPSE/REACTIVE_COMPACT path.) Built before
+    // `orch_cfg` is moved into the orchestrator so it can read `orch_cfg.model`.
+    let cache_safe_slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    let compaction_side_query: Arc<dyn sidequery::SideQueryClient> =
+        Arc::new(sidequery::ProviderSideQueryClient::new(
+            cfg.api_key.clone(),
+            Some(cfg.api_base.clone()),
+            http.clone() as Arc<dyn traits::HttpTransport>,
+        ));
+    let forked_runner = Arc::new(
+        sidequery::ForkedAgentRunner::new(Arc::new(sidequery::NoopSubagentSlotProvider))
+            .with_side_query_client(compaction_side_query, orch_cfg.model.clone()),
+    );
+    let compactor = Arc::new(compaction::CompactionOrchestrator::with_autocompactor(
+        compaction::Autocompactor::with_forked_runner(forked_runner, cache_safe_slot.clone()),
+        150_000,
+    ));
+
     let mut orch_inner = ConversationOrchestrator::new_with_streaming(
         orch_cfg,
         api_client,
@@ -921,7 +990,17 @@ pub async fn build_mobile_inner(
     // carry a deterministically-computed `transcript_path` (claude-code
     // `getTranscriptPathForSession`) even though no `JsonlWriter` is wired —
     // mobile sibling of desktop's `.with_config_home(cfg.claude_home.clone())`.
-    .with_config_home(cfg.claude_home.clone());
+    .with_config_home(cfg.claude_home.clone())
+    // Audit fix (#15): the orchestrator shares the ONE AnalyticsBus (so its
+    // events ride the same sink as the ApiService + tools).
+    .with_analytics_bus(analytics_bus)
+    // Audit fix (#3): attach the compactor + the shared cache-safe slot so the
+    // turn loop autocompacts before context-window overflow (desktop parity).
+    .with_compaction(compactor)
+    .with_cache_safe_slot(cache_safe_slot)
+    // Audit fix (#13): per-turn V2 `<task-reminder>` over the file-backed
+    // TodoStore (tool_task IS registered on mobile) — mirror of desktop.
+    .with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()));
     // P0.1 (gated): attach the memdir prefetch when enabled above.
     if let Some(prefetch) = memdir_prefetch {
         orch_inner = orch_inner.with_memory_prefetch(prefetch);

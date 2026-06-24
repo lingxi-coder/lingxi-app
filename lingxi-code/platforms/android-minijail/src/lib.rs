@@ -66,7 +66,13 @@ pub struct JailedOutput {
     pub stdout: String,
     /// Captured stderr (UTF-8 lossy).
     pub stderr: String,
-    /// Exit code (`-1` if signalled).
+    /// The child's exit code (`status & 0xFF` of `minijail_wait`), or `-1` for an
+    /// enforcement failure, a watchdog timeout, or a minijail-internal error.
+    ///
+    /// NOTE: this is NOT a reliable signal-kill marker. `minijail_wait` folds a
+    /// signal-killed child into the same `128 + n` band as a voluntary `exit 137`,
+    /// so a high exit code here may be either; callers MUST consult `timed_out`
+    /// (not `exit_code == -1`) to detect the watchdog kill. See `decode_exit`.
     pub exit_code: i32,
     /// True when the watchdog killed the group for exceeding `timeout_ms`.
     pub timed_out: bool,

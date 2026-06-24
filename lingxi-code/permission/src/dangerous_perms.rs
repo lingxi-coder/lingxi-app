@@ -34,6 +34,10 @@ use crate::rule::{
 const BASH_TOOL_NAME: &str = "Bash";
 const POWERSHELL_TOOL_NAME: &str = "PowerShell";
 const AGENT_TOOL_NAME: &str = "Agent";
+/// The Android mobile shell tool (`tools/shell-mobile` `TOOL_NAME`). It runs
+/// mksh/sh-compatible commands through the in-engine sandbox, so it shares
+/// Bash's command-pattern rule semantics and dangerous-rule analysis.
+const SHELL_TOOL_NAME: &str = "Shell";
 
 /// The exact-shape match used by both shell predicates against a single
 /// lowercase pattern. 1:1 with the per-pattern body of
@@ -66,8 +70,10 @@ fn matches_pattern_shape(content: &str, pattern: &str) -> bool {
 /// 3. A dangerous interpreter pattern in any of the rule-shape variants.
 #[must_use]
 pub fn is_dangerous_bash_permission(tool_name: &str, rule_content: &Option<String>) -> bool {
-    // Only check Bash rules.
-    if tool_name != BASH_TOOL_NAME {
+    // Only check Bash rules (and the Android mobile `Shell` tool, which runs the
+    // same mksh/sh-compatible command patterns — a dangerous `Shell(python:*)`
+    // allow rule would bypass the auto-mode classifier just like `Bash(python:*)`).
+    if tool_name != BASH_TOOL_NAME && tool_name != SHELL_TOOL_NAME {
         return false;
     }
 
@@ -279,6 +285,36 @@ mod tests {
     fn bash_predicate_ignores_non_bash_tools() {
         assert!(!is_dangerous_bash_permission("PowerShell", &content("python:*")));
         assert!(!is_dangerous_bash_permission("Read", &None));
+    }
+
+    // ── mobile `Shell` tool shares Bash command semantics ──
+
+    #[test]
+    fn mobile_shell_dangerous_rules_are_flagged() {
+        // The Android mobile `Shell` tool (`tools/shell-mobile` `TOOL_NAME`) runs
+        // mksh/sh-compatible commands, so a dangerous `Shell` allow rule must be
+        // flagged exactly like the same `Bash` rule — otherwise an auto-mode
+        // classifier bypass is never stripped.
+        assert!(is_dangerous_bash_permission(SHELL_TOOL_NAME, &content("python:*")));
+        assert!(is_dangerous_bash_permission(SHELL_TOOL_NAME, &content("node:*")));
+        // Tool-wide `Shell` allow lets the model run ALL commands.
+        assert!(is_dangerous_bash_permission(SHELL_TOOL_NAME, &None));
+        assert!(is_dangerous_bash_permission(SHELL_TOOL_NAME, &content("*")));
+        // A safe `Shell` command root is not dangerous.
+        assert!(!is_dangerous_bash_permission(SHELL_TOOL_NAME, &content("ls:*")));
+        // The OR classifier predicate also flags it.
+        assert!(is_dangerous_classifier_permission(SHELL_TOOL_NAME, &content("python:*")));
+    }
+
+    #[test]
+    fn find_collects_dangerous_mobile_shell_allow_rules() {
+        let rules = vec![
+            allow(SHELL_TOOL_NAME, Some("python:*"), PermissionRuleSource::UserSettings),
+            allow(SHELL_TOOL_NAME, Some("ls:*"), PermissionRuleSource::UserSettings),
+        ];
+        let found = find_dangerous_classifier_permissions(&rules);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].rule_display, "Shell(python:*)");
     }
 
     #[test]

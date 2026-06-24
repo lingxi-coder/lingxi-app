@@ -273,6 +273,14 @@ fn diff_to_text(diff: &git2::Diff<'_>) -> Result<GitDiff, GitOpError> {
 /// Unified diff of the working tree against HEAD (staged + unstaged changes),
 /// truncated at [`GIT_DIFF_MAX_CHARS`].
 ///
+/// Unlike desktop `git diff` (which hides untracked files by default), this
+/// intentionally INCLUDES untracked files via `include_untracked` /
+/// `recurse_untracked_dirs`, so brand-new files appear in the diff's delta list
+/// — one call surfaces new files on a constrained device. Note: this does NOT
+/// set `show_untracked_content`, so an untracked file's content is detected but
+/// not printed as `+` lines in the patch body. See the matching note in the
+/// tool's `diff` prompt description.
+///
 /// # Errors
 ///
 /// [`GitOpError::Libgit2`] if HEAD or the diff cannot be resolved.
@@ -1190,6 +1198,42 @@ mod tests {
         );
         assert!(d.patch.contains("a.txt"), "diff should name the file");
         assert!(!d.truncated, "small diff should not truncate");
+    }
+
+    #[test]
+    fn diff_detects_untracked_files() {
+        // Documents the (intentional) divergence from desktop `git diff`: the
+        // diff options include untracked files, so a brand-new file shows up in
+        // the diff's delta list as `Untracked` (desktop `git diff` hides it).
+        // Note: `show_untracked_content` is NOT set, so the rendered patch BODY
+        // for an untracked-only change is empty — the file is detected but its
+        // content is not printed as a `+` addition.
+        let dir = tempdir().unwrap();
+        let (repo, _first, _second) = init_history(dir.path());
+        std::fs::write(dir.path().join("fresh.txt"), "brand-new\n").unwrap();
+
+        let head_tree = repo.head().and_then(|h| h.peel_to_tree()).unwrap();
+        let mut opts = git2::DiffOptions::new();
+        opts.include_untracked(true).recurse_untracked_dirs(true);
+        let raw = repo
+            .diff_tree_to_workdir_with_index(Some(&head_tree), Some(&mut opts))
+            .unwrap();
+        let listed = raw.deltas().any(|d| {
+            d.status() == git2::Delta::Untracked
+                && d.new_file().path() == Some(Path::new("fresh.txt"))
+        });
+        assert!(
+            listed,
+            "untracked fresh.txt should appear in the diff's delta list"
+        );
+
+        // The public `diff` (patch text) does NOT print untracked content.
+        let d = diff(&repo).unwrap();
+        assert!(
+            !d.patch.contains("brand-new"),
+            "untracked content is not rendered without show_untracked_content, got:\n{}",
+            d.patch
+        );
     }
 
     #[test]

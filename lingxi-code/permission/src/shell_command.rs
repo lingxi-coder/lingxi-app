@@ -38,9 +38,14 @@ pub fn command_from_input(input: &serde_json::Value) -> Option<&str> {
 }
 
 /// Is this a shell tool whose content rules are command patterns?
+///
+/// `Bash` (desktop) + `PowerShell` (Windows) + `Shell` — the Android mobile
+/// shell tool (`tools/shell-mobile` `TOOL_NAME`), which runs mksh/sh-compatible
+/// commands through the in-engine sandbox and so must get the SAME per-command
+/// narrowing + dangerous-rule analysis + content matching as desktop `Bash`.
 #[must_use]
 pub fn is_shell_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "Bash" | "PowerShell")
+    matches!(tool_name, "Bash" | "PowerShell" | "Shell")
 }
 
 /// Split `command` into subcommands on the shell list separators
@@ -527,6 +532,29 @@ pub fn command_exact_allowed(allow_contents: &[&str], command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_tool_names_include_mobile_shell() {
+        // Desktop Bash + Windows PowerShell + the Android mobile `Shell` tool
+        // (`tools/shell-mobile` `TOOL_NAME`) all carry command-pattern content
+        // rules, so all three must get the per-command narrowing + dangerous-rule
+        // analysis + content matching.
+        assert!(is_shell_tool("Bash"));
+        assert!(is_shell_tool("PowerShell"));
+        assert!(is_shell_tool("Shell"));
+        // Non-shell tools are unaffected.
+        assert!(!is_shell_tool("Read"));
+        assert!(!is_shell_tool("Agent"));
+    }
+
+    #[test]
+    fn shell_tool_command_roots_for_mksh_style_commands() {
+        // mksh/sh-compatible commands narrow to sensible per-command roots.
+        assert!(command_fully_allowed(&["git status"], "git status"));
+        assert!(command_fully_allowed(&["ls:*"], "ls -la"));
+        // and a denied subcommand stays denied behind a compound under `Shell`.
+        assert!(rule_matches_any_subcommand("rm:*", "echo ok && rm -rf /tmp/x"));
+    }
 
     #[test]
     fn splits_on_separators_quote_aware() {

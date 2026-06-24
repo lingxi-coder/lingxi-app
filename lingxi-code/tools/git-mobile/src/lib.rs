@@ -174,6 +174,12 @@ impl Tool for GitTool {
             OPERATIONS.join(", ")
         ));
         prompt.push_str(
+            "Note: unlike desktop `git diff` (which hides untracked files by \
+             default), the `diff` operation ALSO includes untracked files, so a \
+             brand-new file is reported in the diff (its content is not printed as \
+             additions) — one call surfaces new files too.\n\n",
+        );
+        prompt.push_str(
             "v1 is READ + LOCAL-WRITE + PUSH. merge and pull are FAST-FORWARD-ONLY \
              and push is fast-forward-only too (a non-fast-forward is reported as \
              a named error — pull/rebase first — never forced). Remotes are \

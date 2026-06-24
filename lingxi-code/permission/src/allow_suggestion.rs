@@ -225,6 +225,27 @@ mod tests {
     }
 
     #[test]
+    fn mobile_shell_narrows_to_command_root_like_bash() {
+        // The Android mobile `Shell` tool (`tools/shell-mobile` `TOOL_NAME`) must
+        // narrow an AllowAlways to a per-command-root rule, exactly like `Bash` —
+        // NOT a tool-wide `Shell` allow (which would auto-allow every future
+        // shell call after one approval).
+        assert_eq!(
+            content("Shell", json!({ "command": "git status" })),
+            Some("git status:*".into())
+        );
+        assert_eq!(
+            content("Shell", json!({ "command": "git commit -m \"x\"" })),
+            Some("git commit:*".into())
+        );
+        // And the persisted narrowed `Shell` rule matches only the covered
+        // command, not an unrelated one.
+        let rule = allow_suggestion("Shell", &json!({ "command": "git status" }));
+        assert!(call_matches_rule(&rule, "Shell", &json!({ "command": "git status -s" })));
+        assert!(!call_matches_rule(&rule, "Shell", &json!({ "command": "rm -rf /tmp/x" })));
+    }
+
+    #[test]
     fn bash_with_no_root_falls_back_tool_wide() {
         // A flag-only / empty command yields a tool-wide allow.
         assert_eq!(content("Bash", json!({ "command": "-v" })), None);

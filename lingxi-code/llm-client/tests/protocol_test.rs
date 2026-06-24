@@ -7,6 +7,7 @@ fn tool_declarations_require_tools_capability() {
         name: "Read".to_string(),
         description: "d".to_string(),
         input_schema: serde_json::json!({"type":"object"}),
+        ..Default::default()
     }];
     let capabilities = Capabilities {
         streaming: true,

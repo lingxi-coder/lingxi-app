@@ -112,6 +112,7 @@ fn encode_request_shape_is_gemini_generate_content() {
         name: "Read".to_string(),
         description: "d".to_string(),
         input_schema: serde_json::json!({"type":"object"}),
+        ..Default::default()
     }];
 
     let provider_request = codec.encode_request(&request).unwrap();

@@ -552,6 +552,7 @@ fn convert_tool_declaration(value: Value) -> Result<ToolDeclaration, LlmError> {
         name,
         description,
         input_schema,
+        ..Default::default()
     })
 }
 

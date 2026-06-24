@@ -580,7 +580,16 @@ pub struct MessageDeltaPayload {
 }
 
 /// Canonical tool declaration.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Most tools are caller-defined (`tool_type == None`): the provider receives
+/// `name`/`description`/`input_schema`. A hosted tool (Anthropic computer use,
+/// web search, code execution) sets `tool_type` to the provider wire type
+/// (e.g. `computer_use_20250124`); the provider then passes it through as a
+/// typed hosted tool and attaches the matching beta header. `extra` carries
+/// hosted-tool-specific wire fields (e.g. `display_width_px`) merged verbatim
+/// into the encoded tool object. Ported 1:1 from codex `liter-llm`
+/// hosted-tool passthrough (`provider/anthropic.rs`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ToolDeclaration {
     /// Tool name.
     pub name: String,
@@ -588,6 +597,15 @@ pub struct ToolDeclaration {
     pub description: String,
     /// JSON schema for tool input.
     pub input_schema: Value,
+    /// Hosted-tool wire type, when this is a provider-hosted tool (e.g.
+    /// `computer_use_20250124`). `None` ⇒ caller-defined tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_type: Option<String>,
+    /// Extra hosted-tool wire fields merged verbatim into the encoded tool
+    /// object (e.g. `display_width_px`, `display_height_px`). Empty for
+    /// caller-defined tools.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Tool-choice policy.

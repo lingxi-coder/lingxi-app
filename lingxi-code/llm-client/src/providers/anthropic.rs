@@ -111,6 +111,13 @@ impl WireCodec for AnthropicMessagesCodec {
         provider_request
             .headers
             .insert("content-type".to_string(), "application/json".to_string());
+        // Hosted computer-use tool ⇒ attach the `computer-use-2025-01-24` beta
+        // header (codex `liter-llm` `dynamic_headers` parity).
+        if let Some(beta) = computer_use_beta_header(request) {
+            provider_request
+                .headers
+                .insert("anthropic-beta".to_string(), beta);
+        }
 
         Ok(provider_request)
     }
@@ -395,11 +402,49 @@ fn normalize_tool_result_content(output: &Value) -> Value {
 }
 
 fn encode_tool(tool: &ToolDeclaration) -> Value {
+    // Hosted tool (computer use / web search / code execution): emit the typed
+    // passthrough shape `{ "type", "name", ...extra }`. Ported 1:1 from codex
+    // `liter-llm` `provider/anthropic.rs` hosted-tool passthrough, where hosted
+    // tools carry a `type` and provider-specific fields (e.g. display dims)
+    // rather than a caller-defined `input_schema`.
+    if let Some(tool_type) = &tool.tool_type {
+        let mut obj = serde_json::Map::new();
+        obj.insert("type".to_string(), Value::String(tool_type.clone()));
+        obj.insert("name".to_string(), Value::String(tool.name.clone()));
+        for (key, value) in &tool.extra {
+            obj.insert(key.clone(), value.clone());
+        }
+        return Value::Object(obj);
+    }
     serde_json::json!({
         "name": tool.name,
         "description": tool.description,
         "input_schema": tool.input_schema,
     })
+}
+
+/// Anthropic beta header for the hosted computer-use tool. Ported 1:1 from
+/// codex `liter-llm` `provider/anthropic.rs` (`BETA_COMPUTER_USE`).
+const BETA_COMPUTER_USE: &str = "computer-use-2025-01-24";
+
+/// Hosted computer-use tool wire types. A request carrying either type must
+/// send the `computer-use-2025-01-24` beta header. Mirrors codex `liter-llm`
+/// `HOSTED_TOOL_TYPES` (computer-use entries).
+const COMPUTER_USE_TOOL_TYPES: &[&str] = &["computer_20241022", "computer_use_20250124"];
+
+/// Compute request-dependent Anthropic beta headers from the request's tools.
+///
+/// Ported 1:1 from codex `liter-llm` `provider/anthropic.rs::dynamic_headers`
+/// (computer-use branch): a hosted `computer_20241022` / `computer_use_20250124`
+/// tool adds `anthropic-beta: computer-use-2025-01-24`. Returns `None` when no
+/// such tool is present so the header is omitted and wire bytes stay unchanged.
+fn computer_use_beta_header(request: &LlmRequest) -> Option<String> {
+    let has_computer_use = request.tools.iter().any(|tool| {
+        tool.tool_type
+            .as_deref()
+            .is_some_and(|ty| COMPUTER_USE_TOOL_TYPES.contains(&ty))
+    });
+    has_computer_use.then(|| BETA_COMPUTER_USE.to_string())
 }
 
 fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {

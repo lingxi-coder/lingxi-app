@@ -98,6 +98,7 @@ fn openai_encodes_tool_choice_variants() {
             name: "Read".to_string(),
             description: "d".to_string(),
             input_schema: serde_json::json!({"type": "object"}),
+            ..Default::default()
         }];
 
         let provider_request = openai_codec().encode_request(&request).unwrap();
@@ -123,6 +124,7 @@ fn gemini_encodes_tool_choice_variants() {
             name: "Read".to_string(),
             description: "d".to_string(),
             input_schema: serde_json::json!({"type": "object"}),
+            ..Default::default()
         }];
 
         let provider_request = gemini_codec().encode_request(&request).unwrap();

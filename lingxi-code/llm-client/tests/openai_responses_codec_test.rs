@@ -316,6 +316,7 @@ fn tools_encode_flattened_responses_shape() {
         name: "Read".to_string(),
         description: "read a file".to_string(),
         input_schema: serde_json::json!({"type": "object"}),
+        ..Default::default()
     }];
 
     let provider_request = codec().encode_request(&request).unwrap();
@@ -670,6 +671,7 @@ fn encode_request_full_body_golden() {
         name: "Bash".to_string(),
         description: "run a command".to_string(),
         input_schema: serde_json::json!({"type": "object"}),
+        ..Default::default()
     }];
     request.tool_choice = Some(ToolChoice::Auto);
     request.reasoning = Some(llm_client::ReasoningConfig::Enabled {

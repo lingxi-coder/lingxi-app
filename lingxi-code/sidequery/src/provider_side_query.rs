@@ -488,6 +488,7 @@ fn convert_one_tool(
         name,
         description,
         input_schema,
+        ..Default::default()
     })
 }
 

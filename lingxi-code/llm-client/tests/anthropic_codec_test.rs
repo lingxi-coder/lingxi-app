@@ -184,6 +184,7 @@ fn encode_request_shape_is_anthropic_messages() {
         name: "Read".to_string(),
         description: "Read a file".to_string(),
         input_schema: serde_json::json!({"type":"object"}),
+        ..Default::default()
     });
 
     let provider_request = codec.encode_request(&request).unwrap();
@@ -195,6 +196,60 @@ fn encode_request_shape_is_anthropic_messages() {
     assert_eq!(provider_request.body_json["system"][0]["text"], "sys");
     assert_eq!(provider_request.body_json["messages"][0]["role"], "user");
     assert_eq!(provider_request.body_json["tools"][0]["input_schema"]["type"], "object");
+}
+
+#[test]
+fn encode_request_hosted_computer_use_tool_passthrough_and_beta_header() {
+    // codex `liter-llm` parity: a hosted `computer_use_20250124` tool is
+    // emitted as a typed passthrough (`type`/`name` + extra wire fields) and
+    // the request carries `anthropic-beta: computer-use-2025-01-24`.
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    request.messages.push(Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Text { text: "use the computer".to_string(), cache_control: None }],
+    });
+    let mut extra = serde_json::Map::new();
+    extra.insert("display_width_px".to_string(), serde_json::json!(1024));
+    extra.insert("display_height_px".to_string(), serde_json::json!(768));
+    request.tools.push(ToolDeclaration {
+        name: "computer".to_string(),
+        description: String::new(),
+        input_schema: serde_json::Value::Null,
+        tool_type: Some("computer_use_20250124".to_string()),
+        extra,
+    });
+
+    let provider_request = codec.encode_request(&request).unwrap();
+
+    let tool = &provider_request.body_json["tools"][0];
+    assert_eq!(tool["type"], "computer_use_20250124");
+    assert_eq!(tool["name"], "computer");
+    assert_eq!(tool["display_width_px"], 1024);
+    assert_eq!(tool["display_height_px"], 768);
+    // Hosted-tool passthrough does not emit a caller `input_schema`.
+    assert!(tool.get("input_schema").is_none());
+    assert_eq!(provider_request.headers["anthropic-beta"], "computer-use-2025-01-24");
+}
+
+#[test]
+fn encode_request_no_beta_header_without_hosted_tool() {
+    // A caller-defined tool must not trigger the computer-use beta header.
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    request.messages.push(Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Text { text: "hi".to_string(), cache_control: None }],
+    });
+    request.tools.push(ToolDeclaration {
+        name: "Read".to_string(),
+        description: "Read a file".to_string(),
+        input_schema: serde_json::json!({"type":"object"}),
+        ..Default::default()
+    });
+
+    let provider_request = codec.encode_request(&request).unwrap();
+    assert!(provider_request.headers.get("anthropic-beta").is_none());
 }
 
 #[test]
@@ -368,6 +423,7 @@ fn encode_omits_empty_tools_array() {
         name: "Read".to_string(),
         description: "d".to_string(),
         input_schema: serde_json::json!({"type":"object"}),
+        ..Default::default()
     });
     let encoded = codec.encode_request(&with_tools).unwrap();
     assert_eq!(encoded.body_json["tools"][0]["name"], "Read");

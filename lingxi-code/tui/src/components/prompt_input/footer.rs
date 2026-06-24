@@ -112,11 +112,12 @@ pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement
     } else {
         String::new()
     };
-    // (M7-08/M7-09) Vim mode indicator: shown only when vim is enabled; the v2
-    // form distinguishes `-- VISUAL --` from `-- VISUAL LINE --`.
-    let mode_label =
-        footer_mode_label_v2(props.vim_enabled, props.vim_mode, props.vim_visual_linewise)
-            .map(str::to_string);
+    // (PIC-03) claude-code only ever renders `-- INSERT --` in the footer
+    // (`showVim`); NORMAL/VISUAL modes show NO mode label (the hint takes the
+    // slot instead). The `footer_mode_label_v2` helper is retained for callers
+    // that want the full set, but the live footer shows INSERT only.
+    let mode_label = (props.vim_enabled && props.vim_mode == VimMode::Insert)
+        .then(|| "-- INSERT --".to_string());
     // claude-code `showHint = !suppressHint && !showVim`: the `? for shortcuts`
     // hint is shown only when the buffer is empty (`suppressHint = input.length
     // > 0`) and no vim mode-indicator is rendered (`showVim`). The

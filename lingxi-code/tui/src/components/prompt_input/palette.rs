@@ -123,13 +123,17 @@ impl PaletteState {
         let rows = self.rows();
         match code {
             KeyCode::Down => {
-                if !rows.is_empty() && self.selected + 1 < rows.len() {
-                    self.selected += 1;
+                // (cp-04) wrap: last → first.
+                if !rows.is_empty() {
+                    self.selected = (self.selected + 1) % rows.len();
                 }
                 PaletteKeyOutcome::Consumed
             }
             KeyCode::Up => {
-                self.selected = self.selected.saturating_sub(1);
+                // (cp-04) wrap: first → last.
+                if !rows.is_empty() {
+                    self.selected = (self.selected + rows.len() - 1) % rows.len();
+                }
                 PaletteKeyOutcome::Consumed
             }
             KeyCode::Tab | KeyCode::Enter => {
@@ -307,9 +311,9 @@ mod tests {
             PaletteKeyOutcome::Consumed
         ));
         assert_eq!(p.selected, 0);
-        // Up at the top stays at 0 (no wrap).
+        // (cp-04) Up at the top wraps to the last row.
         handle_key(&mut p, KeyCode::Up);
-        assert_eq!(p.selected, 0);
+        assert_eq!(p.selected, p.rows().len() - 1);
     }
 
     #[test]

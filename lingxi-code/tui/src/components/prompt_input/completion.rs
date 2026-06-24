@@ -118,13 +118,17 @@ impl CompletionState {
         let len = self.rows().len();
         match code {
             KeyCode::Down => {
-                if len > 0 && self.selected + 1 < len {
-                    self.selected += 1;
+                // (cp-04) wrap: last → first.
+                if len > 0 {
+                    self.selected = (self.selected + 1) % len;
                 }
                 CompletionKeyOutcome::Consumed
             }
             KeyCode::Up => {
-                self.selected = self.selected.saturating_sub(1);
+                // (cp-04) wrap: first → last.
+                if len > 0 {
+                    self.selected = (self.selected + len - 1) % len;
+                }
                 CompletionKeyOutcome::Consumed
             }
             KeyCode::Esc => {
@@ -214,15 +218,12 @@ pub fn CompletionOverlay(props: &CompletionOverlayProps) -> impl Into<AnyElement
     let selected = props.selected;
     let theme = props.theme;
     if props.rows.is_empty() {
-        let msg = if props.empty_query {
-            EMPTY_NO_QUERY
-        } else {
-            EMPTY_WITH_QUERY
-        };
-        return element! {
-            View(height: 1) { Text(content: msg.to_string(), color: theme.dim) }
-        }
-        .into_any();
+        // (cp-06) The inline `@`-overlay collapses to nothing when there are no
+        // matches — claude-code does NOT render a "No matching files" /
+        // "Start typing to search…" row inline (that literal belongs to the
+        // full QuickOpenDialog surface, not the inline dropdown).
+        let _ = (EMPTY_NO_QUERY, EMPTY_WITH_QUERY, theme);
+        return element! { View(height: 0) }.into_any();
     }
     let rows: Vec<_> = props.rows.iter().take(OVERLAY_MAX_ITEMS).cloned().collect();
     element! {
@@ -322,10 +323,10 @@ mod tests {
         assert_eq!(c.selected, 0);
         c.handle_key(KeyCode::Down);
         assert_eq!(c.selected, 1);
-        c.handle_key(KeyCode::Down); // clamp at last
-        assert_eq!(c.selected, 1);
-        c.handle_key(KeyCode::Up);
+        c.handle_key(KeyCode::Down); // (cp-04) wrap last → first
         assert_eq!(c.selected, 0);
+        c.handle_key(KeyCode::Up); // (cp-04) wrap first → last
+        assert_eq!(c.selected, 1);
     }
 
     #[test]

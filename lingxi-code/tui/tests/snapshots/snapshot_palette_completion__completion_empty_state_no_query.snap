@@ -1,6 +1,6 @@
 ---
-source: crates/tui/tests/snapshot_palette_completion.rs
+source: tui/tests/snapshot_palette_completion.rs
 assertion_line: 42
 expression: out
 ---
-Start typing to search…
+

@@ -317,6 +317,9 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 vim_enabled: vim_enabled,
                 vim_mode: vim_mode,
                 vim_visual_linewise: vim_visual_linewise,
+                // (PIC-10) Surface the active permission mode in the footer
+                // (the only place it shows after SS-01 removed the status line).
+                permission_mode: permission_mode,
             )
             // (M9-05) Background-task footer pill, drawn bottom-most when present
             // (claude-code `BackgroundTaskStatus`). Hidden (no row) when `None`.

@@ -11,6 +11,29 @@
 //! footer.
 
 use iocraft::prelude::*;
+use permission::PermissionMode;
+
+/// Footer permission-mode indicator (claude-code `ModeIndicator`):
+/// `{symbol} {title-lowercased} on (shift+tab to cycle)` for NON-default modes;
+/// `None` for the default mode (no indicator). Symbols/titles ported from
+/// `utils/permissions/PermissionMode.ts`. After SS-01 removed the built-in
+/// status line this is the only place the active permission mode is surfaced.
+#[must_use]
+pub fn perm_mode_label(mode: PermissionMode) -> Option<String> {
+    let (symbol, title) = match mode {
+        PermissionMode::Default => return None,
+        PermissionMode::Plan => ("\u{23f8}", "Plan Mode"),
+        PermissionMode::AcceptEdits => ("\u{23f5}\u{23f5}", "Accept edits"),
+        PermissionMode::BypassPermissions => ("\u{23f5}\u{23f5}", "Bypass Permissions"),
+        PermissionMode::DontAsk => ("\u{23f5}\u{23f5}", "Don't Ask"),
+        PermissionMode::Auto => ("\u{23f5}\u{23f5}", "Auto mode"),
+        PermissionMode::Bubble => ("\u{23f5}\u{23f5}", "Bubble"),
+    };
+    Some(format!(
+        "{symbol} {} on (shift+tab to cycle)",
+        title.to_lowercase()
+    ))
+}
 
 use crate::components::prompt_input::{mode_indicator, VimMode};
 use crate::theme::TuiTheme;
@@ -86,6 +109,9 @@ pub struct PromptInputFooterProps {
     /// (M7-09) Whether the active Visual selection is linewise (`V`) vs charwise
     /// (`v`). Selects `-- VISUAL LINE --` over `-- VISUAL --`.
     pub vim_visual_linewise: bool,
+    /// (PIC-10) Active permission mode — a non-default mode renders the
+    /// `{symbol} {mode} on (shift+tab to cycle)` indicator in the footer.
+    pub permission_mode: PermissionMode,
 }
 
 impl Default for PromptInputFooterProps {
@@ -97,6 +123,7 @@ impl Default for PromptInputFooterProps {
             vim_enabled: false,
             vim_mode: VimMode::Insert,
             vim_visual_linewise: false,
+            permission_mode: PermissionMode::Default,
         }
     }
 }
@@ -122,7 +149,10 @@ pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement
     // hint is shown only when the buffer is empty (`suppressHint = input.length
     // > 0`) and no vim mode-indicator is rendered (`showVim`). The
     // `shift + ⏎ for newline` text never appears in the resting footer.
-    let show_hint = props.is_empty && mode_label.is_none();
+    // (PIC-10) Non-default permission mode shows its indicator instead of the
+    // hint (claude-code: `modePart` present → hint not pushed).
+    let perm_part = perm_mode_label(props.permission_mode);
+    let show_hint = props.is_empty && mode_label.is_none() && perm_part.is_none();
     element! {
         View(flex_direction: FlexDirection::Column) {
             #(mode_label.map(|label| element! {
@@ -134,6 +164,11 @@ pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement
                 Text(content: glyph, color: TuiTheme::DIM)
                 Text(content: placeholder, color: TuiTheme::DIM)
             }
+            #(perm_part.map(|p| element! {
+                View(flex_direction: FlexDirection::Row) {
+                    Text(content: p, color: TuiTheme::DIM)
+                }
+            }))
             #(show_hint.then(|| element! {
                 View(flex_direction: FlexDirection::Row) {
                     Text(content: "? for shortcuts".to_string(), color: TuiTheme::DIM)
@@ -150,6 +185,20 @@ mod tests {
     #[test]
     fn glyph_prompt_is_pointer() {
         assert_eq!(FooterMode::Prompt.glyph(), "❯ ");
+    }
+
+    #[test]
+    fn perm_mode_label_indicator() {
+        // (PIC-10) Default → no indicator; non-default → "{symbol} {mode} on …".
+        assert_eq!(perm_mode_label(PermissionMode::Default), None);
+        assert_eq!(
+            perm_mode_label(PermissionMode::Plan).as_deref(),
+            Some("\u{23f8} plan mode on (shift+tab to cycle)")
+        );
+        assert_eq!(
+            perm_mode_label(PermissionMode::AcceptEdits).as_deref(),
+            Some("\u{23f5}\u{23f5} accept edits on (shift+tab to cycle)")
+        );
     }
 
     #[test]

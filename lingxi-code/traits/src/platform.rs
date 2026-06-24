@@ -21,6 +21,7 @@ use crate::http::HttpTransport;
 use crate::notification::NotificationService;
 use crate::process::ProcessRunner;
 use crate::sandbox::Sandbox;
+use crate::secure_storage::SecureStorage;
 use crate::share::SharingService;
 use crate::stt::SpeechToText;
 use crate::tts::TextToSpeech;
@@ -75,6 +76,15 @@ pub trait Platform: Send + Sync {
     }
     /// Screen-capture + input automation backend, if available.
     fn computer_control(&self) -> Option<Arc<dyn ComputerControl>> {
+        None
+    }
+    /// OS-native secure credential store (iOS Keychain / Android Keystore), if
+    /// the platform provides one. When `None`, the composition root falls back to
+    /// a non-persisting development stub — so OAuth `/login` (which must persist
+    /// tokens) is gated off. A device platform injects a real, encrypted store
+    /// here so the engine's `CredentialManager` persists secrets to the OS vault
+    /// instead of the plaintext fallback.
+    fn secure_storage(&self) -> Option<Arc<dyn SecureStorage>> {
         None
     }
 }

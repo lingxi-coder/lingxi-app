@@ -387,6 +387,20 @@ impl PluginManager {
         copy_dir_recursive(src_dir, &dest)
             .await
             .map_err(|e| PluginManagerError::Io(format!("failed to materialize plugin cache: {e}")))?;
+        // Durably record the install (marketplace → plugin → version) so a later
+        // launch can re-discover the exact cache dir. Best-effort: a record-write
+        // failure must not fail an otherwise-successful install.
+        if let Err(e) = crate::installed::record(
+            &self.install_dir,
+            repo_subpath,
+            name,
+            version,
+            crate::installed::now_ms(),
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "failed to write installed_plugins.json record");
+        }
         Ok(dest)
     }
 

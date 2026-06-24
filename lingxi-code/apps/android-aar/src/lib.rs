@@ -179,6 +179,7 @@ pub fn build_mobile_engine(
             notifications: None,
             clipboard: None,
             shell: None,
+            secure_storage: None,
         }));
         engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
     }
@@ -541,6 +542,159 @@ fn clipboard_error_from_ffi(e: ClipboardFfiError) -> traits::ClipboardError {
     match e {
         ClipboardFfiError::Unsupported => traits::ClipboardError::Unsupported,
         ClipboardFfiError::Other { message } => traits::ClipboardError::Other(message),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Secure storage — foreign (Kotlin) Keystore callback interface + engine bridge.
+// ---------------------------------------------------------------------------
+//
+// The Kotlin app implements a crate-local async `AndroidSecureStorage` callback
+// interface backed by the Android Keystore / EncryptedSharedPreferences. The
+// engine's `protocol::SecureStorageData` is serde-encoded by the bridge into an
+// OPAQUE `blob: Vec<u8>` keyed by (service, account); the native side stores /
+// returns the blob verbatim (encrypted at rest by the Keystore). The bridge
+// adapts it to the shared `traits::SecureStorage` seam and reports
+// is_encrypted()=true / backend=AndroidKeystore so OAuth /login can persist.
+//
+// The bridge struct/impl + its error-fan-out are gated to `target_os =
+// "android"` (not just `uniffi`) because they serde-encode through `serde_json`,
+// which is a direct dependency only under the android target table — mirroring
+// every other `serde_json::` use in this file. The callback interface + its FFI
+// error enum stay plain `uniffi` so their converters register on the host
+// bindgen build and `AndroidSecureStorage` can be named in `build_android_engine`.
+
+/// FFI error surface for the Android secure-storage callback interface. A flat
+/// enum so `UniFFI` can render it for an async `callback_interface` method; the
+/// bridge fans it back out onto the richer [`traits::SecureStorageError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum SecureStorageFfiError {
+    /// The OS denied access (e.g. Keystore unlock / user-auth required).
+    #[error("secure storage permission denied: {message}")]
+    PermissionDenied {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+    /// The Keystore/store is currently unusable.
+    #[error("secure storage backend unavailable: {message}")]
+    BackendUnavailable {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+    /// Any other native failure.
+    #[error("secure storage io error: {message}")]
+    Io {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+}
+
+/// Crate-local foreign callback interface for the native Android Keystore-backed
+/// secure store. The engine's serialized `SecureStorageData` crosses the seam as
+/// an opaque `blob` keyed by `(service, account)`; the Kotlin side persists it in
+/// the Keystore / EncryptedSharedPreferences. Bridged to [`traits::SecureStorage`]
+/// by [`AndroidSecureStorageBridge`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait AndroidSecureStorage: Send + Sync {
+    /// Persist `blob` under `(service, account)`, overwriting any existing entry.
+    async fn store(
+        &self,
+        service: String,
+        account: String,
+        blob: Vec<u8>,
+    ) -> Result<(), SecureStorageFfiError>;
+    /// Return the blob for `(service, account)`, or `None` if absent.
+    async fn retrieve(
+        &self,
+        service: String,
+        account: String,
+    ) -> Result<Option<Vec<u8>>, SecureStorageFfiError>;
+    /// Remove `(service, account)` (removing a non-existent entry is not an error).
+    async fn delete(&self, service: String, account: String)
+        -> Result<(), SecureStorageFfiError>;
+    /// List every `account` stored under `service`.
+    async fn list(&self, service: String) -> Result<Vec<String>, SecureStorageFfiError>;
+}
+
+/// Adapts the crate-local [`AndroidSecureStorage`] (opaque-blob FFI) to the
+/// shared [`traits::SecureStorage`] seam: serde-encodes `SecureStorageData` to a
+/// blob on store, decodes on retrieve, and reports the Keystore as an encrypted
+/// backend so the engine persists secrets there.
+#[cfg(all(feature = "uniffi", target_os = "android"))]
+struct AndroidSecureStorageBridge {
+    inner: Box<dyn AndroidSecureStorage>,
+}
+
+#[cfg(all(feature = "uniffi", target_os = "android"))]
+#[async_trait::async_trait]
+impl traits::SecureStorage for AndroidSecureStorageBridge {
+    async fn store(
+        &self,
+        service: &str,
+        account: &str,
+        data: protocol::SecureStorageData,
+    ) -> Result<(), traits::SecureStorageError> {
+        let blob = serde_json::to_vec(&data)
+            .map_err(|e| traits::SecureStorageError::Io(format!("serialize: {e}")))?;
+        self.inner
+            .store(service.to_string(), account.to_string(), blob)
+            .await
+            .map_err(securestorage_error_from_ffi)
+    }
+    async fn retrieve(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
+        match self
+            .inner
+            .retrieve(service.to_string(), account.to_string())
+            .await
+            .map_err(securestorage_error_from_ffi)?
+        {
+            Some(blob) => {
+                let data = serde_json::from_slice(&blob)
+                    .map_err(|e| traits::SecureStorageError::Io(format!("deserialize: {e}")))?;
+                Ok(Some(data))
+            }
+            None => Ok(None),
+        }
+    }
+    async fn delete(&self, service: &str, account: &str) -> Result<(), traits::SecureStorageError> {
+        self.inner
+            .delete(service.to_string(), account.to_string())
+            .await
+            .map_err(securestorage_error_from_ffi)
+    }
+    async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
+        self.inner
+            .list(service.to_string())
+            .await
+            .map_err(securestorage_error_from_ffi)
+    }
+    fn is_encrypted(&self) -> bool {
+        true
+    }
+    fn backend(&self) -> traits::SecureStorageBackend {
+        traits::SecureStorageBackend::AndroidKeystore
+    }
+}
+
+/// Fan a flat [`SecureStorageFfiError`] back out onto [`traits::SecureStorageError`].
+#[cfg(all(feature = "uniffi", target_os = "android"))]
+fn securestorage_error_from_ffi(e: SecureStorageFfiError) -> traits::SecureStorageError {
+    match e {
+        SecureStorageFfiError::PermissionDenied { message } => {
+            traits::SecureStorageError::PermissionDenied(message)
+        }
+        SecureStorageFfiError::BackendUnavailable { message } => {
+            traits::SecureStorageError::BackendUnavailable(message)
+        }
+        SecureStorageFfiError::Io { message } => traits::SecureStorageError::Io(message),
     }
 }
 
@@ -1263,6 +1417,7 @@ pub fn build_android_engine(
     shell: Option<AndroidShellConfigFfi>,
     git: Option<AndroidGitConfigFfi>,
     git_credential_provider: Option<Box<dyn AndroidGitCredentialProvider>>,
+    secure_storage: Option<Box<dyn AndroidSecureStorage>>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let listener: Arc<dyn ClientEventListener> =
         Arc::new(AndroidListenerBridge { inner: listener });
@@ -1332,6 +1487,8 @@ pub fn build_android_engine(
             })),
             clipboard: Some(Arc::new(AndroidClipboardBridge { inner: clipboard })),
             shell: shell_cfg,
+            secure_storage: secure_storage
+                .map(|s| std::sync::Arc::new(AndroidSecureStorageBridge { inner: s }) as std::sync::Arc<dyn traits::SecureStorage>),
         });
 
         // D8: run the eager capability probe and populate the SHARED cache
@@ -1502,6 +1659,7 @@ pub fn build_android_engine(
             shell,
             git,
             git_credential_provider,
+            secure_storage,
         );
         Err(MobileEngineError::PlatformUnavailable)
     }

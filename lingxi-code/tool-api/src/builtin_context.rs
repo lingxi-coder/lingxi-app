@@ -20,6 +20,7 @@ use traits::camera::CameraControl;
 use traits::clipboard::Clipboard;
 use traits::clock::Clock;
 use traits::computer_control::ComputerControl;
+use traits::coordinator_mode::CoordinatorModeHandle;
 use traits::filesystem::FileSystem;
 use traits::http::HttpTransport;
 use traits::mailbox::MailboxRouterHandle;
@@ -106,6 +107,11 @@ pub struct BuiltinToolContext {
     /// Budget enforcer — `AgentTool` gates spawn calls through this seam.
     /// Production wires `cost::BudgetEnforcer`.
     pub budget_enforcer: Option<Arc<dyn BudgetEnforcerHandle>>,
+    /// Coordinator-mode seam — `AgentTool` consults this LIVE to gate the
+    /// fork-subagent path (mutually exclusive with coordinator mode) and to
+    /// select the slim coordinator tool prompt. `None` ⇒ not coordinator (the
+    /// default). Production wires `coordinator::CoordinatorMode`.
+    pub coordinator_mode: Option<Arc<dyn CoordinatorModeHandle>>,
     /// Permission gate (enforcement 3b) — `AgentTool` threads this into the
     /// `RegistryToolInvoker` it hands the spawner, so a spawned subagent's tool
     /// calls are gated by the SAME policy as the main loop (closing the bypass

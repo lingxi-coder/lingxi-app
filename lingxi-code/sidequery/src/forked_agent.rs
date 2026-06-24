@@ -1,34 +1,38 @@
 //! Forked-agent runner: full agent loop rooted at the parent's cache-safe
 //! prompt prefix.
 //!
-//! Unlike [`crate::side_query::SideQueryClient`] (stateless one-shot), a
-//! forked agent runs the complete subagent loop in a borrowed slot from
-//! the host's state-machine pool. It serializes its prompt with the same
-//! byte layout as the parent (via [`CacheSafeParams`]) so Anthropic's
-//! prompt cache hits on the shared prefix.
+//! **The multi-turn, tool-using fork lives elsewhere — by design.** The full
+//! parent-prefix-rooted, tool-iterating forked subagent loop is implemented and
+//! wired via the `Agent` tool's fork path, NOT through this runner:
+//! `tool_agent::AgentTool::call` (`subagent_type == "fork"`) → `SubagentSpawner`
+//! → `agent::PoolSubagentSpawner::spawn` → `StateMachinePool::allocate` →
+//! `agent::runner::run_subagent_loop` (the real `loop` to `end_turn`/`max_turns`).
+//! All the claude-code fork parity bits are there: the `FORK_AGENT` builtin with
+//! `use_exact_tools`, `traits::fork_subagent::build_forked_messages` for the
+//! cache-safe prefix, the verbatim parent system prompt, and the
+//! `is_in_fork_child` recursion guard. A forked agent that runs tools therefore
+//! goes through `AgentTool`, where that guard and the exact-tools pool apply.
 //!
-//! **Architectural note (M1):** `lingxi-sidequery` deliberately does not
-//! depend on `lingxi-agent` — the agent crate already depends on
-//! `lingxi-memory`, and `lingxi-memory` depends on this crate (for the
-//! refactored selector in Task 5). To avoid the dependency cycle, the
-//! runner accepts a `SubagentSlotProvider` trait object that the agent
-//! crate implements on `StateMachinePool` in a later wiring plan. The
-//! field is unused while only the single-turn path is wired.
+//! **This runner is the SINGLE-TURN summarization helper.** It is intentionally
+//! one-shot: when a [`SideQueryClient`] is wired via
+//! [`ForkedAgentRunner::with_side_query_client`], [`ForkedAgentRunner::run`]
+//! replays the parent's cache-safe prefix
+//! (`cache_safe_params.fork_context_messages`) ahead of the fork's own
+//! `prompt_messages` so Anthropic's prompt cache hits the shared prefix, then
+//! issues ONE stateless LLM call and returns the assistant text + usage. No tool
+//! loop runs here — its consumers are summarization-shaped (autocompaction and
+//! the post-session memory extraction). When no client is wired, [`run`] returns
+//! the legacy `"[forked-agent-stub]"` sentinel.
 //!
-//! **Single-turn path (this revision):** when a [`SideQueryClient`] is wired
-//! via [`ForkedAgentRunner::with_side_query_client`], [`ForkedAgentRunner::run`]
-//! performs a real, *single-turn* forked call: it replays the parent's
-//! cache-safe prefix (`cache_safe_params.fork_context_messages`) ahead of the
-//! fork's own `prompt_messages` so Anthropic's prompt cache hits on the shared
-//! prefix, then issues one stateless LLM call through the client and returns
-//! the assistant text + usage. No tool loop runs on this path.
+//! **Cycle note:** `lingxi-sidequery` deliberately does not depend on
+//! `lingxi-agent` (the cycle would be `agent → memory → sidequery`). The
+//! multi-turn, tool-using fork loop therefore lives in `AgentTool`
+//! (`StateMachinePool::run_subagent_loop`), not here; this runner is the
+//! single-turn (summarization-shaped) path only. A future *sidequery-level*
+//! multi-turn consumer that genuinely cannot reach `AgentTool` would need its
+//! own slot-allocation seam wired in at that point.
 //!
-//! **Still future work:** the FULL multi-turn, tool-using subagent loop
-//! (the §10 `runner.rs` `run_subagent` driver that borrows a slot from
-//! [`SubagentSlotProvider`] and iterates tool calls) is not implemented here.
-//! When no client is wired, [`ForkedAgentRunner::run`] returns the legacy
-//! `"[forked-agent-stub]"` sentinel so existing callers keep building against
-//! the final shape.
+//! [`run`]: ForkedAgentRunner::run
 
 use crate::cache_safe_params::CacheSafeParams;
 use crate::purposes::QuerySource;
@@ -42,25 +46,6 @@ use thiserror::Error;
 /// override it. Mirrors `MAX_OUTPUT_TOKENS_FOR_SUMMARY` from the compaction
 /// path — single-turn forks today are summarization-shaped.
 const DEFAULT_FORK_MAX_TOKENS: u32 = 20_000;
-
-/// Pool-shaped abstraction that lets the runner allocate forked slots
-/// without depending on `lingxi-agent`. Implemented by
-/// `agent::StateMachinePool` in the wiring layer (later plan).
-///
-/// M1.14 only requires `Send + Sync` so the runner can hold an `Arc`.
-pub trait SubagentSlotProvider: Send + Sync {}
-
-/// A [`SubagentSlotProvider`] that never allocates a slot.
-///
-/// The single-turn side-query path (`with_side_query_client` → [`ForkedAgentRunner::run`])
-/// does not touch `pool` — slot allocation is the future multi-turn runner's
-/// job — so a composition root that wires the forked autocompact summarizer
-/// (In-Loop Compaction Batch 6) can pass this no-op provider. Replace it with
-/// the real `agent::StateMachinePool` once the multi-turn fork path lands.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NoopSubagentSlotProvider;
-
-impl SubagentSlotProvider for NoopSubagentSlotProvider {}
 
 /// Coarse purpose tag for a forked agent. Mirrors [`QuerySource`] for the
 /// subset of purposes that legitimately fork (full loops), and is carried
@@ -112,9 +97,6 @@ pub struct ForkedAgentResult {
 /// Forked-agent failure surface.
 #[derive(Debug, Clone, Error)]
 pub enum ForkError {
-    /// Pool refused to allocate a slot (saturated or shutting down).
-    #[error("pool error: {0}")]
-    Pool(String),
     /// The shared [`crate::CacheSafeParamsSlot`] is empty — the parent has
     /// not completed a turn yet.
     #[error("no cache-safe params available")]
@@ -124,36 +106,29 @@ pub enum ForkError {
     Internal(String),
 }
 
-/// Runs forked agents inside slots borrowed from a shared pool.
-///
-/// The pool reference is intentionally retained even though the single-turn
-/// path does not yet allocate slots: it locks in the public surface for when
-/// the §10 multi-turn runner graduates, and lets callers plumb the runner from
-/// `CompactionOrchestrator::new` today.
+/// Runs single-turn forked agents (summarization-shaped side queries).
 ///
 /// When a [`SideQueryClient`] is wired via [`Self::with_side_query_client`],
 /// [`Self::run`] performs a real single-turn forked call (see the module
 /// docs); otherwise it returns the legacy stub sentinel.
 pub struct ForkedAgentRunner {
-    #[allow(dead_code)] // Used once the §10 multi-turn runner is wired in.
-    pool: Arc<dyn SubagentSlotProvider>,
     /// Optional single-turn backend: `(client, model)`. `None` until a caller
     /// opts in via [`Self::with_side_query_client`], preserving the stub path.
     side_query: Option<(Arc<dyn SideQueryClient>, String)>,
 }
 
+impl Default for ForkedAgentRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ForkedAgentRunner {
-    /// Build a runner backed by the given pool. Multiple subsystems
-    /// (compaction, supervisor, ...) share the same pool instance.
-    ///
-    /// The runner starts with no single-turn backend; call
+    /// Build a runner with no single-turn backend; call
     /// [`Self::with_side_query_client`] to opt into the real single-turn path.
     #[must_use]
-    pub fn new(pool: Arc<dyn SubagentSlotProvider>) -> Self {
-        Self {
-            pool,
-            side_query: None,
-        }
+    pub fn new() -> Self {
+        Self { side_query: None }
     }
 
     /// Wire a real single-turn forked path backed by `client`, calling `model`.
@@ -194,9 +169,8 @@ impl ForkedAgentRunner {
     /// When no backend is wired the runner returns the legacy
     /// `"[forked-agent-stub]"` sentinel, unchanged.
     ///
-    /// The FULL multi-turn, tool-using subagent loop (the §10 `run_subagent`
-    /// driver that borrows a slot from [`SubagentSlotProvider`]) remains future
-    /// work.
+    /// The FULL multi-turn, tool-using subagent loop runs through `AgentTool`
+    /// (`StateMachinePool::run_subagent_loop`), not this single-turn runner.
     ///
     /// # Errors
     ///
@@ -264,11 +238,6 @@ mod tests {
     use protocol::{ConversationMessage, MessageId};
     use std::sync::Mutex;
     use tool_api::context::ToolUseOptions;
-
-    /// A `SubagentSlotProvider` that is never asked to allocate on the
-    /// single-turn path (the runner does not borrow a slot here).
-    struct NoopProvider;
-    impl SubagentSlotProvider for NoopProvider {}
 
     /// Mock `SideQueryClient`: records the request it was handed and returns a
     /// canned response so tests can assert both the request mapping and the
@@ -352,7 +321,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_without_client_returns_stub() {
-        let runner = ForkedAgentRunner::new(Arc::new(NoopProvider));
+        let runner = ForkedAgentRunner::new();
         let req = request_with(vec![user_msg("prefix")], vec![user_msg("prompt")], None);
 
         let result = runner.run(req).await.expect("stub run succeeds");
@@ -374,7 +343,7 @@ mod tests {
             canned_usage,
         });
 
-        let runner = ForkedAgentRunner::new(Arc::new(NoopProvider))
+        let runner = ForkedAgentRunner::new()
             .with_side_query_client(client.clone(), "claude-opus-4-6".into());
 
         let req = request_with(
@@ -418,7 +387,7 @@ mod tests {
         let client = Arc::new(FailingClient {
             message: "boom".into(),
         });
-        let runner = ForkedAgentRunner::new(Arc::new(NoopProvider))
+        let runner = ForkedAgentRunner::new()
             .with_side_query_client(client, "m".into());
 
         let req = request_with(vec![user_msg("prefix")], vec![user_msg("prompt")], None);
@@ -440,7 +409,7 @@ mod tests {
             canned_text: String::new(),
             canned_usage: Usage::default(),
         });
-        let runner = ForkedAgentRunner::new(Arc::new(NoopProvider))
+        let runner = ForkedAgentRunner::new()
             .with_side_query_client(client.clone(), "m".into());
 
         let req = request_with(vec![], vec![user_msg("only-prompt")], None);

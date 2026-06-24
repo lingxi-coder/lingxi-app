@@ -34,7 +34,7 @@ use orchestrator::StreamingApiClient;
 use tokio::sync::Mutex;
 use traits::{
     CameraControl, Clock, FileSystem, HttpTransport, Platform, ProcessRunner, Sandbox,
-    SharingService, VoiceRecorder, WorktreeManager,
+    SecureStorage, SharingService, VoiceRecorder, WorktreeManager,
 };
 
 pub use crate::host::{
@@ -52,6 +52,7 @@ pub struct HostFakePlatform {
     process: Arc<dyn ProcessRunner>,
     sandbox: Arc<dyn Sandbox>,
     worktree: Arc<dyn WorktreeManager>,
+    secure_storage: Option<Arc<dyn SecureStorage>>,
 }
 
 impl HostFakePlatform {
@@ -68,7 +69,17 @@ impl HostFakePlatform {
             process: Arc::new(PosixProcess::new()),
             sandbox: Arc::new(PosixSandbox::new()),
             worktree: Arc::new(PosixWorktree::new()),
+            secure_storage: None,
         }
+    }
+
+    /// Inject a fake secure store so the built runtime reports
+    /// `oauth_supported = store.is_encrypted()` — used to prove the native
+    /// secure-storage injection seam end-to-end off-device.
+    #[must_use]
+    pub fn with_secure_storage(mut self, store: Arc<dyn SecureStorage>) -> Self {
+        self.secure_storage = Some(store);
+        self
     }
 }
 
@@ -101,6 +112,9 @@ impl Platform for HostFakePlatform {
     }
     fn share(&self) -> Option<Arc<dyn SharingService>> {
         None
+    }
+    fn secure_storage(&self) -> Option<Arc<dyn SecureStorage>> {
+        self.secure_storage.clone()
     }
 }
 

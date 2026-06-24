@@ -371,10 +371,7 @@ mod tests {
 
     #[tokio::test]
     async fn extract_writes_file_and_advances_watermark() {
-        use sidequery::{
-            NoopSubagentSlotProvider, SideQueryClient, SideQueryError, SideQueryRequest,
-            SideQueryResponse,
-        };
+        use sidequery::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
         use async_trait::async_trait;
         use tool_api::context::ToolUseOptions;
 
@@ -396,7 +393,7 @@ mod tests {
             }
         }
 
-        let runner = ForkedAgentRunner::new(Arc::new(NoopSubagentSlotProvider))
+        let runner = ForkedAgentRunner::new()
             .with_side_query_client(Arc::new(Client), "claude-haiku-4-5".into());
 
         let cache_safe = CacheSafeParams {

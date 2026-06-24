@@ -964,3 +964,48 @@ fn walkdir(root: &Path) -> Vec<String> {
     }
     out
 }
+
+#[tokio::test]
+async fn install_records_to_installed_plugins_json_and_is_rediscovered() {
+    use plugin::PluginSource;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src-repo");
+    init_git_plugin_repo(&src, "durableplugin"); // version 2.1.0
+    let install_root = tmp.path().join("plugins");
+
+    // Install once (via the git arm → copy_into_cache → record).
+    {
+        let (manager, _cmd) = make_manager(&install_root, &tmp.path().join("secrets")).await;
+        manager
+            .install(PluginSource::Git {
+                url: format!("file://{}", src.display()),
+                ref_: String::new(),
+            })
+            .await
+            .expect("git install should succeed + record");
+    }
+
+    // The durable record was written.
+    let recorded = install_root.join("installed_plugins.json");
+    assert!(recorded.exists(), "installed_plugins.json should be written");
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&recorded).unwrap()).unwrap();
+    assert_eq!(json["version"], 2, "V2 schema");
+
+    // A FRESH manager (simulating a relaunch) re-discovers the plugin from the
+    // record alone — resolving its exact cache dir, no probing.
+    let rediscovered = plugin::discover_recorded_plugins(&install_root).await;
+    assert_eq!(rediscovered.len(), 1, "exactly one recorded plugin re-discovered");
+    assert_eq!(rediscovered[0].1.name, "durableplugin");
+    assert_eq!(rediscovered[0].1.version, "2.1.0");
+
+    // And re-enabling it on a fresh manager materializes its command again.
+    let (m2, cmd2) = make_manager(&install_root, &tmp.path().join("secrets2")).await;
+    let (id, manifest, dir) = rediscovered.into_iter().next().unwrap();
+    m2.enable(&id, manifest, dir).await.expect("re-enable from record");
+    assert!(
+        cmd2.read().await.resolve("durableplugin:hello").is_some(),
+        "re-discovered plugin's command should register"
+    );
+}

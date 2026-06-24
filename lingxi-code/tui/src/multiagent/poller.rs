@@ -50,6 +50,16 @@ impl MultiAgentFeed for PollerFeed {
             .collect::<Vec<_>>();
         vec![MultiAgentEvent::TasksRefreshed(rows)]
     }
+
+    /// (BGTASK-3) Delegate to the registry's `kill`; the next `poll()` picks
+    /// up the resulting status change.
+    async fn kill(&self, task_id: &str) -> Result<(), String> {
+        self.tasks
+            .kill(task_id)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -61,8 +71,20 @@ mod tests {
 
     /// Minimal stand-in `TaskRegistryHandle`: `list` returns a canned set; the
     /// other methods are unused by `PollerFeed::poll` and return trivially.
+    /// (BGTASK-3) `killed` records every id passed to `kill`, for
+    /// `PollerFeed::kill` delegation tests.
     struct StubTasks {
         rows: Vec<TaskRecord>,
+        killed: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl StubTasks {
+        fn new(rows: Vec<TaskRecord>) -> Self {
+            Self {
+                rows,
+                killed: std::sync::Mutex::new(Vec::new()),
+            }
+        }
     }
 
     #[async_trait]
@@ -86,8 +108,13 @@ mod tests {
         async fn set_status(&self, _: &str, _: &str) -> Result<TaskRecord, TaskRegistryError> {
             Err(TaskRegistryError::Internal("unused".into()))
         }
-        async fn kill(&self, _: &str) -> Result<TaskRecord, TaskRegistryError> {
-            Err(TaskRegistryError::Internal("unused".into()))
+        async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError> {
+            self.killed.lock().expect("poisoned").push(id.to_string());
+            self.rows
+                .iter()
+                .find(|r| r.task_id == id)
+                .cloned()
+                .ok_or_else(|| TaskRegistryError::NotFound(id.to_string()))
         }
         async fn output(
             &self,
@@ -100,24 +127,22 @@ mod tests {
 
     #[tokio::test]
     async fn poll_maps_registry_records_to_task_rows() {
-        let stub = Arc::new(StubTasks {
-            rows: vec![
-                TaskRecord {
-                    task_id: "b00000001".into(),
-                    task_type: "local_bash".into(),
-                    status: "running".into(),
-                    description: "cargo build".into(),
-                    command: None,
-                },
-                TaskRecord {
-                    task_id: "a00000002".into(),
-                    task_type: "local_agent".into(),
-                    status: "completed".into(),
-                    description: "explore".into(),
-                    command: None,
-                },
-            ],
-        });
+        let stub = Arc::new(StubTasks::new(vec![
+            TaskRecord {
+                task_id: "b00000001".into(),
+                task_type: "local_bash".into(),
+                status: "running".into(),
+                description: "cargo build".into(),
+                command: None,
+            },
+            TaskRecord {
+                task_id: "a00000002".into(),
+                task_type: "local_agent".into(),
+                status: "completed".into(),
+                description: "explore".into(),
+                command: None,
+            },
+        ]));
         let feed = PollerFeed::new(stub);
         match feed.poll().await.as_slice() {
             [MultiAgentEvent::TasksRefreshed(rows)] => {
@@ -129,5 +154,22 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn kill_delegates_to_the_registry_handle() {
+        // (BGTASK-3)
+        let stub = Arc::new(StubTasks::new(vec![TaskRecord {
+            task_id: "b00000001".into(),
+            task_type: "local_bash".into(),
+            status: "running".into(),
+            description: "cargo build".into(),
+            command: None,
+        }]));
+        let feed = PollerFeed::new(stub.clone());
+        assert!(feed.kill("b00000001").await.is_ok());
+        assert_eq!(stub.killed.lock().unwrap().as_slice(), ["b00000001"]);
+        // Unknown id -> the registry's NotFound surfaces as Err.
+        assert!(feed.kill("nonexistent").await.is_err());
     }
 }

@@ -904,6 +904,11 @@ pub struct AppState {
     /// free, and claude-code itself amortizes this via a background-refreshed
     /// index rather than re-walking on every keystroke.
     pub project_file_cache: Option<(std::path::PathBuf, Vec<String>)>,
+    /// (BGTASK-3) Set by the `/tasks` dialog's `x`-stop key: the task id to
+    /// kill. `pump_task_stop` calls the multiagent feed's `kill` OUTSIDE the
+    /// `AppState` lock, then clears the flag. The next poll picks up the
+    /// resulting status change — no manual refresh needed here.
+    pub pending_task_stop: Option<String>,
     /// (`/copy`) Set by the `/copy [N]` submit intercept: a request to write
     /// the selected assistant text to the system clipboard (claude-code
     /// `commands/copy/copy.tsx` → `setClipboard`). The SYNC submit path can't
@@ -1057,6 +1062,7 @@ impl AppState {
             pending_permission_delete: None,
             pending_permission_add: None,
             project_file_cache: None,
+            pending_task_stop: None,
             pending_copy_clipboard: None,
             pending_terminal_sequence: None,
             status_line_text: None,

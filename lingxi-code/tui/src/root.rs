@@ -720,16 +720,19 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
             // section-grouped, running-first display order the renderer
             // uses — both must call `display_order` so the highlighted row
             // and Enter's target stay in sync with what's drawn.
-            let ids: Vec<String> = display_order(&st.multiagent.tasks)
-                .into_iter()
-                .map(|t| t.task_id.clone())
-                .collect();
+            let ordered: Vec<crate::multiagent::state::TaskRow> =
+                display_order(&st.multiagent.tasks).into_iter().cloned().collect();
             let ct = iocraft_to_crossterm028_key(k);
-            match handle_background_tasks_key(state, &ids, ct.code) {
+            match handle_background_tasks_key(state, &ordered, ct.code) {
                 TaskDialogOutcome::Close => st.close_screen(),
                 TaskDialogOutcome::Stay => { /* keep the screen open */ }
                 TaskDialogOutcome::OpenedDetail(_id) => {
                     // Tailing is driven by the ticker pump (Task 7); nothing here.
+                }
+                // (BGTASK-3) Raise the request; `pump_task_stop` (tick loop)
+                // calls the feed's kill OUTSIDE this sync key handler.
+                TaskDialogOutcome::Stop(id) => {
+                    st.pending_task_stop = Some(id);
                 }
             }
         }
@@ -2367,6 +2370,24 @@ pub async fn pump_permission_add(state: &Arc<Mutex<AppState>>) -> bool {
     true
 }
 
+/// (BGTASK-3) Drain a pending `/tasks` `x`-stop: call the multiagent feed's
+/// `kill` for the staged task id OUTSIDE the `AppState` lock. Best-effort —
+/// a failed kill (task already finished, unsupported feed) is silently
+/// dropped; the next poll's status reflects whatever's actually true.
+pub async fn pump_task_stop(
+    state: &Arc<Mutex<AppState>>,
+    feed: &dyn crate::multiagent::MultiAgentFeed,
+) -> bool {
+    let id = {
+        let mut st = state.lock().await;
+        let Some(id) = st.pending_task_stop.take() else {
+            return false;
+        };
+        id
+    };
+    feed.kill(&id).await.is_ok()
+}
+
 /// (`/copy`) Write a pending `/copy` selection to the system clipboard.
 ///
 /// Mirrors [`pump_save_color`] (no `OrchestratorHandle`, no priority guard): the
@@ -2848,6 +2869,12 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 // is wired (the desktop mount supplies both; others pass `None`).
                 if let (Some(feed), Some(tx)) = (multiagent_feed.as_ref(), multiagent_tx.as_ref()) {
                     let _sent = crate::multiagent::pump_once(feed.as_ref(), tx).await;
+                }
+                // (BGTASK-3) `/tasks` `x`-stop pump: best-effort, fire-and-forget
+                // (the next poll above picks up the resulting status change —
+                // no redraw bump needed here).
+                if let Some(feed) = multiagent_feed.as_ref() {
+                    let _stopped = pump_task_stop(&state, feed.as_ref()).await;
                 }
                 let streaming = state.lock().await.streaming.is_some();
                 if streaming || needs_redraw {
@@ -3958,6 +3985,57 @@ mod tests {
         let stored = pump_store_provider_key(&state).await;
         assert!(!stored, "no store bound ⇒ pump stores nothing and returns false");
         assert!(state.lock().await.pending_store_key.is_none());
+    }
+
+    /// (BGTASK-3) `pump_task_stop` drains `pending_task_stop` and calls the
+    /// feed's `kill` for that id, OUTSIDE the lock — mirrors the
+    /// `pump_permission_delete`/`pump_save_color` take-then-act shape.
+    #[tokio::test]
+    async fn pump_task_stop_drains_pending_and_calls_feed_kill() {
+        struct RecordingFeed {
+            killed: std::sync::Mutex<Vec<String>>,
+        }
+        #[async_trait::async_trait]
+        impl crate::multiagent::MultiAgentFeed for RecordingFeed {
+            async fn poll(&self) -> Vec<crate::multiagent::MultiAgentEvent> {
+                Vec::new()
+            }
+            async fn kill(&self, task_id: &str) -> Result<(), String> {
+                self.killed.lock().unwrap().push(task_id.to_string());
+                Ok(())
+            }
+        }
+
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.pending_task_stop = Some("b00000001".to_string());
+        let state = Arc::new(Mutex::new(st));
+        let feed = RecordingFeed {
+            killed: std::sync::Mutex::new(Vec::new()),
+        };
+
+        let stopped = pump_task_stop(&state, &feed).await;
+        assert!(stopped, "pump must report a successful kill");
+        assert_eq!(feed.killed.lock().unwrap().as_slice(), ["b00000001"]);
+        assert!(state.lock().await.pending_task_stop.is_none());
+    }
+
+    /// Nothing pending → no-op, no feed call.
+    #[tokio::test]
+    async fn pump_task_stop_noop_when_nothing_pending() {
+        struct PanicsIfCalled;
+        #[async_trait::async_trait]
+        impl crate::multiagent::MultiAgentFeed for PanicsIfCalled {
+            async fn poll(&self) -> Vec<crate::multiagent::MultiAgentEvent> {
+                Vec::new()
+            }
+            async fn kill(&self, _task_id: &str) -> Result<(), String> {
+                panic!("kill must not be called when nothing is pending");
+            }
+        }
+
+        let state = Arc::new(Mutex::new(AppState::new(crate::state::StatusSnapshot::default())));
+        let stopped = pump_task_stop(&state, &PanicsIfCalled).await;
+        assert!(!stopped);
     }
 
     /// (Plan 3c §6.3) `pump_open_connect` opens the masked API-key screen for an

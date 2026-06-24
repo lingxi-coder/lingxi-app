@@ -42,14 +42,20 @@ pub enum TaskDialogOutcome {
     Close,
     /// Entered detail for this task id — controller should begin tailing it.
     OpenedDetail(String),
+    /// (BGTASK-3) The user pressed `x` on a running task — controller should
+    /// call the registry's kill for this task id.
+    Stop(String),
 }
 
-/// Reduce a key against the dialog. `task_ids` is the live ordered list of task
-/// ids from `AppState.multiagent.tasks`.
+use crate::multiagent::state::TaskRow;
+
+/// Reduce a key against the dialog. `tasks` is the live display-ordered list
+/// from `AppState.multiagent.tasks` (via [`display_order`]) — selection
+/// indexes into it the same way the renderer does.
 #[must_use]
 pub fn handle_background_tasks_key(
     state: &mut BackgroundTasksState,
-    task_ids: &[String],
+    tasks: &[TaskRow],
     key: crossterm::event::KeyCode,
 ) -> TaskDialogOutcome {
     use crossterm::event::KeyCode;
@@ -60,19 +66,25 @@ pub fn handle_background_tasks_key(
                 TaskDialogOutcome::Stay
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if !task_ids.is_empty() {
-                    state.selected = (state.selected + 1).min(task_ids.len() - 1);
+                if !tasks.is_empty() {
+                    state.selected = (state.selected + 1).min(tasks.len() - 1);
                 }
                 TaskDialogOutcome::Stay
             }
-            KeyCode::Enter => match task_ids.get(state.selected) {
-                Some(id) => {
+            KeyCode::Enter => match tasks.get(state.selected) {
+                Some(t) => {
                     state.mode = TaskDialogMode::Detail;
-                    state.detail_task_id = Some(id.clone());
+                    state.detail_task_id = Some(t.task_id.clone());
                     state.tail = OutputTailState::default();
-                    TaskDialogOutcome::OpenedDetail(id.clone())
+                    TaskDialogOutcome::OpenedDetail(t.task_id.clone())
                 }
                 None => TaskDialogOutcome::Stay,
+            },
+            // (BGTASK-3) `x` stops the selected task — only when it's running
+            // (claude-code gates the hint/key on `status === 'running'`).
+            KeyCode::Char('x') => match tasks.get(state.selected) {
+                Some(t) if t.status == "running" => TaskDialogOutcome::Stop(t.task_id.clone()),
+                _ => TaskDialogOutcome::Stay,
             },
             // claude-code list hint is `←/Esc close` — both keys close the
             // dialog from the top-level list (TASKS-DIALOG-KEYHINTS).
@@ -85,6 +97,15 @@ pub fn handle_background_tasks_key(
                 state.detail_task_id = None;
                 TaskDialogOutcome::Stay
             }
+            // (BGTASK-3) `x` also stops from the detail view.
+            KeyCode::Char('x') => match state
+                .detail_task_id
+                .as_ref()
+                .and_then(|id| tasks.iter().find(|t| &t.task_id == id))
+            {
+                Some(t) if t.status == "running" => TaskDialogOutcome::Stop(t.task_id.clone()),
+                _ => TaskDialogOutcome::Stay,
+            },
             _ => TaskDialogOutcome::Stay,
         },
     }
@@ -92,7 +113,6 @@ pub fn handle_background_tasks_key(
 
 use crate::components::tasks::detail::render_task_detail;
 use crate::components::tasks::render_task_row;
-use crate::multiagent::state::TaskRow;
 
 /// Canonical section order (claude-code `BackgroundTasksDialog.tsx`): the
 /// teammate "Agents" group, then Shells/Monitors/Remote agents/Local
@@ -239,11 +259,15 @@ pub fn render_background_tasks_to_string(
                 out.push_str(&render_task_row(row));
                 out.push('\n');
             }
-            // (TASKS-DIALOG-KEYHINTS) `↑/↓ select · Enter view · ←/Esc close`.
-            // The conditional `x stop` hint is omitted: LingXi tasks are not
-            // killable (no stop action), so claude-code's killable-gate would
-            // never surface it either.
-            out.push_str("\u{2191}/\u{2193} select \u{00B7} Enter view \u{00B7} \u{2190}/Esc close");
+            // (TASKS-DIALOG-KEYHINTS/BGTASK-3) `↑/↓ select · Enter view ·
+            // [x stop] · ←/Esc close` — `x stop` only when the selected row
+            // is a running task (claude-code's killable-gate).
+            let running = ordered.get(state.selected).is_some_and(|t| t.status == "running");
+            out.push_str("\u{2191}/\u{2193} select \u{00B7} Enter view \u{00B7} ");
+            if running {
+                out.push_str("x stop \u{00B7} ");
+            }
+            out.push_str("\u{2190}/Esc close");
             out
         }
         TaskDialogMode::Detail => {
@@ -252,10 +276,13 @@ pub fn render_background_tasks_to_string(
                 .as_ref()
                 .and_then(|id| tasks.iter().find(|t| &t.task_id == id));
             match row {
-                Some(r) => format!(
-                    "{}\n\u{2190} back \u{00B7} esc close",
-                    render_task_detail(r, &state.tail)
-                ),
+                Some(r) => {
+                    let stop_hint = if r.status == "running" { "x stop \u{00B7} " } else { "" };
+                    format!(
+                        "{}\n{stop_hint}\u{2190} back \u{00B7} esc close",
+                        render_task_detail(r, &state.tail)
+                    )
+                }
                 None => "Background tasks\n(task no longer available)".to_string(),
             }
         }
@@ -267,8 +294,12 @@ mod tests {
     use super::*;
     use crossterm::event::KeyCode;
 
-    fn ids() -> Vec<String> {
-        vec!["b1".into(), "b2".into(), "b3".into()]
+    fn ids() -> Vec<TaskRow> {
+        vec![
+            task("b1", "local_bash", "running"),
+            task("b2", "local_bash", "completed"),
+            task("b3", "local_bash", "completed"),
+        ]
     }
 
     #[test]
@@ -376,5 +407,72 @@ mod tests {
         let s = BackgroundTasksState::default();
         let out = render_background_tasks_to_string(&s, &tasks);
         assert!(!out.contains("active"), "{out}");
+    }
+
+    #[test]
+    fn x_stops_the_selected_running_task() {
+        // (BGTASK-3)
+        let tasks = vec![task("b1", "local_bash", "running")];
+        let mut s = BackgroundTasksState::default();
+        assert_eq!(
+            handle_background_tasks_key(&mut s, &tasks, KeyCode::Char('x')),
+            TaskDialogOutcome::Stop("b1".into())
+        );
+    }
+
+    #[test]
+    fn x_is_a_no_op_on_a_completed_task() {
+        // (BGTASK-3) claude-code gates the kill action on status=='running'.
+        let tasks = vec![task("b1", "local_bash", "completed")];
+        let mut s = BackgroundTasksState::default();
+        assert_eq!(
+            handle_background_tasks_key(&mut s, &tasks, KeyCode::Char('x')),
+            TaskDialogOutcome::Stay
+        );
+    }
+
+    #[test]
+    fn x_stops_from_detail_view_too() {
+        let tasks = vec![task("b1", "local_bash", "running")];
+        let mut s = BackgroundTasksState {
+            mode: TaskDialogMode::Detail,
+            detail_task_id: Some("b1".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            handle_background_tasks_key(&mut s, &tasks, KeyCode::Char('x')),
+            TaskDialogOutcome::Stop("b1".into())
+        );
+    }
+
+    #[test]
+    fn list_footer_shows_x_stop_only_for_a_running_selection() {
+        // (BGTASK-3/TASKS-DIALOG-KEYHINTS)
+        let tasks = vec![task("b1", "local_bash", "running"), task("b2", "local_agent", "completed")];
+        let running_selected = BackgroundTasksState {
+            selected: 0,
+            ..Default::default()
+        };
+        let out = render_background_tasks_to_string(&running_selected, &tasks);
+        assert!(out.contains("x stop"), "{out}");
+
+        let completed_selected = BackgroundTasksState {
+            selected: 1,
+            ..Default::default()
+        };
+        let out2 = render_background_tasks_to_string(&completed_selected, &tasks);
+        assert!(!out2.contains("x stop"), "{out2}");
+    }
+
+    #[test]
+    fn detail_footer_shows_x_stop_for_a_running_task() {
+        let tasks = vec![task("b1", "local_bash", "running")];
+        let s = BackgroundTasksState {
+            mode: TaskDialogMode::Detail,
+            detail_task_id: Some("b1".into()),
+            ..Default::default()
+        };
+        let out = render_background_tasks_to_string(&s, &tasks);
+        assert!(out.contains("x stop"), "{out}");
     }
 }

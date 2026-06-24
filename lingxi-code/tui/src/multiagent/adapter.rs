@@ -16,6 +16,13 @@ use tokio::sync::mpsc::UnboundedSender;
 pub trait MultiAgentFeed: Send + Sync {
     /// Produce the events for the next tick. An empty `Vec` means "no change".
     async fn poll(&self) -> Vec<MultiAgentEvent>;
+
+    /// (BGTASK-3) Stop a running task. Default: unsupported — feeds that
+    /// don't back a real task registry (fixtures, tests) inherit this rather
+    /// than each having to stub it out.
+    async fn kill(&self, _task_id: &str) -> Result<(), String> {
+        Err("this feed does not support stopping tasks".to_string())
+    }
 }
 
 /// Poll `feed` once and forward every produced event to `tx`. Returns the

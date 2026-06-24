@@ -144,6 +144,10 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             return exit_codes::ARGV_ERROR;
         }
         let stream = Arc::new(stream_json::StreamJsonStream::new_placeholder());
+        // P4: wire --include-partial-messages and --include-hook-events flags
+        // before build_runtime so the stream is fully configured before any
+        // hook or SSE events flow through it.
+        stream.set_flags(parsed.include_partial_messages, parsed.include_hook_events);
         let adapter: Arc<dyn traits::OutputStream> = stream.clone();
         let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
             Ok(r) => r,

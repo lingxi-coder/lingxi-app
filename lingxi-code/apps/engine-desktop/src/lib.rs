@@ -2910,7 +2910,12 @@ pub async fn build(
         // of degrading to a no-op. Opt-in: byte-identical when no `agent` hook is
         // configured. (`subagent_spawner` is an `Arc`; cloned here, still moved
         // into the tool context below.)
-        .with_agent_spawner(subagent_spawner.clone()),
+        .with_agent_spawner(subagent_spawner.clone())
+        // P4: wire the output stream as hook observer so --include-hook-events
+        // and the SessionStart/Setup always-stream gate emit hook_started /
+        // hook_response frames. Default no-op when the stream impl ignores them
+        // (TUI / plain sink paths).
+        .with_hook_observer(output.clone()),
     );
 
     // G4: fill the subagent spawner's hook-executor cell now that `hooks` exists,

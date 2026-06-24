@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use llm_client::model::context_window::{context_window_for_model, max_output_tokens_for_model};
 use serde_json::{json, Value};
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use traits::{CostSnapshot, OutputStream};
@@ -192,6 +193,16 @@ pub struct StreamJsonStream {
     /// The last completed assistant text (collected just before boundary reset).
     /// Used by `run_stream_json_print` to populate the result frame's `result` field.
     last_result_text: Mutex<String>,
+    /// `--include-partial-messages`: emit `stream_event` frames for each SSE
+    /// event received from the API. Reconstructed from parsed `LlmEvent`
+    /// (semantically equivalent, not byte-for-byte identical — G5 fidelity gap).
+    /// AtomicBool so it can be set after Arc construction.
+    include_partial_messages: AtomicBool,
+    /// `--include-hook-events`: emit `system/hook_started` + `system/hook_response`
+    /// frames before/after each blocking hook dispatch. SessionStart/Setup hooks
+    /// ALWAYS emit (even without this flag) — all others only with this flag.
+    /// AtomicBool so it can be set after Arc construction.
+    include_hook_events: AtomicBool,
 }
 
 impl StreamJsonStream {
@@ -207,6 +218,8 @@ impl StreamJsonStream {
             accum: Arc::new(Mutex::new(MessageAccum::default())),
             suppress_frames: false,
             last_result_text: Mutex::new(String::new()),
+            include_partial_messages: AtomicBool::new(false),
+            include_hook_events: AtomicBool::new(false),
         }
     }
 
@@ -221,6 +234,8 @@ impl StreamJsonStream {
             accum: Arc::new(Mutex::new(MessageAccum::default())),
             suppress_frames: true,
             last_result_text: Mutex::new(String::new()),
+            include_partial_messages: AtomicBool::new(false),
+            include_hook_events: AtomicBool::new(false),
         }
     }
 
@@ -235,6 +250,8 @@ impl StreamJsonStream {
             accum: Arc::new(Mutex::new(MessageAccum::default())),
             suppress_frames: false,
             last_result_text: Mutex::new(String::new()),
+            include_partial_messages: AtomicBool::new(false),
+            include_hook_events: AtomicBool::new(false),
         }
     }
 
@@ -249,7 +266,23 @@ impl StreamJsonStream {
             accum: Arc::new(Mutex::new(MessageAccum::default())),
             suppress_frames: true,
             last_result_text: Mutex::new(String::new()),
+            include_partial_messages: AtomicBool::new(false),
+            include_hook_events: AtomicBool::new(false),
         }
+    }
+
+    /// Set the `--include-partial-messages` and `--include-hook-events` flags.
+    ///
+    /// Called from `lib.rs` (or wherever the `Arc<StreamJsonStream>` is
+    /// wired in) after `build_runtime` completes, using the parsed `Argv`
+    /// flags. These flags are `false` by default so all constructors are
+    /// behavior-neutral until explicitly opted in.
+    ///
+    /// Uses `AtomicBool` so the method takes `&self` (not `&mut self`),
+    /// making it callable on an `Arc<StreamJsonStream>` without unwrapping.
+    pub fn set_flags(&self, include_partial_messages: bool, include_hook_events: bool) {
+        self.include_partial_messages.store(include_partial_messages, Ordering::Relaxed);
+        self.include_hook_events.store(include_hook_events, Ordering::Relaxed);
     }
 
     /// Fill in the init parameters after `build_runtime` has given us
@@ -769,6 +802,118 @@ impl OutputStream for StreamJsonStream {
         let mut out = self.out.lock().await;
         emit_line(&mut out, &frame);
     }
+
+    /// Emit a `stream_event` NDJSON frame for `--include-partial-messages`.
+    ///
+    /// GROUND-TRUTH shape (6 keys, exact order):
+    /// `{type, event, session_id, parent_tool_use_id, uuid, ttft_ms}`
+    ///
+    /// `ttft_ms` is present ONLY on the `message_start` frame (the first
+    /// event in a stream). LingXi does not track TTFT, so we emit `null`.
+    /// Per the capture (01-stream-partial.ndjson line 11 vs 12-18), the
+    /// `message_start` frame has `ttft_ms` and subsequent frames do not.
+    ///
+    /// FIDELITY NOTE (G5): `event_json` is reconstructed from the parsed
+    /// `LlmEvent` — semantically equivalent to the Anthropic SSE event but
+    /// NOT byte-for-byte identical (e.g. field ordering, default values).
+    async fn emit_stream_event(&self, event_json: &str, is_message_start: bool) {
+        if !self.include_partial_messages.load(Ordering::Relaxed) || self.suppress_frames {
+            return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let event: serde_json::Value =
+            serde_json::from_str(event_json).unwrap_or(serde_json::Value::Null);
+        let mut obj = serde_json::Map::new();
+        obj.insert("type".into(), json!("stream_event"));
+        obj.insert("event".into(), event);
+        obj.insert("session_id".into(), json!(session_id));
+        obj.insert("parent_tool_use_id".into(), serde_json::Value::Null);
+        obj.insert("uuid".into(), json!(uuid));
+        if is_message_start {
+            // ttft_ms present only on message_start frame; we don't track TTFT.
+            obj.insert("ttft_ms".into(), serde_json::Value::Null);
+        }
+        let frame = serde_json::Value::Object(obj);
+        let mut out = self.out.lock().await;
+        emit_line(&mut out, &frame);
+    }
+
+    /// Emit a `system/hook_started` NDJSON frame for `--include-hook-events`.
+    ///
+    /// SessionStart and Setup hooks ALWAYS emit (gate `pGn`); all others
+    /// only emit when `include_hook_events` is true.
+    async fn emit_hook_started(
+        &self,
+        hook_id: &str,
+        hook_name: &str,
+        hook_event: &str,
+    ) {
+        if self.suppress_frames {
+            return;
+        }
+        // Gate pGn: SessionStart + Setup always stream; others need the flag.
+        let always_stream = matches!(hook_event, "SessionStart" | "Setup");
+        if !always_stream && !self.include_hook_events.load(Ordering::Relaxed) {
+            return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let frame = json!({
+            "type": "system",
+            "subtype": "hook_started",
+            "hook_id": hook_id,
+            "hook_name": hook_name,
+            "hook_event": hook_event,
+            "uuid": uuid,
+            "session_id": session_id
+        });
+        let mut out = self.out.lock().await;
+        emit_line(&mut out, &frame);
+    }
+
+    /// Emit a `system/hook_response` NDJSON frame for `--include-hook-events`.
+    ///
+    /// Same gate as `emit_hook_started`: SessionStart/Setup always stream.
+    #[allow(clippy::too_many_arguments)]
+    async fn emit_hook_response(
+        &self,
+        hook_id: &str,
+        hook_name: &str,
+        hook_event: &str,
+        output: &str,
+        stdout: &str,
+        stderr: &str,
+        exit_code: Option<i32>,
+        outcome: &str,
+    ) {
+        if self.suppress_frames {
+            return;
+        }
+        // Gate pGn: SessionStart + Setup always stream; others need the flag.
+        let always_stream = matches!(hook_event, "SessionStart" | "Setup");
+        if !always_stream && !self.include_hook_events.load(Ordering::Relaxed) {
+            return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let frame = json!({
+            "type": "system",
+            "subtype": "hook_response",
+            "hook_id": hook_id,
+            "hook_name": hook_name,
+            "hook_event": hook_event,
+            "output": output,
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": exit_code,
+            "outcome": outcome,
+            "uuid": uuid,
+            "session_id": session_id
+        });
+        let mut out = self.out.lock().await;
+        emit_line(&mut out, &frame);
+    }
 }
 
 // ── init-frame builder ───────────────────────────────────────────────────────
@@ -1114,6 +1259,111 @@ mod tests {
         // Accumulator reset
         let acc = stream.accum.lock().await;
         assert!(acc.blocks.is_empty());
+    }
+
+    // ── P4: --include-partial-messages (stream_event frames) ─────────────────
+
+    /// Verify `emit_stream_event` is suppressed when `include_partial_messages`
+    /// is false (the default). This test just ensures no panic occurs and no
+    /// extra output would be emitted in the default state.
+    #[tokio::test]
+    async fn stream_event_no_op_when_flag_off() {
+        let params = make_params("sess");
+        let stream = Arc::new(StreamJsonStream::new(params));
+        // Default: include_partial_messages=false. Should be a no-op.
+        stream.emit_stream_event(r#"{"type":"message_start","message":{}}"#, true).await;
+        stream.emit_stream_event(r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#, false).await;
+        // No panic = pass. Output goes to stdout which tests don't capture per-assertion.
+    }
+
+    /// Verify that `set_flags` enables `include_partial_messages` atomically
+    /// and that the stream does not panic when the flag is set.
+    #[tokio::test]
+    async fn stream_event_emits_when_flag_on() {
+        let params = make_params("sess-partial");
+        let stream = Arc::new(StreamJsonStream::new(params));
+        // Enable partial messages.
+        stream.set_flags(true, false);
+        // Should emit without panicking. Output goes to stdout.
+        stream.emit_stream_event(r#"{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}}"#, true).await;
+        stream.emit_stream_event(r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#, false).await;
+        stream.emit_stream_event(r#"{"type":"message_stop"}"#, false).await;
+        // No panic = pass.
+    }
+
+    /// Verify that `emit_stream_event` is suppressed in suppress_frames mode
+    /// (json-mode) even if `include_partial_messages` is set.
+    #[tokio::test]
+    async fn stream_event_suppressed_in_json_mode() {
+        let params = make_params("sess-json");
+        let stream = Arc::new(StreamJsonStream::new_json_mode(params));
+        stream.set_flags(true, false);
+        // suppress_frames=true overrides include_partial_messages.
+        // Should be a no-op (no panic).
+        stream.emit_stream_event(r#"{"type":"message_start","message":{}}"#, true).await;
+    }
+
+    // ── P4: --include-hook-events (hook lifecycle frames) ─────────────────────
+
+    /// Verify `emit_hook_started` is a no-op for non-SessionStart events when
+    /// `include_hook_events` is false.
+    #[tokio::test]
+    async fn hook_started_no_op_for_non_session_start_when_flag_off() {
+        let params = make_params("sess");
+        let stream = Arc::new(StreamJsonStream::new(params));
+        // Default: include_hook_events=false.
+        stream.emit_hook_started("hook:1234", "my-hook", "PreToolUse").await;
+        // No panic = pass.
+    }
+
+    /// Verify `emit_hook_started` ALWAYS emits for SessionStart (gate pGn)
+    /// even when `include_hook_events` is false.
+    #[tokio::test]
+    async fn hook_started_always_emits_for_session_start() {
+        let params = make_params("sess-session-start");
+        let stream = Arc::new(StreamJsonStream::new(params));
+        // Flag OFF, but SessionStart always streams.
+        stream.emit_hook_started("hook:sess", "session-hook", "SessionStart").await;
+        // No panic = pass.
+    }
+
+    /// Verify `emit_hook_started` ALWAYS emits for Setup (gate pGn).
+    #[tokio::test]
+    async fn hook_started_always_emits_for_setup() {
+        let params = make_params("sess-setup");
+        let stream = Arc::new(StreamJsonStream::new(params));
+        stream.emit_hook_started("hook:setup", "setup-hook", "Setup").await;
+        // No panic = pass.
+    }
+
+    /// Verify that `set_flags` enables `include_hook_events` and
+    /// `emit_hook_started` + `emit_hook_response` emit for all event types.
+    #[tokio::test]
+    async fn hook_events_emit_when_flag_on() {
+        let params = make_params("sess-hook-events");
+        let stream = Arc::new(StreamJsonStream::new(params));
+        stream.set_flags(false, true);
+        // Should emit without panicking.
+        stream.emit_hook_started("hook:abc", "my-formatter", "PostToolUse").await;
+        stream.emit_hook_response(
+            "hook:abc", "my-formatter", "PostToolUse",
+            "formatted output", "formatted output", "", Some(0), "success",
+        ).await;
+        // No panic = pass.
+    }
+
+    /// Verify `emit_hook_response` is suppressed in json-mode.
+    #[tokio::test]
+    async fn hook_response_suppressed_in_json_mode() {
+        let params = make_params("sess-json-hook");
+        let stream = Arc::new(StreamJsonStream::new_json_mode(params));
+        stream.set_flags(false, true);
+        // suppress_frames=true overrides include_hook_events.
+        stream.emit_hook_response(
+            "hook:xyz", "my-hook", "Stop",
+            "", "", "", None, "success",
+        ).await;
+        // No panic = pass.
     }
 
     /// Verify --output-format json argv routing

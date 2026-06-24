@@ -15,6 +15,7 @@ use super::accumulator::{BlockAccumulator, BlockKind, CompletedBlock};
 use super::StreamingError;
 use llm_client::{ContentBlock as LlmContentBlock, ContentDelta, LlmEvent, Usage};
 use protocol::{ContentBlock, ToolUseId};
+use serde_json::{json, Value};
 use std::sync::Arc;
 use traits::OutputStream;
 
@@ -91,6 +92,33 @@ pub async fn dispatch_event(
             //
             // stream-json P1: notify the sink of the message id + model so
             // it can record them before accumulating per-delta blocks.
+            //
+            // stream-json P4: emit the reconstructed SSE event for
+            // --include-partial-messages BEFORE the normal handling.
+            {
+                let usage_val = json!({
+                    "input_tokens": response.usage.billable_tokens.input,
+                    "cache_creation_input_tokens": response.usage.billable_tokens.cache_write,
+                    "cache_read_input_tokens": response.usage.billable_tokens.cache_read,
+                    "output_tokens": response.usage.billable_tokens.output,
+                    "service_tier": "standard"
+                });
+                let event_json = serde_json::to_string(&json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": response.id,
+                        "type": "message",
+                        "role": "assistant",
+                        "model": response.model,
+                        "content": [],
+                        "stop_reason": null,
+                        "stop_sequence": null,
+                        "usage": usage_val
+                    }
+                }))
+                .unwrap_or_default();
+                output.emit_stream_event(&event_json, true).await;
+            }
             output
                 .emit_message_start(&response.id, &response.model)
                 .await;
@@ -101,6 +129,17 @@ pub async fn dispatch_event(
             index,
             content_block,
         } => {
+            // stream-json P4: reconstruct SSE event for --include-partial-messages.
+            {
+                let cb_val = reconstruct_content_block_json(&content_block);
+                let event_json = serde_json::to_string(&json!({
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": cb_val
+                }))
+                .unwrap_or_default();
+                output.emit_stream_event(&event_json, false).await;
+            }
             let kind = match &content_block {
                 LlmContentBlock::Text { .. } => BlockKind::Text,
                 LlmContentBlock::ToolCall { id, name, .. } => BlockKind::ToolUse {
@@ -151,6 +190,17 @@ pub async fn dispatch_event(
             Ok(RouterAction::Continue)
         }
         LlmEvent::ContentBlockDelta { index, delta } => {
+            // stream-json P4: reconstruct SSE event for --include-partial-messages.
+            {
+                let delta_val = reconstruct_delta_json(&delta);
+                let event_json = serde_json::to_string(&json!({
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": delta_val
+                }))
+                .unwrap_or_default();
+                output.emit_stream_event(&event_json, false).await;
+            }
             match delta {
                 ContentDelta::TextDelta { text } => {
                     acc.append_text(index, &text)?;
@@ -182,6 +232,15 @@ pub async fn dispatch_event(
             Ok(RouterAction::Continue)
         }
         LlmEvent::ContentBlockStop { index } => {
+            // stream-json P4: reconstruct SSE event for --include-partial-messages.
+            {
+                let event_json = serde_json::to_string(&json!({
+                    "type": "content_block_stop",
+                    "index": index
+                }))
+                .unwrap_or_default();
+                output.emit_stream_event(&event_json, false).await;
+            }
             let completed = acc.stop_block(index)?;
             match completed {
                 CompletedBlock::Text { text } => {
@@ -217,6 +276,26 @@ pub async fn dispatch_event(
             }
         }
         LlmEvent::MessageDelta { delta, usage } => {
+            // stream-json P4: reconstruct SSE event for --include-partial-messages.
+            {
+                let usage_val = usage.as_ref().map(|u| json!({
+                    "output_tokens": u.billable_tokens.output
+                }));
+                let mut delta_obj = serde_json::Map::new();
+                if let Some(sr) = &delta.stop_reason {
+                    delta_obj.insert("stop_reason".into(), json!(sr));
+                } else {
+                    delta_obj.insert("stop_reason".into(), Value::Null);
+                }
+                delta_obj.insert("stop_sequence".into(), Value::Null);
+                let event_json = serde_json::to_string(&json!({
+                    "type": "message_delta",
+                    "delta": Value::Object(delta_obj),
+                    "usage": usage_val.unwrap_or(Value::Null)
+                }))
+                .unwrap_or_default();
+                output.emit_stream_event(&event_json, false).await;
+            }
             // §0.7 "light up thinking/usage": `message_delta` carries the
             // final usage snapshot. Surface it to the output sink BEFORE
             // computing the router action — the stop-reason behavior below
@@ -253,7 +332,61 @@ pub async fn dispatch_event(
         // from the transport layer. The Completed short-circuit terminal is
         // treated as an end-of-stream signal (the full response is available
         // in the response field but we forward the already-accumulated blocks).
-        LlmEvent::MessageStop | LlmEvent::Completed { .. } => Ok(RouterAction::EndOfStream),
+        LlmEvent::MessageStop | LlmEvent::Completed { .. } => {
+            // stream-json P4: emit message_stop for --include-partial-messages.
+            let event_json = serde_json::to_string(&json!({
+                "type": "message_stop"
+            }))
+            .unwrap_or_default();
+            output.emit_stream_event(&event_json, false).await;
+            Ok(RouterAction::EndOfStream)
+        }
+    }
+}
+
+// ── SSE reconstruction helpers ───────────────────────────────────────────────
+
+/// Reconstruct the JSON value for an `LlmContentBlock` at stream start
+/// (used in the `content_block_start` SSE event for P4 partial-messages).
+fn reconstruct_content_block_json(block: &LlmContentBlock) -> Value {
+    match block {
+        LlmContentBlock::Text { .. } => json!({"type": "text", "text": ""}),
+        LlmContentBlock::ToolCall { id, name, .. } => {
+            json!({"type": "tool_use", "id": id, "name": name, "input": {}})
+        }
+        LlmContentBlock::Reasoning { .. } => json!({"type": "thinking", "thinking": ""}),
+        LlmContentBlock::RedactedThinking { data } => {
+            json!({"type": "redacted_thinking", "data": data})
+        }
+        LlmContentBlock::ServerToolUse { id, name, input } => {
+            json!({"type": "server_tool_use", "id": id, "name": name, "input": input})
+        }
+        LlmContentBlock::ConnectorText { connector_text, signature } => {
+            json!({"type": "connector_text", "connector_text": connector_text, "signature": signature})
+        }
+        LlmContentBlock::AdvisorToolResult { tool_use_id, content, is_error } => {
+            json!({"type": "tool_result", "tool_use_id": tool_use_id, "content": content, "is_error": is_error})
+        }
+        _ => json!({"type": "unknown"}),
+    }
+}
+
+/// Reconstruct the JSON value for a `ContentDelta`
+/// (used in the `content_block_delta` SSE event for P4 partial-messages).
+fn reconstruct_delta_json(delta: &ContentDelta) -> Value {
+    match delta {
+        ContentDelta::TextDelta { text } => json!({"type": "text_delta", "text": text}),
+        ContentDelta::InputJsonDelta { partial_json } => {
+            json!({"type": "input_json_delta", "partial_json": partial_json})
+        }
+        ContentDelta::ThinkingDelta { thinking } => {
+            json!({"type": "thinking_delta", "thinking": thinking})
+        }
+        ContentDelta::SignatureDelta { signature } => {
+            json!({"type": "signature_delta", "signature": signature})
+        }
+        ContentDelta::CitationsDelta { citation } => json!({"type": "citations_delta", "citation": citation}),
+        ContentDelta::ConnectorTextDelta { connector_text } => json!({"type": "connector_text_delta", "connector_text": connector_text}),
     }
 }
 

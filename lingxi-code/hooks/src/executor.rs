@@ -48,7 +48,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use traits::subagent_spawn::SubagentSpawner;
-use traits::{HttpTransport, ProcessCommand, ProcessError, ProcessRunner, RuntimeSpawner, Sandbox};
+use traits::{HttpTransport, OutputStream, ProcessCommand, ProcessError, ProcessRunner, RuntimeSpawner, Sandbox};
 
 /// Default HTTP hook timeout (10 minutes — matches
 /// `claude-code/src/utils/hooks/execHttpHook.ts:12` `DEFAULT_HTTP_HOOK_TIMEOUT_MS`).
@@ -228,6 +228,15 @@ pub struct HookExecutorImpl {
     /// [`Self::with_policy_disable_all_hooks`]; defaults `false` (the no-managed
     /// -policy path) so it is behavior-neutral until a policy is wired.
     policy_disable_all_hooks: bool,
+    /// Optional output stream observer for `--include-hook-events` frames.
+    ///
+    /// When set, `execute` and `execute_session_end` emit
+    /// `hook_started` / `hook_response` frames through this sink BEFORE and
+    /// AFTER each blocking hook dispatches. Non-blocking (background) hooks
+    /// are excluded — their completion is asynchronous and cannot be paired
+    /// with a reliable "before" frame. Attached via
+    /// [`Self::with_hook_observer`]; `None` by default (no-op, zero cost).
+    hook_observer: Option<Arc<dyn OutputStream>>,
 }
 
 impl HookExecutorImpl {
@@ -254,6 +263,7 @@ impl HookExecutorImpl {
             sandbox: None,
             async_registry: None,
             policy_disable_all_hooks: false,
+            hook_observer: None,
         }
     }
 
@@ -267,6 +277,18 @@ impl HookExecutorImpl {
     #[must_use]
     pub fn with_policy_disable_all_hooks(mut self, disable_all_hooks: bool) -> Self {
         self.policy_disable_all_hooks = disable_all_hooks;
+        self
+    }
+
+    /// Attach an output stream as a hook lifecycle observer. When set,
+    /// `execute` and `execute_session_end` call
+    /// [`OutputStream::emit_hook_started`] before each blocking hook and
+    /// [`OutputStream::emit_hook_response`] after it completes. Non-blocking
+    /// (background) hooks are excluded. Used by `--include-hook-events` in the
+    /// stream-json CLI path; default `None` (behavior-neutral).
+    #[must_use]
+    pub fn with_hook_observer(mut self, observer: Arc<dyn OutputStream>) -> Self {
+        self.hook_observer = Some(observer);
         self
     }
 
@@ -435,6 +457,16 @@ impl HookExecutorImpl {
                 status_message: hook.status_message.clone(),
             });
             if hook.blocking {
+                // Emit hook_started BEFORE dispatch (for --include-hook-events).
+                if let Some(observer) = &self.hook_observer {
+                    observer
+                        .emit_hook_started(
+                            &hook.id.to_string(),
+                            &hook.name,
+                            &hook_event,
+                        )
+                        .await;
+                }
                 // Bound this hook by the remaining batch budget. Once the batch
                 // deadline has passed, `timeout_at` fires immediately, so the
                 // remaining hooks are skipped (the binary's already-aborted
@@ -461,9 +493,57 @@ impl HookExecutorImpl {
                         exit_code: None,
                         response: None,
                     };
+                    // Emit timeout hook_response before merging.
+                    if let Some(observer) = &self.hook_observer {
+                        observer
+                            .emit_hook_response(
+                                &hook.id.to_string(),
+                                &hook.name,
+                                &hook_event,
+                                "",
+                                &timed_out.stdout,
+                                &timed_out.stderr,
+                                timed_out.exit_code,
+                                "timeout",
+                            )
+                            .await;
+                    }
                     Self::merge(&mut agg, hook, timed_out);
                     break;
                 };
+                // Emit hook_response AFTER dispatch (for --include-hook-events).
+                if let Some(observer) = &self.hook_observer {
+                    let outcome_str = match result.outcome {
+                        HookOutcome::Success => "success",
+                        HookOutcome::Error => "error",
+                        HookOutcome::Cancelled => "error",
+                        HookOutcome::Timeout => "timeout",
+                    };
+                    let resp_text = result
+                        .response
+                        .as_ref()
+                        .and_then(|r| r.system_message.as_deref())
+                        .unwrap_or("");
+                    let combined_output = if resp_text.is_empty() {
+                        result.stdout.clone()
+                    } else if result.stdout.is_empty() {
+                        resp_text.to_string()
+                    } else {
+                        format!("{}\n{}", result.stdout, resp_text)
+                    };
+                    observer
+                        .emit_hook_response(
+                            &hook.id.to_string(),
+                            &hook.name,
+                            &hook_event,
+                            &combined_output,
+                            &result.stdout,
+                            &result.stderr,
+                            result.exit_code,
+                            outcome_str,
+                        )
+                        .await;
+                }
                 if hook.once && matches!(result.outcome, HookOutcome::Success) {
                     self.registry.write().await.remove_once_hook(hook.id);
                 }
@@ -523,8 +603,52 @@ impl HookExecutorImpl {
                 status_message: hook.status_message.clone(),
             });
             if hook.blocking {
+                // Emit hook_started BEFORE dispatch (for --include-hook-events).
+                if let Some(observer) = &self.hook_observer {
+                    observer
+                        .emit_hook_started(
+                            &hook.id.to_string(),
+                            &hook.name,
+                            &hook_event,
+                        )
+                        .await;
+                }
                 // Synchronous path — unchanged from M5-06.
                 let result = self.dispatcher().dispatch(hook, &event, &ctx).await;
+                // Emit hook_response AFTER dispatch (for --include-hook-events).
+                if let Some(observer) = &self.hook_observer {
+                    let outcome_str = match result.outcome {
+                        HookOutcome::Success => "success",
+                        HookOutcome::Error => "error",
+                        HookOutcome::Cancelled => "error",
+                        HookOutcome::Timeout => "timeout",
+                    };
+                    // `output` = combined response text (stdout + any systemMessage).
+                    let resp_text = result
+                        .response
+                        .as_ref()
+                        .and_then(|r| r.system_message.as_deref())
+                        .unwrap_or("");
+                    let combined_output = if resp_text.is_empty() {
+                        result.stdout.clone()
+                    } else if result.stdout.is_empty() {
+                        resp_text.to_string()
+                    } else {
+                        format!("{}\n{}", result.stdout, resp_text)
+                    };
+                    observer
+                        .emit_hook_response(
+                            &hook.id.to_string(),
+                            &hook.name,
+                            &hook_event,
+                            &combined_output,
+                            &result.stdout,
+                            &result.stderr,
+                            result.exit_code,
+                            outcome_str,
+                        )
+                        .await;
+                }
                 // `once` runtime removal (claude-code `registerSkillHooks.ts:35-36`,
                 // `utils/hooks.ts:2918-2919`): drop the hook from the registry
                 // only after it runs with a *success* outcome, so it never fires

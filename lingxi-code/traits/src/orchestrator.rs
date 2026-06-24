@@ -958,6 +958,59 @@ pub trait OutputStream: Send + Sync {
         _request_id: Option<&str>,
     ) {
     }
+
+    /// Emit a raw SSE stream event frame (`stream_event`) for
+    /// `--include-partial-messages`.
+    ///
+    /// `event_json` is a JSON string reconstructed from the parsed `LlmEvent`
+    /// (semantically equivalent to the original Anthropic SSE event, but NOT
+    /// byte-for-byte identical since LingXi already parsed the raw bytes).
+    /// `is_message_start` is `true` only for the `message_start` event, which
+    /// is the only event that carries `ttft_ms` in the GROUND-TRUTH output.
+    ///
+    /// **Default no-op**: every pre-existing `OutputStream` impl keeps
+    /// compiling unchanged. Only `StreamJsonStream` overrides this.
+    async fn emit_stream_event(&self, _event_json: &str, _is_message_start: bool) {}
+
+    /// Emit a `system/hook_started` frame for `--include-hook-events`.
+    ///
+    /// Called before each hook dispatches. `hook_id` and `hook_name` identify
+    /// the hook; `hook_event` is the `Debug` name of the `HookEventType`
+    /// (e.g. `"SessionStart"`, `"PreToolUse"`).
+    ///
+    /// **Default no-op**: every pre-existing `OutputStream` impl keeps
+    /// compiling unchanged. Only `StreamJsonStream` overrides this.
+    async fn emit_hook_started(
+        &self,
+        _hook_id: &str,
+        _hook_name: &str,
+        _hook_event: &str,
+    ) {
+    }
+
+    /// Emit a `system/hook_response` frame for `--include-hook-events`.
+    ///
+    /// Called after each hook completes. Parameters carry the hook identity
+    /// fields (same as [`Self::emit_hook_started`]) plus the full result:
+    /// `output` is the combined hook response text (stdout + any
+    /// `systemMessage`); `exit_code` is `None` for non-command hooks;
+    /// `outcome` is `"success"`, `"error"`, `"block"`, or `"timeout"`.
+    ///
+    /// **Default no-op**: every pre-existing `OutputStream` impl keeps
+    /// compiling unchanged. Only `StreamJsonStream` overrides this.
+    #[allow(clippy::too_many_arguments)]
+    async fn emit_hook_response(
+        &self,
+        _hook_id: &str,
+        _hook_name: &str,
+        _hook_event: &str,
+        _output: &str,
+        _stdout: &str,
+        _stderr: &str,
+        _exit_code: Option<i32>,
+        _outcome: &str,
+    ) {
+    }
 }
 
 #[cfg(test)]

@@ -105,6 +105,9 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
             // (M7-15) String oracle drops color; the syntect theme is
             // immaterial here. The live component path threads the real theme.
             theme_name: crate::theme::ThemeName::default(),
+            // (diff-03) No terminal width in the string oracle — 0 disables
+            // padding, matching the prior behavior.
+            width: 0,
         }),
         RenderedMessage::AssistantThinking { thinking, expanded } => {
             thinking::render_thinking_to_string(thinking::ThinkingProps {

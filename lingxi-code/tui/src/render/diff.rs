@@ -241,7 +241,13 @@ fn word_diff_spans(
 
 /// Layout a single non-word-diffed row (context, or unpaired/too-dissimilar
 /// add/remove): gutter + whole-line syntax-colored content over the line bg.
-fn plain_row(row: &DiffRow, gutter_w: usize, lang: Option<&str>, theme: ThemeName) -> StyledLine {
+fn plain_row(
+    row: &DiffRow,
+    gutter_w: usize,
+    lang: Option<&str>,
+    theme: ThemeName,
+    width: usize,
+) -> StyledLine {
     let bg = match row.kind {
         LineKind::Add => add_bg(theme),
         LineKind::Remove => remove_bg(theme),
@@ -262,7 +268,13 @@ fn plain_row(row: &DiffRow, gutter_w: usize, lang: Option<&str>, theme: ThemeNam
     } else {
         spans.extend(content_spans(&row.text, lang, bg, theme));
     }
-    StyledLine { spans }
+    let mut line = StyledLine { spans };
+    // (diff-03) Pad changed (Add/Remove) rows so the line bg reaches the
+    // right edge; Context keeps the terminal-default bg, so no pad.
+    if row.kind != LineKind::Context {
+        pad_line_to_width(&mut line, width, bg);
+    }
+    line
 }
 
 /// Layout a word-diffed row: gutter + per-word emphasis spans.
@@ -271,6 +283,7 @@ fn word_row(
     gutter_w: usize,
     content: Vec<StyledSpan>,
     theme: ThemeName,
+    width: usize,
 ) -> StyledLine {
     let bg = match row.kind {
         LineKind::Add => add_bg(theme),
@@ -279,7 +292,11 @@ fn word_row(
     };
     let mut spans = vec![gutter_span(row, gutter_w, bg, theme)];
     spans.extend(content);
-    StyledLine { spans }
+    let mut line = StyledLine { spans };
+    if row.kind != LineKind::Context {
+        pad_line_to_width(&mut line, width, bg);
+    }
+    line
 }
 
 /// Hard cap on rendered diff body lines (claude-code shows a "… N more lines"
@@ -375,9 +392,28 @@ pub fn diff_stats(old: &str, new: &str) -> (usize, usize) {
 /// Render a structured diff of `old` → `new`. `path` drives syntax language
 /// detection (claude-code's `filePath` prop). Hunks are separated by unified
 /// `@@` headers; output past `MAX_DIFF_LINES` body rows is truncated with a
-/// "… N more lines" footer. Never panics.
+/// "… N more lines" footer. Never panics. Equivalent to
+/// [`render_with_width`] with `width = 0` (no right-edge padding — see
+/// diff-03 there).
 #[must_use]
 pub fn render(old: &str, new: &str, path: Option<&str>, theme: ThemeName) -> Vec<StyledLine> {
+    render_with_width(old, new, path, theme, 0)
+}
+
+/// (diff-03) [`render`], plus padding changed (Add/Remove) rows with spaces
+/// carrying the line background out to `width` total columns (claude-code
+/// `wrapText`'s "pad changed lines so background extends to edge"). Context
+/// rows are never padded (terminal-default background). `width = 0` (or any
+/// value at/below the gutter width) disables padding — every row already
+/// reaches or exceeds that, so the pad-to-width never has anything to add.
+#[must_use]
+pub fn render_with_width(
+    old: &str,
+    new: &str,
+    path: Option<&str>,
+    theme: ThemeName,
+    width: usize,
+) -> Vec<StyledLine> {
     let hunks = grouped_hunks(old, new);
     if hunks.is_empty() {
         return Vec::new();
@@ -410,7 +446,7 @@ pub fn render(old: &str, new: &str, path: Option<&str>, theme: ThemeName) -> Vec
             out.push(hunk_separator());
         }
         first_hunk = false;
-        let laid = layout_rows(&rows, gutter_w, lang.as_deref(), theme);
+        let laid = layout_rows(&rows, gutter_w, lang.as_deref(), theme, width);
         // `laid` has one line per row (word-diff pairs are 1:1 with rows), so
         // body_emitted tracks row count directly.
         for line in laid {
@@ -428,6 +464,25 @@ pub fn render(old: &str, new: &str, path: Option<&str>, theme: ThemeName) -> Vec
     out
 }
 
+/// (diff-03) Append a space-pad span carrying `bg` so `line`'s total display
+/// width reaches `width`. No-op if `line` already reaches/exceeds `width`.
+fn pad_line_to_width(line: &mut StyledLine, width: usize, bg: StyleColor) {
+    let cur_w: usize = line
+        .spans
+        .iter()
+        .map(|s| unicode_width::UnicodeWidthStr::width(s.text.as_str()))
+        .sum();
+    if cur_w < width {
+        line.spans.push(StyledSpan::styled(
+            " ".repeat(width - cur_w),
+            SpanStyle {
+                bg,
+                ..SpanStyle::default()
+            },
+        ));
+    }
+}
+
 /// Lay out a slice of diff rows into styled lines, pairing adjacent
 /// remove→add runs for word-level diffing (claude-code `processAdjacentLines`).
 fn layout_rows(
@@ -435,6 +490,7 @@ fn layout_rows(
     gutter_w: usize,
     lang: Option<&str>,
     theme: ThemeName,
+    width: usize,
 ) -> Vec<StyledLine> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -465,22 +521,22 @@ fn layout_rows(
                     word_diff_spans(&rem.text, &add.text, false, theme, rb),
                     word_diff_spans(&rem.text, &add.text, true, theme, ab),
                 ) {
-                    out.push(word_row(rem, gutter_w, rem_spans, theme));
-                    out.push(word_row(add, gutter_w, add_spans, theme));
+                    out.push(word_row(rem, gutter_w, rem_spans, theme, width));
+                    out.push(word_row(add, gutter_w, add_spans, theme, width));
                 } else {
                     // Too dissimilar — whole-line coloring for both.
-                    out.push(plain_row(rem, gutter_w, lang, theme));
-                    out.push(plain_row(add, gutter_w, lang, theme));
+                    out.push(plain_row(rem, gutter_w, lang, theme, width));
+                    out.push(plain_row(add, gutter_w, lang, theme, width));
                 }
             }
             for rem in &removes[pairs..] {
-                out.push(plain_row(rem, gutter_w, lang, theme));
+                out.push(plain_row(rem, gutter_w, lang, theme, width));
             }
             for add in &adds[pairs..] {
-                out.push(plain_row(add, gutter_w, lang, theme));
+                out.push(plain_row(add, gutter_w, lang, theme, width));
             }
         } else {
-            out.push(plain_row(&rows[i], gutter_w, lang, theme));
+            out.push(plain_row(&rows[i], gutter_w, lang, theme, width));
             i += 1;
         }
     }
@@ -552,6 +608,52 @@ mod tests {
         // `render_empty_diff_is_empty`.)
         let rows = classified_rows("a\nb\n", "a\nb\n");
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn render_with_width_pads_changed_rows_to_full_width() {
+        // (diff-03) A short added line, padded to 30 columns total, carries
+        // the green bg on the trailing pad span too.
+        let lines = render_with_width("a\n", "a\nb\n", Some("x.txt"), ThemeName::Dark, 30);
+        let add = lines
+            .iter()
+            .find(|l| !is_header(l) && rowline(l).contains('+'))
+            .expect("an add line");
+        let total_w: usize = add
+            .spans
+            .iter()
+            .map(|s| unicode_width::UnicodeWidthStr::width(s.text.as_str()))
+            .sum();
+        assert_eq!(total_w, 30, "row should be padded to the full width");
+        let last = add.spans.last().expect("at least one span");
+        assert!(last.text.chars().all(|c| c == ' '), "pad span is spaces: {last:?}");
+        assert_eq!(last.style.bg, add_bg(ThemeName::Dark));
+    }
+
+    #[test]
+    fn render_with_width_does_not_pad_context_rows() {
+        // (diff-03) Context rows keep the terminal-default bg — no pad span.
+        let lines = render_with_width("a\n", "a\nb\n", Some("x.txt"), ThemeName::Dark, 30);
+        let ctx = lines
+            .iter()
+            .find(|l| !is_header(l) && !rowline(l).contains('+') && !rowline(l).contains('-'))
+            .expect("a context line");
+        let total_w: usize = ctx
+            .spans
+            .iter()
+            .map(|s| unicode_width::UnicodeWidthStr::width(s.text.as_str()))
+            .sum();
+        assert!(total_w < 30, "context row must not be padded to width: {total_w}");
+    }
+
+    #[test]
+    fn render_with_width_zero_matches_render() {
+        // width=0 is render()'s exact behavior (no padding ever fires).
+        let to_lines = |v: &[StyledLine]| v.iter().map(rowline).collect::<Vec<_>>();
+        assert_eq!(
+            to_lines(&render_with_width("a\n", "a\nb\n", Some("x.txt"), ThemeName::Dark, 0)),
+            to_lines(&render("a\n", "a\nb\n", Some("x.txt"), ThemeName::Dark)),
+        );
     }
 
     #[test]

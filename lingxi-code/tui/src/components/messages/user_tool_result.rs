@@ -151,6 +151,10 @@ pub struct UserToolResultProps {
     /// syntax coloring (the diff recolors with the picker). Threaded from
     /// `scrollback::render_message`. Defaults to dark.
     pub theme_name: crate::theme::ThemeName,
+    /// (diff-03) Render width — pads the diff's changed rows so their
+    /// background reaches the right edge (claude-code `wrapText`). `0`
+    /// (the default) disables padding.
+    pub width: usize,
 }
 
 /// Extract the human-displayable body from a tool result JSON.
@@ -244,6 +248,22 @@ pub fn render_edit_write_diff_lines(
     let old = old_string.unwrap_or("");
     let new = new_string.unwrap_or("");
     diff::render(old, new, path, theme)
+}
+
+/// (diff-03) [`render_edit_write_diff_lines`], plus right-edge padding to
+/// `width` total columns on changed rows.
+#[must_use]
+pub fn render_edit_write_diff_lines_with_width(
+    _tool: &str,
+    old_string: Option<&str>,
+    new_string: Option<&str>,
+    path: Option<&str>,
+    theme: crate::theme::ThemeName,
+    width: usize,
+) -> Vec<StyledLine> {
+    let old = old_string.unwrap_or("");
+    let new = new_string.unwrap_or("");
+    diff::render_with_width(old, new, path, theme, width)
 }
 
 /// (fileedit-result-added-removed-header) claude-code
@@ -490,12 +510,13 @@ pub fn UserToolResultMessage(props: &UserToolResultProps) -> impl Into<AnyElemen
     // call inputs are present. Each StyledLine becomes a Row; each span a
     // Text wrapped in a View carrying its diff background.
     if is_diff_tool(&props.tool) && (props.old_string.is_some() || props.new_string.is_some()) {
-        let lines = render_edit_write_diff_lines(
+        let lines = render_edit_write_diff_lines_with_width(
             &props.tool,
             props.old_string.as_deref(),
             props.new_string.as_deref(),
             props.file_path.as_deref(),
             props.theme_name,
+            props.width,
         );
         let prefix = if props.focused { FOCUS_PREFIX } else { "" };
         // (fileedit-result-added-removed-header) "Added N line(s)[, removed M

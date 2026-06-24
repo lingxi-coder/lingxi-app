@@ -138,6 +138,8 @@ pub fn render_message(
                     file_path: file_path,
                     // (M7-15) active theme → diff syntax follows the picker.
                     theme_name: theme_name,
+                    // (diff-03) right-edge background padding on changed rows.
+                    width: width,
                 )
             }
             .into_any()

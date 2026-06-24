@@ -1,5 +1,6 @@
 ---
-source: crates/tui/tests/render_messages_batch1.rs
+source: tui/tests/render_messages_batch1.rs
+assertion_line: 168
 expression: s
 ---
-Running SessionStart hooks…
+  ⎿  Running SessionStart hooks…

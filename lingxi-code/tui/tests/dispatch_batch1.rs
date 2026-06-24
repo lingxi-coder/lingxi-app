@@ -46,7 +46,7 @@ fn each_variant_routes_to_its_renderer() {
                 text: "limited".into(),
                 upsell: None,
             },
-            "limited",
+            "  \u{23BF}  limited",
         ),
         (
             RenderedMessage::Shutdown {
@@ -71,7 +71,7 @@ fn each_variant_routes_to_its_renderer() {
                 count: 1,
                 transcript_summary: true,
             },
-            "1 PreToolUse hook ran",
+            "  \u{23BF}  1 PreToolUse hook ran",
         ),
         (
             RenderedMessage::PlanApproval {

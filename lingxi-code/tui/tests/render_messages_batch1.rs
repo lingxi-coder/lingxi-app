@@ -88,24 +88,10 @@ fn system_api_error_singular_second_and_truncated() {
     insta::assert_snapshot!("system_api_error_singular_second_and_truncated", s);
 }
 
-#[test]
-fn system_api_error_appends_api_timeout_ms_hint_when_set() {
-    // (ma-09) No other test in this binary touches API_TIMEOUT_MS, so a bare
-    // set/remove around the assertion is sufficient isolation.
-    std::env::set_var("API_TIMEOUT_MS", "60000");
-    let s = render_system_api_error_to_string(SystemApiErrorProps {
-        error: "529 Overloaded".into(),
-        retry_attempt: 1,
-        retry_in_seconds: 2,
-        max_retries: 10,
-        truncated: false,
-    });
-    std::env::remove_var("API_TIMEOUT_MS");
-    assert!(
-        s.ends_with("\u{00B7} API_TIMEOUT_MS=60000ms, try increasing it"),
-        "{s:?}"
-    );
-}
+// (ma-09) The API_TIMEOUT_MS-hint behavior is covered by an in-crate unit
+// test (system_api_error.rs) against the pure, env-free helper — mutating
+// the real process env var here would race this binary's other
+// render_system_api_error_to_string calls (which read the SAME global env).
 
 #[test]
 fn rate_limit_with_upsell() {

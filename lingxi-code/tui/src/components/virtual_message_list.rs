@@ -172,11 +172,16 @@ fn render_text_for_measure(msg: &RenderedMessage, width: usize) -> String {
             ));
             out
         }
-        // error text + optional dim upsell line.
-        RenderedMessage::RateLimit { text, upsell } => match upsell {
-            Some(u) => format!("{text}\n{u}"),
-            None => text.clone(),
-        },
+        // (rate-limit-missing-gutter) `  ⎿  ` gutter + error text + optional
+        // dim upsell line (indented to match).
+        RenderedMessage::RateLimit { text, upsell } => {
+            crate::components::messages::rate_limit::render_rate_limit_to_string(
+                crate::components::messages::rate_limit::RateLimitProps {
+                    text: text.clone(),
+                    upsell: upsell.clone(),
+                },
+            )
+        }
         // header + optional `Reason:` line + (rejected) tail line.
         RenderedMessage::Shutdown {
             from,
@@ -214,24 +219,19 @@ fn render_text_for_measure(msg: &RenderedMessage, width: usize) -> String {
                 },
             )
         }
-        // Single dim line (running or transcript summary).
+        // (hook-progress-missing-gutter) `  ⎿  ` gutter + single dim line.
         RenderedMessage::HookProgress {
             event,
             count,
             transcript_summary,
-        } => {
-            if *transcript_summary {
-                let unit = if *count == 1 { "hook" } else { "hooks" };
-                format!("{count} {event} {unit} ran")
-            } else {
-                let unit = if *count == 1 {
-                    "hook\u{2026}"
-                } else {
-                    "hooks\u{2026}"
-                };
-                format!("Running {event} {unit}")
-            }
-        }
+        } => crate::components::messages::hook_progress::render_hook_progress_to_string(
+            crate::components::messages::hook_progress::HookProgressProps {
+                event: event.clone(),
+                count: *count,
+                transcript_summary: *transcript_summary,
+                ..Default::default()
+            },
+        ),
         // Mirrors `render_plan_approval_to_string`.
         RenderedMessage::PlanApproval { kind } => match kind {
             crate::state::PlanApprovalKind::Request {

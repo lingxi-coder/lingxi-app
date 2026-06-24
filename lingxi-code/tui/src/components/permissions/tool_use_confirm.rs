@@ -23,6 +23,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use iocraft::prelude::*;
 
 use super::{DialogFocus, DialogResolution};
+use crate::theme::TuiTheme;
 
 /// Mutable state carried across renders for this dialog.
 #[derive(Debug, Clone, Default)]
@@ -44,9 +45,14 @@ pub struct ToolUseConfirmProps {
     pub cwd: std::path::PathBuf,
     /// Which button to highlight on this render.
     pub focus: DialogFocus,
-    /// (M9-07) Worker badge `● @name` prepended when worker-originated.
-    /// `None` (the live default) leaves the dialog byte-identical to before.
-    pub worker_badge: Option<String>,
+    /// (perm-09) Worker name, when worker-originated — rendered as a dim
+    /// `· @name` suffix on the title row (claude-code
+    /// `PermissionRequestTitle`'s `workerBadge`), not a separate line. `None`
+    /// (the live default) leaves the dialog byte-identical to before.
+    pub worker_name: Option<String>,
+    /// (perm-05) Active palette — drives the top-border + title accent
+    /// (claude-code `PermissionDialog`'s default `color="permission"`).
+    pub theme: crate::theme::Theme,
 }
 
 /// Pure key handler. Returns `Some(resolution)` when the user picks an
@@ -76,7 +82,11 @@ pub fn handle_key(state: &mut ToolUseConfirmState, key: KeyEvent) -> Option<Dial
 /// `Do you want to proceed?` question — NOT "Claude needs your permission to
 /// use {tool}" + "Input: {json}". (perm-01) Options are `Yes` / `Yes, and don't
 /// ask again for {tool} commands in {cwd}` / `No` (no `[1]`/`[2]`/`[N]`
-/// numbered prefixes; the 1/2/n keys remain as hidden accelerators).
+/// numbered prefixes; the 1/2/n keys remain as hidden accelerators). (perm-05)
+/// Top-only round border colored `theme.permission` (claude-code
+/// `PermissionDialog`'s `borderLeft/Right/Bottom=false`), not a full round
+/// box. (perm-09) The worker name renders as a dim `· @name` suffix on the
+/// title row (claude-code `PermissionRequestTitle`), not a separate line.
 #[component]
 pub fn ToolUseConfirm(props: &ToolUseConfirmProps) -> impl Into<AnyElement<'static>> {
     use crate::components::messages::assistant_tool_use::{
@@ -144,7 +154,8 @@ pub fn ToolUseConfirm(props: &ToolUseConfirmProps) -> impl Into<AnyElement<'stat
     };
     let cwd_disp = props.cwd.display().to_string();
     let focus = props.focus;
-    let worker_badge = props.worker_badge.clone();
+    let worker_name = props.worker_name.clone();
+    let accent = props.theme.permission;
     let button_label = move |for_focus: DialogFocus, label: String| -> String {
         if for_focus == focus {
             format!("> {label}")
@@ -162,12 +173,17 @@ pub fn ToolUseConfirm(props: &ToolUseConfirmProps) -> impl Into<AnyElement<'stat
         View(
             flex_direction: FlexDirection::Column,
             border_style: BorderStyle::Round,
-            padding: 1,
+            border_color: accent,
+            border_edges: Edges::Top,
+            padding_left: 1,
+            padding_right: 1,
         ) {
-            #(worker_badge.as_deref().map(|badge| element! {
-                Text(content: badge.to_string())
-            }))
-            Text(content: "Tool use".to_string(), weight: Weight::Bold)
+            View(flex_direction: FlexDirection::Row, gap: 1) {
+                Text(content: "Tool use".to_string(), weight: Weight::Bold, color: accent)
+                #(worker_name.as_deref().map(|n| element! {
+                    Text(content: format!("\u{00B7} @{n}"), color: TuiTheme::DIM)
+                }))
+            }
             Text(content: body)
             #(diff_rows)
             Text(content: "Do you want to proceed?".to_string())

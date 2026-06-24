@@ -37,6 +37,27 @@ fn snapshot_tool_use_confirm_default_state() {
 }
 
 #[test]
+fn tool_use_confirm_worker_name_renders_inline_on_title_row() {
+    // (perm-09) Dim `· @name` suffix on the SAME row as the bold "Tool use"
+    // title, not a separate badge line above it.
+    let mut element = element! {
+        ToolUseConfirm(
+            tool_name: "Bash".to_string(),
+            tool_input: serde_json::json!({"command": "ls -la"}),
+            cwd: std::path::PathBuf::from("/work"),
+            focus: DialogFocus::AllowOnce,
+            worker_name: Some("alice".to_string()),
+        )
+    };
+    let frame = element.to_string();
+    let title_line = frame
+        .lines()
+        .find(|l| l.contains("Tool use"))
+        .expect("a title line");
+    assert!(title_line.contains("\u{00B7} @alice"), "got: {title_line:?}");
+}
+
+#[test]
 fn snapshot_tool_use_confirm_edit_shows_diff() {
     // (perm-02) An Edit permission request renders the structured diff inside
     // the dialog so the user sees the change before approving.

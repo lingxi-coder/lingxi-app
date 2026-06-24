@@ -745,17 +745,15 @@ pub fn render_screen(
                 let tool_name = tool_name.clone();
                 let tool_input = tool_input.clone();
                 let focus = state.tool_use_dialog_state.focus;
-                let worker_badge = pp
-                    .worker
-                    .as_ref()
-                    .map(|w| crate::components::permissions::worker::render_worker_badge(&w.name));
+                let worker_name = pp.worker.as_ref().map(|w| w.name.clone());
                 element! {
                     ToolUseConfirm(
                         tool_name: tool_name,
                         tool_input: tool_input,
                         cwd: std::env::current_dir().unwrap_or_default(),
                         focus: focus,
-                        worker_badge: worker_badge,
+                        worker_name: worker_name,
+                        theme: state.theme,
                     )
                 }
                 .into_any()

@@ -1950,8 +1950,9 @@ mod tests {
             team: Some("alpha".to_string()),
         };
         open_permission_dialog(&mut st, req, Some(tx), Some(worker));
-        // The worker rides onto the pending permission → the dialog renders the
-        // `● @name` badge (app.rs maps `pp.worker` → `render_worker_badge`).
+        // The worker rides onto the pending permission → the dialog renders a
+        // dim `· @name` suffix on the title row (app.rs maps `pp.worker` →
+        // `ToolUseConfirm`'s `worker_name` prop — perm-09).
         let pp = st.pending_permission.as_ref().unwrap();
         assert_eq!(pp.worker.as_ref().unwrap().name, "researcher");
     }

@@ -135,6 +135,16 @@ impl CoordinatorMode {
     }
 }
 
+/// Live coordinator-mode seam consumed by `AgentTool` via
+/// [`tool_api::BuiltinToolContext::coordinator_mode`]. Reads the same atomic
+/// flag as [`CoordinatorMode::is_enabled`], so a mid-session switch is observed
+/// immediately (the fork-subagent gate + slim coordinator prompt stay in sync).
+impl traits::coordinator_mode::CoordinatorModeHandle for CoordinatorMode {
+    fn is_enabled(&self) -> bool {
+        CoordinatorMode::is_enabled(self)
+    }
+}
+
 /// Result of a mode-switch tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModeSwitchResult {

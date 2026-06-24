@@ -313,7 +313,7 @@ pub fn build_session_memory_handle(
     };
     let config_home = memory::claude_md::user_config_dir(home);
     let runner = Arc::new(
-        sidequery::ForkedAgentRunner::new(Arc::new(sidequery::NoopSubagentSlotProvider))
+        sidequery::ForkedAgentRunner::new()
             .with_side_query_client(side_query_client, config.extraction_model.clone()),
     );
     Arc::new(crate::SessionMemoryHandle {

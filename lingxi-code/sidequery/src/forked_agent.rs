@@ -26,11 +26,11 @@
 //!
 //! **Cycle note:** `lingxi-sidequery` deliberately does not depend on
 //! `lingxi-agent` (the cycle would be `agent → memory → sidequery`). The
-//! [`SubagentSlotProvider`] seam below was a placeholder for routing a multi-turn
-//! loop *through this runner*; since that loop already exists in `AgentTool`, the
-//! seam is currently unused. A future *sidequery-level* multi-turn consumer (one
-//! that genuinely cannot reach `AgentTool`) could give it real "drive a fork to
-//! completion" methods backed by `StateMachinePool`; otherwise it can be removed.
+//! multi-turn, tool-using fork loop therefore lives in `AgentTool`
+//! (`StateMachinePool::run_subagent_loop`), not here; this runner is the
+//! single-turn (summarization-shaped) path only. A future *sidequery-level*
+//! multi-turn consumer that genuinely cannot reach `AgentTool` would need its
+//! own slot-allocation seam wired in at that point.
 //!
 //! [`run`]: ForkedAgentRunner::run
 
@@ -46,24 +46,6 @@ use thiserror::Error;
 /// override it. Mirrors `MAX_OUTPUT_TOKENS_FOR_SUMMARY` from the compaction
 /// path — single-turn forks today are summarization-shaped.
 const DEFAULT_FORK_MAX_TOKENS: u32 = 20_000;
-
-/// Placeholder seam for routing a multi-turn fork *through this runner*.
-///
-/// It is currently an empty marker and UNUSED: the multi-turn, tool-using fork
-/// already runs through `AgentTool` → `StateMachinePool::run_subagent_loop` (see
-/// the module docs), so this runner never allocates a slot. A future
-/// sidequery-level multi-turn consumer could give this real "drive a fork to
-/// completion" methods backed by `agent::StateMachinePool`; otherwise the trait
-/// + the `pool` field can be removed.
-pub trait SubagentSlotProvider: Send + Sync {}
-
-/// The no-op [`SubagentSlotProvider`] every current caller passes: this runner
-/// is single-turn (summarization), so it never touches `pool`. Wired by the
-/// autocompaction / memory-extraction composition roots.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NoopSubagentSlotProvider;
-
-impl SubagentSlotProvider for NoopSubagentSlotProvider {}
 
 /// Coarse purpose tag for a forked agent. Mirrors [`QuerySource`] for the
 /// subset of purposes that legitimately fork (full loops), and is carried
@@ -115,9 +97,6 @@ pub struct ForkedAgentResult {
 /// Forked-agent failure surface.
 #[derive(Debug, Clone, Error)]
 pub enum ForkError {
-    /// Pool refused to allocate a slot (saturated or shutting down).
-    #[error("pool error: {0}")]
-    Pool(String),
     /// The shared [`crate::CacheSafeParamsSlot`] is empty — the parent has
     /// not completed a turn yet.
     #[error("no cache-safe params available")]
@@ -127,36 +106,29 @@ pub enum ForkError {
     Internal(String),
 }
 
-/// Runs forked agents inside slots borrowed from a shared pool.
-///
-/// The pool reference is intentionally retained even though the single-turn
-/// path does not yet allocate slots: it locks in the public surface for when
-/// the §10 multi-turn runner graduates, and lets callers plumb the runner from
-/// `CompactionOrchestrator::new` today.
+/// Runs single-turn forked agents (summarization-shaped side queries).
 ///
 /// When a [`SideQueryClient`] is wired via [`Self::with_side_query_client`],
 /// [`Self::run`] performs a real single-turn forked call (see the module
 /// docs); otherwise it returns the legacy stub sentinel.
 pub struct ForkedAgentRunner {
-    #[allow(dead_code)] // Used once the §10 multi-turn runner is wired in.
-    pool: Arc<dyn SubagentSlotProvider>,
     /// Optional single-turn backend: `(client, model)`. `None` until a caller
     /// opts in via [`Self::with_side_query_client`], preserving the stub path.
     side_query: Option<(Arc<dyn SideQueryClient>, String)>,
 }
 
+impl Default for ForkedAgentRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ForkedAgentRunner {
-    /// Build a runner backed by the given pool. Multiple subsystems
-    /// (compaction, supervisor, ...) share the same pool instance.
-    ///
-    /// The runner starts with no single-turn backend; call
+    /// Build a runner with no single-turn backend; call
     /// [`Self::with_side_query_client`] to opt into the real single-turn path.
     #[must_use]
-    pub fn new(pool: Arc<dyn SubagentSlotProvider>) -> Self {
-        Self {
-            pool,
-            side_query: None,
-        }
+    pub fn new() -> Self {
+        Self { side_query: None }
     }
 
     /// Wire a real single-turn forked path backed by `client`, calling `model`.
@@ -197,9 +169,8 @@ impl ForkedAgentRunner {
     /// When no backend is wired the runner returns the legacy
     /// `"[forked-agent-stub]"` sentinel, unchanged.
     ///
-    /// The FULL multi-turn, tool-using subagent loop (the §10 `run_subagent`
-    /// driver that borrows a slot from [`SubagentSlotProvider`]) remains future
-    /// work.
+    /// The FULL multi-turn, tool-using subagent loop runs through `AgentTool`
+    /// (`StateMachinePool::run_subagent_loop`), not this single-turn runner.
     ///
     /// # Errors
     ///
@@ -267,11 +238,6 @@ mod tests {
     use protocol::{ConversationMessage, MessageId};
     use std::sync::Mutex;
     use tool_api::context::ToolUseOptions;
-
-    /// A `SubagentSlotProvider` that is never asked to allocate on the
-    /// single-turn path (the runner does not borrow a slot here).
-    struct NoopProvider;
-    impl SubagentSlotProvider for NoopProvider {}
 
     /// Mock `SideQueryClient`: records the request it was handed and returns a
     /// canned response so tests can assert both the request mapping and the
@@ -355,7 +321,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_without_client_returns_stub() {
-        let runner = ForkedAgentRunner::new(Arc::new(NoopProvider));
+        let runner = ForkedAgentRunner::new();
         let req = request_with(vec![user_msg("prefix")], vec![user_msg("prompt")], None);
 
         let result = runner.run(req).await.expect("stub run succeeds");
@@ -377,7 +343,7 @@ mod tests {
             canned_usage,
         });
 
-        let runner = ForkedAgentRunner::new(Arc::new(NoopProvider))
+        let runner = ForkedAgentRunner::new()
             .with_side_query_client(client.clone(), "claude-opus-4-6".into());
 
         let req = request_with(
@@ -421,7 +387,7 @@ mod tests {
         let client = Arc::new(FailingClient {
             message: "boom".into(),
         });
-        let runner = ForkedAgentRunner::new(Arc::new(NoopProvider))
+        let runner = ForkedAgentRunner::new()
             .with_side_query_client(client, "m".into());
 
         let req = request_with(vec![user_msg("prefix")], vec![user_msg("prompt")], None);
@@ -443,7 +409,7 @@ mod tests {
             canned_text: String::new(),
             canned_usage: Usage::default(),
         });
-        let runner = ForkedAgentRunner::new(Arc::new(NoopProvider))
+        let runner = ForkedAgentRunner::new()
             .with_side_query_client(client.clone(), "m".into());
 
         let req = request_with(vec![], vec![user_msg("only-prompt")], None);

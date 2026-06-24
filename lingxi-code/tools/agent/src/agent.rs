@@ -942,11 +942,15 @@ impl Tool for AgentTool {
                 .collect(),
             None => Vec::new(),
         };
-        // The coordinator-mode signal (TS `isCoordinatorMode()`) is not yet
-        // threaded onto `BuiltinToolContext` / `PromptOptions`, so the slim
-        // coordinator branch is structurally ported but driven by `false`
-        // (the full prompt) for now — see `build_prompt`.
-        Self::build_prompt(&agents, &mcp_server_names, false)
+        // Coordinator-mode signal (TS `isCoordinatorMode()`), read LIVE from the
+        // `coordinator_mode` seam on `BuiltinToolContext` (`None` ⇒ not
+        // coordinator). Selects the slim coordinator prompt in `build_prompt`.
+        let is_coordinator = self
+            .ctx
+            .coordinator_mode
+            .as_ref()
+            .is_some_and(|m| m.is_enabled());
+        Self::build_prompt(&agents, &mcp_server_names, is_coordinator)
     }
 
     async fn call(
@@ -996,15 +1000,19 @@ impl Tool for AgentTool {
         // EXPLICIT type always wins (never forks), even when the gate is ON.
         //
         // The gate (`is_fork_subagent_enabled`) is mutually exclusive with
-        // coordinator mode + non-interactive sessions. `is_coordinator` is not
-        // threaded onto `BuiltinToolContext` today (the `prompt()` path already
-        // notes this with `false`), so it is passed `false` here — the coordinator
-        // arm of the mutual-exclusion is therefore inert until that signal is
-        // wired (documented thin-coordinator residual). The non-interactive arm IS
-        // honored via `ctx.options.is_non_interactive_session`.
+        // coordinator mode + non-interactive sessions. `is_coordinator` is read
+        // LIVE from the `coordinator_mode` seam on `BuiltinToolContext` (`None` ⇒
+        // not coordinator), so a mid-session mode switch immediately disables
+        // forking. The non-interactive arm is honored via
+        // `ctx.options.is_non_interactive_session`.
+        let is_coordinator = self
+            .ctx
+            .coordinator_mode
+            .as_ref()
+            .is_some_and(|m| m.is_enabled());
         let is_fork = parsed.subagent_type.is_none()
             && traits::fork_subagent::is_fork_subagent_enabled(
-                false, // is_coordinator — not threaded yet (see above)
+                is_coordinator,
                 ctx.options.is_non_interactive_session,
             );
 

@@ -3025,7 +3025,7 @@ pub async fn build(
             http.clone() as Arc<dyn traits::HttpTransport>,
         ));
     let forked_runner = Arc::new(
-        sidequery::ForkedAgentRunner::new(Arc::new(sidequery::NoopSubagentSlotProvider))
+        sidequery::ForkedAgentRunner::new()
             .with_side_query_client(side_query_client.clone(), orch_cfg.model.clone()),
     );
     let autocompactor =
@@ -3586,6 +3586,9 @@ pub async fn build(
         ),
         mailbox_router: coordinator_mailbox,
         budget_enforcer: Some(budget_enforcer),
+        coordinator_mode: Some(
+            coordinator_mode.clone() as Arc<dyn traits::coordinator_mode::CoordinatorModeHandle>
+        ),
         // (3b) AgentTool threads this into the subagent's RegistryToolInvoker so
         // spawned subagents are gated by the same boot gate as the main loop.
         permission_gate: Some(perms.clone()),

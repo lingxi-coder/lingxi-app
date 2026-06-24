@@ -362,13 +362,11 @@ mod tests {
         // fallback, so to force failures we wire a runner with an empty slot:
         // `compact` then returns `CompactionError::Internal("no cache-safe
         // params")` on every call.
-        use sidequery::{CacheSafeParamsSlot, ForkedAgentRunner, SubagentSlotProvider};
+        use sidequery::{CacheSafeParamsSlot, ForkedAgentRunner};
         use std::sync::Arc;
-        struct NoopProvider;
-        impl SubagentSlotProvider for NoopProvider {}
         // No `with_side_query_client` → run() would fail too, but the empty slot
         // is consulted first and short-circuits with an error before any call.
-        let runner = Arc::new(ForkedAgentRunner::new(Arc::new(NoopProvider)));
+        let runner = Arc::new(ForkedAgentRunner::new());
         let slot = Arc::new(CacheSafeParamsSlot::new()); // never saved → empty
         Autocompactor::with_forked_runner(runner, slot)
     }

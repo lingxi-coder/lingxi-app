@@ -122,13 +122,6 @@ impl StateMachinePool {
     }
 }
 
-/// Lets `lingxi-sidequery::ForkedAgentRunner` allocate slots without taking
-/// a direct dependency on this crate (avoids the
-/// `sidequery → agent → memory → sidequery` cycle). The trait is currently a
-/// marker so the M1.14 stub compiles; production methods land alongside the
-/// real forked-agent runner in a later plan.
-impl sidequery::SubagentSlotProvider for StateMachinePool {}
-
 /// Failure modes for [`StateMachinePool`] operations.
 #[derive(Debug, thiserror::Error)]
 pub enum PoolError {

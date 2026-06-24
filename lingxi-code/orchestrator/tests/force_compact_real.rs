@@ -144,14 +144,9 @@ fn errored_compactor() -> Arc<CompactionOrchestrator> {
     use compaction::autocompact::Autocompactor;
     use compaction::microcompact::{Microcompactor, TimeBasedMCConfig};
     use compaction::snip::SnipCompactor;
-    use sidequery::{CacheSafeParamsSlot, ForkedAgentRunner, SubagentSlotProvider};
+    use sidequery::{CacheSafeParamsSlot, ForkedAgentRunner};
 
-    // Marker pool — `SubagentSlotProvider` is intentionally an empty
-    // marker trait (M1.14); the forked-agent stub never touches it.
-    struct NeverProvider;
-    impl SubagentSlotProvider for NeverProvider {}
-
-    let runner = Arc::new(ForkedAgentRunner::new(Arc::new(NeverProvider)));
+    let runner = Arc::new(ForkedAgentRunner::new());
     let slot = Arc::new(CacheSafeParamsSlot::new()); // empty — triggers Internal err
 
     let orch = CompactionOrchestrator {

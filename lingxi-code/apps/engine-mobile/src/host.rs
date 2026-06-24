@@ -908,6 +908,8 @@ pub async fn build_mobile_inner(
         task_registry: None,
         mailbox_router: None,
         budget_enforcer: None,
+        // Mobile has no coordinator runtime; fork-subagent gate sees non-coordinator.
+        coordinator_mode: None,
         // (3b) No subagent spawner on mobile → AgentTool never builds an
         // invoker, so the dispatch gate is unused here. The main loop is still
         // gated via `perms` (passed to the orchestrator below).
@@ -1016,7 +1018,7 @@ pub async fn build_mobile_inner(
             http.clone() as Arc<dyn traits::HttpTransport>,
         ));
     let forked_runner = Arc::new(
-        sidequery::ForkedAgentRunner::new(Arc::new(sidequery::NoopSubagentSlotProvider))
+        sidequery::ForkedAgentRunner::new()
             .with_side_query_client(compaction_side_query, orch_cfg.model.clone()),
     );
     let compactor = Arc::new(compaction::CompactionOrchestrator::with_autocompactor(

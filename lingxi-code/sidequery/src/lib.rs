@@ -22,7 +22,6 @@ pub mod side_query;
 pub use cache_safe_params::{CacheSafeParams, CacheSafeParamsSlot};
 pub use forked_agent::{
     ForkError, ForkPurpose, ForkedAgentRequest, ForkedAgentResult, ForkedAgentRunner,
-    NoopSubagentSlotProvider, SubagentSlotProvider,
 };
 pub use provider_side_query::ProviderSideQueryClient;
 pub use purposes::QuerySource;

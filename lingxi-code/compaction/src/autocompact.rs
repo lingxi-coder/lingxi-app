@@ -334,15 +334,10 @@ mod tests {
     use serde_json::json;
     use sidequery::{
         CacheSafeParams, SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse,
-        SubagentSlotProvider,
     };
     use std::collections::{HashMap, VecDeque};
     use std::sync::Mutex;
     use tool_api::context::ToolUseOptions;
-
-    /// `SubagentSlotProvider` never asked to allocate on the single-turn path.
-    struct NoopProvider;
-    impl SubagentSlotProvider for NoopProvider {}
 
     /// Mock `SideQueryClient` returning a canned raw summary string and
     /// recording the request it was handed.
@@ -408,7 +403,7 @@ mod tests {
             canned_text: canned_text.into(),
         });
         let runner = Arc::new(
-            ForkedAgentRunner::new(Arc::new(NoopProvider))
+            ForkedAgentRunner::new()
                 .with_side_query_client(client.clone(), "claude-opus-4-6".into()),
         );
         let slot = Arc::new(CacheSafeParamsSlot::new());
@@ -453,7 +448,7 @@ mod tests {
             seen_lens: Mutex::new(Vec::new()),
         });
         let runner = Arc::new(
-            ForkedAgentRunner::new(Arc::new(NoopProvider))
+            ForkedAgentRunner::new()
                 .with_side_query_client(client.clone(), "claude-opus-4-6".into()),
         );
         let slot = Arc::new(CacheSafeParamsSlot::new());
@@ -571,7 +566,7 @@ mod tests {
             canned_text: "<summary>S</summary>".into(),
         });
         let runner = Arc::new(
-            ForkedAgentRunner::new(Arc::new(NoopProvider))
+            ForkedAgentRunner::new()
                 .with_side_query_client(client, "m".into()),
         );
         // Empty slot — never saved.

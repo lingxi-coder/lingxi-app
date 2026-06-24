@@ -254,6 +254,7 @@ fn decode_response(resp: llm_client::LlmResponse, want_structured: bool) -> Side
             output: bt.output,
             cache_read: bt.cache_read,
             cache_write: bt.cache_write,
+            cache_write_1h: 0,
             reasoning_output: bt.reasoning_output,
         },
         server_tool_use: None,

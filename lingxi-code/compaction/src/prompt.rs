@@ -113,7 +113,7 @@ Here's an example of how your output should be structured:
 5. Problem Solving:
    [Description of solved problems and ongoing troubleshooting]
 
-6. All user messages:
+6. All user messages: 
     - [Detailed non tool use user message]
     - [...]
 
@@ -131,7 +131,7 @@ Here's an example of how your output should be structured:
 </summary>
 </example>
 
-Please provide your summary based on the conversation so far, following this structure and ensuring precision and thoroughness in your response.
+Please provide your summary based on the conversation so far, following this structure and ensuring precision and thoroughness in your response. 
 
 There may be additional summarization instructions provided in the included context. If so, remember to follow these instructions when creating the above summary. Examples of instructions include:
 <example>
@@ -142,8 +142,7 @@ When summarizing the conversation focus on typescript code changes and also reme
 <example>
 # Summary instructions
 When you are using compact - please focus on test output and code changes. Include file reads verbatim.
-</example>
-";
+</example>";
 
 /// Assemble the base compact prompt — prompt.ts:293-303 (`getCompactPrompt`).
 ///
@@ -322,6 +321,27 @@ pub fn get_compact_user_summary_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Binary oracle: BASE_COMPACT_PROMPT must be exactly 5426 bytes — confirmed
+    /// against v2.1.186 at offset 198743995 (`tail -c +198743996 | head -c 5426`).
+    #[test]
+    fn base_compact_prompt_byte_length_matches_binary() {
+        assert_eq!(
+            BASE_COMPACT_PROMPT.len(),
+            5426,
+            "BASE_COMPACT_PROMPT must be 5426 bytes (binary oracle v2.1.186)"
+        );
+        // Spot-check the two trailing-space lines that account for the
+        // 5424→5426 difference vs the older TS source.
+        assert!(
+            BASE_COMPACT_PROMPT.contains("6. All user messages: \n"),
+            "example header must have trailing space before \\n"
+        );
+        assert!(
+            BASE_COMPACT_PROMPT.contains("thoroughness in your response. \n"),
+            "closing instruction must have trailing space before \\n"
+        );
+    }
 
     #[test]
     fn get_compact_prompt_is_byte_faithful_golden() {

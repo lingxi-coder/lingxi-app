@@ -45,6 +45,72 @@ pub enum PermissionsDialogMode {
     Detail,
 }
 
+/// (PERM-1) The active behavior tab (claude-code `PermissionRuleList` tabs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PermTab {
+    /// Allowed rules.
+    #[default]
+    Allow,
+    /// Ask-first rules.
+    Ask,
+    /// Denied rules.
+    Deny,
+}
+
+impl PermTab {
+    /// Tab cycle order (Tab): Allow → Ask → Deny → Allow.
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            PermTab::Allow => PermTab::Ask,
+            PermTab::Ask => PermTab::Deny,
+            PermTab::Deny => PermTab::Allow,
+        }
+    }
+
+    /// Reverse cycle (BackTab).
+    #[must_use]
+    pub fn prev(self) -> Self {
+        match self {
+            PermTab::Allow => PermTab::Deny,
+            PermTab::Ask => PermTab::Allow,
+            PermTab::Deny => PermTab::Ask,
+        }
+    }
+
+    /// Title in the tab header.
+    #[must_use]
+    pub fn title(self) -> &'static str {
+        match self {
+            PermTab::Allow => "Allow",
+            PermTab::Ask => "Ask",
+            PermTab::Deny => "Deny",
+        }
+    }
+
+    /// The `behavior` label rows in this tab carry.
+    #[must_use]
+    fn behavior(self) -> &'static str {
+        match self {
+            PermTab::Allow => "Allow",
+            PermTab::Ask => "Ask",
+            PermTab::Deny => "Deny",
+        }
+    }
+
+    /// Per-tab subtitle (claude-code `PermissionRuleList`).
+    #[must_use]
+    pub fn subtitle(self) -> &'static str {
+        match self {
+            PermTab::Allow => "Claude Code won't ask before using allowed tools.",
+            PermTab::Ask => {
+                "Claude Code will always ask for confirmation before using these tools."
+            }
+            PermTab::Deny => "Claude Code will always reject requests to use denied tools.",
+        }
+    }
+}
+
 /// Screen state.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PermissionsScreenState {
@@ -52,10 +118,23 @@ pub struct PermissionsScreenState {
     pub mode: String,
     /// The configured-rule rows (user → project → local order).
     pub rows: Vec<PermRuleRow>,
-    /// Selected row index.
+    /// Selected row index (within the active tab's filtered rows).
     pub selected: usize,
     /// List or detail.
     pub dialog_mode: PermissionsDialogMode,
+    /// (PERM-1) The active behavior tab.
+    pub tab: PermTab,
+}
+
+impl PermissionsScreenState {
+    /// The rows belonging to the active tab (filtered by behavior).
+    #[must_use]
+    pub fn tab_rows(&self) -> Vec<&PermRuleRow> {
+        self.rows
+            .iter()
+            .filter(|r| r.behavior == self.tab.behavior())
+            .collect()
+    }
 }
 
 /// Controller outcome after a key.
@@ -157,6 +236,7 @@ pub fn load_permission_sections(
         rows,
         selected: 0,
         dialog_mode: PermissionsDialogMode::List,
+        tab: PermTab::Allow,
     }
 }
 
@@ -169,18 +249,31 @@ pub fn handle_permissions_key(
     use crossterm::event::KeyCode;
     match state.dialog_mode {
         PermissionsDialogMode::List => match key {
+            // (PERM-1) Tab/BackTab cycle the Allow/Ask/Deny tabs, re-anchoring
+            // the selection to the new tab's filtered rows.
+            KeyCode::Tab => {
+                state.tab = state.tab.next();
+                state.selected = 0;
+                PermissionsOutcome::Stay
+            }
+            KeyCode::BackTab => {
+                state.tab = state.tab.prev();
+                state.selected = 0;
+                PermissionsOutcome::Stay
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 state.selected = state.selected.saturating_sub(1);
                 PermissionsOutcome::Stay
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if !state.rows.is_empty() {
-                    state.selected = (state.selected + 1).min(state.rows.len() - 1);
+                let n = state.tab_rows().len();
+                if n > 0 {
+                    state.selected = (state.selected + 1).min(n - 1);
                 }
                 PermissionsOutcome::Stay
             }
             KeyCode::Enter => {
-                if !state.rows.is_empty() {
+                if !state.tab_rows().is_empty() {
                     state.dialog_mode = PermissionsDialogMode::Detail;
                 }
                 PermissionsOutcome::Stay
@@ -203,25 +296,39 @@ pub fn handle_permissions_key(
 pub fn render_permissions_to_string(state: &PermissionsScreenState) -> String {
     match state.dialog_mode {
         PermissionsDialogMode::List => {
-            let mut out = format!("Permissions\nMode: {}\n", state.mode);
-            if state.rows.is_empty() {
-                out.push_str("No permission rules configured.");
-                return out;
-            }
-            for (i, row) in state.rows.iter().enumerate() {
-                let marker = if i == state.selected {
-                    "\u{276F} "
+            // (PERM-1) Tab header (active in brackets) + (PERM-3) per-tab subtitle.
+            let tab_mark = |t: PermTab| -> String {
+                if t == state.tab {
+                    format!("[{}]", t.title())
                 } else {
-                    "  "
-                };
-                out.push_str(marker);
-                out.push_str(&format!("{} \u{00B7} {}", row.behavior, row.rule));
+                    format!(" {} ", t.title())
+                }
+            };
+            let mut out = format!(
+                "Permissions\nMode: {}\n{} {} {}\n{}\n",
+                state.mode,
+                tab_mark(PermTab::Allow),
+                tab_mark(PermTab::Ask),
+                tab_mark(PermTab::Deny),
+                state.tab.subtitle(),
+            );
+            let rows = state.tab_rows();
+            if rows.is_empty() {
+                out.push_str(&format!("No {} rules configured.", state.tab.title().to_lowercase()));
                 out.push('\n');
+            } else {
+                for (i, row) in rows.iter().enumerate() {
+                    let marker = if i == state.selected { "\u{276F} " } else { "  " };
+                    out.push_str(marker);
+                    // The behavior is the active tab, so the row shows just the rule.
+                    out.push_str(&row.rule);
+                    out.push('\n');
+                }
             }
-            out.push_str("Press \u{2191}\u{2193} to navigate \u{00B7} Enter to select \u{00B7} Esc to go back");
+            out.push_str("\u{2191}\u{2193} navigate \u{00B7} \u{21c6} tabs \u{00B7} Enter view \u{00B7} Esc close");
             out
         }
-        PermissionsDialogMode::Detail => match state.rows.get(state.selected) {
+        PermissionsDialogMode::Detail => match state.tab_rows().get(state.selected).copied() {
             Some(row) => render_rule_detail(row),
             None => "Permissions\n(rule no longer available)".to_string(),
         },
@@ -292,10 +399,11 @@ mod tests {
 
     #[test]
     fn nav_enter_and_esc() {
+        // Two rows in the default (Allow) tab so Down moves within the tab.
         let mut s = PermissionsScreenState {
             rows: vec![
                 row("Allow", "Bash", "User"),
-                row("Deny", "Read(./s/**)", "Project"),
+                row("Allow", "Read(./s/**)", "Project"),
             ],
             ..PermissionsScreenState::default()
         };
@@ -321,35 +429,57 @@ mod tests {
     }
 
     #[test]
-    fn list_render_marks_selection_mode_and_behavior() {
+    fn tabbed_list_filters_by_behavior_with_subtitle() {
+        // (PERM-1/PERM-3) Allow tab shows only Allow rules (just the rule, since
+        // the behavior IS the tab), the tab header marks the active tab, and the
+        // per-tab subtitle appears.
         let s = PermissionsScreenState {
             mode: "acceptEdits".into(),
             rows: vec![
                 row("Allow", "Bash", "User"),
                 row("Deny", "Read(./s/**)", "Local"),
             ],
-            selected: 1,
+            selected: 0,
             dialog_mode: PermissionsDialogMode::List,
+            tab: PermTab::Allow,
         };
         let out = render_permissions_to_string(&s);
         assert!(out.starts_with(
-            "Permissions\nMode: acceptEdits\n  Allow \u{00B7} Bash\n\u{276F} Deny \u{00B7} Read(./s/**)\n"
-        ));
+            "Permissions\nMode: acceptEdits\n[Allow]  Ask   Deny \nClaude Code won't ask before using allowed tools.\n\u{276F} Bash\n"
+        ), "got: {out}");
+        // The Deny rule is NOT in the Allow tab.
+        assert!(!out.contains("Read(./s/**)"), "got: {out}");
         assert!(out.ends_with(
-            "Press \u{2191}\u{2193} to navigate \u{00B7} Enter to select \u{00B7} Esc to go back"
+            "\u{2191}\u{2193} navigate \u{00B7} \u{21c6} tabs \u{00B7} Enter view \u{00B7} Esc close"
         ));
     }
 
     #[test]
-    fn empty_list_shows_locked_empty_state() {
+    fn tab_key_switches_behavior_tab() {
+        let mut s = PermissionsScreenState {
+            rows: vec![row("Allow", "Bash", "User"), row("Deny", "Edit", "Local")],
+            ..PermissionsScreenState::default()
+        };
+        assert_eq!(s.tab, PermTab::Allow);
+        let _ = handle_permissions_key(&mut s, KeyCode::Tab);
+        assert_eq!(s.tab, PermTab::Ask);
+        let _ = handle_permissions_key(&mut s, KeyCode::Tab);
+        assert_eq!(s.tab, PermTab::Deny);
+        // Deny tab shows the Edit rule.
+        assert!(render_permissions_to_string(&s).contains("\u{276F} Edit"));
+        let _ = handle_permissions_key(&mut s, KeyCode::BackTab);
+        assert_eq!(s.tab, PermTab::Ask);
+    }
+
+    #[test]
+    fn empty_tab_shows_locked_empty_state() {
+        // Default tab (Allow) with no Allow rules.
         let out = render_permissions_to_string(&PermissionsScreenState {
             mode: "default".into(),
+            rows: vec![row("Deny", "Bash", "User")],
             ..PermissionsScreenState::default()
         });
-        assert_eq!(
-            out,
-            "Permissions\nMode: default\nNo permission rules configured."
-        );
+        assert!(out.contains("No allow rules configured."), "got: {out}");
     }
 
     #[test]

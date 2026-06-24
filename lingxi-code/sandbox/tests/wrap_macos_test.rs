@@ -32,8 +32,10 @@ fn macos_wrap_emits_profile_at_real_path() {
     let mut parts = tail.splitn(2, ' ');
     let path = parts.next().expect("profile path");
     let content = std::fs::read_to_string(path).expect("read profile");
+    // The profile is now the full claude-code k0d template: `(deny default)`
+    // carries a `(with message "<logTag>")` and the static header follows.
     assert!(content.starts_with("(version 1)\n"), "got: {content}");
-    assert!(content.contains("(deny default)"), "got: {content}");
+    assert!(content.contains("(deny default (with message"), "got: {content}");
     assert!(content.contains("(allow file-read*)"), "got: {content}");
     let _ = std::fs::remove_file(path);
 }
@@ -53,12 +55,14 @@ fn macos_sbpl_includes_allow_write_entries() {
         .next()
         .unwrap();
     let content = std::fs::read_to_string(path).unwrap();
+    // k0d form: a non-glob allow_write path becomes `(allow file-write*\n
+    // (subpath "<path>")\n (with message "<logTag>"))`.
     assert!(
-        content.contains(r#"(allow file-write* (regex "^/Users/u/repo"))"#),
+        content.contains("(allow file-write*\n  (subpath \"/Users/u/repo\")"),
         "missing first allow_write entry: {content}"
     );
     assert!(
-        content.contains(r#"(allow file-write* (regex "^/tmp/work"))"#),
+        content.contains("(allow file-write*\n  (subpath \"/tmp/work\")"),
         "missing second allow_write entry: {content}"
     );
     let _ = std::fs::remove_file(path);
@@ -75,8 +79,10 @@ fn macos_sbpl_includes_deny_read_entries() {
         .next()
         .unwrap();
     let content = std::fs::read_to_string(path).unwrap();
+    // k0d form: a non-glob deny_read path becomes `(deny file-read*\n
+    // (subpath "<path>")\n (with message "<logTag>"))`.
     assert!(
-        content.contains(r#"(deny file-read* (regex "^/private/etc"))"#),
+        content.contains("(deny file-read*\n  (subpath \"/private/etc\")"),
         "missing deny_read entry: {content}"
     );
     let _ = std::fs::remove_file(path);
@@ -100,20 +106,35 @@ fn macos_sbpl_no_network_unless_requested() {
 }
 
 #[test]
-fn macos_sbpl_network_when_domains_listed() {
-    let mut policy = cfg(vec![], vec![]);
-    policy.network.allowed_domains = vec!["api.example.com".to_string()];
-    let wrapped = wrap_with_sandbox("curl", &policy, Platform::Mac).expect("wrap ok");
+fn macos_sbpl_full_network_only_for_wildcard() {
+    // claude-code parity: full `(allow network*)` is emitted only for the
+    // wildcard-all policy. A SPECIFIC allow-list restricts (the binary proxy-
+    // filters it; the legacy `sandbox-exec -f` path has no proxy, so it yields
+    // the restricted branch — never silently granting full egress).
+    let mut specific = cfg(vec![], vec![]);
+    specific.network.allowed_domains = vec!["api.example.com".to_string()];
+    let p = profile_of(wrap_with_sandbox("curl", &specific, Platform::Mac).expect("wrap ok"));
+    assert!(
+        !p.contains("(allow network*)"),
+        "a specific allow-list must NOT grant full network egress: {p}"
+    );
+
+    let mut wildcard = cfg(vec![], vec![]);
+    wildcard.network.allowed_domains = vec!["*".to_string()];
+    let p = profile_of(wrap_with_sandbox("curl", &wildcard, Platform::Mac).expect("wrap ok"));
+    assert!(p.contains("(allow network*)"), "wildcard should allow all: {p}");
+}
+
+/// Read + delete the SBPL profile a wrapped `sandbox-exec -f <path> …` points at.
+fn profile_of(wrapped: String) -> String {
     let path = wrapped
         .strip_prefix("sandbox-exec -f ")
         .unwrap()
         .split(' ')
         .next()
-        .unwrap();
-    let content = std::fs::read_to_string(path).unwrap();
-    assert!(
-        content.contains("(allow network*)"),
-        "expected network allow line: {content}"
-    );
-    let _ = std::fs::remove_file(path);
+        .unwrap()
+        .to_string();
+    let content = std::fs::read_to_string(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    content
 }

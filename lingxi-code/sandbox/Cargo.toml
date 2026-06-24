@@ -9,6 +9,11 @@ license.workspace = true
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 permission = { path = "../permission" }
+# Reuse the byte-faithful k0d SBPL profile builder (the macOS sandbox profile
+# generator) instead of duplicating a minimal template here. `sandbox-runtime`
+# is a leaf crate (no path-dep on sandbox/permission/traits/protocol), so this
+# introduces no dependency cycle.
+sandbox-runtime = { path = "../sandbox-runtime" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

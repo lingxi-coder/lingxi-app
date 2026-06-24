@@ -130,6 +130,14 @@ pub struct AssistantToolUseProps {
     /// (claude-code `getDisplayPath`). Empty (the default) renders absolute /
     /// `~`-relative paths only.
     pub cwd: PathBuf,
+    /// (ma-02) Resolution state of the paired tool result, driving the `●` dot
+    /// color exactly like claude-code's `ToolUseLoader`:
+    ///   `None`        → unresolved (no result yet) → dim dot.
+    ///   `Some(false)` → resolved success           → green dot.
+    ///   `Some(true)`  → resolved error             → red dot.
+    /// The dispatcher fills this from the paired `UserToolResult` (looked up by
+    /// `id`) — `None` when no result has arrived for this `tool_use_id`.
+    pub resolution: Option<bool>,
 }
 
 /// Pure-string renderer used by snapshot tests AND the iocraft component
@@ -186,14 +194,29 @@ fn single_line_json_preview(input: &serde_json::Value) -> String {
     out
 }
 
+/// `●` dot color for a tool-use header, given the paired result's resolution
+/// state (claude-code `ToolUseLoader`): dim while unresolved, green on success,
+/// red on error. `None` = no result yet, `Some(is_error)` = resolved.
+#[must_use]
+pub fn resolution_dot_color(resolution: Option<bool>) -> Color {
+    match resolution {
+        None => TuiTheme::DIM,
+        Some(false) => TuiTheme::SUCCESS,
+        Some(true) => TuiTheme::ERROR,
+    }
+}
+
 /// iocraft component. (ma-02) The header is split into per-segment styling
-/// rather than one blanket cyan `Text`: the `●` dot is dim (claude-code's
-/// unresolved `ToolUseLoader` state — resolution-state green/error-red needs
-/// the errored-tool-id lookup, deferred), the tool NAME is bold in the default
-/// text color, and the `(preview)` is the default color too.
+/// rather than one blanket cyan `Text`: the `●` dot follows the paired result's
+/// resolution state (claude-code `ToolUseLoader`: dim while unresolved, green on
+/// success, red on error), the tool NAME is bold in the default text color, and
+/// the `(preview)` is the default color too.
 #[component]
 pub fn AssistantToolUseMessage(props: &AssistantToolUseProps) -> impl Into<AnyElement<'static>> {
     let prefix = if props.focused { FOCUS_PREFIX } else { "" };
+    // `ToolUseLoader` dot color: dim when unresolved (`dimColor`), else the
+    // success/error theme token with no dimming.
+    let dot_color = resolution_dot_color(props.resolution);
     let name = user_facing_name(&props.tool).to_string();
     let preview = match render_tool_use_message(&props.tool, &props.input, &props.cwd) {
         Some(s) if s.is_empty() => None,
@@ -209,7 +232,7 @@ pub fn AssistantToolUseMessage(props: &AssistantToolUseProps) -> impl Into<AnyEl
                 #((!prefix.is_empty()).then(|| element! {
                     Text(content: prefix.to_string(), color: TuiTheme::DIM)
                 }))
-                Text(content: MARKER.to_string(), color: TuiTheme::DIM)
+                Text(content: MARKER.to_string(), color: dot_color)
                 Text(content: format!(" {name}"), weight: Weight::Bold)
                 #(preview.map(|p| element! { Text(content: format!("({p})")) }))
             }
@@ -292,7 +315,17 @@ mod tests {
             expanded: false,
             focused: false,
             cwd: PathBuf::from("/p"),
+            resolution: None,
         });
         assert_eq!(s, "● Search(pattern: \"*.rs\")");
+    }
+
+    #[test]
+    fn resolution_maps_to_dot_color() {
+        // (ma-02) claude-code `ToolUseLoader`: dim unresolved / green success /
+        // red error. The three states map to three distinct theme colors.
+        assert_eq!(resolution_dot_color(None), TuiTheme::DIM);
+        assert_eq!(resolution_dot_color(Some(false)), TuiTheme::SUCCESS);
+        assert_eq!(resolution_dot_color(Some(true)), TuiTheme::ERROR);
     }
 }

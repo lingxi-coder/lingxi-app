@@ -23,6 +23,7 @@ fn collapsed_read_with_file_path() {
         expanded: false,
         focused: false,
         cwd: PathBuf::from("/tmp"),
+        resolution: None,
     });
     assert_snapshot!(s, @"● Read(x.rs)");
 }
@@ -36,6 +37,7 @@ fn expanded_read_shows_pretty_json() {
         expanded: true,
         focused: false,
         cwd: PathBuf::from("/tmp"),
+        resolution: None,
     });
     assert_snapshot!(s, @r#"
     ● Read(x.rs)
@@ -55,6 +57,7 @@ fn focused_collapsed_has_arrow_prefix() {
         expanded: false,
         focused: true,
         cwd: PathBuf::from("/tmp"),
+        resolution: None,
     });
     assert_snapshot!(s, @"> ● Read(x.rs)");
 }

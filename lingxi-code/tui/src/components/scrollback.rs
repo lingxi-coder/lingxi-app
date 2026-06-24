@@ -72,6 +72,7 @@ pub fn render_message(
     theme: Theme,
     theme_name: ThemeName,
     width: usize,
+    resolved: &HashMap<ToolUseId, bool>,
 ) -> AnyElement<'static> {
     match m {
         RenderedMessage::UserText { body, .. } => element! {
@@ -94,6 +95,10 @@ pub fn render_message(
         RenderedMessage::AssistantToolUse { id, tool, input } => {
             let is_expanded = expanded.get(&id).copied().unwrap_or(false);
             let is_focused = focused_tool_id.as_ref() == Some(&id);
+            // (ma-02) Resolution state of the paired result (by `id`): `None`
+            // when no result has arrived → dim dot; `Some(is_error)` → green /
+            // red dot (claude-code `ToolUseLoader`).
+            let resolution = resolved.get(&id).copied();
             element! {
                 AssistantToolUseMessage(
                     id: id,
@@ -104,6 +109,7 @@ pub fn render_message(
                     // Session cwd drives getDisplayPath path-shortening in the
                     // per-tool preview (claude-code `renderToolUseMessage`).
                     cwd: std::env::current_dir().unwrap_or_default(),
+                    resolution: resolution,
                 )
             }
             .into_any()

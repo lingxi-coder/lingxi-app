@@ -77,6 +77,7 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
                 expanded,
                 focused,
                 cwd: std::env::current_dir().unwrap_or_default(),
+                resolution: None,
             })
         }
         RenderedMessage::UserToolResult {

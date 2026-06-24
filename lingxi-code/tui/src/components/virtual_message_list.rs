@@ -712,6 +712,21 @@ pub fn VirtualMessageList(props: &VirtualMessageListProps) -> impl Into<AnyEleme
     let focused_tool_id = props.focused_tool_id.clone();
     let theme = props.theme;
     let theme_name = props.theme_name;
+    // (ma-02) Resolution map: every tool result in the FULL log (not just the
+    // window — a tool-use block can be visible while its result paginates in)
+    // keyed by `tool_use_id` → `is_error`. Drives the `●` dot color
+    // (claude-code `ToolUseLoader`: dim unresolved / green success / red error).
+    let resolved: std::collections::HashMap<ToolUseId, bool> = props
+        .messages
+        .iter()
+        .filter_map(|m| match m {
+            crate::state::RenderedMessage::UserToolResult { id, result, .. } => Some((
+                id.clone(),
+                crate::components::messages::user_tool_result::tool_result_error(result).is_some(),
+            )),
+            _ => None,
+        })
+        .collect();
     // (A2) Thread the cache's render width into each message so markdown TABLES
     // in assistant bodies lay out to the live viewport width. The cache was
     // built at this same width, so measurement and render agree.
@@ -729,6 +744,7 @@ pub fn VirtualMessageList(props: &VirtualMessageListProps) -> impl Into<AnyEleme
                     theme,
                     theme_name,
                     width,
+                    &resolved,
                 )
             })
             .collect()

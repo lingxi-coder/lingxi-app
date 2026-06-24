@@ -338,6 +338,8 @@ impl TuiTheme {
     pub const USER: Color = Color::Reset;
     /// Error/system-error text — `Theme::dark().error`.
     pub const ERROR: Color = Theme::dark().error;
+    /// Success text (resolved tool-use dot) — `Theme::dark().success`.
+    pub const SUCCESS: Color = Theme::dark().success;
     /// Dim text (system hints, footnotes) — `Theme::dark().dim`.
     pub const DIM: Color = Theme::dark().dim;
 }

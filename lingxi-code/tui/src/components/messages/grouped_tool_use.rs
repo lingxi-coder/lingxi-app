@@ -54,6 +54,7 @@ pub fn render_grouped_to_string(
             expanded: false,
             focused: false,
             cwd: std::env::current_dir().unwrap_or_default(),
+            resolution: None,
         });
         let res_line = render_user_tool_result_to_string(UserToolResultProps {
             id: ToolUseId::new(),

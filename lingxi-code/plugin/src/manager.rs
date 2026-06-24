@@ -210,14 +210,33 @@ impl PluginManager {
                         "Marketplace '{name}' not found. Available marketplaces: {avail}"
                     ))
                 })?;
-                // 3. Resolve the plugin dir inside the clone (path-safety guarded)
-                //    and materialize it into the versioned cache.
+                // 3. Resolve the plugin dir inside the clone (lexical guard), then
+                //    canonicalize and assert it is STILL inside the clone — a
+                //    120000 symlink in the untrusted repo (e.g. `path` pointing at
+                //    `~/.ssh`) would otherwise let the copy follow it out of the
+                //    clone and exfiltrate host files into the cache.
                 let src_dir = crate::marketplace::MarketplaceManager::plugin_dir_in_clone(
                     &clone_dir, entry,
                 )
                 .map_err(PluginManagerError::Marketplace)?;
-                let landed = self.copy_into_cache(&src_dir, &mkt_name).await?;
-                // 4. Finalize (load manifest + components, stamp source, enable).
+                let real_src = tokio::fs::canonicalize(&src_dir).await.map_err(|_| {
+                    PluginManagerError::Marketplace(format!(
+                        "Marketplace name '{name}' resolves to a path outside the cache directory"
+                    ))
+                })?;
+                let real_clone = tokio::fs::canonicalize(&clone_dir).await.map_err(|e| {
+                    PluginManagerError::Marketplace(format!("marketplace clone unreadable: {e}"))
+                })?;
+                if !real_src.starts_with(&real_clone) {
+                    return Err(PluginManagerError::Marketplace(format!(
+                        "Marketplace name '{name}' resolves to a path outside the cache directory"
+                    )));
+                }
+                // 4. Materialize under the catalog's DECLARED name (the segment
+                //    reboot discovery resolves `plugin@<marketplace-name>` to),
+                //    not the URL slug.
+                let landed = self.copy_into_cache(&real_src, &index.name).await?;
+                // 5. Finalize (load manifest + components, stamp source, enable).
                 self.finalize_install(source, landed).await
             }
             PluginSource::Git { url, ref_ } => {
@@ -713,6 +732,21 @@ fn repo_dir_for_url(url: &str) -> String {
 /// non-regular entries are silently skipped so a malicious clone cannot plant a
 /// dangling/escaping link in the cache.
 async fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    // Refuse to copy a symlinked ROOT: `read_dir` follows it to the target
+    // (potentially outside the source tree), which an untrusted clone could
+    // abuse to exfiltrate arbitrary host files into the cache. Entries
+    // discovered INSIDE a directory are already skipped if they are symlinks,
+    // but the walk's own root is not covered by that check.
+    if tokio::fs::symlink_metadata(src)
+        .await?
+        .file_type()
+        .is_symlink()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to copy a symlinked directory",
+        ));
+    }
     tokio::fs::create_dir_all(dst).await?;
     // Iterative DFS over (src, dst) pairs to avoid boxing for async recursion.
     let mut stack = vec![(src.to_path_buf(), dst.to_path_buf())];

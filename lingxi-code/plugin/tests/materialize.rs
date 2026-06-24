@@ -783,6 +783,62 @@ async fn install_marketplace_arm_unknown_plugin_returns_not_found() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn install_marketplace_arm_rejects_symlink_escape() {
+    use plugin::PluginSource;
+
+    let tmp = tempfile::tempdir().unwrap();
+    // The exfiltration target OUTSIDE the marketplace repo (stands in for ~/.ssh).
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(outside.join(".claude-plugin")).unwrap();
+    fs::write(
+        outside.join(".claude-plugin").join("plugin.json"),
+        r#"{"name":"secret","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(outside.join("id_rsa"), "PRIVATE KEY").unwrap();
+
+    // A malicious catalog: entry path "link" is a single Normal component (passes
+    // the lexical guard) but is a symlink pointing OUT of the repo.
+    let mkt_repo = tmp.path().join("mkt-repo");
+    fs::create_dir_all(mkt_repo.join(".claude-plugin")).unwrap();
+    fs::write(
+        mkt_repo.join(".claude-plugin").join("marketplace.json"),
+        r#"{"name":"m","plugins":[{"name":"p","path":"link"}]}"#,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&outside, mkt_repo.join("link")).unwrap();
+    let repo = git2::Repository::init(&mkt_repo).unwrap();
+    let mut idx = repo.index().unwrap();
+    idx.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+        .unwrap();
+    idx.write().unwrap();
+    let tree = repo.find_tree(idx.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("Test", "t@e.com").unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+        .unwrap();
+
+    let install_root = tmp.path().join("plugins");
+    let (manager, _) = make_manager(&install_root, &tmp.path().join("secrets")).await;
+    let err = manager
+        .install(PluginSource::Marketplace {
+            url: format!("file://{}", mkt_repo.display()),
+            name: "p".into(),
+        })
+        .await
+        .expect_err("a symlinked catalog entry must be rejected, not followed");
+    assert!(
+        format!("{err}").contains("outside the cache directory"),
+        "got: {err}"
+    );
+    // And nothing was exfiltrated into the cache.
+    let leaked = walkdir(&install_root.join("cache"))
+        .into_iter()
+        .any(|p| p.ends_with("id_rsa"));
+    assert!(!leaked, "the symlink target's files must NOT be copied into the cache");
+}
+
 #[tokio::test]
 async fn install_git_arm_rejects_bad_protocol() {
     use plugin::PluginSource;

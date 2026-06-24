@@ -153,10 +153,36 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         return run::run_stream_json_print(&parsed, &runtime, stream, permission_mode).await;
     }
 
+    // `--output-format json` / `--json` in PRINT mode: emit only the final
+    // result JSON line (suppress all streaming frames). Only intercept when
+    // a non-slash prompt is present or `--print` is active (no slash prompt)
+    // — slash commands keep the old JSON event format, interactive/REPL mode
+    // with `--json` falls through to the normal dispatch path (repl.rs handles it).
+    let is_non_slash_print = parsed.prompt.as_deref().map_or(false, |p| !p.trim_start().starts_with('/'));
+    if parsed.is_json_output() && (is_non_slash_print || parsed.print) {
+        let stream = Arc::new(stream_json::StreamJsonStream::new_json_mode_placeholder());
+        let adapter: Arc<dyn traits::OutputStream> = stream.clone();
+        let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("lingxi-cli: {e}");
+                return exit_codes::RUNTIME_ERROR;
+            }
+        };
+        if let Some(notice) = startup_deprecation_notice(&parsed) {
+            eprintln!("{notice}");
+        }
+        if let Some(notice) = &permission_notice {
+            eprintln!("{notice}");
+        }
+        return run::run_json_print(&parsed, &runtime, stream, permission_mode).await;
+    }
+
     // Pick the sink first so we can install it on the orchestrator at
-    // construction time. For `--json` the session id used in `turn_start`
-    // is minted afresh (synchronous mint via `SessionId::new`); for
-    // plain mode the id is unused.
+    // construction time. `--json` with a slash command uses `JsonSink` so the
+    // old `{"event":"command_output",...}` format is preserved. All other
+    // modes use `PlainSink` (the `--json` + normal-prompt path already returned
+    // above via `run_json_print`).
     let sink: Arc<dyn output::OutputSink> = if parsed.is_json_output() {
         Arc::new(output::JsonSink::new(protocol::SessionId::new()))
     } else {

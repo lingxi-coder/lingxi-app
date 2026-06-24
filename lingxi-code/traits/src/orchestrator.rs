@@ -59,6 +59,12 @@ pub struct CostSnapshot {
     /// Cumulative output tokens across all turns.
     #[serde(default)]
     pub output_tokens: u64,
+    /// Cumulative cache-read input tokens across all turns.
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    /// Cumulative cache-creation input tokens across all turns.
+    #[serde(default)]
+    pub cache_creation_tokens: u64,
     /// Cumulative successful `messages_create` calls.
     #[serde(default)]
     pub api_calls: u32,

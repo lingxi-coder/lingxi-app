@@ -7,10 +7,11 @@
 //! 2. `system/status` — emitted once before the API call (call `emit_status()`).
 //! 3. `assistant` — accumulated per-message, flushed at `emit_message_boundary()`.
 //! 4. `user` — tool_result echo, emitted by `emit_tool_result()`.
+//! 5. `result` — emitted at the end via `emit_result_success()` / `emit_result_error()`.
 //!
 //! ## Wire format
 //! - Compact JSON + `\n` (LF only).
-//! - U+2028 → ` `, U+2029 → ` ` (line-splitter safety).
+//! - U+2028 → ` `, U+2029 → ` ` (line-splitter safety).
 //! - Every frame carries `session_id` + `uuid` (random v4).
 //! - Atomic per-line stdout writes (Mutex-locked).
 
@@ -68,6 +69,15 @@ impl AccBlock {
             AccBlock::ToolUse { id, name, input } => {
                 json!({"type": "tool_use", "id": id, "name": name, "input": input})
             }
+        }
+    }
+
+    /// Extract text content, if this is a Text block.
+    fn as_text(&self) -> Option<&str> {
+        if let AccBlock::Text(t) = self {
+            Some(t.as_str())
+        } else {
+            None
         }
     }
 }
@@ -128,6 +138,15 @@ impl MessageAccum {
             "context_management": null
         })
     }
+
+    /// Collect all text from Text blocks (joined, no separator).
+    fn collect_text(&self) -> String {
+        self.blocks
+            .iter()
+            .filter_map(|b| b.as_text())
+            .collect::<Vec<_>>()
+            .join("")
+    }
 }
 
 // ── StreamJsonStream ─────────────────────────────────────────────────────────
@@ -165,6 +184,13 @@ pub struct StreamJsonStream {
     init_params: Mutex<Option<StreamJsonInitParams>>,
     /// Per-message accumulator (behind Mutex so the async trait can write it).
     accum: Arc<Mutex<MessageAccum>>,
+    /// When true, suppress all frames except the final result frame.
+    /// Set by `new_json_mode_placeholder()` / `new_json_mode()` for
+    /// `--output-format json` / `--json` output paths.
+    suppress_frames: bool,
+    /// The last completed assistant text (collected just before boundary reset).
+    /// Used by `run_stream_json_print` to populate the result frame's `result` field.
+    last_result_text: Mutex<String>,
 }
 
 impl StreamJsonStream {
@@ -178,6 +204,22 @@ impl StreamJsonStream {
             session_id: Mutex::new(String::new()),
             init_params: Mutex::new(None),
             accum: Arc::new(Mutex::new(MessageAccum::default())),
+            suppress_frames: false,
+            last_result_text: Mutex::new(String::new()),
+        }
+    }
+
+    /// Construct a json-mode placeholder: same as `new_placeholder()` but
+    /// with `suppress_frames = true`. All frames EXCEPT the final result
+    /// frame are suppressed. Used by `--output-format json` / `--json`.
+    pub fn new_json_mode_placeholder() -> Self {
+        Self {
+            out: Arc::new(Mutex::new(std::io::stdout())),
+            session_id: Mutex::new(String::new()),
+            init_params: Mutex::new(None),
+            accum: Arc::new(Mutex::new(MessageAccum::default())),
+            suppress_frames: true,
+            last_result_text: Mutex::new(String::new()),
         }
     }
 
@@ -190,6 +232,22 @@ impl StreamJsonStream {
             session_id: Mutex::new(session_id),
             init_params: Mutex::new(Some(init_params)),
             accum: Arc::new(Mutex::new(MessageAccum::default())),
+            suppress_frames: false,
+            last_result_text: Mutex::new(String::new()),
+        }
+    }
+
+    /// Convenience constructor for json-mode tests where all params are known
+    /// upfront.
+    pub fn new_json_mode(init_params: StreamJsonInitParams) -> Self {
+        let session_id = init_params.session_id.clone();
+        Self {
+            out: Arc::new(Mutex::new(std::io::stdout())),
+            session_id: Mutex::new(session_id),
+            init_params: Mutex::new(Some(init_params)),
+            accum: Arc::new(Mutex::new(MessageAccum::default())),
+            suppress_frames: true,
+            last_result_text: Mutex::new(String::new()),
         }
     }
 
@@ -202,7 +260,11 @@ impl StreamJsonStream {
 
     /// Emit the `system/init` frame. Called once before `run_turn`.
     /// Panics if [`set_init_params`] has not been called yet.
+    /// No-op when `suppress_frames` is true.
     pub async fn emit_init(&self) {
+        if self.suppress_frames {
+            return;
+        }
         let uuid = uuid::Uuid::new_v4().to_string();
         let params_guard = self.init_params.lock().await;
         let p = params_guard.as_ref().expect("set_init_params must be called before emit_init");
@@ -236,7 +298,11 @@ impl StreamJsonStream {
 
     /// Emit the `system/status` frame (status: "requesting"). Called just
     /// before the API turn starts.
+    /// No-op when `suppress_frames` is true.
     pub async fn emit_status(&self) {
+        if self.suppress_frames {
+            return;
+        }
         let uuid = uuid::Uuid::new_v4().to_string();
         let session_id = self.session_id.lock().await.clone();
         let frame = json!({
@@ -248,6 +314,191 @@ impl StreamJsonStream {
         });
         let mut out = self.out.lock().await;
         emit_line(&mut out, &frame);
+    }
+
+    /// Build the success result frame Value (exact 20-key golden order).
+    ///
+    /// Pure builder — does not write to stdout. Call `emit_result_success`
+    /// to build + emit.
+    pub async fn build_result_success_frame(
+        &self,
+        result_text: &str,
+        stop_reason: &str,
+        cost: &CostSnapshot,
+        model_id: &str,
+        fast_mode_state: &str,
+    ) -> Value {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let session_id = self.session_id.lock().await.clone();
+        let duration_ms: u64 = cost.session_duration.as_millis().try_into().unwrap_or(u64::MAX);
+
+        let usage = Self::build_usage_block(cost);
+        let model_usage = Self::build_model_usage_block(cost, model_id);
+
+        // EXACT key order (20 keys) per GROUND-TRUTH:
+        // type,subtype,is_error,api_error_status,duration_ms,duration_api_ms,
+        // ttft_ms,ttft_stream_ms,time_to_request_ms,num_turns,result,stop_reason,
+        // session_id,total_cost_usd,usage,modelUsage,permission_denials,
+        // terminal_reason,fast_mode_state,uuid
+        let mut obj = serde_json::Map::new();
+        obj.insert("type".into(), json!("result"));
+        obj.insert("subtype".into(), json!("success"));
+        obj.insert("is_error".into(), json!(false));
+        obj.insert("api_error_status".into(), Value::Null);
+        obj.insert("duration_ms".into(), json!(duration_ms));
+        obj.insert("duration_api_ms".into(), Value::Null);
+        obj.insert("ttft_ms".into(), Value::Null);
+        obj.insert("ttft_stream_ms".into(), Value::Null);
+        obj.insert("time_to_request_ms".into(), Value::Null);
+        obj.insert("num_turns".into(), json!(cost.api_calls));
+        obj.insert("result".into(), json!(result_text));
+        obj.insert("stop_reason".into(), json!(stop_reason));
+        obj.insert("session_id".into(), json!(session_id));
+        obj.insert("total_cost_usd".into(), json!(cost.total_usd));
+        obj.insert("usage".into(), usage);
+        obj.insert("modelUsage".into(), Value::Object(model_usage));
+        obj.insert("permission_denials".into(), json!([]));
+        obj.insert("terminal_reason".into(), json!("completed"));
+        obj.insert("fast_mode_state".into(), json!(fast_mode_state));
+        obj.insert("uuid".into(), json!(uuid));
+
+        Value::Object(obj)
+    }
+
+    /// Emit the success result frame and return the Value.
+    pub async fn emit_result_success(
+        &self,
+        result_text: &str,
+        stop_reason: &str,
+        cost: &CostSnapshot,
+        model_id: &str,
+        fast_mode_state: &str,
+    ) -> Value {
+        let frame = self
+            .build_result_success_frame(result_text, stop_reason, cost, model_id, fast_mode_state)
+            .await;
+        let mut out = self.out.lock().await;
+        emit_line(&mut out, &frame);
+        frame
+    }
+
+    /// Build the error result frame Value (exact 20-key golden order, with
+    /// `errors` at the `result` position and `is_error=true`).
+    ///
+    /// Pure builder — does not write to stdout.
+    pub async fn build_result_error_frame(
+        &self,
+        subtype: &str,
+        errors: Vec<String>,
+        cost: &CostSnapshot,
+        model_id: &str,
+        fast_mode_state: &str,
+    ) -> Value {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let session_id = self.session_id.lock().await.clone();
+        let duration_ms: u64 = cost.session_duration.as_millis().try_into().unwrap_or(u64::MAX);
+
+        let terminal_reason = match subtype {
+            "error_during_execution" => "error",
+            "error_max_turns" => "maxTurns",
+            "error_max_budget_usd" => "budgetExceeded",
+            "error_max_structured_output_retries" => "maxStructuredOutputRetries",
+            _ => "error",
+        };
+
+        let usage = Self::build_usage_block(cost);
+        let model_usage = Self::build_model_usage_block(cost, model_id);
+
+        // EXACT key order (20 keys), errors replaces result at position 10:
+        // type,subtype,is_error,api_error_status,duration_ms,duration_api_ms,
+        // ttft_ms,ttft_stream_ms,time_to_request_ms,num_turns,errors,stop_reason,
+        // session_id,total_cost_usd,usage,modelUsage,permission_denials,
+        // terminal_reason,fast_mode_state,uuid
+        let mut obj = serde_json::Map::new();
+        obj.insert("type".into(), json!("result"));
+        obj.insert("subtype".into(), json!(subtype));
+        obj.insert("is_error".into(), json!(true));
+        obj.insert("api_error_status".into(), Value::Null);
+        obj.insert("duration_ms".into(), json!(duration_ms));
+        obj.insert("duration_api_ms".into(), Value::Null);
+        obj.insert("ttft_ms".into(), Value::Null);
+        obj.insert("ttft_stream_ms".into(), Value::Null);
+        obj.insert("time_to_request_ms".into(), Value::Null);
+        obj.insert("num_turns".into(), json!(cost.api_calls));
+        obj.insert("errors".into(), json!(errors));
+        obj.insert("stop_reason".into(), Value::Null);
+        obj.insert("session_id".into(), json!(session_id));
+        obj.insert("total_cost_usd".into(), json!(cost.total_usd));
+        obj.insert("usage".into(), usage);
+        obj.insert("modelUsage".into(), Value::Object(model_usage));
+        obj.insert("permission_denials".into(), json!([]));
+        obj.insert("terminal_reason".into(), json!(terminal_reason));
+        obj.insert("fast_mode_state".into(), json!(fast_mode_state));
+        obj.insert("uuid".into(), json!(uuid));
+
+        Value::Object(obj)
+    }
+
+    /// Emit the error result frame and return the Value.
+    pub async fn emit_result_error(
+        &self,
+        subtype: &str,
+        errors: Vec<String>,
+        cost: &CostSnapshot,
+        model_id: &str,
+        fast_mode_state: &str,
+    ) -> Value {
+        let frame = self
+            .build_result_error_frame(subtype, errors, cost, model_id, fast_mode_state)
+            .await;
+        let mut out = self.out.lock().await;
+        emit_line(&mut out, &frame);
+        frame
+    }
+
+    /// Return the last completed assistant text (populated just before
+    /// accumulator reset in `emit_message_boundary`).
+    pub async fn get_last_result_text(&self) -> String {
+        self.last_result_text.lock().await.clone()
+    }
+
+    /// Build the `usage` sub-block (snake_case per GROUND-TRUTH).
+    fn build_usage_block(cost: &CostSnapshot) -> Value {
+        json!({
+            "input_tokens": cost.input_tokens,
+            "cache_creation_input_tokens": cost.cache_creation_tokens,
+            "cache_read_input_tokens": cost.cache_read_tokens,
+            "output_tokens": cost.output_tokens,
+            "server_tool_use": {"web_search_requests": 0_u64, "web_fetch_requests": 0_u64},
+            "service_tier": "standard",
+            "cache_creation": {
+                "ephemeral_1h_input_tokens": 0_u64,
+                "ephemeral_5m_input_tokens": 0_u64
+            },
+            "inference_geo": "not_available",
+            "iterations": [],
+            "speed": "standard"
+        })
+    }
+
+    /// Build the `modelUsage` sub-map keyed by `model_id` (camelCase per
+    /// GROUND-TRUTH). Empty map when no tokens were consumed.
+    fn build_model_usage_block(cost: &CostSnapshot, model_id: &str) -> serde_json::Map<String, Value> {
+        let mut model_usage = serde_json::Map::new();
+        if cost.input_tokens > 0 || cost.output_tokens > 0 || cost.total_usd > 0.0 {
+            let entry = json!({
+                "inputTokens": cost.input_tokens,
+                "outputTokens": cost.output_tokens,
+                "cacheReadInputTokens": cost.cache_read_tokens,
+                "cacheCreationInputTokens": cost.cache_creation_tokens,
+                "webSearchRequests": 0_u64,
+                "costUSD": cost.total_usd,
+                "contextWindow": 200000_u64,
+                "maxOutputTokens": 32000_u64
+            });
+            model_usage.insert(model_id.to_string(), entry);
+        }
+        model_usage
     }
 }
 
@@ -269,6 +520,9 @@ impl OutputStream for StreamJsonStream {
         name: &str,
         input: &serde_json::Value,
     ) {
+        if self.suppress_frames {
+            return;
+        }
         let mut acc = self.accum.lock().await;
         acc.blocks.push(AccBlock::ToolUse {
             id: id.as_str().to_string(),
@@ -283,10 +537,10 @@ impl OutputStream for StreamJsonStream {
         _tool: &str,
         result: &serde_json::Value,
     ) {
+        if self.suppress_frames {
+            return;
+        }
         // Emit a `user` frame with a tool_result content block.
-        // For P1, we don't have the original tool_use_id passed through here —
-        // the trait passes `id` but SinkAdapter historically dropped it.
-        // We use the id arg directly.
         let tool_use_id = _id.as_str();
         let is_error = result.get("error").is_some();
         let uuid = uuid::Uuid::new_v4().to_string();
@@ -319,6 +573,9 @@ impl OutputStream for StreamJsonStream {
     }
 
     async fn emit_thinking(&self, thinking: &str, signature: Option<&str>) {
+        if self.suppress_frames {
+            return;
+        }
         let mut acc = self.accum.lock().await;
         if let Some(AccBlock::Thinking { thinking: t, signature: s }) = acc.blocks.last_mut() {
             t.push_str(thinking);
@@ -369,6 +626,21 @@ impl OutputStream for StreamJsonStream {
         stop_reason: Option<&str>,
         request_id: Option<&str>,
     ) {
+        // Before resetting, capture the last assistant text for the result frame.
+        {
+            let acc = self.accum.lock().await;
+            let text = acc.collect_text();
+            drop(acc);
+            *self.last_result_text.lock().await = text;
+        }
+
+        if self.suppress_frames {
+            // Still need to reset the accumulator even in suppressed mode.
+            let mut acc = self.accum.lock().await;
+            acc.reset();
+            return;
+        }
+
         // Flush the accumulated blocks as one `assistant` frame.
         let acc = self.accum.lock().await;
         let uuid = uuid::Uuid::new_v4().to_string();
@@ -490,6 +762,23 @@ pub fn permission_mode_str(mode: permission::PermissionMode) -> &'static str {
 mod tests {
     use super::*;
 
+    fn make_params(session_id: &str) -> StreamJsonInitParams {
+        build_init_params(
+            session_id,
+            vec![],
+            vec![],
+            "claude-opus-4-8",
+            "default",
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            "default",
+            None,
+            "off",
+        )
+    }
+
     /// Verify that the init frame includes the 20 mandatory keys in the correct
     /// order as defined by GROUND-TRUTH.md.
     #[tokio::test]
@@ -530,20 +819,7 @@ mod tests {
     /// block are concatenated, not split into multiple text blocks.
     #[tokio::test]
     async fn text_accumulation_concatenates() {
-        let params = build_init_params(
-            "sess",
-            vec![],
-            vec![],
-            "claude-opus-4-8",
-            "default",
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            "default",
-            None,
-            "off",
-        );
+        let params = make_params("sess");
         let stream = Arc::new(StreamJsonStream::new(params));
         stream.emit_message_start("msg_test", "claude-opus-4-8").await;
         stream.emit_text("he").await;
@@ -561,20 +837,7 @@ mod tests {
     /// Verify that `emit_message_boundary` resets the accumulator.
     #[tokio::test]
     async fn message_boundary_resets_accumulator() {
-        let params = build_init_params(
-            "sess",
-            vec![],
-            vec![],
-            "claude-opus-4-8",
-            "default",
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            "default",
-            None,
-            "off",
-        );
+        let params = make_params("sess");
         let stream = Arc::new(StreamJsonStream::new(params));
         stream.emit_message_start("msg_001", "claude-opus-4-8").await;
         stream.emit_text("pong").await;
@@ -594,5 +857,166 @@ mod tests {
         let s = "hello\u{2028}world\u{2029}end";
         let escaped = escape_line_terminators(s);
         assert_eq!(escaped, "hello\\u2028world\\u2029end");
+    }
+
+    /// Verify that `emit_message_boundary` stores the last text in
+    /// `last_result_text` before resetting.
+    #[tokio::test]
+    async fn message_boundary_stores_last_result_text() {
+        let params = make_params("sess");
+        let stream = Arc::new(StreamJsonStream::new(params));
+        stream.emit_message_start("msg_001", "claude-opus-4-8").await;
+        stream.emit_text("pong").await;
+        stream
+            .emit_message_boundary(Some("end_turn"), Some("req_test"))
+            .await;
+        let text = stream.get_last_result_text().await;
+        assert_eq!(text, "pong", "last_result_text should be 'pong'");
+    }
+
+    /// Verify that the result/success frame has the correct 20-key order.
+    #[tokio::test]
+    async fn result_frame_success_has_correct_key_order() {
+        let params = make_params("test-session-for-result");
+        let stream = StreamJsonStream::new(params);
+        let cost = CostSnapshot {
+            session_id: Default::default(),
+            total_usd: 0.05,
+            input_tokens: 100,
+            output_tokens: 10,
+            cache_read_tokens: 50,
+            cache_creation_tokens: 5,
+            api_calls: 1,
+            session_duration: std::time::Duration::from_millis(1000),
+            ..Default::default()
+        };
+        let frame = stream
+            .build_result_success_frame("pong", "end_turn", &cost, "claude-opus-4-8", "off")
+            .await;
+
+        let obj = frame.as_object().unwrap();
+        let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        let expected_keys = [
+            "type",
+            "subtype",
+            "is_error",
+            "api_error_status",
+            "duration_ms",
+            "duration_api_ms",
+            "ttft_ms",
+            "ttft_stream_ms",
+            "time_to_request_ms",
+            "num_turns",
+            "result",
+            "stop_reason",
+            "session_id",
+            "total_cost_usd",
+            "usage",
+            "modelUsage",
+            "permission_denials",
+            "terminal_reason",
+            "fast_mode_state",
+            "uuid",
+        ];
+        assert_eq!(keys, expected_keys, "result/success frame must have exact 20-key order");
+        assert_eq!(frame["type"], "result");
+        assert_eq!(frame["subtype"], "success");
+        assert_eq!(frame["is_error"], false);
+        assert_eq!(frame["result"], "pong");
+        assert_eq!(frame["stop_reason"], "end_turn");
+        assert_eq!(frame["num_turns"], 1_u64);
+        assert_eq!(frame["terminal_reason"], "completed");
+        assert_eq!(frame["fast_mode_state"], "off");
+        assert!(frame["uuid"].is_string());
+        // modelUsage has the model key
+        let mu = frame["modelUsage"].as_object().unwrap();
+        assert!(mu.contains_key("claude-opus-4-8"), "modelUsage must be keyed by model_id");
+        // usage block
+        let usage = frame["usage"].as_object().unwrap();
+        assert_eq!(usage["input_tokens"], 100_u64);
+        assert_eq!(usage["cache_read_input_tokens"], 50_u64);
+        assert_eq!(usage["cache_creation_input_tokens"], 5_u64);
+        assert_eq!(usage["output_tokens"], 10_u64);
+    }
+
+    /// Verify that the result/error frame uses `errors` (not `result`).
+    #[tokio::test]
+    async fn result_frame_error_has_errors_not_result() {
+        let params = make_params("test-session-for-error");
+        let stream = StreamJsonStream::new(params);
+        let cost = CostSnapshot::default();
+        let frame = stream
+            .build_result_error_frame(
+                "error_during_execution",
+                vec!["API failed".to_string()],
+                &cost,
+                "claude-opus-4-8",
+                "off",
+            )
+            .await;
+
+        let obj = frame.as_object().unwrap();
+        let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        // errors at index 10 (where result would be in success frame)
+        assert_eq!(keys[10], "errors", "errors must be at position 10");
+        assert!(!keys.contains(&"result"), "error frame must not have 'result' key");
+        assert_eq!(frame["is_error"], true);
+        assert_eq!(frame["terminal_reason"], "error");
+        assert_eq!(frame["subtype"], "error_during_execution");
+        let errors = frame["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0], "API failed");
+    }
+
+    /// Verify terminal_reason mapping for all error subtypes.
+    #[tokio::test]
+    async fn result_frame_error_terminal_reason_mapping() {
+        let params = make_params("sess");
+        let stream = StreamJsonStream::new(params);
+        let cost = CostSnapshot::default();
+
+        let cases = [
+            ("error_during_execution", "error"),
+            ("error_max_turns", "maxTurns"),
+            ("error_max_budget_usd", "budgetExceeded"),
+            ("error_max_structured_output_retries", "maxStructuredOutputRetries"),
+        ];
+        for (subtype, expected_terminal_reason) in &cases {
+            let frame = stream
+                .build_result_error_frame(subtype, vec![], &cost, "model", "off")
+                .await;
+            assert_eq!(
+                frame["terminal_reason"], *expected_terminal_reason,
+                "subtype={subtype} must map to terminal_reason={expected_terminal_reason}"
+            );
+        }
+    }
+
+    /// Verify suppress_frames suppresses init/status/boundary frames.
+    #[tokio::test]
+    async fn json_mode_suppresses_frames_but_stores_text() {
+        let params = make_params("sess");
+        let stream = StreamJsonStream::new_json_mode(params);
+        // These should be no-ops (no panic, no output that we can detect in tests)
+        stream.emit_message_start("msg_001", "model").await;
+        stream.emit_text("hello from json mode").await;
+        // emit_message_boundary in suppressed mode should still store last_result_text
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+        let text = stream.get_last_result_text().await;
+        assert_eq!(text, "hello from json mode");
+        // Accumulator reset
+        let acc = stream.accum.lock().await;
+        assert!(acc.blocks.is_empty());
+    }
+
+    /// Verify --output-format json argv routing
+    #[test]
+    fn json_output_format_detected() {
+        // This tests the argv logic, not stream_json directly, but verifies
+        // the route is distinct from stream-json.
+        use crate::argv::Argv;
+        let a = Argv::from_iter(["lingxi-cli", "--output-format", "json", "hi"]).unwrap();
+        assert!(a.is_json_output(), "is_json_output must be true for --output-format json");
+        assert!(!a.is_stream_json(), "is_stream_json must be false for --output-format json");
     }
 }

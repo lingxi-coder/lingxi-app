@@ -20,7 +20,7 @@ use session::jsonl::loader::{
 use session::jsonl::JsonlMessage;
 use std::path::PathBuf;
 use std::sync::Arc;
-use traits::{FileSystem, SlashCommandDispatcher, SlashDispatchResult};
+use traits::{FileSystem, OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
 
 /// Drive a one-shot conversation: either a `/slash-command` or a normal
 /// prompt that runs through the orchestrator turn loop.
@@ -122,13 +122,50 @@ pub async fn run_stream_json_print(
 
     // ③ Run the turn — streaming callbacks (emit_text / emit_tool_call /
     //    emit_message_start / emit_message_boundary) fire on the stream.
-    match runtime.orchestrator.run_turn(&prompt).await {
-        Ok(_outcome) => exit_codes::SUCCESS,
-        Err(e) => {
-            eprintln!("lingxi-cli: {e}");
-            exit_codes::RUNTIME_ERROR
-        }
+    let turn_result = runtime.orchestrator.run_turn(&prompt).await;
+
+    // ④ Emit the result frame.
+    let cost = runtime.orchestrator.snapshot_cost().await;
+    let result_text = stream.get_last_result_text().await;
+    let model = {
+        let session_handle = runtime.orchestrator.session();
+        let session = session_handle.lock().await;
+        session.model.clone()
+    };
+
+    if turn_result.is_err() {
+        let err_msg = turn_result.unwrap_err().to_string();
+        stream
+            .emit_result_error(
+                "error_during_execution",
+                vec![err_msg],
+                &cost,
+                &model,
+                "off",
+            )
+            .await;
+        exit_codes::RUNTIME_ERROR
+    } else {
+        stream
+            .emit_result_success(&result_text, "end_turn", &cost, &model, "off")
+            .await;
+        exit_codes::SUCCESS
     }
+}
+
+/// Drive a one-shot `--output-format json` / `--json` conversation.
+///
+/// Same as `run_stream_json_print` but with `suppress_frames=true` baked into
+/// the stream: only the final `result` JSON line is emitted.
+pub async fn run_json_print(
+    argv: &Argv,
+    runtime: &Runtime,
+    stream: Arc<StreamJsonStream>,
+    permission_mode: permission::PermissionMode,
+) -> i32 {
+    // The stream already has suppress_frames=true; we delegate to the shared
+    // implementation which respects that flag.
+    run_stream_json_print(argv, runtime, stream, permission_mode).await
 }
 
 /// `--json-schema` structured-output loop: run the turn (the model is forced to

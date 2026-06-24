@@ -2124,10 +2124,12 @@ impl ConversationOrchestrator {
         // Sum per-model usage into aggregate token counters. api_calls comes
         // from our own counter because cost::Usage does not carry a
         // per-call count (its `add()` merges token totals only).
-        let (mut input_tokens, mut output_tokens) = (0u64, 0u64);
+        let (mut input_tokens, mut output_tokens, mut cache_read_tokens, mut cache_creation_tokens) = (0u64, 0u64, 0u64, 0u64);
         for entry in state.per_model_usage.values() {
             input_tokens = input_tokens.saturating_add(entry.usage.tokens.input);
             output_tokens = output_tokens.saturating_add(entry.usage.tokens.output);
+            cache_read_tokens = cache_read_tokens.saturating_add(entry.cache_read_input_tokens);
+            cache_creation_tokens = cache_creation_tokens.saturating_add(entry.cache_creation_input_tokens);
         }
         let api_calls = self
             .api_calls_recorded
@@ -2142,6 +2144,8 @@ impl ConversationOrchestrator {
             total_usd,
             input_tokens,
             output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
             api_calls,
             session_duration,
         }

@@ -1308,11 +1308,14 @@ pub fn scroll_with_viewport(st: &mut AppState, dir: ScrollDir, viewport_height: 
     let total = st.height_cache.total_lines();
     let max = total.saturating_sub(viewport_height) as i64;
     let cur = st.scroll_offset as i64;
+    // (RRS-01) PageUp/PageDown move HALF a viewport (claude-code), not a full
+    // one. Step = max(1, viewport/2) via viewport.max(2)/2.
+    let page = (viewport_height.max(2) / 2) as i64;
     let new = match dir {
         ScrollDir::LineUp => cur + 1,
         ScrollDir::LineDown => cur - 1,
-        ScrollDir::PageUp => cur + viewport_height as i64,
-        ScrollDir::PageDown => cur - viewport_height as i64,
+        ScrollDir::PageUp => cur + page,
+        ScrollDir::PageDown => cur - page,
         ScrollDir::Top => max,
         ScrollDir::Bottom => 0,
     };
@@ -1440,10 +1443,11 @@ mod dispatch_tests {
                 timestamp: 0,
             });
         }
+        // (RRS-01) PageUp steps HALF a viewport: 10/2 = 5.
+        scroll_with_viewport(&mut st, ScrollDir::PageUp, 10);
+        assert_eq!(st.scroll_offset, 5);
         scroll_with_viewport(&mut st, ScrollDir::PageUp, 10);
         assert_eq!(st.scroll_offset, 10);
-        scroll_with_viewport(&mut st, ScrollDir::PageUp, 10);
-        assert_eq!(st.scroll_offset, 20);
     }
 
     #[test]

@@ -285,6 +285,15 @@ pub struct MobileRuntime {
     /// synthesize boundary events (`TurnStarted` / `MessageComplete`) and emit
     /// listing replies, so everything rides one outbound channel.
     pub event_sink: Arc<dyn client_adapter::ClientEventSink>,
+    /// Whether the wired secure-storage backend can actually PERSIST credentials
+    /// (i.e. is a real OS Keychain/Keystore, `is_encrypted() == true`). Mobile
+    /// currently wires the non-persisting `PlainTextSecureStorage` stub, so this
+    /// is `false` and OAuth `/login` cannot persist its tokens — the Login arm
+    /// short-circuits with a clear message instead of failing at the persist step
+    /// with a cryptic `BackendUnavailable` (audit re-pass, secure-storage finding;
+    /// the real native store is a §11 / Plan-17 follow-up). Becomes `true`
+    /// automatically once a native Keychain/Keystore SecureStorage is injected.
+    pub oauth_supported: bool,
 }
 
 /// Errors surfaced while building a [`MobileRuntime`].
@@ -457,6 +466,11 @@ pub async fn build_mobile_inner(
     let sandbox = platform.sandbox();
     let worktree = platform.worktree();
     let storage = Arc::new(platform_posix_minimal::PlainTextSecureStorage::new());
+    // Audit (secure-storage): whether the wired backend can actually persist
+    // credentials (real Keychain/Keystore). The stub above cannot, so OAuth
+    // `/login` is short-circuited with a clear message below instead of failing
+    // at the persist step. Computed before `storage` moves into CredentialManager.
+    let oauth_supported = traits::SecureStorage::is_encrypted(storage.as_ref());
 
     // Audit fix (telemetry parity): ONE shared AnalyticsBus drives the whole
     // pipeline — the `ApiService` (so `tengu_api_*` events are not dropped), the
@@ -1085,6 +1099,7 @@ pub async fn build_mobile_inner(
         permission_gate: adapter_gate,
         listener,
         event_sink,
+        oauth_supported,
     })
 }
 
@@ -1453,6 +1468,29 @@ impl MobileEngineHandle {
 
             // ── Auth ─────────────────────────────────────────────────────────
             ClientCommand::Login => {
+                // Audit (secure-storage): on a build with no persisting secure
+                // store (mobile currently wires the PlainTextSecureStorage stub),
+                // an OAuth exchange would authenticate but fail to persist its
+                // tokens with a cryptic `BackendUnavailable`. Short-circuit with a
+                // clear, actionable message instead. API-key auth needs no /login.
+                // Lifts automatically once a native Keychain/Keystore store is
+                // injected (then `oauth_supported` is true). §11 / Plan-17 follow-up.
+                if !self.inner.oauth_supported {
+                    self.event_sink
+                        .emit(ClientEvent::Error {
+                            kind: client_protocol::events::ErrorKindDto::Internal,
+                            message: "OAuth login is not yet supported on this platform \
+                                      (no secure credential store); configure an API key instead."
+                                .to_string(),
+                        })
+                        .await;
+                    self.event_sink
+                        .emit(ClientEvent::AuthState {
+                            state: lower_auth_state(self.inner.auth.current_user().await),
+                        })
+                        .await;
+                    return Ok(());
+                }
                 let state = match self.inner.auth.login().await {
                     Ok(li) => lower_auth_state(Some(li)),
                     Err(e) => {

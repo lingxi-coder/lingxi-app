@@ -48,6 +48,49 @@ pub enum PermissionDecision {
     },
 }
 
+/// Extra inputs for the tool-dispatch permission check beyond `name` + `input`,
+/// so a stdio `can_use_tool` control_request can be byte-faithful and an allow
+/// can carry the host's `updatedInput` rewrite.
+///
+/// Threaded from the orchestrator's tool dispatch into
+/// [`PermissionGate::check_with_context`]. All fields are optional; the default
+/// (`PermissionCheckContext::default()`) behaves exactly like
+/// [`PermissionGate::check_with_worker`] with no worker.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PermissionCheckContext {
+    /// Subagent/teammate worker attribution (as in [`PermissionGate::check_with_worker`]).
+    pub worker: Option<PromptWorker>,
+    /// The assistant message's `tool_use` block id this check is for — the REAL
+    /// id a stdio `can_use_tool` request should carry (claude-code
+    /// `createCanUseTool(toolUseID)`), so the host can correlate + dedup. `None`
+    /// ⇒ the gate mints a fresh id.
+    pub tool_use_id: Option<String>,
+    /// The policy Ask's human-readable decision reason, forwarded as the
+    /// `decision_reason` field of a stdio `can_use_tool` request. `None` ⇒
+    /// omitted. (Suggestions / blocked_path are not yet surfaced through the
+    /// resolution seam; tracked as a follow-up.)
+    pub decision_reason: Option<String>,
+}
+
+/// Richer outcome of [`PermissionGate::check_with_context`]: an allow may carry
+/// the host/policy-rewritten tool input (`updatedInput`) the dispatcher should
+/// run the tool with instead of the original.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionOutcome {
+    /// Permitted. `updated_input` is the rewritten input to use instead of the
+    /// original (claude-code `updatedInput` when it has keys), or `None` to keep
+    /// the original.
+    Allow {
+        /// Host/policy-rewritten tool input, or `None` to keep the original.
+        updated_input: Option<Value>,
+    },
+    /// Rejected, with the reason surfaced to the model as the `tool_result`.
+    Deny {
+        /// Reason surfaced to the model.
+        reason: String,
+    },
+}
+
 /// What produced a [`PermissionGate`] decision — lets the turn loop fire the
 /// source-gated permission hooks the way claude-code does: `PermissionRequest`
 /// on an about-to-ask, `PermissionDenied` ONLY on an auto-mode classifier deny
@@ -143,6 +186,29 @@ pub trait PermissionGate: Send + Sync {
     ) -> PermissionDecision {
         let _ = worker;
         self.check(name, input).await
+    }
+
+    /// Like [`Self::check_with_worker`], but carrying a [`PermissionCheckContext`]
+    /// (real `tool_use_id`, decision reason) and returning a [`PermissionOutcome`]
+    /// that may carry the host's `updatedInput` rewrite.
+    ///
+    /// The tool-dispatch path calls this so the stdio `can_use_tool` gate can
+    /// emit a byte-faithful request (real tool_use_id) and apply the host's
+    /// rewritten input. The default IGNORES the extra context and delegates to
+    /// [`Self::check_with_worker`], mapping `Allow`→`Allow{updated_input:None}`
+    /// — so every existing impl is unchanged (frozen-trait safe). Only
+    /// `StdioControlPermissionGate` (the stdio transport) and the wrapping
+    /// `PolicyPermissionGate` OVERRIDE it.
+    async fn check_with_context(
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
+    ) -> PermissionOutcome {
+        match self.check_with_worker(name, input, ctx.worker.clone()).await {
+            PermissionDecision::Allow => PermissionOutcome::Allow { updated_input: None },
+            PermissionDecision::Deny { reason } => PermissionOutcome::Deny { reason },
+        }
     }
 
     /// Resolve permission when a `PreToolUse` / `PermissionRequest` hook has

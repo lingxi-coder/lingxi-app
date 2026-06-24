@@ -40,8 +40,8 @@
 
 use crate::defaults_per_tool::tool_default;
 use crate::gate::{
-    PermissionDecision, PermissionDecisionSource, PermissionGate, PermissionResolution,
-    PromptDefault,
+    PermissionCheckContext, PermissionDecision, PermissionDecisionSource, PermissionGate,
+    PermissionOutcome, PermissionResolution, PromptDefault,
 };
 use crate::mode::PermissionMode;
 use crate::policy::PermissionPolicy;
@@ -141,6 +141,44 @@ impl PolicyPermissionGate {
         }
     }
 
+    /// Like [`Self::decide_with_worker`] but returns a [`PermissionOutcome`] that
+    /// can carry the host/policy `updatedInput` rewrite, forwarding the full
+    /// [`PermissionCheckContext`] (real `tool_use_id`, decision reason) to the
+    /// inner transport on the Ask-delegate path. Used by the tool-dispatch
+    /// `check_with_context` seam.
+    async fn decide_outcome_with_context(
+        &self,
+        result: PermissionResult,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
+    ) -> PermissionOutcome {
+        match result {
+            // A policy-rule allow may itself carry a rewritten input — surface it
+            // (previously dropped at the `PermissionDecision::Allow` boundary).
+            PermissionResult::Allow { updated_input, .. } => {
+                PermissionOutcome::Allow { updated_input }
+            }
+            PermissionResult::Deny {
+                reason,
+                explanation,
+                ..
+            } => PermissionOutcome::Deny {
+                reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
+            },
+            PermissionResult::Ask { ref reason, .. } => {
+                if read_only_default_auto_allows(name, reason) {
+                    PermissionOutcome::Allow { updated_input: None }
+                } else {
+                    // Delegate to the inner transport WITH the context so a stdio
+                    // `can_use_tool` request carries the real tool_use_id and its
+                    // allow can return the host's `updatedInput`.
+                    self.inner.check_with_context(name, input, ctx).await
+                }
+            }
+        }
+    }
+
     /// Like [`Self::decide`] but WITHOUT consulting the inner prompt transport:
     /// returns a [`PermissionResolution`] that carries the deny SOURCE and, for a
     /// would-be prompt, an [`PermissionResolution::Ask`] instead of resolving it.
@@ -216,6 +254,19 @@ impl PermissionGate for PolicyPermissionGate {
         worker: Option<crate::gate::PromptWorker>,
     ) -> PermissionDecision {
         self.decide_with_worker(self.effective_authorize(name, input), name, input, worker)
+            .await
+    }
+
+    /// As [`Self::check_with_worker`], but returns a [`PermissionOutcome`] that
+    /// can carry the host/policy `updatedInput` rewrite and forwards the full
+    /// context (real `tool_use_id`) to the inner transport on the Ask path.
+    async fn check_with_context(
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
+    ) -> PermissionOutcome {
+        self.decide_outcome_with_context(self.effective_authorize(name, input), name, input, ctx)
             .await
     }
 

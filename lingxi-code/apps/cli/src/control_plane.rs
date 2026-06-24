@@ -26,7 +26,9 @@ use tokio::sync::{oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use permission::gate::{PermissionDecision, PermissionGate, PromptWorker};
+use permission::gate::{
+    PermissionCheckContext, PermissionDecision, PermissionGate, PermissionOutcome, PromptWorker,
+};
 
 use crate::stream_json::{serialize_ndjson_line, OutboundTx};
 
@@ -270,24 +272,43 @@ impl StdioControlPermissionGate {
         Self { plane }
     }
 
-    /// Run the `can_use_tool` round-trip and map the host's decision.
-    async fn decide(
+    /// Collapse a [`PermissionOutcome`] to the 2-valued [`PermissionDecision`]
+    /// (dropping any `updated_input`) for the `check`/`check_with_worker` callers
+    /// that cannot apply a rewrite.
+    fn outcome_to_decision(outcome: PermissionOutcome) -> PermissionDecision {
+        match outcome {
+            PermissionOutcome::Allow { .. } => PermissionDecision::Allow,
+            PermissionOutcome::Deny { reason } => PermissionDecision::Deny { reason },
+        }
+    }
+
+    /// Run the `can_use_tool` round-trip and map the host's decision to a
+    /// [`PermissionOutcome`] (carrying any `updatedInput` rewrite).
+    async fn decide_outcome(
         &self,
         name: &str,
         input: &Value,
-        worker: Option<PromptWorker>,
-    ) -> PermissionDecision {
+        ctx: &PermissionCheckContext,
+    ) -> PermissionOutcome {
         // §3.2 outbound request: emit `tool_name, input, tool_use_id` (+ agent_id
-        // when a worker is present); the rest of the schema superset is absent.
-        let tool_use_id = Uuid::new_v4().to_string();
+        // when a worker is present, + decision_reason when supplied). Use the REAL
+        // assistant tool_use id when the dispatcher provides it (so the host can
+        // correlate + dedup), else mint one.
+        let tool_use_id = ctx
+            .tool_use_id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
         let mut request = json!({
             "subtype": "can_use_tool",
             "tool_name": name,
             "input": input,
             "tool_use_id": tool_use_id,
         });
-        if let Some(w) = worker {
+        if let Some(w) = &ctx.worker {
             request["agent_id"] = json!(w.name);
+        }
+        if let Some(reason) = &ctx.decision_reason {
+            request["decision_reason"] = json!(reason);
         }
         let (request_id, rx) = self.plane.send_request(request, Some(tool_use_id)).await;
 
@@ -301,7 +322,7 @@ impl StdioControlPermissionGate {
                     r = rx => r,
                     () = token.cancelled() => {
                         self.plane.cancel_request(&request_id).await;
-                        return PermissionDecision::Deny {
+                        return PermissionOutcome::Deny {
                             reason: "Tool permission request failed: aborted".to_string(),
                         };
                     }
@@ -311,24 +332,38 @@ impl StdioControlPermissionGate {
         };
         match result {
             Ok(Ok(payload)) => self.map_payload(payload).await,
-            Ok(Err(err)) => PermissionDecision::Deny {
+            Ok(Err(err)) => PermissionOutcome::Deny {
                 reason: format!("Tool permission request failed: {err}"),
             },
-            Err(_) => PermissionDecision::Deny {
+            Err(_) => PermissionOutcome::Deny {
                 reason: "Tool permission request failed: control channel closed".to_string(),
             },
         }
     }
 
-    /// Map a `PermissionToolOutput` payload onto a [`PermissionDecision`] (§3.3).
-    async fn map_payload(&self, payload: Value) -> PermissionDecision {
+    /// Map a `PermissionToolOutput` payload onto a [`PermissionOutcome`] (§3.3).
+    async fn map_payload(&self, payload: Value) -> PermissionOutcome {
         match payload.get("behavior").and_then(Value::as_str) {
             Some("allow") => {
-                // `updatedInput` rewrite is deferred (§3.5 gap): LingXi's
-                // `PermissionDecision::Allow` cannot carry a rewritten input, so
-                // allow with the ORIGINAL input. `updatedPermissions` persistence
-                // is likewise deferred.
-                PermissionDecision::Allow
+                // §3.3 / strict schema: an allow result REQUIRES an `updatedInput`
+                // object key (claude-code `PermissionAllowResultSchema`); a missing
+                // (or non-object) key is a malformed allow → deny. The value may be
+                // `{}` (no rewrite); only a NON-EMPTY object substitutes the tool
+                // input (claude-code applies `updatedInput` "when it has keys").
+                match payload.get("updatedInput") {
+                    Some(Value::Object(map)) => {
+                        let updated_input = if map.is_empty() {
+                            None
+                        } else {
+                            Some(Value::Object(map.clone()))
+                        };
+                        PermissionOutcome::Allow { updated_input }
+                    }
+                    _ => PermissionOutcome::Deny {
+                        reason: "Tool permission request failed: malformed allow result (missing updatedInput)"
+                            .to_string(),
+                    },
+                }
             }
             Some("deny") => {
                 let message = payload
@@ -345,9 +380,9 @@ impl StdioControlPermissionGate {
                     // (§3.4 — the binary calls `ctx.abortController.abort()`).
                     self.plane.cancel_active_turn().await;
                 }
-                PermissionDecision::Deny { reason: message }
+                PermissionOutcome::Deny { reason: message }
             }
-            _ => PermissionDecision::Deny {
+            _ => PermissionOutcome::Deny {
                 reason: "Tool permission request returned an unknown behavior".to_string(),
             },
         }
@@ -357,7 +392,10 @@ impl StdioControlPermissionGate {
 #[async_trait]
 impl PermissionGate for StdioControlPermissionGate {
     async fn check(&self, name: &str, input: &Value) -> PermissionDecision {
-        self.decide(name, input, None).await
+        Self::outcome_to_decision(
+            self.decide_outcome(name, input, &PermissionCheckContext::default())
+                .await,
+        )
     }
 
     async fn check_with_worker(
@@ -366,7 +404,20 @@ impl PermissionGate for StdioControlPermissionGate {
         input: &Value,
         worker: Option<PromptWorker>,
     ) -> PermissionDecision {
-        self.decide(name, input, worker).await
+        let ctx = PermissionCheckContext {
+            worker,
+            ..PermissionCheckContext::default()
+        };
+        Self::outcome_to_decision(self.decide_outcome(name, input, &ctx).await)
+    }
+
+    async fn check_with_context(
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
+    ) -> PermissionOutcome {
+        self.decide_outcome(name, input, ctx).await
     }
 }
 
@@ -684,8 +735,70 @@ mod tests {
         assert_eq!(frame["request"]["agent_id"], "researcher");
         let req_id = frame["request_id"].as_str().unwrap().to_string();
         plane
-            .resolve_response(&success_response(&req_id, json!({"behavior": "allow"})))
+            .resolve_response(&success_response(
+                &req_id,
+                json!({"behavior": "allow", "updatedInput": {}}),
+            ))
             .await;
         assert_eq!(check.await.unwrap(), PermissionDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn context_uses_real_tool_use_id_and_returns_updated_input() {
+        // #10: the request carries the dispatcher-supplied tool_use_id (not a
+        // minted uuid). #2a: a non-empty updatedInput flows back as the rewrite.
+        let (plane, mut rx) = plane_with_channel();
+        let gate = StdioControlPermissionGate::new(plane.clone());
+        let input = json!({"command": "ls"});
+        let ctx = PermissionCheckContext {
+            tool_use_id: Some("toolu_real_42".to_string()),
+            decision_reason: Some("needs review".to_string()),
+            ..PermissionCheckContext::default()
+        };
+        let check =
+            tokio::spawn(async move { gate.check_with_context("Bash", &input, &ctx).await });
+
+        let line = rx.recv().await.unwrap();
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame["request"]["tool_use_id"], "toolu_real_42", "real id used");
+        assert_eq!(frame["request"]["decision_reason"], "needs review");
+        let req_id = frame["request_id"].as_str().unwrap().to_string();
+
+        plane
+            .resolve_response(&success_response(
+                &req_id,
+                json!({"behavior": "allow", "updatedInput": {"command": "ls -la"}}),
+            ))
+            .await;
+        match check.await.unwrap() {
+            PermissionOutcome::Allow { updated_input } => {
+                assert_eq!(updated_input, Some(json!({"command": "ls -la"})));
+            }
+            other => panic!("expected Allow with updated_input, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn allow_without_updated_input_is_denied() {
+        // #7: the strict schema requires an `updatedInput` key on an allow; a
+        // bare allow is malformed → deny.
+        let (plane, mut rx) = plane_with_channel();
+        let gate = StdioControlPermissionGate::new(plane.clone());
+        let input = json!({});
+        let check = tokio::spawn(async move { gate.check("Bash", &input).await });
+        let line = rx.recv().await.unwrap();
+        let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        plane
+            .resolve_response(&success_response(&req_id, json!({"behavior": "allow"})))
+            .await;
+        match check.await.unwrap() {
+            PermissionDecision::Deny { reason } => {
+                assert!(reason.contains("malformed allow result"), "got {reason}");
+            }
+            other => panic!("expected Deny for malformed allow, got {other:?}"),
+        }
     }
 }

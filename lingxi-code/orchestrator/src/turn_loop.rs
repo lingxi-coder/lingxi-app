@@ -2424,7 +2424,29 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                                 .reason
                                 .unwrap_or_else(|| "permission denied by hook".into()),
                         },
-                        _ => orch.perms.check(name, &effective_input).await,
+                        _ => {
+                            // Delegate to the inner prompt transport, carrying the
+                            // REAL tool_use_id (so a stdio `can_use_tool` request is
+                            // byte-faithful) and applying the host's `updatedInput`
+                            // rewrite to the input the tool actually runs with.
+                            let ctx = traits::permission_gate::PermissionCheckContext {
+                                tool_use_id: Some(tool_use_id.to_string()),
+                                ..Default::default()
+                            };
+                            match orch.perms.check_with_context(name, &effective_input, &ctx).await {
+                                traits::permission_gate::PermissionOutcome::Allow {
+                                    updated_input,
+                                } => {
+                                    if let Some(u) = updated_input {
+                                        effective_input = u;
+                                    }
+                                    PermissionDecision::Allow
+                                }
+                                traits::permission_gate::PermissionOutcome::Deny { reason } => {
+                                    PermissionDecision::Deny { reason }
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -1,5 +1,7 @@
 //! Snapshot tests for `AssistantToolUseMessage` (M6-04 Tasks 3 + 4).
 
+use std::path::PathBuf;
+
 use insta::assert_snapshot;
 use protocol::ToolUseId;
 use tui::components::messages::assistant_tool_use::{
@@ -12,14 +14,17 @@ fn id() -> ToolUseId {
 
 #[test]
 fn collapsed_read_with_file_path() {
+    // (ma-01) Per-tool preview: Read shows getDisplayPath(file_path) — here
+    // cwd=/tmp shortens /tmp/x.rs to x.rs.
     let s = render_assistant_tool_use_to_string(AssistantToolUseProps {
         id: id(),
         tool: "Read".into(),
         input: serde_json::json!({"file_path": "/tmp/x.rs"}),
         expanded: false,
         focused: false,
+        cwd: PathBuf::from("/tmp"),
     });
-    assert_snapshot!(s, @r#"● Read({"file_path": "/tmp/x.rs"})"#);
+    assert_snapshot!(s, @"● Read(x.rs)");
 }
 
 #[test]
@@ -30,9 +35,10 @@ fn expanded_read_shows_pretty_json() {
         input: serde_json::json!({"file_path": "/tmp/x.rs", "limit": 100}),
         expanded: true,
         focused: false,
+        cwd: PathBuf::from("/tmp"),
     });
     assert_snapshot!(s, @r#"
-    ● Read({"file_path": "/tmp/x.rs", "limit": 100})
+    ● Read(x.rs)
     {
       "file_path": "/tmp/x.rs",
       "limit": 100
@@ -48,6 +54,7 @@ fn focused_collapsed_has_arrow_prefix() {
         input: serde_json::json!({"file_path": "/tmp/x.rs"}),
         expanded: false,
         focused: true,
+        cwd: PathBuf::from("/tmp"),
     });
-    assert_snapshot!(s, @r#"> ● Read({"file_path": "/tmp/x.rs"})"#);
+    assert_snapshot!(s, @"> ● Read(x.rs)");
 }

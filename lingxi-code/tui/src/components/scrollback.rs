@@ -101,6 +101,9 @@ pub fn render_message(
                     input: input,
                     expanded: is_expanded,
                     focused: is_focused,
+                    // Session cwd drives getDisplayPath path-shortening in the
+                    // per-tool preview (claude-code `renderToolUseMessage`).
+                    cwd: std::env::current_dir().unwrap_or_default(),
                 )
             }
             .into_any()

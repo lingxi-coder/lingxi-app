@@ -59,7 +59,11 @@ pub fn render_advisor_to_string(props: AdvisorProps) -> String {
         AdvisorKind::ServerToolUse { model, input } => {
             let mut out = "Advising".to_string();
             if let Some(m) = model {
-                out.push_str(&format!(" using {m}"));
+                // (ma-07) friendly display name (renderModelName), not the raw id.
+                out.push_str(&format!(
+                    " using {}",
+                    crate::render::model_name::render_model_name(m)
+                ));
             }
             if let Some(i) = input {
                 out.push_str(&format!(" \u{00B7} {i}")); // ` · ` middot

@@ -893,7 +893,8 @@ fn overview_lines(data: &StatsData) -> Vec<String> {
         out.push(row);
     }
     if let Some(fav) = data.favorite_model() {
-        out.push(format!("Favorite model: {fav}"));
+        // (stats-model-name-raw) friendly display name (renderModelName).
+        out.push(format!("Favorite model: {}", crate::render::model_name::render_model_name(fav)));
     }
     out.push(format!(
         "Total tokens: {}",
@@ -946,8 +947,13 @@ fn models_lines(data: &StatsData) -> Vec<String> {
     let total = data.total_tokens();
     for (model, usage) in entries {
         // (stats-models-row-bullet) figures.bullet (●) prefix; bold name + dim
-        // (pct%) await a structured render.
-        out.push(format!("\u{25CF} {model} ({}%)", format_pct(usage.total(), total)));
+        // (pct%) await a structured render. (stats-model-name-raw) friendly
+        // display name via renderModelName.
+        out.push(format!(
+            "\u{25CF} {} ({}%)",
+            crate::render::model_name::render_model_name(model),
+            format_pct(usage.total(), total)
+        ));
         out.push(format!(
             "  In: {} \u{00B7} Out: {}",
             format_number(usage.input_tokens),

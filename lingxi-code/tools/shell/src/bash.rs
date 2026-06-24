@@ -252,9 +252,24 @@ pub fn resolve_timeout_ms(input: &Value) -> u64 {
     }
 }
 
-/// Resolve the shell binary to spawn under (per host OS).
+/// Resolve the shell binary to spawn under.
+///
+/// Mirrors `findSuitableShell()` in `src/utils/Shell.ts`: if
+/// `CLAUDE_CODE_SHELL` is set to a non-empty value that contains `"bash"` or
+/// `"zsh"`, return it verbatim (no executable-check — that matches the TS
+/// behaviour which only validates that the path exists/is-executable, not
+/// that it runs successfully). Fall back to the compile-time OS default when
+/// the env var is absent, empty, or names an unsupported shell.
+///
+/// The return value is either the env-var string (leaked to `'static` so the
+/// signature stays `&'static str`) or a compile-time constant.
 #[must_use]
 pub fn resolve_shell_path() -> &'static str {
+    if let Ok(v) = std::env::var("CLAUDE_CODE_SHELL") {
+        if !v.is_empty() && (v.contains("bash") || v.contains("zsh")) {
+            return Box::leak(v.into_boxed_str());
+        }
+    }
     if cfg!(target_os = "macos") {
         BASH_SHELL_MACOS
     } else {
@@ -1717,10 +1732,60 @@ mod tests {
 
     #[test]
     fn resolve_shell_path_matches_host_os() {
+        // Ensure CLAUDE_CODE_SHELL is unset so we hit the OS-fallback branch.
+        std::env::remove_var("CLAUDE_CODE_SHELL");
         if cfg!(target_os = "macos") {
             assert_eq!(resolve_shell_path(), "/bin/zsh");
         } else {
             assert_eq!(resolve_shell_path(), "/bin/bash");
+        }
+    }
+
+    /// CLAUDE_CODE_SHELL override: a bash path is honoured.
+    #[test]
+    fn resolve_shell_path_honours_claude_code_shell_bash() {
+        std::env::set_var("CLAUDE_CODE_SHELL", "/opt/homebrew/bin/bash");
+        let result = resolve_shell_path();
+        std::env::remove_var("CLAUDE_CODE_SHELL");
+        assert_eq!(result, "/opt/homebrew/bin/bash");
+    }
+
+    /// CLAUDE_CODE_SHELL override: a zsh path is honoured.
+    #[test]
+    fn resolve_shell_path_honours_claude_code_shell_zsh() {
+        std::env::set_var("CLAUDE_CODE_SHELL", "/usr/local/bin/zsh");
+        let result = resolve_shell_path();
+        std::env::remove_var("CLAUDE_CODE_SHELL");
+        assert_eq!(result, "/usr/local/bin/zsh");
+    }
+
+    /// CLAUDE_CODE_SHELL set to an unsupported shell (neither bash nor zsh)
+    /// falls back to the OS default — matches TS fallback path.
+    #[test]
+    fn resolve_shell_path_rejects_unsupported_shell() {
+        std::env::set_var("CLAUDE_CODE_SHELL", "/bin/sh");
+        std::env::remove_var("CLAUDE_CODE_SHELL"); // first clear; now test with fish
+        std::env::set_var("CLAUDE_CODE_SHELL", "/usr/bin/fish");
+        let result = resolve_shell_path();
+        std::env::remove_var("CLAUDE_CODE_SHELL");
+        // fish contains neither "bash" nor "zsh", so OS default is used.
+        if cfg!(target_os = "macos") {
+            assert_eq!(result, "/bin/zsh");
+        } else {
+            assert_eq!(result, "/bin/bash");
+        }
+    }
+
+    /// Empty CLAUDE_CODE_SHELL falls back to OS default.
+    #[test]
+    fn resolve_shell_path_ignores_empty_claude_code_shell() {
+        std::env::set_var("CLAUDE_CODE_SHELL", "");
+        let result = resolve_shell_path();
+        std::env::remove_var("CLAUDE_CODE_SHELL");
+        if cfg!(target_os = "macos") {
+            assert_eq!(result, "/bin/zsh");
+        } else {
+            assert_eq!(result, "/bin/bash");
         }
     }
 

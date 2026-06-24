@@ -5,11 +5,12 @@
 //! bash provider) plus a 30-minute
 //! default timeout. `spawn_background` lands a real child with
 //! file-mode stdio (POSIX `O_NOFOLLOW`) wired to a per-task output file
-//! and a setsid call so [`super::kill_tree::kill_tree_unix`] can later
-//! terminate the descendant process group. `kill(handle)` simply
-//! delegates to `kill_tree_unix(handle.pid)`.
+//! and a setsid call so [`super::kill_tree::kill_tree_force`] can later
+//! terminate the descendant process group. `kill(handle)` delegates to
+//! `kill_tree_force(handle.pid)` — immediate SIGKILL with no grace period,
+//! matching `treeKill(pid, 'SIGKILL')` in `src/utils/ShellCommand.ts:337-343`.
 
-use crate::process::kill_tree::kill_tree_unix;
+use crate::process::kill_tree::kill_tree_force;
 use crate::process::spawn_unsafe::attach_setsid;
 use crate::process::wrap::{
     ai_agent_value, is_bash_provider_shell, task_output_path, DEFAULT_TIMEOUT, ENV_AI_AGENT,
@@ -338,7 +339,10 @@ impl ProcessRunner for PosixProcess {
     }
 
     async fn kill(&self, handle: &ProcessHandle) -> Result<(), ProcessError> {
-        kill_tree_unix(handle.pid).await
+        // Parity: claude-code's `#doKill` calls `treeKill(pid, 'SIGKILL')` directly
+        // (ShellCommand.ts:337-343) — no SIGTERM grace period. Use kill_tree_force
+        // (immediate SIGKILL) instead of kill_tree_unix (SIGTERM + 5 s + SIGKILL).
+        kill_tree_force(handle.pid)
     }
 
     fn is_available(&self) -> bool {

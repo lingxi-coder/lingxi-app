@@ -5,9 +5,12 @@
 //! POSITIVE PGID to `killpg(2)`, which delivers the signal to every member
 //! of the group, including any descendants the child has forked.
 //!
-//! Sequence: SIGTERM → 5 s grace → SIGKILL. Matches claude-code's
-//! `treeKill(pid, 'SIGKILL')` semantics but with a polite SIGTERM first
-//! (the node `tree-kill` library's default sequence is similar).
+//! Two exported variants:
+//! - [`kill_tree_force`]: immediate SIGKILL, no grace period. Used by
+//!   `ProcessRunner::kill()` — matches `treeKill(pid, 'SIGKILL')` in
+//!   `src/utils/ShellCommand.ts:337-343` which sends SIGKILL directly.
+//! - [`kill_tree_unix`]: SIGTERM → 5 s grace → SIGKILL. Kept for callers
+//!   (e.g. shutdown paths) that want a polite drain before force-killing.
 
 use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;

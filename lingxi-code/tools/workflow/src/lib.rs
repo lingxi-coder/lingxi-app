@@ -402,12 +402,15 @@ impl Tool for WorkflowTool {
         }
 
         // errorCode 3 — still-running resume target
-        // ⚠️ UNREACHABLE: the binary looks up a `local_workflow` task by
-        // `workflowRunId === resumeFromRunId` in the task registry. LingXi's
-        // `ToolUseContext` does not carry a task-registry handle; the registry is
-        // owned by the composition root and not threaded to `validate_input`.
-        // This gate is not wired. The model will proceed and the launcher will
-        // surface a conflict at launch time if the workflow is still running.
+        // The binary looks up a `local_workflow` task by `workflowRunId ===
+        // resumeFromRunId` in the task registry. LingXi's `ToolUseContext` does
+        // not carry a task-registry handle, so this gate is NOT enforced here;
+        // instead it is enforced at LAUNCH time by `TaskRegistryWorkflowLauncher`
+        // (the composition root, which owns the registry — see
+        // `find_running_workflow_by_run_id`), which returns the byte-exact
+        // "Workflow … is still running … Stop it first with TaskStop(…)" error.
+        // Observable behaviour matches: a resume of a still-running workflow is
+        // rejected before a second run starts.
 
         Ok(())
     }

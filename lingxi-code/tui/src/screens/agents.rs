@@ -62,14 +62,22 @@ pub fn handle_agents_key(
 ) -> AgentsOutcome {
     use crossterm::event::KeyCode;
     match state.mode {
+        // (agents-06) Arrow-only nav + Esc-only close — claude-code's AgentsList
+        // binds no j/k/q. (agents-05) Selection WRAPS at both ends.
         AgentsDialogMode::List => match key {
-            KeyCode::Up | KeyCode::Char('k') => {
-                state.selected = state.selected.saturating_sub(1);
+            KeyCode::Up => {
+                if !state.rows.is_empty() {
+                    state.selected = if state.selected == 0 {
+                        state.rows.len() - 1
+                    } else {
+                        state.selected - 1
+                    };
+                }
                 AgentsOutcome::Stay
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 if !state.rows.is_empty() {
-                    state.selected = (state.selected + 1).min(state.rows.len() - 1);
+                    state.selected = (state.selected + 1) % state.rows.len();
                 }
                 AgentsOutcome::Stay
             }
@@ -79,7 +87,7 @@ pub fn handle_agents_key(
                 }
                 AgentsOutcome::Stay
             }
-            KeyCode::Esc | KeyCode::Char('q') => AgentsOutcome::Close,
+            KeyCode::Esc => AgentsOutcome::Close,
             _ => AgentsOutcome::Stay,
         },
         AgentsDialogMode::Detail => match key {
@@ -148,17 +156,36 @@ fn render_agent_detail(row: &AgentRow) -> String {
         row.tools.join(", ")
     };
     out.push_str(&format!("Tools: {tools}"));
-    if let Some(m) = &row.model {
-        out.push_str(&format!("\nModel: {m}"));
-    }
+    // (agents-04) Always render the Model line (claude-code `getAgentModelDisplay`):
+    // unset → "Inherit from parent (default)", "inherit" → "Inherit from parent",
+    // else the capitalized model string.
+    out.push_str(&format!("\nModel: {}", agent_model_display(row.model.as_deref())));
     if let Some(pm) = &row.permission_mode {
         out.push_str(&format!("\nPermission mode: {pm}"));
     }
     if let Some(c) = &row.color {
         out.push_str(&format!("\nColor: {c}"));
     }
-    out.push_str("\nesc to go back");
+    // (agents-07) No detail footer — claude-code's AgentDetail shows none.
     out
+}
+
+/// claude-code `getAgentModelDisplay`: the agent-detail Model line value.
+fn agent_model_display(model: Option<&str>) -> String {
+    match model {
+        None => "Inherit from parent (default)".to_string(),
+        Some("inherit") => "Inherit from parent".to_string(),
+        Some(m) => capitalize(m),
+    }
+}
+
+/// claude-code `capitalize` — uppercase the first character, rest unchanged.
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -229,9 +256,10 @@ mod tests {
             path: Some(".lingxi/agents/explorer.md".into()),
         };
         let out = render_agent_detail(&r);
+        // (agents-04) Model is capitalized; (agents-07) no trailing footer.
         assert_eq!(
             out,
-            ".lingxi/agents/explorer.md\nDescription (tells Claude when to use this agent):\n  find things\nTools: Read, Grep\nModel: opus\nPermission mode: plan\nColor: cyan\nesc to go back"
+            ".lingxi/agents/explorer.md\nDescription (tells Claude when to use this agent):\n  find things\nTools: Read, Grep\nModel: Opus\nPermission mode: plan\nColor: cyan"
         );
     }
 
@@ -239,5 +267,43 @@ mod tests {
     fn detail_empty_tools_is_all() {
         let out = render_agent_detail(&row("x"));
         assert!(out.contains("Tools: All tools"));
+    }
+
+    #[test]
+    fn detail_model_always_shown_with_inherit_defaults() {
+        // (agents-04) Unset model → "Inherit from parent (default)".
+        let out = render_agent_detail(&row("x"));
+        assert!(out.ends_with("\nModel: Inherit from parent (default)"), "got: {out}");
+        // "inherit" → "Inherit from parent" (no "(default)" suffix).
+        let mut r = row("x");
+        r.model = Some("inherit".into());
+        assert!(render_agent_detail(&r).ends_with("\nModel: Inherit from parent"));
+    }
+
+    #[test]
+    fn list_nav_wraps_at_both_ends() {
+        // (agents-05) Up at the top wraps to the last row; Down at the bottom
+        // wraps to the first.
+        let mut s = AgentsScreenState {
+            rows: vec![row("a"), row("b"), row("c")],
+            ..AgentsScreenState::default()
+        };
+        handle_agents_key(&mut s, KeyCode::Up); // 0 → 2 (wrap)
+        assert_eq!(s.selected, 2);
+        handle_agents_key(&mut s, KeyCode::Down); // 2 → 0 (wrap)
+        assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn list_ignores_vim_keys() {
+        // (agents-06) j/k/q are not bound in the list.
+        let mut s = AgentsScreenState {
+            rows: vec![row("a"), row("b")],
+            ..AgentsScreenState::default()
+        };
+        assert_eq!(handle_agents_key(&mut s, KeyCode::Char('j')), AgentsOutcome::Stay);
+        assert_eq!(s.selected, 0, "j must not move the selection");
+        assert_eq!(handle_agents_key(&mut s, KeyCode::Char('q')), AgentsOutcome::Stay);
+        // q does not close.
     }
 }

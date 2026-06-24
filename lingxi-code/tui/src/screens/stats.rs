@@ -41,6 +41,7 @@
 
 use std::collections::BTreeMap;
 
+use chrono::{Datelike, Duration as ChronoDuration, NaiveDate};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 
@@ -668,26 +669,90 @@ pub fn sparkline(values: &[u64]) -> String {
 /// present.
 #[must_use]
 pub fn heatmap(daily: &BTreeMap<String, u64>) -> Vec<String> {
+    heatmap_with_today(daily, chrono::Local::now().date_naive())
+}
+
+/// GitHub-style 7-row × N-week activity grid — a faithful port of claude-code
+/// `generateHeatmap` (`utils/heatmap.ts`). The grid ends at `today`'s week
+/// (anchored on that week's Sunday) and walks back `width-1` weeks; future days
+/// are blank, past days carry their intensity glyph (`·` for no activity).
+/// Output rows: a month-label line, the 7 weekday rows (`Mon`/`Wed`/`Fri`
+/// labels on rows 1/3/5), a blank line, and the `Less … More` legend.
+/// `today` is injected so the layout is deterministic in tests.
+#[must_use]
+pub fn heatmap_with_today(daily: &BTreeMap<String, u64>, today: NaiveDate) -> Vec<String> {
     if daily.is_empty() {
         return Vec::new();
     }
+    const TERMINAL_WIDTH: i64 = 80;
+    const DAY_LABEL_WIDTH: i64 = 4;
+    // width = min(52, max(10, terminalWidth - dayLabelWidth)).
+    let width = (TERMINAL_WIDTH - DAY_LABEL_WIDTH).clamp(10, 52) as usize;
+
     let counts: Vec<u64> = daily.values().copied().filter(|&c| c > 0).collect();
     let pct = percentiles(&counts);
-    // One glyph per day, ascending by date (BTreeMap iteration order).
-    let strip: String = daily
-        .values()
-        .map(|&c| heatmap_char(intensity(c, pct)))
+
+    // Sunday of the current week, then back (width-1) weeks.
+    let dow = i64::from(today.weekday().num_days_from_sunday());
+    let current_week_start = today - ChronoDuration::days(dow);
+    let start_date = current_week_start - ChronoDuration::days((width as i64 - 1) * 7);
+
+    let mut grid = vec![vec![' '; width]; 7];
+    let mut month_order: Vec<u32> = Vec::new();
+    let mut last_month: i32 = -1;
+    let mut current = start_date;
+    for week in 0..width {
+        for day in 0..7usize {
+            if current > today {
+                grid[day][week] = ' ';
+            } else {
+                let date_str = current.format("%Y-%m-%d").to_string();
+                let count = daily.get(&date_str).copied().unwrap_or(0);
+                if day == 0 {
+                    let month = current.month0();
+                    if month as i32 != last_month {
+                        month_order.push(month);
+                        last_month = month as i32;
+                    }
+                }
+                grid[day][week] = heatmap_char(intensity(count, pct));
+            }
+            current += ChronoDuration::days(1);
+        }
+    }
+
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    let mut lines: Vec<String> = Vec::new();
+
+    // Month labels: each unique month, padEnd(floor(width / max(months,1))).
+    let label_w = width / month_order.len().max(1);
+    let labels: String = month_order
+        .iter()
+        .map(|&m| format!("{:<w$}", MONTHS[m as usize], w = label_w))
         .collect();
-    vec![
-        strip,
-        // (stats-heatmap-legend-indent) blank line + 4-space indent, matching
-        // claude-code heatmap.ts (`lines.push(''); '    Less '+…+' More'`).
-        String::new(),
-        format!(
-            "    Less {} {} {} {} More",
-            '\u{2591}', '\u{2592}', '\u{2593}', '\u{2588}'
-        ),
-    ]
+    lines.push(format!("    {labels}"));
+
+    // 7 weekday rows; labels only on Mon(1)/Wed(3)/Fri(5).
+    for day in 0..7usize {
+        let label = if day == 1 || day == 3 || day == 5 {
+            format!("{:<3}", DAYS[day])
+        } else {
+            "   ".to_string()
+        };
+        let row: String = grid[day].iter().collect();
+        lines.push(format!("{label} {row}"));
+    }
+
+    // Legend (blank line + 4-space indent).
+    lines.push(String::new());
+    lines.push(format!(
+        "    Less {} {} {} {} More",
+        '\u{2591}', '\u{2592}', '\u{2593}', '\u{2588}'
+    ));
+    lines
 }
 
 /// `(p25, p50, p75)` of `counts` (claude-code `calculatePercentiles`, which
@@ -1190,26 +1255,31 @@ mod tests {
     }
 
     #[test]
-    fn heatmap_strip_has_one_glyph_per_day_plus_legend() {
-        let valid: &[char] = &['\u{00B7}', '\u{2591}', '\u{2592}', '\u{2593}', '\u{2588}'];
+    fn heatmap_renders_7row_grid_with_labels_and_legend() {
         let mut daily = BTreeMap::new();
         daily.insert("2026-05-01".to_string(), 1u64);
         daily.insert("2026-05-02".to_string(), 5u64);
-        daily.insert("2026-05-03".to_string(), 9u64);
-        let rows = heatmap(&daily);
-        // strip + blank line + indented legend.
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].chars().count(), 3);
-        assert!(
-            rows[0].chars().all(|c| valid.contains(&c)),
-            "got: {}",
-            rows[0]
-        );
-        assert!(rows[1].is_empty(), "blank line before legend");
-        assert!(rows[2].starts_with("    Less "));
-        assert!(rows[2].ends_with(" More"));
+        daily.insert("2026-06-03".to_string(), 9u64);
+        let today = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
+        let rows = heatmap_with_today(&daily, today);
+        // month-label line + 7 weekday rows + blank + legend = 10 rows.
+        assert_eq!(rows.len(), 10, "got: {rows:#?}");
+        // Output rows: 0=months, 1=Sun, 2=Mon, 3=Tue, 4=Wed, 5=Thu, 6=Fri, 7=Sat.
+        assert!(rows[2].starts_with("Mon"), "Mon label: {}", rows[2]);
+        assert!(rows[4].starts_with("Wed"), "Wed label: {}", rows[4]);
+        assert!(rows[6].starts_with("Fri"), "Fri label: {}", rows[6]);
+        assert!(rows[1].starts_with("   "), "Sun has blank label: {}", rows[1]);
+        // Each weekday row's grid is `width` glyphs (52 weeks at terminalWidth=80).
+        let valid: &[char] = &[' ', '\u{00B7}', '\u{2591}', '\u{2592}', '\u{2593}', '\u{2588}'];
+        let grid: String = rows[2].chars().skip(4).collect();
+        assert_eq!(grid.chars().count(), 52, "Mon row grid width");
+        assert!(grid.chars().all(|c| valid.contains(&c)), "glyphs: {grid}");
+        // Legend.
+        assert!(rows[8].is_empty(), "blank line before legend");
+        assert!(rows[9].starts_with("    Less "));
+        assert!(rows[9].ends_with(" More"));
         // Empty -> no rows.
-        assert!(heatmap(&BTreeMap::new()).is_empty());
+        assert!(heatmap_with_today(&BTreeMap::new(), today).is_empty());
     }
 
     #[test]

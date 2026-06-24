@@ -1182,7 +1182,8 @@ impl AppState {
             crate::screens::hooks::HooksScreenState {
                 rows,
                 selected: 0,
-                mode: crate::screens::hooks::HooksDialogMode::List,
+                mode: crate::screens::hooks::HooksDialogMode::EventList,
+                selected_event: None,
             },
         ));
         crate::telemetry::screen_opened("hooks");

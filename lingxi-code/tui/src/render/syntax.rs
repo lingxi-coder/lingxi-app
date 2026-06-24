@@ -83,8 +83,19 @@ pub fn detect_language(info_string: Option<&str>, path: Option<&str>) -> Option<
             return Some(token.to_string());
         }
     }
-    // Fall back to the file extension.
+    // (syntax-02) Filename / stem lookup BEFORE the extension fallback
+    // (claude-code `FILENAME_LANGS`): `Dockerfile`/`Makefile`/`CMakeLists.txt`/
+    // `Rakefile`/`Gemfile` carry no extension but map to a language.
     if let Some(p) = path {
+        let base = std::path::Path::new(p)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("");
+        let stem = base.split('.').next().unwrap_or("");
+        if let Some(lang) = filename_language(base).or_else(|| filename_language(stem)) {
+            return Some(lang.to_string());
+        }
+        // Fall back to the file extension.
         if let Some(ext) = std::path::Path::new(p).extension().and_then(|e| e.to_str()) {
             if !ext.is_empty() {
                 return Some(ext.to_string());
@@ -92,6 +103,17 @@ pub fn detect_language(info_string: Option<&str>, path: Option<&str>) -> Option<
         }
     }
     None
+}
+
+/// Language for a bare filename / stem (claude-code `FILENAME_LANGS`).
+fn filename_language(name: &str) -> Option<&'static str> {
+    match name {
+        "Dockerfile" => Some("dockerfile"),
+        "Makefile" => Some("makefile"),
+        "Rakefile" | "Gemfile" => Some("ruby"),
+        "CMakeLists" => Some("cmake"),
+        _ => None,
+    }
 }
 
 /// One plain (uncolored) StyledLine per input line — the fallback when the
@@ -227,7 +249,23 @@ mod tests {
     fn no_lang_returns_none() {
         assert_eq!(detect_language(None, None), None);
         assert_eq!(detect_language(Some(""), None), None);
-        assert_eq!(detect_language(None, Some("Makefile")), None); // no extension
+        // (syntax-02) A truly extension-less, unknown filename is still None.
+        assert_eq!(detect_language(None, Some("README")), None);
+    }
+
+    #[test]
+    fn filename_based_language_detection() {
+        // (syntax-02) FILENAME_LANGS — basename and stem.
+        let d = |p: &str| detect_language(None, Some(p));
+        assert_eq!(d("Dockerfile").as_deref(), Some("dockerfile"));
+        assert_eq!(d("Makefile").as_deref(), Some("makefile"));
+        assert_eq!(d("Rakefile").as_deref(), Some("ruby"));
+        assert_eq!(d("Gemfile").as_deref(), Some("ruby"));
+        // Stem lookup: `CMakeLists.txt` → stem `CMakeLists` → cmake.
+        assert_eq!(d("path/to/CMakeLists.txt").as_deref(), Some("cmake"));
+        assert_eq!(d("Dockerfile.dev").as_deref(), Some("dockerfile"));
+        // A normal extension still wins via the fallback.
+        assert_eq!(d("main.rs").as_deref(), Some("rs"));
     }
 
     #[test]

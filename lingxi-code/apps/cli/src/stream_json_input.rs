@@ -187,6 +187,17 @@ pub fn process_line(
             Ok(FrameAction::ControlResponse(frame))
         }
 
+        "control_cancel_request" => {
+            // §1.4 INBOUND: the host cancels a control_request IT sent us. The
+            // CLI-as-server inbound handlers (initialize/interrupt/set_*/get_*)
+            // are synchronous and resolve before a cancel could arrive, so there
+            // is no in-flight async handler to abort — drop it (byte-faithful for
+            // the stdio-local path; a request_id→AbortHandle map is only needed
+            // once an async [D] handler lands). The OUTBOUND cancel LingXi emits
+            // for its own aborted `can_use_tool` is handled in `control_plane`.
+            Ok(FrameAction::Consumed)
+        }
+
         "user" => {
             // Role check.
             let role = frame

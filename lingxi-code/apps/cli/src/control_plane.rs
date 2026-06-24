@@ -88,6 +88,32 @@ impl StdioControlPlane {
         }
     }
 
+    /// A clone of the active turn's cancellation token, if any. The gate selects
+    /// on it so a turn abort (interrupt / Ctrl-C) cancels an in-flight
+    /// `can_use_tool` request rather than blocking forever.
+    async fn active_turn_token(&self) -> Option<CancellationToken> {
+        self.active_turn_cancel.lock().await.clone()
+    }
+
+    /// Abort an outbound `control_request` whose turn was cancelled / superseded
+    /// (§1.4 outbound-emit): enqueue `control_cancel_request` to tell the host to
+    /// drop its prompt, remove the pending entry locally (tracking its tool_use_id
+    /// so a late response is deduped), and let the awaiting future fall through.
+    async fn cancel_request(&self, request_id: &str) {
+        let entry = {
+            let mut pending = self.pending.lock().await;
+            pending.remove(request_id)
+        };
+        if let Some(tuid) = entry.and_then(|e| e.tool_use_id) {
+            self.track_resolved(tuid).await;
+        }
+        let frame = json!({
+            "type": "control_cancel_request",
+            "request_id": request_id,
+        });
+        let _ = self.outbound_tx.send(serialize_ndjson_line(&frame));
+    }
+
     /// Emit a CLI-originated `control_request` and return a receiver resolved
     /// when the matching `control_response` arrives (`sendRequest`,
     /// structuredIO.ts:469). Mints a `request_id`, enqueues the frame on the
@@ -97,7 +123,7 @@ impl StdioControlPlane {
         &self,
         request: Value,
         tool_use_id: Option<String>,
-    ) -> oneshot::Receiver<Result<Value, String>> {
+    ) -> (String, oneshot::Receiver<Result<Value, String>>) {
         let request_id = Uuid::new_v4().to_string();
         let frame = json!({
             "type": "control_request",
@@ -108,7 +134,7 @@ impl StdioControlPlane {
         {
             let mut pending = self.pending.lock().await;
             pending.insert(
-                request_id,
+                request_id.clone(),
                 PendingControlRequest {
                     responder: tx,
                     tool_use_id,
@@ -118,7 +144,7 @@ impl StdioControlPlane {
         // Enqueue AFTER registering so a (theoretically) instant response can't
         // race the insert. The drain task serializes to stdout.
         let _ = self.outbound_tx.send(serialize_ndjson_line(&frame));
-        rx
+        (request_id, rx)
     }
 
     /// Resolve an inbound `control_response` against `pendingRequests`
@@ -141,8 +167,22 @@ impl StdioControlPlane {
         };
         let Some(entry) = entry else {
             // Orphan / duplicate `control_response`: no matching pending entry.
-            // Phase 4 adds the resolved-tool-use dedup drop + log line; here it
-            // is simply ignored (inline, never surfaced to the turn loop).
+            // §1.5 dedup: if the payload's `toolUseID` was already resolved (a
+            // websocket-reconnect double-delivery), log + drop so it can't
+            // double-resolve a tool_use (which would 400 on a non-unique id).
+            let tool_use_id = response
+                .get("response")
+                .and_then(|p| p.get("toolUseID"))
+                .and_then(Value::as_str);
+            if let Some(tuid) = tool_use_id {
+                if self.is_resolved(tuid).await {
+                    tracing::debug!(
+                        "Ignoring duplicate control_response for already-resolved toolUseID={} request_id={}",
+                        tuid,
+                        request_id
+                    );
+                }
+            }
             return;
         };
         if let Some(tuid) = entry.tool_use_id.clone() {
@@ -175,6 +215,15 @@ impl StdioControlPlane {
         while ring.len() > MAX_RESOLVED_TOOL_USE_IDS {
             ring.pop_front();
         }
+    }
+
+    /// Whether `tool_use_id` is in the resolved ring (§1.5 dedup check).
+    async fn is_resolved(&self, tool_use_id: &str) -> bool {
+        self.resolved_tool_use_ids
+            .lock()
+            .await
+            .iter()
+            .any(|id| id == tool_use_id)
     }
 }
 
@@ -218,13 +267,27 @@ impl StdioControlPermissionGate {
         if let Some(w) = worker {
             request["agent_id"] = json!(w.name);
         }
-        let rx = self
-            .plane
-            .send_request(request, Some(tool_use_id))
-            .await;
+        let (request_id, rx) = self.plane.send_request(request, Some(tool_use_id)).await;
+
         // There is NO timeout on the can_use_tool request (§3.1): block until a
-        // control_response arrives or the channel drops (host gone / turn end).
-        match rx.await {
+        // control_response arrives, the channel drops, or the turn is aborted.
+        // On a turn abort (interrupt / Ctrl-C), emit `control_cancel_request` so
+        // the host drops its prompt, and deny (§1.4 / §3.1 AbortError → deny).
+        let result = match self.plane.active_turn_token().await {
+            Some(token) => {
+                tokio::select! {
+                    r = rx => r,
+                    () = token.cancelled() => {
+                        self.plane.cancel_request(&request_id).await;
+                        return PermissionDecision::Deny {
+                            reason: "Tool permission request failed: aborted".to_string(),
+                        };
+                    }
+                }
+            }
+            None => rx.await,
+        };
+        match result {
             Ok(Ok(payload)) => self.map_payload(payload).await,
             Ok(Err(err)) => PermissionDecision::Deny {
                 reason: format!("Tool permission request failed: {err}"),
@@ -311,7 +374,7 @@ mod tests {
     #[tokio::test]
     async fn send_request_emits_frame_and_resolves_success() {
         let (plane, mut rx) = plane_with_channel();
-        let fut = plane
+        let (req_id, fut) = plane
             .send_request(
                 json!({"subtype": "can_use_tool", "tool_name": "Bash"}),
                 Some("tu1".to_string()),
@@ -322,7 +385,7 @@ mod tests {
         let frame: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(frame["type"], "control_request");
         assert_eq!(frame["request"]["tool_name"], "Bash");
-        let req_id = frame["request_id"].as_str().unwrap().to_string();
+        assert_eq!(frame["request_id"].as_str().unwrap(), req_id);
 
         plane
             .resolve_response(&success_response(&req_id, json!({"behavior": "allow"})))
@@ -333,13 +396,10 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_response_error_subtype_rejects() {
-        let (plane, mut rx) = plane_with_channel();
-        let fut = plane
+        let (plane, _rx) = plane_with_channel();
+        let (req_id, fut) = plane
             .send_request(json!({"subtype": "can_use_tool"}), None)
             .await;
-        let line = rx.recv().await.unwrap();
-        let frame: Value = serde_json::from_str(&line).unwrap();
-        let req_id = frame["request_id"].as_str().unwrap().to_string();
 
         let resp = json!({
             "type": "control_response",
@@ -351,13 +411,8 @@ mod tests {
 
     #[tokio::test]
     async fn success_with_no_inner_payload_resolves_empty_object() {
-        let (plane, mut rx) = plane_with_channel();
-        let fut = plane.send_request(json!({"subtype": "x"}), None).await;
-        let line = rx.recv().await.unwrap();
-        let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let (plane, _rx) = plane_with_channel();
+        let (req_id, fut) = plane.send_request(json!({"subtype": "x"}), None).await;
         // `response` key absent (the `rn(gt)` no-payload case).
         let resp = json!({
             "type": "control_response",
@@ -365,6 +420,68 @@ mod tests {
         });
         plane.resolve_response(&resp).await;
         assert_eq!(fut.await.unwrap().unwrap(), json!({}));
+    }
+
+    #[tokio::test]
+    async fn turn_abort_emits_control_cancel_request_and_denies() {
+        // §1.4 / §3.1: a turn abort while the gate awaits cancels the outbound
+        // request and denies.
+        let (plane, mut rx) = plane_with_channel();
+        let token = CancellationToken::new();
+        plane.set_active_turn(token.clone()).await;
+        let gate = StdioControlPermissionGate::new(plane.clone());
+        let input = json!({});
+        let check = tokio::spawn(async move { gate.check("Bash", &input).await });
+
+        // Drain the can_use_tool request, then abort the turn.
+        let line = rx.recv().await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&line).unwrap()["request"]["subtype"],
+            "can_use_tool"
+        );
+        token.cancel();
+
+        assert_eq!(
+            check.await.unwrap(),
+            PermissionDecision::Deny {
+                reason: "Tool permission request failed: aborted".to_string()
+            }
+        );
+        // A control_cancel_request frame is emitted to the host.
+        let cancel_line = rx.recv().await.expect("cancel frame emitted");
+        let cancel: Value = serde_json::from_str(&cancel_line).unwrap();
+        assert_eq!(cancel["type"], "control_cancel_request");
+        assert!(cancel["request_id"].is_string());
+    }
+
+    #[tokio::test]
+    async fn duplicate_control_response_for_resolved_tool_use_is_dropped() {
+        // §1.5: resolve once (tracking the tool_use_id), then a duplicate
+        // response (orphan, same toolUseID) is dropped without re-resolving.
+        let (plane, _rx) = plane_with_channel();
+        let (req_id, fut) = plane
+            .send_request(json!({"subtype": "can_use_tool"}), Some("tu-dup".to_string()))
+            .await;
+        plane
+            .resolve_response(&success_response(
+                &req_id,
+                json!({"behavior": "allow", "toolUseID": "tu-dup"}),
+            ))
+            .await;
+        assert_eq!(fut.await.unwrap().unwrap()["behavior"], "allow");
+
+        // The duplicate has a NEW request_id (orphan) but the same toolUseID.
+        let dup = json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": "late-redelivery",
+                "response": {"behavior": "allow", "toolUseID": "tu-dup"}
+            }
+        });
+        // Must not panic / double-resolve; the tool_use_id is in the resolved ring.
+        plane.resolve_response(&dup).await;
+        assert!(plane.is_resolved("tu-dup").await);
     }
 
     #[tokio::test]

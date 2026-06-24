@@ -243,6 +243,11 @@ fn content_lines(bindings: &[ParsedBinding]) -> Vec<String> {
     let mut out = Vec::with_capacity(SHORTCUTS.len() + SLASH_COMMANDS.len() + 2);
     out.push(SHORTCUTS_HEADER.to_string());
     for row in SHORTCUTS {
+        // (help-3) `ctrl + z to suspend` is non-Windows only
+        // (claude-code `getPlatform() !== 'windows'`).
+        if cfg!(windows) && row.label == "to suspend" {
+            continue;
+        }
         out.push(format_row(&row_chord(row, bindings), row.label));
     }
     out.push(COMMANDS_HEADER.to_string());
@@ -411,9 +416,17 @@ mod tests {
     fn every_shortcut_and_command_is_a_body_line() {
         let bindings = default_bindings();
         let lines = content_lines(&bindings);
+        // (help-3) the `to suspend` row is dropped on Windows only.
+        let dropped = usize::from(cfg!(windows));
         // Header + each shortcut + header + each command.
-        assert_eq!(lines.len(), SHORTCUTS.len() + SLASH_COMMANDS.len() + 2);
+        assert_eq!(
+            lines.len(),
+            SHORTCUTS.len() - dropped + SLASH_COMMANDS.len() + 2
+        );
         for row in SHORTCUTS {
+            if cfg!(windows) && row.label == "to suspend" {
+                continue;
+            }
             let chord = row_chord(row, &bindings);
             assert!(
                 lines

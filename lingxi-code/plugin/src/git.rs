@@ -45,11 +45,28 @@ pub fn clone_plugin_git(url: &str, ref_: &str, dest: &Path) -> Result<String, St
     let repo = builder
         .clone(url, dest)
         .map_err(|e| format!("Failed to clone repository: {}", e.message()))?;
+    // Recurse submodules (the binary clones with `--recurse-submodules`); a
+    // plugin whose components live in a submodule would otherwise land an
+    // incomplete tree. (`--shallow-submodules` is not expressible via this git2
+    // API, so submodules fetch at full depth — more data, never less.)
+    update_submodules_recursive(&repo)
+        .map_err(|e| format!("Failed to clone repository: {}", e.message()))?;
     let head = repo
         .head()
         .and_then(|h| h.peel_to_commit())
         .map_err(|e| e.message().to_string())?;
     Ok(head.id().to_string())
+}
+
+/// Initialise + update every submodule, recursing into nested submodules
+/// (the binary's `git submodule update --init --recursive`).
+fn update_submodules_recursive(repo: &git2::Repository) -> Result<(), git2::Error> {
+    for mut submodule in repo.submodules()? {
+        submodule.update(true, None)?; // init = true
+        let sub_repo = submodule.open()?;
+        update_submodules_recursive(&sub_repo)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

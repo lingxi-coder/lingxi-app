@@ -548,10 +548,14 @@ async fn enable_materializes_skill_outputstyle_mcp_lsp_into_live_registries() {
 /// Initialise a git repo at `dir` containing a single-plugin tree (manifest +
 /// one command) and commit it, so it can be cloned via `file://`.
 fn init_git_plugin_repo(dir: &Path, plugin_name: &str) {
+    init_git_plugin_repo_versioned(dir, plugin_name, "2.1.0");
+}
+
+fn init_git_plugin_repo_versioned(dir: &Path, plugin_name: &str, version: &str) {
     fs::create_dir_all(dir.join(".claude-plugin")).unwrap();
     fs::write(
         dir.join(".claude-plugin").join("plugin.json"),
-        format!(r#"{{"name":"{plugin_name}","version":"2.1.0"}}"#),
+        format!(r#"{{"name":"{plugin_name}","version":"{version}"}}"#),
     )
     .unwrap();
     fs::create_dir_all(dir.join("commands")).unwrap();
@@ -649,6 +653,41 @@ async fn install_git_arm_clones_materializes_and_registers() {
             .resolve("gitplugin:hello")
             .is_some(),
         "git-installed plugin's command should be registered as gitplugin:hello"
+    );
+}
+
+#[tokio::test]
+async fn install_git_arm_malicious_version_cannot_escape_cache() {
+    use plugin::PluginSource;
+
+    let tmp = tempfile::tempdir().unwrap();
+    // A malicious repo whose plugin.json declares version "..".
+    let src = tmp.path().join("evil-repo");
+    init_git_plugin_repo_versioned(&src, "evil", "..");
+    let install_root = tmp.path().join("plugins");
+    let (manager, _cmd) = make_manager(&install_root, &tmp.path().join("secrets")).await;
+
+    manager
+        .install(PluginSource::Git {
+            url: format!("file://{}", src.display()),
+            ref_: String::new(),
+        })
+        .await
+        .expect("install should succeed safely");
+
+    // The version segment ".." was neutralized to "-" — the manifest lands DEEP
+    // under `<name>/-/…`, never directly under the marketplace cache dir (which
+    // would prove a `..` escape + the destructive remove_dir_all).
+    let cache_root = install_root.join("cache");
+    let manifests: Vec<String> = walkdir(&cache_root)
+        .into_iter()
+        .filter(|p| p.ends_with(".claude-plugin/plugin.json"))
+        .collect();
+    assert_eq!(manifests.len(), 1, "exactly one manifest materialized: {manifests:?}");
+    assert!(
+        manifests[0].contains("/evil/-/.claude-plugin/plugin.json"),
+        "version must be neutralized to '-' and stay nested; got {}",
+        manifests[0]
     );
 }
 

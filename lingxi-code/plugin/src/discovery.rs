@@ -159,7 +159,8 @@ fn parse_plugin_identifier(id: &str) -> (&str, Option<&str>) {
 /// (`pluginLoader.ts:139`) does: marketplace/plugin replace any char outside
 /// `[A-Za-z0-9\-_]` with `-`; version additionally keeps `.`.
 pub(crate) fn sanitize_segment(s: &str, allow_dot: bool) -> String {
-    s.chars()
+    let mapped: String = s
+        .chars()
         .map(|c| {
             let keep = c.is_ascii_alphanumeric()
                 || c == '-'
@@ -171,7 +172,18 @@ pub(crate) fn sanitize_segment(s: &str, allow_dot: bool) -> String {
                 '-'
             }
         })
-        .collect()
+        .collect();
+    // A pure-dot or empty segment would resolve to the parent (`..`) or current
+    // (`.`) directory, letting an attacker-controlled name/version escape its
+    // cache subdir (e.g. a malicious plugin.json `"version": ".."` would make a
+    // join resolve to the SIBLING cache dir, which an unconditional
+    // remove_dir_all would then wipe). Collapse these to a safe token — no real
+    // semver / plugin / marketplace segment is ever exactly "", ".", or "..".
+    if mapped.is_empty() || mapped == "." || mapped == ".." {
+        "-".to_string()
+    } else {
+        mapped
+    }
 }
 
 /// Discover the plugins enabled by the `enabledPlugins` allowlist against the

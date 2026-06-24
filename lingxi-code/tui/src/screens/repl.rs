@@ -12,7 +12,7 @@ use iocraft::prelude::*;
 use protocol::ToolUseId;
 
 use crate::components::prompt_input::completion::{CompletionOverlay, CompletionState};
-use crate::components::prompt_input::palette::{PaletteOverlay, PaletteState, OVERLAY_MAX_ITEMS};
+use crate::components::prompt_input::palette::{PaletteOverlay, PaletteState};
 use crate::components::prompt_input::{
     HistorySearchOverlay, HistorySearchState, PromptInput, PromptInputFooter, SessionColorBanner,
     VimMode,
@@ -249,9 +249,12 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
             // this draws inline in the bottom zone (design D4). Only one is
             // ever open at a time (the dispatcher enforces palette-wins-on-`/`).
             #(palette.as_ref().filter(|p| p.open).map(|p| {
-                let rows: Vec<_> = p.rows().into_iter().take(OVERLAY_MAX_ITEMS).collect();
+                // (cp-08) The FULL filtered list (not just the visible window)
+                // goes in — PaletteOverlay needs every row's name width to
+                // compute the shared column width, then slices internally.
+                let rows = p.rows();
                 element! {
-                    PaletteOverlay(rows: rows, selected: p.selected, theme: theme)
+                    PaletteOverlay(rows: rows, selected: p.selected, theme: theme, width: prompt_width)
                 }
             }))
             #(completion.as_ref().filter(|c| c.open).map(|c| {

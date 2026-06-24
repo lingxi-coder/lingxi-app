@@ -15,7 +15,7 @@ fn palette_dropdown_three_filtered_commands() {
     state.sync_from_prompt("/co"); // compact / config / context / copy / cost ...
                                    // Keep snapshot stable: take the first 3 ranked rows.
     let rows: Vec<_> = state.rows().into_iter().take(3).collect();
-    let out = render(element! { PaletteOverlay(rows: rows, selected: 0usize) });
+    let out = render(element! { PaletteOverlay(rows: rows, selected: 0usize, width: 60usize) });
     insta::assert_snapshot!(out);
 }
 
@@ -56,8 +56,8 @@ fn repl_screen_shows_palette_above_prompt() {
     let el = render_screen(&st, 10, 60);
     let out = render(el);
     assert!(
-        out.contains('\u{2013}'),
-        "palette rows use the en-dash separator"
+        out.contains("/compact"),
+        "palette rows list the filtered commands"
     );
     insta::assert_snapshot!(out);
 }

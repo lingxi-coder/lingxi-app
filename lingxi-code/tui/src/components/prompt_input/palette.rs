@@ -9,8 +9,11 @@
 //! gate set), matching claude-code's
 //! `commands.filter(c => !c.isHidden && !$te(c))` palette filter.
 //!
-//! Literal lock (design §2.8): rows show `name` + ` – ` (en-dash, U+2013) +
-//! description, mirroring claude-code PromptInputFooterSuggestions.tsx.
+//! (cp-08) Rows mirror claude-code `PromptInputFooterSuggestions`'s
+//! non-unified ("command") layout: a fixed-width padded name column (sized
+//! from the widest name in the filtered list, clamped to 40% of terminal
+//! width) followed by a separately width-truncated description — see
+//! `format_palette_row`.
 
 use command_api::builtin_support::names::{
     command_aliases, core_description, is_command_env_disabled, is_palette_hidden,
@@ -232,30 +235,99 @@ fn handle_key(state: &mut PaletteState, code: KeyCode) -> PaletteKeyOutcome {
 /// Props for the palette dropdown overlay.
 #[derive(Default, Props)]
 pub struct PaletteOverlayProps {
-    /// The filtered rows to display (caller truncates to `OVERLAY_MAX_ITEMS`).
+    /// The FULL filtered rows (not just the visible window) — needed to
+    /// compute the shared name-column width (cp-08) before slicing to
+    /// `OVERLAY_MAX_ITEMS` for rendering.
     pub rows: Vec<PaletteRow>,
     /// Index of the highlighted row within `rows`.
     pub selected: usize,
     /// (M7-15) Active palette — the selected-row `suggestion` accent + dim
     /// rest are centralized here.
     pub theme: Theme,
+    /// (cp-08) Live terminal column width, driving the name-column width
+    /// (`floor(width * 0.4)`) and description truncation budget.
+    pub width: usize,
 }
 
-/// Render the palette dropdown: up to `OVERLAY_MAX_ITEMS` rows, each
-/// `name – description`. The selected row is highlighted; the rest are dim.
-/// Literal lock: `" – "` is U+2013 with surrounding spaces (claude-code
-/// PromptInputFooterSuggestions row format).
+/// The command name as it's displayed (with a leading `/` and, when matched
+/// via a typed alias, ` (<alias>)` — cp-03).
+fn display_text_for(row: &PaletteRow) -> String {
+    let alias = row.matched_alias.map(|a| format!(" ({a})")).unwrap_or_default();
+    format!("/{}{}", row.name, alias)
+}
+
+/// claude-code `truncateToWidth` (utils/truncate.ts): grapheme-safe width
+/// truncation that appends `…` when truncation occurs (unlike
+/// `status_line::truncate_to_width`, which mirrors the ellipsis-less
+/// `truncateToWidthNoEllipsis` variant used elsewhere).
+fn truncate_to_width_ellipsis(text: &str, max_width: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width <= 1 {
+        return "\u{2026}".to_string();
+    }
+    let mut width = 0usize;
+    let mut result = String::new();
+    for seg in text.graphemes(true) {
+        let seg_width = UnicodeWidthStr::width(seg);
+        if width + seg_width > max_width - 1 {
+            break;
+        }
+        result.push_str(seg);
+        width += seg_width;
+    }
+    result.push('\u{2026}');
+    result
+}
+
+/// (cp-08) claude-code `SuggestionItemRow`'s non-unified ("command") row
+/// layout: a fixed-width padded name column (shared across every row, sized
+/// from the WIDEST name in the full filtered list, clamped to 40% of the
+/// terminal width) plus a separately width-truncated, whitespace-collapsed
+/// description — no `–` separator (the column padding alone provides the
+/// gap). Mirrors `PromptInputFooterSuggestions`'s `maxColumnWidth` (computed
+/// once over every row, not just the visible window) and per-row
+/// `descriptionWidth` math.
+fn format_palette_row(row: &PaletteRow, all_rows: &[PaletteRow], columns: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    let columns = columns.max(1);
+    let max_name_width = (columns * 2) / 5; // floor(columns * 0.4), exact in integer math
+    let widest = all_rows
+        .iter()
+        .map(|r| UnicodeWidthStr::width(display_text_for(r).as_str()))
+        .max()
+        .unwrap_or(0);
+    let max_column_width = widest + 5;
+    let display_text_width = max_column_width.min(max_name_width);
+    let mut name = display_text_for(row);
+    if UnicodeWidthStr::width(name.as_str()) > display_text_width.saturating_sub(2) {
+        name = truncate_to_width_ellipsis(&name, display_text_width.saturating_sub(2));
+    }
+    let pad = display_text_width.saturating_sub(UnicodeWidthStr::width(name.as_str()));
+    let padded_name = format!("{name}{}", " ".repeat(pad));
+    let description_width = columns.saturating_sub(display_text_width).saturating_sub(4);
+    let collapsed_desc = row.description.split_whitespace().collect::<Vec<_>>().join(" ");
+    let desc = truncate_to_width_ellipsis(&collapsed_desc, description_width);
+    format!("{padded_name}{desc}")
+}
+
+/// Render the palette dropdown: up to `OVERLAY_MAX_ITEMS` rows, name-column
+/// padded + description-truncated per `format_palette_row` (cp-08). The
+/// selected row is highlighted; the rest are dim.
 #[component]
 pub fn PaletteOverlay(props: &PaletteOverlayProps) -> impl Into<AnyElement<'static>> {
-    let rows: Vec<_> = props.rows.iter().take(OVERLAY_MAX_ITEMS).cloned().collect();
+    let all_rows = &props.rows;
+    let visible: Vec<_> = props.rows.iter().take(OVERLAY_MAX_ITEMS).cloned().collect();
     let selected = props.selected;
     let theme = props.theme;
+    let columns = props.width;
     element! {
         View(flex_direction: FlexDirection::Column) {
-            #(rows.into_iter().enumerate().map(|(i, row)| {
-                // (cp-03) ` (<alias>)` after the name when matched via a typed alias.
-                let alias = row.matched_alias.map(|a| format!(" ({a})")).unwrap_or_default();
-                let line = format!("/{}{} \u{2013} {}", row.name, alias, row.description);
+            #(visible.into_iter().enumerate().map(|(i, row)| {
+                let line = format_palette_row(&row, all_rows, columns);
                 // (M7-15) Centralized: selected row uses the theme's `suggestion`
                 // accent (claude-code's completion highlight), the rest dim.
                 let color = if i == selected { theme.suggestion } else { theme.dim };

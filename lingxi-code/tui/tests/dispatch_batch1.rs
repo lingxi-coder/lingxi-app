@@ -22,7 +22,7 @@ fn each_variant_routes_to_its_renderer() {
                 messages_before: 50,
                 messages_after: 5,
             },
-            "\u{273B} Conversation compacted (ctrl+o for history)",
+            "\n\u{273B} Conversation compacted (ctrl+o for history)\n",
         ),
         (
             RenderedMessage::SystemTextRich {

@@ -134,9 +134,10 @@ fn render_text_for_measure(msg: &RenderedMessage, width: usize) -> String {
         }
         // Single dim+italic line `✻ Thinking…`.
         RenderedMessage::AssistantRedactedThinking => "\u{273B} Thinking\u{2026}".to_string(),
-        // Single dim boundary line (counts not rendered — claude-code parity).
+        // (compact-boundary-marginy) dim boundary line + blank row above/below
+        // (counts not rendered — claude-code parity).
         RenderedMessage::CompactBoundary { .. } => {
-            "\u{273B} Conversation compacted (ctrl+o for history)".to_string()
+            "\n\u{273B} Conversation compacted (ctrl+o for history)\n".to_string()
         }
         // Info → body verbatim; warning/error → `● ` marker (cols) + body.
         RenderedMessage::SystemTextRich { body, level } => match level {
@@ -982,12 +983,13 @@ mod tests {
 
     #[test]
     fn measured_height_pins_compact_boundary_m7_04() {
-        // Single boundary line; counts are not rendered.
+        // (compact-boundary-marginy) boundary line + blank row above/below =
+        // 3 rows; counts are not rendered.
         let m = RenderedMessage::CompactBoundary {
             messages_before: 50,
             messages_after: 5,
         };
-        assert_eq!(measured_height(&m, 80), 1);
+        assert_eq!(measured_height(&m, 80), 3);
     }
 
     #[test]

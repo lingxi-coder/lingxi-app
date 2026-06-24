@@ -4,7 +4,7 @@
   "_note": "Locks high-value renderer strings/markers, markdown element STRUCTURE (one StyledLine per visual line + element markers), syntax-highlight STRUCTURE (line counts / fence boundaries — NOT per-token color, see spec §0 Q3), and StructuredDiff layout (gutter line-numbers + +/- markers, hunk-header `@@ ... @@`). Per-token highlight color is an explicit literal-lock EXCEPTION. Color/style is covered by the per-component unit tests + insta snapshots in lingxi-tui. All golden strings extracted from the real renderers (the StyledLine plain_text projection), not invented.",
   "renderers": {
     "compact_boundary": {
-      "expected_rendered_text": "✻ Conversation compacted (ctrl+o for history)"
+      "expected_rendered_text": "\n✻ Conversation compacted (ctrl+o for history)\n"
     },
     "bash_input": {
       "command": "ls -la",

@@ -691,6 +691,154 @@ async fn install_git_arm_malicious_version_cannot_escape_cache() {
     );
 }
 
+/// Build a git marketplace repo: a `.claude-plugin/marketplace.json` catalog
+/// listing one path-based plugin that lives at `plugins/<plugin>/` in the repo.
+fn init_git_marketplace_repo(dir: &Path, marketplace: &str, plugin: &str) {
+    fs::create_dir_all(dir.join(".claude-plugin")).unwrap();
+    fs::write(
+        dir.join(".claude-plugin").join("marketplace.json"),
+        format!(
+            r#"{{"name":"{marketplace}","plugins":[{{"name":"{plugin}","path":"plugins/{plugin}"}}]}}"#
+        ),
+    )
+    .unwrap();
+    let pdir = dir.join("plugins").join(plugin);
+    fs::create_dir_all(pdir.join(".claude-plugin")).unwrap();
+    fs::write(
+        pdir.join(".claude-plugin").join("plugin.json"),
+        format!(r#"{{"name":"{plugin}","version":"3.0.0"}}"#),
+    )
+    .unwrap();
+    fs::create_dir_all(pdir.join("commands")).unwrap();
+    fs::write(
+        pdir.join("commands").join("hi.md"),
+        "---\ndescription: marketplace cmd\n---\nHi from the marketplace plugin.\n",
+    )
+    .unwrap();
+
+    let repo = git2::Repository::init(dir).unwrap();
+    let mut index = repo.index().unwrap();
+    index
+        .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+        .unwrap();
+    index.write().unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+        .unwrap();
+}
+
+#[tokio::test]
+async fn install_marketplace_arm_clones_catalog_finds_entry_and_registers() {
+    use plugin::PluginSource;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mkt_repo = tmp.path().join("mkt-repo");
+    init_git_marketplace_repo(&mkt_repo, "mymkt", "mpplugin");
+    let install_root = tmp.path().join("plugins");
+    let (manager, command_registry) =
+        make_manager(&install_root, &tmp.path().join("secrets")).await;
+
+    let id = manager
+        .install(PluginSource::Marketplace {
+            url: format!("file://{}", mkt_repo.display()),
+            name: "mpplugin".into(),
+        })
+        .await
+        .expect("marketplace install should resolve catalog + materialize + enable");
+    assert!(!id.to_string().is_empty());
+
+    // The catalog was cloned under marketplaces/, and the plugin materialized
+    // into the cache + its command registered (namespaced).
+    assert!(install_root.join("marketplaces").exists(), "catalog cloned");
+    assert!(
+        command_registry
+            .read()
+            .await
+            .resolve("mpplugin:hi")
+            .is_some(),
+        "marketplace plugin's command should be registered as mpplugin:hi"
+    );
+}
+
+#[tokio::test]
+async fn install_marketplace_arm_unknown_plugin_returns_not_found() {
+    use plugin::PluginSource;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mkt_repo = tmp.path().join("mkt-repo");
+    init_git_marketplace_repo(&mkt_repo, "mymkt", "mpplugin");
+    let (manager, _) = make_manager(&tmp.path().join("plugins"), &tmp.path().join("secrets")).await;
+
+    let err = manager
+        .install(PluginSource::Marketplace {
+            url: format!("file://{}", mkt_repo.display()),
+            name: "ghost".into(),
+        })
+        .await
+        .expect_err("a missing plugin must be a typed not-found error");
+    assert!(
+        format!("{err}").contains("Marketplace 'ghost' not found. Available marketplaces:"),
+        "got: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn install_marketplace_arm_rejects_symlink_escape() {
+    use plugin::PluginSource;
+
+    let tmp = tempfile::tempdir().unwrap();
+    // The exfiltration target OUTSIDE the marketplace repo (stands in for ~/.ssh).
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(outside.join(".claude-plugin")).unwrap();
+    fs::write(
+        outside.join(".claude-plugin").join("plugin.json"),
+        r#"{"name":"secret","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(outside.join("id_rsa"), "PRIVATE KEY").unwrap();
+
+    // A malicious catalog: entry path "link" is a single Normal component (passes
+    // the lexical guard) but is a symlink pointing OUT of the repo.
+    let mkt_repo = tmp.path().join("mkt-repo");
+    fs::create_dir_all(mkt_repo.join(".claude-plugin")).unwrap();
+    fs::write(
+        mkt_repo.join(".claude-plugin").join("marketplace.json"),
+        r#"{"name":"m","plugins":[{"name":"p","path":"link"}]}"#,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&outside, mkt_repo.join("link")).unwrap();
+    let repo = git2::Repository::init(&mkt_repo).unwrap();
+    let mut idx = repo.index().unwrap();
+    idx.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+        .unwrap();
+    idx.write().unwrap();
+    let tree = repo.find_tree(idx.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("Test", "t@e.com").unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+        .unwrap();
+
+    let install_root = tmp.path().join("plugins");
+    let (manager, _) = make_manager(&install_root, &tmp.path().join("secrets")).await;
+    let err = manager
+        .install(PluginSource::Marketplace {
+            url: format!("file://{}", mkt_repo.display()),
+            name: "p".into(),
+        })
+        .await
+        .expect_err("a symlinked catalog entry must be rejected, not followed");
+    assert!(
+        format!("{err}").contains("outside the cache directory"),
+        "got: {err}"
+    );
+    // And nothing was exfiltrated into the cache.
+    let leaked = walkdir(&install_root.join("cache"))
+        .into_iter()
+        .any(|p| p.ends_with("id_rsa"));
+    assert!(!leaked, "the symlink target's files must NOT be copied into the cache");
+}
+
 #[tokio::test]
 async fn install_git_arm_rejects_bad_protocol() {
     use plugin::PluginSource;

@@ -465,11 +465,15 @@ pub async fn build_mobile_inner(
     let process = platform.process();
     let sandbox = platform.sandbox();
     let worktree = platform.worktree();
-    let storage = Arc::new(platform_posix_minimal::PlainTextSecureStorage::new());
-    // Audit (secure-storage): whether the wired backend can actually persist
-    // credentials (real Keychain/Keystore). The stub above cannot, so OAuth
-    // `/login` is short-circuited with a clear message below instead of failing
-    // at the persist step. Computed before `storage` moves into CredentialManager.
+    // Secure storage: prefer the platform's NATIVE store (iOS Keychain / Android
+    // Keystore) when the device layer injects one; otherwise fall back to the
+    // non-persisting development stub. The stub cannot persist secrets, so OAuth
+    // `/login` is short-circuited with a clear message below (it cannot store
+    // tokens); a real injected store flips `oauth_supported` true and enables
+    // subscription login. Computed before `storage` moves into CredentialManager.
+    let storage: Arc<dyn traits::SecureStorage> = platform.secure_storage().unwrap_or_else(|| {
+        Arc::new(platform_posix_minimal::PlainTextSecureStorage::new())
+    });
     let oauth_supported = traits::SecureStorage::is_encrypted(storage.as_ref());
 
     // Audit fix (telemetry parity): ONE shared AnalyticsBus drives the whole
@@ -2068,6 +2072,114 @@ mod tests {
         // the command registry binds to. Constructing it at all proves the full
         // mobile assembly (tool registry + command registry + adapter sinks).
         let _handle: Arc<dyn traits::OrchestratorHandle> = rt.orchestrator.clone();
+    }
+
+    /// Audit (secure-storage): the runtime's `oauth_supported` reflects the
+    /// platform's injected secure store — `false` with the non-persisting stub
+    /// (so `/login` is gated off), `true` once a real encrypted store is injected
+    /// (enabling the OAuth persist path). Proves the native secure-storage
+    /// injection seam (`Platform::secure_storage()` → `build_mobile_inner`)
+    /// end-to-end, off-device.
+    #[tokio::test]
+    async fn injected_encrypted_store_enables_oauth() {
+        use async_trait::async_trait;
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+
+        /// In-memory `SecureStorage` that reports itself as encrypted — the
+        /// off-device stand-in for a real Keychain/Keystore bridge.
+        #[derive(Default)]
+        struct FakeEncryptedStore {
+            map: Mutex<HashMap<(String, String), protocol::SecureStorageData>>,
+        }
+        #[async_trait]
+        impl traits::SecureStorage for FakeEncryptedStore {
+            async fn store(
+                &self,
+                service: &str,
+                account: &str,
+                data: protocol::SecureStorageData,
+            ) -> Result<(), traits::SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .insert((service.to_string(), account.to_string()), data);
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                service: &str,
+                account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .get(&(service.to_string(), account.to_string()))
+                    .cloned())
+            }
+            async fn delete(
+                &self,
+                service: &str,
+                account: &str,
+            ) -> Result<(), traits::SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .remove(&(service.to_string(), account.to_string()));
+                Ok(())
+            }
+            async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .filter(|(s, _)| s == service)
+                    .map(|(_, a)| a.clone())
+                    .collect())
+            }
+            fn is_encrypted(&self) -> bool {
+                true
+            }
+            fn backend(&self) -> traits::SecureStorageBackend {
+                traits::SecureStorageBackend::EncryptedFile
+            }
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        // No store injected → the non-persisting stub → OAuth /login gated off.
+        let rt_stub = build_mobile(
+            test_config(tmp.path()),
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+            Arc::new(FakeListener::default()),
+            Arc::new(RecordingPermissionSink::default()),
+        )
+        .await
+        .expect("build_mobile (stub) failed");
+        assert!(
+            !rt_stub.oauth_supported,
+            "the non-persisting stub store must gate OAuth /login off"
+        );
+
+        // Inject an encrypted store → OAuth /login enabled.
+        let platform: Arc<dyn traits::Platform> = Arc::new(
+            HostFakePlatform::new(tmp.path().to_path_buf())
+                .with_secure_storage(Arc::new(FakeEncryptedStore::default())),
+        );
+        let rt_real = build_mobile(
+            test_config(tmp.path()),
+            platform,
+            Arc::new(FakeListener::default()),
+            Arc::new(RecordingPermissionSink::default()),
+        )
+        .await
+        .expect("build_mobile (encrypted) failed");
+        assert!(
+            rt_real.oauth_supported,
+            "an injected encrypted secure store must enable OAuth /login"
+        );
     }
 
     /// F3-03: the built runtime binds the adapter sinks — the

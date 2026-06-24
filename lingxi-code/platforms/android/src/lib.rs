@@ -37,8 +37,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use traits::{
     CameraControl, Clipboard, Clock, FileSystem, HttpTransport, NotificationService, Platform,
-    ProcessRunner, Sandbox, SharingService, SpeechToText, TextToSpeech, VoiceRecorder,
-    WorktreeManager,
+    ProcessRunner, Sandbox, SecureStorage, SharingService, SpeechToText, TextToSpeech,
+    VoiceRecorder, WorktreeManager,
 };
 
 /// Construction inputs for [`AndroidPlatform`].
@@ -66,6 +66,11 @@ pub struct AndroidPlatformInputs {
     /// Native system clipboard (Kotlin impl), when wired. `None` keeps the
     /// `clipboard` tool reporting "unavailable".
     pub clipboard: Option<Arc<dyn Clipboard>>,
+    /// Native Android Keystore-backed secure store (Kotlin impl), when wired.
+    /// `None` keeps the non-persisting development stub, which gates OAuth
+    /// `/login` off (it cannot persist tokens). Inject a real store to enable
+    /// subscription login.
+    pub secure_storage: Option<Arc<dyn SecureStorage>>,
     /// Android shell/sandbox configuration (spec r3). `None` keeps shell
     /// support fully absent (posix-minimal stubs stay wired).
     pub shell: Option<AndroidShellConfig>,
@@ -86,6 +91,7 @@ pub struct AndroidPlatform {
     tts: Option<Arc<dyn TextToSpeech>>,
     notifications: Option<Arc<dyn NotificationService>>,
     clipboard: Option<Arc<dyn Clipboard>>,
+    secure_storage: Option<Arc<dyn SecureStorage>>,
     /// The shared capability cache when shell support is wired (`None` for the
     /// posix-minimal-stub configuration). Held so the eager probe (engine-mobile)
     /// and the runner can read/populate the SAME instance the sandbox reads.
@@ -130,6 +136,7 @@ impl AndroidPlatform {
             tts: inputs.tts,
             notifications: inputs.notifications,
             clipboard: inputs.clipboard,
+            secure_storage: inputs.secure_storage,
             shell_caps,
         }
     }
@@ -189,6 +196,9 @@ impl Platform for AndroidPlatform {
     fn clipboard(&self) -> Option<Arc<dyn Clipboard>> {
         self.clipboard.clone()
     }
+    fn secure_storage(&self) -> Option<Arc<dyn SecureStorage>> {
+        self.secure_storage.clone()
+    }
     // computer_control() defaults to None.
 }
 
@@ -243,6 +253,7 @@ mod tests {
             tts: None,
             notifications: None,
             clipboard: None,
+            secure_storage: None,
             shell,
         }
     }

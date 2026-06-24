@@ -48,6 +48,7 @@ uniffi = [
     "dep:platform-posix-minimal",
     "dep:tokio",
     "dep:orchestrator",
+    "dep:serde_json",
     "engine-mobile/uniffi",
 ]
 # M10-P1b: opt-in bindings-generator toolchain for the `uniffi-bindgen` bin.
@@ -92,6 +93,9 @@ uniffi = { workspace = true, optional = true }
 # the F3-04 handle tests name. Optional + pulled under `uniffi` so the plain
 # (no-feature) build stays minimal. All engine-tier (no `apps/*` edge).
 async-trait = { workspace = true, optional = true }
+# Opaque-blob serde for the iOS Keychain secure-storage bridge: `SecureStorageData`
+# is serialized to bytes the native side persists. Optional + pulled under `uniffi`.
+serde_json = { workspace = true, optional = true }
 client-protocol = { path = "../../client-protocol", optional = true }
 platform-posix-minimal = { path = "../../platforms/posix-minimal", optional = true }
 orchestrator = { path = "../../orchestrator", optional = true }

@@ -78,6 +78,9 @@ pub struct PlatformImpls {
     pub voice: Arc<dyn VoiceRecorder>,
     /// Swift `SharingService` impl.
     pub share: Arc<dyn SharingService>,
+    /// Swift Keychain-backed `SecureStorage` impl, if provided. When `None` the
+    /// composition root falls back to the non-persisting development stub.
+    pub secure_storage: Option<Arc<dyn traits::SecureStorage>>,
     /// The app's writable sandbox container root.
     pub app_sandbox_root: String,
 }
@@ -122,6 +125,7 @@ pub fn build_mobile_engine(
             tts: None,
             notifications: None,
             clipboard: None,
+            secure_storage: impls.secure_storage,
         }));
         engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
     }
@@ -729,6 +733,143 @@ fn camera_error_from_ffi(e: CameraFfiError) -> traits::CameraError {
     }
 }
 
+/// FFI error surface for the iOS secure-storage callback interface. A flat enum
+/// so `UniFFI` can render it for an async `callback_interface` method; the bridge
+/// fans it back out onto the richer [`traits::SecureStorageError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum SecureStorageFfiError {
+    /// The OS denied access (e.g. Keychain item requires user auth / device unlock).
+    #[error("secure storage permission denied: {message}")]
+    PermissionDenied {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+    /// The Keychain is currently unusable.
+    #[error("secure storage backend unavailable: {message}")]
+    BackendUnavailable {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+    /// Any other native failure (non-zero OSStatus, etc.).
+    #[error("secure storage io error: {message}")]
+    Io {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+}
+
+/// Crate-local foreign callback interface for the native iOS Keychain-backed
+/// secure store — the Swift app implements it over `SecItemAdd`/`SecItemCopyMatching`
+/// (kSecClass GenericPassword, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+/// so items are excluded from iCloud/iTunes backups). The engine's serialized
+/// `SecureStorageData` crosses the seam as an opaque `blob` keyed by
+/// `(service, account)`. Bridged to [`traits::SecureStorage`] by
+/// [`IosSecureStorageBridge`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait IosSecureStorage: Send + Sync {
+    /// Persist `blob` under `(service, account)`, overwriting any existing entry.
+    async fn store(
+        &self,
+        service: String,
+        account: String,
+        blob: Vec<u8>,
+    ) -> Result<(), SecureStorageFfiError>;
+    /// Return the blob for `(service, account)`, or `None` if absent.
+    async fn retrieve(
+        &self,
+        service: String,
+        account: String,
+    ) -> Result<Option<Vec<u8>>, SecureStorageFfiError>;
+    /// Remove `(service, account)` (removing a non-existent entry is not an error).
+    async fn delete(&self, service: String, account: String)
+        -> Result<(), SecureStorageFfiError>;
+    /// List every `account` stored under `service`.
+    async fn list(&self, service: String) -> Result<Vec<String>, SecureStorageFfiError>;
+}
+
+/// Adapts the crate-local [`IosSecureStorage`] (opaque-blob FFI) to the shared
+/// [`traits::SecureStorage`] seam: serde-encodes `SecureStorageData` to a blob on
+/// store, decodes on retrieve, and reports the Keychain as an encrypted backend.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+struct IosSecureStorageBridge {
+    inner: Box<dyn IosSecureStorage>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::SecureStorage for IosSecureStorageBridge {
+    async fn store(
+        &self,
+        service: &str,
+        account: &str,
+        data: protocol::SecureStorageData,
+    ) -> Result<(), traits::SecureStorageError> {
+        let blob = serde_json::to_vec(&data)
+            .map_err(|e| traits::SecureStorageError::Io(format!("serialize: {e}")))?;
+        self.inner
+            .store(service.to_string(), account.to_string(), blob)
+            .await
+            .map_err(securestorage_error_from_ffi)
+    }
+    async fn retrieve(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
+        match self
+            .inner
+            .retrieve(service.to_string(), account.to_string())
+            .await
+            .map_err(securestorage_error_from_ffi)?
+        {
+            Some(blob) => {
+                let data = serde_json::from_slice(&blob)
+                    .map_err(|e| traits::SecureStorageError::Io(format!("deserialize: {e}")))?;
+                Ok(Some(data))
+            }
+            None => Ok(None),
+        }
+    }
+    async fn delete(&self, service: &str, account: &str) -> Result<(), traits::SecureStorageError> {
+        self.inner
+            .delete(service.to_string(), account.to_string())
+            .await
+            .map_err(securestorage_error_from_ffi)
+    }
+    async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
+        self.inner
+            .list(service.to_string())
+            .await
+            .map_err(securestorage_error_from_ffi)
+    }
+    fn is_encrypted(&self) -> bool {
+        true
+    }
+    fn backend(&self) -> traits::SecureStorageBackend {
+        traits::SecureStorageBackend::IosKeychain
+    }
+}
+
+/// Fan a flat [`SecureStorageFfiError`] back out onto [`traits::SecureStorageError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+fn securestorage_error_from_ffi(e: SecureStorageFfiError) -> traits::SecureStorageError {
+    match e {
+        SecureStorageFfiError::PermissionDenied { message } => {
+            traits::SecureStorageError::PermissionDenied(message)
+        }
+        SecureStorageFfiError::BackendUnavailable { message } => {
+            traits::SecureStorageError::BackendUnavailable(message)
+        }
+        SecureStorageFfiError::Io { message } => traits::SecureStorageError::Io(message),
+    }
+}
+
 /// FFI error surface for the iOS mic-recorder callback interface. A flat enum so
 /// `UniFFI` can render it for an async `callback_interface` method; the bridge
 /// fans it back out onto the richer [`traits::VoiceError`].
@@ -941,6 +1082,7 @@ pub fn build_ios_engine(
     notifications: Box<dyn IosNotification>,
     clipboard: Box<dyn IosClipboard>,
     permissions: Box<dyn IosPermissionSink>,
+    secure_storage: Option<Box<dyn IosSecureStorage>>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let listener: Arc<dyn ClientEventListener> = Arc::new(IosListenerBridge { inner: listener });
     #[cfg(target_os = "ios")]
@@ -973,6 +1115,8 @@ pub fn build_ios_engine(
                 inner: notifications,
             })),
             clipboard: Some(Arc::new(IosClipboardBridge { inner: clipboard })),
+            secure_storage: secure_storage
+                .map(|s| Arc::new(IosSecureStorageBridge { inner: s }) as Arc<dyn traits::SecureStorage>),
         }));
         let permission_sink: Arc<dyn PermissionRequestSink> =
             Arc::new(IosPermissionSinkBridge { inner: permissions });
@@ -994,6 +1138,7 @@ pub fn build_ios_engine(
             notifications,
             clipboard,
             permissions,
+            secure_storage,
         );
         Err(MobileEngineError::PlatformUnavailable)
     }

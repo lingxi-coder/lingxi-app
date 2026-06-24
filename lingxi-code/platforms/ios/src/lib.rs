@@ -22,8 +22,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use traits::{
     CameraControl, Clipboard, Clock, FileSystem, HttpTransport, NotificationService, Platform,
-    ProcessRunner, Sandbox, SharingService, SpeechToText, TextToSpeech, VoiceRecorder,
-    WorktreeManager,
+    ProcessRunner, Sandbox, SecureStorage, SharingService, SpeechToText, TextToSpeech,
+    VoiceRecorder, WorktreeManager,
 };
 
 /// Construction inputs for [`IosPlatform`].
@@ -50,6 +50,10 @@ pub struct IosPlatformInputs {
     /// Native system clipboard (Swift impl), when wired. `None` keeps the
     /// `clipboard` tool reporting "unavailable".
     pub clipboard: Option<Arc<dyn Clipboard>>,
+    /// Native iOS Keychain-backed secure store (Swift impl), when wired. `None`
+    /// keeps the non-persisting development stub, which gates OAuth `/login` off
+    /// (it cannot persist tokens). Inject a real store to enable subscription login.
+    pub secure_storage: Option<Arc<dyn SecureStorage>>,
 }
 
 /// The iOS [`Platform`].
@@ -67,6 +71,7 @@ pub struct IosPlatform {
     tts: Option<Arc<dyn TextToSpeech>>,
     notifications: Option<Arc<dyn NotificationService>>,
     clipboard: Option<Arc<dyn Clipboard>>,
+    secure_storage: Option<Arc<dyn SecureStorage>>,
 }
 
 impl IosPlatform {
@@ -90,6 +95,7 @@ impl IosPlatform {
             tts: inputs.tts,
             notifications: inputs.notifications,
             clipboard: inputs.clipboard,
+            secure_storage: inputs.secure_storage,
         }
     }
 }
@@ -133,6 +139,9 @@ impl Platform for IosPlatform {
     }
     fn clipboard(&self) -> Option<Arc<dyn Clipboard>> {
         self.clipboard.clone()
+    }
+    fn secure_storage(&self) -> Option<Arc<dyn SecureStorage>> {
+        self.secure_storage.clone()
     }
     // computer_control() defaults to None — screen automation is not an iOS
     // capability in M8.

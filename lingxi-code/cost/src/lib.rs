@@ -14,6 +14,7 @@ pub mod events;
 pub mod handle;
 pub mod pricing;
 pub mod summary;
+pub mod token_usage_replay;
 pub mod tracker;
 pub mod usage;
 
@@ -29,5 +30,9 @@ pub use pricing::{
     BATCH_DISCOUNT_BPS,
 };
 pub use summary::{CostSummary, ModelCostSummary, PeriodCostSummary, SessionCostSummary};
+pub use token_usage_replay::{
+    latest_token_usage_turn_id, latest_token_usage_turn_id_from_events, ReplayTurn,
+    ReplayTurnStatus,
+};
 pub use tracker::{CostState, CostTracker, ModelUsage};
 pub use usage::{ApiSpeed, ServerToolUsage, TokenUsage, Usage};

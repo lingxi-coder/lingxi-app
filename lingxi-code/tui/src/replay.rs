@@ -26,6 +26,9 @@
 //!   `ToolUseResult` event does.
 //! - `Assistant`/`User` thinking → [`RenderedMessage::AssistantThinking`]
 //!   (collapsed) / [`RenderedMessage::AssistantRedactedThinking`] (no body).
+//!   A `RedactedThinking` block replays as the bodyless `✻ Thinking…`
+//!   placeholder, the resume-time analog of codex's `replay_thread_item`
+//!   rendering a `Reasoning` item whose raw content is hidden.
 //!
 //! `System` messages and `Image` blocks are NOT replayed: `System` lines are
 //! reconstructed at runtime from settings + memory on resume (matching
@@ -187,6 +190,13 @@ fn push_user_block(
                 file_path,
             });
         }
+        // Redacted reasoning replays as the bodyless `✻ Thinking…` placeholder,
+        // mirroring codex's `replay_thread_item` for a `Reasoning` item whose
+        // raw content is hidden (`config.show_raw_agent_reasoning == false`):
+        // the redacted block carries no displayable text, only the marker.
+        ContentBlock::RedactedThinking { .. } => {
+            out.push(RenderedMessage::AssistantRedactedThinking);
+        }
         // A user message may also carry an Image or Document block (paste/PDF
         // path); the persisted block has no scrollback id/metadata, so it is not
         // replayed.
@@ -196,7 +206,6 @@ fn push_user_block(
         | ContentBlock::Thinking { .. }
         // Low-frequency server-side blocks are preserved in the JSONL for
         // resume/replay byte parity but have no scrollback renderer.
-        | ContentBlock::RedactedThinking { .. }
         | ContentBlock::ServerToolUse { .. }
         | ContentBlock::ConnectorText { .. }
         | ContentBlock::AdvisorToolResult { .. } => {}
@@ -235,6 +244,12 @@ fn push_assistant_block(
                 expanded: false,
             });
         }
+        // Redacted reasoning replays as the bodyless `✻ Thinking…` placeholder,
+        // mirroring codex's `replay_thread_item` for a `Reasoning` item whose
+        // raw content is hidden (`config.show_raw_agent_reasoning == false`).
+        ContentBlock::RedactedThinking { .. } => {
+            out.push(RenderedMessage::AssistantRedactedThinking);
+        }
         // A tool result block should never appear on an assistant message;
         // images and documents aren't replayed (see module docs).
         ContentBlock::ToolResult { .. }
@@ -242,7 +257,6 @@ fn push_assistant_block(
         | ContentBlock::Document { .. }
         // Low-frequency server-side blocks are preserved in the JSONL for
         // resume/replay byte parity but have no scrollback renderer.
-        | ContentBlock::RedactedThinking { .. }
         | ContentBlock::ServerToolUse { .. }
         | ContentBlock::ConnectorText { .. }
         | ContentBlock::AdvisorToolResult { .. } => {}
@@ -401,6 +415,40 @@ mod tests {
             RenderedMessage::AssistantThinking { thinking, expanded }
                 if thinking == "reasoning" && !*expanded
         ));
+    }
+
+    #[test]
+    fn redacted_thinking_block_replays_as_placeholder() {
+        // Codex replays a hidden-raw `Reasoning` item as the bodyless thinking
+        // marker; the LingXi analog is a persisted `RedactedThinking` block,
+        // which must render as `AssistantRedactedThinking` rather than be
+        // dropped (it previously fell into the silent-skip arm).
+        let h = vec![ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::RedactedThinking {
+                data: "opaque-payload".into(),
+            }],
+            stop_reason: None,
+        }];
+        let out = rebuild_messages(&h);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(&out[0], RenderedMessage::AssistantRedactedThinking));
+    }
+
+    #[test]
+    fn redacted_thinking_on_user_message_also_replays() {
+        // The wire transcript can carry a redacted-thinking block on a user-role
+        // entry (provider replay envelope); it replays identically.
+        let h = vec![ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::RedactedThinking {
+                data: "opaque".into(),
+            }],
+            is_meta: false,
+        }];
+        let out = rebuild_messages(&h);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(&out[0], RenderedMessage::AssistantRedactedThinking));
     }
 
     #[test]

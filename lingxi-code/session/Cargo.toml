@@ -14,7 +14,7 @@ serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }
 thiserror.workspace = true
 async-trait.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util"] }
+tokio = { workspace = true, features = ["fs", "io-util", "sync", "rt"] }
 tracing.workspace = true
 uuid = { version = "1.10", features = ["v4", "serde"] }
 regex = "1"
@@ -26,6 +26,7 @@ tempfile = "3.13"
 pretty_assertions = "1"
 platform-posix = { path = "../platforms/posix" }
 filetime = "0.2"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true

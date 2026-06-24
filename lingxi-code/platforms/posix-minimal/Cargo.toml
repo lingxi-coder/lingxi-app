@@ -25,5 +25,14 @@ tracing.workspace = true
 thiserror.workspace = true
 fs2 = "0.4"
 
+# `libc::O_NOFOLLOW` + `OpenOptionsExt::custom_flags` harden the task-output
+# exclusive-create / no-follow append opens (mirrors `platforms/posix`). Unix
+# only; non-unix targets fall back to `create_new`/plain-append (see `fs.rs`).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.13"
+
 [lints]
 workspace = true

@@ -136,6 +136,7 @@ mod tests {
                 allow_local_binding: true,
                 http_proxy_port: Some(8080),
                 socks_proxy_port: Some(1080),
+                allow_mach_lookup: vec![],
             },
             filesystem: FilesystemRestrictionConfig {
                 allow_write: vec!["/work".into()],
@@ -143,6 +144,7 @@ mod tests {
                 deny_read: vec!["/secret".into()],
                 allow_read: vec!["/secret/ok".into()],
                 allow_managed_read_paths_only: false,
+                allow_git_config: false,
             },
             ripgrep: EngineRipgrep {
                 command: "rg".into(),

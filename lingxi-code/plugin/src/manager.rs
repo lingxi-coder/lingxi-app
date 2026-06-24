@@ -53,6 +53,16 @@ pub enum PluginManagerError {
     /// User-config loader failure.
     #[error("loader: {0}")]
     Loader(String),
+    /// Network fetch failure (git clone / HTTP download). The body carries the
+    /// byte-faithful claude-code failure detail.
+    #[error("fetch: {0}")]
+    Fetch(String),
+    /// Archive-unpack failure (`.mcpb` zip extract).
+    #[error("unpack: {0}")]
+    Unpack(String),
+    /// Marketplace catalog / policy failure.
+    #[error("marketplace: {0}")]
+    Marketplace(String),
 }
 
 /// The plugin lifecycle coordinator.
@@ -175,28 +185,209 @@ impl PluginManager {
                  not yet wired — install a pre-fetched plugin directory via \
                  PluginSource::LocalPath"
             ))),
-            PluginSource::Marketplace { url, name } => Err(PluginManagerError::Io(format!(
-                "install of '{name}' from marketplace {url} requires the marketplace \
-                 fetch loop (not yet wired) — install a pre-fetched plugin directory \
-                 via PluginSource::LocalPath"
-            ))),
-            PluginSource::Git { url, ref_ } => Err(PluginManagerError::Io(format!(
-                "install from git {url}@{ref_} requires the git-clone fetch path \
-                 (not yet wired) — install a pre-fetched plugin directory via \
-                 PluginSource::LocalPath"
-            ))),
-            PluginSource::Mcpb { path, .. } => Err(PluginManagerError::Io(format!(
-                "install from .mcpb bundle {} requires the zip-unpack handler \
-                 (not yet wired) — install a pre-fetched plugin directory via \
-                 PluginSource::LocalPath",
-                path.display()
-            ))),
+            PluginSource::Marketplace { url, name } => {
+                let source = PluginSource::Marketplace {
+                    url: url.clone(),
+                    name: name.clone(),
+                };
+                let mkt = crate::marketplace::MarketplaceManager::new(self.install_dir.clone());
+                // 1. Clone + parse the marketplace catalog (keyed by the marketplace
+                //    repo identity so distinct marketplaces don't collide).
+                let mkt_name = repo_dir_for_url(&url);
+                let (index, clone_dir) = mkt
+                    .resolve_index_via_git(&url, &mkt_name)
+                    .await
+                    .map_err(PluginManagerError::Marketplace)?;
+                // 2. Find the plugin entry by name (byte-exact not-found message).
+                let entry = index.plugins.iter().find(|p| p.name == name).ok_or_else(|| {
+                    let avail = index
+                        .plugins
+                        .iter()
+                        .map(|p| p.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    PluginManagerError::Marketplace(format!(
+                        "Marketplace '{name}' not found. Available marketplaces: {avail}"
+                    ))
+                })?;
+                // 3. Resolve the plugin dir inside the clone (lexical guard), then
+                //    canonicalize and assert it is STILL inside the clone — a
+                //    120000 symlink in the untrusted repo (e.g. `path` pointing at
+                //    `~/.ssh`) would otherwise let the copy follow it out of the
+                //    clone and exfiltrate host files into the cache.
+                let src_dir = crate::marketplace::MarketplaceManager::plugin_dir_in_clone(
+                    &clone_dir, entry,
+                )
+                .map_err(PluginManagerError::Marketplace)?;
+                let real_src = tokio::fs::canonicalize(&src_dir).await.map_err(|_| {
+                    PluginManagerError::Marketplace(format!(
+                        "Marketplace name '{name}' resolves to a path outside the cache directory"
+                    ))
+                })?;
+                let real_clone = tokio::fs::canonicalize(&clone_dir).await.map_err(|e| {
+                    PluginManagerError::Marketplace(format!("marketplace clone unreadable: {e}"))
+                })?;
+                if !real_src.starts_with(&real_clone) {
+                    return Err(PluginManagerError::Marketplace(format!(
+                        "Marketplace name '{name}' resolves to a path outside the cache directory"
+                    )));
+                }
+                // 4. Materialize under the catalog's DECLARED name (the segment
+                //    reboot discovery resolves `plugin@<marketplace-name>` to),
+                //    not the URL slug.
+                let landed = self.copy_into_cache(&real_src, &index.name).await?;
+                // 5. Finalize (load manifest + components, stamp source, enable).
+                self.finalize_install(source, landed).await
+            }
+            PluginSource::Git { url, ref_ } => {
+                let source = PluginSource::Git {
+                    url: url.clone(),
+                    ref_: ref_.clone(),
+                };
+                // Clone under `repos/<host>/<owner>/<repo>/` (a fresh checkout —
+                // remove any stale clone first, matching re-install semantics).
+                let repo_subpath = repo_dir_for_url(&url);
+                let clone_dir = self.install_dir.join("repos").join(&repo_subpath);
+                if clone_dir.exists() {
+                    tokio::fs::remove_dir_all(&clone_dir).await.ok();
+                }
+                if let Some(parent) = clone_dir.parent() {
+                    tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                        PluginManagerError::Fetch(format!("Failed to clone repository: {e}"))
+                    })?;
+                }
+                // git2 is synchronous + blocks on the network → spawn_blocking.
+                let (u, r, cd) = (url.clone(), ref_.clone(), clone_dir.clone());
+                tokio::task::spawn_blocking(move || crate::git::clone_plugin_git(&u, &r, &cd))
+                    .await
+                    .map_err(|e| {
+                        PluginManagerError::Fetch(format!("Failed to clone repository: {e}"))
+                    })?
+                    .map_err(PluginManagerError::Fetch)?;
+                // The clone IS the plugin dir (single-plugin repo). Materialize it
+                // into the versioned cache, then finalize like the local arm.
+                let landed = self.copy_into_cache(&clone_dir, &repo_subpath).await?;
+                self.finalize_install(source, landed).await
+            }
+            PluginSource::Mcpb { path, hash } => {
+                let source = PluginSource::Mcpb {
+                    path: path.clone(),
+                    hash: hash.clone(),
+                };
+                // 1. Read the bundle bytes (local file; remote download deferred).
+                let bytes = tokio::fs::read(&path).await.map_err(|e| {
+                    PluginManagerError::Fetch(format!(
+                        "Failed to download MCPB {}: {e}",
+                        path.display()
+                    ))
+                })?;
+                // 2. Integrity: the content hash is the ONLY tamper check (claude-
+                //    code has no signature). Verified before extraction.
+                if !hash.is_empty() && crate::mcpb::sha256_hex(&bytes) != *hash {
+                    return Err(PluginManagerError::Unpack(format!(
+                        "MCPB manifest invalid at {} (hash mismatch)",
+                        path.display()
+                    )));
+                }
+                // 3. mkdtemp → extract (path-traversal / too-many-files / zip-bomb
+                //    guarded), on a blocking thread.
+                let tmp = tempfile::tempdir().map_err(|e| {
+                    PluginManagerError::Unpack(format!(
+                        "Failed to extract MCPB {}: {e}",
+                        path.display()
+                    ))
+                })?;
+                let tmp_path = tmp.path().to_path_buf();
+                tokio::task::spawn_blocking(move || {
+                    crate::mcpb::unpack_mcpb(&bytes, &tmp_path)?;
+                    // 4. Normalize: ensure a `.claude-plugin/plugin.json` exists
+                    //    (translate a root `manifest.json` if needed).
+                    crate::mcpb::ensure_plugin_manifest(&tmp_path)
+                })
+                .await
+                .map_err(|e| PluginManagerError::Unpack(e.to_string()))?
+                .map_err(PluginManagerError::Unpack)?;
+                // 5. Land into the versioned cache + finalize.
+                let bundle = mcpb_bundle_name(&path);
+                let landed = self.copy_into_cache(tmp.path(), &bundle).await?;
+                self.finalize_install(source, landed).await
+            }
             PluginSource::BuiltIn => Err(PluginManagerError::Io(
                 "BuiltIn plugins are compiled into the engine and are not \
                  installed via PluginManager::install"
                     .to_string(),
             )),
         }
+    }
+
+    /// Shared tail for every network install arm: a valid plugin directory is
+    /// now on disk at `landed_dir`. Load its manifest + auto-detected components
+    /// (reusing the local-path loader), stamp the REAL fetch `source` (so trust
+    /// + provenance match the origin rather than defaulting to `LocalPath`), and
+    /// enable it.
+    async fn finalize_install(
+        &self,
+        source: PluginSource,
+        landed_dir: PathBuf,
+    ) -> Result<PluginId, PluginManagerError> {
+        let Some((id, mut manifest)) = crate::discovery::load_plugin_from_path(&landed_dir).await
+        else {
+            return Err(PluginManagerError::Io(format!(
+                "no plugin manifest found at {}",
+                landed_dir.display()
+            )));
+        };
+        manifest.source = source.clone();
+        manifest.trust_level = crate::trust::default_trust_for_source(&source);
+        self.enable(&id, manifest, landed_dir).await?;
+        Ok(id)
+    }
+
+    /// Materialize a freshly-fetched plugin tree at `src_dir` into the versioned
+    /// cache layout `cache/<marketplace>/<plugin>/<version>/` that
+    /// [`crate::discovery::discover_enabled_plugins`] resolves. `<marketplace>`
+    /// is the sanitized source identity (`repo_subpath`); `<plugin>`/`<version>`
+    /// come from the just-fetched `.claude-plugin/plugin.json` (version falls
+    /// back to `"unknown"` when absent). Returns the landed `<version>/` dir.
+    async fn copy_into_cache(
+        &self,
+        src_dir: &Path,
+        repo_subpath: &str,
+    ) -> Result<PathBuf, PluginManagerError> {
+        // Read name + version from the fetched manifest to compute the path.
+        let manifest_path = src_dir.join(".claude-plugin").join("plugin.json");
+        let raw = tokio::fs::read_to_string(&manifest_path).await.map_err(|_| {
+            PluginManagerError::Io(format!(
+                "no plugin manifest found at {}",
+                src_dir.display()
+            ))
+        })?;
+        let json: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| PluginManagerError::Validation(format!("invalid plugin.json: {e}")))?;
+        let name = json
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| PluginManagerError::Validation("plugin.json missing name".into()))?;
+        let version = json
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("unknown");
+
+        let dest = self
+            .install_dir
+            .join("cache")
+            .join(crate::discovery::sanitize_segment(repo_subpath, false))
+            .join(crate::discovery::sanitize_segment(name, false))
+            .join(crate::discovery::sanitize_segment(version, true));
+        if dest.exists() {
+            tokio::fs::remove_dir_all(&dest).await.ok();
+        }
+        copy_dir_recursive(src_dir, &dest)
+            .await
+            .map_err(|e| PluginManagerError::Io(format!("failed to materialize plugin cache: {e}")))?;
+        Ok(dest)
     }
 
     /// Mark `id` as `Loaded` and inject its components into the engine
@@ -545,4 +736,84 @@ fn extract_frontmatter(raw: &str) -> Option<&str> {
         .find("\n---")
         .or_else(|| rest.find("\r\n---"))?;
     Some(&rest[..end])
+}
+
+/// Derive a stable, sanitized `host/owner/repo` sub-path from a git URL, used as
+/// both the `repos/<…>/` clone destination and the cache `<marketplace>`
+/// identity. Strips a trailing `.git`, the `git@host:owner/repo` SSH form, and
+/// any URL scheme; each path segment is sanitized to `[A-Za-z0-9._-]`.
+fn repo_dir_for_url(url: &str) -> String {
+    // Normalize the SSH `git@host:owner/repo` form to `host/owner/repo`.
+    let stripped = if let Some(rest) = url.strip_prefix("git@") {
+        rest.replacen(':', "/", 1)
+    } else {
+        // Drop the scheme (`https://`, `file://`, `ssh://`, …).
+        url.split("://").last().unwrap_or(url).to_string()
+    };
+    let stripped = stripped.trim_end_matches('/').trim_end_matches(".git");
+    let joined: Vec<String> = stripped
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+        .map(|seg| crate::discovery::sanitize_segment(seg, true))
+        .collect();
+    if joined.is_empty() {
+        "repo".to_string()
+    } else {
+        joined.join("/")
+    }
+}
+
+/// Derive a stable cache `<marketplace>` segment for a `.mcpb` bundle from its
+/// file name (the stem, sanitized). e.g. `/x/my-plugin.mcpb` → `my-plugin`.
+fn mcpb_bundle_name(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("mcpb");
+    crate::discovery::sanitize_segment(stem, true)
+}
+
+/// Recursively copy the directory tree at `src` to `dst` (creating `dst`).
+/// Symlink-safe: only regular files and directories are copied (matching
+/// claude-code's `copyDir`, which skips special entries); symlinks and other
+/// non-regular entries are silently skipped so a malicious clone cannot plant a
+/// dangling/escaping link in the cache.
+async fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    // Refuse to copy a symlinked ROOT: `read_dir` follows it to the target
+    // (potentially outside the source tree), which an untrusted clone could
+    // abuse to exfiltrate arbitrary host files into the cache. Entries
+    // discovered INSIDE a directory are already skipped if they are symlinks,
+    // but the walk's own root is not covered by that check.
+    if tokio::fs::symlink_metadata(src)
+        .await?
+        .file_type()
+        .is_symlink()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to copy a symlinked directory",
+        ));
+    }
+    tokio::fs::create_dir_all(dst).await?;
+    // Iterative DFS over (src, dst) pairs to avoid boxing for async recursion.
+    let mut stack = vec![(src.to_path_buf(), dst.to_path_buf())];
+    while let Some((from, to)) = stack.pop() {
+        let mut entries = tokio::fs::read_dir(&from).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            // `file_type()` does NOT follow symlinks → a symlink reports neither
+            // is_dir nor is_file here and is skipped.
+            let ft = entry.file_type().await?;
+            let child_from = entry.path();
+            let child_to = to.join(entry.file_name());
+            if ft.is_dir() {
+                tokio::fs::create_dir_all(&child_to).await?;
+                stack.push((child_from, child_to));
+            } else if ft.is_file() {
+                tokio::fs::copy(&child_from, &child_to).await?;
+            }
+            // else: symlink / device / fifo → skipped.
+        }
+    }
+    Ok(())
 }

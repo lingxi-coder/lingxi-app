@@ -158,8 +158,9 @@ fn parse_plugin_identifier(id: &str) -> (&str, Option<&str>) {
 /// Sanitize one path segment exactly as claude-code's `getVersionedCachePathIn`
 /// (`pluginLoader.ts:139`) does: marketplace/plugin replace any char outside
 /// `[A-Za-z0-9\-_]` with `-`; version additionally keeps `.`.
-fn sanitize_segment(s: &str, allow_dot: bool) -> String {
-    s.chars()
+pub(crate) fn sanitize_segment(s: &str, allow_dot: bool) -> String {
+    let mapped: String = s
+        .chars()
         .map(|c| {
             let keep = c.is_ascii_alphanumeric()
                 || c == '-'
@@ -171,7 +172,18 @@ fn sanitize_segment(s: &str, allow_dot: bool) -> String {
                 '-'
             }
         })
-        .collect()
+        .collect();
+    // A pure-dot or empty segment would resolve to the parent (`..`) or current
+    // (`.`) directory, letting an attacker-controlled name/version escape its
+    // cache subdir (e.g. a malicious plugin.json `"version": ".."` would make a
+    // join resolve to the SIBLING cache dir, which an unconditional
+    // remove_dir_all would then wipe). Collapse these to a safe token — no real
+    // semver / plugin / marketplace segment is ever exactly "", ".", or "..".
+    if mapped.is_empty() || mapped == "." || mapped == ".." {
+        "-".to_string()
+    } else {
+        mapped
+    }
 }
 
 /// Discover the plugins enabled by the `enabledPlugins` allowlist against the
@@ -295,7 +307,9 @@ pub async fn discover_installed_plugins(
 ///
 /// Mirrors `createPluginFromPath` (`pluginLoader.ts:1348`): Step 1 loads the
 /// manifest, Step 3 auto-detects the optional component directories.
-async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId, PluginManifest)> {
+pub(crate) async fn load_plugin_from_path(
+    plugin_dir: &Path,
+) -> Option<(PluginId, PluginManifest)> {
     let manifest_path = plugin_dir.join(".claude-plugin").join("plugin.json");
     let raw = tokio::fs::read_to_string(&manifest_path).await.ok()?;
     let parsed: RawManifest = match serde_json::from_str(&raw) {

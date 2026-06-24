@@ -310,6 +310,24 @@ impl TaskRegistry {
         self.tasks.read().await.values().cloned().collect()
     }
 
+    /// Find a RUNNING `local_workflow` task whose effective run id equals
+    /// `run_id`, returning its task id. Backs claude-code's resume gate
+    /// (Workflow validateInput errorCode 3): a `resumeFromRunId` naming a
+    /// still-running workflow must be rejected — two runs sharing a run id
+    /// would race on the same journal.
+    pub async fn find_running_workflow_by_run_id(&self, run_id: &str) -> Option<String> {
+        let tasks = self.tasks.read().await;
+        tasks.iter().find_map(|(task_id, state)| match state {
+            TaskState::LocalWorkflow(w)
+                if matches!(w.base.status, TaskStatus::Running)
+                    && w.run_id.as_deref() == Some(run_id) =>
+            {
+                Some(task_id.clone())
+            }
+            _ => None,
+        })
+    }
+
     /// Test-only: force a `local_bash` task into a known status + exit code so
     /// `output()`'s `status`/`exit_code`/`done` projection can be exercised
     /// deterministically (`set_status` cannot set `exit_code`). Panics if the
@@ -825,7 +843,7 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             script,
             resume_from_run_id,
             args,
-            run_id: _,
+            run_id,
             invocation_mode: _,
             workflow_source: _,
             launched_from_subagent: _,
@@ -835,6 +853,9 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             script: script.clone(),
             resume_from_run_id: resume_from_run_id.clone(),
             args: args.clone(),
+            // Effective run id: the launcher-minted id for a fresh run, else the
+            // resumed id (so the resume gate can find a still-running workflow).
+            run_id: run_id.clone().or_else(|| resume_from_run_id.clone()),
             current_step: 0,
         }),
         TaskSpawnInput::MonitorMcp { server_name, watch } => {
@@ -2228,6 +2249,56 @@ mod spawn_tests {
         assert_eq!(n.error.as_deref(), Some("rate limited"));
         assert_eq!(n.tool_use_id.as_deref(), Some("toolu_7"));
         assert!(n.exit_code.is_none(), "agent tasks have no exit_code");
+    }
+
+    #[tokio::test]
+    async fn find_running_workflow_by_run_id_matches_only_running_same_id() {
+        use crate::state::{LocalWorkflowTaskState, TaskState, TaskStateBase};
+        let (_d, registry) = make_registry();
+
+        let mk = |id: &str, status: TaskStatus, run_id: Option<&str>| {
+            TaskState::LocalWorkflow(LocalWorkflowTaskState {
+                base: TaskStateBase {
+                    id: id.into(),
+                    task_type: TaskType::LocalWorkflow,
+                    status,
+                    description: "wf".into(),
+                    tool_use_id: None,
+                    start_time: SystemTime::now(),
+                    end_time: None,
+                    total_paused_ms: 0,
+                    output_file: std::path::PathBuf::from(format!("/tmp/tasks/{id}.output")),
+                    output_offset: 0,
+                    notified: false,
+                },
+                workflow_id: String::new(),
+                script: String::new(),
+                resume_from_run_id: None,
+                args: None,
+                run_id: run_id.map(str::to_string),
+                current_step: 0,
+            })
+        };
+
+        registry
+            .insert_state_for_test(mk("w-run", TaskStatus::Running, Some("wf_aaa")))
+            .await;
+        registry
+            .insert_state_for_test(mk("w-done", TaskStatus::Completed, Some("wf_bbb")))
+            .await;
+
+        // A running workflow with the matching run id is found (resume blocked).
+        assert_eq!(
+            registry
+                .find_running_workflow_by_run_id("wf_aaa")
+                .await
+                .as_deref(),
+            Some("w-run")
+        );
+        // A completed workflow with that id is NOT found (resume allowed).
+        assert_eq!(registry.find_running_workflow_by_run_id("wf_bbb").await, None);
+        // Unknown id → None.
+        assert_eq!(registry.find_running_workflow_by_run_id("wf_zzz").await, None);
     }
 
     #[tokio::test]

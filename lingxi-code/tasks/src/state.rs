@@ -167,6 +167,12 @@ pub struct LocalWorkflowTaskState {
     /// The `args` global value (JSON string), if any.
     #[serde(default)]
     pub args: Option<String>,
+    /// The EFFECTIVE run id (`wf_…`) this workflow executes under — the
+    /// launcher-minted id for a fresh run, or the resumed id. Stored so the
+    /// resume gate (claude-code validateInput errorCode 3) can detect a
+    /// `resumeFromRunId` that names a still-running workflow.
+    #[serde(default)]
+    pub run_id: Option<String>,
     /// Index of the currently-executing step.
     pub current_step: usize,
 }

@@ -36,6 +36,13 @@ use traits::{AuthHandle, OrchestratorHandle};
 #[cfg(feature = "uniffi")]
 mod host;
 
+// Audit fix (#14): the disk-backed Skill loader the FFI host wires so the mobile
+// Skill tool resolves on-disk `.claude/commands` / `.claude/skills` under the
+// app-private root. uniffi-gated — its `SkillLoader` impl uses `async-trait`
+// (an FFI-only optional dep) and only the FFI host constructs a real loader.
+#[cfg(feature = "uniffi")]
+mod skill_loader;
+
 #[cfg(feature = "uniffi")]
 pub use host::{
     build_mobile, build_mobile_engine, build_mobile_engine_inner, build_mobile_inner,
@@ -97,17 +104,53 @@ pub fn mobile_tool_registry(ctx: BuiltinToolContext) -> ToolRegistry {
     reg
 }
 
-/// Register the mobile tool set into an existing registry.
+/// Register the mobile tool set into an existing registry, with the `Skill` tool
+/// INERT (the hermetic `EmptySkillLoader`). Used by tests and the non-FFI host
+/// build. The FFI host instead calls [`register_mobile_tools_with_skill_loader`]
+/// to wire a disk-backed loader (audit fix #14).
 pub fn register_mobile_tools(reg: &mut ToolRegistry, ctx: BuiltinToolContext) {
+    register_mobile_non_skill_tools(reg, ctx.clone());
+    // Skill tool with the hermetic `EmptySkillLoader` (no on-disk discovery).
+    tool_skill::register_all(reg, ctx);
+}
+
+/// Audit fix (#14): register the mobile tool set with a FUNCTIONAL `Skill` tool
+/// backed by `skill_loader` (the disk-backed `MobileDiskSkillLoader`) instead of
+/// the inert `EmptySkillLoader`, so model-invoked skills resolve against the
+/// device's on-disk `.claude/commands` / `.claude/skills`. uniffi-gated because
+/// the loader impl needs `async-trait` (an FFI-only optional dep) and only the
+/// FFI host wires a real loader.
+#[cfg(feature = "uniffi")]
+pub fn register_mobile_tools_with_skill_loader(
+    reg: &mut ToolRegistry,
+    ctx: BuiltinToolContext,
+    skill_loader: Arc<dyn tool_skill::skill::SkillLoader>,
+) {
+    register_mobile_non_skill_tools(reg, ctx.clone());
+    reg.register_builtin(Arc::new(tool_skill::SkillTool::with_loader(
+        ctx,
+        skill_loader,
+    )));
+}
+
+/// Every mobile tool EXCEPT `Skill` (whose loader differs by build). Builtin wire
+/// order is locale-sorted at enumeration time, so registration order is immaterial.
+fn register_mobile_non_skill_tools(reg: &mut ToolRegistry, ctx: BuiltinToolContext) {
     // ----- cross-platform subset (also linked by engine-desktop) -----------
     tool_file::register_all(reg, ctx.clone());
     tool_task::register_all(reg, ctx.clone());
     tool_web::register_all(reg, ctx.clone(), None);
     tool_plan::register_all(reg, ctx.clone());
     tool_meta::register_all(reg, ctx.clone());
+    // Audit fix (#7): the cron tools (Create/List/Delete/RemoteTrigger) are
+    // registered, but mobile starts NO `cron::CronScheduler` (the desktop root is
+    // the only place one runs) and wires no `task_registry` for it to fire into —
+    // a backgrounded app has no long-running daemon. So a created cron job is
+    // saved/listed/deletable but does NOT auto-fire on this platform; CronCreate's
+    // result text says so (see schedule_cron.rs `scheduler_active`). RemoteTrigger
+    // is independent of the local scheduler (it triggers a cloud-side run).
     tool_cron::register_all(reg, ctx.clone());
     tool_ui::register_all(reg, ctx.clone());
-    tool_skill::register_all(reg, ctx.clone());
     // ----- mobile-exclusive tools ------------------------------------------
     tool_camera::register_all(reg, ctx.clone());
     tool_voice::register_all(reg, ctx.clone());
@@ -121,6 +164,20 @@ pub fn register_mobile_tools(reg: &mut ToolRegistry, ctx: BuiltinToolContext) {
     // P4: Android-only Git tool. Self-gates on ctx.android_git.as_ref().is_some_and(|g| g.enabled);
     // iOS and desktop are unaffected (their ctx.android_git is None).
     tool_git_mobile::register_all(reg, ctx);
+}
+
+/// Audit fix (#14): the FFI sibling of [`mobile_tool_registry`] that wires a
+/// disk-backed `Skill` loader (the mobile composition root passes the
+/// `MobileDiskSkillLoader` it built from the device's app-private root).
+#[cfg(feature = "uniffi")]
+#[must_use]
+pub fn mobile_tool_registry_with_skill_loader(
+    ctx: BuiltinToolContext,
+    skill_loader: Arc<dyn tool_skill::skill::SkillLoader>,
+) -> ToolRegistry {
+    let mut reg = ToolRegistry::new();
+    register_mobile_tools_with_skill_loader(&mut reg, ctx, skill_loader);
+    reg
 }
 
 /// Assemble the mobile builtin **skill** registry.

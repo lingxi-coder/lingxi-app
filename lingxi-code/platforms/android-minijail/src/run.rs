@@ -30,6 +30,61 @@ pub fn run_jailed(spec: &JailSpec) -> JailedOutput {
     }
 }
 
+/// Decode the int returned by `minijail_wait` into a `JailedOutput.exit_code`.
+///
+/// `minijail_wait` does NOT hand back a raw `waitpid(2)` status — it pre-collapses
+/// the wait status into a single int (see `libminijail.c::minijail_wait_internal`,
+/// vendored at `third_party/minijail/libminijail.c`):
+///   * a normally-exited child (`WIFEXITED`) → `WEXITSTATUS` (the true 0..=255 exit
+///     code), so `exit 0`→0, `exit 1`→1, `exit 137`→137, `exit 200`→200;
+///   * a signal-killed child (`WIFSIGNALED`) → `MINIJAIL_ERR_SIG_BASE + signum`
+///     = `128 + n` (bash's `$? = 128 + signum` convention), with `SIGSYS`/seccomp
+///     mapped to `MINIJAIL_ERR_SECCOMP_VIOLATION` (253);
+///   * an internal failure (e.g. `waitpid` error / `-ECHILD`) → a NEGATIVE value.
+///
+/// We therefore return the low byte (`status & 0xFF`) for any non-negative status
+/// and reserve `-1` strictly for the negative internal-error case — mirroring the
+/// desktop `PosixProcess` semantics (`output.status.code().unwrap_or(-1)`) for
+/// normally-exited children, which never collapse a real exit code into -1.
+///
+/// AMBIGUITY — exit codes `>= 128` are NOT perfectly distinguishable from signals.
+/// Because minijail folds the signal case into the SAME `128 + n` band, a
+/// voluntary `exit 137` and a `SIGKILL`-killed child both surface as `137`; there
+/// is no information left in `minijail_wait`'s return value to tell them apart.
+/// The old behaviour treated the whole `>= 128` band as "signalled → -1", which
+/// silently corrupted legitimate high exit codes (`exit 137`/`exit 200` → -1).
+/// We now preserve the value: `is_error` (`exit_code != 0`) is intact, and the
+/// dominant kill cause — the watchdog timeout — is already carried INDEPENDENTLY
+/// by the `timed_out` flag (set by the call site BEFORE calling `decode_exit`).
+/// Callers MUST consult `timed_out`, NOT a `-1` exit code, to detect a kill.
+///
+/// CAVEAT — 126/127 are NOT guaranteed child exit codes. `minijail_wait` returns
+/// `MINIJAIL_ERR_NO_ACCESS` (126) / `MINIJAIL_ERR_NO_COMMAND` (127) when minijail
+/// itself could not `exec` the target (e.g. not executable / not found), so a
+/// 126/127 here may be a minijail exec-failure code rather than something the
+/// child returned. We surface them as-is: they coincide with bash's own 126
+/// ("cannot execute") / 127 ("command not found") conventions, so the value is
+/// meaningful to callers either way and needs no special-casing.
+///
+/// This is a pure mapping over an int (the `c_int` from the FFI is `i32`), so it
+/// lives at file scope — outside the android-only FFI module — and is unit-tested
+/// on the host. On non-android hosts the only caller is the FFI runner (cfg'd
+/// out), so the lib build legitimately sees it as unused; the host TESTS exercise
+/// it directly.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn decode_exit(status: i32) -> i32 {
+    if status < 0 {
+        // minijail internal error (e.g. wait failed / -ECHILD) — never a child
+        // exit code.
+        -1
+    } else {
+        // Normally-exited children carry their true exit code (incl. >= 128 like
+        // `exit 137`); signal-killed children share the 128+n band but the
+        // watchdog kill is reported via `timed_out`, not here.
+        status & 0xFF
+    }
+}
+
 #[cfg(target_os = "android")]
 mod android_impl {
     // LINK ANCHOR — do not remove. `platform-android-libcap` is a build-only
@@ -185,31 +240,6 @@ mod android_impl {
             let _ = file.read_to_end(&mut buf);
             buf
         })
-    }
-
-    /// Decode `minijail_wait`'s status (P0a encoding): nonnegative is the child's
-    /// exit code (`status & 0xFF`); a child terminated by signal `n` is reported
-    /// by minijail as `128 + n` (>= 128). A SIGKILL (9) → 137, which we map to
-    /// `exit_code` -1 and let the `timed_out` flag carry the real cause.
-    ///
-    /// CAVEAT — 126/127 are NOT guaranteed child exit codes. `minijail_wait`
-    /// returns `MINIJAIL_ERR_NO_ACCESS` (126) / `MINIJAIL_ERR_NO_COMMAND` (127)
-    /// when minijail itself could not `exec` the target (e.g. not executable /
-    /// not found), so a 126/127 here may be a minijail exec-failure code rather
-    /// than something the child returned. We surface them as-is: they coincide
-    /// with bash's own 126 ("cannot execute") / 127 ("command not found")
-    /// conventions, so the value is meaningful to callers either way and needs no
-    /// special-casing.
-    fn decode_exit(status: c_int) -> i32 {
-        if status < 0 {
-            // minijail internal error (e.g. wait failed).
-            -1
-        } else if status >= 128 {
-            // Signalled child — not a real exit code.
-            -1
-        } else {
-            status & 0xFF
-        }
     }
 
     fn fail(reason: String) -> JailedOutput {
@@ -559,7 +589,7 @@ mod android_impl {
         let exit_code = if was_timed_out {
             -1
         } else {
-            decode_exit(status)
+            super::decode_exit(status)
         };
 
         JailedOutput {
@@ -595,5 +625,49 @@ mod tests {
         let out = run_jailed(&spec);
         assert!(out.enforcement_failed.is_some());
         assert_eq!(out.exit_code, -1);
+    }
+
+    // `decode_exit` is a pure mapping over `minijail_wait`'s return int, so it is
+    // exercised on the host even though the FFI jail body is android-only.
+    #[test]
+    fn decode_exit_normal_codes() {
+        assert_eq!(decode_exit(0), 0); // exit 0
+        assert_eq!(decode_exit(1), 1); // exit 1
+        assert_eq!(decode_exit(126), 126); // bash "cannot execute" / minijail NO_ACCESS
+        assert_eq!(decode_exit(127), 127); // bash "not found" / minijail NO_COMMAND
+    }
+
+    #[test]
+    fn decode_exit_high_codes_are_preserved() {
+        // The bug case: a child that VOLUNTARILY `exit 137` is WIFEXITED with
+        // WEXITSTATUS == 137, so minijail_wait returns 137 — it must NOT be
+        // collapsed to -1 just because it crosses the 128 boundary. The
+        // watchdog-kill case is carried independently by `timed_out`.
+        assert_eq!(decode_exit(137), 137); // exit 137 (was -1 before the fix)
+        assert_eq!(decode_exit(200), 200); // exit 200 (was -1 before the fix)
+        assert_eq!(decode_exit(128), 128);
+        assert_eq!(decode_exit(255), 255);
+    }
+
+    #[test]
+    fn decode_exit_signalled_child_shares_the_high_band() {
+        // A child killed by signal `n` is reported by minijail as 128 + n (bash
+        // convention), so e.g. SIGKILL(9) -> 137 and SIGSEGV(11) -> 139. These
+        // are INDISTINGUISHABLE from a voluntary `exit 137` / `exit 139`, so
+        // decode_exit surfaces the low byte either way; callers must consult
+        // `timed_out` for the watchdog-kill cause rather than treating the code
+        // as a kill marker.
+        assert_eq!(decode_exit(128 + 9), 137); // SIGKILL via minijail encoding
+        assert_eq!(decode_exit(128 + 11), 139); // SIGSEGV via minijail encoding
+        // SECCOMP violation (SIGSYS) is reported as MINIJAIL_ERR_SECCOMP_VIOLATION(253).
+        assert_eq!(decode_exit(253), 253);
+    }
+
+    #[test]
+    fn decode_exit_negative_is_internal_error() {
+        // minijail_wait returns a negative value (-ECHILD / -errno) on its own
+        // internal failure — never a child exit code, so it maps to -1.
+        assert_eq!(decode_exit(-1), -1);
+        assert_eq!(decode_exit(-10), -1);
     }
 }

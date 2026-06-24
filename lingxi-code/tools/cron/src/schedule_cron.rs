@@ -523,18 +523,41 @@ fn semantic_bool(v: Option<&Value>, default: bool) -> bool {
 }
 
 /// Build the model-facing result text (CronCreateTool.ts:143-153).
-fn build_result_content(id: &str, human: &str, recurring: bool, durable: bool) -> String {
+///
+/// `scheduler_active` is true on hosts that run a live cron scheduler — the
+/// desktop composition root starts `cron::CronScheduler` and wires a real
+/// `TaskRegistry` for it to fire jobs into. It is false on hosts that have no
+/// scheduler (mobile/iOS: a backgrounded app has no long-running daemon and no
+/// `TaskRegistry`), where a created job is still saved / listed / deletable but
+/// will NOT fire automatically. In that case the result text says so rather than
+/// promising execution, so the model is not told a job is scheduled when nothing
+/// will ever run it (audit: "registered-but-inert cron misrepresents itself").
+fn build_result_content(
+    id: &str,
+    human: &str,
+    recurring: bool,
+    durable: bool,
+    scheduler_active: bool,
+) -> String {
     let where_ = if durable {
         "Persisted to .claude/scheduled_tasks.json"
     } else {
         "Session-only (not written to disk, dies when Claude exits)"
     };
     if recurring {
-        format!(
-            "Scheduled recurring job {id} ({human}). {where_}. Auto-expires after {DEFAULT_MAX_AGE_DAYS} days. Use CronDelete to cancel sooner."
-        )
+        let tail = if scheduler_active {
+            format!("Auto-expires after {DEFAULT_MAX_AGE_DAYS} days. Use CronDelete to cancel sooner.")
+        } else {
+            "NOTE: this platform has no active cron scheduler, so the job will NOT fire automatically; use CronList to review or CronDelete to remove it.".to_string()
+        };
+        format!("Scheduled recurring job {id} ({human}). {where_}. {tail}")
     } else {
-        format!("Scheduled one-shot task {id} ({human}). {where_}. It will fire once then auto-delete.")
+        let tail = if scheduler_active {
+            "It will fire once then auto-delete.".to_string()
+        } else {
+            "NOTE: this platform has no active cron scheduler, so the task will NOT fire automatically; use CronList to review or CronDelete to remove it.".to_string()
+        };
+        format!("Scheduled one-shot task {id} ({human}). {where_}. {tail}")
     }
 }
 
@@ -821,7 +844,12 @@ impl Tool for CronCreateTool {
         bus.log_event(SCHEDULE_CRON_COMPLETED, md).await;
 
         let human = cron_to_human(&cron);
-        let content = build_result_content(&id, &human, recurring, durable);
+        // `task_registry` is Some only on a host that wired a live scheduler (the
+        // desktop root constructs the `TaskRegistry` AND starts `CronScheduler`
+        // together); mobile/iOS leave it None and start no scheduler, so the
+        // created job will never auto-fire — reflect that in the result text.
+        let scheduler_active = self.ctx.task_registry.is_some();
+        let content = build_result_content(&id, &human, recurring, durable, scheduler_active);
 
         Ok(ToolCallResult {
             data: json!({
@@ -929,15 +957,33 @@ mod tests {
 
     #[test]
     fn result_content_variants() {
-        let r = build_result_content("d12345678", "Every day at 9:00am", true, false);
+        // scheduler_active = true (desktop): promises firing, as before.
+        let r = build_result_content("d12345678", "Every day at 9:00am", true, false, true);
         assert!(r.contains("Scheduled recurring job d12345678 (Every day at 9:00am)."));
         assert!(r.contains("Session-only (not written to disk, dies when Claude exits)"));
         assert!(r.contains("Auto-expires after 30 days. Use CronDelete to cancel sooner."));
 
-        let o = build_result_content("d87654321", "February 28 at 2:30pm", false, true);
+        let o = build_result_content("d87654321", "February 28 at 2:30pm", false, true, true);
         assert!(o.contains("Scheduled one-shot task d87654321 (February 28 at 2:30pm)."));
         assert!(o.contains("Persisted to .claude/scheduled_tasks.json"));
         assert!(o.contains("It will fire once then auto-delete."));
+    }
+
+    #[test]
+    fn result_content_no_scheduler_is_honest() {
+        // scheduler_active = false (mobile/iOS): keeps the saved-job prefix but
+        // does NOT promise firing — it tells the model nothing will auto-run.
+        let r = build_result_content("d12345678", "Every day at 9:00am", true, true, false);
+        assert!(r.contains("Scheduled recurring job d12345678 (Every day at 9:00am)."));
+        assert!(r.contains("Persisted to .claude/scheduled_tasks.json"));
+        assert!(r.contains("no active cron scheduler"));
+        assert!(r.contains("will NOT fire automatically"));
+        assert!(!r.contains("Auto-expires after 30 days"));
+
+        let o = build_result_content("d87654321", "February 28 at 2:30pm", false, false, false);
+        assert!(o.contains("Scheduled one-shot task d87654321 (February 28 at 2:30pm)."));
+        assert!(o.contains("no active cron scheduler"));
+        assert!(!o.contains("It will fire once then auto-delete."));
     }
 
     #[tokio::test]
@@ -1047,7 +1093,10 @@ mod tests {
         assert_eq!(out.data["humanSchedule"], json!("February 28 at 2:30pm"));
         let content = out.data["content"].as_str().unwrap();
         assert!(content.contains("Scheduled one-shot task"));
-        assert!(content.contains("It will fire once then auto-delete"));
+        // The shared test ctx wires no `task_registry` (no live scheduler), so the
+        // result text is the honest no-scheduler variant (mobile/iOS behavior),
+        // not the desktop "It will fire once" promise.
+        assert!(content.contains("no active cron scheduler"));
         assert!(content.contains("Persisted to .claude/scheduled_tasks.json"));
         // recurring:false → the optional `recurring` key is omitted on disk.
         let doc = read_doc(tmp.path()).await;

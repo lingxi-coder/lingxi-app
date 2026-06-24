@@ -72,6 +72,13 @@ uniffi = [
     # pricing) shared with engine-desktop. Engine-tier (no `apps/*` edge),
     # optional + uniffi-gated like its runtime-wiring siblings above.
     "dep:provider-config",
+    # Audit fix (autocompaction parity): the real `CompactionOrchestrator` +
+    # its `ProviderSideQueryClient`/`ForkedAgentRunner`/`CacheSafeParamsSlot`
+    # the mobile build wires via `.with_compaction(...)` so a long mobile
+    # session autocompacts before context-window overflow (mirror of the
+    # desktop root). Engine-tier (no `apps/*` edge), optional + uniffi-gated.
+    "dep:compaction",
+    "dep:sidequery",
 ]
 
 [dependencies]
@@ -124,6 +131,12 @@ cost = { path = "../../cost", optional = true }
 # `MultiCredentialProvider`) the desktop build path already uses. Engine-tier
 # (no `apps/*` edge), optional + uniffi-gated like its siblings above.
 provider-config = { path = "../../provider-config", optional = true }
+# Audit fix (autocompaction parity): `CompactionOrchestrator` + the side-query
+# summarizer it forks. Engine-tier (no `apps/*` edge), optional + uniffi-gated
+# like the other runtime-wiring crates — the compactor is built inside
+# `build_mobile_inner` and attached via `.with_compaction(...)`.
+compaction = { path = "../../compaction", optional = true }
+sidequery = { path = "../../sidequery", optional = true }
 # SESSIONS/HISTORY: enumerates the on-disk `<claude_home>/projects/<cwd>/*.jsonl`
 # session catalog for the `ListSessions` command. Engine-tier, optional +
 # uniffi-gated like its siblings above.
@@ -144,7 +157,10 @@ async-trait = { workspace = true, optional = true }
 # Cross-platform tool crates (shared with engine-desktop).
 tool-file = { path = "../../tools/file" }
 tool-task = { path = "../../tools/task" }
-tool-web = { path = "../../tools/web" }
+# Audit fix (WebFetch parity): enable `web-markdown` so mobile WebFetch converts
+# HTML→markdown (htmd) instead of returning raw HTML to the model (raw HTML can
+# blow the context window and diverges from desktop/claude-code output shape).
+tool-web = { path = "../../tools/web", features = ["web-markdown"] }
 tool-plan = { path = "../../tools/plan" }
 tool-meta = { path = "../../tools/meta" }
 tool-cron = { path = "../../tools/cron" }

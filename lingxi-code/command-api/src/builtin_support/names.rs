@@ -400,6 +400,37 @@ pub const HOST_BOUND_DEFERRED_GAPS: &[(&str, &str)] = &[
 /// so any `isHidden:!0` command is dropped from both surfaces.
 pub const HIDDEN_PALETTE_COMMANDS: &[&str] = &["extra-usage", "heapdump", "rate-limit-options"];
 
+/// `(command, aliases)` for the builtins that ship an `aliases:` array in
+/// claude-code (cp-03). The slash palette folds these into the fuzzy candidate
+/// set (so typing `/cost` finds `/usage`) and, when a row matched via a typed
+/// alias, shows ` (<alias>)` after the name (`createCommandSuggestionItem`).
+/// Ported from each `commands/<name>/index.ts` `aliases` literal.
+pub const COMMAND_ALIASES: &[(&str, &[&str])] = &[
+    ("clear", &["reset", "new"]),
+    ("config", &["settings"]),
+    ("desktop", &["app"]),
+    ("exit", &["quit"]),
+    ("feedback", &["bug"]),
+    ("mobile", &["ios", "android"]),
+    ("permissions", &["allowed-tools"]),
+    ("plugin", &["plugins", "marketplace"]),
+    ("resume", &["continue"]),
+    ("rewind", &["checkpoint"]),
+    ("session", &["remote"]),
+    ("tasks", &["bashes"]),
+    ("usage", &["cost", "stats"]),
+    ("x402", &["wallet", "pay"]),
+];
+
+/// The aliases for `name` (empty when it has none). See [`COMMAND_ALIASES`].
+#[must_use]
+pub fn command_aliases(name: &str) -> &'static [&'static str] {
+    COMMAND_ALIASES
+        .iter()
+        .find(|(cmd, _)| *cmd == name)
+        .map_or(&[], |(_, aliases)| *aliases)
+}
+
 /// Returns `true` if `name` is hidden or disabled in claude-code's default
 /// external build and therefore must NOT appear in the slash palette or the
 /// `/help` screen — mirroring claude-code's

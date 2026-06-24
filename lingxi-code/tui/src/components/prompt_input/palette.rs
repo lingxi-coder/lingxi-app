@@ -13,7 +13,8 @@
 //! description, mirroring claude-code PromptInputFooterSuggestions.tsx.
 
 use command_api::builtin_support::names::{
-    core_description, is_command_env_disabled, is_palette_hidden, BUILTIN_COMMAND_NAMES,
+    command_aliases, core_description, is_command_env_disabled, is_palette_hidden,
+    BUILTIN_COMMAND_NAMES,
 };
 use iocraft::prelude::*;
 
@@ -26,10 +27,14 @@ pub const OVERLAY_MAX_ITEMS: usize = 5;
 /// One filtered palette row: command name + description (both `'static`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaletteRow {
-    /// Command name without the leading `/`.
+    /// Command name without the leading `/`. Always the canonical command —
+    /// the accept text commits `/<name> ` even when matched via an alias.
     pub name: &'static str,
     /// Description text (real for the 18 core commands, stub otherwise).
     pub description: &'static str,
+    /// (cp-03) The typed alias this row matched through, if any — rendered as
+    /// ` (<alias>)` after the name (`findMatchedAlias` / `createCommandSuggestionItem`).
+    pub matched_alias: Option<&'static str>,
 }
 
 /// Palette overlay state. `open == false` means the overlay is dismissed and
@@ -77,25 +82,84 @@ impl PaletteState {
     /// any command where `isHidden || isEnabled()===off` from the palette.
     #[must_use]
     pub fn rows(&self) -> Vec<PaletteRow> {
-        let names: Vec<String> = BUILTIN_COMMAND_NAMES
+        let visible = |n: &str| !is_palette_hidden(n) && !is_command_env_disabled(n);
+        let names: Vec<&'static str> = BUILTIN_COMMAND_NAMES
             .iter()
-            .filter(|n| !is_palette_hidden(n) && !is_command_env_disabled(n))
-            .map(|s| (*s).to_string())
+            .copied()
+            .filter(|n| visible(n))
             .collect();
-        filtered_ranked(&self.filter, &names)
-            .into_iter()
-            .filter_map(|matched| {
-                BUILTIN_COMMAND_NAMES
-                    .iter()
-                    .copied()
-                    .find(|n| *n == matched && !is_palette_hidden(n) && !is_command_env_disabled(n))
-                    .map(|name| PaletteRow {
-                        name,
-                        description: core_description(name),
-                    })
-            })
-            .collect()
+
+        // Bare `/` (empty filter): all commands by name (cp-02 alphabetical),
+        // no aliases — aliases only surface once the user types a filter.
+        if self.filter.is_empty() {
+            let cands: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
+            return filtered_ranked(&self.filter, &cands)
+                .into_iter()
+                .filter_map(|m| names.iter().copied().find(|n| *n == m))
+                .map(|name| PaletteRow {
+                    name,
+                    description: core_description(name),
+                    matched_alias: None,
+                })
+                .collect();
+        }
+
+        // (cp-03) Non-empty filter: rank NAME matches first (claude-code's Fuse
+        // `commandName` weight 3), then ALIAS matches (`aliasKey` weight 2) for
+        // commands not already shown — so `/co` lists the co* commands before
+        // surfacing `/usage` via its `cost` alias. `matched_alias` (the displayed
+        // ` (<alias>)`) is `findMatchedAlias`, computed for EVERY row regardless
+        // of which pass matched it, exactly as claude-code does.
+        let row = |name: &'static str| PaletteRow {
+            name,
+            description: core_description(name),
+            matched_alias: find_matched_alias(&self.filter, name),
+        };
+        let mut seen = std::collections::HashSet::new();
+        let mut out: Vec<PaletteRow> = Vec::new();
+
+        // Pass 1 — name matches.
+        let name_cands: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
+        for token in filtered_ranked(&self.filter, &name_cands) {
+            if let Some(name) = names.iter().copied().find(|n| *n == token) {
+                if seen.insert(name) {
+                    out.push(row(name));
+                }
+            }
+        }
+
+        // Pass 2 — alias matches (canonical command not already shown).
+        let mut alias_cands: Vec<String> = Vec::new();
+        let mut alias_owner: std::collections::HashMap<String, &'static str> =
+            std::collections::HashMap::new();
+        for &name in &names {
+            for &alias in command_aliases(name) {
+                alias_cands.push(alias.to_string());
+                alias_owner.entry(alias.to_string()).or_insert(name);
+            }
+        }
+        for token in filtered_ranked(&self.filter, &alias_cands) {
+            if let Some(&name) = alias_owner.get(token) {
+                if seen.insert(name) {
+                    out.push(row(name));
+                }
+            }
+        }
+        out
     }
+}
+
+/// claude-code `findMatchedAlias`: the first alias of `name` that the
+/// (lowercased, already-trimmed) `query` is a prefix of, or `None`.
+fn find_matched_alias(query: &str, name: &'static str) -> Option<&'static str> {
+    if query.is_empty() {
+        return None;
+    }
+    let q = query.to_lowercase();
+    command_aliases(name)
+        .iter()
+        .copied()
+        .find(|alias| alias.to_lowercase().starts_with(&q))
 }
 
 /// What the palette key handler decided. The dispatcher in `root.rs` acts on
@@ -189,7 +253,9 @@ pub fn PaletteOverlay(props: &PaletteOverlayProps) -> impl Into<AnyElement<'stat
     element! {
         View(flex_direction: FlexDirection::Column) {
             #(rows.into_iter().enumerate().map(|(i, row)| {
-                let line = format!("/{} \u{2013} {}", row.name, row.description);
+                // (cp-03) ` (<alias>)` after the name when matched via a typed alias.
+                let alias = row.matched_alias.map(|a| format!(" ({a})")).unwrap_or_default();
+                let line = format!("/{}{} \u{2013} {}", row.name, alias, row.description);
                 // (M7-15) Centralized: selected row uses the theme's `suggestion`
                 // accent (claude-code's completion highlight), the rest dim.
                 let color = if i == selected { theme.suggestion } else { theme.dim };
@@ -242,6 +308,38 @@ mod tests {
         let narrowed = p.rows();
         assert!(narrowed.len() < all);
         assert!(narrowed.iter().any(|r| r.name == "compact"));
+    }
+
+    #[test]
+    fn alias_matching_surfaces_canonical_with_alias_label() {
+        // (cp-03) Typing an alias surfaces its CANONICAL command, tagged with
+        // the matched alias; the accept text still commits the canonical name.
+        let mut p = PaletteState::default();
+        p.sync_from_prompt("/cost");
+        let usage = p
+            .rows()
+            .into_iter()
+            .find(|r| r.name == "usage")
+            .expect("/cost should surface /usage");
+        assert_eq!(usage.matched_alias, Some("cost"));
+        assert_eq!(usage.name, "usage"); // accept commits `/usage `, not `/cost `
+
+        p.sync_from_prompt("/settings");
+        let config = p
+            .rows()
+            .into_iter()
+            .find(|r| r.name == "config")
+            .expect("/settings should surface /config");
+        assert_eq!(config.matched_alias, Some("settings"));
+
+        // A name match (no alias prefix) carries no alias label.
+        p.sync_from_prompt("/config");
+        let config = p.rows().into_iter().find(|r| r.name == "config").unwrap();
+        assert_eq!(config.matched_alias, None);
+
+        // Bare `/` never folds aliases — all rows are plain.
+        p.sync_from_prompt("/");
+        assert!(p.rows().iter().all(|r| r.matched_alias.is_none()));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 ---
-source: crates/tui/src/render/markdown.rs
+source: tui/src/render/markdown.rs
+assertion_line: 891
 expression: "render(\"see [the docs](https://example.io/guide)\", &theme())"
 ---
 - spans:
@@ -13,15 +14,8 @@ expression: "render(\"see [the docs](https://example.io/guide)\", &theme())"
       kind: Text
     - text: the docs
       style:
-        fg: Default
-        bg: Default
-        bold: false
-        italic: false
-        underline: false
-      kind: Text
-    - text: " (https://example.io/guide)"
-      style:
-        fg: Default
+        fg:
+          Named: Blue
         bg: Default
         bold: false
         italic: false

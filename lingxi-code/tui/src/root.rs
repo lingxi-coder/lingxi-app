@@ -147,19 +147,10 @@ fn map_iocraft_key(
         (KeyCode::Down, _) => Some(HistoryStep(1)),
         (KeyCode::PageUp, _) => Some(ScrollStep(ScrollDir::PageUp)),
         (KeyCode::PageDown, _) => Some(ScrollStep(ScrollDir::PageDown)),
-        // Vim-style nav only when prompt is empty.
-        (KeyCode::Char('j'), m) if m == KeyModifiers::NONE && prompt_empty => {
-            Some(ScrollStep(ScrollDir::LineDown))
-        }
-        (KeyCode::Char('k'), m) if m == KeyModifiers::NONE && prompt_empty => {
-            Some(ScrollStep(ScrollDir::LineUp))
-        }
-        (KeyCode::Char('g'), m) if m == KeyModifiers::NONE && prompt_empty => {
-            Some(ScrollStep(ScrollDir::Top))
-        }
-        (KeyCode::Char('G'), m) if m == KeyModifiers::SHIFT && prompt_empty => {
-            Some(ScrollStep(ScrollDir::Bottom))
-        }
+        // (RRS-05) No empty-prompt j/k/g/G → scroll mappings: claude-code is not
+        // vim-modal by default, so those keys type the character (otherwise a
+        // message could never START with j/k/g/G). They fall through to the
+        // printable-char catch-all below.
         // (M7-13 review) Ctrl-G opens the Settings screen (Config tab). Mirrors
         // `keymap::map_key_ml`. Placed before the printable-char catch-all; the
         // CONTROL modifier means it never collides with the vim-nav `g`

@@ -31,9 +31,53 @@ pub struct ResumeRow {
     /// Title (already truncated to ≤ 50 chars + ellipsis by the loader).
     pub title: String,
     /// `[YYYY-MM-DDTHH:MM:SSZ]`-style timestamp body (without the brackets).
+    /// (Retained for the detail/preview surface.)
     pub modified_label: String,
     /// `(N message[s])` count label, singular for 1.
     pub count_label: String,
+    /// (resume-metadata) Dim metadata line shown under the title:
+    /// `<relative time ago> · <N> messages` (claude-code `formatLogMetadata`,
+    /// joined with ` · `, no brackets/parens). Git branch is omitted (not
+    /// carried on the session metadata).
+    pub metadata_label: String,
+}
+
+/// Relative-time-ago string (claude-code `formatRelativeTimeAgo` with
+/// `numeric:'always'`, long English units): `5 minutes ago`, `3 days ago`,
+/// `in 2 hours` (future). Largest matching unit wins.
+#[must_use]
+pub fn relative_time_ago(modified: std::time::SystemTime, now: std::time::SystemTime) -> String {
+    // Positive => in the past.
+    let diff: i64 = match now.duration_since(modified) {
+        Ok(d) => d.as_secs() as i64,
+        Err(e) => -(e.duration().as_secs() as i64),
+    };
+    const INTERVALS: &[(&str, i64)] = &[
+        ("year", 31_536_000),
+        ("month", 2_592_000),
+        ("week", 604_800),
+        ("day", 86_400),
+        ("hour", 3_600),
+        ("minute", 60),
+        ("second", 1),
+    ];
+    for &(unit, secs) in INTERVALS {
+        if diff.abs() >= secs {
+            let value = diff / secs; // truncates toward zero
+            let n = value.abs();
+            let unit_str = if n == 1 {
+                unit.to_string()
+            } else {
+                format!("{unit}s")
+            };
+            return if value >= 0 {
+                format!("{n} {unit_str} ago")
+            } else {
+                format!("in {n} {unit_str}")
+            };
+        }
+    }
+    "0 seconds ago".to_string()
 }
 
 impl ResumeRow {
@@ -45,6 +89,18 @@ impl ResumeRow {
     /// render timestamps byte-for-byte identically (no hand-copied formatter).
     #[must_use]
     pub fn from_meta(m: &SessionMetadata) -> Self {
+        Self::from_meta_at(m, std::time::SystemTime::now())
+    }
+
+    /// [`from_meta`](Self::from_meta) with an injected `now` for deterministic
+    /// relative-time tests.
+    #[must_use]
+    pub fn from_meta_at(m: &SessionMetadata, now: std::time::SystemTime) -> Self {
+        let msgs = if m.message_count == 1 {
+            "1 message".to_string()
+        } else {
+            format!("{} messages", m.message_count)
+        };
         Self {
             uuid: m.uuid,
             title: m.title.clone(),
@@ -54,6 +110,7 @@ impl ResumeRow {
             } else {
                 format!("({} messages)", m.message_count)
             },
+            metadata_label: format!("{} \u{00b7} {}", relative_time_ago(m.modified, now), msgs),
         }
     }
 }
@@ -162,19 +219,18 @@ pub fn ResumeScreen(props: &ResumeScreenProps) -> impl Into<AnyElement<'static>>
 
     let header = "Resume which session?".to_string();
     let selected = state.selected;
-    // Build one Text per row: "> N. <title>  [<modified>]  (<count>)".
-    let row_lines: Vec<String> = state
+    // (resume-metadata) Each row is a title line + a dim metadata line below it
+    // (`<relative time> · <N> messages`, paddingLeft 2), NOT the old inline
+    // `[<modified>] (<count>)`. `(title_line, metadata_line)` per row.
+    let row_lines: Vec<(String, String)> = state
         .rows
         .iter()
         .enumerate()
         .map(|(i, r)| {
             let marker = if i == selected { "> " } else { "  " };
-            format!(
-                "{marker}{}. {}  [{}]  {}",
-                i + 1,
-                r.title,
-                r.modified_label,
-                r.count_label
+            (
+                format!("{marker}{}", r.title),
+                format!("  {}", r.metadata_label),
             )
         })
         .collect();
@@ -199,8 +255,11 @@ pub fn ResumeScreen(props: &ResumeScreenProps) -> impl Into<AnyElement<'static>>
         View(flex_direction: FlexDirection::Column, padding: 1) {
             Text(content: header)
             View(flex_direction: FlexDirection::Column, padding_top: 1) {
-                #(row_lines.into_iter().map(|line| element! {
-                    Text(content: line)
+                #(row_lines.into_iter().map(|(title, meta)| element! {
+                    View(flex_direction: FlexDirection::Column) {
+                        Text(content: title)
+                        Text(content: meta, color: Color::DarkGrey)
+                    }
                 }))
             }
             View(
@@ -355,20 +414,41 @@ mod tests {
     }
 
     #[test]
+    fn relative_time_ago_units() {
+        let base = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let ago = |secs: u64| relative_time_ago(base - Duration::from_secs(secs), base);
+        assert_eq!(ago(30), "30 seconds ago");
+        assert_eq!(ago(60), "1 minute ago");
+        assert_eq!(ago(300), "5 minutes ago");
+        assert_eq!(ago(3600), "1 hour ago");
+        assert_eq!(ago(86_400), "1 day ago");
+        assert_eq!(ago(2 * 86_400), "2 days ago");
+        // Future.
+        assert_eq!(
+            relative_time_ago(base + Duration::from_secs(120), base),
+            "in 2 minutes"
+        );
+    }
+
+    #[test]
     fn component_renders_rows_and_selection_marker() {
+        // Fixed `now` (5 min after the first session) for deterministic
+        // relative-time metadata.
+        let now = UNIX_EPOCH + Duration::from_secs(1_748_113_392 + 300);
         let st = ResumeState::new(vec![
-            ResumeRow::from_meta(&meta("first session", 1_748_113_392, 3)),
-            ResumeRow::from_meta(&meta("second session", 1_748_113_300, 1)),
+            ResumeRow::from_meta_at(&meta("first session", 1_748_113_392, 3), now),
+            ResumeRow::from_meta_at(&meta("second session", 1_748_113_300, 1), now),
         ]);
         let mut element = element! { ResumeScreen(state: st) };
         let frame = element.to_string();
         assert!(frame.contains("Resume which session?"), "got: {frame}");
         assert!(frame.contains("first session"), "got: {frame}");
-        assert!(frame.contains("(3 messages)"), "got: {frame}");
-        assert!(frame.contains("(1 message)"), "got: {frame}");
+        // (resume-metadata) Dim metadata line: "<relative> · <N> messages".
+        assert!(frame.contains("5 minutes ago \u{00b7} 3 messages"), "got: {frame}");
+        assert!(frame.contains("1 message"), "got: {frame}");
         // Selected (row 0) prefixed "> ", unselected "  ".
-        assert!(frame.contains("> 1."), "got: {frame}");
-        assert!(frame.contains("  2."), "got: {frame}");
+        assert!(frame.contains("> first session"), "got: {frame}");
+        assert!(frame.contains("  second session"), "got: {frame}");
     }
 
     #[test]

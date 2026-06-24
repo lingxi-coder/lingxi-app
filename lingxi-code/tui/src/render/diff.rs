@@ -72,6 +72,21 @@ pub fn remove_bg(_theme: ThemeName) -> StyleColor {
     StyleColor::Rgb(0x40, 0x00, 0x00)
 }
 
+/// (diff-02) Green decoration color for the Add gutter (sigil + line number)
+/// — claude-code `theme.addDecoration` (`rgb(80, 200, 80)`, dark-theme
+/// value), locked independent of the active theme like `add_bg`/`remove_bg`.
+#[must_use]
+pub fn add_decoration(_theme: ThemeName) -> StyleColor {
+    StyleColor::Rgb(80, 200, 80)
+}
+
+/// (diff-02) Red decoration color for the Remove gutter — claude-code
+/// `theme.deleteDecoration` (`rgb(220, 90, 90)`).
+#[must_use]
+pub fn remove_decoration(_theme: ThemeName) -> StyleColor {
+    StyleColor::Rgb(220, 90, 90)
+}
+
 /// claude-code CHANGE_THRESHOLD: above this changed-fraction, word diffing is
 /// abandoned for whole-line coloring (lines too dissimilar to align words).
 const CHANGE_THRESHOLD: f64 = 0.4;
@@ -121,17 +136,17 @@ fn sigil(kind: LineKind) -> char {
 }
 
 /// Build the gutter span ("  12 + ") for a row: right-aligned line number +
-/// space + sigil + space, dim-colored, carrying the line background.
-fn gutter_span(row: &DiffRow, gutter_w: usize, bg: StyleColor) -> StyledSpan {
+/// space + sigil + space, carrying the line background. (diff-02) Colored
+/// green/red for Add/Remove (claude-code `decorationColor`); dim BrightBlack
+/// only for Context.
+fn gutter_span(row: &DiffRow, gutter_w: usize, bg: StyleColor, theme: ThemeName) -> StyledSpan {
     let text = format!("{:>w$} {} ", row.line_no, sigil(row.kind), w = gutter_w);
-    StyledSpan::styled(
-        text,
-        SpanStyle {
-            fg: StyleColor::Named(NamedColor::BrightBlack),
-            bg,
-            ..SpanStyle::default()
-        },
-    )
+    let fg = match row.kind {
+        LineKind::Add => add_decoration(theme),
+        LineKind::Remove => remove_decoration(theme),
+        LineKind::Context => StyleColor::Named(NamedColor::BrightBlack),
+    };
+    StyledSpan::styled(text, SpanStyle { fg, bg, ..SpanStyle::default() })
 }
 
 /// Syntax-highlight `text` as a single line and overlay `bg` onto every
@@ -232,7 +247,7 @@ fn plain_row(row: &DiffRow, gutter_w: usize, lang: Option<&str>, theme: ThemeNam
         LineKind::Remove => remove_bg(theme),
         LineKind::Context => StyleColor::Default,
     };
-    let mut spans = vec![gutter_span(row, gutter_w, bg)];
+    let mut spans = vec![gutter_span(row, gutter_w, bg, theme)];
     // (diff-01) Removed lines render as PLAINTEXT in claude-code (no syntax
     // highlight) — only the red bg decoration marks them. Added/context lines
     // keep syntax coloring.
@@ -262,7 +277,7 @@ fn word_row(
         LineKind::Remove => remove_bg(theme),
         LineKind::Context => StyleColor::Default,
     };
-    let mut spans = vec![gutter_span(row, gutter_w, bg)];
+    let mut spans = vec![gutter_span(row, gutter_w, bg, theme)];
     spans.extend(content);
     StyledLine { spans }
 }
@@ -551,6 +566,43 @@ mod tests {
                 .any(|s| s.style.bg == remove_bg(ThemeName::Dark)),
             "remove line has red background"
         );
+    }
+
+    #[test]
+    fn render_add_gutter_uses_green_decoration_not_dim() {
+        // (diff-02) The Add gutter's sigil+number span is colored green, not
+        // the dim BrightBlack used for Context lines.
+        let lines = render("a\n", "a\nb\n", Some("x.txt"), ThemeName::Dark);
+        let add = lines
+            .iter()
+            .find(|l| !is_header(l) && rowline(l).contains('+'))
+            .expect("an add line");
+        let gutter = &add.spans[0];
+        assert_eq!(gutter.style.fg, add_decoration(ThemeName::Dark));
+    }
+
+    #[test]
+    fn render_remove_gutter_uses_red_decoration_not_dim() {
+        // (diff-02)
+        let lines = render("a\nb\n", "a\n", Some("x.txt"), ThemeName::Dark);
+        let rem = lines
+            .iter()
+            .find(|l| !is_header(l) && rowline(l).contains('-'))
+            .expect("a - line");
+        let gutter = &rem.spans[0];
+        assert_eq!(gutter.style.fg, remove_decoration(ThemeName::Dark));
+    }
+
+    #[test]
+    fn render_context_gutter_stays_dim() {
+        // (diff-02) Context lines keep the BrightBlack dim gutter fg.
+        let lines = render("a\n", "a\nb\n", Some("x.txt"), ThemeName::Dark);
+        let ctx = lines
+            .iter()
+            .find(|l| !is_header(l) && !rowline(l).contains('+') && !rowline(l).contains('-'))
+            .expect("a context line");
+        let gutter = &ctx.spans[0];
+        assert_eq!(gutter.style.fg, StyleColor::Named(NamedColor::BrightBlack));
     }
 
     #[test]

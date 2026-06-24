@@ -131,6 +131,27 @@ impl StatsData {
         self.daily_messages.len()
     }
 
+    /// Total span of days covered (first→last activity date, inclusive) — the
+    /// `/N` denominator on the "Active days" line. Falls back to
+    /// [`active_days`](Self::active_days) when the dates are missing/unparsable.
+    #[must_use]
+    pub fn range_days(&self) -> usize {
+        match (self.first_date.as_deref(), self.last_date.as_deref()) {
+            (Some(f), Some(l)) => {
+                match (
+                    NaiveDate::parse_from_str(f, "%Y-%m-%d"),
+                    NaiveDate::parse_from_str(l, "%Y-%m-%d"),
+                ) {
+                    (Ok(fd), Ok(ld)) => usize::try_from((ld - fd).num_days() + 1)
+                        .unwrap_or(0)
+                        .max(1),
+                    _ => self.active_days(),
+                }
+            }
+            _ => self.active_days(),
+        }
+    }
+
     /// The day with the most messages (claude-code `peakActivityDay`). Ties
     /// resolve to the chronologically-earliest date (the `BTreeMap` walks
     /// ascending and a strict `>` keeps the first seen).
@@ -828,6 +849,44 @@ fn format_peak_day(date: &str) -> String {
 /// The Overview tab's body lines (heatmap + headline fields), claude-code
 /// `OverviewTab` order: heatmap, then Favorite model / Total tokens / Sessions
 /// / Active days / Most active day.
+/// Consecutive-active-day streaks (claude-code `calculateStreaks`): `(longest,
+/// current)`. `longest` = the longest run of consecutive calendar days that are
+/// all active; `current` = the run of consecutive active days ending at `today`
+/// (0 when `today` itself is inactive). `today` is injected for tests.
+#[must_use]
+pub fn streaks(daily: &BTreeMap<String, u64>, today: NaiveDate) -> (u64, u64) {
+    use std::collections::BTreeSet;
+    let active: BTreeSet<NaiveDate> = daily
+        .keys()
+        .filter_map(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+        .collect();
+    if active.is_empty() {
+        return (0, 0);
+    }
+    // Current streak: walk back from today while each day is active.
+    let mut current = 0u64;
+    let mut check = today;
+    while active.contains(&check) {
+        current += 1;
+        match check.pred_opt() {
+            Some(p) => check = p,
+            None => break,
+        }
+    }
+    // Longest streak: longest run of consecutive days in the sorted active set.
+    let sorted: Vec<NaiveDate> = active.into_iter().collect();
+    let (mut longest, mut temp) = (1u64, 1u64);
+    for w in sorted.windows(2) {
+        if (w[1] - w[0]).num_days() == 1 {
+            temp += 1;
+            longest = longest.max(temp);
+        } else {
+            temp = 1;
+        }
+    }
+    (longest, current)
+}
+
 fn overview_lines(data: &StatsData) -> Vec<String> {
     let mut out = Vec::new();
     for row in heatmap(&data.daily_messages) {
@@ -844,7 +903,12 @@ fn overview_lines(data: &StatsData) -> Vec<String> {
         "Sessions: {}",
         format_number(data.total_sessions as u64)
     ));
-    out.push(format!("Active days: {}", data.active_days()));
+    // (stats-overview-missing-fields) Active days `/rangeDays` + streaks.
+    out.push(format!("Active days: {}/{}", data.active_days(), data.range_days()));
+    let (longest, current) = streaks(&data.daily_messages, chrono::Local::now().date_naive());
+    let plural = |n: u64| if n == 1 { "day" } else { "days" };
+    out.push(format!("Longest streak: {longest} {}", plural(longest)));
+    out.push(format!("Current streak: {current} {}", plural(current)));
     if let Some(day) = data.peak_activity_day() {
         out.push(format!("Most active day: {}", format_peak_day(day)));
     }
@@ -1140,9 +1204,31 @@ mod tests {
         assert!(out.contains("Favorite model: claude-opus"), "got: {out}");
         assert!(out.contains("Total tokens: 150"), "got: {out}");
         assert!(out.contains("Sessions: 1"), "got: {out}");
-        assert!(out.contains("Active days: 1"), "got: {out}");
-        assert!(out.contains("Most active day: May 1"), "got: {out}");
+        assert!(out.contains("Active days: 1/1"), "got: {out}");
         assert!(out.ends_with(FOOTER), "got: {out}");
+        // The taller overview (heatmap grid + streaks) pushes the lower fields
+        // below the fold; assert them against the full body.
+        let body = overview_lines(&st.data).join("\n");
+        assert!(body.contains("Most active day: May 1"), "body: {body}");
+        assert!(body.contains("Longest streak:"), "body: {body}");
+        assert!(body.contains("Current streak:"), "body: {body}");
+    }
+
+    #[test]
+    fn streaks_longest_and_current() {
+        let mut daily = BTreeMap::new();
+        // A 3-day run, a gap, then a 2-day run ending on the 10th.
+        for d in ["2026-06-01", "2026-06-02", "2026-06-03", "2026-06-09", "2026-06-10"] {
+            daily.insert(d.to_string(), 1u64);
+        }
+        // today = 2026-06-10 → current streak = 2 (09, 10); longest = 3.
+        let today = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap();
+        assert_eq!(streaks(&daily, today), (3, 2));
+        // today = 2026-06-12 (inactive) → current streak = 0.
+        let today2 = NaiveDate::from_ymd_opt(2026, 6, 12).unwrap();
+        assert_eq!(streaks(&daily, today2), (3, 0));
+        // Empty → (0, 0).
+        assert_eq!(streaks(&BTreeMap::new(), today), (0, 0));
     }
 
     #[test]

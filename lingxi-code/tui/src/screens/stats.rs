@@ -945,7 +945,9 @@ fn models_lines(data: &StatsData) -> Vec<String> {
 
     let total = data.total_tokens();
     for (model, usage) in entries {
-        out.push(format!("{model} ({}%)", format_pct(usage.total(), total)));
+        // (stats-models-row-bullet) figures.bullet (●) prefix; bold name + dim
+        // (pct%) await a structured render.
+        out.push(format!("\u{25CF} {model} ({}%)", format_pct(usage.total(), total)));
         out.push(format!(
             "  In: {} \u{00B7} Out: {}",
             format_number(usage.input_tokens),

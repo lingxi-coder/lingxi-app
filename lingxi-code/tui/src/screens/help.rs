@@ -54,7 +54,10 @@ const VIEWPORT: usize = 16;
 const KEY_WIDTH: usize = 16;
 
 /// Locked screen title (claude-code `HelpV2` `Tabs title`).
-pub const TITLE: &str = "Help";
+// (help-4) `Claude Code v<version>` (HelpV2.tsx:141), per the user's strict-1:1
+// branding call. The version is LingXi's `CARGO_PKG_VERSION` (the doctor.rs
+// `cli_version` pattern) — composed at compile time.
+pub const TITLE: &str = concat!("Claude Code v", env!("CARGO_PKG_VERSION"));
 /// Locked intro line (claude-code `HelpV2/General.tsx`).
 pub const INTRO: &str = "Claude understands your codebase, makes edits with your permission, and executes commands \u{2014} right from your terminal.";
 /// Locked `Shortcuts` section header.
@@ -309,7 +312,9 @@ mod tests {
     fn render_shows_title_intro_and_section_headers() {
         let s = HelpState::new();
         let out = render_help_to_string(&s);
-        assert!(out.starts_with("Help\n"), "got: {out}");
+        // (help-4) `Claude Code v<version>` title (version-agnostic assert).
+        assert!(out.starts_with(&format!("{TITLE}\n")), "got: {out}");
+        assert!(out.starts_with("Claude Code v"), "got: {out}");
         assert!(out.contains(INTRO), "intro line present");
         assert!(out.contains(SHORTCUTS_HEADER), "Shortcuts header present");
         assert!(out.ends_with(FOOTER), "footer present, got: {out}");

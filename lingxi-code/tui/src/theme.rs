@@ -105,16 +105,45 @@ impl ThemeSetting {
         ThemeName::from_wire(s).map(ThemeSetting::Named)
     }
 
-    /// Resolve to a concrete renderable theme. Headless TUI cannot probe the
-    /// terminal background, so `Auto` resolves to `Dark` (claude-code's
-    /// dark-default fallback). Real terminal-bg detection is deferred to M8.
+    /// Resolve to a concrete renderable theme. (theme-02) `Auto` consults
+    /// `$COLORFGBG` (claude-code `detectFromColorFgBg`) for a synchronous
+    /// best-effort guess — set by some terminals (rxvt-family, Konsole,
+    /// iTerm2 with the option enabled); falls back to `Dark` when absent or
+    /// unparseable. The OSC-11 terminal-background round-trip claude-code
+    /// also uses is a real terminal query this headless port can't perform,
+    /// so that refinement stays deferred.
     #[must_use]
-    pub const fn resolve(self) -> ThemeName {
+    pub fn resolve(self) -> ThemeName {
         match self {
-            ThemeSetting::Auto => ThemeName::Dark,
+            ThemeSetting::Auto => {
+                colorfgbg_theme(std::env::var("COLORFGBG").ok().as_deref()).unwrap_or(ThemeName::Dark)
+            }
             ThemeSetting::Named(n) => n,
         }
     }
+}
+
+/// (theme-02) claude-code `detectFromColorFgBg`: parse `$COLORFGBG`
+/// (`fg;bg` or `fg;other;bg`) and classify by the LAST `;`-delimited
+/// component, an ANSI color index 0..=15. `0..=6` and `8` are dark ANSI
+/// colors; `7` (white) and `9..=15` (bright) are light. `None` when the
+/// input is missing, has no last segment, or that segment isn't an integer
+/// in `0..=15`.
+#[must_use]
+fn colorfgbg_theme(colorfgbg: Option<&str>) -> Option<ThemeName> {
+    let bg = colorfgbg?.split(';').last()?;
+    if bg.is_empty() {
+        return None;
+    }
+    let bg_num: i32 = bg.parse().ok()?;
+    if !(0..=15).contains(&bg_num) {
+        return None;
+    }
+    Some(if bg_num <= 6 || bg_num == 8 {
+        ThemeName::Dark
+    } else {
+        ThemeName::Light
+    })
 }
 
 /// Map a claude-code `ansi:<name>` color string to an iocraft `Color`.
@@ -395,12 +424,46 @@ mod tests {
     }
 
     #[test]
-    fn auto_resolves_to_dark_headless() {
-        assert_eq!(ThemeSetting::Auto.resolve(), ThemeName::Dark);
+    fn named_resolves_to_itself() {
+        // Env-independent: Named never reads $COLORFGBG.
         assert_eq!(
             ThemeSetting::Named(ThemeName::Light).resolve(),
             ThemeName::Light
         );
+        assert_eq!(
+            ThemeSetting::Named(ThemeName::Dark).resolve(),
+            ThemeName::Dark
+        );
+    }
+
+    #[test]
+    fn colorfgbg_theme_variants() {
+        // (theme-02) Pure helper — no env mutation, so no race with other
+        // tests/processes that might have $COLORFGBG set for real.
+        assert_eq!(colorfgbg_theme(None), None);
+        assert_eq!(colorfgbg_theme(Some("")), None);
+        assert_eq!(colorfgbg_theme(Some("not-a-number")), None);
+        assert_eq!(colorfgbg_theme(Some("16")), None); // out of 0..=15 range
+        assert_eq!(colorfgbg_theme(Some("-1")), None);
+        // rxvt `fg;bg` form.
+        assert_eq!(colorfgbg_theme(Some("15;0")), Some(ThemeName::Dark));
+        assert_eq!(colorfgbg_theme(Some("0;8")), Some(ThemeName::Dark));
+        assert_eq!(colorfgbg_theme(Some("0;7")), Some(ThemeName::Light));
+        assert_eq!(colorfgbg_theme(Some("0;15")), Some(ThemeName::Light));
+        // `fg;other;bg` form — last segment wins.
+        assert_eq!(colorfgbg_theme(Some("15;default;0")), Some(ThemeName::Dark));
+    }
+
+    #[test]
+    fn auto_falls_back_to_dark_without_colorfgbg() {
+        // Best-effort: in a test environment without $COLORFGBG set, Auto
+        // resolves to the documented fallback. (If a developer's real shell
+        // happens to export $COLORFGBG, this assertion would reflect that —
+        // acceptable, since the pure-helper test above is what actually
+        // locks the parsing behavior.)
+        if std::env::var("COLORFGBG").is_err() {
+            assert_eq!(ThemeSetting::Auto.resolve(), ThemeName::Dark);
+        }
     }
 
     #[test]

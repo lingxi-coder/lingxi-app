@@ -76,7 +76,7 @@ use traits::{
     AuthHandle, HttpTransport, OrchestratorHandle, OutputStream, Platform, SlashCommandDispatcher,
 };
 
-use crate::{mobile_command_registry, mobile_tool_registry};
+use crate::{mobile_command_registry, mobile_tool_registry_with_skill_loader};
 
 /// A sized newtype over the platform's `Arc<dyn HttpTransport>`.
 ///
@@ -909,7 +909,25 @@ pub async fn build_mobile_inner(
         "mobile sets sandbox_available=false because it has no live SandboxRuntimeRunner; \
          enabling sandboxing requires injecting one (see the sandbox_runner coupling note)"
     );
-    let tools = Arc::new(mobile_tool_registry(tool_ctx));
+    // Audit fix (#14): build a disk-backed Skill loader so the mobile Skill tool
+    // resolves on-disk `.claude/commands` / `.claude/skills` under the device's
+    // app-private root (`claude_home` = `<app_files_root>/.claude`). `home` = cwd
+    // so `home/.claude` resolves to the same app-private `.claude` as claude_home
+    // (the loaders dedup by name across project/user/managed layers). No
+    // session id at build time on mobile (the session is per-connection), so
+    // `${CLAUDE_SESSION_ID}` is left un-substituted — matching the loader's None
+    // path. The loader owns its own registry, so this needs no reordering of the
+    // composition below.
+    let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> = Arc::new(
+        crate::skill_loader::MobileDiskSkillLoader::load_from_disk(
+            &cwd,
+            &cfg.claude_home,
+            &cwd,
+            None,
+        )
+        .await,
+    );
+    let tools = Arc::new(mobile_tool_registry_with_skill_loader(tool_ctx, skill_loader));
 
     // P0.1 ACTIVATION on mobile (gated, default OFF) — the same gate as desktop,
     // `CLAUDE_CODE_MEMDIR_PREFETCH`. When truthy, wire the memdir-backed memory

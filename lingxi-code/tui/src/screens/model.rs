@@ -320,10 +320,20 @@ pub fn handle_model_key(
     }
 }
 
+/// (model-header-not-bold-no-subheader) claude-code `ModelPicker`'s dim
+/// sub-header line, verbatim.
+pub const SUB_HEADER: &str = "Switch between Claude models. Applies to this session and future Claude Code sessions. For other/previous model names, specify with --model.";
+
 /// Render the grouped picker body (plain text; the iocraft layer wraps it).
+///
+/// (model-header-not-bold-no-subheader) The title is bold/accent-colored at
+/// the component layer (this oracle can't carry color); the dim
+/// [`SUB_HEADER`] line is plain text content, so it's included here.
 #[must_use]
 pub fn render_model_to_string(state: &ModelScreenState) -> String {
     let mut out = String::from("Select model\n");
+    out.push_str(SUB_HEADER);
+    out.push('\n');
     out.push_str(&format!("Search: {}\n", state.query));
     let lines = state.visible_lines();
     if lines.is_empty() {
@@ -496,7 +506,7 @@ mod render_tests {
     #[test]
     fn renders_groups_headers_and_current_badge() {
         let out = render_model_to_string(&st());
-        assert!(out.starts_with("Select model\nSearch: \n"));
+        assert!(out.starts_with(&format!("Select model\n{SUB_HEADER}\nSearch: \n")), "{out}");
         assert!(out.contains("\nBuilt-in\n"));
         assert!(out.contains("\nDeepSeek\n"));
         assert!(out.contains("\u{276F} claude-opus-4-7  \u{00B7} Built-in (current)\n"));
@@ -507,7 +517,10 @@ mod render_tests {
     #[test]
     fn empty_shows_locked_state() {
         let out = render_model_to_string(&ModelScreenState::default());
-        assert_eq!(out, "Select model\nSearch: \nNo models available.");
+        assert_eq!(
+            out,
+            format!("Select model\n{SUB_HEADER}\nSearch: \nNo models available.")
+        );
     }
 
     fn st_with_unconfigured() -> ModelScreenState {

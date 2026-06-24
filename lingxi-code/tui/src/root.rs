@@ -1154,7 +1154,7 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
         && st.prompt_text.is_empty()
     {
         match st.sigint_armed_at {
-            Some(t) if t.elapsed().as_secs() < crate::app::SIGINT_WINDOW_SECS => {
+            Some(t) if t.elapsed().as_millis() < u128::from(crate::app::SIGINT_WINDOW_MS) => {
                 st.should_exit = true;
             }
             _ => {

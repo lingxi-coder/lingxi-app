@@ -28,9 +28,11 @@ use crate::components::prompt_input::{
 use crate::events::keymap::{CursorMove, KeyAction, ScrollDir};
 use crate::state::{AppState, RenderedMessage};
 
-/// Idle Ctrl-C re-arm window: the second Ctrl-C confirms exit only when
-/// the first was within this many seconds. Matches the M5-13 stdio REPL.
-pub const SIGINT_WINDOW_SECS: u64 = 2;
+/// (RRS-08) Double-press re-arm window (Ctrl-C exit confirm, and Ctrl-D —
+/// RRS-07 — which shares this same window): the second press confirms only
+/// when the first was within this many milliseconds. claude-code
+/// `hooks/useDoublePress.ts`'s default.
+pub const SIGINT_WINDOW_MS: u64 = 800;
 
 /// Crate version string surfaced to the placeholder line.
 ///
@@ -510,7 +512,7 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 st.prompt_cursor = 0;
             } else {
                 match st.sigint_armed_at {
-                    Some(t) if t.elapsed().as_secs() < SIGINT_WINDOW_SECS => {
+                    Some(t) if t.elapsed().as_millis() < u128::from(SIGINT_WINDOW_MS) => {
                         st.should_exit = true;
                     }
                     _ => {

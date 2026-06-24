@@ -67,9 +67,10 @@ pub const MODELS_EMPTY_LINE: &str = "No model usage data available";
 pub const TOKENS_PER_DAY: &str = "Tokens per Day";
 /// Locked footer hint. claude-code's footer is
 /// `Esc to cancel · r to cycle dates · ctrl+s to copy`; the `r`/`ctrl+s`
-/// controls are deferred (see module docs), so only the Esc + Tab affordances
-/// this screen actually implements are shown.
-pub const FOOTER: &str = "Tab to switch · Esc to close";
+/// controls are deferred (see module docs). We render the `Esc to cancel`
+/// verb to match claude-code (NOT the Rust-invented `Tab to switch`, which has
+/// no TS equivalent — tab switching is discoverable from the tab headers).
+pub const FOOTER: &str = "Esc to cancel";
 
 /// Per-model aggregated token usage (claude-code `ModelUsage`, the subset this
 /// screen reads). Counts are monotonic sums across every `assistant` row that
@@ -679,8 +680,11 @@ pub fn heatmap(daily: &BTreeMap<String, u64>) -> Vec<String> {
         .collect();
     vec![
         strip,
+        // (stats-heatmap-legend-indent) blank line + 4-space indent, matching
+        // claude-code heatmap.ts (`lines.push(''); '    Less '+…+' More'`).
+        String::new(),
         format!(
-            "Less {} {} {} {} More",
+            "    Less {} {} {} {} More",
             '\u{2591}', '\u{2592}', '\u{2593}', '\u{2588}'
         ),
     ]
@@ -1030,7 +1034,7 @@ mod tests {
         let out = render_stats_to_string(&s);
         assert_eq!(
             out,
-            "No stats available yet. Start using Claude Code!\nTab to switch · Esc to close"
+            "No stats available yet. Start using Claude Code!\nEsc to cancel"
         );
     }
 
@@ -1193,15 +1197,17 @@ mod tests {
         daily.insert("2026-05-02".to_string(), 5u64);
         daily.insert("2026-05-03".to_string(), 9u64);
         let rows = heatmap(&daily);
-        assert_eq!(rows.len(), 2);
+        // strip + blank line + indented legend.
+        assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].chars().count(), 3);
         assert!(
             rows[0].chars().all(|c| valid.contains(&c)),
             "got: {}",
             rows[0]
         );
-        assert!(rows[1].starts_with("Less "));
-        assert!(rows[1].ends_with(" More"));
+        assert!(rows[1].is_empty(), "blank line before legend");
+        assert!(rows[2].starts_with("    Less "));
+        assert!(rows[2].ends_with(" More"));
         // Empty -> no rows.
         assert!(heatmap(&BTreeMap::new()).is_empty());
     }

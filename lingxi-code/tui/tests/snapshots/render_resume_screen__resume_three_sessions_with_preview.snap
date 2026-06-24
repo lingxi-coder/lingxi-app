@@ -4,7 +4,7 @@ assertion_line: 35
 expression: "&frame"
 ---
 
- Resume Session
+ Resume Session (1 of 3)
 
  > first session
    10 minutes ago · 5 messages
@@ -13,4 +13,4 @@ expression: "&frame"
    third session
    13 minutes ago · 1 message
 
- Up/Down select   Enter resume   Esc cancel
+ Type to search   ↑↓ select   Enter resume   Esc cancel

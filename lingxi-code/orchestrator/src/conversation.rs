@@ -536,6 +536,16 @@ fn count_document_and_image_blocks(messages: &[protocol::ConversationMessage]) -
     (documents, images)
 }
 
+/// Bare text injected as a user message when streaming is cancelled (ESC /
+/// SIGINT) BEFORE any tool runs in the current turn. 1:1 with claude-code
+/// `messages.ts:207` `INTERRUPT_MESSAGE`.
+const INTERRUPT_MESSAGE: &str = "[Request interrupted by user]";
+
+/// Bare text injected as a user message when streaming is cancelled (ESC /
+/// SIGINT) DURING tool execution for the current turn. 1:1 with claude-code
+/// `messages.ts:208` `INTERRUPT_MESSAGE_FOR_TOOL_USE`.
+const INTERRUPT_MESSAGE_FOR_TOOL_USE: &str = "[Request interrupted by user for tool use]";
+
 /// The orchestrator. Owns the session, dispatches tools, drives the loop.
 ///
 /// Construction is via `new(...)` (batched-only) or `new_with_streaming(...)`
@@ -3853,6 +3863,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             {
                 let cost = self.snapshot_cost_real().await;
                 self.output.emit_end_turn("aborted_streaming", &cost).await;
+                // claude-code `query.ts:1046-1050`: inject the non-tool-use
+                // interrupt message so the next request can read the context
+                // (TS `createUserInterruptionMessage({toolUse: false})`).
+                // No `signal.reason !== 'interrupt'` guard needed — LingXi's
+                // `CancellationToken` carries no reason, so we always inject.
+                self.inject_meta_user_message(INTERRUPT_MESSAGE).await;
                 final_message_id = last_message_id;
                 break;
             }
@@ -4591,6 +4607,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             {
                 let cost = self.snapshot_cost_real().await;
                 self.output.emit_end_turn("aborted_tools", &cost).await;
+                // claude-code `query.ts:1501-1505`: inject the tool-use
+                // interrupt message so the next request has context
+                // (TS `createUserInterruptionMessage({toolUse: true})`).
+                // No `signal.reason !== 'interrupt'` guard needed — LingXi's
+                // `CancellationToken` carries no reason, so we always inject.
+                self.inject_meta_user_message(INTERRUPT_MESSAGE_FOR_TOOL_USE).await;
                 final_message_id = assistant_id;
                 break;
             }
@@ -4931,6 +4953,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let mut turn_count: u32 = 0;
         loop {
             if cancel.is_cancelled() {
+                // claude-code `query.ts:1046-1050`: inject the non-tool-use
+                // interrupt message on a loop-top pre-cancel (ESC fired before
+                // we even called the model this iteration).
+                self.inject_meta_user_message(INTERRUPT_MESSAGE).await;
                 return Ok(TurnOutcome::Cancelled);
             }
             if self.config.max_turns != 0 && turn_count >= self.config.max_turns {
@@ -4952,7 +4978,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     system_prompt.as_deref(),
                     Some(&mut recovery),
                 ) => r?,
-                () = cancel.cancelled() => return Ok(TurnOutcome::Cancelled),
+                () = cancel.cancelled() => {
+                    // claude-code `query.ts:1046-1050`: inject the non-tool-use
+                    // interrupt message when the cancel fires mid-API-call
+                    // (model was in-flight, no tool_use blocks produced yet).
+                    self.inject_meta_user_message(INTERRUPT_MESSAGE).await;
+                    return Ok(TurnOutcome::Cancelled);
+                }
             };
             // A3: accumulate the running per-turn output tokens (TS
             // `getTurnOutputTokens()`). No-op for accounting when budget is off.

@@ -324,6 +324,12 @@ pub(crate) const MALFORMED_TOOL_USE_RETRY_FAILED: &str =
 pub(crate) const THINKING_ONLY_NUDGE: &str =
     "[Your previous response had no visible output. Please continue and produce a user-visible response.]";
 
+/// Byte-exact bare content returned as `is_error:true` `tool_result` when the
+/// user-interrupt signal fires BEFORE a tool executes — the pre-cancellation
+/// guard in `dispatch_tool_uses_tracked`. 1:1 with claude-code
+/// `toolExecution.ts:413-453` `CANCEL_MESSAGE` (utils/messages.ts:210).
+const CANCEL_MESSAGE: &str = "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed.";
+
 /// Per-conversation recovery bookkeeping carried by the turn drivers in
 /// `conversation.rs` and threaded `&mut` into [`execute_one_turn_with_recovery`].
 ///
@@ -1948,6 +1954,32 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     tool_use_id,
                     name,
                     &serde_json::json!({ "error": msg }),
+                )
+                .await;
+            results.push(result_block);
+            continue;
+        }
+
+        // claude-code `toolExecution.ts:413-453`: if the user-interrupt token
+        // is already cancelled at the top of runToolUse (a pre-cancel — ESC
+        // fired before this tool got CPU), emit the bare CANCEL_MESSAGE as an
+        // is_error tool_result and skip execution. Mirrors the TS guard exactly:
+        // the bare string (NOT `<tool_use_error>`-wrapped), `is_error: true`,
+        // and `continue` without pushing to `post_tool_batch_calls` (tool
+        // didn't run). A `None` cancel token → guard never fires.
+        if cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
+            let result_block = ContentBlock::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                content: CANCEL_MESSAGE.to_string(),
+                is_error: true,
+                provider_tool_use_id: provider_id.clone(),
+                content_blocks: None,
+            };
+            orch.output
+                .emit_tool_result(
+                    tool_use_id,
+                    name,
+                    &serde_json::json!({ "error": CANCEL_MESSAGE }),
                 )
                 .await;
             results.push(result_block);
@@ -6692,6 +6724,117 @@ mod pre_tool_hook_tests {
             fired_cls.load(Ordering::SeqCst),
             1,
             "classifier deny MUST fire the PermissionDenied hook"
+        );
+    }
+}
+
+/// Pre-cancellation guard in `dispatch_tool_uses_tracked`:
+/// when the cancel token is already fired at dispatch entry,
+/// the function must return a `ToolResult` with `is_error:true`
+/// and content = `CANCEL_MESSAGE` for every pending tool.
+#[cfg(test)]
+mod pre_cancel_tests {
+    use super::{dispatch_tool_uses_tracked, CANCEL_MESSAGE};
+    use crate::conversation::ConversationOrchestrator;
+    use crate::test_support::{noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider};
+    use crate::OrchestratorConfig;
+    use async_trait::async_trait;
+    use protocol::{ContentBlock, ToolUseId};
+    use serde_json::json;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tool_api::context::ToolUseContext;
+    use tool_api::progress::ToolProgressSender;
+    use tool_api::registry::ToolRegistry;
+    use tool_api::tool_trait::{
+        DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+        ValidationError,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    /// A tool that always succeeds — if the pre-cancel guard lets it run, the
+    /// test will get a success result instead of the CANCEL_MESSAGE error.
+    struct NeverShouldRunTool;
+    #[async_trait]
+    impl Tool for NeverShouldRunTool {
+        fn name(&self) -> &str { "NeverRun" }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool { true }
+        fn max_result_size_chars(&self) -> usize { 1024 * 1024 }
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool { true }
+        fn is_read_only(&self, _: &serde_json::Value) -> bool { true }
+        async fn validate_input(&self, _: &serde_json::Value, _: &ToolUseContext) -> Result<(), ValidationError> { Ok(()) }
+        async fn check_permissions(&self, _: &serde_json::Value, _: &ToolUseContext) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other { reason: "test".into() },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String { "never-run".into() }
+        async fn prompt(&self, _: &PromptOptions) -> String { String::new() }
+        async fn call(&self, _: serde_json::Value, _: ToolUseContext, _: ToolProgressSender) -> Result<ToolCallResult, ToolError> {
+            panic!("NeverShouldRunTool::call must not be reached when cancel fires before dispatch");
+        }
+    }
+
+    fn orch_with_never_run() -> ConversationOrchestrator {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(NeverShouldRunTool) as Arc<dyn Tool>);
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    /// When the cancel token is already fired at dispatch entry,
+    /// `dispatch_tool_uses_tracked` must return a `ToolResult` with
+    /// `is_error:true` and content = `CANCEL_MESSAGE` for every pending tool.
+    #[tokio::test]
+    async fn pre_cancel_emits_cancel_message_for_pending_tools() {
+        let orch = orch_with_never_run();
+        let cancel = CancellationToken::new();
+        cancel.cancel(); // fire BEFORE dispatch
+
+        let uses = vec![(ToolUseId::new(), "NeverRun".to_string(), json!({}), None)];
+        let (results, prevent_continuation, injected, _) =
+            dispatch_tool_uses_tracked(&orch, &uses, Some(cancel))
+                .await
+                .expect("dispatch must succeed even on pre-cancel");
+
+        assert_eq!(results.len(), 1, "must return one result per tool");
+        match &results[0] {
+            ContentBlock::ToolResult { content, is_error, .. } => {
+                assert!(
+                    *is_error,
+                    "pre-cancel tool_result must have is_error=true, got content={content:?}"
+                );
+                assert_eq!(
+                    content, CANCEL_MESSAGE,
+                    "pre-cancel content must be the bare CANCEL_MESSAGE (not <tool_use_error>-wrapped)"
+                );
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+        // The tool did not run → no injected messages and no post-batch entries.
+        assert!(
+            injected.is_empty(),
+            "a pre-cancelled tool must inject no new messages"
+        );
+        assert!(
+            !prevent_continuation,
+            "a pre-cancelled tool must not set prevent_continuation"
         );
     }
 }

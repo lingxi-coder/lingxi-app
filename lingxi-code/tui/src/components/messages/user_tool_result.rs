@@ -240,6 +240,26 @@ pub fn render_edit_write_diff_lines(
     diff::render(old, new, path, theme)
 }
 
+/// (fileedit-result-added-removed-header) claude-code
+/// `FileEditToolUpdatedMessage`'s "Added N line(s)[, removed M line(s)]"
+/// summary — `None` when there are no changes at all. `Removed` is
+/// capitalized only when it's the sole clause (no additions).
+#[must_use]
+pub fn added_removed_header(additions: usize, removals: usize) -> Option<String> {
+    let added = (additions > 0)
+        .then(|| format!("Added {additions} {}", if additions > 1 { "lines" } else { "line" }));
+    let removed = (removals > 0).then(|| {
+        let cap = if additions == 0 { "R" } else { "r" };
+        format!("{cap}emoved {removals} {}", if removals > 1 { "lines" } else { "line" })
+    });
+    match (added, removed) {
+        (Some(a), Some(r)) => Some(format!("{a}, {r}")),
+        (Some(a), None) => Some(a),
+        (None, Some(r)) => Some(r),
+        (None, None) => None,
+    }
+}
+
 /// Apply both the line cap and the byte cap. Returns the truncated body
 /// plus a `truncated_lines: usize` count (0 when no truncation bit).
 ///
@@ -472,7 +492,19 @@ pub fn UserToolResultMessage(props: &UserToolResultProps) -> impl Into<AnyElemen
             props.theme_name,
         );
         let prefix = if props.focused { FOCUS_PREFIX } else { "" };
-        let header = format!("{prefix}{MARKER}");
+        // (fileedit-result-added-removed-header) "Added N line(s)[, removed M
+        // line(s)]" summary inside the gutter, above the diff rows. claude-code
+        // bolds just the counts; rendered as one dim Text here (the diff
+        // rows' own per-span styling is preserved; this header line is new,
+        // not an existing row, so it's a deliberate, low-priority styling
+        // simplification — same precedent as hook_progress.rs's deferred
+        // per-run bold).
+        let (additions, removals) = diff::diff_stats(
+            props.old_string.as_deref().unwrap_or(""),
+            props.new_string.as_deref().unwrap_or(""),
+        );
+        let summary = added_removed_header(additions, removals).unwrap_or_default();
+        let header = format!("{prefix}{MARKER}{summary}");
         let row_elements: Vec<AnyElement<'static>> = lines
             .into_iter()
             .map(|line| {
@@ -576,6 +608,41 @@ mod tests {
     fn marker_is_arc_gutter_bytes() {
         // "  " + U+23BF (0xE2 0x8E 0xBF) + "  " — matches MessageResponse.tsx.
         assert_eq!(MARKER.as_bytes(), &[0x20, 0x20, 0xE2, 0x8E, 0xBF, 0x20, 0x20]);
+    }
+
+    #[test]
+    fn added_removed_header_variants() {
+        // (fileedit-result-added-removed-header)
+        assert_eq!(added_removed_header(0, 0), None);
+        assert_eq!(added_removed_header(1, 0).as_deref(), Some("Added 1 line"));
+        assert_eq!(added_removed_header(3, 0).as_deref(), Some("Added 3 lines"));
+        // Sole removal clause -> capitalized "Removed".
+        assert_eq!(added_removed_header(0, 1).as_deref(), Some("Removed 1 line"));
+        assert_eq!(added_removed_header(0, 2).as_deref(), Some("Removed 2 lines"));
+        // Both present -> lowercase "removed" joined with ", ".
+        assert_eq!(
+            added_removed_header(2, 3).as_deref(),
+            Some("Added 2 lines, removed 3 lines")
+        );
+    }
+
+    #[test]
+    fn diff_branch_prepends_added_removed_header_inside_gutter() {
+        // (fileedit-result-added-removed-header)
+        let lines = render_edit_write_diff_lines(
+            "Write",
+            None,
+            Some("line one\nline two"),
+            Some("x.txt"),
+            crate::theme::ThemeName::Dark,
+        );
+        assert!(!lines.is_empty());
+        let (additions, removals) = diff::diff_stats("", "line one\nline two");
+        assert_eq!((additions, removals), (2, 0));
+        assert_eq!(
+            added_removed_header(additions, removals).as_deref(),
+            Some("Added 2 lines")
+        );
     }
 
     #[test]

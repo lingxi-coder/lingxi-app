@@ -354,6 +354,24 @@ fn grouped_hunks(old: &str, new: &str) -> Vec<(HunkHeader, Vec<DiffRow>)> {
     hunks
 }
 
+/// (fileedit-result-added-removed-header) Count of added/removed lines
+/// between `old` and `new` — claude-code's `structuredPatch.reduce(...)` line
+/// counts, for the `Added N line(s)[, removed M line(s)]` summary header.
+#[must_use]
+pub fn diff_stats(old: &str, new: &str) -> (usize, usize) {
+    let diff = TextDiff::from_lines(old, new);
+    let mut additions = 0usize;
+    let mut removals = 0usize;
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Insert => additions += 1,
+            ChangeTag::Delete => removals += 1,
+            ChangeTag::Equal => {}
+        }
+    }
+    (additions, removals)
+}
+
 /// Render a structured diff of `old` → `new`. `path` drives syntax language
 /// detection (claude-code's `filePath` prop). Hunks are separated by unified
 /// `@@` headers; output past `MAX_DIFF_LINES` body rows is truncated with a
@@ -615,6 +633,15 @@ mod tests {
         // Context line "a" is line 1, add line "b" is line 2.
         assert!(rows.iter().any(|l| rowline(l).contains('1')));
         assert!(rows.iter().any(|l| rowline(l).contains('2')));
+    }
+
+    #[test]
+    fn diff_stats_counts_additions_and_removals() {
+        // (fileedit-result-added-removed-header)
+        assert_eq!(diff_stats("a\nb\n", "a\nb\n"), (0, 0));
+        assert_eq!(diff_stats("a\n", "a\nb\nc\n"), (2, 0));
+        assert_eq!(diff_stats("a\nb\nc\n", "a\n"), (0, 2));
+        assert_eq!(diff_stats("a\nb\n", "a\nc\nd\n"), (2, 1));
     }
 
     #[test]

@@ -194,6 +194,85 @@ pub async fn persist_permission_update(
     Ok(true)
 }
 
+/// Remove `rule`'s string form from `permissions.{behavior}` of `raw` settings
+/// JSON (the inverse of [`apply_rule_to_settings_json`]). Returns:
+/// - `Ok(Some(new_json))` — at least one matching entry was removed; `new_json`
+///   is the pretty-printed updated settings (trailing newline).
+/// - `Ok(None)` — no matching entry (nothing to write).
+/// - `Err(())` — `raw` is non-empty and not a JSON object (caller maps to
+///   [`PersistError::BrokenJson`] and must NOT overwrite).
+///
+/// Matching is canonical (both sides normalized via `PermissionRuleValue`), so a
+/// legacy on-disk alias of the same rule is removed too.
+fn remove_rule_from_settings_json(raw: &str, rule: &PermissionRule) -> Result<Option<String>, ()> {
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    let mut root: Value = serde_json::from_str(raw).map_err(|_| ())?;
+    let obj = root.as_object_mut().ok_or(())?;
+    let Some(perms) = obj.get_mut("permissions") else {
+        return Ok(None);
+    };
+    let perms_obj = perms.as_object_mut().ok_or(())?;
+    let key = behavior_key(rule.behavior);
+    let Some(arr) = perms_obj.get_mut(key) else {
+        return Ok(None);
+    };
+    let arr_vec = arr.as_array_mut().ok_or(())?;
+
+    let target = rule.value.to_rule_string();
+    let before = arr_vec.len();
+    arr_vec.retain(|existing| {
+        existing.as_str().is_none_or(|s| {
+            PermissionRuleValue::from_rule_string(s).to_rule_string() != target
+        })
+    });
+    if arr_vec.len() == before {
+        return Ok(None); // nothing matched.
+    }
+    let serialized = serde_json::to_string_pretty(&root).map_err(|_| ())?;
+    Ok(Some(serialized + "\n"))
+}
+
+/// Remove `update.rule` from its destination settings file — the inverse of
+/// [`persist_permission_update`], for the interactive `/permissions` delete
+/// (PERM-1). Best-effort + idempotent: `Ok(true)` when an entry was removed,
+/// `Ok(false)` when the destination is not persistable or no entry matched.
+///
+/// # Errors
+/// [`PersistError::BrokenJson`] if the destination is non-empty and not valid
+/// JSON (left untouched); [`PersistError::Io`] on a read/write failure.
+pub async fn remove_permission_update(
+    update: &PermissionUpdate,
+    paths: &PermissionPaths,
+) -> Result<bool, PersistError> {
+    let Some(path) = paths.destination_path(update.destination) else {
+        return Ok(false);
+    };
+    let raw = match tokio::fs::read_to_string(&path).await {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            return Err(PersistError::Io {
+                path: path.clone(),
+                source: e,
+            })
+        }
+    };
+    let Some(new_json) = remove_rule_from_settings_json(&raw, &update.rule)
+        .map_err(|()| PersistError::BrokenJson(path.clone()))?
+    else {
+        return Ok(false);
+    };
+    tokio::fs::write(&path, new_json)
+        .await
+        .map_err(|e| PersistError::Io {
+            path: path.clone(),
+            source: e,
+        })?;
+    Ok(true)
+}
+
 async fn ensure_dir(parent: &Path, path: &Path) -> Result<(), PersistError> {
     tokio::fs::create_dir_all(parent)
         .await
@@ -264,6 +343,49 @@ mod tests {
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["permissions"]["allow"], json!(["Bash"]));
         assert_eq!(v["model"], json!("x"));
+    }
+
+    // ── remove (PERM-1) ──────────────────────────────────────────────────
+
+    #[test]
+    fn removes_rule_preserving_others() {
+        let raw = r#"{ "model": "x", "permissions": { "allow": ["Read", "Edit(src/**)"], "deny": ["Bash(rm:*)"] } }"#;
+        let rule = allow_rule("Read", PermissionUpdateDestination::LocalSettings).rule;
+        let out = remove_rule_from_settings_json(raw, &rule).unwrap().unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["permissions"]["allow"], json!(["Edit(src/**)"]));
+        assert_eq!(v["permissions"]["deny"], json!(["Bash(rm:*)"]));
+        assert_eq!(v["model"], json!("x"));
+        assert!(out.ends_with('\n'));
+    }
+
+    #[test]
+    fn remove_is_noop_when_absent_or_empty() {
+        // Rule not present → None.
+        let raw = r#"{ "permissions": { "allow": ["Read"] } }"#;
+        let rule = allow_rule("Bash", PermissionUpdateDestination::LocalSettings).rule;
+        assert!(remove_rule_from_settings_json(raw, &rule).unwrap().is_none());
+        // Empty / missing permissions → None.
+        assert!(remove_rule_from_settings_json("", &rule).unwrap().is_none());
+        assert!(remove_rule_from_settings_json(r#"{ "model": "x" }"#, &rule)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn remove_matches_legacy_alias() {
+        // On-disk "Task" normalizes to "Agent"; removing "Agent" removes it.
+        let raw = r#"{ "permissions": { "allow": ["Task", "Read"] } }"#;
+        let agent = allow_rule("Agent", PermissionUpdateDestination::LocalSettings).rule;
+        let out = remove_rule_from_settings_json(raw, &agent).unwrap().unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["permissions"]["allow"], json!(["Read"]));
+    }
+
+    #[test]
+    fn remove_broken_json_errors_without_write() {
+        let rule = allow_rule("Bash", PermissionUpdateDestination::LocalSettings).rule;
+        assert!(remove_rule_from_settings_json("{not json", &rule).is_err());
     }
 
     #[test]

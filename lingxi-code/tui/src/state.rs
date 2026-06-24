@@ -614,6 +614,11 @@ pub struct AppState {
     /// (M7-15) Stored theme *preference* (`auto` + 6 names). `Auto` resolves
     /// to a concrete `ThemeName` for `theme`. Persisted to `settings.json`.
     pub theme_setting: ThemeSetting,
+    /// (theme-syntax-toggle) Session-level `syntaxHighlightingDisabled`
+    /// (claude-code app state). Toggled by Ctrl+T in the theme picker; drives
+    /// the picker's syntax-status line + preview. Like `theme_setting`, disk
+    /// persistence is a separate concern.
+    pub syntax_highlighting_disabled: bool,
     /// `Some` while a turn is being driven by the orchestrator.
     pub in_flight_turn: Option<TurnInFlight>,
     /// Timestamp of the first Ctrl-C while idle; cleared after 2s.
@@ -985,6 +990,7 @@ impl AppState {
             status,
             theme: theme_for(ThemeSetting::Auto.resolve()),
             theme_setting: ThemeSetting::Auto,
+            syntax_highlighting_disabled: false,
             in_flight_turn: None,
             sigint_armed_at: None,
             should_exit: false,
@@ -1145,7 +1151,8 @@ impl AppState {
     /// directly from the sync `/theme` submit path.
     pub fn open_theme_picker(&mut self) {
         self.active_screen = Some(crate::screens::Screen::Theme(
-            crate::screens::theme::ThemePickerState::new(self.theme_setting),
+            crate::screens::theme::ThemePickerState::new(self.theme_setting)
+                .with_syntax_disabled(self.syntax_highlighting_disabled),
         ));
         crate::telemetry::screen_opened("theme");
     }

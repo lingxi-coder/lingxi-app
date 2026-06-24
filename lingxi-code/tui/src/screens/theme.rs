@@ -66,6 +66,10 @@ pub struct ThemePickerState {
     pub highlighted: usize,
     /// Setting active when the picker opened (restored on Esc).
     prior: ThemeSetting,
+    /// (theme-syntax-toggle) Mirror of `AppState.syntax_highlighting_disabled`,
+    /// synced on open + on the Ctrl+T toggle. Drives the syntax-status line +
+    /// whether the preview is syntax-highlighted.
+    pub syntax_disabled: bool,
 }
 
 impl ThemePickerState {
@@ -82,7 +86,15 @@ impl ThemePickerState {
         Self {
             highlighted,
             prior: current,
+            syntax_disabled: false,
         }
+    }
+
+    /// Builder: open focused on `current` with the live syntax-disabled flag.
+    #[must_use]
+    pub fn with_syntax_disabled(mut self, disabled: bool) -> Self {
+        self.syntax_disabled = disabled;
+        self
     }
 
     /// The setting active when the picker opened (restored on cancel).
@@ -137,6 +149,14 @@ pub fn theme_picker_handle_key(
             state.preview(app);
             ThemePickerOutcome::Stay
         }
+        // (theme-syntax-toggle) Ctrl+T toggles syntax highlighting
+        // (claude-code `theme:toggleSyntaxHighlighting`, default ctrl+t).
+        KeyCode::Char('t') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+            let next = !state.syntax_disabled;
+            state.syntax_disabled = next;
+            app.syntax_highlighting_disabled = next;
+            ThemePickerOutcome::Stay
+        }
         KeyCode::Enter => {
             app.set_theme(state.highlighted_setting());
             ThemePickerOutcome::Commit
@@ -168,12 +188,38 @@ pub fn render_theme_picker_to_string(state: &ThemePickerState) -> String {
     }
     // Preview: the locked diff snippet flattened to plain text (the colors live
     // in the component; the oracle keeps the text for layout regressions).
-    let preview = diff::render(PREVIEW_OLD, PREVIEW_NEW, Some("greet.js"), ThemeName::Dark);
+    // (theme-syntax-toggle) When syntax is disabled, the preview uses no path →
+    // no language → plain code (the same gate the component applies).
+    let preview = diff::render(PREVIEW_OLD, PREVIEW_NEW, preview_path(state), ThemeName::Dark);
     for line in preview {
         out.push_str(&line.plain_text());
         out.push('\n');
     }
+    // (theme-syntax-status-line) dim status line below the preview.
+    out.push_str(&syntax_status_line(state.syntax_disabled));
     out
+}
+
+/// The preview's syntax `path` — `Some("greet.js")` (JS highlighting) normally,
+/// `None` when syntax highlighting is toggled off (so `diff::render` detects no
+/// language and renders plain).
+fn preview_path(state: &ThemePickerState) -> Option<&'static str> {
+    if state.syntax_disabled {
+        None
+    } else {
+        Some("greet.js")
+    }
+}
+
+/// The dim syntax-status line shown under the preview (claude-code ThemePicker
+/// `Syntax highlighting enabled/disabled (<shortcut> to …)`).
+#[must_use]
+pub fn syntax_status_line(disabled: bool) -> String {
+    if disabled {
+        "Syntax highlighting disabled (ctrl+t to enable)".to_string()
+    } else {
+        "Syntax highlighting enabled (ctrl+t to disable)".to_string()
+    }
 }
 
 /// Props for [`ThemePickerScreen`].
@@ -211,8 +257,10 @@ pub fn ThemePickerScreen(props: &ThemePickerScreenProps) -> impl Into<AnyElement
 
     // Preview: the locked diff snippet rendered as a `StructuredDiff`. The
     // active `theme_name` flows into the syntect highlighter so the preview
-    // code recolors live with the highlighted theme.
-    let preview = diff::render(PREVIEW_OLD, PREVIEW_NEW, Some("greet.js"), props.theme_name);
+    // code recolors live with the highlighted theme. (theme-syntax-toggle) When
+    // syntax highlighting is toggled off, the preview drops the path → no
+    // language → plain code.
+    let preview = diff::render(PREVIEW_OLD, PREVIEW_NEW, preview_path(&state), props.theme_name);
     let preview_rows: Vec<AnyElement<'static>> = preview
         .into_iter()
         .map(|line| {
@@ -260,6 +308,8 @@ pub fn ThemePickerScreen(props: &ThemePickerScreenProps) -> impl Into<AnyElement
             ) {
                 #(preview_rows)
             }
+            // (theme-syntax-status-line) dim syntax-status line below the preview.
+            Text(content: syntax_status_line(state.syntax_disabled), color: theme.dim)
             View(margin_top: 1) {
                 Text(content: "Up/Down select   Enter apply   Esc cancel".to_string(), color: theme.dim)
             }
@@ -303,5 +353,26 @@ mod tests {
         // Preview diff carries both sides of the locked snippet.
         assert!(s.contains("Hello, World!"));
         assert!(s.contains("Hello, Claude!"));
+    }
+
+    #[test]
+    fn syntax_status_line_reflects_disabled_flag() {
+        // (theme-syntax-status-line) enabled by default.
+        let st = ThemePickerState::new(ThemeSetting::Named(ThemeName::Dark));
+        assert!(
+            render_theme_picker_to_string(&st)
+                .contains("Syntax highlighting enabled (ctrl+t to disable)"),
+            "enabled status line missing"
+        );
+        assert_eq!(preview_path(&st), Some("greet.js"));
+
+        // (theme-syntax-toggle) disabled → flipped status line + no preview lang.
+        let st = st.with_syntax_disabled(true);
+        let s = render_theme_picker_to_string(&st);
+        assert!(
+            s.contains("Syntax highlighting disabled (ctrl+t to enable)"),
+            "got: {s}"
+        );
+        assert_eq!(preview_path(&st), None);
     }
 }

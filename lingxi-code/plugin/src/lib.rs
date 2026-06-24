@@ -15,6 +15,7 @@
 pub mod agent_validation;
 pub mod blocklist;
 pub mod discovery;
+mod git;
 pub mod lifecycle;
 pub mod loader;
 pub mod manager;

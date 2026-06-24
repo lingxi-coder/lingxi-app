@@ -3,9 +3,9 @@ source: tui/tests/snapshot_palette_completion.rs
 assertion_line: 62
 expression: out
 ---
-/copy – (unimplemented in v0.6.0)
-/color – (unimplemented in v0.6.0)
-/commit – (unimplemented in v0.6.0)
+/copy – Copy Claude's last response to clipboard (or /copy N
+/color – Set the prompt bar color for this session
+/commit – Create a git commit
 /config – Open settings
 /compact – Free up context by summarizing the conversation
 ❯o/co 

@@ -475,9 +475,15 @@ pub fn is_command_env_disabled(name: &str) -> bool {
         .is_some_and(|(_, var)| std::env::var(var).is_ok_and(|v| !v.is_empty()))
 }
 
-/// Descriptions for the 18 core commands, used for `/help` rendering in M5-10.
-/// Lookup by core name; falls back to `"(unimplemented in v0.6.0)"` for the 81
-/// non-core entries.
+/// One-line descriptions for the builtin commands, used for slash-palette +
+/// `/help` rendering. The first 18 are the M5-10 core set; the remainder
+/// (cp-01) are the real per-command `description:` strings ported from each
+/// claude-code `commands/<name>` object so no VISIBLE palette row shows the
+/// `"(unimplemented in v0.6.0)"` placeholder. Commands that are hidden/disabled
+/// (internal/dev/entitlement-gated) or LingXi-specific with no claude-code
+/// analogue keep the placeholder fallback. Descriptions retain the "Claude
+/// Code" product noun verbatim (1:1 with the oracle — the branding judgment
+/// applies to screen titles, not command help strings).
 #[must_use]
 pub fn core_description(name: &str) -> &'static str {
     match name {
@@ -501,6 +507,58 @@ pub fn core_description(name: &str) -> &'static str {
         // (`name:"usage",aliases:["cost","stats"],...`).
         "usage" => "Show session cost, plan usage, and what's contributing to your limits",
         "version" => "Print version information",
+        // (cp-01) Remaining visible builtins — real claude-code descriptions.
+        "add-dir" => "Add a new working directory",
+        "advisor" => "Configure the advisor model",
+        "branch" => "Create a branch of the current conversation at this point",
+        "bridge" => "Connect this terminal for remote-control sessions",
+        "btw" => "Ask a quick side question without interrupting the main conversation",
+        "chrome" => "Claude in Chrome (Beta) settings",
+        "color" => "Set the prompt bar color for this session",
+        "commit" => "Create a git commit",
+        "commit-push-pr" => "Commit, push, and open a PR",
+        "context" => "Visualize current context usage as a colored grid",
+        "copy" => "Copy Claude's last response to clipboard (or /copy N for the Nth-latest)",
+        "desktop" => "Continue the current session in Claude Desktop",
+        "diff" => "View uncommitted changes and per-turn diffs",
+        "effort" => "Set effort level for model usage",
+        "export" => "Export the current conversation to a file or clipboard",
+        "fast" => "Toggle fast mode",
+        "feedback" => "Submit feedback about Claude Code",
+        "files" => "List all files currently in context",
+        "ide" => "Manage IDE integrations and show status",
+        "init-verifiers" => "Create verifier skill(s) for automated verification of code changes",
+        "insights" => "Generate a report analyzing your Claude Code sessions",
+        "install" => "Install Claude Code native build",
+        "install-github-app" => "Set up Claude GitHub Actions for a repository",
+        "install-slack-app" => "Install the Claude Slack app",
+        "keybindings" => "Open or create your keybindings configuration file",
+        "mobile" => "Show QR code to download the Claude mobile app",
+        "passes" => "Share a free week of Claude Code with friends and earn extra usage",
+        "plan" => "Enable plan mode or view the current session plan",
+        "plugin" => "Manage Claude Code plugins",
+        "privacy-settings" => "View and update your privacy settings",
+        "release-notes" => "View release notes",
+        "reload-plugins" => "Activate pending plugin changes in the current session",
+        "remote-env" => "Configure the default remote environment for teleport sessions",
+        "remote-setup" => "Setup Claude Code on the web (requires connecting your GitHub account)",
+        "rename" => "Rename the current conversation",
+        "resume" => "Resume a previous conversation",
+        "review" => "Review a pull request",
+        "rewind" => "Restore the code and/or conversation to a previous point",
+        "sandbox-toggle" => "Toggle sandbox mode for bash commands",
+        "security-review" => "Complete a security review of the pending changes on the current branch",
+        "session" => "Show remote session URL and QR code",
+        "skills" => "List available skills",
+        "statusline" => "Set up Claude Code's status line UI",
+        "stickers" => "Order Claude Code stickers",
+        "tasks" => "List and manage background tasks",
+        "terminal-setup" => "Install Shift+Enter key binding for newlines",
+        "theme" => "Change the theme",
+        "ultraplan" => "Claude Code on the web drafts an advanced plan you can edit and approve",
+        "upgrade" => "Upgrade to Max for higher rate limits and more Opus",
+        "voice" => "Toggle voice mode",
+        "x402" => "Configure x402 crypto payments (USDC on Base)",
         _ => "(unimplemented in v0.6.0)",
     }
 }

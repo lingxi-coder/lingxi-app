@@ -9,17 +9,17 @@
 //!   ... (68 lines, sorted ASCII-ascending) ...
 //! ```
 //!
-//! Where `<description>` is `core_description(name)` for the 18 core
-//! commands and the literal `"(unimplemented in v0.6.0)"` for the other
-//! non-core entries. The 26 hidden/disabled commands
-//! ([`is_palette_hidden`]) are filtered out to match claude-code's
+//! Where `<description>` is `core_description(name)` — the real per-command
+//! one-liner for every visible builtin with a claude-code analogue (cp-01),
+//! falling back to the literal `"(unimplemented in v0.6.0)"` only for the few
+//! LingXi-specific / internal commands without one. The 26 hidden/disabled
+//! commands ([`is_palette_hidden`]) are filtered out to match claude-code's
 //! `commands.filter(c => !c.isHidden && !$te(c))` help/palette filter, so the
 //! default total (no `DISABLE_*_COMMAND` env gates set) is 1 header + 68
 //! visible commands = 69 lines.
 
 use crate::builtin_support::names::{
     core_description, is_command_env_disabled, is_palette_hidden, BUILTIN_COMMAND_NAMES,
-    BUILTIN_CORE_NAMES,
 };
 
 /// Render the locked `/help` output as a single `String`.
@@ -58,20 +58,16 @@ pub fn render_help_screen() -> String {
         }
         out.push_str("  ");
 
-        // Column 2: core description if known, else unimplemented marker.
-        if is_core(name) {
-            out.push_str(core_description(name));
-        } else {
-            out.push_str("(unimplemented in v0.6.0)");
-        }
+        // Column 2: the real per-command description (cp-01). `core_description`
+        // now covers every visible builtin with a claude-code analogue and
+        // returns the `(unimplemented in v0.6.0)` placeholder only for the few
+        // LingXi-specific / internal commands without one — so `/help` and the
+        // slash palette stay in lock-step.
+        out.push_str(core_description(name));
         out.push('\n');
     }
 
     out
-}
-
-fn is_core(name: &str) -> bool {
-    BUILTIN_CORE_NAMES.contains(&name)
 }
 
 #[cfg(test)]
@@ -131,14 +127,15 @@ mod tests {
     }
 
     #[test]
-    fn first_command_line_is_add_dir_unimplemented() {
+    fn first_command_line_is_add_dir_with_real_description() {
         let s = render_help_screen();
         let line2 = s.lines().nth(1).unwrap();
         // Col-1 width = longest_name (rate-limit-options = 18) + 2 = 20.
-        // "/add-dir" (8 chars: `/`+`add-dir`) gets 13 spaces of right-padding
-        // to reach col-1=20, then 2 spaces of separator before description.
+        // "/add-dir" (8 chars: `/`+`add-dir`) gets 12 spaces of right-padding
+        // to reach col-1=20, then 2 spaces of separator before the description.
+        // (cp-01) add-dir now carries its real claude-code description.
         let expected = format!(
-            "  /add-dir{}  (unimplemented in v0.6.0)",
+            "  /add-dir{}  Add a new working directory",
             " ".repeat(20 - 8)
         );
         assert_eq!(line2, expected);

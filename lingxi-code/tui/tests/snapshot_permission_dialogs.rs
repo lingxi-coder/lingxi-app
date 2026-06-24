@@ -48,10 +48,13 @@ fn snapshot_exit_plan_mode_with_5_line_plan() {
     };
     let frame = element.to_string();
     insta::assert_snapshot!("exit_plan_mode_with_5_line_plan", &frame);
-    assert!(frame.contains("Claude Code needs your approval for the plan"));
+    // (perm-06) "Ready to code?" + plan-approval options.
+    assert!(frame.contains("Ready to code?"), "got: {frame}");
     assert!(frame.contains("1. Read foo.rs"));
     assert!(frame.contains("5. Commit"));
-    assert!(frame.contains("> [1] Allow Once"));
+    assert!(frame.contains("> Yes, manually approve edits"), "got: {frame}");
+    assert!(frame.contains("Yes, auto-accept edits"), "got: {frame}");
+    assert!(frame.contains("No, keep planning"), "got: {frame}");
 }
 
 #[test]

@@ -51,7 +51,11 @@ pub fn handle_key(state: &mut ExitPlanModeState, key: KeyEvent) -> Option<Dialog
 /// iocraft component rendering the plan body + 3 buttons.
 #[component]
 pub fn ExitPlanMode(props: &ExitPlanModeProps) -> impl Into<AnyElement<'static>> {
-    let header = "Claude Code needs your approval for the plan".to_string();
+    // (perm-06) claude-code `ExitPlanMode` dialog: bold "Ready to code?" title +
+    // the plan + the plan-approval option list (NOT the generic [1]/[2]/[N]).
+    // AllowAlways persists → "auto-accept edits"; AllowOnce proceeds once →
+    // "manually approve edits"; Deny stays in plan mode → "No, keep planning".
+    let header = "Ready to code?".to_string();
     let plan = props.plan.clone();
     let focus = props.focus;
     let button_label = move |for_focus: DialogFocus, label: &str| -> String {
@@ -61,16 +65,16 @@ pub fn ExitPlanMode(props: &ExitPlanModeProps) -> impl Into<AnyElement<'static>>
             format!("  {label}")
         }
     };
-    let allow_once = button_label(DialogFocus::AllowOnce, "[1] Allow Once");
-    let allow_always = button_label(DialogFocus::AllowAlways, "[2] Allow Always");
-    let deny = button_label(DialogFocus::Deny, "[N] Deny");
+    let allow_once = button_label(DialogFocus::AllowOnce, "Yes, manually approve edits");
+    let allow_always = button_label(DialogFocus::AllowAlways, "Yes, auto-accept edits");
+    let deny = button_label(DialogFocus::Deny, "No, keep planning");
     element! {
         View(
             flex_direction: FlexDirection::Column,
             border_style: BorderStyle::Round,
             padding: 1,
         ) {
-            Text(content: header)
+            Text(content: header, weight: Weight::Bold)
             View(flex_direction: FlexDirection::Column, padding_top: 1) {
                 Text(content: plan)
             }

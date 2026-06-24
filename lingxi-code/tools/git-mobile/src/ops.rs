@@ -787,6 +787,48 @@ pub(crate) fn ssh_allowed(
     Ok(())
 }
 
+/// Gate a remote URL on its transport scheme, enforcing the tool's documented
+/// **HTTPS-ONLY** contract as a *positive* allowlist rather than an SSH-only
+/// denylist (audit finding: an SSH-only gate let `http://` and `git://` through).
+///
+/// - `https://` — always allowed (TLS + host credential over an encrypted
+///   channel).
+/// - SSH remotes (`ssh://`, `git@…`, scp syntax) — delegated to [`ssh_allowed`]
+///   (allowed only when SSH credentials are configured).
+/// - `file://` — allowed ONLY in test builds (the `file://` bare-remote suite);
+///   rejected in production so a model-supplied local path / `file://` cannot be
+///   used to read arbitrary app-UID files into the workspace.
+/// - everything else — rejected. In particular `http://` would send the
+///   host-supplied PAT as cleartext HTTP Basic auth (token exfil on hostile
+///   Wi-Fi) and `git://` is unauthenticated/MITM-able; both contradict the
+///   advertised HTTPS-only policy.
+///
+/// Called on the model-supplied `repo_url` at clone and on the *resolved* remote
+/// URL at fetch/push, so a remote configured out of band is re-checked.
+///
+/// # Errors
+///
+/// [`GitOpError::InvalidInput`] naming HTTPS for any non-allowed scheme.
+pub(crate) fn transport_allowed(
+    url: &str,
+    ssh: Option<&crate::auth::SshConfig>,
+) -> Result<(), GitOpError> {
+    if is_ssh_url(url) {
+        return ssh_allowed(url, ssh);
+    }
+    let lower = url.trim().to_ascii_lowercase();
+    if lower.starts_with("https://") {
+        return Ok(());
+    }
+    #[cfg(test)]
+    if lower.starts_with("file://") {
+        return Ok(());
+    }
+    Err(GitOpError::InvalidInput(format!(
+        "remote `{url}` is not allowed; only HTTPS (https://) remotes are supported"
+    )))
+}
+
 /// Clone `repo_url` into `dest_rel` (relative to `workspace_root`).
 ///
 /// SSH URLs are rejected (G7). The destination is validated to stay inside the
@@ -811,7 +853,7 @@ pub fn clone(
     if repo_url.is_empty() {
         return Err(GitOpError::InvalidInput("clone requires `repo_url`".into()));
     }
-    ssh_allowed(repo_url, net.ssh.as_ref())?;
+    transport_allowed(repo_url, net.ssh.as_ref())?;
 
     // Resolve + validate the destination. `dest` itself does not exist yet, so
     // canonicalize its PARENT and require that to be inside the workspace root,
@@ -879,7 +921,7 @@ pub fn fetch(
         .find_remote(name)
         .map_err(|e| GitOpError::from_git2(&e))?;
     if let Ok(url) = remote.url() {
-        ssh_allowed(url, net.ssh.as_ref())?;
+        transport_allowed(url, net.ssh.as_ref())?;
     }
     crate::auth::set_ca_location(net.ca_dir.as_deref())?;
     crate::auth::ensure_ssh_homedir(net.ssh.as_ref())?;
@@ -996,7 +1038,7 @@ pub fn push(
         .find_remote(remote_name)
         .map_err(|e| GitOpError::from_git2(&e))?;
     if let Ok(url) = remote.url() {
-        ssh_allowed(url, net.ssh.as_ref())?;
+        transport_allowed(url, net.ssh.as_ref())?;
     }
 
     crate::auth::set_ca_location(net.ca_dir.as_deref())?;
@@ -1096,6 +1138,27 @@ mod tests {
         assert!(matches!(err, GitOpError::InvalidInput(ref m) if m.to_lowercase().contains("ssh")));
         assert!(ssh_allowed("https://github.com/o/r.git", None).is_ok(), "https unaffected");
         assert!(ssh_allowed("ssh://git@host/o/r.git", Some(&ssh)).is_ok(), "ssh:// allowed with config");
+    }
+
+    #[test]
+    fn transport_allowlist_is_https_only() {
+        let ssh = crate::auth::SshConfig { private_key_path: "/x/id".into(), ..Default::default() };
+        // https is the only allowed remote scheme in production.
+        assert!(transport_allowed("https://github.com/o/r.git", None).is_ok());
+        assert!(transport_allowed("HTTPS://GitHub.com/o/r.git", None).is_ok(), "case-insensitive");
+        // http:// leaks the PAT in cleartext; git:// is unauthenticated — both rejected.
+        for bad in ["http://attacker/x.git", "git://attacker/x.git", "/data/data/pkg/db", "ftp://h/x"] {
+            let err = transport_allowed(bad, None).unwrap_err();
+            assert!(
+                matches!(err, GitOpError::InvalidInput(ref m) if m.to_lowercase().contains("https")),
+                "{bad} must be rejected naming HTTPS, got {err:?}"
+            );
+        }
+        // SSH remotes still flow through the SSH credential gate.
+        assert!(transport_allowed("git@github.com:o/r.git", Some(&ssh)).is_ok());
+        assert!(transport_allowed("git@github.com:o/r.git", None).is_err(), "ssh needs config");
+        // file:// is permitted only under cfg(test) (this suite relies on it).
+        assert!(transport_allowed("file:///tmp/x", None).is_ok(), "file:// allowed in tests");
     }
 
     /// Build a repo at `dir` with a known two-commit history:

@@ -148,6 +148,8 @@ mod android_impl {
     extern "C" {
         fn minijail_new() -> *mut RawMinijail;
         fn minijail_no_new_privs(j: *mut RawMinijail);
+        //   void minijail_close_open_fds(struct minijail *j);       // :235
+        fn minijail_close_open_fds(j: *mut RawMinijail);
         fn minijail_rlimit(
             j: *mut RawMinijail,
             r#type: c_int,
@@ -252,6 +254,49 @@ mod android_impl {
         }
     }
 
+    /// Block until the jailed LEADER `pid` terminates, WITHOUT reaping it.
+    ///
+    /// Uses `waitid(P_PID, …, WEXITED | WNOWAIT)`: it returns when the leader has
+    /// exited but leaves it a reapable zombie for `minijail_wait` to reap last.
+    /// Two properties matter:
+    /// - It waits on the LEADER, not on pipe EOF, so a backgrounded grandchild
+    ///   that inherits and holds the stdout/stderr write end (`sleep 300 & echo
+    ///   hi`) cannot pin the call to the full timeout.
+    /// - Leaving the leader an un-reaped zombie keeps its pid/pgid RESERVED, so
+    ///   the subsequent group-cleanup `kill(-pgid)` can never race a recycled
+    ///   pgid (the documented kill/reap hazard is sidestepped entirely).
+    ///
+    /// Retries on `EINTR`; returns on any other error (e.g. `ECHILD`) so the
+    /// caller proceeds to the cleanup kill + `minijail_wait`.
+    fn wait_leader_exit(pid: libc::pid_t) {
+        // SAFETY: `siginfo_t` is a plain C struct; zeroing it is a valid initial
+        // state for `waitid`, which fills it on success.
+        #[allow(unsafe_code)]
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        loop {
+            // SAFETY: `waitid` only writes `info`; `pid` is the live/zombie child.
+            #[allow(unsafe_code)]
+            let rc = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &raw mut info,
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            };
+            if rc == 0 {
+                return;
+            }
+            // SAFETY: reading the thread-local errno after a failed libc call.
+            #[allow(unsafe_code)]
+            let e = unsafe { *libc::__errno() };
+            if e == libc::EINTR {
+                continue;
+            }
+            return;
+        }
+    }
+
     /// Build the jail, fork+exec the command, capture stdio, enforce the timeout
     /// by killing the child's own process group, reap, and return the outcome.
     /// Any setup failure returns `enforcement_failed` — we NEVER run unconfined.
@@ -275,6 +320,18 @@ mod android_impl {
         // (2) no_new_privs — mandatory for an unprivileged seccomp filter.
         // SAFETY: `jail.0` is valid; the setter has no other preconditions.
         unsafe { minijail_no_new_privs(jail.0) };
+
+        // (2b) Close every inherited fd in the jailed child except stdin/stdout/
+        // stderr (the pipe fds minijail itself manages). Without this, libminijail
+        // leaves ALL inherited fds open in the child (it only dup2's 0/1/2), so the
+        // engine's non-CLOEXEC native fds (JNI/ART, libgit2, audio, C libs) would
+        // be reachable from attacker-supplied shell commands — and the net-deny
+        // seccomp filter blocks socket()/connect() but NOT read()/write() on an
+        // already-open fd, so a leaked live connection or secret file fd would
+        // bypass confinement. Requesting close_open_fds sets the libminijail flag
+        // that closes them just before execve.
+        // SAFETY: `jail.0` is valid; the setter only toggles an internal flag.
+        unsafe { minijail_close_open_fds(jail.0) };
 
         // (3) rlimits. Each resource int comes from the safe side (RLIMIT_*).
         for rl in &spec.rlimits {
@@ -366,24 +423,31 @@ mod android_impl {
         }
 
         // (6) PRE_EXECVE chdir hook. `cwd_c` MUST outlive the run call (the hook
-        // runs in the child during minijail_run, reading this pointer).
+        // runs in the child during minijail_run, reading this pointer). Skip the
+        // hook entirely for an EMPTY cwd: chdir("") returns ENOENT, which would
+        // make the hook abort the child pre-execve — an empty cwd means "run in
+        // the inherited working directory", not "fail". (The live Shell path
+        // always sets a canonical cwd; this guards the SystemShell/None-cwd path.)
         let Ok(cwd_c) = CString::new(spec.cwd.as_str()) else {
             return fail("cwd contains an interior NUL byte".into());
         };
-        // SAFETY: `jail.0` is valid; `chdir_hook` is an `extern "C"` fn matching
-        // `minijail_hook_t = int (*)(void *)`. `payload` is the `cwd_c` pointer,
-        // which lives on this stack frame past the run call, so it is valid when
-        // the hook fires inside the child. PRE_EXECVE == 1 (verified above).
-        let rc = unsafe {
-            minijail_add_hook(
-                jail.0,
-                chdir_hook,
-                cwd_c.as_ptr().cast::<c_void>().cast_mut(),
-                MINIJAIL_HOOK_EVENT_PRE_EXECVE,
-            )
-        };
-        if rc != 0 {
-            return fail(format!("minijail_add_hook(chdir) -> {rc}"));
+        if !spec.cwd.is_empty() {
+            // SAFETY: `jail.0` is valid; `chdir_hook` is an `extern "C"` fn
+            // matching `minijail_hook_t = int (*)(void *)`. `payload` is the
+            // `cwd_c` pointer, which lives on this stack frame past the run call,
+            // so it is valid when the hook fires inside the child. PRE_EXECVE ==
+            // 1 (verified above).
+            let rc = unsafe {
+                minijail_add_hook(
+                    jail.0,
+                    chdir_hook,
+                    cwd_c.as_ptr().cast::<c_void>().cast_mut(),
+                    MINIJAIL_HOOK_EVENT_PRE_EXECVE,
+                )
+            };
+            if rc != 0 {
+                return fail(format!("minijail_add_hook(chdir) -> {rc}"));
+            }
         }
 
         // (7) Marshal filename + argv + envp as NUL-terminated C arrays. The
@@ -501,10 +565,12 @@ mod android_impl {
                 let tick = Duration::from_millis(20);
                 loop {
                     if done.load(Ordering::SeqCst) {
-                        // Normal path: the child exited, the readers hit EOF and
-                        // were joined, and `done` was set — all BEFORE the reaping
-                        // minijail_wait. Returning here means no kill fires, so
-                        // there is no recycled-pgid hazard.
+                        // Normal/background path: the leader exited,
+                        // `wait_leader_exit` returned and set `done` — all before
+                        // the reaping minijail_wait. Returning here means this
+                        // watchdog fires no kill (and never sets `timed_out`), so
+                        // a fast command that backgrounds a child is not reported
+                        // as timed out and there is no recycled-pgid hazard.
                         return;
                     }
                     if start.elapsed() >= timeout {
@@ -540,48 +606,78 @@ mod android_impl {
             })
         };
 
-        // (11) Tear down in an order that closes the kill/reap TOCTOU window.
+        // (11) Tear down so the wall-clock tracks the LEADER's exit, not pipe
+        // EOF, while keeping `minijail_wait` the sole, LAST reap and closing the
+        // kill/reap recycled-pgid window.
         //
-        // ORDERING GUARANTEE (why a kill can never hit a recycled pgid):
-        // `minijail_wait` is the ONLY reap, and it is the LAST step below — it
-        // runs strictly after the watchdog has been joined. The watchdog only
-        // ever issues `kill(-pgid)` while the child is still UNREAPED, so the
-        // pgid cannot have been recycled at kill time. Walk both paths:
+        // We block on the leader via `wait_leader_exit` (waitid WNOWAIT), NOT by
+        // joining the pipe readers first: a backgrounded grandchild that holds a
+        // stdout/stderr write end (`sleep 300 & echo hi`) would otherwise keep
+        // the readers blocked and pin the call to the full timeout even though
+        // the foreground command finished instantly.
         //
-        //  - Normal exit: the child exits and closes its stdout/stderr write
-        //    ends → the reader threads hit EOF and return → we join them, set
-        //    `done`, and join the watchdog. The watchdog sees `done` (or its
-        //    deadline has not elapsed) and returns WITHOUT killing. Only then do
-        //    we call minijail_wait. No kill ever fires.
+        // RECYCLE-PGID SAFETY: `wait_leader_exit` leaves the leader a reapable
+        // ZOMBIE, which keeps its pid/pgid reserved until `minijail_wait` reaps
+        // it last. So the group-cleanup `kill(-pgid)` below — and any late
+        // watchdog kill — can never hit a recycled pgid. Walk both paths:
         //
-        //  - Hang/timeout: the child ignores the deadline and keeps its pipes
-        //    open, so the readers stay blocked. The watchdog's deadline elapses
-        //    while the child is still live+unreaped; it sets `timed_out` and
-        //    SIGKILLs the (still-ours) pgid. The kill closes the pipes → readers
-        //    EOF → we join the readers, set `done`, join the watchdog (already
-        //    returned post-kill), THEN minijail_wait reaps the killed child. The
-        //    kill happens-before the readers' EOF, which happens-before the
-        //    join+reap — so kill strictly precedes reap.
+        //  - Normal/background exit: the leader exits; `wait_leader_exit`
+        //    returns; we cancel the watchdog (`done`) and `kill(-pgid)` to tear
+        //    down any backgrounded grandchildren (a tool call is complete — its
+        //    background procs must not outlive it). That closes every pipe write
+        //    end, so the readers hit EOF; we join them, join the watchdog (which
+        //    saw `done` and never killed / never set timed_out), then reap.
         //
-        // Joining the readers FIRST is safe from deadlock: in both paths the
-        // child's pipes get closed (natural exit, or the watchdog's kill), so
-        // read_to_end returns.
+        //  - Hang/timeout: the leader ignores the deadline; the watchdog's
+        //    deadline elapses, it sets `timed_out` and SIGKILLs the (still-ours)
+        //    pgid; the leader dies; `wait_leader_exit` returns; we kill the group
+        //    again (harmless — pgid still reserved by the zombie), join readers
+        //    (now EOF), join the watchdog (already returned), then reap.
+        //
+        // In every path the cleanup kill happens-before the reap, and the pgid is
+        // reserved by the un-reaped zombie throughout — no recycle hazard.
+        wait_leader_exit(pid);
 
-        // Readers finish at EOF (child closed the pipes — it has exited or been
-        // killed). Join both before touching the watchdog or reaping.
-        let stdout_bytes = stdout_reader.join().unwrap_or_default();
-        let stderr_bytes = stderr_reader.join().unwrap_or_default();
-
-        // Cancel + join the watchdog BEFORE the reaping minijail_wait. Setting
-        // `done` makes a not-yet-fired watchdog return on its next tick without
-        // killing; if it already fired (timeout path) it has returned. Either
-        // way, once this join completes no kill can ever run again — so the
-        // subsequent reap cannot race a recycled pgid.
+        // Leader has exited (zombie, reserving the pgid). Cancel the watchdog and
+        // kill the child's process group to terminate any lingering backgrounded
+        // grandchildren still holding the pipe.
+        // SAFETY: `child_pgid` is the child's own session pgid; negating targets
+        // only that group. The zombie leader keeps the pgid reserved, so this can
+        // never hit a recycled group; killing a group whose only member is the
+        // zombie leader is a harmless no-op.
         done.store(true, Ordering::SeqCst);
+        unsafe { libc::kill(-child_pgid, libc::SIGKILL) };
+
+        // Readers now hit EOF promptly (every pipe write end is closed by the
+        // group kill). Bound the final join: in the rare case a grandchild did
+        // its OWN setsid — escaping the group kill — and still holds a pipe end,
+        // wait a short grace and then DETACH that reader rather than block
+        // forever. The common in-group `cmd & background` case EOFs within a few
+        // ms, so this adds no latency there.
+        let drain_start = Instant::now();
+        let drain_grace = Duration::from_millis(200);
+        while (!stdout_reader.is_finished() || !stderr_reader.is_finished())
+            && drain_start.elapsed() < drain_grace
+        {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let stdout_bytes = if stdout_reader.is_finished() {
+            stdout_reader.join().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let stderr_bytes = if stderr_reader.is_finished() {
+            stderr_reader.join().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // Join the watchdog (it returned on `done`, or after its own timeout
+        // kill). After this, no kill can run again.
         let _ = watchdog.join();
 
-        // Reap LAST. minijail_wait blocks until the (only) child exits — prompt
-        // because by now it has either exited naturally or been SIGKILLed.
+        // Reap LAST. minijail_wait reaps the zombie leader; prompt because the
+        // leader has already exited.
         // SAFETY: `jail.0` is valid and its child has not been waited on yet.
         let status = unsafe { minijail_wait(jail.0) };
 

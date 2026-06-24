@@ -150,14 +150,18 @@ pub fn plan_from_policy(
             hard: u64::from(cpu),
         });
     }
-    if let Some(mem_mb) = policy.limits.max_memory_mb {
-        let bytes = u64::from(mem_mb) * 1024 * 1024;
-        rlimits.push(Rlimit {
-            resource: RlimitResource::As,
-            soft: bytes,
-            hard: bytes,
-        });
-    }
+    // limits.max_memory_mb is intentionally NOT mapped (best-effort, like
+    // max_processes below). The only candidate rlimit is RLIMIT_AS, which caps
+    // total VIRTUAL address space, not RSS — and on Android/Bionic a fresh
+    // execve of mksh/toybox plus the Bionic loader and the Scudo allocator
+    // reserve large VA regions (allocator arenas, ~1 MB-per-thread stacks,
+    // mmap'd .so segments) far exceeding actual memory use, so a sane-looking
+    // cap (a few hundred MB) makes mmap/brk fail with ENOMEM and kills the shell
+    // at startup instead of enforcing a useful ceiling. RLIMIT_DATA is likewise
+    // ineffective (Scudo uses mmap, not brk), and RLIMIT_RSS is a no-op on
+    // modern Linux. There is no interpreter-safe memory rlimit on Android, so we
+    // leave memory unbounded here rather than ship a footgun that silently
+    // breaks every shell invocation when a policy sets max_memory_mb.
     if let Some(nofile) = policy.limits.max_open_files {
         rlimits.push(Rlimit {
             resource: RlimitResource::NoFile,
@@ -383,8 +387,8 @@ mod tests {
         let mut p = base_policy();
         p.limits = ResourceLimits {
             max_cpu_seconds: Some(30),
-            max_memory_mb: Some(512),
-            max_processes: Some(8), // intentionally NOT mapped (UID-scoped NPROC)
+            max_memory_mb: Some(512), // intentionally NOT mapped (no interpreter-safe rlimit)
+            max_processes: Some(8),   // intentionally NOT mapped (UID-scoped NPROC)
             max_open_files: Some(256),
         };
         let plan = plan_from_policy(ExecTarget::SystemShell, &p, vec![]).expect("plan");
@@ -393,11 +397,15 @@ mod tests {
             soft: 30,
             hard: 30
         }));
-        assert!(plan.rlimits.contains(&Rlimit {
-            resource: RlimitResource::As,
-            soft: 512 * 1024 * 1024,
-            hard: 512 * 1024 * 1024
-        }));
+        // RLIMIT_AS must NOT be mapped: it caps virtual address space (not RSS)
+        // and would ENOMEM-kill mksh/toybox + Bionic/Scudo at startup.
+        assert!(
+            !plan
+                .rlimits
+                .iter()
+                .any(|r| r.resource == RlimitResource::As),
+            "max_memory_mb must not map to RLIMIT_AS (breaks interpreters on Android)"
+        );
         assert!(plan.rlimits.contains(&Rlimit {
             resource: RlimitResource::NoFile,
             soft: 256,
@@ -408,11 +416,11 @@ mod tests {
             soft: 0,
             hard: 0
         }));
-        // max_processes intentionally unmapped:
+        // max_memory_mb and max_processes intentionally unmapped:
         assert_eq!(
             plan.rlimits.len(),
-            4,
-            "NPROC must not be mapped in v1 (UID-scoped)"
+            3,
+            "neither RLIMIT_AS (memory) nor NPROC is mapped in v1"
         );
         assert_eq!(plan.network, NetProfile::DenyNet);
         // P2: DenyNet plans carry the net-deny policy identity (arch-independent).

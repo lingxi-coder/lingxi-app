@@ -1516,26 +1516,27 @@ pub fn build_android_engine(
                         "capability probe runtime build failed: {e}"
                     ))
                 })?;
-            let caps =
+            let mut caps =
                 probe_rt.block_on(platform_android::capabilities::probe_android_capabilities());
-            cache.set(caps);
 
-            // P5b-T7: fold the bundled-shell bootstrap result into the cached
-            // capabilities so capability reporting is TRUTHFUL — the arg-less
-            // `probe_android_capabilities()` cannot know the bundled paths, so
-            // `bundled_shell_exec` is false until proven here. Only when the
-            // bootstrap succeeded (`bundled.is_some()`).
+            // P5b-T7: fold the bundled-shell bootstrap result into the capabilities
+            // so reporting is TRUTHFUL — the arg-less `probe_android_capabilities()`
+            // cannot know the bundled paths, so `bundled_shell_exec` is false until
+            // proven here. This MUST be applied BEFORE the single `cache.set()`:
+            // `CapabilityCache` wraps `OnceLock` (first-write-wins), so a
+            // second `set()` after the probe result was already stored would be a
+            // silent no-op and the bundled facts (notably `bundled_mksh_version`,
+            // which the tool prompt re-reads from the cache) would be lost.
             let bundled_ready = bundled.is_some();
             if bundled_ready {
-                let mut c = cache.get();
-                c.bundled_shell_exec = true;
-                c.bundled_mksh_version = bundled.as_ref().and_then(|b| b.mksh_version.clone());
-                c.bundled_applets = platform_android::capabilities::BUNDLED_TOYBOX_APPLETS
+                caps.bundled_shell_exec = true;
+                caps.bundled_mksh_version = bundled.as_ref().and_then(|b| b.mksh_version.clone());
+                caps.bundled_applets = platform_android::capabilities::BUNDLED_TOYBOX_APPLETS
                     .iter()
                     .map(|s| (*s).to_string())
                     .collect();
-                cache.set(c);
             }
+            cache.set(caps);
 
             // P3-T5 + P5b-T7: compute the Shell-tool registration gate + prompt
             // info from the just-probed capabilities + the bundled bootstrap +
@@ -1589,39 +1590,57 @@ pub fn build_android_engine(
                         as std::sync::Arc<dyn tool_api::GitCredentialProvider>
                 });
             let workspace_ready = std::path::Path::new(&c.workspace_root).is_dir();
-            let ca_store_reachable =
-                c.ca_cert_dir.is_empty() || std::path::Path::new(&c.ca_cert_dir).exists();
+            // CA trust store. mbedTLS fails closed against an EMPTY chain, so an
+            // empty `ca_cert_dir` means every HTTPS op will fail with an opaque
+            // cert error. Treat an empty CA dir as reachable ONLY for local-only
+            // use (no network credential provider); if the host wired a
+            // credential provider (network intended) but no CA dir, do NOT
+            // advertise the git tool as ready — that would be a tool that looks
+            // usable yet hard-fails every clone/fetch/pull/push.
+            let ca_store_reachable = if c.ca_cert_dir.is_empty() {
+                credential_provider.is_none()
+            } else {
+                std::path::Path::new(&c.ca_cert_dir).exists()
+            };
             cfg.android_git = Some(tool_api::AndroidGitToolCtx {
                 enabled: android_git_gate(c.enable_git, workspace_ready, ca_store_reachable),
                 has_token: credential_provider.is_some(),
                 workspace_root: c.workspace_root.clone(),
             });
-            // Defense-in-depth: the SSH private-key path is HOST-supplied (not
-            // model-supplied), but still validate it stays inside the app
-            // sandbox (`app_files_root`) before handing it to libgit2. An empty
-            // path = no SSH. If validation fails (escapes the sandbox / missing),
-            // drop ALL ssh fields so an SSH op reports "not configured" rather
-            // than passing an out-of-sandbox key.
+            // Defense-in-depth: SSH key paths are HOST-supplied (not
+            // model-supplied), but still validate they stay inside the app
+            // sandbox (`app_files_root`) before handing them to libgit2, and use
+            // the CANONICAL path that was containment-checked (not the raw
+            // string) so the path libssh2 actually opens is exactly the one
+            // validated — closing a check-then-use TOCTOU. An empty private path
+            // = no SSH. If the private key fails validation, drop ALL ssh fields
+            // so an SSH op reports "not configured" rather than using an
+            // out-of-sandbox key. The public key (non-secret) is validated the
+            // same way; on failure it is dropped to None so libssh2 derives it
+            // from the private key, rather than reading an out-of-sandbox file.
             let ssh_root = std::path::Path::new(&app_files_root_str);
-            let ssh_key_ok = !c.ssh_private_key_path.is_empty()
-                && tool_git_mobile::auth::validate_ssh_key_path(
-                    &c.ssh_private_key_path,
-                    ssh_root,
-                )
-                .is_ok();
-            let (ssh_private_key_path, ssh_public_key_path, ssh_known_hosts) = if ssh_key_ok {
-                (
-                    Some(c.ssh_private_key_path),
-                    if c.ssh_public_key_path.is_empty() {
+            let canonical_priv = if c.ssh_private_key_path.is_empty() {
+                None
+            } else {
+                tool_git_mobile::auth::validate_ssh_key_path(&c.ssh_private_key_path, ssh_root).ok()
+            };
+            let (ssh_private_key_path, ssh_public_key_path, ssh_known_hosts) =
+                if let Some(priv_canon) = canonical_priv {
+                    let pub_canon = if c.ssh_public_key_path.is_empty() {
                         None
                     } else {
-                        Some(c.ssh_public_key_path)
-                    },
-                    c.ssh_known_hosts_sha256_hex,
-                )
-            } else {
-                (None, None, Vec::new())
-            };
+                        tool_git_mobile::auth::validate_ssh_key_path(&c.ssh_public_key_path, ssh_root)
+                            .ok()
+                            .map(|p| p.to_string_lossy().into_owned())
+                    };
+                    (
+                        Some(priv_canon.to_string_lossy().into_owned()),
+                        pub_canon,
+                        c.ssh_known_hosts_sha256_hex,
+                    )
+                } else {
+                    (None, None, Vec::new())
+                };
             cfg.android_git_secret = Some(tool_api::AndroidGitSecret {
                 credential_provider,
                 ca_dir: if c.ca_cert_dir.is_empty() {

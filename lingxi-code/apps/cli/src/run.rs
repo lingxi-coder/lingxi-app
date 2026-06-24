@@ -240,16 +240,24 @@ pub async fn run_stream_json_print(
 ///
 /// Phase 1 implements: `initialize` (full payload) and `interrupt` (cancel signal).
 /// All other subtypes return the byte-exact fallthrough error.
-fn dispatch_control_request(
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_control_request(
     subtype: &str,
     request_id: &str,
+    frame: &serde_json::Value,
     writer: &ControlPlaneWriter,
     cancel_tx: &tokio::sync::watch::Sender<bool>,
+    orchestrator: &Arc<orchestrator::ConversationOrchestrator>,
+    task_registry: &Arc<tasks::registry::TaskRegistry>,
+    end_notify: &Arc<tokio::sync::Notify>,
     init_commands: &[serde_json::Value],
     init_agents: &[serde_json::Value],
     init_models: &[serde_json::Value],
     init_account: &serde_json::Value,
 ) {
+    // Request body fields live at `frame.request.<field>` (already key-normalized).
+    let field = |k: &str| frame.get("request").and_then(|r| r.get(k));
+
     match subtype {
         "initialize" => {
             let payload = json!({
@@ -275,13 +283,139 @@ fn dispatch_control_request(
             writer.reply_success(request_id, Some(payload));
         }
         "interrupt" => {
+            // §2.2 #1: cancel the per-turn token, then ack.
             let _ = cancel_tx.send(true);
             writer.reply_success(request_id, None);
         }
-        _ => {
-            let error_msg = format!("Unsupported control request subtype: {subtype}");
-            writer.reply_error(request_id, &error_msg);
+        "set_model" => {
+            // §2.2 #5: `"default"` (or absent) resolves to the session default —
+            // a no-op here (no default-model accessor); any other id switches.
+            let model = field("model").and_then(|v| v.as_str());
+            match model {
+                Some(m) if m != "default" => {
+                    match orchestrator.switch_model(m, None).await {
+                        Ok(()) => writer.reply_success(request_id, None),
+                        Err(e) => writer.reply_error(request_id, &e.to_string()),
+                    }
+                }
+                _ => writer.reply_success(request_id, None),
+            }
         }
+        "mcp_status" => {
+            // §2.2 #7: `{mcpServers: [...]}`.
+            let servers: Vec<serde_json::Value> = orchestrator
+                .list_mcp_servers()
+                .await
+                .into_iter()
+                .map(|s| {
+                    let status = match s.status {
+                        McpStatus::Connected => "connected",
+                        McpStatus::Disconnected => "disconnected",
+                        McpStatus::Error(_) => "error",
+                    };
+                    json!({"name": s.name, "status": status})
+                })
+                .collect();
+            writer.reply_success(request_id, Some(json!({"mcpServers": servers})));
+        }
+        "get_context_usage" => {
+            // §2.2 #9: token-budget breakdown (shape inferred — not byte-dumped).
+            let (used, total) = orchestrator.context_window_usage().await;
+            writer.reply_success(
+                request_id,
+                Some(json!({
+                    "usedTokens": used,
+                    "maxTokens": total
+                })),
+            );
+        }
+        "get_session_cost" => {
+            // §2.2 #10: `{text}` (format inferred — not byte-dumped).
+            let cost = orchestrator.snapshot_cost().await;
+            writer.reply_success(
+                request_id,
+                Some(json!({"text": format!("Total cost: ${:.4}", cost.total_usd)})),
+            );
+        }
+        "get_usage" => {
+            // §2.2 #11: usage snapshot (shape inferred — not byte-dumped).
+            let cost = orchestrator.snapshot_cost().await;
+            writer.reply_success(
+                request_id,
+                Some(json!({
+                    "input_tokens": cost.input_tokens,
+                    "output_tokens": cost.output_tokens,
+                    "cache_read_tokens": cost.cache_read_tokens,
+                    "cache_creation_tokens": cost.cache_creation_tokens,
+                    "total_tokens": cost.total_tokens
+                })),
+            );
+        }
+        "stop_task" => {
+            // §2.2 #38: best-effort kill; not_found/not_running ⇒ success `{}`.
+            if let Some(task_id) = field("task_id").and_then(|v| v.as_str()) {
+                let _ = task_registry.kill(task_id).await;
+            }
+            writer.reply_success(request_id, Some(json!({})));
+        }
+        "end_session" => {
+            // §2.2 #2: abort the in-flight turn, ack, then break the loop.
+            let _ = cancel_tx.send(true);
+            writer.reply_success(request_id, None);
+            end_notify.notify_one();
+        }
+        // The orchestrator-free arms (set_max_thinking_tokens, get_binary_version,
+        // rename_session, message_rated, seed_read_state) and the byte-exact
+        // `Unsupported control request subtype` fallthrough are pure — classified
+        // by `pure_control_response` so the wire shapes are unit-testable without
+        // a live orchestrator.
+        other => match pure_control_response(other, frame) {
+            PureControlReply::Success(payload) => writer.reply_success(request_id, payload),
+            PureControlReply::Error(msg) => writer.reply_error(request_id, &msg),
+        },
+    }
+}
+
+/// Reply for a pure (orchestrator-free) control arm.
+#[derive(Debug, PartialEq)]
+enum PureControlReply {
+    /// `control_response` success; `None` ⇒ inner `response` key omitted.
+    Success(Option<serde_json::Value>),
+    /// `control_response` error with this message.
+    Error(String),
+}
+
+/// Classify the control arms that need no async orchestrator/registry access,
+/// including the byte-exact `Unsupported control request subtype` fallthrough.
+///
+/// Several arms are accept-and-ack approximations per spec §2.2 `[T (partial)]`:
+/// `set_max_thinking_tokens` and `seed_read_state` lack a storage seam (acked,
+/// not persisted); `rename_session` validates non-empty but defers persistence.
+fn pure_control_response(subtype: &str, frame: &serde_json::Value) -> PureControlReply {
+    let field = |k: &str| frame.get("request").and_then(|r| r.get(k));
+    match subtype {
+        // §2.2 #6: accepted + acked; value not persisted (no session field yet).
+        "set_max_thinking_tokens" => PureControlReply::Success(None),
+        // §2.2 #8: `{version, buildTime}`.
+        "get_binary_version" => PureControlReply::Success(Some(json!({
+            "version": traits::CLAUDE_CODE_VERSION,
+            "buildTime": ""
+        }))),
+        // §2.2 #41: trim + validate; error on empty; persistence deferred.
+        "rename_session" => {
+            let title = field("title").and_then(|v| v.as_str()).unwrap_or("");
+            if title.trim().is_empty() {
+                PureControlReply::Error("title must be non-empty".to_string())
+            } else {
+                PureControlReply::Success(None)
+            }
+        }
+        // §2.2 #45: telemetry-only; ack with `{}`.
+        "message_rated" => PureControlReply::Success(Some(json!({}))),
+        // §2.2 #21: seed read-state cache; errors swallowed ⇒ empty ack (no seam).
+        "seed_read_state" => PureControlReply::Success(None),
+        // The binary fallthrough for every unhandled / deep [D] subtype.
+        _ => PureControlReply::Error(format!("Unsupported control request subtype: {subtype}")),
     }
 }
 
@@ -503,11 +637,18 @@ pub async fn run_stream_json_input_loop(
     // ③ Drain control_request and control_response channels concurrently with
     //    the turn loop.
     //
-    // Phase 1: replace the Phase-0 stub with the full 46-arm dispatcher.
-    // `initialize` returns a rich payload; `interrupt` fires the cancel signal;
-    // all other subtypes return the byte-exact fallthrough error.
+    // Phase 1: `initialize`/`interrupt` + byte-exact fallthrough.
+    // Phase 3: the tractable inbound arms (set_model/get_*/mcp_status/
+    // get_binary_version/rename_session/message_rated/stop_task/end_session/…),
+    // which need async orchestrator/registry access — so the dispatcher is async
+    // and owns clones of the handle + task registry.
     let outbound_tx = stream.outbound_tx();
     let ctrl_plane = ControlPlaneWriter::new(outbound_tx.clone());
+    let ctrl_orch = runtime.orchestrator.clone();
+    let ctrl_tasks = runtime.task_registry.clone();
+    // `end_session` signals the turn loop to drain + exit (the loop selects on it).
+    let end_notify = Arc::new(tokio::sync::Notify::new());
+    let end_notify_ctrl = end_notify.clone();
     let ctrl_req_task = tokio::spawn(async move {
         while let Some(frame) = control_req_rx.recv().await {
             let subtype = control_request_subtype(&frame).to_string();
@@ -515,13 +656,18 @@ pub async fn run_stream_json_input_loop(
             dispatch_control_request(
                 &subtype,
                 &request_id,
+                &frame,
                 &ctrl_plane,
                 &cancel_tx_clone,
+                &ctrl_orch,
+                &ctrl_tasks,
+                &end_notify_ctrl,
                 &init_commands,
                 &init_agents,
                 &init_models,
                 &init_account,
-            );
+            )
+            .await;
         }
     });
 
@@ -531,9 +677,13 @@ pub async fn run_stream_json_input_loop(
     let mut had_any_turn = false;
 
     loop {
-        let turn = match turn_rx.recv().await {
-            Some(t) => t,
-            None => break, // stdin closed or fatal error — exit the loop.
+        let turn = tokio::select! {
+            // `end_session` (§2.2 #2): the host asked us to drain + exit.
+            _ = end_notify.notified() => break,
+            recv = turn_rx.recv() => match recv {
+                Some(t) => t,
+                None => break, // stdin closed or fatal error — exit the loop.
+            },
         };
         had_any_turn = true;
         let prompt = content_to_prompt(&turn.content);
@@ -1418,5 +1568,75 @@ mod tests {
         );
         assert!(tui_runtime.orchestrator.is_some());
         assert!(tui_runtime.bridge.is_some());
+    }
+
+    // ── P5 Phase 3: pure control-arm classification ──────────────────────────
+
+    fn req(subtype: &str, body: serde_json::Value) -> serde_json::Value {
+        let mut request = body;
+        request["subtype"] = json!(subtype);
+        json!({"type": "control_request", "request_id": "r1", "request": request})
+    }
+
+    #[test]
+    fn pure_unknown_subtype_falls_through_byte_exact() {
+        let frame = req("totally_made_up", json!({}));
+        assert_eq!(
+            pure_control_response("totally_made_up", &frame),
+            PureControlReply::Error(
+                "Unsupported control request subtype: totally_made_up".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn pure_get_binary_version_shape() {
+        let frame = req("get_binary_version", json!({}));
+        let PureControlReply::Success(Some(payload)) =
+            pure_control_response("get_binary_version", &frame)
+        else {
+            panic!("expected success payload");
+        };
+        assert_eq!(payload["version"], traits::CLAUDE_CODE_VERSION);
+        assert!(payload.get("buildTime").is_some());
+    }
+
+    #[test]
+    fn pure_rename_session_empty_title_errors() {
+        let frame = req("rename_session", json!({"title": "   "}));
+        assert_eq!(
+            pure_control_response("rename_session", &frame),
+            PureControlReply::Error("title must be non-empty".to_string())
+        );
+    }
+
+    #[test]
+    fn pure_rename_session_valid_title_acks_empty() {
+        let frame = req("rename_session", json!({"title": "My Session"}));
+        assert_eq!(
+            pure_control_response("rename_session", &frame),
+            PureControlReply::Success(None)
+        );
+    }
+
+    #[test]
+    fn pure_message_rated_acks_empty_object() {
+        let frame = req("message_rated", json!({"sentiment": "up"}));
+        assert_eq!(
+            pure_control_response("message_rated", &frame),
+            PureControlReply::Success(Some(json!({})))
+        );
+    }
+
+    #[test]
+    fn pure_set_max_thinking_and_seed_read_state_ack_no_payload() {
+        for st in ["set_max_thinking_tokens", "seed_read_state"] {
+            let frame = req(st, json!({}));
+            assert_eq!(
+                pure_control_response(st, &frame),
+                PureControlReply::Success(None),
+                "{st} should ack with no payload"
+            );
+        }
     }
 }

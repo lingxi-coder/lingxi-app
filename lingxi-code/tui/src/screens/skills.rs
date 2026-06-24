@@ -98,6 +98,10 @@ pub struct SkillSection {
     pub title: String,
     /// Rows in this section, pre-sorted by name.
     pub rows: Vec<SkillRow>,
+    /// (skills-section-subtitle-missing) The section's skills directory,
+    /// display-shortened (claude-code `getSourceSubtitle` / `getDisplayPath`)
+    /// — rendered as `"{title} ({subtitle})"`. `None` omits the parens.
+    pub subtitle: Option<String>,
 }
 
 /// Screen state: the grouped sections + the embedded scroll window over the
@@ -173,6 +177,12 @@ pub fn load_skill_sections(cwd: &Path, claude_home: &Path) -> Vec<SkillSection> 
         .into_iter()
         .map(|section| SkillSection {
             title: section.title,
+            subtitle: section
+                .path
+                .map(|p| crate::components::messages::assistant_tool_use::get_display_path(
+                    &p.to_string_lossy(),
+                    cwd,
+                )),
             rows: section
                 .rows
                 .into_iter()
@@ -257,7 +267,12 @@ fn content_lines(sections: &[SkillSection]) -> Vec<String> {
             out.push(String::new());
         }
         first = false;
-        out.push(section.title.clone());
+        // (skills-section-subtitle-missing) "{title} ({subtitle})" when the
+        // section has a display-path subtitle.
+        match &section.subtitle {
+            Some(sub) => out.push(format!("{} ({sub})", section.title)),
+            None => out.push(section.title.clone()),
+        }
         for row in &section.rows {
             out.push(render_skill_row(row));
         }
@@ -356,6 +371,7 @@ mod tests {
         SkillSection {
             title: title.into(),
             rows,
+            subtitle: None,
         }
     }
 
@@ -548,6 +564,42 @@ mod tests {
         assert_eq!(r.when_to_use.as_deref(), Some("when alpha"));
         // Token estimate flows through the existing `estimated_tokens`.
         assert!(r.estimated_tokens() > 0);
+    }
+
+    #[test]
+    fn section_subtitle_is_display_path_and_renders_in_content_lines() {
+        // (skills-section-subtitle-missing)
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (cwd, claude_home) = fixture(tmp.path());
+        std::fs::create_dir_all(cwd.join(".claude").join("skills").join("alpha"))
+            .expect("mkdir alpha");
+        std::fs::write(
+            cwd.join(".claude").join("skills").join("alpha").join("SKILL.md"),
+            "---\nname: alpha\ndescription: d\n---\nBody.\n",
+        )
+        .expect("write SKILL.md");
+        std::fs::create_dir_all(claude_home.join("skills").join("beta")).expect("mkdir beta");
+        std::fs::write(
+            claude_home.join("skills").join("beta").join("SKILL.md"),
+            "---\nname: beta\ndescription: d\n---\nBody.\n",
+        )
+        .expect("write SKILL.md");
+
+        let sections = load_skill_sections(&cwd, &claude_home);
+        assert_eq!(sections.len(), 2);
+        // Project: relative to cwd (under cwd).
+        assert_eq!(
+            sections[0].subtitle.as_deref(),
+            Some(".claude/skills"),
+            "{:?}",
+            sections[0].subtitle
+        );
+        // User: `~`-prefixed (under $HOME via claude_home).
+        let user_sub = sections[1].subtitle.as_deref().unwrap_or("");
+        assert!(user_sub.ends_with("/skills"), "{user_sub:?}");
+
+        let lines = content_lines(&sections);
+        assert_eq!(lines[0], "Project skills (.claude/skills)");
     }
 
     #[test]

@@ -5,10 +5,11 @@
 //! `Spinner.tsx:41` (`SPINNER_FRAMES = [...DEFAULT, ...reverse(DEFAULT)]`):
 //! 6 forward chars then 6 reverse chars = 12 total.
 //!
-//! Linux platforms substitute `✳` → `*` (one frame difference); locked here
-//! as the darwin variant since macOS is our primary dev platform and the
-//! spec §2.8 requires byte-for-byte parity with claude-code. (A
-//! `cfg(target_os = "linux")` variant can be added later if needed.)
+//! (SS-09) `frame_at_index` selects the platform/`$TERM`-appropriate frame
+//! set at runtime (claude-code `getDefaultCharacters`): `TERM=xterm-ghostty`
+//! substitutes the 6th glyph `✽`→`*`; non-macOS otherwise substitutes the
+//! 3rd glyph `✳`→`*` (Linux). `SPINNER_FRAMES` stays the darwin-default
+//! constant other code/tests reference directly.
 //!
 //! The verb pool is claude-code's full [`SPINNER_VERBS`] list
 //! (`claude-code/src/constants/spinnerVerbs.ts:17-203`, 187 entries), ported
@@ -25,6 +26,27 @@ use iocraft::prelude::*;
 /// 12-frame asterisk animation (forward+reverse cycle). claude-code's
 /// darwin default characters from `Spinner/utils.ts`.
 pub const SPINNER_FRAMES: &[&str] = &["·", "✢", "✳", "✶", "✻", "✽", "✽", "✻", "✶", "✳", "✢", "·"];
+
+/// (SS-09) `TERM=xterm-ghostty` substitutes the 6th glyph `✽`→`*` (renders
+/// slightly offset in Ghostty otherwise).
+const SPINNER_FRAMES_GHOSTTY: &[&str] = &["·", "✢", "✳", "✶", "✻", "*", "*", "✻", "✶", "✳", "✢", "·"];
+
+/// (SS-09) Non-macOS, non-Ghostty (claude-code's `else` branch, covering
+/// Linux) substitutes the 3rd glyph `✳`→`*`.
+const SPINNER_FRAMES_OTHER: &[&str] = &["·", "✢", "*", "✶", "✻", "✽", "✽", "✻", "✶", "✳", "✢", "·"];
+
+/// (SS-09) claude-code `getDefaultCharacters`: select the frame set by
+/// `$TERM` (ghostty) first, else by platform (darwin vs. everything else).
+#[must_use]
+fn spinner_frames_for(term: Option<&str>, is_macos: bool) -> &'static [&'static str] {
+    if term == Some("xterm-ghostty") {
+        SPINNER_FRAMES_GHOSTTY
+    } else if is_macos {
+        SPINNER_FRAMES
+    } else {
+        SPINNER_FRAMES_OTHER
+    }
+}
 
 /// The 3-verb subset the M6 deterministic snapshot/parity fixtures lock
 /// (Crunching/Thinking/Generating). Retained only as the backing pool for
@@ -346,11 +368,14 @@ pub const FRAME_TICK_MS: u64 = 100;
 /// keeps it for the whole turn (see [`SpinnerWithVerb`]).
 pub const VERB_ROTATE_MS: u64 = 4000;
 
-/// Get the spinner glyph for a tick index. Wraps modulo `SPINNER_FRAMES.len()`.
+/// Get the spinner glyph for a tick index. (SS-09) Selects the platform/TERM-
+/// appropriate frame set (claude-code `getDefaultCharacters`); wraps modulo
+/// its length (always 12).
 #[inline]
 #[must_use]
 pub fn frame_at_index(tick: usize) -> &'static str {
-    SPINNER_FRAMES[tick % SPINNER_FRAMES.len()]
+    let frames = spinner_frames_for(std::env::var("TERM").ok().as_deref(), cfg!(target_os = "macos"));
+    frames[tick % frames.len()]
 }
 
 /// Get the verb for a rotation index. Wraps modulo `VERBS_M6.len()`.
@@ -467,6 +492,24 @@ mod tests {
         assert_eq!(format!("{}{}", "Crunching", '…'), "Crunching…");
         // U+2026 HORIZONTAL ELLIPSIS, NOT three ASCII dots.
         assert_eq!('…' as u32, 0x2026);
+    }
+
+    #[test]
+    fn spinner_frames_for_platform_and_term() {
+        // (SS-09) Parameterized — no env reading, so no environment coupling.
+        assert_eq!(spinner_frames_for(None, true), SPINNER_FRAMES); // macOS
+        assert_eq!(spinner_frames_for(None, false), SPINNER_FRAMES_OTHER); // Linux
+        // Ghostty wins regardless of platform.
+        assert_eq!(spinner_frames_for(Some("xterm-ghostty"), true), SPINNER_FRAMES_GHOSTTY);
+        assert_eq!(spinner_frames_for(Some("xterm-ghostty"), false), SPINNER_FRAMES_GHOSTTY);
+        assert_eq!(
+            SPINNER_FRAMES_GHOSTTY,
+            &["·", "✢", "✳", "✶", "✻", "*", "*", "✻", "✶", "✳", "✢", "·"]
+        );
+        assert_eq!(
+            SPINNER_FRAMES_OTHER,
+            &["·", "✢", "*", "✶", "✻", "✽", "✽", "✻", "✶", "✳", "✢", "·"]
+        );
     }
 
     #[test]

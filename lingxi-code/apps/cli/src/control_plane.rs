@@ -172,23 +172,36 @@ impl StdioControlPlane {
             pending.remove(&request_id)
         };
         let Some(entry) = entry else {
-            // Orphan / duplicate `control_response`: no matching pending entry.
-            // §1.5 dedup: if the payload's `toolUseID` was already resolved (a
-            // websocket-reconnect double-delivery), log + drop so it can't
-            // double-resolve a tool_use (which would 400 on a non-unique id).
+            // No matching pending entry. Two cases (claude-code `processLine`
+            // orphan path, structuredIO.ts:374-399):
             let tool_use_id = response
                 .get("response")
                 .and_then(|p| p.get("toolUseID"))
                 .and_then(Value::as_str);
             if let Some(tuid) = tool_use_id {
                 if self.is_resolved(tuid).await {
+                    // §1.5 dedup: the payload's `toolUseID` was already resolved (a
+                    // websocket-reconnect double-delivery) — drop so it can't
+                    // double-resolve a tool_use (which would 400 on a non-unique id).
                     tracing::debug!(
                         "Ignoring duplicate control_response for already-resolved toolUseID={} request_id={}",
                         tuid,
                         request_id
                     );
+                    return;
                 }
             }
+            // GENUINE orphan: no pending request AND the toolUseID (if any) is not
+            // a known-resolved duplicate. The binary's `unexpectedResponseCallback`
+            // (handleOrphanedPermissionResponse) recovers by looking the unresolved
+            // tool_use up in the transcript and executing it — a transcript-recovery
+            // deep feature deferred for the stdio-only path. Surface the orphan
+            // (warn) rather than dropping it silently so it is observable.
+            tracing::warn!(
+                "Dropping orphan control_response (no pending request; orphaned-tool recovery not wired) request_id={} toolUseID={:?}",
+                request_id,
+                tool_use_id
+            );
             return;
         };
         if let Some(tuid) = entry.tool_use_id.clone() {

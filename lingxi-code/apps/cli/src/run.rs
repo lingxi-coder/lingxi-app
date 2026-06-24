@@ -371,13 +371,16 @@ async fn dispatch_control_request(
             end_notify.notify_one();
         }
         // The orchestrator-free arms (set_max_thinking_tokens, get_binary_version,
-        // rename_session, message_rated, seed_read_state) and the byte-exact
-        // `Unsupported control request subtype` fallthrough are pure — classified
-        // by `pure_control_response` so the wire shapes are unit-testable without
-        // a live orchestrator.
+        // rename_session, message_rated, seed_read_state), the CLI-originated
+        // guard subtypes (no-reply), and the byte-exact `Unsupported control
+        // request subtype` fallthrough are pure — classified by
+        // `pure_control_response` so the wire shapes are unit-testable without a
+        // live orchestrator.
         other => match pure_control_response(other, frame) {
             PureControlReply::Success(payload) => writer.reply_success(request_id, payload),
             PureControlReply::Error(msg) => writer.reply_error(request_id, &msg),
+            // CLI-originated subtype seen inbound — no control_response (see below).
+            PureControlReply::Ignore => {}
         },
     }
 }
@@ -389,6 +392,9 @@ enum PureControlReply {
     Success(Option<serde_json::Value>),
     /// `control_response` error with this message.
     Error(String),
+    /// No `control_response` at all — a CLI-originated subtype seen inbound that
+    /// the binary handles as a top-of-chain guard, never in the server switch.
+    Ignore,
 }
 
 /// Classify the control arms that need no async orchestrator/registry access,
@@ -420,6 +426,14 @@ fn pure_control_response(subtype: &str, frame: &serde_json::Value) -> PureContro
         "message_rated" => PureControlReply::Success(Some(json!({}))),
         // §2.2 #21: seed read-state cache; errors swallowed ⇒ empty ack (no seam).
         "seed_read_state" => PureControlReply::Success(None),
+        // CLI-ORIGINATED subtypes: `can_use_tool` / `request_user_dialog` /
+        // `elicitation` are CLIENT→SERVER frames the CLI itself SENDS (their
+        // `control_response` is handled by the resolver task). The binary checks
+        // them as top-of-chain GUARDS routed to the StructuredIO pending-request
+        // path — they NEVER enter this server switch nor reach the Unsupported
+        // fallthrough. A well-behaved host never sends them inbound as a
+        // control_request, so we emit NO control_response rather than erroring.
+        "can_use_tool" | "request_user_dialog" | "elicitation" => PureControlReply::Ignore,
         // The binary fallthrough for every unhandled / deep [D] subtype.
         _ => PureControlReply::Error(format!("Unsupported control request subtype: {subtype}")),
     }
@@ -1610,6 +1624,20 @@ mod tests {
                 "Unsupported control request subtype: totally_made_up".to_string()
             )
         );
+    }
+
+    #[test]
+    fn pure_cli_originated_subtypes_are_ignored_not_unsupported() {
+        // #5: an inbound control_request for a CLI-originated subtype is a guard
+        // case — no control_response, NOT an Unsupported error.
+        for st in ["can_use_tool", "request_user_dialog", "elicitation"] {
+            let frame = req(st, json!({}));
+            assert_eq!(
+                pure_control_response(st, &frame),
+                PureControlReply::Ignore,
+                "{st} must be ignored (top-of-chain guard), not Unsupported"
+            );
+        }
     }
 
     #[test]

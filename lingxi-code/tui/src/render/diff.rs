@@ -371,7 +371,10 @@ pub fn render(old: &str, new: &str, path: Option<&str>, theme: ThemeName) -> Vec
         .max()
         .unwrap_or(1);
     let gutter_w = max_no.to_string().len();
-    let lang = syntax::detect_language(None, path);
+    // (syntax-01) `new` wins for the first-line/shebang heuristic (it's the
+    // post-edit content); a pure-delete diff (`new` empty) falls back to `old`.
+    let first_line = new.lines().next().or_else(|| old.lines().next());
+    let lang = syntax::detect_language_with_first_line(None, path, first_line);
 
     // Total body rows across all hunks (excludes headers) — used for the
     // truncation footer count.

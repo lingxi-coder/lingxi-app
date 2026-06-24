@@ -513,7 +513,14 @@ impl<'a> Builder<'a> {
     /// `cb.lang` is the fence info-string (e.g. `rust`); empty/unknown → plain
     /// fallback. Emits one [`StyledLine`] per code line. Empty body → nothing.
     fn emit_code_block(&mut self, cb: &CodeBlockState) {
-        let lang = crate::render::syntax::detect_language(cb.lang.as_deref(), None);
+        // (syntax-01) No file path for a fenced block, but its own first
+        // line stands in for the shebang/first-line heuristic.
+        let first_line = cb.text.lines().next();
+        let lang = crate::render::syntax::detect_language_with_first_line(
+            cb.lang.as_deref(),
+            None,
+            first_line,
+        );
         let highlighted =
             crate::render::syntax::highlight(&cb.text, lang.as_deref(), self.theme.code_theme);
         if highlighted.is_empty() {

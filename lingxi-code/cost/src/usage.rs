@@ -14,12 +14,20 @@ pub struct TokenUsage {
     pub input: u64,
     /// Output (completion) tokens.
     pub output: u64,
-    /// Tokens written into the prompt cache.
+    /// Tokens written into the prompt cache (standard 5-minute TTL).
     pub cache_write: u64,
     /// Tokens read from the prompt cache.
     pub cache_read: u64,
     /// Reasoning / thinking output tokens.
     pub reasoning_output: u64,
+    /// Tokens written into the ephemeral 1-hour prompt cache.
+    ///
+    /// Mirrors `cache_creation.ephemeral_1h_input_tokens` in the Anthropic API
+    /// response (binary field `promptCacheWrite1hTokens`). Currently always 0
+    /// until the llm-client Anthropic codec is wired to parse the field;
+    /// see `TokenClass::CacheWrite1h` for the TODO note.
+    #[serde(default)]
+    pub cache_write_1h: u64,
 }
 
 /// Composite usage record: tokens plus optional non-token counters and
@@ -60,6 +68,7 @@ impl Usage {
             TokenClass::CacheWrite => self.tokens.cache_write,
             TokenClass::CacheRead => self.tokens.cache_read,
             TokenClass::ReasoningOutput => self.tokens.reasoning_output,
+            TokenClass::CacheWrite1h => self.tokens.cache_write_1h,
         }
     }
 
@@ -90,6 +99,7 @@ impl Usage {
             .saturating_add(self.tokens.cache_write)
             .saturating_add(self.tokens.cache_read)
             .saturating_add(self.tokens.reasoning_output)
+            .saturating_add(self.tokens.cache_write_1h)
     }
 
     /// Accumulate `other` into `self`, merging token counts and server-tool
@@ -109,6 +119,10 @@ impl Usage {
             .tokens
             .reasoning_output
             .saturating_add(other.tokens.reasoning_output);
+        self.tokens.cache_write_1h = self
+            .tokens
+            .cache_write_1h
+            .saturating_add(other.tokens.cache_write_1h);
         if let Some(s) = other.server_tool_use {
             let dst = self
                 .server_tool_use
@@ -135,12 +149,13 @@ mod tests {
                 // reasoning_output is excluded from total_context_tokens (it is
                 // folded into output_tokens on the wire — mirrors TS).
                 reasoning_output: 7,
+                cache_write_1h: 0,
             },
             ..Usage::default()
         };
         // input + cache_write + cache_read + output = 100 + 10 + 25 + 40 = 175.
         assert_eq!(usage.total_context_tokens(), 175);
-        // total_tokens still includes reasoning_output.
+        // total_tokens includes reasoning_output but not cache_write_1h (0 here).
         assert_eq!(usage.total_tokens(), 182);
     }
 

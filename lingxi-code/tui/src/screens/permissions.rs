@@ -228,13 +228,51 @@ pub fn render_permissions_to_string(state: &PermissionsScreenState) -> String {
     }
 }
 
-/// The detail body for one rule.
+/// Split a rule string into `(toolName, ruleContent)`: `Read(./s/**)` →
+/// `("Read", Some("./s/**"))`, `Bash` → `("Bash", None)`.
+fn parse_rule(rule: &str) -> (&str, Option<&str>) {
+    if let Some(open) = rule.find('(') {
+        if rule.ends_with(')') {
+            return (&rule[..open], Some(&rule[open + 1..rule.len() - 1]));
+        }
+    }
+    (rule, None)
+}
+
+/// (PERM-2) Human-readable rule description (claude-code
+/// `PermissionRuleDescription`): a Bash rule always describes itself; a
+/// content-less rule for any other tool reads "Any use of the {tool} tool";
+/// a content-bearing non-Bash rule has no extra description (`None`).
+#[must_use]
+pub fn rule_description(rule: &str) -> Option<String> {
+    let (tool, content) = parse_rule(rule);
+    match tool {
+        "Bash" => Some(match content {
+            Some(c) if c.ends_with(":*") => {
+                format!("Any Bash command starting with {}", &c[..c.len() - 2])
+            }
+            Some(c) => format!("The Bash command {c}"),
+            None => "Any Bash command".to_string(),
+        }),
+        _ => match content {
+            None => Some(format!("Any use of the {tool} tool")),
+            Some(_) => None,
+        },
+    }
+}
+
+/// The detail body for one rule (PERM-2): the rule value, its human-readable
+/// description (when one applies), the behavior, and `From {source}`.
 fn render_rule_detail(row: &PermRuleRow) -> String {
     let mut out = String::new();
     out.push_str(&row.rule);
     out.push('\n');
+    if let Some(desc) = rule_description(&row.rule) {
+        out.push_str(&desc);
+        out.push('\n');
+    }
     out.push_str(&format!("Behavior: {}\n", row.behavior));
-    out.push_str(&format!("Source: {} settings", row.source));
+    out.push_str(&format!("From {}", row.source));
     out.push_str("\nesc to go back");
     out
 }
@@ -316,11 +354,36 @@ mod tests {
 
     #[test]
     fn detail_render_fields() {
+        // (PERM-2) Read(content) → no description; `From {source}` not "Source:".
         let r = row("Deny", "Read(./secrets/**)", "Local");
         assert_eq!(
             render_rule_detail(&r),
-            "Read(./secrets/**)\nBehavior: Deny\nSource: Local settings\nesc to go back"
+            "Read(./secrets/**)\nBehavior: Deny\nFrom Local\nesc to go back"
         );
+        // A content-less tool rule → "Any use of the {tool} tool" description.
+        let r = row("Allow", "WebSearch", "Project");
+        assert_eq!(
+            render_rule_detail(&r),
+            "WebSearch\nAny use of the WebSearch tool\nBehavior: Allow\nFrom Project\nesc to go back"
+        );
+    }
+
+    #[test]
+    fn rule_description_per_tool() {
+        // (PERM-2) Bash variants.
+        assert_eq!(
+            rule_description("Bash(npm test:*)").as_deref(),
+            Some("Any Bash command starting with npm test")
+        );
+        assert_eq!(
+            rule_description("Bash(ls -la)").as_deref(),
+            Some("The Bash command ls -la")
+        );
+        assert_eq!(rule_description("Bash").as_deref(), Some("Any Bash command"));
+        // Other tool, no content → "Any use of the {tool} tool".
+        assert_eq!(rule_description("Read").as_deref(), Some("Any use of the Read tool"));
+        // Other tool WITH content → no description.
+        assert_eq!(rule_description("Read(./s/**)"), None);
     }
 
     #[test]

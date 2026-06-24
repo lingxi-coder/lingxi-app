@@ -506,6 +506,41 @@ pub fn control_frame_request_id(frame: &Value) -> &str {
         .unwrap_or("")
 }
 
+// ── ControlPlaneWriter ────────────────────────────────────────────────────────
+
+/// Wraps the outbound NDJSON sender so the control-request dispatcher can reply
+/// without holding a reference to the full `StreamJsonStream`.
+///
+/// One `ControlPlaneWriter` is created per `run_stream_json_input_loop` invocation
+/// and moved into the control-dispatcher task. It clones the sender arc so it
+/// shares the same single-writer stdout drain as the streaming output.
+pub struct ControlPlaneWriter {
+    tx: std::sync::Arc<crate::stream_json::OutboundTx>,
+}
+
+impl ControlPlaneWriter {
+    /// Wrap an `Arc<OutboundTx>` (obtained via `StreamJsonStream::outbound_tx()`).
+    pub fn new(tx: std::sync::Arc<crate::stream_json::OutboundTx>) -> Self {
+        Self { tx }
+    }
+
+    /// Send a success `control_response` envelope.
+    ///
+    /// When `payload` is `None` the inner `"response"` key is omitted (not `null`).
+    pub fn reply_success(&self, request_id: &str, payload: Option<serde_json::Value>) {
+        let frame = build_control_response_success(request_id, payload);
+        let line = crate::stream_json::serialize_ndjson_line(&frame);
+        let _ = self.tx.send(line);
+    }
+
+    /// Send an error `control_response` envelope.
+    pub fn reply_error(&self, request_id: &str, msg: &str) {
+        let frame = build_control_response_error(request_id, msg);
+        let line = crate::stream_json::serialize_ndjson_line(&frame);
+        let _ = self.tx.send(line);
+    }
+}
+
 // ── Unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -819,5 +854,52 @@ mod tests {
         let line = r#"{"type":"update_environment_variables","env":{"SOME_VAR":"value"}}"#;
         let result = process_line(line, &mut fresh_seen()).unwrap();
         assert!(matches!(result, FrameAction::Consumed));
+    }
+
+    // ── Phase 1: ControlPlaneWriter ───────────────────────────────────────────
+
+    #[test]
+    fn control_plane_writer_reply_success_envelope_shape() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let writer = ControlPlaneWriter::new(std::sync::Arc::new(tx));
+        writer.reply_success("req-1", Some(json!({"pid": 42})));
+
+        let line = rx.try_recv().expect("should have sent one line");
+        let parsed: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed["type"], "control_response");
+        let inner = &parsed["response"];
+        assert_eq!(inner["subtype"], "success");
+        assert_eq!(inner["request_id"], "req-1");
+        assert_eq!(inner["response"]["pid"], 42);
+    }
+
+    #[test]
+    fn control_plane_writer_reply_error_envelope_shape() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let writer = ControlPlaneWriter::new(std::sync::Arc::new(tx));
+        writer.reply_error("req-2", "Unsupported control request subtype: foo");
+
+        let line = rx.try_recv().expect("should have sent one line");
+        let parsed: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed["type"], "control_response");
+        let inner = &parsed["response"];
+        assert_eq!(inner["subtype"], "error");
+        assert_eq!(inner["request_id"], "req-2");
+        assert_eq!(inner["error"], "Unsupported control request subtype: foo");
+    }
+
+    #[test]
+    fn control_plane_writer_reply_success_no_payload_omits_response_key() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let writer = ControlPlaneWriter::new(std::sync::Arc::new(tx));
+        writer.reply_success("req-3", None);
+
+        let line = rx.try_recv().expect("should have sent one line");
+        let parsed: Value = serde_json::from_str(&line).unwrap();
+        let inner = &parsed["response"];
+        assert_eq!(inner["subtype"], "success");
+        assert_eq!(inner["request_id"], "req-3");
+        // The inner "response" key must be absent when payload is None.
+        assert!(inner.get("response").is_none(), "response key must be absent when payload is None");
     }
 }

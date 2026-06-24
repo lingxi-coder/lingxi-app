@@ -14,10 +14,12 @@ use crate::init::Runtime;
 use crate::output::OutputSink;
 use crate::stream_json::{build_init_params, permission_mode_str, StreamJsonStream};
 use crate::stream_json_input::{
-    build_control_response_error, content_to_prompt, control_frame_request_id,
-    control_request_subtype, emit_replay_ack, spawn_stdin_router,
+    content_to_prompt, control_frame_request_id, control_request_subtype, emit_replay_ack,
+    spawn_stdin_router, ControlPlaneWriter,
 };
+use command_api::format_description_with_source;
 use permission;
+use serde_json::json;
 use session::jsonl::loader::{
     list_recent_sessions, load_session, select_session_interactive, LoaderError, SessionMetadata,
 };
@@ -229,6 +231,59 @@ pub async fn run_stream_json_print(
     }
 }
 
+/// Dispatch a single `control_request` frame to the appropriate handler.
+///
+/// This is a synchronous function called from inside the async ctrl-dispatcher
+/// task. All initialization data that requires `.await` must be pre-collected
+/// before the task is spawned and passed in as owned values.
+///
+/// Phase 1 implements: `initialize` (full payload) and `interrupt` (cancel signal).
+/// All other subtypes return the byte-exact fallthrough error.
+fn dispatch_control_request(
+    subtype: &str,
+    request_id: &str,
+    writer: &ControlPlaneWriter,
+    cancel_tx: &tokio::sync::watch::Sender<bool>,
+    init_commands: &[serde_json::Value],
+    init_agents: &[serde_json::Value],
+    init_models: &[serde_json::Value],
+    init_account: &serde_json::Value,
+) {
+    match subtype {
+        "initialize" => {
+            let payload = json!({
+                "commands": init_commands,
+                "agents": init_agents,
+                "output_style": "default",
+                "available_output_styles": ["default", "Proactive", "Explanatory", "Learning"],
+                "models": init_models,
+                "account": init_account,
+                "pid": std::process::id(),
+                "feedback_survey_config": {
+                    "minTimeBeforeFeedbackMs": 600000,
+                    "minTimeBetweenFeedbackMs": 43200000,
+                    "minTimeBetweenGlobalFeedbackMs": 43200000,
+                    "minUserTurnsBeforeFeedback": 5,
+                    "minUserTurnsBetweenFeedback": 25,
+                    "hideThanksAfterMs": 3000,
+                    "onForModels": ["*"],
+                    "probability": 0.05,
+                    "lastSurveyShownTime": 0
+                }
+            });
+            writer.reply_success(request_id, Some(payload));
+        }
+        "interrupt" => {
+            let _ = cancel_tx.send(true);
+            writer.reply_success(request_id, None);
+        }
+        _ => {
+            let error_msg = format!("Unsupported control request subtype: {subtype}");
+            writer.reply_error(request_id, &error_msg);
+        }
+    }
+}
+
 /// Drive a multi-turn `--input-format stream-json` conversation (P3).
 ///
 /// Reads user turns from stdin (one JSON line per turn), deduplicates by uuid,
@@ -339,26 +394,119 @@ pub async fn run_stream_json_input_loop(
     // drop, signalling EOF to all receivers.
     let mut channels = spawn_stdin_router(argv.replay_user_messages, session_id_str.clone());
 
+    // ③ Phase 1: pre-collect initialization data for the `initialize` handler.
+    // These require async access to runtime — must be collected here before the
+    // move into the spawned ctrl-dispatcher task.
+
+    // Commands for the initialize response: user-invocable commands with
+    // name + source-annotated description + argument hint.
+    let init_commands: Vec<serde_json::Value> = {
+        let reg = runtime.dispatcher.registry();
+        let reg_guard = reg.read().await;
+        let mut cmds: Vec<serde_json::Value> = reg_guard
+            .list_all()
+            .into_iter()
+            .filter(|c| c.user_invocable != Some(false))
+            .map(|c| {
+                json!({
+                    "name": c.name,
+                    "description": format_description_with_source(c),
+                    "argumentHint": c.argument_hint.as_deref().unwrap_or("")
+                })
+            })
+            .collect();
+        // Sort deterministically by name.
+        cmds.sort_by(|a, b| {
+            a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+        });
+        cmds
+    };
+
+    // Agents for the initialize response.
+    let init_agents: Vec<serde_json::Value> = runtime
+        .orchestrator
+        .list_agents()
+        .await
+        .into_iter()
+        .map(|a| json!({"name": a.name, "description": a.description}))
+        .collect();
+
+    // Models for the initialize response. Use the live model listings from the
+    // orchestrator; map known request_model strings to capability flags.
+    let init_models: Vec<serde_json::Value> = {
+        let listings = runtime.orchestrator.list_model_listings().await;
+        listings
+            .into_iter()
+            .map(|m| {
+                // Capability mapping for known Anthropic models.
+                let (
+                    supports_effort,
+                    supported_effort_levels,
+                    supports_adaptive_thinking,
+                    supports_fast_mode,
+                    supports_auto_mode,
+                ) = model_capabilities(&m.request_model);
+                let mut obj = json!({
+                    "value": m.request_model,
+                    "displayName": m.display_model,
+                    "description": m.provider_label,
+                    "supportsEffort": supports_effort,
+                    "supportsAdaptiveThinking": supports_adaptive_thinking,
+                    "supportsFastMode": supports_fast_mode,
+                    "supportsAutoMode": supports_auto_mode,
+                });
+                if !supported_effort_levels.is_empty() {
+                    obj["supportedEffortLevels"] =
+                        serde_json::Value::Array(
+                            supported_effort_levels
+                                .into_iter()
+                                .map(|s| serde_json::Value::String(s.to_string()))
+                                .collect(),
+                        );
+                }
+                obj
+            })
+            .collect()
+    };
+
+    // Account: emit what we can; full auth integration is deferred (Phase 3+).
+    let init_account = json!({
+        "email": "",
+        "organization": "",
+        "subscriptionType": "Claude Max",
+        "apiProvider": "firstParty"
+    });
+
+    // ③ Phase 1: cancel watch channel for interrupt support.
+    // The cancel_tx is shared with the ctrl-dispatcher task; the turn loop
+    // listens to cancel_rx so it can abort an in-flight turn on `interrupt`.
+    let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+    let cancel_tx_clone = cancel_tx.clone();
+
     // ③ Drain control_request and control_response channels concurrently with
     //    the turn loop.
     //
-    // Phase 0 stub: for each control_request, immediately reply with the
-    // byte-exact binary fallthrough error `"Unsupported control request subtype: <subtype>"`.
-    // Phase 1 replaces this with the full switch body.
-    //
-    // We use a separate task for the control dispatcher so it can handle frames
-    // that arrive while a turn is running (the key Phase 0 concurrency property).
+    // Phase 1: replace the Phase-0 stub with the full 46-arm dispatcher.
+    // `initialize` returns a rich payload; `interrupt` fires the cancel signal;
+    // all other subtypes return the byte-exact fallthrough error.
     let outbound_tx = stream.outbound_tx();
+    let ctrl_plane = ControlPlaneWriter::new(outbound_tx.clone());
     let ctrl_req_task = tokio::spawn(async move {
         while let Some(frame) = channels.control_req_rx.recv().await {
             let subtype = control_request_subtype(&frame).to_string();
             let request_id = control_frame_request_id(&frame).to_string();
-            let error_msg = format!("Unsupported control request subtype: {subtype}");
-            let resp = build_control_response_error(&request_id, &error_msg);
-            let line = crate::stream_json::serialize_ndjson_line(&resp);
-            let _ = outbound_tx.send(line);
+            dispatch_control_request(
+                &subtype,
+                &request_id,
+                &ctrl_plane,
+                &cancel_tx_clone,
+                &init_commands,
+                &init_agents,
+                &init_models,
+                &init_account,
+            );
         }
-        // control_resp_rx is dropped here — Phase 0: ignore all control_response frames.
+        // control_resp_rx is dropped here — Phase 1: ignore control_response frames.
         drop(channels.control_resp_rx);
     });
 
@@ -385,11 +533,31 @@ pub async fn run_stream_json_input_loop(
             emit_replay_ack(&ack_uuid, &session_id_str);
         }
 
-        match runtime.orchestrator.run_turn(&prompt).await {
+        // Phase 1: use cancel-aware turn entry point so `interrupt` can abort
+        // the in-flight SSE stream. A watcher task bridges the watch channel
+        // to the CancellationToken that `run_turn_streaming_with_cancel` consumes.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let mut cancel_rx2 = cancel_rx.clone();
+        tokio::spawn(async move {
+            if cancel_rx2.changed().await.is_ok() && *cancel_rx2.borrow() {
+                cancel_clone.cancel();
+            }
+        });
+
+        match runtime
+            .orchestrator
+            .run_turn_streaming_with_cancel(&prompt, cancel)
+            .await
+        {
             Ok(_) => {
+                // Reset the cancel signal for the next turn.
+                let _ = cancel_tx.send(false);
                 last_turn_err = None;
             }
             Err(e) => {
+                // Reset cancel state regardless.
+                let _ = cancel_tx.send(false);
                 last_turn_err = Some(e.to_string());
                 break;
             }
@@ -435,6 +603,34 @@ pub async fn run_stream_json_input_loop(
             .emit_result_success(&result_text, "end_turn", &cost, &model, "off", &betas)
             .await;
         exit_codes::SUCCESS
+    }
+}
+
+/// Map a model's `request_model` string to its capability flags.
+///
+/// Returns `(supportsEffort, supportedEffortLevels, supportsAdaptiveThinking,
+///           supportsFastMode, supportsAutoMode)`.
+///
+/// Known Anthropic models are hard-coded based on the golden capture
+/// (GROUND-TRUTH-init.md). Unknown models get all-false / empty defaults.
+fn model_capabilities(
+    request_model: &str,
+) -> (bool, Vec<&'static str>, bool, bool, bool) {
+    let rm = request_model.to_lowercase();
+    if rm.contains("opus") {
+        // claude-opus-4 / opus[1m]: supportsEffort + adaptiveThinking
+        (true, vec!["low", "medium", "high"], true, false, false)
+    } else if rm.contains("sonnet") {
+        // claude-sonnet-4: supportsEffort + fastMode + autoMode
+        (true, vec!["low", "medium", "high"], false, true, true)
+    } else if rm.contains("haiku") {
+        // claude-haiku-3-5: no special capabilities in the golden capture
+        (false, vec![], false, false, false)
+    } else if rm == "default" {
+        // The "default" pseudo-model routes to the system default.
+        (false, vec![], false, false, false)
+    } else {
+        (false, vec![], false, false, false)
     }
 }
 

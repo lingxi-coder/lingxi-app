@@ -185,11 +185,41 @@ impl PluginManager {
                  not yet wired — install a pre-fetched plugin directory via \
                  PluginSource::LocalPath"
             ))),
-            PluginSource::Marketplace { url, name } => Err(PluginManagerError::Io(format!(
-                "install of '{name}' from marketplace {url} requires the marketplace \
-                 fetch loop (not yet wired) — install a pre-fetched plugin directory \
-                 via PluginSource::LocalPath"
-            ))),
+            PluginSource::Marketplace { url, name } => {
+                let source = PluginSource::Marketplace {
+                    url: url.clone(),
+                    name: name.clone(),
+                };
+                let mkt = crate::marketplace::MarketplaceManager::new(self.install_dir.clone());
+                // 1. Clone + parse the marketplace catalog (keyed by the marketplace
+                //    repo identity so distinct marketplaces don't collide).
+                let mkt_name = repo_dir_for_url(&url);
+                let (index, clone_dir) = mkt
+                    .resolve_index_via_git(&url, &mkt_name)
+                    .await
+                    .map_err(PluginManagerError::Marketplace)?;
+                // 2. Find the plugin entry by name (byte-exact not-found message).
+                let entry = index.plugins.iter().find(|p| p.name == name).ok_or_else(|| {
+                    let avail = index
+                        .plugins
+                        .iter()
+                        .map(|p| p.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    PluginManagerError::Marketplace(format!(
+                        "Marketplace '{name}' not found. Available marketplaces: {avail}"
+                    ))
+                })?;
+                // 3. Resolve the plugin dir inside the clone (path-safety guarded)
+                //    and materialize it into the versioned cache.
+                let src_dir = crate::marketplace::MarketplaceManager::plugin_dir_in_clone(
+                    &clone_dir, entry,
+                )
+                .map_err(PluginManagerError::Marketplace)?;
+                let landed = self.copy_into_cache(&src_dir, &mkt_name).await?;
+                // 4. Finalize (load manifest + components, stamp source, enable).
+                self.finalize_install(source, landed).await
+            }
             PluginSource::Git { url, ref_ } => {
                 let source = PluginSource::Git {
                     url: url.clone(),

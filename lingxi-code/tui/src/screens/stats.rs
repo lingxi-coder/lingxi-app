@@ -115,6 +115,11 @@ pub struct StatsData {
     pub first_date: Option<String>,
     /// Latest session date seen (`YYYY-MM-DD`), if any.
     pub last_date: Option<String>,
+    /// (session-duration) Longest single-session duration in milliseconds
+    /// (claude-code `longestSession.duration`), 0 when no session had a
+    /// measurable span. `#[serde(default)]` so a pre-field cache still loads.
+    #[serde(default)]
+    pub longest_session_ms: u64,
 }
 
 impl StatsData {
@@ -210,6 +215,12 @@ pub struct SessionContribution {
     /// The session's date bucket (`YYYY-MM-DD` from the first main-chain
     /// message timestamp), if one was found.
     pub date: Option<String>,
+    /// Raw ISO-8601 timestamp of the FIRST main-chain message (session start),
+    /// used with [`Self::last_ts`] to compute the session duration
+    /// (claude-code `lastTimestamp - firstTimestamp`).
+    pub first_ts: Option<String>,
+    /// Raw ISO-8601 timestamp of the LAST main-chain message (session end).
+    pub last_ts: Option<String>,
     /// `model -> usage` accumulated from this file's `assistant` rows.
     pub model_usage: BTreeMap<String, ModelUsage>,
     /// `model -> total tokens` for this file's date bucket.
@@ -262,6 +273,13 @@ pub fn parse_session(content: &str, is_subagent: bool) -> SessionContribution {
                 if let Some(d) = date_bucket(&v) {
                     out.date = Some(d);
                 }
+            }
+            // (session-duration) Track first + last main-chain timestamp.
+            if let Some(ts) = v.get("timestamp").and_then(serde_json::Value::as_str) {
+                if out.first_ts.is_none() {
+                    out.first_ts = Some(ts.to_string());
+                }
+                out.last_ts = Some(ts.to_string());
             }
             out.message_count += 1;
         }
@@ -352,6 +370,11 @@ pub fn aggregate(contribs: &[SessionContribution]) -> StatsData {
                 data.total_messages += c.message_count;
                 *data.daily_messages.entry(date.clone()).or_default() += c.message_count as u64;
                 track_date(&mut data, date);
+                // (session-duration) longest session = max(last_ts - first_ts).
+                if let (Some(first), Some(last)) = (&c.first_ts, &c.last_ts) {
+                    let dur = session_duration_ms(first, last);
+                    data.longest_session_ms = data.longest_session_ms.max(dur);
+                }
             }
         }
         // Merge per-model usage (subagent files contribute here too).
@@ -371,6 +394,57 @@ pub fn aggregate(contribs: &[SessionContribution]) -> StatsData {
         }
     }
     data
+}
+
+/// Milliseconds between two ISO-8601 timestamps (`last - first`), clamped to 0
+/// when either fails to parse or the span is negative (claude-code
+/// `lastTimestamp.getTime() - firstTimestamp.getTime()`).
+#[must_use]
+pub fn session_duration_ms(first: &str, last: &str) -> u64 {
+    let parse = |s: &str| chrono::DateTime::parse_from_rfc3339(s).ok();
+    match (parse(first), parse(last)) {
+        (Some(a), Some(b)) => {
+            let ms = b.signed_duration_since(a).num_milliseconds();
+            u64::try_from(ms).unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
+
+/// Human-readable duration (claude-code `formatDuration`, no options): `0s`,
+/// `{s}s` under a minute, then `{m}m {s}s` / `{h}h {m}m {s}s` / `{d}d {h}h {m}m`
+/// with rounding carry-over.
+#[must_use]
+pub fn format_duration(ms: u64) -> String {
+    if ms < 60_000 {
+        return format!("{}s", ms / 1000);
+    }
+    let mut days = ms / 86_400_000;
+    let mut hours = (ms % 86_400_000) / 3_600_000;
+    let mut minutes = (ms % 3_600_000) / 60_000;
+    // `Math.round((ms % 60000) / 1000)` — round to nearest second.
+    let mut seconds = ((ms % 60_000) as f64 / 1000.0).round() as u64;
+    if seconds == 60 {
+        seconds = 0;
+        minutes += 1;
+    }
+    if minutes == 60 {
+        minutes = 0;
+        hours += 1;
+    }
+    if hours == 24 {
+        hours = 0;
+        days += 1;
+    }
+    if days > 0 {
+        format!("{days}d {hours}h {minutes}m")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m {seconds}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 /// Update `first_date`/`last_date` with `date` (lexicographic order is
@@ -445,7 +519,7 @@ impl HistoryFingerprint {
 /// the [`PersistedStatsCache`] / [`StatsData`] shape changes so a stale file is
 /// rejected by [`decode_stats_cache`] and falls back to a full walk. This is our
 /// OWN counter — see the module-section note above for why it is not `3`.
-pub const STATS_CACHE_VERSION: u32 = 1;
+pub const STATS_CACHE_VERSION: u32 = 2;
 
 /// The on-disk cache envelope (claude-code `PersistedStatsCache`): the schema
 /// version, the [`HistoryFingerprint`] the [`StatsData`] was computed from, and
@@ -904,6 +978,14 @@ fn overview_lines(data: &StatsData) -> Vec<String> {
         "Sessions: {}",
         format_number(data.total_sessions as u64)
     ));
+    // (stats-overview-missing-fields) Longest session duration, `N/A` when no
+    // session had a measurable span (claude-code `Longest session`).
+    let longest = if data.longest_session_ms > 0 {
+        format_duration(data.longest_session_ms)
+    } else {
+        "N/A".to_string()
+    };
+    out.push(format!("Longest session: {longest}"));
     // (stats-overview-missing-fields) Active days `/rangeDays` + streaks.
     out.push(format!("Active days: {}/{}", data.active_days(), data.range_days()));
     let (longest, current) = streaks(&data.daily_messages, chrono::Local::now().date_naive());
@@ -1522,5 +1604,43 @@ mod tests {
         let json = serde_json::to_string(&data).expect("serialize StatsData");
         let back: StatsData = serde_json::from_str(&json).expect("deserialize StatsData");
         assert_eq!(back, data);
+    }
+
+    #[test]
+    fn format_duration_matches_claude_code() {
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(30_000), "30s");
+        assert_eq!(format_duration(59_000), "59s");
+        assert_eq!(format_duration(90_000), "1m 30s");
+        assert_eq!(format_duration(3_661_000), "1h 1m 1s");
+        assert_eq!(format_duration(90_061_000), "1d 1h 1m");
+        // Rounding carry: 59.5s under a minute → still <60000 → floor "59s".
+        assert_eq!(format_duration(59_500), "59s");
+    }
+
+    #[test]
+    fn session_duration_from_iso_timestamps() {
+        let d = session_duration_ms("2026-05-25T14:00:00.000Z", "2026-05-25T15:30:00.000Z");
+        assert_eq!(d, 90 * 60 * 1000); // 1h30m
+        // Negative / unparseable → 0.
+        assert_eq!(session_duration_ms("2026-05-25T15:00:00Z", "2026-05-25T14:00:00Z"), 0);
+        assert_eq!(session_duration_ms("bad", "also-bad"), 0);
+    }
+
+    #[test]
+    fn longest_session_flows_into_overview() {
+        // A transcript whose first→last main-chain timestamps span 2 hours.
+        let content = [
+            r#"{"type":"user","timestamp":"2026-05-25T10:00:00.000Z","message":{"role":"user","content":"hi"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-05-25T12:00:00.000Z","message":{"model":"claude-opus-4-6","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+        ]
+        .join("\n");
+        let contrib = parse_session(&content, false);
+        assert_eq!(contrib.first_ts.as_deref(), Some("2026-05-25T10:00:00.000Z"));
+        assert_eq!(contrib.last_ts.as_deref(), Some("2026-05-25T12:00:00.000Z"));
+        let data = aggregate(&[contrib]);
+        assert_eq!(data.longest_session_ms, 2 * 60 * 60 * 1000);
+        let overview = overview_lines(&data).join("\n");
+        assert!(overview.contains("Longest session: 2h 0m 0s"), "got: {overview}");
     }
 }

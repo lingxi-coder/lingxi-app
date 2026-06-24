@@ -11,6 +11,7 @@ fn row(task_type: &str, status: &str, description: &str) -> TaskRow {
         task_type: task_type.into(),
         status: status.into(),
         description: description.into(),
+        command: None,
     }
 }
 

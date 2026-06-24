@@ -714,12 +714,14 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
             //   - OpenedDetail → entered a task's detail; the ticker pump (Task 7)
             //     drives the output tail, so there is nothing to do synchronously.
             use crate::screens::background_tasks::{
-                handle_background_tasks_key, TaskDialogOutcome,
+                display_order, handle_background_tasks_key, TaskDialogOutcome,
             };
-            let ids: Vec<String> = st
-                .multiagent
-                .tasks
-                .iter()
+            // (TASKS-DIALOG-SORT-ORDER) `state.selected` indexes the SAME
+            // section-grouped, running-first display order the renderer
+            // uses — both must call `display_order` so the highlighted row
+            // and Enter's target stay in sync with what's drawn.
+            let ids: Vec<String> = display_order(&st.multiagent.tasks)
+                .into_iter()
                 .map(|t| t.task_id.clone())
                 .collect();
             let ct = iocraft_to_crossterm028_key(k);

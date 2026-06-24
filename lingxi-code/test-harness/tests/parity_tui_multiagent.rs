@@ -28,6 +28,7 @@ fn task_row(t: &str, s: &str, d: &str) -> TaskRow {
         task_type: t.into(),
         status: s.into(),
         description: d.into(),
+        command: None,
     }
 }
 

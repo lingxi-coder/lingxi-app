@@ -53,6 +53,7 @@ mod tests {
             task_type: "local_bash".into(),
             status: "running".into(),
             description: "x".into(),
+            command: None,
         }])]]);
         let (tx, mut rx) = mpsc::unbounded_channel();
         let sent = pump_once(&feed, &tx).await;

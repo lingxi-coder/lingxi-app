@@ -42,6 +42,7 @@ mod tests {
             task_type: task_type.into(),
             status: status.into(),
             description: desc.into(),
+            command: None,
         }
     }
 

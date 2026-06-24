@@ -13,12 +13,14 @@ fn rows() -> Vec<TaskRow> {
             task_type: "local_bash".into(),
             status: "running".into(),
             description: "cargo build".into(),
+            command: None,
         },
         TaskRow {
             task_id: "b2".into(),
             task_type: "local_agent".into(),
             status: "completed".into(),
             description: "review".into(),
+            command: None,
         },
     ]
 }
@@ -93,6 +95,7 @@ mod routing_seam {
             task_type: "local_bash".into(),
             status: "running".into(),
             description: "x".into(),
+            command: None,
         }
     }
 

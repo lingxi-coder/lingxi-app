@@ -18,6 +18,7 @@ pub fn task_row_from_record(r: TaskRecord) -> TaskRow {
         task_type: r.task_type,
         status: r.status,
         description: r.description,
+        command: r.command,
     }
 }
 

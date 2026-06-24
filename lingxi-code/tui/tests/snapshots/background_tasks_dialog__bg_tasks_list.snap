@@ -1,9 +1,13 @@
 ---
 source: tui/tests/background_tasks_dialog.rs
-assertion_line: 29
+assertion_line: 31
 expression: "render_background_tasks_to_string(&state, &rows())"
 ---
 Background tasks
+1 active shell
+  Shells (1)
 ❯ cargo build (running)
+
+  Local agents (1)
   review (done, unread)
 ↑/↓ select · Enter view · ←/Esc close

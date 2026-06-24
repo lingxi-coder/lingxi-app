@@ -25,6 +25,7 @@ mod tests {
             task_type: "local_bash".into(),
             status: "running".into(),
             description: "build".into(),
+            command: None,
         }]);
         let b = a.clone();
         assert_eq!(a, b);

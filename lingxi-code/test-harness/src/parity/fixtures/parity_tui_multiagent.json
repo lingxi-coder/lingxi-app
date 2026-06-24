@@ -3,7 +3,7 @@
     {
       "name": "task_footer",
       "tasks": [{"task_type": "local_bash", "status": "running", "description": "cargo build"}],
-      "expected_contains": ["1 shell", "to view"]
+      "expected_contains": ["1 shell"]
     },
     {
       "name": "task_rows",

@@ -1,11 +1,14 @@
 //! `BackgroundTaskStatus` footer (claude-code `BackgroundTaskStatus.tsx`):
-//! `<getPillLabel> · ↓ to view`. Hidden when there are no tasks or every task
+//! the bare `getPillLabel` text. Hidden when there are no tasks or every task
 //! is an in-process teammate (shown in the spinner tree instead).
+//!
+//! (FOOTER-CTA-ALWAYS-ON) claude-code only appends a " · ↓ to view" CTA when
+//! `pillNeedsCta` is true, which is exactly the single-ultraplan-remote_agent
+//! case — an excluded cloud surface here — so the in-scope pill is always the
+//! bare label with no CTA suffix.
 
 use crate::multiagent::state::TaskRow;
 
-/// ` · ↓ to view` hint (space + U+00B7 + space + U+2193 + " to view").
-const VIEW_HINT: &str = " \u{00B7} \u{2193} to view";
 /// `◇` (U+25C7) — claude-code `DIAMOND_OPEN`, prefixed on the remote/cloud
 /// session pill label.
 const DIAMOND_OPEN: &str = "\u{25C7}";
@@ -21,7 +24,7 @@ pub fn render_task_footer(tasks: &[TaskRow]) -> Option<String> {
     if pill.is_empty() {
         return None;
     }
-    Some(format!("{}{VIEW_HINT}", pill_label(&pill)))
+    Some(pill_label(&pill))
 }
 
 /// Type-specific pill label (claude-code `getPillLabel`). When all tasks share
@@ -80,6 +83,7 @@ mod tests {
             task_type: task_type.into(),
             status: "running".into(),
             description: "x".into(),
+            command: None,
         }
     }
 
@@ -100,24 +104,18 @@ mod tests {
         // renders as shells (no `kind` field → all shells).
         assert_eq!(
             render_task_footer(&[row("local_bash")]).as_deref(),
-            Some("1 shell \u{00B7} \u{2193} to view")
+            Some("1 shell")
         );
         // Mixed types → generic `{n} background tasks`.
         let two = vec![row("local_bash"), row("local_agent")];
-        assert_eq!(
-            render_task_footer(&two).as_deref(),
-            Some("2 background tasks \u{00B7} \u{2193} to view")
-        );
+        assert_eq!(render_task_footer(&two).as_deref(), Some("2 background tasks"));
     }
 
     #[test]
     fn counts_nonteammate_only() {
         // a mix: 1 bash + 1 teammate → label reflects the 1 non-teammate shell.
         let mix = vec![row("local_bash"), row("in_process_teammate")];
-        assert_eq!(
-            render_task_footer(&mix).as_deref(),
-            Some("1 shell \u{00B7} \u{2193} to view")
-        );
+        assert_eq!(render_task_footer(&mix).as_deref(), Some("1 shell"));
     }
 
     #[test]
@@ -126,24 +124,24 @@ mod tests {
             let rows: Vec<TaskRow> = (0..n).map(|_| row(t)).collect();
             render_task_footer(&rows).unwrap()
         };
-        assert_eq!(lbl("local_bash", 3), "3 shells \u{00B7} \u{2193} to view");
-        assert_eq!(lbl("local_agent", 1), "1 local agent \u{00B7} \u{2193} to view");
-        assert_eq!(lbl("local_agent", 2), "2 local agents \u{00B7} \u{2193} to view");
-        assert_eq!(
-            lbl("local_workflow", 2),
-            "2 background workflows \u{00B7} \u{2193} to view"
-        );
-        assert_eq!(lbl("monitor_mcp", 1), "1 monitor \u{00B7} \u{2193} to view");
-        assert_eq!(lbl("dream", 4), "dreaming \u{00B7} \u{2193} to view");
-        assert_eq!(
-            lbl("remote_agent", 1),
-            "\u{25C7} 1 cloud session \u{00B7} \u{2193} to view"
-        );
-        assert_eq!(
-            lbl("remote_agent", 2),
-            "\u{25C7} 2 cloud sessions \u{00B7} \u{2193} to view"
-        );
+        assert_eq!(lbl("local_bash", 3), "3 shells");
+        assert_eq!(lbl("local_agent", 1), "1 local agent");
+        assert_eq!(lbl("local_agent", 2), "2 local agents");
+        assert_eq!(lbl("local_workflow", 2), "2 background workflows");
+        assert_eq!(lbl("monitor_mcp", 1), "1 monitor");
+        assert_eq!(lbl("dream", 4), "dreaming");
+        assert_eq!(lbl("remote_agent", 1), "\u{25C7} 1 cloud session");
+        assert_eq!(lbl("remote_agent", 2), "\u{25C7} 2 cloud sessions");
         // Unknown single type → generic fallback.
-        assert_eq!(lbl("mystery", 2), "2 background tasks \u{00B7} \u{2193} to view");
+        assert_eq!(lbl("mystery", 2), "2 background tasks");
+    }
+
+    #[test]
+    fn no_view_hint_cta() {
+        // (FOOTER-CTA-ALWAYS-ON) The " · ↓ to view" CTA only ever applies to
+        // the excluded single-ultraplan-remote_agent cloud case, so the
+        // in-scope pill never carries it.
+        let out = render_task_footer(&[row("local_bash")]).unwrap();
+        assert!(!out.contains("to view"), "got: {out}");
     }
 }

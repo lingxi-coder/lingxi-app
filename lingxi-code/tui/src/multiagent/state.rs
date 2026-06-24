@@ -17,6 +17,11 @@ pub struct TaskRow {
     pub status: String,
     /// Human-readable description.
     pub description: String,
+    /// (BASH-ROW-USES-DESCRIPTION-NOT-COMMAND) The shell command, for
+    /// `local_bash` tasks only — claude-code's `BackgroundTask.tsx` shows
+    /// this (not `description`) for non-monitor local-shell rows. `None`
+    /// for every other task type.
+    pub command: Option<String>,
 }
 
 /// One teammate/worker row. Populated from the coordinator surface in M9-06;

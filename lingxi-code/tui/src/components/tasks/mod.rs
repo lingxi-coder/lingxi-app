@@ -14,16 +14,23 @@ pub mod status_text;
 use crate::multiagent::state::TaskRow;
 
 /// Render a task list row from the wire-available `TaskRow` (claude-code
-/// `BackgroundTask.tsx`). Only `task_type`, `status`, `description` are on the
-/// wire, so rich per-type fields (elapsed, counts, `, unread`, activity, dream
-/// phase) are passed as defaults here (spec §2.4 — omit, never invent); the
-/// renderers accept them so fixtures/a richer feed light them up unchanged.
+/// `BackgroundTask.tsx`). `task_type`/`status`/`description` and (for
+/// `local_bash`) `command` are on the wire; rich per-type fields (elapsed,
+/// counts, `, unread`, activity, dream phase) are passed as defaults here
+/// (spec §2.4 — omit, never invent); the renderers accept them so
+/// fixtures/a richer feed light them up unchanged.
 #[must_use]
 pub fn render_task_row(row: &TaskRow) -> String {
     let d = row.description.as_str();
     let s = row.status.as_str();
     match row.task_type.as_str() {
-        "local_bash" => shell_progress::render_shell_progress_to_string(d, s, None),
+        // (BASH-ROW-USES-DESCRIPTION-NOT-COMMAND) claude-code's local_bash
+        // row shows the shell command, not the description.
+        "local_bash" => shell_progress::render_shell_progress_to_string(
+            row.command.as_deref().unwrap_or(d),
+            s,
+            None,
+        ),
         "local_agent" => rows::render_local_agent_row(d, s, false),
         "remote_agent" => rows::render_remote_agent_row(d, s, None),
         "in_process_teammate" => rows::render_in_process_teammate_row(d, s, None),
@@ -31,5 +38,35 @@ pub fn render_task_row(row: &TaskRow) -> String {
         "monitor_mcp" => rows::render_monitor_mcp_row(d, s, false),
         "dream" => rows::render_dream_row(d, s, None, None),
         _ => format!("{d} {}", status_text::render_task_status_text(s, None)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_bash_row_prefers_command_over_description() {
+        // (BASH-ROW-USES-DESCRIPTION-NOT-COMMAND)
+        let row = TaskRow {
+            task_id: "b1".into(),
+            task_type: "local_bash".into(),
+            status: "running".into(),
+            description: "Running shell command".into(),
+            command: Some("cargo build".into()),
+        };
+        assert!(render_task_row(&row).starts_with("cargo build"));
+    }
+
+    #[test]
+    fn local_bash_row_falls_back_to_description_without_command() {
+        let row = TaskRow {
+            task_id: "b1".into(),
+            task_type: "local_bash".into(),
+            status: "running".into(),
+            description: "Running shell command".into(),
+            command: None,
+        };
+        assert!(render_task_row(&row).starts_with("Running shell command"));
     }
 }

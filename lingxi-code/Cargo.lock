@@ -3245,6 +3245,7 @@ dependencies = [
  "agent",
  "async-trait",
  "command-api",
+ "git2",
  "hooks",
  "lsp",
  "mcp",

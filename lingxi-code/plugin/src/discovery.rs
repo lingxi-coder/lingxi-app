@@ -158,7 +158,7 @@ fn parse_plugin_identifier(id: &str) -> (&str, Option<&str>) {
 /// Sanitize one path segment exactly as claude-code's `getVersionedCachePathIn`
 /// (`pluginLoader.ts:139`) does: marketplace/plugin replace any char outside
 /// `[A-Za-z0-9\-_]` with `-`; version additionally keeps `.`.
-fn sanitize_segment(s: &str, allow_dot: bool) -> String {
+pub(crate) fn sanitize_segment(s: &str, allow_dot: bool) -> String {
     s.chars()
         .map(|c| {
             let keep = c.is_ascii_alphanumeric()
@@ -295,7 +295,9 @@ pub async fn discover_installed_plugins(
 ///
 /// Mirrors `createPluginFromPath` (`pluginLoader.ts:1348`): Step 1 loads the
 /// manifest, Step 3 auto-detects the optional component directories.
-async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId, PluginManifest)> {
+pub(crate) async fn load_plugin_from_path(
+    plugin_dir: &Path,
+) -> Option<(PluginId, PluginManifest)> {
     let manifest_path = plugin_dir.join(".claude-plugin").join("plugin.json");
     let raw = tokio::fs::read_to_string(&manifest_path).await.ok()?;
     let parsed: RawManifest = match serde_json::from_str(&raw) {

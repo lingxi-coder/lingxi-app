@@ -544,3 +544,146 @@ async fn enable_materializes_skill_outputstyle_mcp_lsp_into_live_registries() {
         "LSP config removed on unload"
     );
 }
+
+/// Initialise a git repo at `dir` containing a single-plugin tree (manifest +
+/// one command) and commit it, so it can be cloned via `file://`.
+fn init_git_plugin_repo(dir: &Path, plugin_name: &str) {
+    fs::create_dir_all(dir.join(".claude-plugin")).unwrap();
+    fs::write(
+        dir.join(".claude-plugin").join("plugin.json"),
+        format!(r#"{{"name":"{plugin_name}","version":"2.1.0"}}"#),
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("commands")).unwrap();
+    fs::write(
+        dir.join("commands").join("hello.md"),
+        "---\ndescription: greets from git\n---\nHello from the git plugin.\n",
+    )
+    .unwrap();
+
+    let repo = git2::Repository::init(dir).unwrap();
+    let mut index = repo.index().unwrap();
+    index
+        .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+        .unwrap();
+    index.write().unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+        .unwrap();
+}
+
+/// Build a `PluginManager` rooted at `install_dir`, returning it + the live
+/// command registry to assert against.
+async fn make_manager(
+    install_dir: &Path,
+    secrets_dir: &Path,
+) -> (PluginManager, Arc<RwLock<CommandRegistry>>) {
+    let command_registry = Arc::new(RwLock::new(CommandRegistry::new()));
+    let storage = PlainTextSecureStorage::new(secrets_dir.to_path_buf())
+        .await
+        .unwrap();
+    let credentials = Arc::new(CredentialManager::new(
+        Arc::new(storage),
+        Arc::new(PosixClock::new()),
+        Arc::new(PosixHttp::new()),
+    ));
+    let manager = PluginManager::new(
+        install_dir.to_path_buf(),
+        Arc::new(PosixFileSystem::new(install_dir.to_path_buf())),
+        Arc::new(PosixHttp::new()),
+        Arc::new(PosixRuntime::new()),
+        credentials,
+        Arc::new(PluginBlocklist::new(String::new())),
+        Arc::new(StrictPluginOnlyPolicy::empty()),
+        command_registry.clone(),
+        Arc::new(RwLock::new(SkillRegistry::new())),
+        Arc::new(RwLock::new(HookRegistry::new())),
+        Arc::new(RwLock::new(OutputStyleRegistry::new())),
+        Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new()))),
+        Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
+        Arc::new(RwLock::new(ToolRegistry::new())),
+    );
+    (manager, command_registry)
+}
+
+#[tokio::test]
+async fn install_git_arm_clones_materializes_and_registers() {
+    use plugin::PluginSource;
+
+    let tmp = tempfile::tempdir().unwrap();
+    // Source repo to clone FROM (file://).
+    let src = tmp.path().join("src-repo");
+    init_git_plugin_repo(&src, "gitplugin");
+    // Manager rooted at a SEPARATE install dir (the plugin cache).
+    let install_root = tmp.path().join("plugins");
+    let (manager, command_registry) =
+        make_manager(&install_root, &tmp.path().join("secrets")).await;
+
+    let url = format!("file://{}", src.display());
+    let id = manager
+        .install(PluginSource::Git {
+            url,
+            ref_: String::new(),
+        })
+        .await
+        .expect("git install should clone + materialize + enable");
+    assert!(!id.to_string().is_empty());
+
+    // The clone landed in the versioned cache layout the discovery resolves:
+    // cache/<repo-identity>/<plugin>/<version>/ holding the manifest.
+    let cache_root = install_root.join("cache");
+    let mut found_manifest = false;
+    for entry in walkdir(&cache_root) {
+        if entry.ends_with(".claude-plugin/plugin.json") {
+            found_manifest = true;
+        }
+    }
+    assert!(found_manifest, "plugin manifest should be materialized under {cache_root:?}");
+
+    // The plugin's command was registered via install→enable (namespaced).
+    assert!(
+        command_registry
+            .read()
+            .await
+            .resolve("gitplugin:hello")
+            .is_some(),
+        "git-installed plugin's command should be registered as gitplugin:hello"
+    );
+}
+
+#[tokio::test]
+async fn install_git_arm_rejects_bad_protocol() {
+    use plugin::PluginSource;
+    let tmp = tempfile::tempdir().unwrap();
+    let (manager, _) = make_manager(&tmp.path().join("plugins"), &tmp.path().join("secrets")).await;
+    let err = manager
+        .install(PluginSource::Git {
+            url: "ftp://evil.example/x".into(),
+            ref_: String::new(),
+        })
+        .await
+        .expect_err("unsupported protocol must be rejected");
+    assert!(
+        format!("{err}").contains("Invalid git URL protocol"),
+        "got: {err}"
+    );
+}
+
+/// Tiny recursive file walk (test-only) yielding every file path as a String.
+fn walkdir(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                out.push(p.to_string_lossy().into_owned());
+            }
+        }
+    }
+    out
+}

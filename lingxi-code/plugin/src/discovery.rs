@@ -270,6 +270,37 @@ async fn resolve_installed_version_dir(plugin_dir: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Re-discover every plugin recorded in `installed_plugins.json`, resolving each
+/// to its exact versioned cache dir `cache/<marketplace>/<plugin>/<version>/`.
+///
+/// This is the durable counterpart to [`crate::manager::PluginManager`]'s
+/// record-on-install: the records carry the authoritative `(marketplace,
+/// plugin, version)` triple, so resolution is exact (no single-version probe).
+/// Each segment is sanitized identically to the install-time path so the read
+/// path matches the write path. A record whose cache dir is missing / has no
+/// manifest is skipped (resilient to a hand-deleted cache). Returned tuples are
+/// `(freshly-minted id, manifest, install dir)`, sorted by plugin name.
+pub async fn discover_recorded_plugins(
+    plugins_dir: &Path,
+) -> Vec<(PluginId, PluginManifest, PathBuf)> {
+    let state = crate::installed::load(plugins_dir).await;
+    let cache_root = plugins_dir.join("cache");
+    let mut out = Vec::new();
+    for (marketplace, plugins) in &state.plugins {
+        for (name, record) in plugins {
+            let dir = cache_root
+                .join(sanitize_segment(marketplace, false))
+                .join(sanitize_segment(name, false))
+                .join(sanitize_segment(&record.version, true));
+            if let Some((id, manifest)) = load_plugin_from_path(&dir).await {
+                out.push((id, manifest, dir));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+    out
+}
+
 /// Walk `plugins_dir` and return every installed plugin discovered on disk.
 ///
 /// Each returned tuple is `(freshly-minted id, manifest, install dir)`. A

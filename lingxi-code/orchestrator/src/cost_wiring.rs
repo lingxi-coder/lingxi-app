@@ -31,6 +31,7 @@ pub(crate) fn llm_usage_to_cost_usage(usage: &LlmUsage) -> Usage {
             cache_write: usage.billable_tokens.cache_write,
             cache_read: usage.billable_tokens.cache_read,
             reasoning_output: usage.billable_tokens.reasoning_output,
+            cache_write_1h: 0,
         },
         server_tool_use: usage.server_tool_use.map(|s| ServerToolUsage {
             // cost's counter is u32; clamp the (u64) wire value defensively.

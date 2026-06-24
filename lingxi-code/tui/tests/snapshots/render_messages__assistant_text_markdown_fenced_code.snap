@@ -1,7 +1,8 @@
 ---
 source: tui/tests/render_messages.rs
+assertion_line: 69
 expression: element.to_string()
 ---
-● intro
+⏺ intro
   fn main() {}
   outro

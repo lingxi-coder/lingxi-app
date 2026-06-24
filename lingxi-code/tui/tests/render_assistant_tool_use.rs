@@ -2,10 +2,9 @@
 
 use std::path::PathBuf;
 
-use insta::assert_snapshot;
 use protocol::ToolUseId;
 use tui::components::messages::assistant_tool_use::{
-    render_assistant_tool_use_to_string, AssistantToolUseProps,
+    render_assistant_tool_use_to_string, AssistantToolUseProps, MARKER,
 };
 
 fn id() -> ToolUseId {
@@ -25,7 +24,8 @@ fn collapsed_read_with_file_path() {
         cwd: PathBuf::from("/tmp"),
         resolution: None,
     });
-    assert_snapshot!(s, @"● Read(x.rs)");
+    // (ma-03) MARKER is the platform BLACK_CIRCLE (⏺ macOS / ● else).
+    assert_eq!(s, format!("{MARKER} Read(x.rs)"));
 }
 
 #[test]
@@ -39,13 +39,10 @@ fn expanded_read_shows_pretty_json() {
         cwd: PathBuf::from("/tmp"),
         resolution: None,
     });
-    assert_snapshot!(s, @r#"
-    ● Read(x.rs)
-    {
-      "file_path": "/tmp/x.rs",
-      "limit": 100
-    }
-    "#);
+    assert_eq!(
+        s,
+        format!("{MARKER} Read(x.rs)\n{{\n  \"file_path\": \"/tmp/x.rs\",\n  \"limit\": 100\n}}")
+    );
 }
 
 #[test]
@@ -59,5 +56,5 @@ fn focused_collapsed_has_arrow_prefix() {
         cwd: PathBuf::from("/tmp"),
         resolution: None,
     });
-    assert_snapshot!(s, @"> ● Read(x.rs)");
+    assert_eq!(s, format!("> {MARKER} Read(x.rs)"));
 }

@@ -1,7 +1,8 @@
 ---
 source: tui/tests/render_messages.rs
+assertion_line: 61
 expression: element.to_string()
 ---
-● - one
+⏺ - one
   - two
   - three

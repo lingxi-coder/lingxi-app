@@ -1633,7 +1633,9 @@ mod dispatch_tests {
         });
         let mut element = render_screen(&st, 5, 80);
         let rendered = element.to_string();
-        assert!(rendered.contains("● hi"), "got: {rendered}");
+        // (ma-03) marker glyph is platform-conditional (⏺ macOS / ● else).
+        let marker = crate::components::messages::assistant_text::MARKER;
+        assert!(rendered.contains(&format!("{marker}hi")), "got: {rendered}");
         // (SS-01) No built-in status row renders without a custom statusLine
         // command, so the model id no longer appears in the chrome.
         assert!(

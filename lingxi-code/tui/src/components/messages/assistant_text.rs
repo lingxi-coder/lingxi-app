@@ -43,9 +43,14 @@ fn effective_width(width: usize) -> usize {
     }
 }
 
-/// Locked dot marker — "● " (U+25CF + ASCII space). Sits once to the LEFT of
-/// the body column (claude-code `minWidth={2}` sibling box), NOT per line.
-pub const MARKER: &str = "\u{25CF} ";
+/// Locked dot marker (ma-03 `figures.BLACK_CIRCLE`): `⏺ ` (U+23FA) on macOS,
+/// `● ` (U+25CF) elsewhere — + ASCII space. Sits once to the LEFT of the body
+/// column (claude-code `minWidth={2}` sibling box), NOT per line.
+pub const MARKER: &str = if cfg!(target_os = "macos") {
+    "\u{23FA} "
+} else {
+    "\u{25CF} "
+};
 
 /// Continuation indent (2 spaces) matching the marker's display width, so the
 /// string oracle's wrapped/continuation rows align under the body column.
@@ -190,15 +195,20 @@ mod tests {
 
     #[test]
     fn marker_bytes() {
-        // U+25CF = 0xE2 0x97 0x8F, then ASCII space.
-        assert_eq!(MARKER.as_bytes(), &[0xE2, 0x97, 0x8F, 0x20]);
+        // (ma-03) `⏺ ` on macOS, `● ` elsewhere — glyph + ASCII space.
+        let glyph = if cfg!(target_os = "macos") {
+            "\u{23FA}"
+        } else {
+            "\u{25CF}"
+        };
+        assert_eq!(MARKER, format!("{glyph} "));
     }
 
     #[test]
     fn oracle_prefixes_first_line_with_marker() {
         let s = render_assistant_text_to_string("hello", 0);
         assert!(s.starts_with(MARKER), "got: {s:?}");
-        assert_eq!(s, "\u{25CF} hello");
+        assert_eq!(s, format!("{MARKER}hello"));
     }
 
     #[test]
@@ -206,7 +216,7 @@ mod tests {
         // Two paragraphs flatten to "a", "", "b" (blank between paragraphs).
         let s = render_assistant_text_to_string("a\n\nb", 0);
         let lines: Vec<&str> = s.lines().collect();
-        assert_eq!(lines[0], "\u{25CF} a");
+        assert_eq!(lines[0], format!("{MARKER}a"));
         // Continuation lines are indented 2 to align under the body column.
         for cont in &lines[1..] {
             assert!(
@@ -220,7 +230,7 @@ mod tests {
     fn oracle_flattens_bold_to_plain() {
         // Bold styling is dropped in the plain oracle; the literal text stays.
         let s = render_assistant_text_to_string("a **b** c", 0);
-        assert_eq!(s, "\u{25CF} a b c");
+        assert_eq!(s, format!("{MARKER}a b c"));
     }
 
     #[test]

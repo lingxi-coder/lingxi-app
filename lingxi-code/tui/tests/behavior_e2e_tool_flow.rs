@@ -8,6 +8,7 @@
 
 use protocol::ToolUseId;
 use tokio::sync::Notify;
+use tui::components::messages::assistant_tool_use::MARKER;
 use tui::components::messages::render_entry_to_string;
 use tui::events::orchestrator_bridge::TurnEvent;
 use tui::state::{AppState, StatusSnapshot};
@@ -38,7 +39,7 @@ fn full_flow_call_then_result_renders_both_blocks() {
     );
     assert_eq!(st.messages.len(), 2);
     let s0 = render_entry_to_string(&st.messages[0], false, false);
-    assert!(s0.contains("● Read"), "got: {s0}");
+    assert!(s0.contains(&format!("{MARKER} Read")), "got: {s0}");
     let s1 = render_entry_to_string(&st.messages[1], false, false);
     assert!(s1.starts_with("  \u{23BF}  fn main() {}"), "got: {s1}");
 }

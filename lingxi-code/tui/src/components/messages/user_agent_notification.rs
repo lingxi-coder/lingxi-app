@@ -11,8 +11,13 @@ use iocraft::prelude::*;
 
 use crate::theme::Theme;
 
-/// `● ` marker (`BLACK_CIRCLE` non-darwin form, U+25CF + space).
-pub const MARKER: &str = "\u{25CF} ";
+/// `BLACK_CIRCLE` marker (ma-03): `⏺ ` (U+23FA) on macOS, `● ` (U+25CF)
+/// elsewhere — followed by a space.
+pub const MARKER: &str = if cfg!(target_os = "macos") {
+    "\u{23FA} "
+} else {
+    "\u{25CF} "
+};
 
 /// Props for [`UserAgentNotificationMessage`].
 #[derive(Debug, Clone, Default, Props)]
@@ -70,8 +75,13 @@ mod tests {
 
     #[test]
     fn marker_bytes() {
-        // ● = U+25CF = 0xE2 0x97 0x8F, then ASCII space.
-        assert_eq!(MARKER.as_bytes(), &[0xE2, 0x97, 0x8F, 0x20]);
+        // (ma-03) `⏺ ` on macOS, `● ` elsewhere — glyph + ASCII space.
+        let glyph = if cfg!(target_os = "macos") {
+            "\u{23FA}"
+        } else {
+            "\u{25CF}"
+        };
+        assert_eq!(MARKER, format!("{glyph} "));
     }
 
     #[test]
@@ -81,7 +91,7 @@ mod tests {
             status: Some("completed".into()),
             theme: Theme::dark(),
         });
-        assert_eq!(out, "\u{25CF} Task done");
+        assert_eq!(out, format!("{MARKER}Task done"));
     }
 
     #[test]

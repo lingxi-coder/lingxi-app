@@ -103,8 +103,13 @@ pub fn AdvisorMessage(props: &AdvisorProps) -> impl Into<AnyElement<'static>> {
         return element! {
             View(flex_direction: FlexDirection::Column) {
                 View(flex_direction: FlexDirection::Row) {
-                    // ToolUseLoader dot (unresolved/in-progress → dim).
-                    Text(content: "\u{25CF} ".to_string(), color: theme.dim)
+                    // ToolUseLoader dot (unresolved/in-progress → dim). ma-03:
+                    // the BLACK_CIRCLE glyph is `⏺` on macOS, `●` elsewhere
+                    // (shared with the tool-use marker).
+                    Text(
+                        content: format!("{} ", crate::components::messages::assistant_tool_use::MARKER),
+                        color: theme.dim,
+                    )
                     Text(content: "Advising".to_string(), color: theme.text, weight: Weight::Bold)
                     Text(content: descriptor, color: theme.dim)
                 }

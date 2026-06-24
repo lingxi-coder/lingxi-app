@@ -14,8 +14,13 @@ use protocol::ToolUseId;
 
 use crate::theme::TuiTheme;
 
-/// Marker glyph. 3-byte UTF-8.
-pub const MARKER: &str = "●";
+/// Marker glyph (ma-03 `figures.BLACK_CIRCLE`): `⏺` (U+23FA) on macOS, `●`
+/// (U+25CF) elsewhere. Platform-conditional at compile time.
+pub const MARKER: &str = if cfg!(target_os = "macos") {
+    "\u{23FA}"
+} else {
+    "\u{25CF}"
+};
 /// Focus prefix prepended when this block is the focused one.
 pub const FOCUS_PREFIX: &str = "> ";
 
@@ -246,8 +251,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn marker_is_three_utf8_bytes() {
-        assert_eq!(MARKER.as_bytes(), &[0xE2, 0x97, 0x8F]);
+    fn marker_is_the_platform_black_circle() {
+        // (ma-03) `⏺` (U+23FA) on macOS, `●` (U+25CF) elsewhere.
+        let glyph = if cfg!(target_os = "macos") {
+            "\u{23FA}"
+        } else {
+            "\u{25CF}"
+        };
+        assert_eq!(MARKER, glyph);
     }
 
     #[test]
@@ -317,7 +328,7 @@ mod tests {
             cwd: PathBuf::from("/p"),
             resolution: None,
         });
-        assert_eq!(s, "● Search(pattern: \"*.rs\")");
+        assert_eq!(s, format!("{MARKER} Search(pattern: \"*.rs\")"));
     }
 
     #[test]

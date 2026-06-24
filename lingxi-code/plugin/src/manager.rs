@@ -269,12 +269,49 @@ impl PluginManager {
                 let landed = self.copy_into_cache(&clone_dir, &repo_subpath).await?;
                 self.finalize_install(source, landed).await
             }
-            PluginSource::Mcpb { path, .. } => Err(PluginManagerError::Io(format!(
-                "install from .mcpb bundle {} requires the zip-unpack handler \
-                 (not yet wired) — install a pre-fetched plugin directory via \
-                 PluginSource::LocalPath",
-                path.display()
-            ))),
+            PluginSource::Mcpb { path, hash } => {
+                let source = PluginSource::Mcpb {
+                    path: path.clone(),
+                    hash: hash.clone(),
+                };
+                // 1. Read the bundle bytes (local file; remote download deferred).
+                let bytes = tokio::fs::read(&path).await.map_err(|e| {
+                    PluginManagerError::Fetch(format!(
+                        "Failed to download MCPB {}: {e}",
+                        path.display()
+                    ))
+                })?;
+                // 2. Integrity: the content hash is the ONLY tamper check (claude-
+                //    code has no signature). Verified before extraction.
+                if !hash.is_empty() && crate::mcpb::sha256_hex(&bytes) != *hash {
+                    return Err(PluginManagerError::Unpack(format!(
+                        "MCPB manifest invalid at {} (hash mismatch)",
+                        path.display()
+                    )));
+                }
+                // 3. mkdtemp → extract (path-traversal / too-many-files / zip-bomb
+                //    guarded), on a blocking thread.
+                let tmp = tempfile::tempdir().map_err(|e| {
+                    PluginManagerError::Unpack(format!(
+                        "Failed to extract MCPB {}: {e}",
+                        path.display()
+                    ))
+                })?;
+                let tmp_path = tmp.path().to_path_buf();
+                tokio::task::spawn_blocking(move || {
+                    crate::mcpb::unpack_mcpb(&bytes, &tmp_path)?;
+                    // 4. Normalize: ensure a `.claude-plugin/plugin.json` exists
+                    //    (translate a root `manifest.json` if needed).
+                    crate::mcpb::ensure_plugin_manifest(&tmp_path)
+                })
+                .await
+                .map_err(|e| PluginManagerError::Unpack(e.to_string()))?
+                .map_err(PluginManagerError::Unpack)?;
+                // 5. Land into the versioned cache + finalize.
+                let bundle = mcpb_bundle_name(&path);
+                let landed = self.copy_into_cache(tmp.path(), &bundle).await?;
+                self.finalize_install(source, landed).await
+            }
             PluginSource::BuiltIn => Err(PluginManagerError::Io(
                 "BuiltIn plugins are compiled into the engine and are not \
                  installed via PluginManager::install"
@@ -724,6 +761,17 @@ fn repo_dir_for_url(url: &str) -> String {
     } else {
         joined.join("/")
     }
+}
+
+/// Derive a stable cache `<marketplace>` segment for a `.mcpb` bundle from its
+/// file name (the stem, sanitized). e.g. `/x/my-plugin.mcpb` → `my-plugin`.
+fn mcpb_bundle_name(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("mcpb");
+    crate::discovery::sanitize_segment(stem, true)
 }
 
 /// Recursively copy the directory tree at `src` to `dst` (creating `dst`).

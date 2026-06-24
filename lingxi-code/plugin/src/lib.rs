@@ -18,6 +18,7 @@ pub mod discovery;
 mod git;
 pub mod lifecycle;
 pub mod loader;
+mod mcpb;
 pub mod manager;
 pub mod manifest;
 pub mod marketplace;

@@ -839,6 +839,96 @@ async fn install_marketplace_arm_rejects_symlink_escape() {
     assert!(!leaked, "the symlink target's files must NOT be copied into the cache");
 }
 
+/// Write a `.mcpb` (zip) bundle of `(entry_name, contents)` to `dest`.
+fn write_mcpb(dest: &Path, entries: &[(&str, &str)]) {
+    use std::io::Write;
+    let mut buf = Vec::new();
+    {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let opts = zip::write::SimpleFileOptions::default();
+        for (name, content) in entries {
+            w.start_file(*name, opts).unwrap();
+            w.write_all(content.as_bytes()).unwrap();
+        }
+        w.finish().unwrap();
+    }
+    fs::write(dest, &buf).unwrap();
+}
+
+#[tokio::test]
+async fn install_mcpb_arm_unpacks_materializes_and_registers() {
+    use plugin::PluginSource;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle = tmp.path().join("bundleplugin.mcpb");
+    write_mcpb(
+        &bundle,
+        &[
+            (".claude-plugin/plugin.json", r#"{"name":"bundleplugin","version":"1.0.0"}"#),
+            ("commands/zip.md", "---\ndescription: from a bundle\n---\nZipped command.\n"),
+        ],
+    );
+    let install_root = tmp.path().join("plugins");
+    let (manager, command_registry) =
+        make_manager(&install_root, &tmp.path().join("secrets")).await;
+
+    let id = manager
+        .install(PluginSource::Mcpb {
+            path: bundle.clone(),
+            hash: String::new(),
+        })
+        .await
+        .expect(".mcpb install should unpack + materialize + enable");
+    assert!(!id.to_string().is_empty());
+    assert!(
+        command_registry.read().await.resolve("bundleplugin:zip").is_some(),
+        ".mcpb plugin's command should be registered as bundleplugin:zip"
+    );
+}
+
+#[tokio::test]
+async fn install_mcpb_arm_rejects_path_traversal() {
+    use plugin::PluginSource;
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle = tmp.path().join("evil.mcpb");
+    write_mcpb(&bundle, &[("../../escape.txt", "pwned")]);
+    let (manager, _) = make_manager(&tmp.path().join("plugins"), &tmp.path().join("secrets")).await;
+
+    let err = manager
+        .install(PluginSource::Mcpb {
+            path: bundle,
+            hash: String::new(),
+        })
+        .await
+        .expect_err("a traversal entry must be rejected");
+    assert!(
+        format!("{err}").contains("Path traversal attempt detected"),
+        "got: {err}"
+    );
+    assert!(!tmp.path().join("escape.txt").exists(), "no file escaped the extract dir");
+}
+
+#[tokio::test]
+async fn install_mcpb_arm_rejects_hash_mismatch() {
+    use plugin::PluginSource;
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle = tmp.path().join("p.mcpb");
+    write_mcpb(
+        &bundle,
+        &[(".claude-plugin/plugin.json", r#"{"name":"p","version":"1.0.0"}"#)],
+    );
+    let (manager, _) = make_manager(&tmp.path().join("plugins"), &tmp.path().join("secrets")).await;
+
+    let err = manager
+        .install(PluginSource::Mcpb {
+            path: bundle,
+            hash: "deadbeef".into(),
+        })
+        .await
+        .expect_err("a hash mismatch must abort before extraction");
+    assert!(format!("{err}").contains("hash mismatch"), "got: {err}");
+}
+
 #[tokio::test]
 async fn install_git_arm_rejects_bad_protocol() {
     use plugin::PluginSource;

@@ -29,6 +29,11 @@ tracing.workspace = true
 # Git plugin-source clone (Stage 1 install arm) — the same vendored libgit2 the
 # Android git tool uses, so no new external system dependency is introduced.
 git2 = { path = "../../third_party/git2-rs/git2", default-features = false, features = ["vendored-libgit2", "https", "ssh"] }
+# .mcpb bundle install (Stage 3): pure-Rust zip extract + SHA-256 integrity +
+# a temp extract dir.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+sha2 = "0.10"
+tempfile = "3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync", "fs", "macros", "rt", "rt-multi-thread"] }
@@ -36,6 +41,8 @@ tempfile = "3"
 platform-posix = { path = "../platforms/posix" }
 # Build local git fixtures for the Stage-1 git-install-arm test (file:// clone).
 git2 = { path = "../../third_party/git2-rs/git2", default-features = false, features = ["vendored-libgit2"] }
+# Build .mcpb zip fixtures for the Stage-3 tests.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true

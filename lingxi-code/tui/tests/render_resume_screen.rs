@@ -33,14 +33,13 @@ fn snapshot_resume_three_sessions_with_preview() {
     let mut element = element! { ResumeScreen(state: st) };
     let frame = element.to_string();
     insta::assert_snapshot!("resume_three_sessions_with_preview", &frame);
-    assert!(frame.contains("Resume which session?"), "got: {frame}");
+    assert!(frame.contains("Resume Session"), "got: {frame}");
     assert!(frame.contains("> first session"), "got: {frame}");
     assert!(frame.contains("10 minutes ago \u{00b7} 5 messages"), "got: {frame}");
     // Third session's metadata uses the singular "1 message" (no parens).
     assert!(frame.contains("13 minutes ago \u{00b7} 1 message"), "got: {frame}");
-    // Preview pane (selected row) still shows the parenthesized count + title.
-    assert!(frame.contains("(5 messages)"), "got: {frame}");
-    assert!(frame.contains("Title:    first session"), "got: {frame}");
+    // (resume-preview-pane-not-in-shipped) No always-on preview pane.
+    assert!(!frame.contains("Title:    first session"), "got: {frame}");
 }
 
 #[test]

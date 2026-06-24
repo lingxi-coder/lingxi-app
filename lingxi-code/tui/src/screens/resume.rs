@@ -217,7 +217,9 @@ pub fn ResumeScreen(props: &ResumeScreenProps) -> impl Into<AnyElement<'static>>
         .into_any();
     }
 
-    let header = "Resume which session?".to_string();
+    // (resume-old-form) claude-code `LogSelector` header is the bold
+    // "Resume Session" title (not the stdio picker's "Resume which session?").
+    let header = "Resume Session".to_string();
     let selected = state.selected;
     // (resume-metadata) Each row is a title line + a dim metadata line below it
     // (`<relative time> · <N> messages`, paddingLeft 2), NOT the old inline
@@ -235,41 +237,21 @@ pub fn ResumeScreen(props: &ResumeScreenProps) -> impl Into<AnyElement<'static>>
         })
         .collect();
 
-    // Preview pane: title + uuid + count of the selected row (from metadata
-    // already in hand — no extra file read, no engine change).
-    let preview: Vec<String> = state
-        .selected_row()
-        .map(|r| {
-            vec![
-                format!("Title:    {}", r.title),
-                format!("Session:  {}", r.uuid),
-                format!("Messages: {}", r.count_label),
-                format!("Modified: {}", r.modified_label),
-            ]
-        })
-        .unwrap_or_default();
-
+    // (resume-preview-pane-not-in-shipped) The shipped LogSelector has NO
+    // always-on preview pane (a Ctrl+V transcript preview toggle is a separate,
+    // unported feature). The bordered Title/Session/Messages/Modified box is
+    // removed for 1:1.
     let footer = "Up/Down select   Enter resume   Esc cancel".to_string();
 
     element! {
         View(flex_direction: FlexDirection::Column, padding: 1) {
-            Text(content: header)
+            Text(content: header, weight: Weight::Bold)
             View(flex_direction: FlexDirection::Column, padding_top: 1) {
                 #(row_lines.into_iter().map(|(title, meta)| element! {
                     View(flex_direction: FlexDirection::Column) {
                         Text(content: title)
                         Text(content: meta, color: Color::DarkGrey)
                     }
-                }))
-            }
-            View(
-                flex_direction: FlexDirection::Column,
-                border_style: BorderStyle::Round,
-                padding: 1,
-                margin_top: 1,
-            ) {
-                #(preview.into_iter().map(|line| element! {
-                    Text(content: line)
                 }))
             }
             View(margin_top: 1) {
@@ -441,7 +423,7 @@ mod tests {
         ]);
         let mut element = element! { ResumeScreen(state: st) };
         let frame = element.to_string();
-        assert!(frame.contains("Resume which session?"), "got: {frame}");
+        assert!(frame.contains("Resume Session"), "got: {frame}");
         assert!(frame.contains("first session"), "got: {frame}");
         // (resume-metadata) Dim metadata line: "<relative> · <N> messages".
         assert!(frame.contains("5 minutes ago \u{00b7} 3 messages"), "got: {frame}");

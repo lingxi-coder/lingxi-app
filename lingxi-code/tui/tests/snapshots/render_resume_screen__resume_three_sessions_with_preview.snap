@@ -4,7 +4,7 @@ assertion_line: 35
 expression: "&frame"
 ---
 
- Resume which session?
+ Resume Session
 
  > first session
    10 minutes ago · 5 messages
@@ -12,14 +12,5 @@ expression: "&frame"
    11 minutes ago · 2 messages
    third session
    13 minutes ago · 1 message
-
- ╭────────────────────────────────────────────────╮
- │                                                │
- │ Title:    first session                        │
- │ Session:  00000000-0000-0000-0000-000000000000 │
- │ Messages: (5 messages)                         │
- │ Modified: 1970-01-01T00:05:00Z                 │
- │                                                │
- ╰────────────────────────────────────────────────╯
 
  Up/Down select   Enter resume   Esc cancel

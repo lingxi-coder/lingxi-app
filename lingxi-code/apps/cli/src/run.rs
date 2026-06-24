@@ -13,6 +13,7 @@ use crate::exit_codes;
 use crate::init::Runtime;
 use crate::output::OutputSink;
 use crate::stream_json::{build_init_params, permission_mode_str, StreamJsonStream};
+use crate::stream_json_input::{content_to_prompt, emit_replay_ack, read_input_turns};
 use permission;
 use session::jsonl::loader::{
     list_recent_sessions, load_session, select_session_interactive, LoaderError, SessionMetadata,
@@ -201,6 +202,189 @@ pub async fn run_stream_json_print(
 
     if turn_result.is_err() {
         let err_msg = turn_result.unwrap_err().to_string();
+        stream
+            .emit_result_error(
+                "error_during_execution",
+                vec![err_msg],
+                &cost,
+                &model,
+                "off",
+                &betas,
+            )
+            .await;
+        exit_codes::RUNTIME_ERROR
+    } else {
+        stream
+            .emit_result_success(&result_text, "end_turn", &cost, &model, "off", &betas)
+            .await;
+        exit_codes::SUCCESS
+    }
+}
+
+/// Drive a multi-turn `--input-format stream-json` conversation (P3).
+///
+/// Reads user turns from stdin (one JSON line per turn), deduplicates by uuid,
+/// and feeds each turn sequentially through `run_turn`. Emits `system/init` +
+/// `system/status` before the first turn and a `result` frame after the last.
+///
+/// Under `--replay-user-messages`, duplicate-uuid acks (`isReplay:true`) are
+/// emitted when a dup is detected.
+///
+/// This function is called from `run_cli` when BOTH `--output-format stream-json`
+/// AND `--input-format stream-json` are set. The stream is already installed as
+/// the orchestrator's `OutputStream`.
+pub async fn run_stream_json_input_loop(
+    argv: &Argv,
+    runtime: &Runtime,
+    stream: Arc<StreamJsonStream>,
+    permission_mode: permission::PermissionMode,
+) -> i32 {
+    // Collect the real session_id and model from the orchestrator after build.
+    let (session_id_str, model_str) = {
+        let session_handle = runtime.orchestrator.session();
+        let session = session_handle.lock().await;
+        (session.session_id.to_string(), session.model.clone())
+    };
+
+    // Collect tool names, MCP servers, slash commands, agents, etc. — same as
+    // run_stream_json_print's init-frame population.
+    let tool_names = runtime.orchestrator.tool_names();
+
+    let mcp_servers: Vec<(String, String)> = runtime
+        .orchestrator
+        .list_mcp_servers()
+        .await
+        .into_iter()
+        .map(|s| {
+            let status_str = match s.status {
+                McpStatus::Connected => "connected".to_string(),
+                McpStatus::Disconnected => "disconnected".to_string(),
+                McpStatus::Error(_) => "error".to_string(),
+            };
+            (s.name, status_str)
+        })
+        .collect();
+
+    let (slash_commands, skills) = {
+        let reg = runtime.dispatcher.registry();
+        let reg_guard = reg.read().await;
+        let mut all_cmds: Vec<String> =
+            reg_guard.list_all().into_iter().map(|c| c.name.clone()).collect();
+        all_cmds.sort();
+        let mut skill_names: Vec<String> = reg_guard
+            .list_all()
+            .into_iter()
+            .filter(|c| c.loaded_from.as_deref() == Some("skills"))
+            .map(|c| c.name.clone())
+            .collect();
+        skill_names.sort();
+        drop(reg_guard);
+        (all_cmds, skill_names)
+    };
+
+    let agents: Vec<String> = runtime
+        .orchestrator
+        .list_agents()
+        .await
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+
+    let plugins: Vec<(String, String, String)> = vec![];
+
+    let init_params = build_init_params(
+        &session_id_str,
+        tool_names,
+        mcp_servers,
+        &model_str,
+        permission_mode_str(permission_mode),
+        slash_commands,
+        agents,
+        skills,
+        plugins,
+        "default",
+        None,
+        "off",
+    );
+
+    stream.set_init_params(init_params).await;
+
+    // ① system/init frame (emitted once before any turns).
+    stream.emit_init().await;
+
+    // ② system/status frame (the init "requesting" handshake).
+    stream.emit_status().await;
+
+    // ③ Read all stdin turns synchronously (blocking stdin read).
+    //    We use a blocking task so we don't block the async runtime.
+    let replay = argv.replay_user_messages;
+    let session_id_for_replay = session_id_str.clone();
+    let turns = tokio::task::spawn_blocking(move || {
+        let stdin = std::io::stdin();
+        read_input_turns(stdin.lock(), replay, &session_id_for_replay)
+    })
+    .await;
+
+    let turns = match turns {
+        Ok(Ok(turns)) => turns,
+        Ok(Err(_input_err)) => {
+            // Fatal parse error — already printed to stderr. Exit 1.
+            return exit_codes::RUNTIME_ERROR;
+        }
+        Err(join_err) => {
+            eprintln!("lingxi-cli: stdin reader task panicked: {join_err}");
+            return exit_codes::RUNTIME_ERROR;
+        }
+    };
+
+    if turns.is_empty() {
+        // No user turns received — emit an empty-result envelope.
+        let cost = runtime.orchestrator.snapshot_cost().await;
+        let betas: Vec<String> = vec![];
+        stream
+            .emit_result_success("", "end_turn", &cost, &model_str, "off", &betas)
+            .await;
+        return exit_codes::SUCCESS;
+    }
+
+    // ④ Run each turn sequentially through the orchestrator.
+    let betas: Vec<String> = vec![];
+    let mut last_turn_err: Option<String> = None;
+
+    for turn in &turns {
+        let prompt = content_to_prompt(&turn.content);
+
+        // Under --replay-user-messages, re-emit the inbound user frame as
+        // isReplay:true (the initial-prompt ack for each new turn).
+        if argv.replay_user_messages {
+            let ack_uuid = turn
+                .uuid
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            emit_replay_ack(&ack_uuid, &session_id_str);
+        }
+
+        match runtime.orchestrator.run_turn(&prompt).await {
+            Ok(_) => {
+                last_turn_err = None;
+            }
+            Err(e) => {
+                last_turn_err = Some(e.to_string());
+                break;
+            }
+        }
+    }
+
+    // ⑤ Emit the result frame.
+    let cost = runtime.orchestrator.snapshot_cost().await;
+    let result_text = stream.get_last_result_text().await;
+    let model = {
+        let session_handle = runtime.orchestrator.session();
+        let session = session_handle.lock().await;
+        session.model.clone()
+    };
+
+    if let Some(err_msg) = last_turn_err {
         stream
             .emit_result_error(
                 "error_during_execution",

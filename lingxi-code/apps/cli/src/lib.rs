@@ -69,6 +69,7 @@ pub mod repl_loop;
 pub mod run;
 pub mod sigint;
 pub mod stream_json;
+pub mod stream_json_input;
 pub mod structured_output;
 
 use crate::argv::Argv;
@@ -123,6 +124,13 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         }
     }
 
+    // P3 cross-flag validation for --input-format=stream-json and
+    // --replay-user-messages (§4.1 SPEC-inferred.md, exact error strings).
+    if let Err(msg) = parsed.validate_stream_json_input_args() {
+        eprintln!("Error: {msg}");
+        return exit_codes::ARGV_ERROR;
+    }
+
     // stream-json: `--output-format stream-json --verbose` (print-only, no
     // SinkAdapter/OutputSink layer — the StreamJsonStream IS the OutputStream).
     //
@@ -149,6 +157,11 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         }
         if let Some(notice) = &permission_notice {
             eprintln!("{notice}");
+        }
+        // P3: when --input-format=stream-json is also set, use the multi-turn
+        // stdin loop instead of the single-prompt one-shot path.
+        if parsed.is_stream_json_input() {
+            return run::run_stream_json_input_loop(&parsed, &runtime, stream, permission_mode).await;
         }
         return run::run_stream_json_print(&parsed, &runtime, stream, permission_mode).await;
     }

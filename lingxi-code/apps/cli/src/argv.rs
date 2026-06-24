@@ -368,6 +368,45 @@ impl Argv {
         self.system_prompt.clone()
     }
 
+    /// True iff `--input-format stream-json` is set.
+    #[must_use]
+    pub fn is_stream_json_input(&self) -> bool {
+        matches!(self.input_format.as_deref(), Some("stream-json"))
+    }
+
+    /// Validate `--input-format=stream-json` cross-flag constraints.
+    ///
+    /// Checks (in binary order per §4.1 of SPEC-inferred.md):
+    /// 1. `--input-format=stream-json` requires `--output-format=stream-json`
+    ///    → `Error: --input-format=stream-json requires output-format=stream-json.`
+    /// 2. `--input-format=stream-json` requires `--print`
+    ///    → `Error: --input-format=stream-json requires --print.`
+    /// 3. `--replay-user-messages` requires both `--input-format=stream-json`
+    ///    and `--output-format=stream-json`
+    ///    → `Error: --replay-user-messages requires both --input-format=stream-json and --output-format=stream-json.`
+    ///
+    /// Returns `Ok(())` when the combination is valid. The exact error strings
+    /// are byte-locked to the binary (§4.1 SPEC-inferred.md).
+    pub fn validate_stream_json_input_args(&self) -> Result<(), String> {
+        if self.is_stream_json_input() {
+            if !self.is_stream_json() {
+                return Err("--input-format=stream-json requires output-format=stream-json.".to_string());
+            }
+            if !self.print {
+                return Err("--input-format=stream-json requires --print.".to_string());
+            }
+        }
+        if self.replay_user_messages {
+            if !self.is_stream_json_input() || !self.is_stream_json() {
+                return Err(
+                    "--replay-user-messages requires both --input-format=stream-json and --output-format=stream-json."
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve the effective append-system-prompt from `--append-system-prompt` /
     /// `--append-system-prompt-file` (with file taking precedence when both are
     /// set). Returns `None` when neither flag is set.
@@ -978,5 +1017,105 @@ mod tests {
     fn resolve_append_system_prompt_none_when_not_set() {
         let a = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
         assert!(a.resolve_append_system_prompt().is_none());
+    }
+
+    // ── P3 validation chain ──────────────────────────────────────────────────
+
+    #[test]
+    fn input_format_stream_json_without_output_format_stream_json_errors() {
+        let a = Argv::from_iter([
+            "lingxi-cli", "--print", "--verbose",
+            "--input-format", "stream-json",
+            "--output-format", "json",
+            "hi",
+        ]).unwrap();
+        let err = a.validate_stream_json_input_args().unwrap_err();
+        assert_eq!(err, "--input-format=stream-json requires output-format=stream-json.");
+    }
+
+    #[test]
+    fn input_format_stream_json_without_print_errors() {
+        let a = Argv::from_iter([
+            "lingxi-cli", "--verbose",
+            "--input-format", "stream-json",
+            "--output-format", "stream-json",
+            "hi",
+        ]).unwrap();
+        let err = a.validate_stream_json_input_args().unwrap_err();
+        assert_eq!(err, "--input-format=stream-json requires --print.");
+    }
+
+    #[test]
+    fn replay_user_messages_without_stream_json_input_errors() {
+        let a = Argv::from_iter([
+            "lingxi-cli", "--print", "--verbose",
+            "--output-format", "stream-json",
+            "--replay-user-messages",
+            "hi",
+        ]).unwrap();
+        let err = a.validate_stream_json_input_args().unwrap_err();
+        assert_eq!(
+            err,
+            "--replay-user-messages requires both --input-format=stream-json and --output-format=stream-json."
+        );
+    }
+
+    #[test]
+    fn replay_user_messages_without_output_format_stream_json_errors() {
+        let a = Argv::from_iter([
+            "lingxi-cli", "--print", "--verbose",
+            "--input-format", "stream-json",
+            "--output-format", "json",
+            "--replay-user-messages",
+            "hi",
+        ]).unwrap();
+        // The input-format validation fires first (before replay check).
+        let err = a.validate_stream_json_input_args().unwrap_err();
+        assert_eq!(err, "--input-format=stream-json requires output-format=stream-json.");
+    }
+
+    #[test]
+    fn valid_stream_json_input_flags_pass_validation() {
+        let a = Argv::from_iter([
+            "lingxi-cli", "--print", "--verbose",
+            "--input-format", "stream-json",
+            "--output-format", "stream-json",
+            "hi",
+        ]).unwrap();
+        assert!(a.validate_stream_json_input_args().is_ok());
+    }
+
+    #[test]
+    fn valid_stream_json_input_with_replay_passes_validation() {
+        let a = Argv::from_iter([
+            "lingxi-cli", "--print", "--verbose",
+            "--input-format", "stream-json",
+            "--output-format", "stream-json",
+            "--replay-user-messages",
+            "hi",
+        ]).unwrap();
+        assert!(a.validate_stream_json_input_args().is_ok());
+    }
+
+    #[test]
+    fn no_stream_json_flags_passes_validation() {
+        let a = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
+        assert!(a.validate_stream_json_input_args().is_ok());
+    }
+
+    #[test]
+    fn is_stream_json_input_detects_flag() {
+        let a = Argv::from_iter([
+            "lingxi-cli", "--input-format", "stream-json", "hi",
+        ]).unwrap();
+        assert!(a.is_stream_json_input());
+    }
+
+    #[test]
+    fn is_stream_json_input_false_for_text() {
+        let a = Argv::from_iter([
+            "lingxi-cli", "--input-format", "text", "hi",
+        ]).unwrap();
+        assert!(!a.is_stream_json_input());
     }
 }

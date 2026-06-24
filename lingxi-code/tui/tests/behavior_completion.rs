@@ -44,12 +44,33 @@ fn filter_narrows_completion() {
 }
 
 #[test]
-fn tab_inserts_path_with_at_and_trailing_space() {
+fn tab_completes_unambiguous_match_then_commits_on_second_press() {
+    // (cp-07) claude-code's Tab is two-stage: it first completes to the
+    // longest common prefix across the filtered rows (no trailing space,
+    // overlay stays open) — even a single full match counts, since
+    // `findLongestCommonPrefix` doesn't special-case one row. A second Tab,
+    // once the typed text already equals that prefix, has nothing left to
+    // complete and commits the row outright (trailing space, closes).
     let (mut st, _dir) = state_with_files();
     for ch in "@al".chars() {
         handle_live_key(&mut st, &key(KeyCode::Char(ch)), 24);
     }
     handle_live_key(&mut st, &key(KeyCode::Tab), 24);
+    assert_eq!(st.prompt_text, "@alpha.rs");
+    assert!(st.completion.open, "first Tab completes but stays open");
+
+    handle_live_key(&mut st, &key(KeyCode::Tab), 24);
+    assert_eq!(st.prompt_text, "@alpha.rs ");
+    assert!(!st.completion.open, "second Tab commits and closes");
+}
+
+#[test]
+fn enter_inserts_path_with_at_and_trailing_space() {
+    let (mut st, _dir) = state_with_files();
+    for ch in "@al".chars() {
+        handle_live_key(&mut st, &key(KeyCode::Char(ch)), 24);
+    }
+    handle_live_key(&mut st, &key(KeyCode::Enter), 24);
     assert_eq!(st.prompt_text, "@alpha.rs ");
     assert!(!st.completion.open, "insert closes completion");
 }

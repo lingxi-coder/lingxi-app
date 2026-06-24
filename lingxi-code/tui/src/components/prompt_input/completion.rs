@@ -34,6 +34,29 @@ pub struct CompletionState {
     pub candidates: Vec<String>,
 }
 
+/// (cp-07) claude-code `findLongestCommonPrefix`: the longest shared prefix
+/// across every string in `items`, or `""` if `items` is empty.
+#[must_use]
+fn longest_common_prefix(items: &[String]) -> String {
+    let Some(first) = items.first() else {
+        return String::new();
+    };
+    let mut prefix: Vec<char> = first.chars().collect();
+    for s in &items[1..] {
+        let chars: Vec<char> = s.chars().collect();
+        let n = prefix.len().min(chars.len());
+        let mut i = 0;
+        while i < n && prefix[i] == chars[i] {
+            i += 1;
+        }
+        prefix.truncate(i);
+        if prefix.is_empty() {
+            break;
+        }
+    }
+    prefix.into_iter().collect()
+}
+
 /// Find the active `@` token: the substring from the last `@` to the cursor,
 /// iff that `@` is at the start or preceded by whitespace and the token has no
 /// space. Returns `(at_byte_index, partial)` or `None`.
@@ -143,7 +166,15 @@ impl CompletionState {
     }
 
     /// Tab/Enter handler that rewrites the prompt in place: replaces the active
-    /// `@token` (located via `active_at_token`) with `@<selected> `.
+    /// `@token` (located via `active_at_token`) with the completion.
+    ///
+    /// Enter always commits the highlighted row outright (`@<selected> `,
+    /// trailing space, overlay closes). Tab is two-stage (cp-07, claude-code
+    /// `handleTab`'s file branch): if every currently-filtered row shares a
+    /// prefix longer than what's typed, it completes to that shared prefix
+    /// (no trailing space) and leaves the overlay OPEN — re-filtering against
+    /// the longer prefix is what makes a shared directory prefix "drill
+    /// down" into that directory's children, with no special-casing needed.
     pub fn handle_key_with_prompt(
         &mut self,
         code: KeyCode,
@@ -156,20 +187,32 @@ impl CompletionState {
                 let Some(sel) = rows.get(self.selected).cloned() else {
                     return CompletionKeyOutcome::PassThrough;
                 };
-                let Some((at, _)) = active_at_token(prompt, cursor) else {
+                let Some((at, partial)) = active_at_token(prompt, cursor) else {
                     return CompletionKeyOutcome::PassThrough;
                 };
                 let cursor = cursor.min(prompt.len());
-                let insert = format!("@{sel} ");
+                let lcp = (code == KeyCode::Tab)
+                    .then(|| longest_common_prefix(&rows))
+                    .filter(|p| p.chars().count() > partial.chars().count());
+                let (insert, keep_open) = match &lcp {
+                    Some(prefix) => (format!("@{prefix}"), true),
+                    None => (format!("@{sel} "), false),
+                };
                 let mut new_prompt = String::with_capacity(prompt.len() + insert.len());
                 new_prompt.push_str(&prompt[..at]);
                 new_prompt.push_str(&insert);
                 let new_cursor = new_prompt.len();
                 new_prompt.push_str(&prompt[cursor..]);
-                self.open = false;
-                self.filter.clear();
-                self.selected = 0;
-                self.candidates.clear();
+                if !keep_open {
+                    // Full commit: close. (Leaving `candidates` intact in the
+                    // `keep_open` case matters — the caller re-syncs using
+                    // `self.candidates` right after, so clearing it here
+                    // would throw away the cached listing mid drill-down.)
+                    self.open = false;
+                    self.filter.clear();
+                    self.selected = 0;
+                    self.candidates.clear();
+                }
                 CompletionKeyOutcome::Accept {
                     new_prompt,
                     new_cursor,
@@ -180,20 +223,110 @@ impl CompletionState {
     }
 }
 
-/// Read the immediate (non-recursive) entries of `dir`, excluding dotfiles,
-/// returned as file names sorted ASCII-ascending. The only fs-touching fn in
-/// this module. Errors → empty list (the overlay just shows the empty state).
+/// claude-code `getTopLevelPaths`: the immediate (non-recursive) entries of
+/// `dir`, directories suffixed with `/`, sorted ASCII-ascending. No dotfile
+/// filtering (mirrors raw `fs.readdir`). Used for the bare-`@`/empty-partial
+/// case; a non-empty partial uses [`list_project_paths`] instead (cp-05).
+/// Errors → empty list (the overlay just shows the empty state).
 #[must_use]
 pub fn read_cwd_entries(dir: &Path) -> Vec<String> {
     let mut out: Vec<String> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| !n.starts_with('.'))
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            Some(if is_dir { format!("{name}/") } else { name })
+        })
         .collect();
     out.sort_unstable();
     out
+}
+
+/// (cp-05) claude-code `getPathsForSuggestions`: a recursive project file
+/// listing (tracked + untracked, gitignore-respecting) plus the unique set of
+/// their parent directories (trailing `/`), paths relative to `dir`. Tries
+/// `git ls-files` first (fast path for git repos); falls back to a
+/// gitignore-aware recursive walk (the `ignore` crate — the in-process
+/// equivalent of claude-code's `rg --hidden` fallback) for non-git dirs or if
+/// git is unavailable.
+#[must_use]
+pub fn list_project_paths(dir: &Path) -> Vec<String> {
+    let mut files = git_ls_files(dir).unwrap_or_else(|| walk_project_files(dir));
+    files.sort_unstable();
+    files.dedup();
+    let mut dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for f in &files {
+        let mut p = Path::new(f.as_str());
+        while let Some(parent) = p.parent() {
+            let s = parent.to_string_lossy();
+            if s.is_empty() {
+                break;
+            }
+            dirs.insert(format!("{s}/"));
+            p = parent;
+        }
+    }
+    let mut out: Vec<String> = dirs.into_iter().collect();
+    out.append(&mut files);
+    out
+}
+
+/// `git ls-files` (tracked) + `git ls-files --others --exclude-standard`
+/// (untracked, gitignore-excluded) merged. `None` when `dir` isn't a git repo
+/// or the `git` binary is unavailable — the caller falls back to a walk.
+fn git_ls_files(dir: &Path) -> Option<Vec<String>> {
+    let run = |args: &[&str]| -> Option<Vec<String>> {
+        let output = std::process::Command::new("git")
+            .arg("-c")
+            .arg("core.quotepath=false")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        Some(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect(),
+        )
+    };
+    let mut tracked = run(&["ls-files", "--recurse-submodules"])?;
+    if let Some(mut untracked) = run(&["ls-files", "--others", "--exclude-standard"]) {
+        tracked.append(&mut untracked);
+    }
+    Some(tracked)
+}
+
+/// Recursive gitignore-aware fallback walk (non-git dirs): every file under
+/// `dir` except VCS metadata dirs, dotfiles INCLUDED (claude-code's ripgrep
+/// fallback passes `--hidden`).
+fn walk_project_files(dir: &Path) -> Vec<String> {
+    use ignore::{overrides::OverrideBuilder, WalkBuilder};
+    let mut wb = WalkBuilder::new(dir);
+    wb.hidden(false);
+    let mut ov = OverrideBuilder::new(dir);
+    for pat in ["!.git/", "!.svn/", "!.hg/", "!.bzr/", "!.jj/", "!.sl/"] {
+        let _ = ov.add(pat);
+    }
+    if let Ok(overrides) = ov.build() {
+        wb.overrides(overrides);
+    }
+    wb.build()
+        .filter_map(Result::ok)
+        .filter(|e| e.depth() > 0 && !e.file_type().is_some_and(|t| t.is_dir()))
+        .filter_map(|e| {
+            e.path()
+                .strip_prefix(dir)
+                .ok()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+        })
+        .collect()
 }
 
 /// Props for the completion dropdown overlay.
@@ -330,12 +463,12 @@ mod tests {
     }
 
     #[test]
-    fn tab_inserts_path_with_at_and_trailing_space() {
+    fn enter_inserts_selected_path_with_at_and_trailing_space() {
         let mut c = CompletionState::default();
         // prompt is "@s", cursor 2; selecting replaces the @token in place.
         c.sync("@s", 2, &cands());
         let sel = c.rows()[c.selected].clone();
-        let outcome = c.handle_key_with_prompt(KeyCode::Tab, "@s", 2);
+        let outcome = c.handle_key_with_prompt(KeyCode::Enter, "@s", 2);
         match outcome {
             CompletionKeyOutcome::Accept {
                 new_prompt,
@@ -351,6 +484,66 @@ mod tests {
     }
 
     #[test]
+    fn tab_completes_to_shared_prefix_and_keeps_overlay_open() {
+        // (cp-07) "src/lib.rs" and "src/main.rs" both match "s"; their shared
+        // prefix "src/" is longer than the typed "s", so Tab completes to
+        // the prefix (no trailing space) and leaves the overlay open/intact
+        // for the caller's re-sync (drill-down), instead of committing.
+        let mut c = CompletionState::default();
+        c.sync("@s", 2, &cands());
+        assert_eq!(c.rows(), vec!["src/lib.rs".to_string(), "src/main.rs".to_string()]);
+        let outcome = c.handle_key_with_prompt(KeyCode::Tab, "@s", 2);
+        match outcome {
+            CompletionKeyOutcome::Accept {
+                new_prompt,
+                new_cursor,
+            } => {
+                assert_eq!(new_prompt, "@src/");
+                assert_eq!(new_cursor, "@src/".len());
+            }
+            other => panic!("expected Accept, got {other:?}"),
+        }
+        // Not closed, and the candidate cache survives the call — the
+        // caller (root.rs) re-syncs using `self.candidates` right after.
+        assert!(c.open);
+        assert!(!c.candidates.is_empty());
+    }
+
+    #[test]
+    fn tab_on_unambiguous_match_completes_then_commits_on_second_press() {
+        // (cp-07) Shell-style two-stage Tab: a single full match still
+        // completes-without-committing on the first Tab (claude-code doesn't
+        // special-case "only one row" — `commonPrefix` is just that row's
+        // full text, still longer than the typed partial); the second Tab,
+        // once the prefix typed equals the full match, has no further
+        // common-prefix gain and commits as a normal selection.
+        let mut c = CompletionState::default();
+        c.sync("@README", 7, &cands());
+        assert_eq!(c.rows(), vec!["README.md".to_string()]);
+        let outcome = c.handle_key_with_prompt(KeyCode::Tab, "@README", 7);
+        let CompletionKeyOutcome::Accept { new_prompt, new_cursor } = outcome else {
+            panic!("expected Accept, got {outcome:?}");
+        };
+        assert_eq!(new_prompt, "@README.md");
+        assert!(c.open, "first Tab completes but stays open");
+
+        // Mirror root.rs's post-Accept resync: re-derive filter/candidates
+        // from the rewritten prompt using the still-cached candidate list.
+        let candidates = c.candidates.clone();
+        c.sync(&new_prompt, new_cursor, &candidates);
+        assert_eq!(c.filter, "README.md");
+
+        let outcome2 = c.handle_key_with_prompt(KeyCode::Tab, &new_prompt, new_cursor);
+        match outcome2 {
+            CompletionKeyOutcome::Accept { new_prompt, .. } => {
+                assert_eq!(new_prompt, "@README.md ", "second Tab commits with trailing space");
+            }
+            other => panic!("expected Accept, got {other:?}"),
+        }
+        assert!(!c.open, "second Tab closes the overlay");
+    }
+
+    #[test]
     fn esc_dismisses() {
         let mut c = CompletionState::default();
         c.sync("@src", 4, &cands());
@@ -362,12 +555,68 @@ mod tests {
     }
 
     #[test]
-    fn read_cwd_entries_excludes_dotfiles_and_is_sorted() {
+    fn read_cwd_entries_includes_dotfiles_dirs_trailing_sep_and_is_sorted() {
+        // (cp-05) Top-level listing mirrors raw `fs.readdir`: no dotfile
+        // filtering, directories get a trailing `/`.
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("b.txt"), "").unwrap();
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
         std::fs::write(dir.path().join(".hidden"), "").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
         let entries = read_cwd_entries(dir.path());
-        assert_eq!(entries, vec!["a.txt".to_string(), "b.txt".to_string()]);
+        assert_eq!(
+            entries,
+            vec![
+                ".hidden".to_string(),
+                "a.txt".to_string(),
+                "b.txt".to_string(),
+                "sub/".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn list_project_paths_is_recursive_and_includes_dirs() {
+        // (cp-05) Non-git dir: walk_project_files fallback. Recursive, dirs
+        // get a trailing `/`, files matched by full relative path.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("src/nested")).unwrap();
+        std::fs::write(dir.path().join("src/nested/deep.rs"), "").unwrap();
+        std::fs::write(dir.path().join("top.txt"), "").unwrap();
+        let paths = list_project_paths(dir.path());
+        assert!(paths.contains(&"src/".to_string()), "{paths:?}");
+        assert!(paths.contains(&"src/nested/".to_string()), "{paths:?}");
+        assert!(paths.contains(&"src/nested/deep.rs".to_string()), "{paths:?}");
+        assert!(paths.contains(&"top.txt".to_string()), "{paths:?}");
+    }
+
+    #[test]
+    fn list_project_paths_respects_gitignore_via_git_ls_files() {
+        // Exercises the `git_ls_files` fast path: tracked + untracked-but-
+        // not-ignored files are included; gitignored files are excluded.
+        // (The non-git fallback walk intentionally mirrors ripgrep's own
+        // default `require_git` behavior — `.gitignore` is only honored
+        // inside an actual git work tree — so this is the realistic path.)
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .expect("git")
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t.test"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(dir.path().join("ignored.txt"), "").unwrap();
+        std::fs::write(dir.path().join("kept.txt"), "").unwrap();
+        std::fs::write(dir.path().join("tracked.txt"), "").unwrap();
+        git(&["add", ".gitignore", "tracked.txt"]);
+        git(&["commit", "-q", "-m", "init"]);
+        let paths = list_project_paths(dir.path());
+        assert!(!paths.contains(&"ignored.txt".to_string()), "{paths:?}");
+        assert!(paths.contains(&"kept.txt".to_string()), "{paths:?}");
+        assert!(paths.contains(&"tracked.txt".to_string()), "{paths:?}");
     }
 }

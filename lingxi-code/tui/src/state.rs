@@ -898,6 +898,12 @@ pub struct AppState {
     /// (PERM-1) Set by the `/permissions` add-rule input: a new rule the user
     /// submitted. `pump_permission_add` appends it to Local settings + reloads.
     pub pending_permission_add: Option<crate::screens::permissions::PermRuleRow>,
+    /// (cp-05) Cached recursive project-file listing for `@`-completion,
+    /// keyed by cwd. Computed once per cwd (lazily, on first non-empty `@`
+    /// partial) rather than per keystroke — `git ls-files` is fast but not
+    /// free, and claude-code itself amortizes this via a background-refreshed
+    /// index rather than re-walking on every keystroke.
+    pub project_file_cache: Option<(std::path::PathBuf, Vec<String>)>,
     /// (`/copy`) Set by the `/copy [N]` submit intercept: a request to write
     /// the selected assistant text to the system clipboard (claude-code
     /// `commands/copy/copy.tsx` → `setClipboard`). The SYNC submit path can't
@@ -1050,6 +1056,7 @@ impl AppState {
             pending_save_color: None,
             pending_permission_delete: None,
             pending_permission_add: None,
+            project_file_cache: None,
             pending_copy_clipboard: None,
             pending_terminal_sequence: None,
             status_line_text: None,

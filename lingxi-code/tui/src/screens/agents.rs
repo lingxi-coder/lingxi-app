@@ -12,8 +12,12 @@ pub struct AgentRow {
     pub name: String,
     /// `when_to_use` description.
     pub description: String,
-    /// Allowed tools (empty = all tools).
+    /// Allowed tools. Meaningful only when `wildcard_tools` is `false`.
     pub tools: Vec<String>,
+    /// (agents-03) `true` when the agent inherits every tool (claude-code:
+    /// `tools` frontmatter omitted) — distinguishes "All tools" from an
+    /// explicit empty allow-list ("None"), which `tools` alone can't.
+    pub wildcard_tools: bool,
     /// Optional model display.
     pub model: Option<String>,
     /// Optional permission mode.
@@ -150,8 +154,11 @@ fn render_agent_detail(row: &AgentRow) -> String {
     out.push_str("Description (tells Claude when to use this agent):\n  ");
     out.push_str(&row.description);
     out.push('\n');
-    let tools = if row.tools.is_empty() {
+    // (agents-03) Wildcard -> "All tools"; truly-empty explicit list -> "None".
+    let tools = if row.wildcard_tools {
         "All tools".to_string()
+    } else if row.tools.is_empty() {
+        "None".to_string()
     } else {
         row.tools.join(", ")
     };
@@ -250,6 +257,7 @@ mod tests {
             name: "explorer".into(),
             description: "find things".into(),
             tools: vec!["Read".into(), "Grep".into()],
+            wildcard_tools: false,
             model: Some("opus".into()),
             permission_mode: Some("plan".into()),
             color: Some("cyan".into()),
@@ -264,9 +272,21 @@ mod tests {
     }
 
     #[test]
-    fn detail_empty_tools_is_all() {
-        let out = render_agent_detail(&row("x"));
+    fn detail_wildcard_tools_is_all() {
+        // (agents-03) wildcard_tools=true -> "All tools".
+        let mut r = row("x");
+        r.wildcard_tools = true;
+        let out = render_agent_detail(&r);
         assert!(out.contains("Tools: All tools"));
+    }
+
+    #[test]
+    fn detail_explicit_empty_tools_is_none() {
+        // (agents-03) An explicit empty allow-list (wildcard_tools=false,
+        // tools=[]) means "no tools", not "all tools".
+        let out = render_agent_detail(&row("x"));
+        assert!(!row("x").wildcard_tools);
+        assert!(out.contains("Tools: None"));
     }
 
     #[test]

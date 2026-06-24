@@ -1301,20 +1301,30 @@ fn resync_overlays(st: &mut AppState) {
     st.palette.sync_from_prompt(&st.prompt_text);
     if st.palette.open {
         st.completion.open = false;
-    } else if crate::components::prompt_input::completion::active_at_token(
+    } else if let Some((_, partial)) = crate::components::prompt_input::completion::active_at_token(
         &st.prompt_text,
         st.prompt_cursor,
-    )
-    .is_some()
-    {
-        // Only an active `@` token needs the cwd listing. Reading it on every
-        // non-`@` keystroke (plain typing, arrows, Backspace) was a per-keypress
-        // `read_dir` syscall whose result `sync`'s no-`@` branch discarded — the
-        // plan computes candidates once per directory, not per keystroke.
-        let cwd_entries =
-            crate::components::prompt_input::completion::read_cwd_entries(&st.status.cwd);
+    ) {
+        // (cp-05) Bare `@` (empty partial) shows the top-level cwd listing
+        // (claude-code `getTopLevelPaths`); a real partial searches the full
+        // recursive project tree (`getPathsForSuggestions`). The recursive
+        // listing is cached per-cwd on `AppState` (not recomputed per
+        // keystroke) since it may shell out to `git ls-files`.
+        let candidates = if partial.is_empty() {
+            crate::components::prompt_input::completion::read_cwd_entries(&st.status.cwd)
+        } else {
+            let cwd = st.status.cwd.clone();
+            if st.project_file_cache.as_ref().map(|(c, _)| c) != Some(&cwd) {
+                let listing = crate::components::prompt_input::completion::list_project_paths(&cwd);
+                st.project_file_cache = Some((cwd.clone(), listing));
+            }
+            st.project_file_cache
+                .as_ref()
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
         st.completion
-            .sync(&st.prompt_text, st.prompt_cursor, &cwd_entries);
+            .sync(&st.prompt_text, st.prompt_cursor, &candidates);
     } else {
         // No `@` token: close/clear the overlay without touching the filesystem.
         // `sync` with an empty candidate slice takes its no-token branch, which
@@ -1502,6 +1512,7 @@ pub async fn pump_open_agents(
             name: i.name,
             description: i.description,
             tools: i.tools_allowed,
+            wildcard_tools: i.wildcard_tools,
             ..Default::default()
         })
         .collect();

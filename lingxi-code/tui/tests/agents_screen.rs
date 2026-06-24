@@ -10,6 +10,7 @@ fn rows() -> Vec<AgentRow> {
             name: "explorer".into(),
             description: "find things".into(),
             tools: vec!["Read".into(), "Grep".into()],
+            wildcard_tools: false,
             model: Some("opus".into()),
             permission_mode: Some("plan".into()),
             color: Some("cyan".into()),

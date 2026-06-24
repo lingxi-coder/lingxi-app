@@ -178,8 +178,14 @@ pub struct AgentInfo {
     pub name: String,
     /// Human-readable description (may be truncated by callers).
     pub description: String,
-    /// Tool allow-list (empty = all tools).
+    /// Tool allow-list. Meaningful only when `wildcard_tools` is `false`;
+    /// empty here then means "no tools", not "all tools" (agents-03).
     pub tools_allowed: Vec<String>,
+    /// `true` when the agent's tool policy is `AgentToolPolicy::All`
+    /// (claude-code: `tools` frontmatter omitted) — distinguishes "every
+    /// tool" from an explicit empty allow-list, which `tools_allowed` alone
+    /// cannot (both lower to an empty `Vec`).
+    pub wildcard_tools: bool,
 }
 
 /// Aggregate diagnostic report returned by [`OrchestratorHandle::run_doctor_checks`].
@@ -1069,6 +1075,7 @@ mod tests {
             name: "reviewer".to_string(),
             description: "review code".to_string(),
             tools_allowed: vec!["Read".to_string(), "Grep".to_string()],
+            wildcard_tools: false,
         };
         assert_eq!(info.tools_allowed.len(), 2);
     }

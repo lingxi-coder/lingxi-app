@@ -110,6 +110,7 @@ async fn non_empty_agents_matches_fixture() {
         name: "reviewer".into(),
         description: "Reviews code".into(),
         tools_allowed: vec!["Read".into(), "Grep".into()],
+        wildcard_tools: false,
     }]);
     let r = AgentsHandler::new(mock).handle(&args("agents")).await;
     let expected = fixture["non_empty_sample"]["agents"]["output"]

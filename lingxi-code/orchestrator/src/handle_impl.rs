@@ -181,6 +181,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 name: a.agent_type.clone(),
                 description: a.when_to_use.clone(),
                 tools_allowed: a.allowed_tools.clone(),
+                wildcard_tools: matches!(a.tools, agent::AgentToolPolicy::All { .. }),
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));

@@ -89,6 +89,25 @@ fn system_api_error_singular_second_and_truncated() {
 }
 
 #[test]
+fn system_api_error_appends_api_timeout_ms_hint_when_set() {
+    // (ma-09) No other test in this binary touches API_TIMEOUT_MS, so a bare
+    // set/remove around the assertion is sufficient isolation.
+    std::env::set_var("API_TIMEOUT_MS", "60000");
+    let s = render_system_api_error_to_string(SystemApiErrorProps {
+        error: "529 Overloaded".into(),
+        retry_attempt: 1,
+        retry_in_seconds: 2,
+        max_retries: 10,
+        truncated: false,
+    });
+    std::env::remove_var("API_TIMEOUT_MS");
+    assert!(
+        s.ends_with("\u{00B7} API_TIMEOUT_MS=60000ms, try increasing it"),
+        "{s:?}"
+    );
+}
+
+#[test]
 fn rate_limit_with_upsell() {
     let s = render_rate_limit_to_string(RateLimitProps {
         text: "You've hit your usage limit.".into(),

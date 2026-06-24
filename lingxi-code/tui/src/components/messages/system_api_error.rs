@@ -4,7 +4,8 @@
 //! if truncated (>1000 chars, non-verbose) append `…` + a `(ctrl+o to expand)`
 //! hint (`CtrlOToExpand`); footer dim:
 //! `Retrying in {n} second(s)… (attempt {a}/{m})` (singular `second` when
-//! `n == 1`). `MAX_API_ERROR_CHARS = 1000`.
+//! `n == 1`), plus (ma-09) a ` · API_TIMEOUT_MS={ms}ms, try increasing it`
+//! suffix when that env var is set. `MAX_API_ERROR_CHARS = 1000`.
 #![allow(clippy::needless_pass_by_value)]
 
 use iocraft::prelude::*;
@@ -50,6 +51,13 @@ pub fn render_system_api_error_to_string(props: SystemApiErrorProps) -> String {
         a = props.retry_attempt,
         m = props.max_retries,
     ));
+    // (ma-09) When API_TIMEOUT_MS is set, claude-code appends a hint that the
+    // retry/backoff is governed by it.
+    if let Ok(ms) = std::env::var("API_TIMEOUT_MS") {
+        if !ms.is_empty() {
+            out.push_str(&format!(" \u{00B7} API_TIMEOUT_MS={ms}ms, try increasing it"));
+        }
+    }
     out
 }
 

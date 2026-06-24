@@ -120,6 +120,11 @@ pub struct StatsData {
     /// measurable span. `#[serde(default)]` so a pre-field cache still loads.
     #[serde(default)]
     pub longest_session_ms: u64,
+    /// (stats-overview-missing-fields) The fun factoid line shown under the
+    /// Overview (claude-code `generateFunFactoid`), `None` when no comparison
+    /// applies. Picked once at aggregate time.
+    #[serde(default)]
+    pub factoid: Option<String>,
 }
 
 impl StatsData {
@@ -393,6 +398,8 @@ pub fn aggregate(contribs: &[SessionContribution]) -> StatsData {
             }
         }
     }
+    // (stats-overview-missing-fields) Pick the fun factoid from the final totals.
+    data.factoid = pick_factoid(data.total_tokens(), data.longest_session_ms);
     data
 }
 
@@ -444,6 +451,91 @@ pub fn format_duration(ms: u64) -> String {
         format!("{minutes}m {seconds}s")
     } else {
         format!("{seconds}s")
+    }
+}
+
+/// `(book, tokens)` comparisons for the fun factoid (claude-code
+/// `BOOK_COMPARISONS`), ascending by token count.
+const BOOK_COMPARISONS: &[(&str, u64)] = &[
+    ("The Little Prince", 22_000),
+    ("The Old Man and the Sea", 35_000),
+    ("A Christmas Carol", 37_000),
+    ("Animal Farm", 39_000),
+    ("Fahrenheit 451", 60_000),
+    ("The Great Gatsby", 62_000),
+    ("Slaughterhouse-Five", 64_000),
+    ("Brave New World", 83_000),
+    ("The Catcher in the Rye", 95_000),
+    ("Harry Potter and the Philosopher's Stone", 103_000),
+    ("The Hobbit", 123_000),
+    ("1984", 123_000),
+    ("To Kill a Mockingbird", 130_000),
+    ("Pride and Prejudice", 156_000),
+    ("Dune", 244_000),
+    ("Moby-Dick", 268_000),
+    ("Crime and Punishment", 274_000),
+    ("A Game of Thrones", 381_000),
+    ("Anna Karenina", 468_000),
+    ("Don Quixote", 520_000),
+    ("The Lord of the Rings", 576_000),
+    ("The Count of Monte Cristo", 603_000),
+    ("Les Misérables", 689_000),
+    ("War and Peace", 730_000),
+];
+
+/// `(activity, minutes)` comparisons for the fun factoid (claude-code
+/// `TIME_COMPARISONS`).
+const TIME_COMPARISONS: &[(&str, u64)] = &[
+    ("a TED talk", 18),
+    ("an episode of The Office", 22),
+    ("listening to Abbey Road", 47),
+    ("a yoga class", 60),
+    ("a World Cup soccer match", 90),
+    ("a half marathon (average time)", 120),
+    ("the movie Inception", 148),
+    ("a transatlantic flight", 420),
+    ("a full night of sleep", 480),
+];
+
+/// The fun-factoid candidates (claude-code `generateFunFactoid`): token-vs-book
+/// + longest-session-vs-activity comparisons. The live caller picks one;
+/// claude-code picks at random, this picks deterministically by `total_tokens`
+/// (testable; the cosmetic factoid stays stable per stats load either way).
+#[must_use]
+pub fn generate_factoids(total_tokens: u64, longest_session_ms: u64) -> Vec<String> {
+    let mut out = Vec::new();
+    if total_tokens > 0 {
+        for (name, tokens) in BOOK_COMPARISONS.iter().filter(|(_, t)| total_tokens >= *t) {
+            let times = total_tokens / tokens;
+            if times >= 2 {
+                out.push(format!("You've used ~{times}x more tokens than {name}"));
+            } else {
+                out.push(format!("You've used the same number of tokens as {name}"));
+            }
+        }
+    }
+    if longest_session_ms > 0 {
+        let session_minutes = longest_session_ms / 60_000;
+        for (name, minutes) in TIME_COMPARISONS.iter() {
+            let ratio = session_minutes / minutes;
+            if ratio >= 2 {
+                out.push(format!("Your longest session is ~{ratio}x longer than {name}"));
+            }
+        }
+    }
+    out
+}
+
+/// Deterministic factoid pick (`generate_factoids` indexed by `total_tokens`),
+/// or `None` when there are no candidates.
+#[must_use]
+pub fn pick_factoid(total_tokens: u64, longest_session_ms: u64) -> Option<String> {
+    let factoids = generate_factoids(total_tokens, longest_session_ms);
+    if factoids.is_empty() {
+        None
+    } else {
+        let idx = usize::try_from(total_tokens).unwrap_or(0) % factoids.len();
+        Some(factoids[idx].clone())
     }
 }
 
@@ -994,6 +1086,11 @@ fn overview_lines(data: &StatsData) -> Vec<String> {
     out.push(format!("Current streak: {current} {}", plural(current)));
     if let Some(day) = data.peak_activity_day() {
         out.push(format!("Most active day: {}", format_peak_day(day)));
+    }
+    // (stats-overview-missing-fields) The fun factoid (claude-code shows it in
+    // the suggestion accent below the overview).
+    if let Some(factoid) = &data.factoid {
+        out.push(factoid.clone());
     }
     out
 }
@@ -1625,6 +1722,33 @@ mod tests {
         // Negative / unparseable → 0.
         assert_eq!(session_duration_ms("2026-05-25T15:00:00Z", "2026-05-25T14:00:00Z"), 0);
         assert_eq!(session_duration_ms("bad", "also-bad"), 0);
+    }
+
+    #[test]
+    fn factoid_compares_tokens_to_books_and_session_to_activities() {
+        // 250k tokens ≥ several books; ~11x The Little Prince (22k).
+        let f = generate_factoids(250_000, 0);
+        assert!(
+            f.iter().any(|s| s == "You've used ~11x more tokens than The Little Prince"),
+            "got: {f:?}"
+        );
+        // A book just under 2x → "same number of tokens as".
+        let f2 = generate_factoids(40_000, 0);
+        assert!(
+            f2.iter().any(|s| s == "You've used the same number of tokens as Animal Farm"),
+            "got: {f2:?}"
+        );
+        // 60-minute session is ~3x a TED talk (18m), ~2x an Office episode (22m).
+        let f3 = generate_factoids(0, 60 * 60 * 1000);
+        assert!(
+            f3.iter().any(|s| s == "Your longest session is ~3x longer than a TED talk"),
+            "got: {f3:?}"
+        );
+        // No tokens, no session → empty.
+        assert!(generate_factoids(0, 0).is_empty());
+        // pick_factoid is deterministic + within bounds.
+        assert!(pick_factoid(250_000, 0).is_some());
+        assert!(pick_factoid(0, 0).is_none());
     }
 
     #[test]

@@ -742,8 +742,8 @@ pub fn render_screen(
                 tool_input,
                 ..
             } => {
-                let pretty = serde_json::to_string_pretty(tool_input).unwrap_or_default();
                 let tool_name = tool_name.clone();
+                let tool_input = tool_input.clone();
                 let focus = state.tool_use_dialog_state.focus;
                 let worker_badge = pp
                     .worker
@@ -752,7 +752,8 @@ pub fn render_screen(
                 element! {
                     ToolUseConfirm(
                         tool_name: tool_name,
-                        tool_input_pretty: pretty,
+                        tool_input: tool_input,
+                        cwd: std::env::current_dir().unwrap_or_default(),
                         focus: focus,
                         worker_badge: worker_badge,
                     )

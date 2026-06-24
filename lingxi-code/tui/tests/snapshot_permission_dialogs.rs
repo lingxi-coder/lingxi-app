@@ -17,20 +17,23 @@ fn snapshot_tool_use_confirm_default_state() {
     let mut element = element! {
         ToolUseConfirm(
             tool_name: "Bash".to_string(),
-            tool_input_pretty: "{\"command\":\"ls -la\"}".to_string(),
+            tool_input: serde_json::json!({"command": "ls -la"}),
+            cwd: std::path::PathBuf::from("/work"),
             focus: DialogFocus::AllowOnce,
         )
     };
     let frame = element.to_string();
     insta::assert_snapshot!("tool_use_confirm_default_state", &frame);
-    // Substring locks (insulate against snapshot-file corruption).
+    // (perm-01/perm-03) Substring locks.
+    assert!(frame.contains("Tool use"), "got: {frame}");
+    assert!(frame.contains("Bash(ls -la)"), "got: {frame}");
+    assert!(frame.contains("Do you want to proceed?"), "got: {frame}");
+    assert!(frame.contains("> Yes"), "got: {frame}");
     assert!(
-        frame.contains("Claude needs your permission to use Bash"),
+        frame.contains("Yes, and don't ask again for Bash commands in /work"),
         "got: {frame}"
     );
-    assert!(frame.contains("> [1] Allow Once"));
-    assert!(frame.contains("  [2] Allow Always"));
-    assert!(frame.contains("  [N] Deny"));
+    assert!(frame.contains("  No"), "got: {frame}");
 }
 
 #[test]

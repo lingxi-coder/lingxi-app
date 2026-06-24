@@ -33,9 +33,20 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// Returns the byte-faithful failure detail on a malformed archive, traversal
 /// attempt, too many files, or zip-bomb.
 pub fn unpack_mcpb(bytes: &[u8], dest: &Path) -> Result<(), String> {
+    unpack_mcpb_limited(bytes, dest, MAX_FILES, MAX_TOTAL_BYTES)
+}
+
+/// [`unpack_mcpb`] with explicit limits (so tests can exercise the guards
+/// without building a multi-gigabyte archive).
+fn unpack_mcpb_limited(
+    bytes: &[u8],
+    dest: &Path,
+    max_files: usize,
+    max_total: u64,
+) -> Result<(), String> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))
         .map_err(|e| format!("Failed to extract MCPB {}: {e}", dest.display()))?;
-    if zip.len() > MAX_FILES {
+    if zip.len() > max_files {
         return Err(format!("Archive contains too many files: {}", zip.len()));
     }
     let mut total: u64 = 0;
@@ -43,12 +54,6 @@ pub fn unpack_mcpb(bytes: &[u8], dest: &Path) -> Result<(), String> {
         let mut entry = zip
             .by_index(i)
             .map_err(|e| format!("Failed to extract MCPB {}: {e}", dest.display()))?;
-        total = total.saturating_add(entry.size());
-        if total > MAX_TOTAL_BYTES {
-            return Err(format!(
-                "Archive total size is too large: {total} bytes. This may be a zip bomb."
-            ));
-        }
         // `enclosed_name` returns None for absolute paths / `..` traversal; the
         // explicit component + containment checks below are belt-and-suspenders.
         let rel = entry
@@ -68,8 +73,30 @@ pub fn unpack_mcpb(bytes: &[u8], dest: &Path) -> Result<(), String> {
             if let Some(parent) = out.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
-            let mut buf = Vec::with_capacity(usize::try_from(entry.size()).unwrap_or(0));
-            entry.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+            // Zip-bomb guard on the ACTUAL decompressed bytes: `entry.size()` is
+            // the attacker-controlled central-directory claim and can lie (a 10-
+            // byte claim can deflate-expand to gigabytes), so DO NOT trust it.
+            // Read through a `take()` bounded at the remaining byte budget so
+            // decompression aborts mid-stream instead of materializing the whole
+            // payload, and count the real bytes produced.
+            let remaining = max_total.saturating_sub(total);
+            // Pre-allocate at most the smaller of the claim and the budget so a
+            // lying large claim cannot force a huge up-front allocation either.
+            let cap = usize::try_from(entry.size().min(remaining)).unwrap_or(0);
+            let mut buf = Vec::with_capacity(cap);
+            // `remaining + 1` so a payload exactly at the cap reads one extra
+            // byte and trips the check below (never silently truncates).
+            entry
+                .by_ref()
+                .take(remaining + 1)
+                .read_to_end(&mut buf)
+                .map_err(|e| e.to_string())?;
+            if buf.len() as u64 > remaining {
+                return Err(format!(
+                    "Archive total size is too large: more than {max_total} bytes. This may be a zip bomb."
+                ));
+            }
+            total += buf.len() as u64;
             std::fs::write(&out, &buf).map_err(|e| e.to_string())?;
         }
     }
@@ -121,5 +148,44 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    /// The total-size guard counts ACTUAL decompressed bytes (via a take-bounded
+    /// read), so it triggers regardless of what the entry header claims — the
+    /// zip-bomb-via-lying-header escape the adversarial verify found is closed.
+    #[test]
+    fn total_size_guard_counts_real_bytes_not_the_header_claim() {
+        use std::io::Write;
+        // An HONEST 1000-byte entry; the bounded read counts the real bytes, so a
+        // tiny 100-byte cap must reject it (the header claim is irrelevant).
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            w.start_file("big.bin", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            w.write_all(&vec![0u8; 1000]).unwrap();
+            w.finish().unwrap();
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let err = unpack_mcpb_limited(&buf, tmp.path(), 10_000, 100).unwrap_err();
+        assert!(err.contains("Archive total size is too large"), "got: {err}");
+    }
+
+    #[test]
+    fn too_many_files_guard_trips() {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            for i in 0..5 {
+                w.start_file(format!("f{i}.txt"), zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                w.write_all(b"x").unwrap();
+            }
+            w.finish().unwrap();
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let err = unpack_mcpb_limited(&buf, tmp.path(), 2, 1 << 30).unwrap_err();
+        assert!(err.contains("Archive contains too many files"), "got: {err}");
     }
 }

@@ -773,6 +773,12 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
             match handle_permissions_key(state, ct_key.code) {
                 PermissionsOutcome::Close => st.close_screen(),
                 PermissionsOutcome::Stay => {}
+                // (PERM-1) The sync key path can't `.await` the settings write,
+                // so raise the pending delete; `pump_permission_delete` removes
+                // it + reloads the rules. The screen stays open.
+                PermissionsOutcome::DeleteRule(row) => {
+                    st.pending_permission_delete = Some(row);
+                }
             }
         }
         Some(Screen::Model(state)) => {
@@ -2258,6 +2264,53 @@ pub async fn pump_save_color(
     file.write_all(payload.as_bytes()).await.is_ok()
 }
 
+/// (PERM-1) Drain a pending `/permissions` delete: remove the confirmed rule
+/// from its settings file OUTSIDE the `AppState` lock, then reload the rules and
+/// refresh the open `/permissions` screen. No-op (`false`) when no delete is
+/// pending, the row isn't user-deletable, or nothing matched on disk. Mirrors
+/// [`pump_save_color`] (no handle / priority guard).
+pub async fn pump_permission_delete(state: &Arc<Mutex<AppState>>) -> bool {
+    // 1) Take the pending delete + cwd under the lock.
+    let (row, cwd) = {
+        let mut st = state.lock().await;
+        let Some(row) = st.pending_permission_delete.take() else {
+            return false;
+        };
+        (row, st.status.cwd.clone())
+    };
+    // 2) Map to a persistable update; non-deletable rows are a no-op.
+    let Some(update) = crate::screens::permissions::row_to_permission_update(&row) else {
+        return false;
+    };
+    let claude_home = claude_home_dir();
+    let paths = permission::PermissionPaths {
+        claude_home: claude_home.clone(),
+        cwd: cwd.clone(),
+    };
+    // 3) Remove from settings.json OUTSIDE the lock (best-effort — a broken file
+    //    is left untouched; a missing rule is a silent no-op).
+    if !permission::remove_permission_update(&update, &paths)
+        .await
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    // 4) Reload the rules + refresh the still-open screen (preserve the tab,
+    //    clamp the selection to the new row count).
+    let reloaded = crate::screens::permissions::load_permission_sections(&cwd, &claude_home);
+    let mut st = state.lock().await;
+    if let Some(crate::screens::Screen::Permissions(scr)) = st.active_screen.as_mut() {
+        let tab = scr.tab;
+        scr.mode = reloaded.mode;
+        scr.rows = reloaded.rows;
+        scr.tab = tab;
+        scr.dialog_mode = crate::screens::permissions::PermissionsDialogMode::List;
+        let n = scr.tab_rows().len();
+        scr.selected = scr.selected.min(n.saturating_sub(1));
+    }
+    true
+}
+
 /// (`/copy`) Write a pending `/copy` selection to the system clipboard.
 ///
 /// Mirrors [`pump_save_color`] (no `OrchestratorHandle`, no priority guard): the
@@ -2707,6 +2760,11 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 // were already applied synchronously by the submit intercept;
                 // only the disk write is deferred here.
                 let _wrote_color = pump_save_color(&state, ticker_session_id).await;
+                // (PERM-1) `/permissions` delete pump. Removes a confirmed rule
+                // from settings.json + reloads the screen; redraw on success.
+                if pump_permission_delete(&state).await {
+                    needs_redraw = true;
+                }
                 // (`/copy`) Clipboard write pump. Runs UNCONDITIONALLY (no
                 // handle, no priority guard): a pending `/copy` selection is
                 // written to the system clipboard via the platform utility

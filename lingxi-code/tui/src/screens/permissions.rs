@@ -21,7 +21,10 @@
 //! the persistence mechanism (3c `persist_permission_update`); wiring an
 //! interactive add/remove into this screen is a deferred follow-up.
 
-use permission::{PermissionBehavior, PermissionRuleSource};
+use permission::{
+    PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue,
+    PermissionUpdate, PermissionUpdateDestination,
+};
 
 /// One permission-rule row. Owned/pre-rendered fields so the carrying `Screen`
 /// variant keeps `PartialEq`.
@@ -35,7 +38,7 @@ pub struct PermRuleRow {
     pub source: String,
 }
 
-/// List vs. detail.
+/// List vs. detail vs. delete-confirmation.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum PermissionsDialogMode {
     /// Browsing the rule list.
@@ -43,6 +46,8 @@ pub enum PermissionsDialogMode {
     List,
     /// Viewing one rule's detail.
     Detail,
+    /// (PERM-1) Confirming deletion of the selected rule.
+    ConfirmDelete,
 }
 
 /// (PERM-1) The active behavior tab (claude-code `PermissionRuleList` tabs).
@@ -144,6 +149,9 @@ pub enum PermissionsOutcome {
     Stay,
     /// Close the screen.
     Close,
+    /// (PERM-1) The user confirmed deletion of this rule — the caller persists
+    /// the removal (async) + reloads. Carries the rule to remove.
+    DeleteRule(PermRuleRow),
 }
 
 /// Behavior → display label.
@@ -278,11 +286,41 @@ pub fn handle_permissions_key(
                 }
                 PermissionsOutcome::Stay
             }
+            // (PERM-1) `d` asks to delete the selected rule.
+            KeyCode::Char('d') if !state.tab_rows().is_empty() => {
+                state.dialog_mode = PermissionsDialogMode::ConfirmDelete;
+                PermissionsOutcome::Stay
+            }
             KeyCode::Esc | KeyCode::Char('q') => PermissionsOutcome::Close,
             _ => PermissionsOutcome::Stay,
         },
         PermissionsDialogMode::Detail => match key {
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => {
+                state.dialog_mode = PermissionsDialogMode::List;
+                PermissionsOutcome::Stay
+            }
+            // (PERM-1) `d` from the detail also asks to delete.
+            KeyCode::Char('d') => {
+                state.dialog_mode = PermissionsDialogMode::ConfirmDelete;
+                PermissionsOutcome::Stay
+            }
+            _ => PermissionsOutcome::Stay,
+        },
+        PermissionsDialogMode::ConfirmDelete => match key {
+            // `y` confirms → emit the rule to delete (caller persists + reloads).
+            KeyCode::Char('y' | 'Y') => match state.tab_rows().get(state.selected).copied() {
+                Some(row) => {
+                    let to_delete = row.clone();
+                    state.dialog_mode = PermissionsDialogMode::List;
+                    PermissionsOutcome::DeleteRule(to_delete)
+                }
+                None => {
+                    state.dialog_mode = PermissionsDialogMode::List;
+                    PermissionsOutcome::Stay
+                }
+            },
+            // `n` / Esc cancels back to the list.
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                 state.dialog_mode = PermissionsDialogMode::List;
                 PermissionsOutcome::Stay
             }
@@ -325,14 +363,55 @@ pub fn render_permissions_to_string(state: &PermissionsScreenState) -> String {
                     out.push('\n');
                 }
             }
-            out.push_str("\u{2191}\u{2193} navigate \u{00B7} \u{21c6} tabs \u{00B7} Enter view \u{00B7} Esc close");
+            out.push_str("\u{2191}\u{2193} navigate \u{00B7} \u{21c6} tabs \u{00B7} Enter view \u{00B7} d delete \u{00B7} Esc close");
             out
         }
+        // (PERM-1) Delete confirmation for the selected rule.
+        PermissionsDialogMode::ConfirmDelete => match state.tab_rows().get(state.selected).copied() {
+            Some(row) => format!("Delete rule {}?\ny to delete \u{00B7} n to cancel", row.rule),
+            None => "Permissions\n(rule no longer available)".to_string(),
+        },
         PermissionsDialogMode::Detail => match state.tab_rows().get(state.selected).copied() {
             Some(row) => render_rule_detail(row),
             None => "Permissions\n(rule no longer available)".to_string(),
         },
     }
+}
+
+/// (PERM-1) Reconstruct a [`PermissionUpdate`] from a display row for the
+/// delete write. `None` for rows that aren't user-deletable (Flag / Policy /
+/// CLI / Session / Command sources, or an unrecognised behavior).
+#[must_use]
+pub fn row_to_permission_update(row: &PermRuleRow) -> Option<PermissionUpdate> {
+    let behavior = match row.behavior.as_str() {
+        "Allow" => PermissionBehavior::Allow,
+        "Deny" => PermissionBehavior::Deny,
+        "Ask" => PermissionBehavior::Ask,
+        _ => return None,
+    };
+    let (destination, source) = match row.source.as_str() {
+        "User" => (
+            PermissionUpdateDestination::UserSettings,
+            PermissionRuleSource::UserSettings,
+        ),
+        "Project" => (
+            PermissionUpdateDestination::ProjectSettings,
+            PermissionRuleSource::ProjectSettings,
+        ),
+        "Local" => (
+            PermissionUpdateDestination::LocalSettings,
+            PermissionRuleSource::LocalSettings,
+        ),
+        _ => return None, // not persistable / not user-deletable.
+    };
+    Some(PermissionUpdate {
+        rule: PermissionRule {
+            value: PermissionRuleValue::from_rule_string(&row.rule),
+            behavior,
+            source,
+        },
+        destination,
+    })
 }
 
 /// Split a rule string into `(toolName, ruleContent)`: `Read(./s/**)` →
@@ -450,8 +529,41 @@ mod tests {
         // The Deny rule is NOT in the Allow tab.
         assert!(!out.contains("Read(./s/**)"), "got: {out}");
         assert!(out.ends_with(
-            "\u{2191}\u{2193} navigate \u{00B7} \u{21c6} tabs \u{00B7} Enter view \u{00B7} Esc close"
+            "\u{2191}\u{2193} navigate \u{00B7} \u{21c6} tabs \u{00B7} Enter view \u{00B7} d delete \u{00B7} Esc close"
         ));
+    }
+
+    #[test]
+    fn d_then_y_confirms_delete_of_selected_rule() {
+        // (PERM-1) `d` → confirm prompt → `y` emits DeleteRule for the selected
+        // (tab-filtered) rule; `n`/Esc cancels back to the list.
+        let mut s = PermissionsScreenState {
+            rows: vec![row("Allow", "Bash(npm test:*)", "Local")],
+            ..PermissionsScreenState::default()
+        };
+        assert_eq!(handle_permissions_key(&mut s, KeyCode::Char('d')), PermissionsOutcome::Stay);
+        assert_eq!(s.dialog_mode, PermissionsDialogMode::ConfirmDelete);
+        assert!(render_permissions_to_string(&s).contains("Delete rule Bash(npm test:*)?"));
+        match handle_permissions_key(&mut s, KeyCode::Char('y')) {
+            PermissionsOutcome::DeleteRule(r) => assert_eq!(r.rule, "Bash(npm test:*)"),
+            other => panic!("expected DeleteRule, got {other:?}"),
+        }
+        assert_eq!(s.dialog_mode, PermissionsDialogMode::List);
+
+        // `n` cancels.
+        let _ = handle_permissions_key(&mut s, KeyCode::Char('d'));
+        assert_eq!(handle_permissions_key(&mut s, KeyCode::Char('n')), PermissionsOutcome::Stay);
+        assert_eq!(s.dialog_mode, PermissionsDialogMode::List);
+    }
+
+    #[test]
+    fn row_to_update_maps_deletable_sources_only() {
+        // (PERM-1) Local/Project/User → persistable update; others → None.
+        let local = row("Deny", "Bash(rm:*)", "Local");
+        let u = row_to_permission_update(&local).expect("local is deletable");
+        assert_eq!(u.destination, PermissionUpdateDestination::LocalSettings);
+        assert!(row_to_permission_update(&row("Allow", "Read", "Policy")).is_none());
+        assert!(row_to_permission_update(&row("Allow", "Read", "Session")).is_none());
     }
 
     #[test]

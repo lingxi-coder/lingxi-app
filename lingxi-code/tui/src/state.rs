@@ -890,6 +890,11 @@ pub struct AppState {
     /// resolves the transcript path and appends OUTSIDE the `AppState` lock,
     /// then clears the flag. Mirrors `pending_open_stats` (no handle needed).
     pub pending_save_color: Option<String>,
+    /// (PERM-1) Set by the `/permissions` delete-confirmation: a rule the user
+    /// confirmed deleting. The async `pump_permission_delete` removes it from
+    /// settings.json (OUTSIDE the lock), reloads the rules, and re-renders the
+    /// screen, then clears the flag. `None` when no delete is pending.
+    pub pending_permission_delete: Option<crate::screens::permissions::PermRuleRow>,
     /// (`/copy`) Set by the `/copy [N]` submit intercept: a request to write
     /// the selected assistant text to the system clipboard (claude-code
     /// `commands/copy/copy.tsx` → `setClipboard`). The SYNC submit path can't
@@ -1040,6 +1045,7 @@ impl AppState {
             provider_key_store: None,
             session_agent_color: None,
             pending_save_color: None,
+            pending_permission_delete: None,
             pending_copy_clipboard: None,
             pending_terminal_sequence: None,
             status_line_text: None,

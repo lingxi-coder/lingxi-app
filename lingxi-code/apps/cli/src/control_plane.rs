@@ -368,8 +368,10 @@ impl StdioControlPermissionGate {
                     r = rx => r,
                     () = token.cancelled() => {
                         self.plane.cancel_request(&request_id).await;
+                        // claude-code rejects a turn-aborted request with
+                        // `new AbortError()`, so `String(error)` → "AbortError".
                         return PermissionOutcome::Deny {
-                            reason: "Tool permission request failed: aborted".to_string(),
+                            reason: "Tool permission request failed: AbortError".to_string(),
                         };
                     }
                 }
@@ -397,7 +399,11 @@ impl StdioControlPermissionGate {
                 reason: format!("Tool permission request failed: {err}"),
             },
             Err(_) => PermissionOutcome::Deny {
-                reason: "Tool permission request failed: control channel closed".to_string(),
+                // The oneshot dropped without a value (the plane was torn down):
+                // the same closed-stream condition the binary rejects with
+                // Error("Tool permission stream closed before response received").
+                reason: "Tool permission request failed: Tool permission stream closed before response received"
+                    .to_string(),
             },
         }
     }
@@ -483,11 +489,17 @@ impl StdioControlPermissionGate {
                 }
             }
             Some("deny") => {
-                let message = payload
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Permission denied")
-                    .to_string();
+                // The oracle's deny schema REQUIRES `message`; a deny without it
+                // is a Zod parse failure → the createCanUseTool catch denies with
+                // the "Tool permission request failed: <error>" family, NOT a
+                // hard-coded "Permission denied".
+                let Some(message) = payload.get("message").and_then(Value::as_str) else {
+                    return PermissionOutcome::Deny {
+                        reason: "Tool permission request failed: malformed deny result (missing message)"
+                            .to_string(),
+                    };
+                };
+                let message = message.to_string();
                 if payload
                     .get("interrupt")
                     .and_then(Value::as_bool)
@@ -499,8 +511,12 @@ impl StdioControlPermissionGate {
                 }
                 PermissionOutcome::Deny { reason: message }
             }
+            // Any non-allow/deny behavior is a schema-invalid result; the oracle
+            // funnels it through the same "Tool permission request failed: …"
+            // catch (the exact suffix is a ZodError serialization we don't
+            // reproduce — the byte-faithful part is the prefix).
             _ => PermissionOutcome::Deny {
-                reason: "Tool permission request returned an unknown behavior".to_string(),
+                reason: "Tool permission request failed: invalid permission result".to_string(),
             },
         }
     }
@@ -740,7 +756,7 @@ mod tests {
         assert_eq!(
             check.await.unwrap(),
             PermissionDecision::Deny {
-                reason: "Tool permission request failed: aborted".to_string()
+                reason: "Tool permission request failed: AbortError".to_string()
             }
         );
         // A control_cancel_request frame is emitted to the host.
@@ -1095,6 +1111,37 @@ mod tests {
                 assert!(reason.contains("malformed allow result"), "got {reason}");
             }
             other => panic!("expected Deny for malformed allow, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_without_message_and_unknown_behavior_use_failed_family() {
+        // #8/#16: the oracle's deny schema requires `message`, and any non-
+        // allow/deny behavior is a schema-invalid result → both funnel through
+        // the "Tool permission request failed: …" family (NOT "Permission denied"
+        // / "returned an unknown behavior").
+        for (payload, needle) in [
+            (json!({"behavior": "deny"}), "Tool permission request failed: malformed deny result"),
+            (json!({"behavior": "banana"}), "Tool permission request failed: invalid permission result"),
+            (json!({"nonsense": true}), "Tool permission request failed: invalid permission result"),
+        ] {
+            let (plane, mut rx) = plane_with_channel();
+            let gate = StdioControlPermissionGate::new(plane.clone());
+            let input = json!({});
+            let check = tokio::spawn(async move { gate.check("Bash", &input).await });
+            let line = rx.recv().await.unwrap();
+            let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            plane.resolve_response(&success_response(&req_id, payload)).await;
+            match check.await.unwrap() {
+                PermissionDecision::Deny { reason } => {
+                    assert!(reason.starts_with("Tool permission request failed: "), "got {reason}");
+                    assert!(reason.contains(needle), "got {reason}");
+                }
+                other => panic!("expected Deny, got {other:?}"),
+            }
         }
     }
 

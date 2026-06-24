@@ -369,13 +369,31 @@ impl PermissionGate for PolicyPermissionGate {
     }
 
     /// Apply a LIVE `set_permission_mode` override (claude-code
-    /// `handleSetPermissionMode`). Parses the wire string, rejects an unknown
-    /// mode and a `bypassPermissions` request when the killswitch is active, and
-    /// stores the override read by [`Self::effective_authorize`].
+    /// `handleSetPermissionMode`), byte-faithful to the binary's gating:
+    ///
+    /// - `bypassPermissions` is gated by TWO ordered checks: first the
+    ///   disabled-by-settings killswitch, then the launch-flag availability
+    ///   (`isBypassPermissionsModeAvailable` / `bypass_permissions_available`) —
+    ///   each with its byte-exact error string. So a session NOT launched with
+    ///   `--dangerously-skip-permissions` cannot switch live into bypass.
+    /// - an UNKNOWN mode is NOT an error: the binary reads the mode raw, acks
+    ///   `{mode}`, and `transitionPermissionMode` no-ops an unrecognized mode
+    ///   (classifier off), so we ack WITHOUT changing the live mode.
+    /// - `auto` is accepted unconditionally: the binary only gates it behind
+    ///   `feature('TRANSCRIPT_CLASSIFIER')`, which is OFF in the external build,
+    ///   so the auto-availability check is unreachable here (matching parity).
     async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {
-        let parsed = parse_settable_mode(mode)?;
-        if parsed == PermissionMode::BypassPermissions && self.policy.bypass_killswitch_active {
-            return Err("Bypass permissions mode was disabled by settings".to_string());
+        let Some(parsed) = parse_settable_mode(mode) else {
+            // Unknown mode: accept + ack, but do not mutate the live mode.
+            return Ok(());
+        };
+        if parsed == PermissionMode::BypassPermissions {
+            if self.policy.bypass_killswitch_active {
+                return Err("Cannot set permission mode to bypassPermissions because it is disabled by settings or configuration".to_string());
+            }
+            if !self.policy.bypass_permissions_available {
+                return Err("Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions".to_string());
+            }
         }
         *self.mode_override.write().unwrap_or_else(|e| e.into_inner()) = Some(parsed);
         Ok(())
@@ -386,18 +404,18 @@ impl PermissionGate for PolicyPermissionGate {
 ///
 /// Accepts the five external modes plus the internal `auto` (the binary's
 /// settable set is `default`/`plan`/`acceptEdits`/`bypassPermissions`/`dontAsk`/
-/// `auto`). Unlike [`crate::cli_mode::permission_mode_from_cli_string`] (which
-/// silently coerces unknown → `Default` for settings/CLI parsing), this REJECTS
-/// an unknown mode so the control handler can return an error frame.
-fn parse_settable_mode(s: &str) -> Result<PermissionMode, String> {
+/// `auto`). Returns `None` for an unrecognized mode — the binary accepts any
+/// string and no-ops an unknown one (it does NOT error), so the caller acks
+/// without mutating rather than returning an error frame.
+fn parse_settable_mode(s: &str) -> Option<PermissionMode> {
     match s {
-        "default" => Ok(PermissionMode::Default),
-        "plan" => Ok(PermissionMode::Plan),
-        "acceptEdits" => Ok(PermissionMode::AcceptEdits),
-        "bypassPermissions" => Ok(PermissionMode::BypassPermissions),
-        "dontAsk" => Ok(PermissionMode::DontAsk),
-        "auto" => Ok(PermissionMode::Auto),
-        other => Err(format!("Invalid permission mode: {other}")),
+        "default" => Some(PermissionMode::Default),
+        "plan" => Some(PermissionMode::Plan),
+        "acceptEdits" => Some(PermissionMode::AcceptEdits),
+        "bypassPermissions" => Some(PermissionMode::BypassPermissions),
+        "dontAsk" => Some(PermissionMode::DontAsk),
+        "auto" => Some(PermissionMode::Auto),
+        _ => None,
     }
 }
 
@@ -1194,7 +1212,12 @@ mod tests {
     async fn set_permission_mode_override_changes_authorize_outcome() {
         // No rules, boot mode Default: a mutating tool with no allow rule is an
         // Ask → delegates to the inner prompt transport (here: Deny).
-        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        // bypass_permissions_available=true: the session was launched with
+        // --dangerously-skip-permissions, so a live switch into bypass is allowed.
+        let policy = Arc::new(
+            PermissionPolicy::from_rules(PermissionMode::Default, Vec::new())
+                .with_bypass_available(true),
+        );
         let inner = RecordingInner::new(PermissionDecision::Deny {
             reason: "prompt-denied".into(),
         });
@@ -1220,13 +1243,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_permission_mode_rejects_unknown_mode() {
+    async fn set_permission_mode_accepts_unknown_mode_as_noop() {
+        // The binary accepts any mode string and no-ops an unknown one (no error
+        // frame). A mutating tool with no rule is an Ask → delegates to the inner
+        // transport both before and after the unknown set (mode unchanged).
         let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
-        let gate = PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
-        assert_eq!(
-            gate.set_permission_mode("nonsense").await.unwrap_err(),
-            "Invalid permission mode: nonsense"
-        );
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "prompt-denied".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        gate.set_permission_mode("nonsense").await.expect("unknown mode acked, not errored");
+        // Mode unchanged → still delegates to the inner prompt transport.
+        assert!(matches!(
+            gate.check("Write", &serde_json::json!({})).await,
+            PermissionDecision::Deny { .. }
+        ));
     }
 
     #[tokio::test]
@@ -1239,24 +1270,42 @@ mod tests {
         );
         assert_eq!(
             gate.set_permission_mode("bypassPermissions").await.unwrap_err(),
-            "Bypass permissions mode was disabled by settings"
+            "Cannot set permission mode to bypassPermissions because it is disabled by settings or configuration"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_permission_mode_rejects_bypass_when_not_launched_with_flag() {
+        // Killswitch inactive but the session was NOT launched with
+        // --dangerously-skip-permissions (bypass_permissions_available=false,
+        // the default) → the second ordered check rejects, byte-exact.
+        let policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        assert!(!policy.bypass_permissions_available);
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        assert_eq!(
+            gate.set_permission_mode("bypassPermissions").await.unwrap_err(),
+            "Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions"
         );
     }
 
     #[test]
-    fn parse_settable_mode_accepts_six_modes_rejects_unknown() {
-        assert_eq!(parse_settable_mode("default"), Ok(PermissionMode::Default));
-        assert_eq!(parse_settable_mode("plan"), Ok(PermissionMode::Plan));
+    fn parse_settable_mode_accepts_six_modes_noops_unknown() {
+        assert_eq!(parse_settable_mode("default"), Some(PermissionMode::Default));
+        assert_eq!(parse_settable_mode("plan"), Some(PermissionMode::Plan));
         assert_eq!(
             parse_settable_mode("acceptEdits"),
-            Ok(PermissionMode::AcceptEdits)
+            Some(PermissionMode::AcceptEdits)
         );
         assert_eq!(
             parse_settable_mode("bypassPermissions"),
-            Ok(PermissionMode::BypassPermissions)
+            Some(PermissionMode::BypassPermissions)
         );
-        assert_eq!(parse_settable_mode("dontAsk"), Ok(PermissionMode::DontAsk));
-        assert_eq!(parse_settable_mode("auto"), Ok(PermissionMode::Auto));
-        assert!(parse_settable_mode("bubble").is_err());
+        assert_eq!(parse_settable_mode("dontAsk"), Some(PermissionMode::DontAsk));
+        assert_eq!(parse_settable_mode("auto"), Some(PermissionMode::Auto));
+        // Unknown → None (the caller acks + no-ops, matching the binary).
+        assert_eq!(parse_settable_mode("bubble"), None);
     }
 }

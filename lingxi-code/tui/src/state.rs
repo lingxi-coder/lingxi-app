@@ -895,6 +895,9 @@ pub struct AppState {
     /// settings.json (OUTSIDE the lock), reloads the rules, and re-renders the
     /// screen, then clears the flag. `None` when no delete is pending.
     pub pending_permission_delete: Option<crate::screens::permissions::PermRuleRow>,
+    /// (PERM-1) Set by the `/permissions` add-rule input: a new rule the user
+    /// submitted. `pump_permission_add` appends it to Local settings + reloads.
+    pub pending_permission_add: Option<crate::screens::permissions::PermRuleRow>,
     /// (`/copy`) Set by the `/copy [N]` submit intercept: a request to write
     /// the selected assistant text to the system clipboard (claude-code
     /// `commands/copy/copy.tsx` → `setClipboard`). The SYNC submit path can't
@@ -1046,6 +1049,7 @@ impl AppState {
             session_agent_color: None,
             pending_save_color: None,
             pending_permission_delete: None,
+            pending_permission_add: None,
             pending_copy_clipboard: None,
             pending_terminal_sequence: None,
             status_line_text: None,

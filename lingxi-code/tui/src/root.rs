@@ -779,6 +779,10 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                 PermissionsOutcome::DeleteRule(row) => {
                     st.pending_permission_delete = Some(row);
                 }
+                // (PERM-1) Raise the pending add; `pump_permission_add` appends.
+                PermissionsOutcome::AddRule(row) => {
+                    st.pending_permission_add = Some(row);
+                }
             }
         }
         Some(Screen::Model(state)) => {
@@ -2311,6 +2315,45 @@ pub async fn pump_permission_delete(state: &Arc<Mutex<AppState>>) -> bool {
     true
 }
 
+/// (PERM-1) Drain a pending `/permissions` add: append the submitted rule to
+/// Local settings (`persist_permission_update`, OUTSIDE the lock), reload, and
+/// refresh the open screen — the add counterpart of [`pump_permission_delete`].
+pub async fn pump_permission_add(state: &Arc<Mutex<AppState>>) -> bool {
+    let (row, cwd) = {
+        let mut st = state.lock().await;
+        let Some(row) = st.pending_permission_add.take() else {
+            return false;
+        };
+        (row, st.status.cwd.clone())
+    };
+    let Some(update) = crate::screens::permissions::row_to_permission_update(&row) else {
+        return false;
+    };
+    let claude_home = claude_home_dir();
+    let paths = permission::PermissionPaths {
+        claude_home: claude_home.clone(),
+        cwd: cwd.clone(),
+    };
+    if !permission::persist_permission_update(&update, &paths)
+        .await
+        .unwrap_or(false)
+    {
+        return false; // already present / not persistable / broken file.
+    }
+    let reloaded = crate::screens::permissions::load_permission_sections(&cwd, &claude_home);
+    let mut st = state.lock().await;
+    if let Some(crate::screens::Screen::Permissions(scr)) = st.active_screen.as_mut() {
+        let tab = scr.tab;
+        scr.mode = reloaded.mode;
+        scr.rows = reloaded.rows;
+        scr.tab = tab;
+        scr.dialog_mode = crate::screens::permissions::PermissionsDialogMode::List;
+        let n = scr.tab_rows().len();
+        scr.selected = scr.selected.min(n.saturating_sub(1));
+    }
+    true
+}
+
 /// (`/copy`) Write a pending `/copy` selection to the system clipboard.
 ///
 /// Mirrors [`pump_save_color`] (no `OrchestratorHandle`, no priority guard): the
@@ -2760,9 +2803,12 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 // were already applied synchronously by the submit intercept;
                 // only the disk write is deferred here.
                 let _wrote_color = pump_save_color(&state, ticker_session_id).await;
-                // (PERM-1) `/permissions` delete pump. Removes a confirmed rule
-                // from settings.json + reloads the screen; redraw on success.
+                // (PERM-1) `/permissions` delete + add pumps. Mutate settings.json
+                // + reload the screen; redraw on success.
                 if pump_permission_delete(&state).await {
+                    needs_redraw = true;
+                }
+                if pump_permission_add(&state).await {
                     needs_redraw = true;
                 }
                 // (`/copy`) Clipboard write pump. Runs UNCONDITIONALLY (no

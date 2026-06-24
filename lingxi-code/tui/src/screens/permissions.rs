@@ -48,6 +48,8 @@ pub enum PermissionsDialogMode {
     Detail,
     /// (PERM-1) Confirming deletion of the selected rule.
     ConfirmDelete,
+    /// (PERM-1) Typing a new rule to add to the active tab.
+    AddInput,
 }
 
 /// (PERM-1) The active behavior tab (claude-code `PermissionRuleList` tabs).
@@ -129,6 +131,8 @@ pub struct PermissionsScreenState {
     pub dialog_mode: PermissionsDialogMode,
     /// (PERM-1) The active behavior tab.
     pub tab: PermTab,
+    /// (PERM-1) Buffer for the new-rule text in [`PermissionsDialogMode::AddInput`].
+    pub add_input: String,
 }
 
 impl PermissionsScreenState {
@@ -152,6 +156,10 @@ pub enum PermissionsOutcome {
     /// (PERM-1) The user confirmed deletion of this rule — the caller persists
     /// the removal (async) + reloads. Carries the rule to remove.
     DeleteRule(PermRuleRow),
+    /// (PERM-1) The user submitted a new rule to add — the caller persists it
+    /// (async) to Local settings + reloads. Carries the new rule (source
+    /// `"Local"`, behavior = the active tab).
+    AddRule(PermRuleRow),
 }
 
 /// Behavior → display label.
@@ -245,6 +253,7 @@ pub fn load_permission_sections(
         selected: 0,
         dialog_mode: PermissionsDialogMode::List,
         tab: PermTab::Allow,
+        add_input: String::new(),
     }
 }
 
@@ -291,7 +300,43 @@ pub fn handle_permissions_key(
                 state.dialog_mode = PermissionsDialogMode::ConfirmDelete;
                 PermissionsOutcome::Stay
             }
+            // (PERM-1) `a` opens the new-rule input for the active tab.
+            KeyCode::Char('a') => {
+                state.add_input.clear();
+                state.dialog_mode = PermissionsDialogMode::AddInput;
+                PermissionsOutcome::Stay
+            }
             KeyCode::Esc | KeyCode::Char('q') => PermissionsOutcome::Close,
+            _ => PermissionsOutcome::Stay,
+        },
+        PermissionsDialogMode::AddInput => match key {
+            KeyCode::Esc => {
+                state.add_input.clear();
+                state.dialog_mode = PermissionsDialogMode::List;
+                PermissionsOutcome::Stay
+            }
+            KeyCode::Backspace => {
+                state.add_input.pop();
+                PermissionsOutcome::Stay
+            }
+            KeyCode::Enter => {
+                let rule = state.add_input.trim().to_string();
+                state.add_input.clear();
+                state.dialog_mode = PermissionsDialogMode::List;
+                if rule.is_empty() {
+                    PermissionsOutcome::Stay
+                } else {
+                    PermissionsOutcome::AddRule(PermRuleRow {
+                        behavior: state.tab.behavior().to_string(),
+                        rule,
+                        source: "Local".to_string(),
+                    })
+                }
+            }
+            KeyCode::Char(c) => {
+                state.add_input.push(c);
+                PermissionsOutcome::Stay
+            }
             _ => PermissionsOutcome::Stay,
         },
         PermissionsDialogMode::Detail => match key {
@@ -363,7 +408,7 @@ pub fn render_permissions_to_string(state: &PermissionsScreenState) -> String {
                     out.push('\n');
                 }
             }
-            out.push_str("\u{2191}\u{2193} navigate \u{00B7} \u{21c6} tabs \u{00B7} Enter view \u{00B7} d delete \u{00B7} Esc close");
+            out.push_str("\u{2191}\u{2193} navigate \u{00B7} \u{21c6} tabs \u{00B7} Enter view \u{00B7} a add \u{00B7} d delete \u{00B7} Esc close");
             out
         }
         // (PERM-1) Delete confirmation for the selected rule.
@@ -371,6 +416,12 @@ pub fn render_permissions_to_string(state: &PermissionsScreenState) -> String {
             Some(row) => format!("Delete rule {}?\ny to delete \u{00B7} n to cancel", row.rule),
             None => "Permissions\n(rule no longer available)".to_string(),
         },
+        // (PERM-1) New-rule input for the active tab.
+        PermissionsDialogMode::AddInput => format!(
+            "Add {} rule:\n{}\u{2588}\nEnter add \u{00B7} Esc cancel",
+            state.tab.title().to_lowercase(),
+            state.add_input,
+        ),
         PermissionsDialogMode::Detail => match state.tab_rows().get(state.selected).copied() {
             Some(row) => render_rule_detail(row),
             None => "Permissions\n(rule no longer available)".to_string(),
@@ -521,6 +572,7 @@ mod tests {
             selected: 0,
             dialog_mode: PermissionsDialogMode::List,
             tab: PermTab::Allow,
+            add_input: String::new(),
         };
         let out = render_permissions_to_string(&s);
         assert!(out.starts_with(
@@ -529,8 +581,40 @@ mod tests {
         // The Deny rule is NOT in the Allow tab.
         assert!(!out.contains("Read(./s/**)"), "got: {out}");
         assert!(out.ends_with(
-            "\u{2191}\u{2193} navigate \u{00B7} \u{21c6} tabs \u{00B7} Enter view \u{00B7} d delete \u{00B7} Esc close"
+            "\u{2191}\u{2193} navigate \u{00B7} \u{21c6} tabs \u{00B7} Enter view \u{00B7} a add \u{00B7} d delete \u{00B7} Esc close"
         ));
+    }
+
+    #[test]
+    fn a_then_type_then_enter_adds_rule_to_active_tab() {
+        // (PERM-1) `a` opens the input; typing builds the rule; Enter emits
+        // AddRule with the active tab's behavior + Local source.
+        let mut s = PermissionsScreenState::default(); // Allow tab.
+        assert_eq!(handle_permissions_key(&mut s, KeyCode::Char('a')), PermissionsOutcome::Stay);
+        assert_eq!(s.dialog_mode, PermissionsDialogMode::AddInput);
+        for c in "Bash(ls)".chars() {
+            let _ = handle_permissions_key(&mut s, KeyCode::Char(c));
+        }
+        // Backspace edits the buffer.
+        let _ = handle_permissions_key(&mut s, KeyCode::Backspace);
+        assert_eq!(s.add_input, "Bash(ls");
+        for c in ")".chars() {
+            let _ = handle_permissions_key(&mut s, KeyCode::Char(c));
+        }
+        assert!(render_permissions_to_string(&s).contains("Add allow rule:"));
+        match handle_permissions_key(&mut s, KeyCode::Enter) {
+            PermissionsOutcome::AddRule(r) => {
+                assert_eq!(r.rule, "Bash(ls)");
+                assert_eq!(r.behavior, "Allow");
+                assert_eq!(r.source, "Local");
+            }
+            other => panic!("expected AddRule, got {other:?}"),
+        }
+        assert_eq!(s.dialog_mode, PermissionsDialogMode::List);
+        // Empty input + Enter is a no-op (Stay, back to list).
+        let _ = handle_permissions_key(&mut s, KeyCode::Char('a'));
+        assert_eq!(handle_permissions_key(&mut s, KeyCode::Enter), PermissionsOutcome::Stay);
+        assert_eq!(s.dialog_mode, PermissionsDialogMode::List);
     }
 
     #[test]

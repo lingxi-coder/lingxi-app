@@ -10,43 +10,25 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use toml::Table;
 
-// --- Self-contained shims ---------------------------------------------------
-// Codex's `features` crate depended on `codex_otel::SessionTelemetry` (for
-// `emit_metrics`) and `codex_protocol::protocol::{Event, EventMsg,
-// WarningEvent}` (for the under-development warning). LingXi has no analogues,
-// so the crate carries faithful local copies of exactly the surface it uses,
-// keeping it dependency-light (ported 1:1 from codex `codex-features`).
+// --- Telemetry seam ---------------------------------------------------------
+// Codex's `features` crate called `codex_otel::SessionTelemetry::counter` in
+// `emit_metrics`. Rather than depend on a telemetry crate (which would invert
+// the layer graph — this is a low-level crate), `features` defines the port and
+// lets the telemetry layer implement it (dependency inversion).
+//
+// The under-development warning does NOT define an event type here: codex
+// returned a `codex_protocol::protocol::Event`, but LingXi's event types
+// (`engine::Event` is reducer input; `client-protocol::ClientEvent` is the
+// wire-parity-locked client stream) are neither a clean fit nor a layer this
+// crate should depend on — and the warning is codex-specific (no claude-code
+// parity slot). So the function returns the warning *message* and leaves
+// surfacing it to whatever consumes it, via LingXi's own event path.
 
 /// Metrics sink for [`Features::emit_metrics`]. Mirrors the one method codex
-/// called on `codex_otel::SessionTelemetry`.
+/// called on `codex_otel::SessionTelemetry`; the telemetry layer implements it.
 pub trait MetricsSink {
     /// Increment counter `name` by `inc`, tagged with `(key, value)` pairs.
     fn counter(&self, name: &str, inc: u64, tags: &[(&str, &str)]);
-}
-
-/// Synthesized event (only the `Warning` variant is produced by this crate).
-/// Mirrors `codex_protocol::protocol::Event`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Event {
-    /// Event id (empty for the synthesized warning, matching codex).
-    pub id: String,
-    /// Event payload.
-    pub msg: EventMsg,
-}
-
-/// Event payload variants. Mirrors `codex_protocol::protocol::EventMsg`
-/// (only the variant this crate emits).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EventMsg {
-    /// A user-facing warning.
-    Warning(WarningEvent),
-}
-
-/// Warning payload. Mirrors `codex_protocol::protocol::WarningEvent`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WarningEvent {
-    /// Human-readable warning text.
-    pub message: String,
 }
 // ---------------------------------------------------------------------------
 
@@ -1401,12 +1383,16 @@ pub const FEATURES: &[FeatureSpec] = &[
     },
 ];
 
-pub fn unstable_features_warning_event(
+/// Returns the under-development-features warning *message* (or `None` when
+/// there is nothing to warn about / the warning is suppressed). Codex returned
+/// a `codex_protocol::protocol::Event`; LingXi keeps this crate event-type-free
+/// and lets the caller surface the message through its own event path.
+pub fn unstable_features_warning(
     effective_features: Option<&Table>,
     suppress_unstable_features_warning: bool,
     features: &Features,
     config_path: &str,
-) -> Option<Event> {
+) -> Option<String> {
     if suppress_unstable_features_warning {
         return None;
     }
@@ -1444,10 +1430,7 @@ pub fn unstable_features_warning_event(
     let message = format!(
         "Under-development features enabled: {under_development_feature_keys}. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in {config_path}."
     );
-    Some(Event {
-        id: String::new(),
-        msg: EventMsg::Warning(WarningEvent { message }),
-    })
+    Some(message)
 }
 
 #[cfg(test)]

@@ -6,9 +6,7 @@ use crate::Features;
 use crate::FeaturesToml;
 use crate::Stage;
 use crate::feature_for_key;
-use crate::unstable_features_warning_event;
-use crate::EventMsg;
-use crate::WarningEvent;
+use crate::unstable_features_warning;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 use toml::Table;
@@ -714,17 +712,13 @@ fn unstable_warning_event_only_mentions_enabled_under_development_features() {
     let mut features = Features::with_defaults();
     features.enable(Feature::ApplyPatchStreamingEvents);
 
-    let warning = unstable_features_warning_event(
+    let message = unstable_features_warning(
         Some(&configured_features),
         /*suppress_unstable_features_warning*/ false,
         &features,
         "/tmp/config.toml",
     )
-    .expect("warning event");
-
-    let EventMsg::Warning(WarningEvent { message }) = warning.msg else {
-        panic!("expected warning event");
-    };
+    .expect("warning message");
     assert!(message.contains("apply_patch_streaming_events"));
     assert!(!message.contains("personality"));
     assert!(message.contains("/tmp/config.toml"));
@@ -744,17 +738,13 @@ code_mode = true
     features.enable(Feature::MultiAgentV2);
     features.enable(Feature::CodeMode);
 
-    let warning = unstable_features_warning_event(
+    let message = unstable_features_warning(
         Some(&configured_features),
         /*suppress_unstable_features_warning*/ false,
         &features,
         "/tmp/config.toml",
     )
-    .expect("warning event");
-
-    let EventMsg::Warning(WarningEvent { message }) = warning.msg else {
-        panic!("expected warning event");
-    };
+    .expect("warning message");
     assert_eq!(
         "Under-development features enabled: code_mode, multi_agent_v2. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /tmp/config.toml.".to_string(),
         message

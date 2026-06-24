@@ -57,6 +57,16 @@ pub struct SubagentInvocationContext {
     /// the shared session workspace (claude-code's per-agent `agentWorktree`/cwd
     /// `AsyncLocalStorage`). `None` for the main thread / a non-isolated agent.
     pub cwd: Option<std::path::PathBuf>,
+    /// The assistant message's `tool_use` block id this dispatch is for — the
+    /// REAL id a stdio `can_use_tool` request should carry (claude-code
+    /// `createCanUseTool(toolUseID)`), so the host can correlate + dedup the
+    /// subagent's permission prompt. 1:1 with
+    /// [`crate::permission_gate::PermissionCheckContext::tool_use_id`]: the
+    /// dispatch invoker maps it straight into the gate check context so the
+    /// subagent path is byte-faithful to the main loop's. `None` for a dispatch
+    /// site that has no originating block id (test fixtures / legacy callers),
+    /// in which case the gate mints a fresh id exactly as before.
+    pub tool_use_id: Option<String>,
 }
 
 /// Failure modes for [`ToolInvoker::invoke`].

@@ -167,7 +167,18 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
 
         let runtime = if let Some(plane) = &control_plane {
             let mut cfg = init::resolve_desktop_config(&parsed, permission_mode);
-            let gate = Arc::new(control_plane::StdioControlPermissionGate::new(plane.clone()));
+            // §2b: persist an ALLOW response's `updatedPermissions` rule updates to
+            // the SAME settings tree the engine resolved (claude-code
+            // `persistPermissionUpdates`). Paths come from the same `cfg` so a
+            // host-allowed rule lands where the next session loads it.
+            let gate = Arc::new(
+                control_plane::StdioControlPermissionGate::new(plane.clone()).with_persist(
+                    permission::PermissionPaths {
+                        claude_home: cfg.claude_home.clone(),
+                        cwd: cfg.cwd.clone(),
+                    },
+                ),
+            );
             cfg.injected_permission_gate =
                 Some(gate as Arc<dyn permission::gate::PermissionGate>);
             match init::build_runtime_from_config(cfg, adapter).await {

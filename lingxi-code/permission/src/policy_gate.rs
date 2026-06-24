@@ -155,10 +155,14 @@ impl PolicyPermissionGate {
     ) -> PermissionOutcome {
         match result {
             // A policy-rule allow may itself carry a rewritten input — surface it
-            // (previously dropped at the `PermissionDecision::Allow` boundary).
-            PermissionResult::Allow { updated_input, .. } => {
-                PermissionOutcome::Allow { updated_input }
-            }
+            // (previously dropped at the `PermissionDecision::Allow` boundary). The
+            // local policy gate never derives `updatedPermissions` rule updates
+            // (those originate from the stdio host's `can_use_tool` response), so
+            // `permission_updates` is always empty on this path.
+            PermissionResult::Allow { updated_input, .. } => PermissionOutcome::Allow {
+                updated_input,
+                permission_updates: Vec::new(),
+            },
             PermissionResult::Deny {
                 reason,
                 explanation,
@@ -168,12 +172,29 @@ impl PolicyPermissionGate {
             },
             PermissionResult::Ask { ref reason, .. } => {
                 if read_only_default_auto_allows(name, reason) {
-                    PermissionOutcome::Allow { updated_input: None }
+                    PermissionOutcome::Allow {
+                        updated_input: None,
+                        permission_updates: Vec::new(),
+                    }
                 } else {
                     // Delegate to the inner transport WITH the context so a stdio
                     // `can_use_tool` request carries the real tool_use_id and its
-                    // allow can return the host's `updatedInput`.
-                    self.inner.check_with_context(name, input, ctx).await
+                    // allow can return the host's `updatedInput`. Enrich the ctx
+                    // here (where the policy `reason` is in scope) with the
+                    // serialized `decision_reason` — claude-code
+                    // `createCanUseTool` sets `decision_reason:
+                    // serializeDecisionReason(mainPermissionResult.decisionReason)`.
+                    // The turn loop builds the ctx with only `tool_use_id`; we add
+                    // the reason without touching the unit `PermissionResolution::Ask`.
+                    // (permission_suggestions/blocked_path stay `None` — LingXi's
+                    // policy Ask does not model claude-code's
+                    // PermissionAskDecision.suggestions/blockedPath; see the
+                    // PermissionCheckContext field docs.)
+                    let ctx2 = PermissionCheckContext {
+                        decision_reason: serialize_decision_reason(reason),
+                        ..ctx.clone()
+                    };
+                    self.inner.check_with_context(name, input, &ctx2).await
                 }
             }
         }
@@ -403,6 +424,53 @@ fn deny_reason_string(reason: &PermissionDecisionReason, tool_name: &str) -> Str
 /// Shared guidance appended to certain permission denials (`messages.ts:226`),
 /// instructing the model on acceptable workarounds.
 const DENIAL_WORKAROUND_GUIDANCE: &str = "IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this denial in malicious ways, e.g. do not use your ability to run tests to execute non-test actions. You should only try to work around this restriction in reasonable ways that do not attempt to bypass the intent behind this denial. If you believe this capability is essential to complete the user's request, STOP and explain to the user what you were trying to do and why you need this permission. Let the user decide how to proceed.";
+
+/// Serialize a [`PermissionDecisionReason`] to the free-text `decision_reason`
+/// string a stdio `can_use_tool` control_request carries — 1:1 with claude-code
+/// `serializeDecisionReason` (`cli/structuredIO.ts:64-91`).
+///
+/// The oracle returns `undefined` (⇒ `None`, the key is OMITTED) for the
+/// `rule`/`mode`/`subcommandResults`/`permissionPromptTool` reasons (the common
+/// ask cases — an SDK host parses `decision_reason_type` for those, not the
+/// text), and the reason STRING for `hook`/`asyncAgent`/`sandboxOverride`/
+/// `workingDir`/`safetyCheck`/`other` (+ `classifier` only behind the
+/// `BASH_CLASSIFIER`/`TRANSCRIPT_CLASSIFIER` feature flags, which are `false` in
+/// the external build — so `ClassifierApproved`/`ClassifierRejected` map to
+/// `None` here, matching the gated-off posture used elsewhere in this crate).
+///
+/// Field-shape notes vs claude-code:
+/// - [`PermissionDecisionReason::HookOverride`] carries `reason: Option<String>`
+///   (not a bare string): `Some(r)` ⇒ that text, `None` ⇒ `None` (the hook
+///   supplied no reason, so there is nothing to serialize).
+/// - [`PermissionDecisionReason::SandboxOverride`] carries a
+///   [`SandboxOverrideReason`] ENUM, not a free string. claude-code's
+///   `sandboxOverride` reason is itself a string; rather than fabricate a
+///   rendering, this returns `None` (the override is an allow-side reason that
+///   does not reach the ask path in the external build anyway).
+fn serialize_decision_reason(reason: &PermissionDecisionReason) -> Option<String> {
+    match reason {
+        // Oracle: rule/mode/subcommandResults/permissionPromptTool ⇒ undefined.
+        PermissionDecisionReason::MatchedRule { .. }
+        | PermissionDecisionReason::PermissionMode { .. }
+        | PermissionDecisionReason::SubcommandResults { .. }
+        | PermissionDecisionReason::PermissionPromptTool { .. } => None,
+        // Oracle: hook/asyncAgent/workingDir/safetyCheck/other ⇒ reason string.
+        PermissionDecisionReason::HookOverride { reason, .. } => reason.clone(),
+        PermissionDecisionReason::AsyncAgent { reason }
+        | PermissionDecisionReason::WorkingDirectory { reason }
+        | PermissionDecisionReason::SafetyCheck { reason, .. }
+        | PermissionDecisionReason::Other { reason } => Some(reason.clone()),
+        // sandboxOverride: enum reason, no faithful string rendering → None
+        // (see fn doc); classifier only behind a feature flag that is off in the
+        // external build → None.
+        PermissionDecisionReason::SandboxOverride { .. }
+        | PermissionDecisionReason::ClassifierApproved { .. }
+        | PermissionDecisionReason::ClassifierRejected { .. }
+        | PermissionDecisionReason::DenialLimitExceeded
+        | PermissionDecisionReason::AutoModeFallback
+        | PermissionDecisionReason::BypassPermissions => None,
+    }
+}
 
 /// Map a [`PermissionDecisionReason`] to the coarse [`PermissionDecisionSource`]
 /// the turn loop gates its permission hooks on (claude-code `decisionReason.type`).
@@ -963,6 +1031,146 @@ mod tests {
             }
             other => panic!("expected Deny{{Unspecified}}, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn serialize_decision_reason_matches_oracle_switch() {
+        use crate::result::ClassifierKind;
+        use crate::rule::{PermissionRule, PermissionRuleSource, PermissionRuleValue};
+        // rule/mode/subcommandResults/permissionPromptTool ⇒ None (oracle returns
+        // undefined; the SDK host parses decision_reason_type for those).
+        let rule = PermissionRule {
+            value: PermissionRuleValue::from_rule_string("Bash"),
+            behavior: crate::rule::PermissionBehavior::Ask,
+            source: PermissionRuleSource::UserSettings,
+        };
+        assert_eq!(
+            serialize_decision_reason(&PermissionDecisionReason::MatchedRule { rule }),
+            None
+        );
+        assert_eq!(
+            serialize_decision_reason(&PermissionDecisionReason::PermissionMode {
+                mode: PermissionMode::Default
+            }),
+            None
+        );
+        assert_eq!(
+            serialize_decision_reason(&PermissionDecisionReason::PermissionPromptTool {
+                tool_name: "mcp__x".into()
+            }),
+            None
+        );
+        // hook/asyncAgent/workingDir/safetyCheck/other ⇒ the reason string.
+        assert_eq!(
+            serialize_decision_reason(&PermissionDecisionReason::HookOverride {
+                hook_id: "h1".into(),
+                source: None,
+                reason: Some("blocked by hook".into()),
+            }),
+            Some("blocked by hook".to_string())
+        );
+        // A hook with no reason has nothing to serialize.
+        assert_eq!(
+            serialize_decision_reason(&PermissionDecisionReason::HookOverride {
+                hook_id: "h1".into(),
+                source: None,
+                reason: None,
+            }),
+            None
+        );
+        assert_eq!(
+            serialize_decision_reason(&PermissionDecisionReason::AsyncAgent {
+                reason: "async said no".into()
+            }),
+            Some("async said no".to_string())
+        );
+        assert_eq!(
+            serialize_decision_reason(&PermissionDecisionReason::WorkingDirectory {
+                reason: "escapes root".into()
+            }),
+            Some("escapes root".to_string())
+        );
+        assert_eq!(
+            serialize_decision_reason(&PermissionDecisionReason::SafetyCheck {
+                reason: "dangerous rm".into(),
+                classifier_approvable: false,
+            }),
+            Some("dangerous rm".to_string())
+        );
+        assert_eq!(
+            serialize_decision_reason(&PermissionDecisionReason::Other {
+                reason: "misc".into()
+            }),
+            Some("misc".to_string())
+        );
+        // classifier is feature-gated OFF in the external build → None.
+        assert_eq!(
+            serialize_decision_reason(&PermissionDecisionReason::ClassifierRejected {
+                classifier: ClassifierKind::Transcript,
+                score: 0.9,
+            }),
+            None
+        );
+        // sandboxOverride: enum reason, no faithful string → None.
+        assert_eq!(
+            serialize_decision_reason(&PermissionDecisionReason::SandboxOverride {
+                reason: crate::result::SandboxOverrideReason::ExcludedCommand,
+            }),
+            None
+        );
+    }
+
+    /// Inner gate that records the [`PermissionCheckContext`] handed to
+    /// `check_with_context` (so a test can assert the gate enriched it).
+    struct ContextRecordingInner {
+        ctx: std::sync::Mutex<Option<PermissionCheckContext>>,
+    }
+    #[async_trait]
+    impl PermissionGate for ContextRecordingInner {
+        async fn check(&self, _name: &str, _input: &Value) -> PermissionDecision {
+            PermissionDecision::Allow
+        }
+        async fn check_with_context(
+            &self,
+            _name: &str,
+            _input: &Value,
+            ctx: &PermissionCheckContext,
+        ) -> PermissionOutcome {
+            *self.ctx.lock().unwrap() = Some(ctx.clone());
+            PermissionOutcome::Allow { updated_input: None, permission_updates: Vec::new() }
+        }
+    }
+
+    #[tokio::test]
+    async fn check_with_context_enriches_decision_reason_on_delegated_ask() {
+        // A mutating tool with no rule → Default mode Ask (reason `PermissionMode`)
+        // → delegated to the inner transport. The gate must enrich the ctx with the
+        // serialized decision_reason and preserve the turn loop's tool_use_id.
+        // PermissionMode serializes to None (oracle omits rule/mode), so the
+        // forwarded decision_reason is None for this common case — byte-faithful.
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let inner = Arc::new(ContextRecordingInner {
+            ctx: std::sync::Mutex::new(None),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        let ctx = PermissionCheckContext {
+            tool_use_id: Some("toolu_42".into()),
+            ..Default::default()
+        };
+        let outcome = gate
+            .check_with_context("Bash", &serde_json::json!({}), &ctx)
+            .await;
+        assert_eq!(outcome, PermissionOutcome::Allow { updated_input: None, permission_updates: Vec::new() });
+        let seen = inner.ctx.lock().unwrap().clone().expect("inner consulted");
+        assert_eq!(
+            seen.tool_use_id.as_deref(),
+            Some("toolu_42"),
+            "the dispatcher tool_use_id is preserved through enrichment"
+        );
+        assert_eq!(
+            seen.decision_reason, None,
+            "a PermissionMode ask omits decision_reason (oracle returns undefined)"
+        );
     }
 
     #[test]

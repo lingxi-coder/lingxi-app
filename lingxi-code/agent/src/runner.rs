@@ -1031,6 +1031,12 @@ async fn run_subagent_loop(
                     // Per-agent cwd (worktree isolation / explicit cwd) → the
                     // dispatched tools' working directory.
                     cwd: ctx.cwd.clone(),
+                    // The REAL `tool_use` block id of THIS dispatching call
+                    // (claude-code `createCanUseTool(toolUseID)`): threaded into
+                    // the gate's `PermissionCheckContext` so a subagent's stdio
+                    // `can_use_tool` prompt carries the byte-faithful id instead
+                    // of a freshly minted one — matching the main loop's path.
+                    tool_use_id: Some(tool_use_id.as_str().to_string()),
                 };
                 match invoker.invoke(name, input.clone(), inv_ctx).await {
                     Ok(value) => {

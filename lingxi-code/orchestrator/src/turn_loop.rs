@@ -2436,6 +2436,11 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                             match orch.perms.check_with_context(name, &effective_input, &ctx).await {
                                 traits::permission_gate::PermissionOutcome::Allow {
                                     updated_input,
+                                    // `permission_updates` (the host's
+                                    // `updatedPermissions`) are applied + persisted
+                                    // inside the stdio gate itself, which holds the
+                                    // settings paths; nothing to do here.
+                                    permission_updates: _,
                                 } => {
                                     if let Some(u) = updated_input {
                                         effective_input = u;

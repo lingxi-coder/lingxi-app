@@ -10,7 +10,7 @@ use crate::registry::ToolRegistry;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
-use traits::permission_gate::{PermissionDecision, PermissionGate};
+use traits::permission_gate::PermissionGate;
 use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 
 /// Wraps an `Arc<ToolRegistry>` as a `dyn ToolInvoker`.
@@ -58,7 +58,7 @@ impl ToolInvoker for RegistryToolInvoker {
     async fn invoke(
         &self,
         name: &str,
-        input: Value,
+        mut input: Value,
         ctx: SubagentInvocationContext,
     ) -> Result<Value, ToolInvokerError> {
         let tool = self
@@ -89,10 +89,29 @@ impl ToolInvoker for RegistryToolInvoker {
                     team: ctx.team_name.clone(),
                     is_async: ctx.is_async,
                 });
-            if let PermissionDecision::Deny { reason } =
-                gate.check_with_worker(name, &input, worker).await
-            {
-                return Err(ToolInvokerError::Internal(reason));
+            // Use the richer `check_with_context` (not `check_with_worker`) so the
+            // subagent path is byte-faithful to the main loop's: it carries the
+            // REAL `tool_use_id` of the dispatching call (so a stdio
+            // `can_use_tool` request is correlatable) AND applies the host/policy
+            // `updatedInput` rewrite to the input the tool actually runs with —
+            // mirroring the turn-loop Ask arm. The default `check_with_context`
+            // delegates to `check_with_worker` and maps `Allow`→`Allow{None}`, so
+            // a gate that only overrides `check_with_worker` (or `check`) is
+            // unchanged. Behavior is identical when `updated_input` is `None`.
+            let check_ctx = traits::permission_gate::PermissionCheckContext {
+                worker,
+                tool_use_id: ctx.tool_use_id.clone(),
+                ..Default::default()
+            };
+            match gate.check_with_context(name, &input, &check_ctx).await {
+                traits::permission_gate::PermissionOutcome::Allow { updated_input, .. } => {
+                    if let Some(u) = updated_input {
+                        input = u;
+                    }
+                }
+                traits::permission_gate::PermissionOutcome::Deny { reason } => {
+                    return Err(ToolInvokerError::Internal(reason));
+                }
             }
         }
 
@@ -486,6 +505,7 @@ mod tests {
                     is_async: false,
                     can_show_permission_prompts: true,
                     cwd: None,
+                    tool_use_id: None,
                 },
             )
             .await
@@ -529,6 +549,7 @@ mod tests {
             is_async: false,
             can_show_permission_prompts: false,
             cwd: None,
+            tool_use_id: None,
         }
     }
 
@@ -614,6 +635,7 @@ mod tests {
             is_async: true,
             can_show_permission_prompts: can_show,
             cwd: None,
+            tool_use_id: None,
         }
     }
 
@@ -655,6 +677,141 @@ mod tests {
             .await
             .expect("ok");
         assert_eq!(seen2.lock().unwrap().clone().expect("consulted"), None);
+    }
+
+    /// Gate that overrides `check_with_context` to record the
+    /// [`PermissionCheckContext`] it sees and return a fixed
+    /// [`PermissionOutcome`] — so a test can assert the subagent dispatch path
+    /// threads the REAL `tool_use_id` AND honors a host `updatedInput` rewrite
+    /// (the parity gap the stdio `can_use_tool` flow needs), mirroring the main
+    /// loop's Ask arm.
+    struct ContextRecordingGate {
+        seen: Arc<StdMutex<Option<traits::permission_gate::PermissionCheckContext>>>,
+        outcome: traits::permission_gate::PermissionOutcome,
+    }
+    #[async_trait]
+    impl Gate for ContextRecordingGate {
+        async fn check(&self, _name: &str, _input: &Value) -> GateDecision {
+            // Must not be reached — the override below intercepts the dispatch.
+            GateDecision::Allow
+        }
+        async fn check_with_context(
+            &self,
+            _name: &str,
+            _input: &Value,
+            ctx: &traits::permission_gate::PermissionCheckContext,
+        ) -> traits::permission_gate::PermissionOutcome {
+            *self.seen.lock().unwrap() = Some(ctx.clone());
+            self.outcome.clone()
+        }
+    }
+
+    fn ctx_with_tool_use_id(id: &str) -> SubagentInvocationContext {
+        SubagentInvocationContext {
+            parent_agent_id: None,
+            agent_name: Some("researcher".to_string()),
+            team_name: Some("alpha".to_string()),
+            is_async: true,
+            can_show_permission_prompts: true,
+            cwd: None,
+            tool_use_id: Some(id.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_threads_real_tool_use_id_and_worker_into_context_gate() {
+        // The dispatching call's tool_use block id (and the worker attribution)
+        // must reach the gate's PermissionCheckContext so a subagent's stdio
+        // `can_use_tool` request is byte-faithful (claude-code
+        // `createCanUseTool(toolUseID)`), not a freshly minted id.
+        let seen = Arc::new(StdMutex::new(None));
+        let gate = Arc::new(ContextRecordingGate {
+            seen: seen.clone(),
+            outcome: traits::permission_gate::PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+            },
+        });
+        let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+        invoker
+            .invoke("TestEcho", json!({ "a": 1 }), ctx_with_tool_use_id("toolu_abc123"))
+            .await
+            .expect("allow dispatches");
+        let ctx = seen.lock().unwrap().clone().expect("context gate consulted");
+        assert_eq!(
+            ctx.tool_use_id.as_deref(),
+            Some("toolu_abc123"),
+            "the dispatching call's real tool_use_id reaches PermissionCheckContext.tool_use_id"
+        );
+        let worker = ctx.worker.expect("a named, prompt-eligible worker is attributed");
+        assert_eq!(worker.name, "researcher");
+        assert_eq!(worker.team.as_deref(), Some("alpha"));
+        assert!(worker.is_async);
+    }
+
+    #[tokio::test]
+    async fn dispatch_applies_updated_input_rewrite_to_tool() {
+        // An Allow{updated_input: Some(..)} from the gate (the host's
+        // `updatedInput` rewrite) must substitute the input the tool actually
+        // runs with — mirroring turn_loop's Ask arm. The echo tool returns
+        // whatever input it received, so we can observe the substitution.
+        let gate = Arc::new(ContextRecordingGate {
+            seen: Arc::new(StdMutex::new(None)),
+            outcome: traits::permission_gate::PermissionOutcome::Allow {
+                updated_input: Some(json!({ "rewritten": true })),
+                permission_updates: Vec::new(),
+            },
+        });
+        let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+        let out = invoker
+            .invoke("TestEcho", json!({ "original": true }), ctx_with_tool_use_id("toolu_x"))
+            .await
+            .expect("allow dispatches");
+        assert_eq!(
+            out,
+            json!({ "echo": { "rewritten": true } }),
+            "the gate-rewritten updatedInput, not the original, is what the tool runs with"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_keeps_original_input_when_updated_input_none() {
+        // Behavior identical when updated_input is None: the original input runs.
+        let gate = Arc::new(ContextRecordingGate {
+            seen: Arc::new(StdMutex::new(None)),
+            outcome: traits::permission_gate::PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+            },
+        });
+        let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+        let out = invoker
+            .invoke("TestEcho", json!({ "original": true }), no_ctx())
+            .await
+            .expect("allow dispatches");
+        assert_eq!(out, json!({ "echo": { "original": true } }));
+    }
+
+    #[tokio::test]
+    async fn dispatch_context_deny_blocks_and_surfaces_reason() {
+        // A Deny from the context gate is surfaced as Internal, exactly like the
+        // legacy 2-valued path.
+        let gate = Arc::new(ContextRecordingGate {
+            seen: Arc::new(StdMutex::new(None)),
+            outcome: traits::permission_gate::PermissionOutcome::Deny {
+                reason: "denied via context gate".into(),
+            },
+        });
+        let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+        match invoker
+            .invoke("TestEcho", json!({ "a": 1 }), no_ctx())
+            .await
+        {
+            Err(ToolInvokerError::Internal(reason)) => {
+                assert!(reason.contains("denied via context gate"), "got {reason}");
+            }
+            other => panic!("expected Internal(deny), got {other:?}"),
+        }
     }
 
     #[tokio::test]

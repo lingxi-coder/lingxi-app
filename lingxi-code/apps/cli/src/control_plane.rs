@@ -29,6 +29,10 @@ use uuid::Uuid;
 use permission::gate::{
     PermissionCheckContext, PermissionDecision, PermissionGate, PermissionOutcome, PromptWorker,
 };
+use permission::{
+    persist_permission_update, PermissionBehavior, PermissionPaths, PermissionRule,
+    PermissionRuleSource, PermissionRuleValue, PermissionUpdate, PermissionUpdateDestination,
+};
 
 use crate::stream_json::{serialize_ndjson_line, OutboundTx};
 
@@ -263,13 +267,34 @@ impl StdioControlPlane {
 /// piggyback.
 pub struct StdioControlPermissionGate {
     plane: Arc<StdioControlPlane>,
+    /// Settings-file roots used to PERSIST the host's `updatedPermissions` rule
+    /// updates carried by a `can_use_tool` ALLOW response (claude-code
+    /// `persistPermissionUpdates`). `None` ⇒ persistence is skipped (the gate
+    /// still maps the allow; only the settings write is suppressed — e.g. in
+    /// unit tests with no real settings tree). Wired via [`Self::with_persist`]
+    /// from the CLI config (`cfg.claude_home` / `cfg.cwd`).
+    persist_paths: Option<PermissionPaths>,
 }
 
 impl StdioControlPermissionGate {
     /// Build the decider over the shared control plane.
     #[must_use]
     pub fn new(plane: Arc<StdioControlPlane>) -> Self {
-        Self { plane }
+        Self {
+            plane,
+            persist_paths: None,
+        }
+    }
+
+    /// Attach the settings-file roots so an ALLOW response's `updatedPermissions`
+    /// rule updates are PERSISTED (mirrors `TuiPermissionGate::with_persist`):
+    /// `claude_home` resolves `userSettings`, `cwd` resolves
+    /// project/local settings. Without this the host's rule updates are parsed +
+    /// dropped (no settings write).
+    #[must_use]
+    pub fn with_persist(mut self, paths: PermissionPaths) -> Self {
+        self.persist_paths = Some(paths);
+        self
     }
 
     /// Collapse a [`PermissionOutcome`] to the 2-valued [`PermissionDecision`]
@@ -291,9 +316,14 @@ impl StdioControlPermissionGate {
         ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
         // §3.2 outbound request: emit `tool_name, input, tool_use_id` (+ agent_id
-        // when a worker is present, + decision_reason when supplied). Use the REAL
-        // assistant tool_use id when the dispatcher provides it (so the host can
-        // correlate + dedup), else mint one.
+        // when a worker is present, + decision_reason / permission_suggestions /
+        // blocked_path when supplied — claude-code `createCanUseTool` sends
+        // `decision_reason: serializeDecisionReason(...)`,
+        // `permission_suggestions: mainPermissionResult.suggestions`,
+        // `blocked_path: mainPermissionResult.blockedPath`). Each is OMITTED when
+        // absent (the oracle's `.optional()` fields). Use the REAL assistant
+        // tool_use id when the dispatcher provides it (so the host can correlate +
+        // dedup), else mint one.
         let tool_use_id = ctx
             .tool_use_id
             .clone()
@@ -309,6 +339,22 @@ impl StdioControlPermissionGate {
         }
         if let Some(reason) = &ctx.decision_reason {
             request["decision_reason"] = json!(reason);
+        }
+        // permission_suggestions / blocked_path: forwarded only when the policy
+        // Ask supplies them. PARTIAL (stream-json P5 finding #9): LingXi's policy
+        // `PermissionResult::Ask` does not model claude-code's
+        // `PermissionAskDecision.suggestions` / `.blockedPath` (the per-tool
+        // ask-suggestion builders — e.g. `ruleSuggestionsForCommand` — and the
+        // path-block reason are unported), so `ctx.permission_suggestions` /
+        // `ctx.blocked_path` are always `None` today and these keys are OMITTED,
+        // byte-faithful to the oracle's `.optional()` shape. Emitting them is wired
+        // here so the request becomes byte-complete the moment those builders land
+        // on the policy Ask, with NO further control-plane change.
+        if let Some(suggestions) = &ctx.permission_suggestions {
+            request["permission_suggestions"] = suggestions.clone();
+        }
+        if let Some(path) = &ctx.blocked_path {
+            request["blocked_path"] = json!(path);
         }
         let (request_id, rx) = self.plane.send_request(request, Some(tool_use_id)).await;
 
@@ -331,13 +377,69 @@ impl StdioControlPermissionGate {
             None => rx.await,
         };
         match result {
-            Ok(Ok(payload)) => self.map_payload(payload).await,
+            Ok(Ok(payload)) => {
+                let outcome = self.map_payload(payload).await;
+                // §2b: when the allow carried `updatedPermissions`, parse + persist
+                // them here (claude-code `persistPermissionUpdates`, fire-and-forget
+                // — a persist error never turns the allow into a deny). The in-memory
+                // `applyPermissionUpdates` is a documented PARTIAL (see below).
+                if let PermissionOutcome::Allow {
+                    permission_updates, ..
+                } = &outcome
+                {
+                    if !permission_updates.is_empty() {
+                        self.persist_permission_updates(permission_updates).await;
+                    }
+                }
+                outcome
+            }
             Ok(Err(err)) => PermissionOutcome::Deny {
                 reason: format!("Tool permission request failed: {err}"),
             },
             Err(_) => PermissionOutcome::Deny {
                 reason: "Tool permission request failed: control channel closed".to_string(),
             },
+        }
+    }
+
+    /// Parse + PERSIST the host's `updatedPermissions` rule updates from a
+    /// `can_use_tool` ALLOW response (claude-code `persistPermissionUpdates`).
+    ///
+    /// Best-effort and fire-and-forget — 1:1 with the oracle, where
+    /// `persistPermissionUpdates` is called without awaiting / surfacing errors:
+    /// a parse skip or a [`permission::PersistError`] is logged and the allow
+    /// still stands. Only the `addRules` update type is persisted (the single
+    /// shape LingXi's [`PermissionUpdate`] models, per `persist.rs`); a
+    /// `replaceRules` / `removeRules` / `setMode` / `add|removeDirectories` entry
+    /// — or a malformed one — is skipped with a debug log, never an error
+    /// (mirroring the oracle's tolerant `.catch(undefined)`).
+    ///
+    /// IN-MEMORY APPLY is a documented PARTIAL: claude-code's
+    /// `applyPermissionUpdates` mutates the live `toolPermissionContext` so the
+    /// SAME session's subsequent calls auto-allow. LingXi's enforcing
+    /// `PolicyPermissionGate` wraps an IMMUTABLE `Arc<PermissionPolicy>` (rule
+    /// buckets are baked at `from_rules`; only `mode_override` is interior-mutable),
+    /// so there is no runtime rule-injection seam reachable from this gate. The
+    /// PERSISTED rules take effect on the NEXT session load. Reaching live-apply
+    /// would require adding a session-rule `RwLock<Vec<PermissionRule>>` to
+    /// `PolicyPermissionGate` consulted in `effective_authorize` — a larger change
+    /// deferred with this exact reason.
+    async fn persist_permission_updates(&self, updates: &[Value]) {
+        let Some(paths) = &self.persist_paths else {
+            // No settings tree wired (e.g. unit tests) — parse-only, no write.
+            return;
+        };
+        for raw in updates {
+            for update in parse_add_rules_update(raw) {
+                match persist_permission_update(&update, paths).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to persist permission update from can_use_tool response: {e}"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -357,7 +459,22 @@ impl StdioControlPermissionGate {
                         } else {
                             Some(Value::Object(map.clone()))
                         };
-                        PermissionOutcome::Allow { updated_input }
+                        // §2b / `applyPermissionUpdates` + `persistPermissionUpdates`:
+                        // an allow may also carry an `updatedPermissions` array of
+                        // permission-rule updates the host wants applied + persisted.
+                        // It is OPTIONAL and independent of `updatedInput`: a missing
+                        // or non-array value is simply no updates (mirroring the
+                        // oracle's `.catch(undefined)` — a malformed array is IGNORED,
+                        // never a deny). The raw wire array is carried through and
+                        // parsed + persisted by the consumer ([`Self::decide_outcome`]).
+                        let permission_updates = match payload.get("updatedPermissions") {
+                            Some(Value::Array(arr)) => arr.clone(),
+                            _ => Vec::new(),
+                        };
+                        PermissionOutcome::Allow {
+                            updated_input,
+                            permission_updates,
+                        }
                     }
                     _ => PermissionOutcome::Deny {
                         reason: "Tool permission request failed: malformed allow result (missing updatedInput)"
@@ -386,6 +503,112 @@ impl StdioControlPermissionGate {
                 reason: "Tool permission request returned an unknown behavior".to_string(),
             },
         }
+    }
+}
+
+/// Parse one raw `updatedPermissions` wire entry (a `permissionUpdateSchema`
+/// discriminated union, keyed by `type`) into zero or more [`PermissionUpdate`]s.
+///
+/// Only the `addRules` variant is modeled — `{type:"addRules", rules:[{toolName,
+/// ruleContent?}], behavior, destination}` — because that is the single shape
+/// LingXi's [`PermissionUpdate`] persists (`persist.rs` notes `replaceRules` /
+/// `removeRules` / `setMode` / directory updates are unmodeled). Each element of
+/// `rules` becomes one [`PermissionUpdate`] (claude-code stores rules per behavior
+/// + destination). A non-`addRules` type, a missing/ill-typed field, or an
+/// unknown behavior/destination yields an EMPTY vec (the caller skips it with a
+/// debug log) — never an error, mirroring the oracle's tolerant validation.
+fn parse_add_rules_update(raw: &Value) -> Vec<PermissionUpdate> {
+    let Some(obj) = raw.as_object() else {
+        return Vec::new();
+    };
+    if obj.get("type").and_then(Value::as_str) != Some("addRules") {
+        tracing::debug!(
+            "Skipping non-addRules permission update from can_use_tool response: type={:?}",
+            obj.get("type")
+        );
+        return Vec::new();
+    }
+    let Some(behavior) = obj
+        .get("behavior")
+        .and_then(Value::as_str)
+        .and_then(parse_behavior)
+    else {
+        tracing::debug!("Skipping addRules update with missing/unknown behavior");
+        return Vec::new();
+    };
+    let Some(destination) = obj
+        .get("destination")
+        .and_then(Value::as_str)
+        .and_then(parse_destination)
+    else {
+        tracing::debug!("Skipping addRules update with missing/unknown destination");
+        return Vec::new();
+    };
+    // The settings-file rule SOURCE mirrors the destination (claude-code stores a
+    // persisted rule under the file its destination resolves to). Non-persistable
+    // destinations (session/cliArg) map to their nearest source; `persist` no-ops
+    // them anyway (`destination_path` returns `None`).
+    let source = source_for_destination(destination);
+    let Some(rules) = obj.get("rules").and_then(Value::as_array) else {
+        tracing::debug!("Skipping addRules update with missing rules array");
+        return Vec::new();
+    };
+    rules
+        .iter()
+        .filter_map(|rule_value| {
+            let tool_name = rule_value.get("toolName").and_then(Value::as_str)?;
+            // `ruleContent` is optional; a tool-wide rule omits it.
+            let rule_content = rule_value
+                .get("ruleContent")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            Some(PermissionUpdate {
+                rule: PermissionRule {
+                    value: PermissionRuleValue {
+                        tool_name: permission::rule::normalize_legacy_tool_name(tool_name),
+                        rule_content,
+                    },
+                    behavior,
+                    source,
+                },
+                destination,
+            })
+        })
+        .collect()
+}
+
+/// Map the wire behavior string (`allow`/`deny`/`ask`) to a [`PermissionBehavior`].
+fn parse_behavior(s: &str) -> Option<PermissionBehavior> {
+    match s {
+        "allow" => Some(PermissionBehavior::Allow),
+        "deny" => Some(PermissionBehavior::Deny),
+        "ask" => Some(PermissionBehavior::Ask),
+        _ => None,
+    }
+}
+
+/// Map the wire destination string to a [`PermissionUpdateDestination`]
+/// (`permissionUpdateDestinationSchema`).
+fn parse_destination(s: &str) -> Option<PermissionUpdateDestination> {
+    match s {
+        "userSettings" => Some(PermissionUpdateDestination::UserSettings),
+        "projectSettings" => Some(PermissionUpdateDestination::ProjectSettings),
+        "localSettings" => Some(PermissionUpdateDestination::LocalSettings),
+        "session" => Some(PermissionUpdateDestination::Session),
+        "cliArg" => Some(PermissionUpdateDestination::CliArg),
+        _ => None,
+    }
+}
+
+/// The [`PermissionRuleSource`] a rule persisted to `destination` should carry
+/// (the file it lives in determines its precedence on the next load).
+fn source_for_destination(dest: PermissionUpdateDestination) -> PermissionRuleSource {
+    match dest {
+        PermissionUpdateDestination::UserSettings => PermissionRuleSource::UserSettings,
+        PermissionUpdateDestination::ProjectSettings => PermissionRuleSource::ProjectSettings,
+        PermissionUpdateDestination::LocalSettings => PermissionRuleSource::LocalSettings,
+        PermissionUpdateDestination::CliArg => PermissionRuleSource::CliArg,
+        PermissionUpdateDestination::Session => PermissionRuleSource::Session,
     }
 }
 
@@ -771,11 +994,84 @@ mod tests {
             ))
             .await;
         match check.await.unwrap() {
-            PermissionOutcome::Allow { updated_input } => {
+            PermissionOutcome::Allow { updated_input, .. } => {
                 assert_eq!(updated_input, Some(json!({"command": "ls -la"})));
             }
             other => panic!("expected Allow with updated_input, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn context_emits_suggestions_and_blocked_path_when_present() {
+        // #9: when the policy Ask supplies permission_suggestions / blocked_path,
+        // the can_use_tool request carries them (claude-code
+        // `permission_suggestions` / `blocked_path`). The seam is forward-compatible
+        // even though the policy gate does not populate them yet (always None).
+        let (plane, mut rx) = plane_with_channel();
+        let gate = StdioControlPermissionGate::new(plane.clone());
+        let input = json!({});
+        let ctx = PermissionCheckContext {
+            tool_use_id: Some("toolu_9".to_string()),
+            permission_suggestions: Some(json!([
+                {"type": "addRules", "rules": ["Bash(ls *)"], "behavior": "allow", "destination": "session"}
+            ])),
+            blocked_path: Some("/etc/secret".to_string()),
+            ..PermissionCheckContext::default()
+        };
+        let check =
+            tokio::spawn(async move { gate.check_with_context("Bash", &input, &ctx).await });
+
+        let line = rx.recv().await.unwrap();
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            frame["request"]["permission_suggestions"][0]["type"],
+            "addRules"
+        );
+        assert_eq!(frame["request"]["blocked_path"], "/etc/secret");
+        let req_id = frame["request_id"].as_str().unwrap().to_string();
+        plane
+            .resolve_response(&success_response(
+                &req_id,
+                json!({"behavior": "allow", "updatedInput": {}}),
+            ))
+            .await;
+        assert!(matches!(
+            check.await.unwrap(),
+            PermissionOutcome::Allow { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn context_omits_suggestions_and_blocked_path_when_absent() {
+        // The oracle's permission_suggestions / blocked_path are `.optional()`; with
+        // nothing in the ctx (the common ask) the keys must be ABSENT, not null.
+        let (plane, mut rx) = plane_with_channel();
+        let gate = StdioControlPermissionGate::new(plane.clone());
+        let input = json!({});
+        let check = tokio::spawn(async move { gate.check("Bash", &input).await });
+
+        let line = rx.recv().await.unwrap();
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert!(
+            frame["request"].get("permission_suggestions").is_none(),
+            "absent suggestions ⇒ key omitted"
+        );
+        assert!(
+            frame["request"].get("blocked_path").is_none(),
+            "absent blocked_path ⇒ key omitted"
+        );
+        assert!(
+            frame["request"].get("decision_reason").is_none(),
+            "no decision reason ⇒ key omitted"
+        );
+        let req_id = frame["request_id"].as_str().unwrap().to_string();
+        plane
+            .resolve_response(&success_response(
+                &req_id,
+                json!({"behavior": "allow", "updatedInput": {}}),
+            ))
+            .await;
+        assert_eq!(check.await.unwrap(), PermissionDecision::Allow);
     }
 
     #[tokio::test]
@@ -800,5 +1096,187 @@ mod tests {
             }
             other => panic!("expected Deny for malformed allow, got {other:?}"),
         }
+    }
+
+    // ── §2b: updatedPermissions parse + persist ──────────────────────────────
+
+    #[test]
+    fn parse_add_rules_update_models_each_rule() {
+        // The host's addRules wire entry → one PermissionUpdate per rule, carrying
+        // the parsed behavior + destination and the destination-derived source.
+        let raw = json!({
+            "type": "addRules",
+            "rules": [
+                { "toolName": "Bash", "ruleContent": "npm install" },
+                { "toolName": "Read" }, // tool-wide (no ruleContent)
+            ],
+            "behavior": "allow",
+            "destination": "localSettings",
+        });
+        let updates = parse_add_rules_update(&raw);
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].rule.value.tool_name, "Bash");
+        assert_eq!(updates[0].rule.value.rule_content.as_deref(), Some("npm install"));
+        assert_eq!(updates[0].rule.behavior, PermissionBehavior::Allow);
+        assert_eq!(updates[0].destination, PermissionUpdateDestination::LocalSettings);
+        assert_eq!(updates[0].rule.source, PermissionRuleSource::LocalSettings);
+        // Tool-wide rule keeps ruleContent None.
+        assert_eq!(updates[1].rule.value.tool_name, "Read");
+        assert!(updates[1].rule.value.rule_content.is_none());
+    }
+
+    #[test]
+    fn parse_add_rules_update_normalizes_legacy_tool_name() {
+        let raw = json!({
+            "type": "addRules",
+            "rules": [{ "toolName": "Task", "ruleContent": "general-purpose" }],
+            "behavior": "deny",
+            "destination": "userSettings",
+        });
+        let updates = parse_add_rules_update(&raw);
+        assert_eq!(updates.len(), 1);
+        // "Task" is the legacy alias for "Agent".
+        assert_eq!(updates[0].rule.value.tool_name, "Agent");
+        assert_eq!(updates[0].rule.behavior, PermissionBehavior::Deny);
+        assert_eq!(updates[0].rule.source, PermissionRuleSource::UserSettings);
+    }
+
+    #[test]
+    fn parse_add_rules_update_skips_unmodeled_and_malformed() {
+        // Non-addRules types are skipped (replaceRules/removeRules/setMode/dirs).
+        assert!(parse_add_rules_update(&json!({
+            "type": "replaceRules", "rules": [{ "toolName": "Bash" }],
+            "behavior": "allow", "destination": "localSettings"
+        }))
+        .is_empty());
+        assert!(parse_add_rules_update(&json!({
+            "type": "setMode", "mode": "plan", "destination": "localSettings"
+        }))
+        .is_empty());
+        // Unknown behavior / destination / missing rules → empty (never error).
+        assert!(parse_add_rules_update(&json!({
+            "type": "addRules", "rules": [{ "toolName": "Bash" }],
+            "behavior": "bogus", "destination": "localSettings"
+        }))
+        .is_empty());
+        assert!(parse_add_rules_update(&json!({
+            "type": "addRules", "rules": [{ "toolName": "Bash" }],
+            "behavior": "allow", "destination": "bogus"
+        }))
+        .is_empty());
+        assert!(parse_add_rules_update(&json!({
+            "type": "addRules", "behavior": "allow", "destination": "localSettings"
+        }))
+        .is_empty());
+        // A non-object entry is skipped.
+        assert!(parse_add_rules_update(&json!("nonsense")).is_empty());
+    }
+
+    #[tokio::test]
+    async fn allow_carries_updated_permissions_through_outcome() {
+        // §2b: an allow with `updatedPermissions` surfaces the raw wire array on the
+        // outcome; a missing array is simply empty (not a deny).
+        let (plane, mut rx) = plane_with_channel();
+        let gate = StdioControlPermissionGate::new(plane.clone());
+        let input = json!({});
+        let check = tokio::spawn(async move { gate.check_with_context("Bash", &input, &PermissionCheckContext::default()).await });
+        let line = rx.recv().await.unwrap();
+        let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        plane
+            .resolve_response(&success_response(
+                &req_id,
+                json!({
+                    "behavior": "allow",
+                    "updatedInput": {},
+                    "updatedPermissions": [{
+                        "type": "addRules",
+                        "rules": [{ "toolName": "Bash" }],
+                        "behavior": "allow",
+                        "destination": "localSettings"
+                    }],
+                }),
+            ))
+            .await;
+        match check.await.unwrap() {
+            PermissionOutcome::Allow {
+                permission_updates, ..
+            } => {
+                assert_eq!(permission_updates.len(), 1);
+                assert_eq!(permission_updates[0]["type"], "addRules");
+            }
+            other => panic!("expected Allow with permission_updates, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_updated_permissions_is_not_a_deny() {
+        // The oracle ignores a malformed `updatedPermissions` (`.catch(undefined)`)
+        // — it must NOT turn the allow into a deny. A non-array value → empty.
+        let (plane, mut rx) = plane_with_channel();
+        let gate = StdioControlPermissionGate::new(plane.clone());
+        let input = json!({});
+        let check = tokio::spawn(async move { gate.check("Bash", &input).await });
+        let line = rx.recv().await.unwrap();
+        let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        plane
+            .resolve_response(&success_response(
+                &req_id,
+                json!({"behavior": "allow", "updatedInput": {}, "updatedPermissions": "garbage"}),
+            ))
+            .await;
+        assert_eq!(check.await.unwrap(), PermissionDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn allow_with_persist_writes_rule_to_settings() {
+        // End-to-end: a gate WITH persist paths writes the host's addRules rule to
+        // the resolved settings file (claude-code `persistPermissionUpdates`).
+        let tmp = std::env::temp_dir().join(format!("lx-p5-2b-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let paths = PermissionPaths {
+            claude_home: tmp.join("home/.claude"),
+            cwd: tmp.join("proj"),
+        };
+        let (plane, mut rx) = plane_with_channel();
+        let gate = StdioControlPermissionGate::new(plane.clone()).with_persist(paths);
+        let input = json!({});
+        let check = tokio::spawn(async move {
+            gate.check_with_context("Bash", &input, &PermissionCheckContext::default())
+                .await
+        });
+        let line = rx.recv().await.unwrap();
+        let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        plane
+            .resolve_response(&success_response(
+                &req_id,
+                json!({
+                    "behavior": "allow",
+                    "updatedInput": {},
+                    "updatedPermissions": [{
+                        "type": "addRules",
+                        "rules": [{ "toolName": "Bash", "ruleContent": "npm install" }],
+                        "behavior": "allow",
+                        "destination": "localSettings"
+                    }],
+                }),
+            ))
+            .await;
+        let outcome = check.await.unwrap();
+        assert!(matches!(outcome, PermissionOutcome::Allow { .. }));
+        // The rule landed in <cwd>/.claude/settings.local.json.
+        let path = tmp.join("proj/.claude/settings.local.json");
+        let written = std::fs::read_to_string(&path).expect("settings.local.json written");
+        let v: Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(v["permissions"]["allow"], json!(["Bash(npm install)"]));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

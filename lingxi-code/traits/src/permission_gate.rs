@@ -67,9 +67,35 @@ pub struct PermissionCheckContext {
     pub tool_use_id: Option<String>,
     /// The policy Ask's human-readable decision reason, forwarded as the
     /// `decision_reason` field of a stdio `can_use_tool` request. `None` ⇒
-    /// omitted. (Suggestions / blocked_path are not yet surfaced through the
-    /// resolution seam; tracked as a follow-up.)
+    /// omitted (claude-code `serializeDecisionReason` returns `undefined` for
+    /// rule/mode/subcommandResults/permissionPromptTool, so the common ask
+    /// omits it). Populated by the `PolicyPermissionGate` Ask path from the
+    /// policy result's [`PermissionDecisionReason`].
     pub decision_reason: Option<String>,
+    /// The policy Ask's permission-rule SUGGESTIONS, forwarded as the
+    /// `permission_suggestions` field of a stdio `can_use_tool` request
+    /// (claude-code `mainPermissionResult.suggestions` — a `PermissionUpdate[]`).
+    /// Carried as the RAW wire array so this crate need not name
+    /// `lingxi-permission`'s `PermissionUpdate` (dep direction, see the note at
+    /// the bottom of this file). `None` ⇒ the key is OMITTED from the request.
+    ///
+    /// Today no producer populates this: LingXi's policy `Ask`
+    /// ([`PermissionResult::Ask`]) does not model claude-code's
+    /// `PermissionAskDecision.suggestions` (the per-tool ask-suggestion builders,
+    /// e.g. `ruleSuggestionsForCommand`, are unported). The field exists so the
+    /// wire byte-shape is forward-compatible once those builders land; it is the
+    /// declared-partial sub-part of stream-json P5 finding #9.
+    pub permission_suggestions: Option<Value>,
+    /// The policy Ask's BLOCKED PATH, forwarded as the `blocked_path` field of a
+    /// stdio `can_use_tool` request (claude-code `mainPermissionResult.blockedPath`
+    /// — the filesystem path a path-scoped ask is gated on). `None` ⇒ the key is
+    /// OMITTED.
+    ///
+    /// Like [`Self::permission_suggestions`], no producer populates this today:
+    /// LingXi's policy `Ask` does not carry `PermissionAskDecision.blockedPath`.
+    /// Additive Default-None so the wire shape is forward-compatible (the
+    /// declared-partial sub-part of finding #9).
+    pub blocked_path: Option<String>,
 }
 
 /// Richer outcome of [`PermissionGate::check_with_context`]: an allow may carry
@@ -83,6 +109,19 @@ pub enum PermissionOutcome {
     Allow {
         /// Host/policy-rewritten tool input, or `None` to keep the original.
         updated_input: Option<Value>,
+        /// The host's `updatedPermissions` payload from a `can_use_tool` ALLOW
+        /// response — the RAW wire array of permission-rule updates the host wants
+        /// applied + persisted (claude-code `applyPermissionUpdates` +
+        /// `persistPermissionUpdates`, fired in
+        /// `permissionPromptToolResultToPermissionDecision`). Each element is a
+        /// `permissionUpdateSchema` discriminated union (the only one LingXi
+        /// persists today is `{type:"addRules", rules:[{toolName, ruleContent?}],
+        /// behavior, destination}`). EMPTY for every gate but
+        /// `StdioControlPermissionGate`. The value is a raw `serde_json::Value`
+        /// (not the typed `permission::PermissionUpdate`) because this crate sits
+        /// BELOW `lingxi-permission` in the dependency graph and cannot name that
+        /// type — the permission-aware consumer parses + applies it.
+        permission_updates: Vec<Value>,
     },
     /// Rejected, with the reason surfaced to the model as the `tool_result`.
     Deny {
@@ -206,7 +245,10 @@ pub trait PermissionGate: Send + Sync {
         ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
         match self.check_with_worker(name, input, ctx.worker.clone()).await {
-            PermissionDecision::Allow => PermissionOutcome::Allow { updated_input: None },
+            PermissionDecision::Allow => PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+            },
             PermissionDecision::Deny { reason } => PermissionOutcome::Deny { reason },
         }
     }

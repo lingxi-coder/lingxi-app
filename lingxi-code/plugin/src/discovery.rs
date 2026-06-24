@@ -52,11 +52,19 @@ use std::path::{Path, PathBuf};
 
 /// Raw shape of `.claude-plugin/plugin.json`.
 ///
-/// Mirrors claude-code's `PluginManifestMetadataSchema`
-/// (`schemas.ts:273`): `name` required, the rest optional. Unknown
-/// top-level fields are ignored (serde default), matching the schema's
-/// "unknown top-level fields are silently stripped" contract
-/// (`schemas.ts:879-884`).
+/// Mirrors claude-code's `PluginManifestSchema` (the full union of
+/// `PluginManifestMetadataSchema` + component declaration fields):
+/// - Identity: `name`, `version`, `description`, `author`, `homepage`.
+/// - Component declarations: `skills`, `commands`, `agents`, `outputStyles`,
+///   `hooks`, `mcpServers`, `lspServers`, `channels`.
+/// - Metadata: `keywords`, `license`, `repository`.
+///
+/// `name` is required; all other fields are optional. Unknown top-level
+/// fields are silently ignored by serde. When `commands`/`skills`/etc. are
+/// present they take precedence over auto-detection via `detect_components()`
+/// — but this override logic is not yet implemented in LingXi; the fields
+/// are parsed and stored for future use. Binary: `PluginManifestSchema`
+/// in `schemas.ts`.
 #[derive(Debug, Deserialize)]
 struct RawManifest {
     name: String,
@@ -68,6 +76,44 @@ struct RawManifest {
     author: Option<RawAuthor>,
     #[serde(default)]
     homepage: Option<String>,
+    /// Explicitly declared skill directories. Parsed but not yet wired to
+    /// override `detect_components()`. Binary: `skills` in `PluginManifestSchema`.
+    #[serde(default)]
+    skills: Option<Vec<String>>,
+    /// Explicitly declared command directories. Binary: `commands`.
+    #[serde(default)]
+    commands: Option<Vec<String>>,
+    /// Explicitly declared agent directories. Binary: `agents`.
+    #[serde(default)]
+    agents: Option<Vec<String>>,
+    /// Explicitly declared output-style directories. Binary: `outputStyles`.
+    #[serde(rename = "outputStyles", default)]
+    output_styles: Option<Vec<String>>,
+    /// Explicitly declared MCP server configs (manifest-declared MCP servers).
+    /// Binary: `mcpServers` in `PluginManifestSchema`.
+    #[serde(rename = "mcpServers", default)]
+    mcp_servers: Option<serde_json::Value>,
+    /// Explicitly declared LSP server configs. Binary: `lspServers`.
+    #[serde(rename = "lspServers", default)]
+    lsp_servers: Option<serde_json::Value>,
+    /// Explicit hook declarations. Binary: `hooks`.
+    #[serde(default)]
+    hooks: Option<serde_json::Value>,
+    /// Channel declarations. Binary: `channels`.
+    #[serde(default)]
+    channels: Option<Vec<serde_json::Value>>,
+    /// Dependency declarations. Binary: `dependencies`.
+    #[serde(default)]
+    dependencies: Option<serde_json::Value>,
+    /// Plugin keywords. Binary: `keywords`.
+    #[serde(default)]
+    keywords: Option<Vec<String>>,
+    /// SPDX license identifier. Binary: `license`.
+    #[serde(default)]
+    license: Option<String>,
+    /// Repository URL or object. Binary: `repository`.
+    #[serde(default)]
+    repository: Option<serde_json::Value>,
 }
 
 /// `author` may be a string or an object (`{ name, email, url }`); claude-code

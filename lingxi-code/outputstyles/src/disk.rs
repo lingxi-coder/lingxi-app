@@ -35,6 +35,11 @@ pub struct DiskOutputStyle {
     /// `keepCodingInstructions` (TS, default `true`): when `false`, the
     /// coding-instructions section is omitted from the assembled system prompt.
     pub keep_coding_instructions: bool,
+    /// `force-for-plugin` (binary bytes 189331814, 206814560): when set on a
+    /// plugin-owned output style, the style activates automatically when the
+    /// plugin is enabled. Parsed and stored; enforcement is in the plugin
+    /// activation layer (not yet wired in LingXi).
+    pub force_for_plugin: Option<String>,
 }
 
 /// The active output style resolved for system-prompt assembly — OWNED (unlike
@@ -62,6 +67,12 @@ struct DiskFrontmatter {
     description: Option<String>,
     #[serde(rename = "keepCodingInstructions")]
     keep_coding_instructions: bool,
+    /// Plugin this output style is automatically applied for when the plugin is
+    /// active. Binary bytes 189331814, 206814560. When set on a non-plugin style
+    /// the binary logs a warning (not yet implemented in LingXi). For plugin
+    /// styles, the style activates automatically when the plugin is enabled.
+    #[serde(rename = "force-for-plugin")]
+    force_for_plugin: Option<String>,
 }
 
 impl Default for DiskFrontmatter {
@@ -70,6 +81,7 @@ impl Default for DiskFrontmatter {
             name: None,
             description: None,
             keep_coding_instructions: true,
+            force_for_plugin: None,
         }
     }
 }
@@ -98,6 +110,7 @@ pub fn parse_output_style(raw: &str, stem: &str) -> DiskOutputStyle {
         description: fm.description.unwrap_or_default(),
         prompt: body,
         keep_coding_instructions: fm.keep_coding_instructions,
+        force_for_plugin: fm.force_for_plugin,
     }
 }
 
@@ -209,6 +222,7 @@ mod tests {
             description: String::new(),
             prompt: prompt.into(),
             keep_coding_instructions: true,
+            force_for_plugin: None,
         }
     }
 
@@ -252,5 +266,28 @@ mod tests {
     fn load_from_missing_dir_is_empty() {
         let styles = load_output_styles_from_dir(Path::new("/no/such/dir/xyz"));
         assert!(styles.is_empty());
+    }
+
+    // ---- force-for-plugin (P2 gap, binary bytes 189331814) ------------------
+
+    #[test]
+    fn force_for_plugin_parsed() {
+        let raw = "---\nname: MyStyle\nforce-for-plugin: my-plugin\n---\nBe concise.\n";
+        let s = parse_output_style(raw, "my-style");
+        assert_eq!(
+            s.force_for_plugin.as_deref(),
+            Some("my-plugin"),
+            "force-for-plugin must be parsed from frontmatter"
+        );
+    }
+
+    #[test]
+    fn force_for_plugin_defaults_none() {
+        let s = parse_output_style("Just a body.", "no-plugin");
+        assert_eq!(
+            s.force_for_plugin,
+            None,
+            "force-for-plugin absent → None"
+        );
     }
 }

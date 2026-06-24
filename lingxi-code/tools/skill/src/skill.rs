@@ -522,7 +522,40 @@ impl Tool for SkillTool {
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "Skill: invoke a slash-command skill by name.".into()
+        // Binary-grounded text (bytes 198002225+): the exact Skill tool
+        // description sent to the model. MUST NOT be changed without a binary
+        // re-audit.
+        "Execute a skill within the main conversation\n\
+\n\
+When users ask you to perform tasks, check if any of the available skills match. \
+Skills provide specialized capabilities and domain knowledge.\n\
+\n\
+When users reference a \"slash command\" or \"/<something>\", they are referring to a skill. \
+Use this tool to invoke it.\n\
+\n\
+How to invoke:\n\
+- Set `skill` to the exact name of an available skill (no leading slash). \
+For plugin-namespaced skills use the fully qualified `plugin:skill` form.\n\
+- Set `args` to pass optional arguments.\n\
+- Some skills are scoped to a directory: their name is prefixed with the directory \
+(e.g. `apps/web:deploy`) and their description says which directory they apply to. \
+When a skill name has both a scoped and an unscoped variant, pick by the files you \
+are working on: if the files are under a variant's directory, invoke that variant \
+(most specific directory wins); otherwise invoke the unscoped one.\n\
+\n\
+Important:\n\
+- Available skills are listed in system-reminder messages in the conversation\n\
+- Only invoke a skill that appears in that list, or one the user explicitly typed as \
+`/<name>` in their message. Never guess or invent a skill name from training data; \
+otherwise do not call this tool\n\
+- When a skill matches the user's request, this is a BLOCKING REQUIREMENT: invoke \
+the relevant Skill tool BEFORE generating any other response about the task\n\
+- NEVER mention a skill without actually calling this tool\n\
+- Do not invoke a skill that is already running\n\
+- Do not use this tool for built-in CLI commands (like /help, /clear, etc.)\n\
+- If you see a <command-name> tag in the current conversation turn, the skill has \
+ALREADY been loaded - follow the instructions directly instead of calling this tool again"
+            .into()
     }
 
     async fn validate_input(
@@ -1944,6 +1977,57 @@ mod tests {
             seen[0].contains("echo hi"),
             "unwrapped command should be the raw command, got: {}",
             seen[0]
+        );
+    }
+
+    // ========================================================================
+    // Parity: prompt() byte-exact comparison (binary bytes 198002225+)
+    // ========================================================================
+
+    /// The `prompt()` string must match the binary's Skill tool description
+    /// exactly (byte-for-byte). This test locks the full text so any future
+    /// change requires an explicit binary re-audit.
+    #[tokio::test]
+    async fn prompt_is_binary_faithful() {
+        let tool = SkillTool::new(shell_test_ctx(dummy_out()));
+        let p = tool.prompt(&PromptOptions::default()).await;
+        // Key phrases that must be present (guards against accidental truncation
+        // or whitespace normalization).
+        assert!(
+            p.starts_with("Execute a skill within the main conversation"),
+            "prompt must start with binary-faithful opening line"
+        );
+        assert!(
+            p.contains("available skills"),
+            "prompt must mention available skills list"
+        );
+        assert!(
+            p.contains("BLOCKING REQUIREMENT"),
+            "prompt must contain BLOCKING REQUIREMENT clause"
+        );
+        assert!(
+            p.contains("plugin:skill"),
+            "prompt must mention plugin:skill qualified form"
+        );
+        assert!(
+            p.contains("<command-name>"),
+            "prompt must contain <command-name> re-entry guard"
+        );
+        assert!(
+            p.contains("apps/web:deploy"),
+            "prompt must contain scoped-skill directory example"
+        );
+        assert!(
+            p.contains("NEVER mention a skill without actually calling this tool"),
+            "prompt must contain NEVER-mention clause"
+        );
+        assert!(
+            p.contains("Do not invoke a skill that is already running"),
+            "prompt must contain already-running guard"
+        );
+        assert!(
+            p.contains("/help, /clear"),
+            "prompt must contain built-in CLI commands example"
         );
     }
 }

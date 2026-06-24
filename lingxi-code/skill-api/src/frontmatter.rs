@@ -51,3 +51,189 @@ pub fn parse_skill_markdown(
         file_path,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::SkillSource;
+
+    fn parse(yaml: &str, body: &str) -> Skill {
+        let raw = format!("---\n{yaml}\n---\n{body}");
+        parse_skill_markdown(raw.as_str(), "/tmp/x.md".into(), SkillSource::User, LoadedFrom::Skills)
+            .expect("parse ok")
+    }
+
+    // ---- disable-model-invocation (P1 gap #2) --------------------------------
+
+    #[test]
+    fn disable_model_invocation_parsed_true() {
+        let s = parse("disable-model-invocation: true\nname: locked", "body");
+        assert!(
+            s.frontmatter.disable_model_invocation,
+            "disable-model-invocation: true must parse"
+        );
+    }
+
+    #[test]
+    fn disable_model_invocation_defaults_false() {
+        let s = parse("name: unlocked", "body");
+        assert!(
+            !s.frontmatter.disable_model_invocation,
+            "disable-model-invocation defaults to false"
+        );
+    }
+
+    // ---- user-invocable (P1 gap #3) ------------------------------------------
+
+    #[test]
+    fn user_invocable_parsed_false() {
+        let s = parse("user-invocable: false\nname: model-only", "body");
+        assert_eq!(
+            s.frontmatter.user_invocable,
+            Some(false),
+            "user-invocable: false must parse to Some(false)"
+        );
+    }
+
+    #[test]
+    fn user_invocable_defaults_none() {
+        let s = parse("name: x", "body");
+        assert_eq!(
+            s.frontmatter.user_invocable,
+            None,
+            "user-invocable absent → None (unset, not false)"
+        );
+    }
+
+    // ---- disallowed-tools (P1 gap #4) ----------------------------------------
+
+    #[test]
+    fn disallowed_tools_parsed_list() {
+        let s = parse("disallowed-tools:\n  - Bash\n  - Edit\nname: safe", "body");
+        assert_eq!(
+            s.frontmatter.disallowed_tools.as_deref(),
+            Some(&["Bash".to_string(), "Edit".to_string()][..]),
+            "disallowed-tools YAML list must parse"
+        );
+    }
+
+    #[test]
+    fn disallowed_tools_alias_disallowedtools() {
+        // Binary bytes 94993840: also accepts `disallowedTools` camelCase alias.
+        let s = parse("disallowedTools:\n  - Write\nname: safe", "body");
+        assert_eq!(
+            s.frontmatter.disallowed_tools.as_deref(),
+            Some(&["Write".to_string()][..]),
+            "disallowedTools alias must parse"
+        );
+    }
+
+    #[test]
+    fn disallowed_tools_defaults_none() {
+        let s = parse("name: x", "body");
+        assert!(s.frontmatter.disallowed_tools.is_none());
+    }
+
+    // ---- argument-hint (P1 gap #5) -------------------------------------------
+
+    #[test]
+    fn argument_hint_parsed() {
+        let s = parse("argument-hint: \"<ticket-id>\"\nname: x", "body");
+        assert_eq!(
+            s.frontmatter.argument_hint.as_deref(),
+            Some("<ticket-id>"),
+            "argument-hint must parse"
+        );
+    }
+
+    #[test]
+    fn argument_hint_alias_arguments() {
+        let s = parse("arguments: \"<path>\"\nname: x", "body");
+        assert_eq!(
+            s.frontmatter.argument_hint.as_deref(),
+            Some("<path>"),
+            "arguments alias for argument-hint must parse"
+        );
+    }
+
+    // ---- effort / version / shell (P1 gap #6) --------------------------------
+
+    #[test]
+    fn effort_version_shell_parsed() {
+        let s = parse("effort: high\nversion: \"1.2.3\"\nshell: zsh\nname: x", "body");
+        assert_eq!(s.frontmatter.effort.as_deref(), Some("high"));
+        assert_eq!(s.frontmatter.version.as_deref(), Some("1.2.3"));
+        assert_eq!(s.frontmatter.shell.as_deref(), Some("zsh"));
+    }
+
+    // ---- context / agent (P1 gap #7) -----------------------------------------
+
+    #[test]
+    fn context_and_agent_parsed() {
+        let s = parse("context: fork\nagent: claude\nname: x", "body");
+        assert_eq!(s.frontmatter.context.as_deref(), Some("fork"));
+        assert_eq!(s.frontmatter.agent.as_deref(), Some("claude"));
+    }
+
+    // ---- paths (P1 gap #8) ---------------------------------------------------
+
+    #[test]
+    fn paths_parsed() {
+        let s = parse("paths:\n  - \"src/**\"\n  - \"tests/**\"\nname: x", "body");
+        assert_eq!(
+            s.frontmatter.paths.as_deref(),
+            Some(&["src/**".to_string(), "tests/**".to_string()][..])
+        );
+    }
+
+    // ---- hide-from-slash-command-tool (P2 gap) --------------------------------
+
+    #[test]
+    fn hide_from_slash_command_tool_parsed_true() {
+        let s = parse("hide-from-slash-command-tool: true\nname: x", "body");
+        assert!(s.frontmatter.hide_from_slash_command_tool);
+    }
+
+    #[test]
+    fn hide_from_slash_command_tool_defaults_false() {
+        let s = parse("name: x", "body");
+        assert!(!s.frontmatter.hide_from_slash_command_tool);
+    }
+
+    // ---- created_by / improved_by (P2 gap) -----------------------------------
+
+    #[test]
+    fn created_by_improved_by_parsed() {
+        let s = parse("created_by: alice\nimproved_by: bob\nname: x", "body");
+        assert_eq!(s.frontmatter.created_by.as_deref(), Some("alice"));
+        assert_eq!(s.frontmatter.improved_by.as_deref(), Some("bob"));
+    }
+
+    // ---- model (also in SkillFrontmatter) ------------------------------------
+
+    #[test]
+    fn model_parsed() {
+        let s = parse("model: claude-opus-4-6\nname: x", "body");
+        assert_eq!(s.frontmatter.model.as_deref(), Some("claude-opus-4-6"));
+    }
+
+    // ---- body trimming -------------------------------------------------------
+
+    #[test]
+    fn body_trim_start() {
+        let s = parse("name: x", "\n\nhello world");
+        assert_eq!(s.content, "hello world");
+    }
+
+    // ---- no frontmatter fallback ---------------------------------------------
+
+    #[test]
+    fn no_frontmatter_falls_back_to_defaults() {
+        let raw = "just body text";
+        let s = parse_skill_markdown(raw, "/tmp/x.md".into(), SkillSource::User, LoadedFrom::Skills)
+            .expect("ok");
+        assert!(!s.frontmatter.disable_model_invocation);
+        assert!(s.frontmatter.user_invocable.is_none());
+        assert!(s.frontmatter.disallowed_tools.is_none());
+    }
+}

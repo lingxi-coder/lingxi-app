@@ -97,5 +97,5 @@ fn dispatcher_routes_tool_call_and_result() {
         file_path: None,
     };
     let s2 = render_entry_to_string(&result, false, false);
-    assert!(s2.starts_with("└ hi"), "got: {s2}");
+    assert!(s2.starts_with("  \u{23BF}  hi"), "got: {s2}");
 }

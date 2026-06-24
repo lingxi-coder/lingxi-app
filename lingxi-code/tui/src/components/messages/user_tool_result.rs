@@ -1,8 +1,12 @@
-//! `UserToolResultMessage` — `└ ` indent, dim-colored, line/byte-bounded.
+//! `UserToolResultMessage` — `  ⎿  ` gutter, dim-colored, line/byte-bounded.
 //!
 //! Literal locks (byte-for-byte from claude-code):
-//!   - indent marker: `└ ` (U+2514 + ASCII space, 4-byte UTF-8 `0xE2 0x94 0x94 0x20`)
-//!     source: claude-code/src/components/messages/UserToolResultMessage/UserToolSuccessMessage.tsx
+//!   - gutter marker: `  ⎿  ` (2 spaces + U+23BF + 2 spaces, 7-byte UTF-8
+//!     `0x20 0x20 0xE2 0x8E 0xBF 0x20 0x20`). Every tool result wraps in
+//!     `MessageResponse`, whose fixed `flexShrink=0` left column renders
+//!     `<Text dimColor>{"  "}⎿  </Text>`; the result body lives in the adjacent
+//!     flex column. Matches the sibling `local_command_output::GUTTER`.
+//!     source: claude-code/src/components/MessageResponse.tsx:22
 //!   - truncation footer: `[output truncated, {N} more lines]`
 //!     source: claude-code/src/utils/messages.ts
 //!   - `MAX_LINES` = 100, `MAX_BYTES` = 4000
@@ -19,10 +23,12 @@ use crate::render::ansi::parse_ansi;
 use crate::render::{diff, split_spans_into_line_rows, StyledLine, StyledSpan};
 use crate::theme::TuiTheme;
 
-/// Indent marker glyph + space. 4-byte UTF-8.
-pub const MARKER: &str = "└ ";
-/// Per-line indent (2 spaces) — matches `MARKER` display width.
-pub const INDENT: &str = "  ";
+/// Dim gutter glyph (2 spaces + U+23BF + 2 spaces, 7-byte UTF-8). Mirrors the
+/// `MessageResponse` left column and `local_command_output::GUTTER`.
+pub const MARKER: &str = "  \u{23BF}  ";
+/// Per-line continuation indent (5 spaces) — matches `MARKER` display width so
+/// wrapped/continuation lines align under the content column.
+pub const INDENT: &str = "     ";
 /// Focus prefix prepended when this block is focused.
 pub const FOCUS_PREFIX: &str = "> ";
 /// Hard line cap. claude-code parity.
@@ -148,8 +154,8 @@ pub fn truncate(body: &str) -> (String, usize) {
 
 /// Pure-string renderer.
 ///
-/// Collapsed: `[> ]└ first_line[ (+N lines)]`
-/// Expanded:  `[> ]└ line_1\n  line_2\n  …\n  [output truncated, N more lines]`
+/// Collapsed: `[> ]  ⎿  first_line[ (+N lines)]`
+/// Expanded:  `[> ]  ⎿  line_1\n     line_2\n     …\n     [output truncated, N more lines]`
 #[must_use]
 pub fn render_user_tool_result_to_string(props: UserToolResultProps) -> String {
     let prefix = if props.focused { FOCUS_PREFIX } else { "" };
@@ -334,8 +340,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn marker_is_four_utf8_bytes() {
-        assert_eq!(MARKER.as_bytes(), &[0xE2, 0x94, 0x94, 0x20]);
+    fn marker_is_arc_gutter_bytes() {
+        // "  " + U+23BF (0xE2 0x8E 0xBF) + "  " — matches MessageResponse.tsx.
+        assert_eq!(MARKER.as_bytes(), &[0x20, 0x20, 0xE2, 0x8E, 0xBF, 0x20, 0x20]);
     }
 
     #[test]

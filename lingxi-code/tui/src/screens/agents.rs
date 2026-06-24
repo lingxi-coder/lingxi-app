@@ -97,11 +97,18 @@ pub fn handle_agents_key(
 pub fn render_agents_to_string(state: &AgentsScreenState) -> String {
     match state.mode {
         AgentsDialogMode::List => {
-            let mut out = String::from("Agents\n");
             if state.rows.is_empty() {
-                out.push_str("No agents found.");
-                return out;
+                // claude-code `AgentsList` empty state: a "No agents found"
+                // subtitle plus three dim help lines (verbatim).
+                return "Agents\n\
+                    No agents found\n\
+                    No agents found. Create specialized subagents that Claude can delegate to.\n\
+                    Each subagent has its own context window, custom system prompt, and specific tools.\n\
+                    Try creating: Code Reviewer, Code Simplifier, Security Reviewer, Tech Lead, or UX Reviewer."
+                    .to_string();
             }
+            // Title + dim `{count} agents` subtitle (claude-code `AgentsList`).
+            let mut out = format!("Agents\n{} agents\n", state.rows.len());
             for (i, row) in state.rows.iter().enumerate() {
                 let marker = if i == state.selected {
                     "\u{276F} "
@@ -204,7 +211,7 @@ mod tests {
             mode: AgentsDialogMode::List,
         };
         let out = render_agents_to_string(&s);
-        assert!(out.starts_with("Agents\n\u{276F} explorer \u{00B7} opus\n  writer\n"));
+        assert!(out.starts_with("Agents\n2 agents\n\u{276F} explorer \u{00B7} opus\n  writer\n"));
         assert!(out.ends_with(
             "Press \u{2191}\u{2193} to navigate \u{00B7} Enter to select \u{00B7} Esc to go back"
         ));

@@ -1,8 +1,8 @@
 ---
-source: crates/tui/tests/render_diff.rs
+source: tui/tests/render_diff.rs
+assertion_line: 93
 expression: s
 ---
-[C]@@ -1,0 +1,160 @@
 [C]  1 + [C]L0
 [C]  2 + [C]L1
 [C]  3 + [C]L2

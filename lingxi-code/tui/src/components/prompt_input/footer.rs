@@ -1,10 +1,14 @@
 //! `PromptInputFooter` — the chrome below the editor: mode-indicator,
-//! placeholder, the collapsed help hint, the newline hint, and a (M7-06
-//! empty) suggestions area. Live suggestion filtering arrives in M7-07.
+//! placeholder, the collapsed help hint, and a (M7-06 empty) suggestions area.
+//! Live suggestion filtering arrives in M7-07.
 //!
 //! Literal lock (claude-code `PromptInput*`): the prompt glyph is `❯ `
-//! (figures.pointer + space), the newline hint is `shift + ⏎ for newline`,
-//! and the help hint is `? for shortcuts`.
+//! (figures.pointer + space) and the help hint is `? for shortcuts`. The hint
+//! is shown only when the buffer is empty and the vim mode-indicator is not
+//! shown (claude-code `showHint = !suppressHint && !showVim`, with
+//! `suppressHint = input.length > 0`). The `shift + ⏎ for newline` text lives
+//! ONLY on the `?` help surface (`PromptInputHelpMenu`), never in the resting
+//! footer.
 
 use iocraft::prelude::*;
 
@@ -98,8 +102,8 @@ impl Default for PromptInputFooterProps {
 }
 
 /// Render the footer: an optional `-- MODE --` row (vim), the
-/// `[glyph][placeholder?]` row, and a dim hint row
-/// (`? for shortcuts     shift + ⏎ for newline`).
+/// `[glyph][placeholder?]` row, and — only when the buffer is empty and no vim
+/// mode-indicator is shown — a dim `? for shortcuts` hint row.
 #[component]
 pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement<'static>> {
     let glyph = props.mode.glyph().to_string();
@@ -113,6 +117,11 @@ pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement
     let mode_label =
         footer_mode_label_v2(props.vim_enabled, props.vim_mode, props.vim_visual_linewise)
             .map(str::to_string);
+    // claude-code `showHint = !suppressHint && !showVim`: the `? for shortcuts`
+    // hint is shown only when the buffer is empty (`suppressHint = input.length
+    // > 0`) and no vim mode-indicator is rendered (`showVim`). The
+    // `shift + ⏎ for newline` text never appears in the resting footer.
+    let show_hint = props.is_empty && mode_label.is_none();
     element! {
         View(flex_direction: FlexDirection::Column) {
             #(mode_label.map(|label| element! {
@@ -124,10 +133,11 @@ pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement
                 Text(content: glyph, color: TuiTheme::DIM)
                 Text(content: placeholder, color: TuiTheme::DIM)
             }
-            View(flex_direction: FlexDirection::Row, gap: 5) {
-                Text(content: "? for shortcuts".to_string(), color: TuiTheme::DIM)
-                Text(content: "shift + ⏎ for newline".to_string(), color: TuiTheme::DIM)
-            }
+            #(show_hint.then(|| element! {
+                View(flex_direction: FlexDirection::Row) {
+                    Text(content: "? for shortcuts".to_string(), color: TuiTheme::DIM)
+                }
+            }))
         }
     }
 }

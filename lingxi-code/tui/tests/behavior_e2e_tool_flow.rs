@@ -40,7 +40,7 @@ fn full_flow_call_then_result_renders_both_blocks() {
     let s0 = render_entry_to_string(&st.messages[0], false, false);
     assert!(s0.contains("● Read"), "got: {s0}");
     let s1 = render_entry_to_string(&st.messages[1], false, false);
-    assert!(s1.starts_with("└ fn main() {}"), "got: {s1}");
+    assert!(s1.starts_with("  \u{23BF}  fn main() {}"), "got: {s1}");
 }
 
 #[test]

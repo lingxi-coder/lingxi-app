@@ -242,10 +242,13 @@ pub fn ThemePickerScreen(props: &ThemePickerScreenProps) -> impl Into<AnyElement
     element! {
         View(flex_direction: FlexDirection::Column, padding: 1) {
             Text(content: HEADER, color: theme.permission, weight: Weight::Bold)
-            Text(content: SUB_HEADER, color: theme.dim, weight: Weight::Bold)
+            // (theme-subheader-dimmed) Bold, full-brightness (NOT dim) sub-header.
+            Text(content: SUB_HEADER, color: theme.text, weight: Weight::Bold)
             View(flex_direction: FlexDirection::Column, padding_top: 1) {
                 #(rows.into_iter().map(|(line, sel)| {
-                    let color = if sel { theme.suggestion } else { theme.dim };
+                    // (theme-unselected-rows-dimmed) Only the highlighted row is
+                    // accented; unselected rows stay in the default foreground.
+                    let color = if sel { theme.suggestion } else { theme.text };
                     element! { Text(content: line, color: color) }
                 }))
             }

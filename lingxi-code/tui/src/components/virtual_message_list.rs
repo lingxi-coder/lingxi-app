@@ -721,7 +721,16 @@ pub fn VirtualMessageList(props: &VirtualMessageListProps) -> impl Into<AnyEleme
     } else {
         win.indices()
             .filter_map(|i| props.messages.get(i).cloned())
-            .map(|m| render_message(m, &expanded, focused_tool_id.clone(), theme, theme_name, width))
+            .map(|m| {
+                render_message(
+                    m,
+                    &expanded,
+                    focused_tool_id.clone(),
+                    theme,
+                    theme_name,
+                    width,
+                )
+            })
             .collect()
     };
     element! {
@@ -885,12 +894,13 @@ mod tests {
             expanded: false,
         };
         assert_eq!(measured_height(&collapsed, 80), 1);
-        // Expanded → header `∴ Thinking…` (1) + 2 body lines (indented 2) = 3.
+        // Expanded → header `∴ Thinking…` (1) + gap=1 blank row (1) + 2 body
+        // lines (indented 2) = 4.
         let expanded = RenderedMessage::AssistantThinking {
             thinking: "Step one.\nStep two.".into(),
             expanded: true,
         };
-        assert_eq!(measured_height(&expanded, 80), 3);
+        assert_eq!(measured_height(&expanded, 80), 4);
     }
 
     // ---- (M7-04 review) measurement == render for markdown bodies --------

@@ -32,20 +32,24 @@ pub struct ThinkingProps {
 }
 
 /// Pure-string renderer (snapshot oracle).
+///
+/// Expanded form mirrors claude-code's `gap={1}` column: the `∴ Thinking…`
+/// header, ONE blank row, then the indented markdown body.
 #[must_use]
 pub fn render_thinking_to_string(props: ThinkingProps) -> String {
     if !props.expanded {
         return format!("{THINKING_MARKER}Thinking {EXPAND_HINT}");
     }
-    // Expanded: `∴ Thinking…` then markdown body, each line indented 2.
+    // Expanded: `∴ Thinking…`, a gap=1 blank row, then markdown body indented 2.
     let body = markdown_plain(&props.thinking);
-    let mut out = format!("{THINKING_MARKER}Thinking\u{2026}");
-    for line in body.lines() {
-        out.push('\n');
-        out.push_str(INDENT);
-        out.push_str(line);
+    let mut lines = vec![format!("{THINKING_MARKER}Thinking\u{2026}")];
+    if !body.is_empty() {
+        lines.push(String::new()); // gap={1} blank row between header and body
+        for line in body.lines() {
+            lines.push(format!("{INDENT}{line}"));
+        }
     }
-    out
+    lines.join("\n")
 }
 
 /// Flatten markdown → plain text for the string oracle. Routes through
@@ -66,15 +70,38 @@ fn markdown_plain(text: &str) -> String {
         .join("\n")
 }
 
-/// iocraft component — dim+italic header; expanded body rendered dim.
+/// iocraft component. Collapsed: a single dim+italic `∴ Thinking (ctrl+o to
+/// expand)` line. Expanded: dim+italic `∴ Thinking…` header, a `gap={1}` blank
+/// row, then the markdown body indented 2 — dim but NOT italic (claude-code
+/// `AssistantThinkingMessage.tsx`: header `<Text dimColor italic>`, body
+/// `<Box paddingLeft={2}><Markdown dimColor>` inside a `gap={1}` column).
 #[component]
 pub fn AssistantThinkingMessage(props: &ThinkingProps) -> impl Into<AnyElement<'static>> {
-    let body = render_thinking_to_string(props.clone());
+    if !props.expanded {
+        let header = format!("{THINKING_MARKER}Thinking {EXPAND_HINT}");
+        return element! {
+            View(flex_direction: FlexDirection::Column) {
+                Text(content: header, color: TuiTheme::DIM, italic: true)
+            }
+        }
+        .into_any();
+    }
+    let header = format!("{THINKING_MARKER}Thinking\u{2026}");
+    let body = {
+        let flat = markdown_plain(&props.thinking);
+        flat.lines()
+            .map(|l| format!("{INDENT}{l}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     element! {
-        View(flex_direction: FlexDirection::Column) {
-            Text(content: body, color: TuiTheme::DIM, italic: true)
+        // gap=1 inserts the blank row between the header and the body.
+        View(flex_direction: FlexDirection::Column, gap: 1) {
+            Text(content: header, color: TuiTheme::DIM, italic: true)
+            Text(content: body, color: TuiTheme::DIM)
         }
     }
+    .into_any()
 }
 
 #[cfg(test)]

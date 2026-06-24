@@ -1,7 +1,9 @@
 ---
-source: crates/tui/tests/render_messages_batch1.rs
+source: tui/tests/render_messages_batch1.rs
+assertion_line: 31
 expression: s
 ---
 ∴ Thinking…
+
   Step one.
   Step two.

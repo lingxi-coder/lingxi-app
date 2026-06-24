@@ -607,12 +607,14 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
 
     match &mut st.active_screen {
         Some(Screen::Doctor(_)) => {
-            // (M7-11) Read-only screen: Esc / `q` close; everything else inert.
+            // (M7-11) Read-only screen. (doctor-1) Enter is the advertised
+            // dismiss affordance (claude-code `PressEnterToContinue`); Esc / `q`
+            // are kept as harmless extras.
             match k.code {
                 // (M7-16) `close_screen` emits `tengu_tui_screen_closed` on the
                 // real `Some → None` transition, so the close telemetry is wired
                 // through the shared close path (not duplicated per screen).
-                KeyCode::Esc => st.close_screen(),
+                KeyCode::Enter | KeyCode::Esc => st.close_screen(),
                 KeyCode::Char('q') if k.modifiers == KeyModifiers::NONE => st.close_screen(),
                 _ => {}
             }
@@ -1112,6 +1114,27 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
         return;
     }
     // === end teammate-view Esc ===
+
+    // === (RRS-02) Esc interrupts a streaming turn (claude-code
+    // `escape: 'chat:cancel'` → `useCancelRequest` `onCancel` when
+    // `canCancelRunningTask`). Sits AFTER the permission (1) + active_screen (2)
+    // + overlay (3) + teammate Esc traps so those still own Esc; runs BEFORE vim
+    // (3.5/4) and the default editor so Esc cancels the turn instead of leaking
+    // to the prompt buffer. Mirrors the Ctrl+C `KeyAction::Cancel` branch
+    // (cancel the token + push an interrupt marker). Only fires while a turn is
+    // in flight; otherwise Esc falls through to its normal editor behavior. ===
+    if k.code == KeyCode::Esc {
+        if let Some(tif) = &st.in_flight_turn {
+            tif.cancel.cancel();
+            st.push_message(crate::state::RenderedMessage::SystemText {
+                body: "Interrupted by user".into(),
+                timestamp: chrono::Utc::now().timestamp(),
+                is_error: false,
+            });
+            return;
+        }
+    }
+    // === end Esc-interrupt ===
 
     // === PRIORITY 3.5: vim toggle (M7-08 review). The Ctrl-Alt-V binding must
     // be modal-independent — it flips `vim_enabled` from ANY vim mode (Normal or
@@ -3309,6 +3332,46 @@ mod tests {
         let esc = KeyEvent::new(KeyEventKind::Press, KeyCode::Esc);
         handle_screen_key(&mut st, &esc);
         assert!(st.active_screen.is_none(), "Esc closes the Settings screen (fallback)");
+    }
+
+    /// (RRS-02) Esc interrupts a streaming turn — claude-code
+    /// `escape: 'chat:cancel'`. With a turn in flight (and no screen/overlay/
+    /// teammate trap active) Esc cancels the token and pushes an interrupt
+    /// marker, mirroring the Ctrl+C `KeyAction::Cancel` branch.
+    #[test]
+    fn esc_interrupts_in_flight_turn() {
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        let token = tokio_util::sync::CancellationToken::new();
+        st.in_flight_turn = Some(crate::state::TurnInFlight { turn_id: 1, cancel: token.clone() });
+
+        let esc = KeyEvent::new(KeyEventKind::Press, KeyCode::Esc);
+        handle_live_key(&mut st, &esc, 24);
+
+        assert!(token.is_cancelled(), "Esc must cancel the in-flight turn token");
+        assert!(
+            st.messages.iter().any(|m| matches!(
+                m,
+                crate::state::RenderedMessage::SystemText { body, .. } if body == "Interrupted by user"
+            )),
+            "Esc must push the 'Interrupted by user' interrupt marker"
+        );
+    }
+
+    /// (RRS-02) Esc is a no-op interrupt when NO turn is in flight — it falls
+    /// through to normal editor behavior (no spurious interrupt marker).
+    #[test]
+    fn esc_without_in_flight_turn_does_not_interrupt() {
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        assert!(st.in_flight_turn.is_none());
+        let esc = KeyEvent::new(KeyEventKind::Press, KeyCode::Esc);
+        handle_live_key(&mut st, &esc, 24);
+        assert!(
+            !st.messages.iter().any(|m| matches!(
+                m,
+                crate::state::RenderedMessage::SystemText { body, .. } if body == "Interrupted by user"
+            )),
+            "no interrupt marker when no turn is in flight"
+        );
     }
 
     /// (GAP D fix — tab navigators, TDD) The Stats screen is a TAB NAVIGATOR

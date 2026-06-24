@@ -1,6 +1,7 @@
 ---
-source: crates/tui/tests/prompt_input_footer_snapshot.rs
+source: tui/tests/prompt_input_footer_snapshot.rs
+assertion_line: 14
 expression: el.to_string()
 ---
 ❯ Try "edit <filepath> to..."
-? for shortcuts     shift + ⏎ for newline
+? for shortcuts

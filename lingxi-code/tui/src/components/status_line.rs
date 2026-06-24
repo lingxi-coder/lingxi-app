@@ -163,9 +163,14 @@ pub fn truncate_to_width(text: &str, max_cols: usize) -> String {
 
 /// Status-line component.
 ///
-/// (A6) Two render paths:
-///   - `custom: None` (default) → the built-in `model cwd cost ctx% mode` row,
-///     byte-identical to the historical behavior (parity locks L1/L2/L3).
+/// Mirrors claude-code's `statusLineShouldDisplay = settings?.statusLine !==
+/// undefined` (`StatusLine.tsx`): the status row renders ONLY when the user has
+/// configured a custom `statusLine` command. With no command (`custom: None`,
+/// the default) NOTHING is drawn — claude-code has no built-in `model cwd cost
+/// ctx% mode` row. (LingXi previously rendered such a built-in row; it was
+/// removed for strict 1:1.)
+///
+///   - `custom: None` (default) → nothing (empty `View`).
 ///   - `custom: Some(text)` → the custom command's already-transformed stdout,
 ///     parsed through the in-tree ANSI parser and rendered with `padding_x`
 ///     left/right padding, truncated to `width - 2*padding_x` columns. Mirrors
@@ -173,22 +178,12 @@ pub fn truncate_to_width(text: &str, max_cols: usize) -> String {
 ///     `<Box paddingX={paddingX}><Text dimColor wrap="truncate"><Ansi>…`.
 #[component]
 pub fn StatusLine(props: &StatusLineProps) -> impl Into<AnyElement<'static>> {
-    if let Some(custom) = props.custom.as_ref() {
-        return render_custom(custom, props.padding_x, props.width, &props.theme);
-    }
-    let line = format_status_line(
-        &props.model,
-        &props.cwd,
-        &props.cost,
-        props.context_pct,
-        props.permission_mode,
-    );
-    element! {
-        View(flex_direction: FlexDirection::Row, height: 1) {
-            Text(content: line, color: props.theme.text)
-        }
-    }
-    .into_any()
+    let Some(custom) = props.custom.as_ref() else {
+        // No custom statusLine command → render nothing (parity with
+        // `statusLineShouldDisplay`). The model/cwd/cost props are unused here.
+        return element! { View(height: 0) }.into_any();
+    };
+    render_custom(custom, props.padding_x, props.width, &props.theme)
 }
 
 /// Render the custom status-line text (first visual line only — the status row
@@ -366,9 +361,10 @@ mod tests {
     }
 
     #[test]
-    fn custom_none_renders_builtin_line_unchanged() {
-        // The default `custom: None` path must stay byte-identical to the
-        // historical built-in row (parity lock).
+    fn custom_none_renders_nothing() {
+        // claude-code `statusLineShouldDisplay`: with no custom statusLine
+        // command, the status row renders NOTHING (no built-in model/cwd/cost
+        // row). Strict 1:1.
         let mut element = element! {
             StatusLine(
                 model: "claude-sonnet-4.5".to_string(),
@@ -379,7 +375,11 @@ mod tests {
             )
         };
         let rendered = element.to_string();
-        assert!(rendered.contains("claude-sonnet-4.5 /a/b $0.0000 42% default"));
+        assert!(
+            !rendered.contains("claude-sonnet-4.5"),
+            "built-in status row must not render when no custom statusLine is set: {rendered:?}"
+        );
+        assert_eq!(rendered.trim(), "", "expected an empty status row, got: {rendered:?}");
     }
 
     #[test]

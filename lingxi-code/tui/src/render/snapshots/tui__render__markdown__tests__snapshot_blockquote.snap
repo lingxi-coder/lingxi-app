@@ -1,9 +1,10 @@
 ---
-source: crates/tui/src/render/markdown.rs
+source: tui/src/render/markdown.rs
+assertion_line: 758
 expression: "render(\"> quoted line\\n> second\", &theme())"
 ---
 - spans:
-    - text: "│ "
+    - text: "▎ "
       style:
         fg:
           Named: BrightBlack
@@ -21,7 +22,7 @@ expression: "render(\"> quoted line\\n> second\", &theme())"
         underline: false
       kind: Text
 - spans:
-    - text: "│ "
+    - text: "▎ "
       style:
         fg:
           Named: BrightBlack

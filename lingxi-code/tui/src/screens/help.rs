@@ -61,8 +61,11 @@ pub const INTRO: &str = "Claude understands your codebase, makes edits with your
 pub const SHORTCUTS_HEADER: &str = "Shortcuts";
 /// Locked `Slash commands` section header.
 pub const COMMANDS_HEADER: &str = "Slash commands";
-/// Locked footer hint (mirrors the read-only `skills.rs` footer).
-pub const FOOTER: &str = "Esc to close";
+/// Locked footer hint (claude-code `HelpV2` dismiss hint: the resolved
+/// `help:dismiss` chord + " to cancel", lowercase). Default keymap → `esc`.
+pub const FOOTER: &str = "esc to cancel";
+/// "For more help" docs pointer (claude-code `HelpV2/General.tsx`).
+pub const MORE_HELP: &str = "For more help: https://code.claude.com/docs/en/overview";
 
 /// One prompt-shortcut row.
 ///
@@ -281,6 +284,9 @@ pub fn render_help_to_string_with(state: &HelpState, bindings: &[ParsedBinding])
         out.push_str(&ind);
         out.push('\n');
     }
+    // (help-5) "For more help" docs pointer, above the footer.
+    out.push_str(MORE_HELP);
+    out.push('\n');
     out.push_str(FOOTER);
     out
 }

@@ -1,8 +1,10 @@
 ---
 source: tui/tests/agents_screen.rs
+assertion_line: 34
 expression: render_agents_to_string(&s)
 ---
 Agents
+2 agents
 ❯ explorer · opus
   writer
 Press ↑↓ to navigate · Enter to select · Esc to go back

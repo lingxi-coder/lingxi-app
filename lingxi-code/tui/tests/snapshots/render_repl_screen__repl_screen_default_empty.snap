@@ -1,8 +1,8 @@
 ---
 source: tui/tests/render_repl_screen.rs
+assertion_line: 38
 expression: element.to_string()
 ---
-claude-sonnet-4.5 /a/b $0.0000 42% default
 ❯  
 ❯
-? for shortcuts     shift + ⏎ for newline
+? for shortcuts

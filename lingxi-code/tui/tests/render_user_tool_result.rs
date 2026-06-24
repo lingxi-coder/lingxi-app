@@ -1,6 +1,5 @@
 //! Snapshot tests for `UserToolResultMessage` (M6-04 Tasks 5 + 6).
 
-use insta::assert_snapshot;
 use iocraft::prelude::*;
 use protocol::ToolUseId;
 use tui::components::messages::user_tool_result::{
@@ -22,13 +21,11 @@ fn short_5_line_result_renders_full() {
         focused: false,
         ..Default::default()
     });
-    assert_snapshot!(s, @r"
-    └ line1
-      line2
-      line3
-      line4
-      line5
-    ");
+    // Gutter `  ⎿  ` (5 cols) on the first line; continuation lines indent 5.
+    assert_eq!(
+        s,
+        "  \u{23BF}  line1\n     line2\n     line3\n     line4\n     line5"
+    );
 }
 
 #[test]
@@ -46,8 +43,8 @@ fn long_200_line_result_shows_truncation_footer() {
         ..Default::default()
     });
     // First 100 lines render; lines 101..=200 are dropped.
-    assert!(s.starts_with("└ line1\n"), "got: {s}");
-    assert!(s.contains("\n  line100\n"), "got tail: {s}");
+    assert!(s.starts_with("  \u{23BF}  line1\n"), "got: {s}");
+    assert!(s.contains("\n     line100\n"), "got tail: {s}");
     assert!(!s.contains("line101"), "should not include line101");
     assert!(
         s.ends_with("[output truncated, 100 more lines]"),
@@ -71,7 +68,7 @@ fn bash_expanded_multi_line_renders_one_row_per_line() {
     };
     let out = element.to_string();
     let lines: Vec<&str> = out.lines().collect();
-    // Header `└ ` row + 3 body rows = 4 visual rows.
+    // Header `  ⎿  ` gutter row + 3 body rows = 4 visual rows.
     assert_eq!(
         lines.len(),
         4,
@@ -172,5 +169,5 @@ fn collapsed_long_result_shows_first_line_plus_lines_suffix() {
         focused: false,
         ..Default::default()
     });
-    assert_eq!(s, "└ line1 (+9 lines)");
+    assert_eq!(s, "  \u{23BF}  line1 (+9 lines)");
 }

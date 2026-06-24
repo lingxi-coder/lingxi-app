@@ -29,8 +29,60 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Par
 const DEFAULT_RENDER_WIDTH: usize = 80;
 
 /// Dim vertical bar prefixing blockquote lines. Matches claude-code's
-/// `BLOCKQUOTE_BAR` (`src/constants/figures.ts`).
-const BLOCKQUOTE_BAR: &str = "│";
+/// `BLOCKQUOTE_BAR` (`src/constants/figures.ts`) — U+258E (▎ LEFT ONE QUARTER
+/// BLOCK), NOT the box-drawing `│` (U+2502).
+const BLOCKQUOTE_BAR: &str = "\u{258e}";
+
+/// `numberToLetter` (claude-code `markdown.ts`): 1→a, 26→z, 27→aa, … (bijective
+/// base-26, lowercase).
+fn number_to_letter(mut n: u64) -> String {
+    let mut result = String::new();
+    while n > 0 {
+        n -= 1;
+        result.insert(0, char::from(b'a' + (n % 26) as u8));
+        n /= 26;
+    }
+    result
+}
+
+/// `numberToRoman` (claude-code `markdown.ts`): lowercase roman numerals.
+fn number_to_roman(mut n: u64) -> String {
+    const ROMAN: &[(u64, &str)] = &[
+        (1000, "m"),
+        (900, "cm"),
+        (500, "d"),
+        (400, "cd"),
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
+    ];
+    let mut result = String::new();
+    for &(value, numeral) in ROMAN {
+        while n >= value {
+            result.push_str(numeral);
+            n -= value;
+        }
+    }
+    result
+}
+
+/// `getListNumber` (claude-code `markdown.ts`): ordered-list marker by nesting
+/// `depth` — number at depth 0/1, lowercase letters at depth 2, lowercase roman
+/// at depth 3, number beyond.
+fn get_list_number(depth: usize, n: u64) -> String {
+    match depth {
+        0 | 1 => n.to_string(),
+        2 => number_to_letter(n),
+        3 => number_to_roman(n),
+        _ => n.to_string(),
+    }
+}
 
 /// Map a `pulldown-cmark` column [`Alignment`] to the table renderer's
 /// [`ColumnAlign`]. `None` (no explicit alignment) is markdown's left default,
@@ -321,7 +373,9 @@ impl<'a> Builder<'a> {
                 let indent = "  ".repeat(depth);
                 let marker = match self.list_stack.last_mut() {
                     Some(Some(n)) => {
-                        let m = format!("{n}. ");
+                        // (md-02) Marker glyph by nesting depth (number / letter
+                        // / roman) per claude-code `getListNumber`.
+                        let m = format!("{}. ", get_list_number(depth, *n));
                         *n += 1;
                         m
                     }
@@ -549,6 +603,43 @@ mod tests {
     }
 
     #[test]
+    fn ordered_list_number_helpers() {
+        // (md-02) numberToLetter / numberToRoman parity.
+        assert_eq!(number_to_letter(1), "a");
+        assert_eq!(number_to_letter(26), "z");
+        assert_eq!(number_to_letter(27), "aa");
+        assert_eq!(number_to_roman(1), "i");
+        assert_eq!(number_to_roman(4), "iv");
+        assert_eq!(number_to_roman(9), "ix");
+        // getListNumber by depth: 0/1 number, 2 letter, 3 roman.
+        assert_eq!(get_list_number(0, 2), "2");
+        assert_eq!(get_list_number(1, 2), "2");
+        assert_eq!(get_list_number(2, 2), "b");
+        assert_eq!(get_list_number(3, 2), "ii");
+    }
+
+    #[test]
+    fn ordered_list_marker_switches_glyph_by_depth() {
+        // (md-02) Depth 0/1 = numbers, depth 2 = letters (a.), depth 3 = roman.
+        let md = "1. top\n    1. mid\n        1. deep\n            1. deeper";
+        let texts: Vec<String> = render(md, &theme())
+            .iter()
+            .map(StyledLine::plain_text)
+            .collect();
+        let joined = texts.join("\n");
+        assert!(joined.contains("1. top"), "depth0 number: {joined:?}");
+        assert!(joined.contains("1. mid"), "depth1 number: {joined:?}");
+        assert!(
+            texts.iter().any(|t| t.trim_start().starts_with("a. deep")),
+            "depth2 letter: {joined:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.trim_start().starts_with("i. deeper")),
+            "depth3 roman: {joined:?}"
+        );
+    }
+
+    #[test]
     fn nested_list_indents() {
         let lines = render("- a\n  - b", &theme());
         let texts: Vec<String> = lines.iter().map(StyledLine::plain_text).collect();
@@ -596,7 +687,7 @@ mod tests {
             .iter()
             .find(|l| l.plain_text().contains("quoted"))
             .unwrap();
-        assert!(line.plain_text().starts_with("│ "));
+        assert!(line.plain_text().starts_with("\u{258e} "));
         let text_span = line
             .spans
             .iter()

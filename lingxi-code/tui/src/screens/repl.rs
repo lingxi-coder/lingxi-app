@@ -238,7 +238,9 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 theme_name: theme_name,
             )
             #(if show_spinner {
-                element!(SpinnerWithVerb).into_any()
+                // Glyph + verb render in the active theme's Claude accent
+                // (claude-code `Spinner` `defaultColor='claude'`).
+                element!(SpinnerWithVerb(color: Some(theme.claude))).into_any()
             } else {
                 element!(View).into_any()
             })

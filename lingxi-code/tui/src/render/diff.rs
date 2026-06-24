@@ -233,7 +233,20 @@ fn plain_row(row: &DiffRow, gutter_w: usize, lang: Option<&str>, theme: ThemeNam
         LineKind::Context => StyleColor::Default,
     };
     let mut spans = vec![gutter_span(row, gutter_w, bg)];
-    spans.extend(content_spans(&row.text, lang, bg, theme));
+    // (diff-01) Removed lines render as PLAINTEXT in claude-code (no syntax
+    // highlight) — only the red bg decoration marks them. Added/context lines
+    // keep syntax coloring.
+    if row.kind == LineKind::Remove {
+        spans.push(StyledSpan::styled(
+            row.text.clone(),
+            SpanStyle {
+                bg,
+                ..SpanStyle::default()
+            },
+        ));
+    } else {
+        spans.extend(content_spans(&row.text, lang, bg, theme));
+    }
     StyledLine { spans }
 }
 
@@ -262,12 +275,13 @@ pub const MAX_DIFF_LINES: usize = 100;
 /// unified-diff default.
 const CONTEXT_RADIUS: usize = 3;
 
-/// Build a "@@ -oldStart,oldLen +newStart,newLen @@" header line. claude-code
-/// renders hunk headers dim/cyan.
-fn hunk_header(old_start: usize, old_len: usize, new_start: usize, new_len: usize) -> StyledLine {
+/// Dim `...` separator drawn BETWEEN hunks (claude-code `StructuredDiffList`
+/// "ellipsis separators between them"). Replaces unified `@@` headers, which
+/// claude-code never renders.
+fn hunk_separator() -> StyledLine {
     StyledLine {
         spans: vec![StyledSpan::styled(
-            format!("@@ -{old_start},{old_len} +{new_start},{new_len} @@"),
+            "...".to_string(),
             SpanStyle {
                 fg: StyleColor::Named(NamedColor::BrightBlack),
                 ..SpanStyle::default()
@@ -351,9 +365,15 @@ pub fn render(old: &str, new: &str, path: Option<&str>, theme: ThemeName) -> Vec
     let mut out: Vec<StyledLine> = Vec::new();
     let mut body_emitted = 0usize;
     let mut truncated = false;
-    'hunks: for (header, rows) in hunks {
-        let (os, ol, ns, nl) = header;
-        out.push(hunk_header(os, ol, ns, nl));
+    let mut first_hunk = true;
+    'hunks: for (_header, rows) in hunks {
+        // (diff-05) claude-code's StructuredDiffList separates hunks with a dim
+        // `...` line between them — it never renders unified `@@ -a,b +c,d @@`
+        // headers. Emit the separator before every hunk except the first.
+        if !first_hunk {
+            out.push(hunk_separator());
+        }
+        first_hunk = false;
         let laid = layout_rows(&rows, gutter_w, lang.as_deref(), theme);
         // `laid` has one line per row (word-diff pairs are 1:1 with rows), so
         // body_emitted tracks row count directly.
@@ -603,9 +623,10 @@ mod tests {
     }
 
     #[test]
-    fn render_with_separated_changes_emits_hunk_header() {
+    fn render_with_separated_changes_emits_hunk_separator() {
         // Two change clusters separated by a long unchanged run -> the second
-        // cluster is preceded by a hunk header "@@ ... @@".
+        // cluster is preceded by a dim `...` separator. claude-code's
+        // StructuredDiffList never renders unified `@@ -a,b +c,d @@` headers.
         let old = (1..=40)
             .map(|n| format!("line{n}"))
             .collect::<Vec<_>>()
@@ -616,10 +637,14 @@ mod tests {
         new_lines[37] = "CHANGED_BOTTOM".into();
         let new = new_lines.join("\n") + "\n";
         let lines = render(&old, &new, Some("x.txt"), ThemeName::Dark);
-        let headers = lines.iter().filter(|l| rowline(l).contains("@@")).count();
+        let separators = lines.iter().filter(|l| rowline(l).trim() == "...").count();
         assert!(
-            headers >= 1,
-            "separated change clusters produce hunk header(s)"
+            separators >= 1,
+            "separated change clusters are divided by a `...` separator"
+        );
+        assert!(
+            !lines.iter().any(|l| rowline(l).contains("@@")),
+            "claude-code never renders unified @@ hunk headers"
         );
     }
 

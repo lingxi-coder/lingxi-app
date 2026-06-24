@@ -6058,6 +6058,15 @@ As you answer the user's questions, you can use the following context:\n\
         self.tools.all_names()
     }
 
+    /// The session's DEFAULT main-loop model — the boot-configured model the
+    /// stream-json `set_model` control_request resolves `"default"` (or an
+    /// absent model) back to (claude-code `getDefaultMainLoopModel()`), so a
+    /// client can revert a prior `set_model` override.
+    #[must_use]
+    pub fn default_model(&self) -> String {
+        self.config.model.clone()
+    }
+
     /// Apply a LIVE session permission-mode change (stream-json
     /// `set_permission_mode` control_request). Delegates to the gate's
     /// [`traits::PermissionGate::set_permission_mode`]; only the enforcing

@@ -260,6 +260,10 @@ async fn dispatch_control_request(
 
     match subtype {
         "initialize" => {
+            // SDKControlInitializeResponse keys ONLY (commands, agents,
+            // output_style, available_output_styles, models, account, pid). The
+            // binary does NOT emit a `feedback_survey_config` here — that key was
+            // fabricated and is dropped (it is not in the schema).
             let payload = json!({
                 "commands": init_commands,
                 "agents": init_agents,
@@ -268,17 +272,6 @@ async fn dispatch_control_request(
                 "models": init_models,
                 "account": init_account,
                 "pid": std::process::id(),
-                "feedback_survey_config": {
-                    "minTimeBeforeFeedbackMs": 600000,
-                    "minTimeBetweenFeedbackMs": 43200000,
-                    "minTimeBetweenGlobalFeedbackMs": 43200000,
-                    "minUserTurnsBeforeFeedback": 5,
-                    "minUserTurnsBetweenFeedback": 25,
-                    "hideThanksAfterMs": 3000,
-                    "onForModels": ["*"],
-                    "probability": 0.05,
-                    "lastSurveyShownTime": 0
-                }
             });
             writer.reply_success(request_id, Some(payload));
         }
@@ -288,17 +281,20 @@ async fn dispatch_control_request(
             writer.reply_success(request_id, None);
         }
         "set_model" => {
-            // §2.2 #5: `"default"` (or absent) resolves to the session default —
-            // a no-op here (no default-model accessor); any other id switches.
-            let model = field("model").and_then(|v| v.as_str());
-            match model {
-                Some(m) if m != "default" => {
-                    match orchestrator.switch_model(m, None).await {
-                        Ok(()) => writer.reply_success(request_id, None),
-                        Err(e) => writer.reply_error(request_id, &e.to_string()),
-                    }
-                }
-                _ => writer.reply_success(request_id, None),
+            // §2.2 #5: `"default"` (or an absent model) resolves to the session
+            // default model and APPLIES it — so a client can revert a prior
+            // `set_model` override (claude-code re-resolves via
+            // getDefaultMainLoopModel() and calls setMainLoopModelOverride).
+            let requested = field("model").and_then(|v| v.as_str()).unwrap_or("default");
+            let default_model = orchestrator.default_model();
+            let target = if requested == "default" {
+                default_model.as_str()
+            } else {
+                requested
+            };
+            match orchestrator.switch_model(target, None).await {
+                Ok(()) => writer.reply_success(request_id, None),
+                Err(e) => writer.reply_error(request_id, &e.to_string()),
             }
         }
         "mcp_status" => {
@@ -553,6 +549,12 @@ pub async fn run_stream_json_input_loop(
         while let Some(frame) = control_resp_rx.recv().await {
             resolver_plane.resolve_response(&frame).await;
         }
+        // Stdin closed (EOF): reject any in-flight pending control_request so a
+        // gate awaiting a `can_use_tool` response does not hang forever
+        // (claude-code StructuredIO rejects all pendingRequests at input close).
+        resolver_plane
+            .fail_all_pending("Tool permission stream closed before response received")
+            .await;
     });
 
     // ③ Phase 1: pre-collect initialization data for the `initialize` handler.
@@ -660,9 +662,20 @@ pub async fn run_stream_json_input_loop(
     let end_notify = Arc::new(tokio::sync::Notify::new());
     let end_notify_ctrl = end_notify.clone();
     let ctrl_req_task = tokio::spawn(async move {
+        // §2.2: a second `initialize` is an error, not a re-handshake — the
+        // binary's handleInitializeRequest replies {subtype:'error', error:
+        // 'Already initialized'} when the `initialized` flag is already set.
+        let mut initialized = false;
         while let Some(frame) = control_req_rx.recv().await {
             let subtype = control_request_subtype(&frame).to_string();
             let request_id = control_frame_request_id(&frame).to_string();
+            if subtype == "initialize" {
+                if initialized {
+                    ctrl_plane.reply_error(&request_id, "Already initialized");
+                    continue;
+                }
+                initialized = true;
+            }
             dispatch_control_request(
                 &subtype,
                 &request_id,

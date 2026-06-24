@@ -225,6 +225,28 @@ impl StdioControlPlane {
             .iter()
             .any(|id| id == tool_use_id)
     }
+
+    /// Reject EVERY in-flight pending `control_request` with `reason`.
+    ///
+    /// Called when stdin reaches EOF (the host closed the input stream): without
+    /// this, a gate awaiting a `can_use_tool` `control_response` would block
+    /// forever, hanging the tool call / turn. Mirrors claude-code's
+    /// `StructuredIO.read()` close path, which sets `inputClosed` and rejects
+    /// every `pendingRequests` entry with *"Tool permission stream closed before
+    /// response received"*. Each drained entry's `tool_use_id` is tracked as
+    /// resolved so a late re-delivery is still deduped.
+    pub async fn fail_all_pending(&self, reason: &str) {
+        let drained: Vec<PendingControlRequest> = {
+            let mut pending = self.pending.lock().await;
+            pending.drain().map(|(_, e)| e).collect()
+        };
+        for entry in drained {
+            if let Some(tuid) = entry.tool_use_id.clone() {
+                self.track_resolved(tuid).await;
+            }
+            let _ = entry.responder.send(Err(reason.to_string()));
+        }
+    }
 }
 
 /// Inner-transport `PermissionGate` that resolves an unresolved `Ask` by
@@ -482,6 +504,54 @@ mod tests {
         // Must not panic / double-resolve; the tool_use_id is in the resolved ring.
         plane.resolve_response(&dup).await;
         assert!(plane.is_resolved("tu-dup").await);
+    }
+
+    #[tokio::test]
+    async fn fail_all_pending_rejects_in_flight_requests() {
+        // §EOF: stdin close must reject every pending control_request so an
+        // awaiting gate does not hang forever.
+        let (plane, _rx) = plane_with_channel();
+        let (_id1, fut1) = plane
+            .send_request(json!({"subtype": "can_use_tool"}), Some("a".into()))
+            .await;
+        let (_id2, fut2) = plane
+            .send_request(json!({"subtype": "can_use_tool"}), Some("b".into()))
+            .await;
+        plane
+            .fail_all_pending("Tool permission stream closed before response received")
+            .await;
+        assert_eq!(
+            fut1.await.unwrap().unwrap_err(),
+            "Tool permission stream closed before response received"
+        );
+        assert_eq!(
+            fut2.await.unwrap().unwrap_err(),
+            "Tool permission stream closed before response received"
+        );
+        // Drained tool_use_ids are tracked so a late re-delivery is still deduped.
+        assert!(plane.is_resolved("a").await);
+        assert!(plane.is_resolved("b").await);
+    }
+
+    #[tokio::test]
+    async fn gate_hang_is_broken_by_fail_all_pending() {
+        // The end-to-end #3 scenario: a gate awaiting can_use_tool is unblocked
+        // (denied) when fail_all_pending fires on EOF.
+        let (plane, mut rx) = plane_with_channel();
+        let gate = StdioControlPermissionGate::new(plane.clone());
+        let input = json!({});
+        let check = tokio::spawn(async move { gate.check("Bash", &input).await });
+        // Drain the emitted can_use_tool request, then simulate stdin EOF.
+        let _ = rx.recv().await.unwrap();
+        plane
+            .fail_all_pending("Tool permission stream closed before response received")
+            .await;
+        match check.await.unwrap() {
+            PermissionDecision::Deny { reason } => {
+                assert!(reason.contains("Tool permission stream closed before response received"));
+            }
+            other => panic!("expected Deny on EOF, got {other:?}"),
+        }
     }
 
     #[tokio::test]

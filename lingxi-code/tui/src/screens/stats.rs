@@ -125,6 +125,16 @@ pub struct StatsData {
     /// applies. Picked once at aggregate time.
     #[serde(default)]
     pub factoid: Option<String>,
+    /// (stats-date-range) Per-session `(date, duration_ms)`, retained so a
+    /// date-range view can recount sessions + recompute the longest within the
+    /// window. One entry per counted (non-subagent, dated) session.
+    #[serde(default)]
+    pub sessions: Vec<(String, u64)>,
+    /// (stats-date-range) `date -> model -> usage` with the In/Out/cache splits
+    /// (unlike `daily_model_tokens`, which is date→model→TOTAL), so the Models
+    /// tab can be recomputed for a date window.
+    #[serde(default)]
+    pub daily_model_usage: BTreeMap<String, BTreeMap<String, ModelUsage>>,
 }
 
 impl StatsData {
@@ -376,9 +386,21 @@ pub fn aggregate(contribs: &[SessionContribution]) -> StatsData {
                 *data.daily_messages.entry(date.clone()).or_default() += c.message_count as u64;
                 track_date(&mut data, date);
                 // (session-duration) longest session = max(last_ts - first_ts).
-                if let (Some(first), Some(last)) = (&c.first_ts, &c.last_ts) {
-                    let dur = session_duration_ms(first, last);
-                    data.longest_session_ms = data.longest_session_ms.max(dur);
+                let dur = match (&c.first_ts, &c.last_ts) {
+                    (Some(first), Some(last)) => session_duration_ms(first, last),
+                    _ => 0,
+                };
+                data.longest_session_ms = data.longest_session_ms.max(dur);
+                // (stats-date-range) retain per-session (date, duration) +
+                // dated per-model usage with In/Out splits.
+                data.sessions.push((date.clone(), dur));
+                let day = data.daily_model_usage.entry(date.clone()).or_default();
+                for (model, usage) in &c.model_usage {
+                    let slot = day.entry(model.clone()).or_default();
+                    slot.input_tokens = slot.input_tokens.saturating_add(usage.input_tokens);
+                    slot.output_tokens = slot.output_tokens.saturating_add(usage.output_tokens);
+                    slot.cache_read_tokens =
+                        slot.cache_read_tokens.saturating_add(usage.cache_read_tokens);
                 }
             }
         }
@@ -401,6 +423,67 @@ pub fn aggregate(contribs: &[SessionContribution]) -> StatsData {
     // (stats-overview-missing-fields) Pick the fun factoid from the final totals.
     data.factoid = pick_factoid(data.total_tokens(), data.longest_session_ms);
     data
+}
+
+impl StatsData {
+    /// (stats-date-range) A view of this data restricted to `range` ending at
+    /// `today`. `All` returns the data unchanged; `Last7`/`Last30` keep only the
+    /// dated rows on/after the cutoff and RE-derive every displayed field
+    /// (sessions, longest session, daily messages, per-model usage, chart,
+    /// factoid) from that window — claude-code `aggregateClaudeCodeStatsForRange`.
+    #[must_use]
+    pub fn for_range(&self, range: StatsRange, today: chrono::NaiveDate) -> StatsData {
+        let Some(days) = range.window_days() else {
+            return self.clone();
+        };
+        // Inclusive window: `today - (days-1) ..= today`.
+        let cutoff = today - chrono::Duration::days(days - 1);
+        let cutoff_str = cutoff.format("%Y-%m-%d").to_string();
+        let in_range = |date: &str| *date >= *cutoff_str.as_str();
+
+        let mut out = StatsData::default();
+        // Daily messages.
+        for (date, &n) in &self.daily_messages {
+            if in_range(date) {
+                out.daily_messages.insert(date.clone(), n);
+                out.total_messages += usize::try_from(n).unwrap_or(0);
+                track_date(&mut out, date);
+            }
+        }
+        // Sessions (count + longest).
+        for (date, dur) in &self.sessions {
+            if in_range(date) {
+                out.total_sessions += 1;
+                out.longest_session_ms = out.longest_session_ms.max(*dur);
+                out.sessions.push((date.clone(), *dur));
+            }
+        }
+        // Per-model usage (In/Out splits) + the per-day chart totals.
+        for (date, models) in &self.daily_model_usage {
+            if !in_range(date) {
+                continue;
+            }
+            let day_chart = out.daily_model_tokens.entry(date.clone()).or_default();
+            for (model, usage) in models {
+                out.daily_model_usage
+                    .entry(date.clone())
+                    .or_default()
+                    .insert(model.clone(), usage.clone());
+                let agg = out.model_usage.entry(model.clone()).or_default();
+                agg.input_tokens = agg.input_tokens.saturating_add(usage.input_tokens);
+                agg.output_tokens = agg.output_tokens.saturating_add(usage.output_tokens);
+                agg.cache_read_tokens =
+                    agg.cache_read_tokens.saturating_add(usage.cache_read_tokens);
+                let total = usage.input_tokens.saturating_add(usage.output_tokens);
+                if total > 0 {
+                    let slot = day_chart.entry(model.clone()).or_default();
+                    *slot = slot.saturating_add(total);
+                }
+            }
+        }
+        out.factoid = pick_factoid(out.total_tokens(), out.longest_session_ms);
+        out
+    }
 }
 
 /// Milliseconds between two ISO-8601 timestamps (`last - first`), clamped to 0
@@ -611,7 +694,7 @@ impl HistoryFingerprint {
 /// the [`PersistedStatsCache`] / [`StatsData`] shape changes so a stale file is
 /// rejected by [`decode_stats_cache`] and falls back to a full walk. This is our
 /// OWN counter — see the module-section note above for why it is not `3`.
-pub const STATS_CACHE_VERSION: u32 = 2;
+pub const STATS_CACHE_VERSION: u32 = 3;
 
 /// The on-disk cache envelope (claude-code `PersistedStatsCache`): the schema
 /// version, the [`HistoryFingerprint`] the [`StatsData`] was computed from, and
@@ -665,6 +748,50 @@ pub enum StatsTab {
     Models,
 }
 
+/// Date-range filter for the stats view (claude-code `StatsDateRange`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StatsRange {
+    /// All time (no filter).
+    #[default]
+    All,
+    /// Last 7 days (inclusive of today).
+    Last7,
+    /// Last 30 days (inclusive of today).
+    Last30,
+}
+
+impl StatsRange {
+    /// Cycle order (claude-code `DATE_RANGE_ORDER` = all → 7d → 30d → all).
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            StatsRange::All => StatsRange::Last7,
+            StatsRange::Last7 => StatsRange::Last30,
+            StatsRange::Last30 => StatsRange::All,
+        }
+    }
+
+    /// Display label (claude-code `DATE_RANGE_LABELS`).
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            StatsRange::All => "All time",
+            StatsRange::Last7 => "Last 7 days",
+            StatsRange::Last30 => "Last 30 days",
+        }
+    }
+
+    /// Inclusive day-count of the window, or `None` for `All`.
+    #[must_use]
+    fn window_days(self) -> Option<i64> {
+        match self {
+            StatsRange::All => None,
+            StatsRange::Last7 => Some(7),
+            StatsRange::Last30 => Some(30),
+        }
+    }
+}
+
 impl StatsTab {
     /// The other tab (Tab / Shift-Tab both toggle between the two).
     #[must_use]
@@ -699,6 +826,8 @@ pub struct StatsState {
     /// blocking pool; the screen shows a "computing" line until [`set_data`]
     /// fills it. Opening via [`loading`](StatsState::loading) sets this.
     pub loading: bool,
+    /// (stats-date-range) Active date-range filter, cycled by `r`.
+    pub range: StatsRange,
 }
 
 impl StatsState {
@@ -707,13 +836,36 @@ impl StatsState {
     #[must_use]
     pub fn new(data: StatsData) -> Self {
         let tab = StatsTab::Overview;
+        // Default range = All → `view()` == data, so size on `data` directly.
         let len = body_lines(&data, tab).len();
         Self {
             data,
             tab,
             scroll: ScrollState::new(len, VIEWPORT),
             loading: false,
+            range: StatsRange::All,
         }
+    }
+
+    /// (stats-date-range) The data restricted to the active range. `All` (the
+    /// default) returns it unchanged; `Last7`/`Last30` filter against the local
+    /// `today`. The cutoff uses wall-clock now (like the streak computation).
+    #[must_use]
+    pub fn view(&self) -> StatsData {
+        if self.range == StatsRange::All {
+            self.data.clone()
+        } else {
+            self.data
+                .for_range(self.range, chrono::Local::now().date_naive())
+        }
+    }
+
+    /// (stats-date-range) Cycle to the next range (`r`), re-anchoring the scroll
+    /// to the (possibly different) filtered body length.
+    fn cycle_range(&mut self) {
+        self.range = self.range.next();
+        let len = body_lines(&self.view(), self.tab).len();
+        self.scroll = ScrollState::new(len, VIEWPORT);
     }
 
     /// Open in the LOADING state (empty data) while the background aggregation
@@ -730,8 +882,9 @@ impl StatsState {
     /// Replace the aggregated data (clears `loading`, re-anchors the scroll to
     /// the current tab's body length).
     pub fn set_data(&mut self, data: StatsData) {
-        let len = body_lines(&data, self.tab).len();
         self.data = data;
+        // Size on the active range's view (range is `All` by default → == data).
+        let len = body_lines(&self.view(), self.tab).len();
         self.scroll = ScrollState::new(len, VIEWPORT);
         self.loading = false;
     }
@@ -741,7 +894,7 @@ impl StatsState {
     /// switch).
     fn set_tab(&mut self, tab: StatsTab) {
         self.tab = tab;
-        let len = body_lines(&self.data, tab).len();
+        let len = body_lines(&self.view(), tab).len();
         self.scroll = ScrollState::new(len, VIEWPORT);
     }
 }
@@ -768,6 +921,11 @@ pub fn handle_stats_key(state: &mut StatsState, key: KeyEvent) -> StatsOutcome {
         }
         KeyCode::Esc => StatsOutcome::Close,
         KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => StatsOutcome::Close,
+        // (stats-date-range) `r` cycles the date range (All → 7d → 30d → All).
+        KeyCode::Char('r') if key.modifiers == KeyModifiers::NONE => {
+            state.cycle_range();
+            StatsOutcome::Stay
+        }
         _ => {
             // Scroll keys consume Up/Down/Page/Home/End; anything else is inert.
             let _ = state.scroll.handle_scroll_key(key);
@@ -1177,8 +1335,11 @@ pub fn render_stats_to_string(state: &StatsState) -> String {
     }
     let mut out = tab_header(state.tab);
     out.push('\n');
+    // (stats-date-range) the active range label + cycle hint.
+    out.push_str(&format!("{} \u{00B7} r to change range\n", state.range.label()));
 
-    let lines = body_lines(&state.data, state.tab);
+    let view = state.view();
+    let lines = body_lines(&view, state.tab);
     for line in visible_slice(&lines, &state.scroll) {
         out.push_str(line);
         out.push('\n');
@@ -1749,6 +1910,66 @@ mod tests {
         // pick_factoid is deterministic + within bounds.
         assert!(pick_factoid(250_000, 0).is_some());
         assert!(pick_factoid(0, 0).is_none());
+    }
+
+    #[test]
+    fn for_range_filters_sessions_and_tokens_by_window() {
+        use chrono::NaiveDate;
+        let today = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
+        let recent = "2026-06-22"; // 2 days before today → within Last7 + Last30
+        let old = "2026-05-10"; // > 30 days → outside both windows
+        let mk = |date: &str, inp: u64, out: u64| {
+            parse_session(
+                &format!(
+                    "{}\n{}\n",
+                    user_line(date),
+                    assistant_line(date, "claude-opus-4-6", inp, out)
+                ),
+                false,
+            )
+        };
+        let data = aggregate(&[mk(recent, 100, 50), mk(old, 999, 999)]);
+        assert_eq!(data.total_sessions, 2);
+
+        // All → unchanged.
+        assert_eq!(data.for_range(StatsRange::All, today).total_sessions, 2);
+        // Last7 / Last30 → only the recent session + its tokens.
+        let l7 = data.for_range(StatsRange::Last7, today);
+        assert_eq!(l7.total_sessions, 1);
+        assert_eq!(l7.total_tokens(), 150);
+        assert_eq!(data.for_range(StatsRange::Last30, today).total_sessions, 1);
+    }
+
+    #[test]
+    fn r_key_cycles_the_date_range() {
+        let mut st = StatsState::new(StatsData::default());
+        assert_eq!(st.range, StatsRange::All);
+        let _ = handle_stats_key(&mut st, k(KeyCode::Char('r')));
+        assert_eq!(st.range, StatsRange::Last7);
+        let _ = handle_stats_key(&mut st, k(KeyCode::Char('r')));
+        assert_eq!(st.range, StatsRange::Last30);
+        let _ = handle_stats_key(&mut st, k(KeyCode::Char('r')));
+        assert_eq!(st.range, StatsRange::All);
+    }
+
+    #[test]
+    fn render_shows_active_range_label() {
+        let data = aggregate(&[parse_session(
+            &format!(
+                "{}\n{}\n",
+                user_line("2026-05-01"),
+                assistant_line("2026-05-01", "claude-opus-4-6", 10, 5)
+            ),
+            false,
+        )]);
+        let mut st = StatsState::new(data);
+        assert!(
+            render_stats_to_string(&st).contains("All time \u{00B7} r to change range"),
+            "got: {}",
+            render_stats_to_string(&st)
+        );
+        st.cycle_range();
+        assert!(render_stats_to_string(&st).contains("Last 7 days \u{00B7} r to change range"));
     }
 
     #[test]

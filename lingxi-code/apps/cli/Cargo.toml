@@ -55,6 +55,13 @@ platform-posix = { path = "../../platforms/posix" }
 # CLI-resolved permission mode + bypass-safety guard substrate (cli_mode /
 # bypass_guard). The real `BypassEnv` impl (`bypass_env.rs`) names this directly.
 permission = { path = "../../permission" }
+# CLI parity (2.1.191): the `mcp` and `plugin` subcommand families (`commands/`)
+# drive the MCP config/registry and the plugin manager directly from the CLI
+# (claude `claude mcp …` / `claude plugin …`). These libs moved into
+# engine-desktop's wiring earlier; the management subcommands re-add them as
+# direct CLI deps.
+mcp = { path = "../../mcp" }
+plugin = { path = "../../plugin" }
 
 # clap 4.6+ requires edition2024; pin to a release compatible with Rust 1.82.
 clap = { version = "=4.5.20", features = ["derive", "env"] }

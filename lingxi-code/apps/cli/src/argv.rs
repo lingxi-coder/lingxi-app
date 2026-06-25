@@ -434,6 +434,14 @@ pub struct Argv {
     /// with `lingxi-cli agents`)
     #[arg(long = "background", visible_alias = "bg")]
     pub background: bool,
+
+    /// Top-level subcommand (mcp, auth, plugin, project, setup-token, agents,
+    /// install, update, doctor, auto-mode, ultrareview). When a leading argv
+    /// token matches one of these, clap routes to that family instead of
+    /// treating it as the chat `[prompt]`; global flags before it still bind
+    /// here. `None` = the normal chat / REPL / print path.
+    #[command(subcommand)]
+    pub command: Option<crate::commands::Commands>,
 }
 
 impl Argv {

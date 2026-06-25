@@ -56,6 +56,7 @@
 
 pub mod argv;
 mod bypass_env;
+pub mod commands;
 pub mod control_plane;
 pub mod cwd;
 pub mod exit_codes;
@@ -98,6 +99,14 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // also imply debug mode.
     logging::init(parsed.debug_enabled());
     tracing::debug!(?parsed, "argv parsed");
+
+    // Top-level subcommand dispatch (mcp/auth/plugin/project/setup-token/agents/
+    // install/update/doctor/auto-mode/ultrareview). When clap matched a leading
+    // command token, run that family and exit — this is what stops a bare `mcp`/
+    // `auth` token from being swallowed as a billable chat prompt.
+    if let Some(command) = parsed.command.clone() {
+        return command.run().await;
+    }
 
     if let Err(e) = cwd::apply_cwd(parsed.cwd.as_deref()) {
         eprintln!("lingxi-cli: {e}");

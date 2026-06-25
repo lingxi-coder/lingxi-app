@@ -54,7 +54,24 @@
 //!   silent single-agent fallback). Deterministic decisions are tagged
 //!   `decision_source=deterministic_fallback`.
 //!
-// TODO(multi-agent): Phases 6-7 add finalizer/verification and CLI/TUI wiring.
+//! Phase 6 lands the finalizer, verification, and the gated execution-router
+//! seam:
+//!
+//! - [`finalizer`] — the **sole** writer to the main workspace
+//!   ([`finalizer::Finalizer`]): conflict-check user changes, generate
+//!   `final.patch`, dry-run apply, then apply. No partial apply on conflict;
+//!   `reject_both` requests the user; hybrid requires an explicit patch
+//!   strategy.
+//! - [`verification`] — default suite EXCLUDES `cargo fmt --check` (repo is not
+//!   fmt-clean); changed-files → affected-crate mapping
+//!   ([`verification::affected_crates`]); timeout ⇒
+//!   [`verification::VerificationOutcome::Inconclusive`] (never claims
+//!   complete), non-zero exit ⇒ failure evidence; the fix loop is bounded by
+//!   [`config::LimitConfig::max_iterations`].
+//! - [`execution`] — a gated [`execution::decide_dispatch`] entry that does NOT
+//!   regress the main orchestrator turn loop.
+//!
+// TODO(multi-agent): Phase 7 adds CLI/TUI wiring + composition-root dispatch.
 
 #![forbid(unsafe_code)]
 
@@ -62,6 +79,8 @@ pub mod arbiter;
 pub mod artifacts;
 pub mod config;
 pub mod error;
+pub mod execution;
+pub mod finalizer;
 pub mod orchestrator;
 pub mod prompts;
 pub mod providers;
@@ -69,6 +88,7 @@ pub mod review;
 pub mod revision;
 pub mod router;
 pub mod state;
+pub mod verification;
 pub mod worktrees;
 
 pub use arbiter::deterministic_fallback;
@@ -86,6 +106,16 @@ pub use config::MultiAgentConfig;
 pub use config::MultiAgentMode;
 pub use config::MultiAgentStrategyKind;
 pub use error::MultiAgentError;
+pub use execution::decide_dispatch;
+pub use execution::Dispatch;
+pub use finalizer::ApplyError;
+pub use finalizer::CandidatePatch;
+pub use finalizer::FinalizeOutcome;
+pub use finalizer::FinalizePlan;
+pub use finalizer::Finalizer;
+pub use finalizer::HybridPlan;
+pub use finalizer::PatchApplier;
+pub use finalizer::TodoGitPatchApplier;
 pub use orchestrator::CandidateOutcome;
 pub use orchestrator::CandidateResult;
 pub use orchestrator::CandidateRunContext;
@@ -112,6 +142,16 @@ pub use router::ExecutionRoute;
 pub use router::RouteInput;
 pub use state::DualLlmPhase;
 pub use state::RunArtifacts;
+pub use verification::affected_crates;
+pub use verification::default_suite;
+pub use verification::outcome_to_result;
+pub use verification::run_suite;
+pub use verification::verify_with_fix_loop;
+pub use verification::CommandRunner;
+pub use verification::CommandSource;
+pub use verification::VerificationCommand;
+pub use verification::VerificationFixer;
+pub use verification::VerificationOutcome;
 pub use worktrees::candidate_slug;
 pub use worktrees::new_run_id;
 pub use worktrees::CandidateWorktrees;

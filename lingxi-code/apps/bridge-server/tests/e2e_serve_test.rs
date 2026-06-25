@@ -65,6 +65,8 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         // CLI headless system-prompt flags (715adc4e); None for this e2e fixture.
         system_prompt_override: None,
         append_system_prompt: None,
+        multi_agent: None,
+        explicit_multi_agent: None,
     };
     (tmp, cfg)
 }

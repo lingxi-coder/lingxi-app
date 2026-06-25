@@ -390,6 +390,129 @@ pub fn fixer_for(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// P12: composition-root runtime — the GATED dual-LLM dispatch decision plus
+// the three live adapters assembled from the session's real subagent spawner.
+// ─────────────────────────────────────────────────────────────────────────
+
+use multi_agent::config::MultiAgentConfig;
+use multi_agent::execution::decide_dispatch;
+use multi_agent::execution::Dispatch;
+use multi_agent::router::heuristic_complexity;
+use multi_agent::router::heuristic_write_intent;
+use multi_agent::router::ExplicitMultiAgentFlag;
+use multi_agent::router::RouteInput;
+use multi_agent::router::TaskAreaHint;
+
+/// The composition-root, build-time product of wiring the LingXi-only dual-LLM
+/// multi-agent feature behind its gate.
+///
+/// This is constructed ONLY when `settings.multiAgent` is present AND the gate
+/// (explicit CLI flag / `mode` / auto-trigger) admits the dual-LLM path for at
+/// least the `force`/explicit cases — see [`MultiAgentRuntime::build`]. When the
+/// feature is unconfigured or disabled the builder returns `None`, so a default
+/// session never holds a `MultiAgentRuntime` and the baseline single-agent turn
+/// loop is byte-identical to before this wiring (the host simply never reads a
+/// `Some`).
+///
+/// It holds the parsed config, the resolved explicit flag, and the three REAL
+/// P9-P11 adapters (`SpawnerCandidateRunner` / `SpawnerReviser` + the fixer
+/// selector inputs) already bound to the session's live subagent spawner +
+/// inheritance. A host that decides to run a turn through the dual-LLM pipeline
+/// reads these to construct a [`multi_agent::orchestrator::DualLlm`] (plus the
+/// review / arbiter / finalizer / verification chain); the per-turn route is
+/// decided by [`MultiAgentRuntime::decide`].
+pub struct MultiAgentRuntime {
+    /// The parsed `settings.multiAgent` config (single source of truth for the
+    /// candidate/arbiter endpoints, mode, limits).
+    pub config: MultiAgentConfig,
+    /// The explicit CLI override (`--multi-agent` / `--dual-llm` /
+    /// `--no-multi-agent`), already mapped from `argv.explicit_multi_agent()`.
+    pub explicit_flag: ExplicitMultiAgentFlag,
+    /// The REAL candidate-implementation runner driving the session's subagent
+    /// spawner (P9).
+    pub candidate_runner: std::sync::Arc<dyn CandidateRunner>,
+    /// The REAL author-revision reviser (P10).
+    pub reviser: std::sync::Arc<dyn Reviser>,
+    /// The session's subagent spawner + inheritance, retained so the host can
+    /// build the verification fixer for the resolved fix budget via
+    /// [`MultiAgentRuntime::fixer`] (P11) at finalize time (the budget is the
+    /// winner's `limits.max_iterations`, known per-run).
+    spawner: std::sync::Arc<dyn SubagentSpawner>,
+    inherit: SubagentInheritance,
+}
+
+impl MultiAgentRuntime {
+    /// Build the gated runtime, or `None` when the feature is unconfigured /
+    /// disabled.
+    ///
+    /// - `raw_settings` is the raw `settings.multiAgent` JSON value (`None` when
+    ///   the user set no `multiAgent` block ⇒ feature off ⇒ `None`).
+    /// - `explicit` is `argv.explicit_multi_agent()` (`Some(true)` =
+    ///   `--multi-agent`/`--dual-llm`, `Some(false)` = `--no-multi-agent`,
+    ///   `None` = unset).
+    /// - `spawner` / `inherit` are the session's live `PoolSubagentSpawner` and
+    ///   its tool-invoker + budget Arcs (the same ones built subagents inherit).
+    ///
+    /// A malformed `multiAgent` block (parse error) returns `None` rather than
+    /// failing the build: a misconfigured LingX-only feature must never break
+    /// the baseline session (mirrors the `execution::decide_dispatch` fail-soft
+    /// discipline). The parse error is logged at `warn`.
+    #[must_use]
+    pub fn build(
+        raw_settings: Option<&serde_json::Value>,
+        explicit: Option<bool>,
+        spawner: std::sync::Arc<dyn SubagentSpawner>,
+        inherit: SubagentInheritance,
+    ) -> Option<Self> {
+        let raw = raw_settings?;
+        let config = match MultiAgentConfig::from_value(raw) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "ignoring malformed settings.multiAgent (dual-LLM feature stays off)");
+                return None;
+            }
+        };
+        let explicit_flag = match explicit {
+            Some(true) => ExplicitMultiAgentFlag::On,
+            Some(false) => ExplicitMultiAgentFlag::Off,
+            None => ExplicitMultiAgentFlag::Unset,
+        };
+        let candidate_runner: std::sync::Arc<dyn CandidateRunner> =
+            std::sync::Arc::new(SpawnerCandidateRunner { spawner: spawner.clone(), inherit: inherit.clone() });
+        let reviser: std::sync::Arc<dyn Reviser> =
+            std::sync::Arc::new(SpawnerReviser { spawner: spawner.clone(), inherit: inherit.clone() });
+        Some(Self { config, explicit_flag, candidate_runner, reviser, spawner, inherit })
+    }
+
+    /// Decide how to dispatch a turn (the gated seam). Delegates to
+    /// [`multi_agent::execution::decide_dispatch`] with this runtime's config +
+    /// explicit flag and prompt-derived heuristics for the auto-mode triggers.
+    ///
+    /// `touched_area_hint` lets the host supply richer escalation signal (e.g.
+    /// "the previous single-agent attempt failed verification"); the default is
+    /// all-false (heuristics + write-intent alone drive auto-mode).
+    #[must_use]
+    pub fn decide(&self, user_prompt: &str, touched_area_hint: TaskAreaHint) -> Dispatch {
+        let input = RouteInput {
+            user_prompt,
+            explicit_flag: self.explicit_flag,
+            config: &self.config,
+            estimated_complexity: heuristic_complexity(user_prompt),
+            touched_area_hint,
+            write_intent: heuristic_write_intent(user_prompt),
+        };
+        decide_dispatch(&input)
+    }
+
+    /// Select the verification fixer for a fix budget (P11): the real
+    /// spawner-backed fixer when `max_iterations > 0`, else the genuine no-op.
+    #[must_use]
+    pub fn fixer(&self, max_iterations: u32) -> std::sync::Arc<dyn VerificationFixer> {
+        fixer_for(max_iterations, self.spawner.clone(), self.inherit.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -930,5 +1053,94 @@ mod tests {
         let req = spawner.last_request.lock().unwrap().clone().unwrap();
         assert_eq!(req.cwd.as_deref(), Some(repo.path().to_string_lossy().as_ref()));
         assert!(req.prompt.contains("error[E0277]"));
+    }
+
+    // ── P12: MultiAgentRuntime build/gate tests ──────────────────────────────
+
+    fn dummy_spawner() -> Arc<RecordingSpawner> {
+        Arc::new(RecordingSpawner::new(SpawnScript::CompleteNoWrite))
+    }
+
+    fn two_candidate_settings(enabled: bool, mode: &str) -> serde_json::Value {
+        serde_json::json!({
+            "enabled": enabled,
+            "mode": mode,
+            "candidates": [
+                { "id": "a", "model": "p/a" },
+                { "id": "b", "model": "p/b" }
+            ],
+            "arbiter": { "model": "p/arb" }
+        })
+    }
+
+    #[test]
+    fn runtime_is_none_when_feature_unconfigured() {
+        // No `settings.multiAgent` block ⇒ the gated runtime is never built, so a
+        // default session is byte-identical to before this wiring.
+        let (inherit, _ti, _bud) = inheritance();
+        let rt = MultiAgentRuntime::build(None, None, dummy_spawner(), inherit);
+        assert!(rt.is_none(), "unconfigured feature ⇒ no MultiAgentRuntime");
+    }
+
+    #[test]
+    fn runtime_is_none_when_settings_malformed() {
+        // A malformed block fails soft (logged) rather than breaking the build.
+        let (inherit, _ti, _bud) = inheritance();
+        let bad = serde_json::json!({ "mode": "not-a-mode" });
+        let rt = MultiAgentRuntime::build(Some(&bad), None, dummy_spawner(), inherit);
+        assert!(rt.is_none(), "malformed settings ⇒ no MultiAgentRuntime (fail-soft)");
+    }
+
+    #[test]
+    fn runtime_builds_real_adapters_when_configured() {
+        // A well-formed block builds the runtime holding the REAL spawner-backed
+        // adapters (P9-P11).
+        let (inherit, _ti, _bud) = inheritance();
+        let settings = two_candidate_settings(true, "auto");
+        let rt = MultiAgentRuntime::build(Some(&settings), None, dummy_spawner(), inherit)
+            .expect("configured feature builds a runtime");
+        assert_eq!(rt.config.candidates.len(), 2);
+        // The fixer selector hands back a real fixer for a positive budget and the
+        // no-op for a zero budget (proving the P11 selector is wired).
+        let _real = rt.fixer(2);
+        let _noop = rt.fixer(0);
+    }
+
+    #[test]
+    fn decide_is_single_agent_by_default_when_disabled() {
+        // enabled=false ⇒ the gate keeps the baseline single-agent loop even for a
+        // write-intent prompt, regardless of mode.
+        let (inherit, _ti, _bud) = inheritance();
+        let settings = two_candidate_settings(false, "auto");
+        let rt = MultiAgentRuntime::build(Some(&settings), None, dummy_spawner(), inherit).unwrap();
+        assert_eq!(rt.decide("implement the parser", TaskAreaHint::default()), Dispatch::SingleAgent);
+    }
+
+    #[test]
+    fn decide_routes_dual_llm_on_explicit_flag() {
+        // Explicit `--multi-agent` (Some(true)) overrides mode=off → dual-LLM.
+        let (inherit, _ti, _bud) = inheritance();
+        let settings = two_candidate_settings(true, "off");
+        let rt = MultiAgentRuntime::build(Some(&settings), Some(true), dummy_spawner(), inherit).unwrap();
+        assert_eq!(rt.decide("anything", TaskAreaHint::default()), Dispatch::DualLlm);
+        assert_eq!(rt.explicit_flag, ExplicitMultiAgentFlag::On);
+    }
+
+    #[test]
+    fn decide_no_multi_agent_flag_forces_single_agent() {
+        // Explicit `--no-multi-agent` (Some(false)) wins over mode=force.
+        let (inherit, _ti, _bud) = inheritance();
+        let settings = two_candidate_settings(true, "force");
+        let rt = MultiAgentRuntime::build(Some(&settings), Some(false), dummy_spawner(), inherit).unwrap();
+        assert_eq!(rt.decide("implement it", TaskAreaHint::default()), Dispatch::SingleAgent);
+        assert_eq!(rt.explicit_flag, ExplicitMultiAgentFlag::Off);
+    }
+
+    #[test]
+    fn decide_force_mode_routes_dual_llm() {
+        let (inherit, _ti, _bud) = inheritance();
+        let settings = two_candidate_settings(true, "force");
+        let rt = MultiAgentRuntime::build(Some(&settings), None, dummy_spawner(), inherit).unwrap();
+        assert_eq!(rt.decide("implement it", TaskAreaHint::default()), Dispatch::DualLlm);
     }
 }

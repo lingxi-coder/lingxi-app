@@ -1170,6 +1170,21 @@ pub struct DesktopConfig {
     /// appended after the memory-hierarchy prompt (or after `system_prompt_override`
     /// when both are set). `None` (the default) keeps the assembled prompt unchanged.
     pub append_system_prompt: Option<String>,
+    /// LingXi-only: the raw `settings.multiAgent` JSON block (merged
+    /// project/user/env layers). When `Some`, `build()` parses it and assembles
+    /// the gated dual-LLM [`multi_agent_runtime::MultiAgentRuntime`] from the
+    /// session's real subagent spawner + inheritance, surfaced on
+    /// [`DesktopRuntime::multi_agent`]. `None` (the default) ⇒ the feature is
+    /// OFF and the build is byte-identical to before (no runtime constructed,
+    /// baseline single-agent turn loop untouched). A malformed block fails soft
+    /// (logged, treated as off). NOT a claude-code parity field.
+    pub multi_agent: Option<serde_json::Value>,
+    /// LingXi-only: the explicit multi-agent CLI override
+    /// (`--multi-agent`/`--dual-llm` ⇒ `Some(true)`, `--no-multi-agent` ⇒
+    /// `Some(false)`, unset ⇒ `None`), threaded from
+    /// `apps/cli argv.explicit_multi_agent()`. Only consulted when
+    /// `multi_agent` is `Some`. NOT a claude-code parity field.
+    pub explicit_multi_agent: Option<bool>,
 }
 
 impl std::fmt::Debug for DesktopConfig {
@@ -1220,6 +1235,8 @@ impl std::fmt::Debug for DesktopConfig {
             )
             .field("system_prompt_override", &self.system_prompt_override)
             .field("append_system_prompt", &self.append_system_prompt)
+            .field("multi_agent", &self.multi_agent)
+            .field("explicit_multi_agent", &self.explicit_multi_agent)
             .finish()
     }
 }
@@ -1248,6 +1265,8 @@ impl Default for DesktopConfig {
             connect_prompt: None,
             system_prompt_override: None,
             append_system_prompt: None,
+            multi_agent: None,
+            explicit_multi_agent: None,
         }
     }
 }
@@ -1405,6 +1424,16 @@ pub struct DesktopRuntime {
     /// the model's result here; the print path reads it after each turn to
     /// validate against the schema and retry. `None` for every normal run.
     pub structured_output_slot: Option<orchestrator::structured_output::StructuredOutputSlot>,
+    /// LingXi-only dual-LLM multi-agent runtime (gated, off by default).
+    /// `Some` ONLY when `DesktopConfig.multi_agent` carried a well-formed
+    /// `settings.multiAgent` block; it holds the parsed config, the resolved
+    /// explicit CLI flag, and the REAL spawner-backed candidate/reviser/fixer
+    /// adapters bound to this session's subagent spawner. A host that opts a turn
+    /// into the dual-LLM path reads it (via
+    /// [`multi_agent_runtime::MultiAgentRuntime::decide`]) to build the
+    /// `DualLlm` pipeline. `None` (the default) ⇒ the feature is off and the
+    /// baseline single-agent turn loop is untouched.
+    pub multi_agent: Option<multi_agent_runtime::MultiAgentRuntime>,
 }
 
 /// Errors surfaced while building a [`DesktopRuntime`].
@@ -3329,6 +3358,15 @@ pub async fn build(
     //        exists): a workflow's `agent()` calls inherit this invoker so their
     //        child runners dispatch tools through the parent registry.
     let local_workflow_invoker = Arc::new(DeferredToolInvoker::new());
+    // (5.46e-multi-agent) LingXi-only dual-LLM feature: the tool-invoker the
+    //        gated `MultiAgentRuntime` adapters hand to each spawned
+    //        candidate/reviser/fixer subagent (via `SubagentInheritance`), so a
+    //        dual-LLM child dispatches its Edit/Write/Bash through the SAME parent
+    //        registry under the recursion-lock + boot gate — same deferred pattern
+    //        as the invokers above, bound at (5.5a) once `tools` exists. Only the
+    //        gate (`cfg.multi_agent.is_some()` + the route decision) ever drives a
+    //        spawn through it, so an unconfigured session leaves it inert.
+    let multi_agent_invoker = Arc::new(DeferredToolInvoker::new());
     // Shared `budget.spent()` pool: published once the orchestrator exists
     // (built below) — the same `Arc<AtomicU64>` the main loop feeds per response,
     // so a workflow's `spent()` reads main loop + all workflows. Same deferred
@@ -3600,12 +3638,16 @@ pub async fn build(
         provider: tool_provider,
         default_model: orch_cfg.model.clone(),
         worktree: Arc::new(PosixWorktreeManager::new(cwd.clone())),
-        subagent_spawner: Some(subagent_spawner),
+        // Cloned (not moved) so the gated LingXi-only `MultiAgentRuntime` below
+        // can inherit the SAME spawner Arc the orchestrator holds.
+        subagent_spawner: Some(subagent_spawner.clone()),
         task_registry: Some(
             task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>
         ),
         mailbox_router: coordinator_mailbox,
-        budget_enforcer: Some(budget_enforcer),
+        // Cloned (not moved) so the gated `MultiAgentRuntime` below inherits the
+        // SAME budget enforcer Arc.
+        budget_enforcer: Some(budget_enforcer.clone()),
         coordinator_mode: Some(
             coordinator_mode.clone() as Arc<dyn traits::coordinator_mode::CoordinatorModeHandle>
         ),
@@ -3837,6 +3879,14 @@ pub async fn build(
     //        workflow's `agent()` subagents dispatch their tools through the
     //        parent registry under the same recursion-lock + boot gate.
     local_workflow_invoker.set(Arc::new(
+        tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone()).with_gate(perms.clone()),
+    ));
+
+    // (5.5a-multi-agent) LingXi-only: bind the dual-LLM feature's
+    //        `DeferredToolInvoker` to the real `RegistryToolInvoker` now that
+    //        `tools` exists — same recursion-lock invariant + boot gate as the
+    //        invokers above. Inert unless a turn is routed into the dual-LLM path.
+    multi_agent_invoker.set(Arc::new(
         tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone()).with_gate(perms.clone()),
     ));
 
@@ -4349,6 +4399,25 @@ pub async fn build(
         .entry("anthropic".to_string())
         .or_insert(has_api_key || has_oauth);
 
+    // LingXi-only dual-LLM multi-agent feature (GATED, off by default): assemble
+    // the runtime ONLY when a `settings.multiAgent` block was threaded in. It
+    // binds the REAL session subagent spawner + the inheritance Arcs (the
+    // dual-LLM tool-invoker bound at (5.5a) + the shared budget enforcer) — the
+    // same plumbing built subagents inherit. `None` settings (every default
+    // session) ⇒ `None` runtime ⇒ the baseline single-agent turn loop is
+    // byte-identical to before this wiring. A malformed block fails soft inside
+    // `MultiAgentRuntime::build` (logged, treated as off).
+    let multi_agent = multi_agent_runtime::MultiAgentRuntime::build(
+        cfg.multi_agent.as_ref(),
+        cfg.explicit_multi_agent,
+        subagent_spawner.clone(),
+        traits::subagent_spawn::SubagentInheritance {
+            tool_invoker: multi_agent_invoker.clone()
+                as Arc<dyn traits::tool_invoker::ToolInvoker>,
+            budget: budget_enforcer.clone(),
+        },
+    );
+
     Ok(DesktopRuntime {
         orchestrator: orch,
         dispatcher,
@@ -4365,6 +4434,7 @@ pub async fn build(
         provider_adapter: provider_adapter_handle,
         credentials,
         structured_output_slot,
+        multi_agent,
     })
 }
 
@@ -4786,6 +4856,8 @@ mod tests {
             connect_prompt: None,
             system_prompt_override: None,
             append_system_prompt: None,
+            multi_agent: None,
+            explicit_multi_agent: None,
         };
         (tmp, cfg)
     }

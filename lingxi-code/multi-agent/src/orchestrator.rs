@@ -506,6 +506,7 @@ mod tests {
             request_model: name.to_string(),
             billing_model: name.to_string(),
             aliases: Vec::new(),
+            description: None,
             capabilities: Capabilities::default(),
         }
     }

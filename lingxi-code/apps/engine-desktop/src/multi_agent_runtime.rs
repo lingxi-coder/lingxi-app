@@ -760,6 +760,7 @@ mod tests {
                     request_model: request_model.into(),
                     billing_model: request_model.into(),
                     aliases: Vec::new(),
+                    description: None,
                     capabilities: Capabilities::default(),
                 }],
                 pricing: PricingConfig::default(),

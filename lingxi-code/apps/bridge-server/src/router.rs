@@ -91,6 +91,17 @@ pub trait CommandRouter: Send + Sync + 'static {
     /// `sink`. Pure side-effecting: it never blocks the caller for a turn (the
     /// turn path lives on [`crate::server::TurnDriver`]).
     async fn route(&self, command: ClientCommand, sink: Arc<dyn ClientEventSink>);
+
+    /// Dispatch a raw `/<name> [args]` line and hand back the dispatch RESULT so
+    /// the connection (which owns the [`crate::server::TurnDriver`] + queue) can
+    /// decide whether to PRINT it (display-only `type: "local"` commands) or run
+    /// it AS a turn (`type: "prompt"` commands like `/loop`, plus Markdown /
+    /// Plugin prompt commands — claude-code injects the expanded prompt as the
+    /// user message). Returns `None` when no dispatcher is wired (the connection
+    /// then falls back to the display-only `route` path).
+    async fn dispatch_slash(&self, _raw: &str) -> Option<traits::SlashDispatchResult> {
+        None
+    }
 }
 
 /// Lower an `Option<LoginInfo>` to the auth-state DTO (`current_user` → wire).
@@ -314,6 +325,11 @@ impl Drop for TaskPoll {
 
 #[async_trait]
 impl CommandRouter for EngineCommandRouter {
+    async fn dispatch_slash(&self, raw: &str) -> Option<traits::SlashDispatchResult> {
+        let dispatcher = self.dispatcher.as_ref()?;
+        Some(dispatcher.dispatch(raw).await)
+    }
+
     // The full command dispatch is one match over the command surface; splitting
     // it would scatter the one-place-routes-everything map this module exists to
     // be. (Same convention as `engine_desktop::build`.)
@@ -345,6 +361,11 @@ impl CommandRouter for EngineCommandRouter {
                     let display = match dispatcher.dispatch(&raw).await {
                         traits::SlashDispatchResult::Handled { display }
                         | traits::SlashDispatchResult::Unknown { display, .. } => display,
+                        // A `type: "prompt"` command reached the display-only
+                        // fallback (the connection should have intercepted it via
+                        // `dispatch_slash` and run it as a turn). Surface the
+                        // expanded prompt so nothing is silently dropped.
+                        traits::SlashDispatchResult::RunAsTurn { prompt } => prompt,
                         traits::SlashDispatchResult::NotASlashCommand => {
                             format!("not a slash command: {raw}")
                         }

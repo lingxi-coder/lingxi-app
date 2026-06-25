@@ -731,6 +731,15 @@ mod tests {
         use super::MsgQueueWakeupScheduler;
         use tool_cron::WakeupScheduler;
 
+        // PARITY: the sentinel resolver gate `is_loop_default_prompt_enabled`
+        // (binary `fJr`/`tengu_kairos_loop_prompt`) DEFAULTS OFF, so a sentinel
+        // passes through verbatim unless the port's `CLAUDE_CODE_LOOP_PROMPT`
+        // override (the stand-in for the server flag flip) is set. Enable it so
+        // this test exercises the resolution path, and clear the shared delivery
+        // state so the FIRST-delivery branch (full preamble) fires.
+        std::env::set_var("CLAUDE_CODE_LOOP_PROMPT", "1");
+        tool_cron::reset_autonomous_loop_delivered();
+
         let queue = Arc::new(MessageQueueManager::new());
         let runtime: Arc<dyn traits::RuntimeSpawner> = Arc::new(TestRuntime);
         let sched = MsgQueueWakeupScheduler::new(queue.clone(), runtime);
@@ -759,10 +768,12 @@ mod tests {
         assert_eq!(cmd.priority, QueuePriority::Next);
         assert_eq!(cmd.source, msgqueue::QueueSource::Cron);
         let text = cmd.text().expect("user-input text");
-        // The sentinel resolved to the synthesized autonomous-loop block.
+        // The sentinel resolved to the autonomous-loop instruction block.
         assert_ne!(text, "<<autonomous-loop-dynamic>>");
         assert!(text.contains("autonomous"));
         assert!(text.contains("ScheduleWakeup"));
+
+        std::env::remove_var("CLAUDE_CODE_LOOP_PROMPT");
     }
 
     #[tokio::test]

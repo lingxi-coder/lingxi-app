@@ -484,8 +484,26 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
             // / bridge sender), so it records the line; the ticker `use_future`'s
             // `root::pump_turn` observes the flag, drains any pasted image paths
             // (`st.paste` stays untouched here so they reach that turn), and calls
-            // `spawn_streaming_turn`. Slash commands never reach here (they
-            // intercept + return above), so this is always a real prompt.
+            // `spawn_streaming_turn`.
+            //
+            // NOTE: only the FIXED LIST of display-only builtins above (`/doctor`,
+            // `/memory`, `/theme`, `/export`, `/config`, `/status`, `/copy`,
+            // `/agents`, `/mcp`, `/hooks`, `/permissions`, `/model`, `/vim`,
+            // `/skills`, `/stats`, `/tasks`, `/help`, `/clear`, `/compact`,
+            // `/exit`) intercepts before this point. ANY OTHER slash input —
+            // including prompt-commands like `/loop` and Markdown/Plugin commands —
+            // falls through here and is sent to the model AS RAW TEXT.
+            // PARITY-TODO: the live TUI submit path does NOT consult the slash
+            // `dispatcher`, so a typed `/loop 5m /foo` is delivered verbatim
+            // instead of being expanded into the bundled-skill prompt and run as a
+            // turn (the `SlashDispatchResult::RunAsTurn` wiring in
+            // `handle_submit_line` / `run_one_submit` is exercised only by tests;
+            // it has no live caller — `pump_turn` is the production path and holds
+            // only an `OrchestratorHandle`, which exposes NO slash-dispatch seam).
+            // Closing this needs a dispatcher threaded into the TUI session (or a
+            // `dispatch_slash` method on `OrchestratorHandle`) so `pump_turn` can
+            // expand a `RunAsTurn` prompt before `spawn_streaming_turn`. The CLI,
+            // bridge, and mobile surfaces ARE correctly wired; only the TUI is not.
             st.pending_turn = Some(line.clone());
             st.push_message(RenderedMessage::UserText {
                 body: line,
@@ -670,11 +688,41 @@ fn apply_copy_command(st: &mut AppState, args: &str) {
 /// that resolve to `Handled { display: "<name>: not implemented" }`.
 /// We therefore intercept `/clear` and `/exit` *before* the dispatcher
 /// for the M6-02 contract, and let everything else fall through.
+/// Outcome of [`handle_submit_line`]: whether the caller should run a turn, and
+/// with what prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubmitDisposition {
+    /// Fully handled (slash intercept / display-only command) — no turn runs.
+    Handled,
+    /// Run a turn with the typed line as-is (plain text). The caller applies its
+    /// normal paste-pill / image expansion to `submitted`.
+    RunTyped,
+    /// Run a turn with this ALREADY-EXPANDED prompt (a `type: "prompt"` command
+    /// like `/loop` or a Markdown/Plugin command). The caller submits it
+    /// verbatim — no paste expansion (the command builder already produced the
+    /// final text).
+    RunExpanded(String),
+}
+
+/// Dispatch a submitted line through the slash `dispatcher`, expanding a
+/// prompt-command (`/loop`, Markdown/Plugin → [`SubmitDisposition::RunExpanded`])
+/// or surfacing a display-only builtin ([`SubmitDisposition::Handled`]).
+///
+/// PARITY-TODO / WARNING: this fn (and [`run_one_submit`]) is NOT on the live
+/// production submit path. The interactive TUI submits via the SYNC
+/// `dispatch(KeyAction::Submit)` → `AppState::pending_turn` → `root::pump_turn`,
+/// which holds only an `OrchestratorHandle` and never consults a slash
+/// dispatcher — so a typed `/loop` is sent to the model as raw text there (see
+/// the PARITY-TODO at the `pending_turn` assignment in `dispatch`). The only
+/// callers of this fn are unit/integration tests. It models the CORRECT
+/// expand-then-run behavior and is ready to wire once a `SlashCommandDispatcher`
+/// is threaded into the TUI session/`pump_turn`; until then it must not be
+/// mistaken for live coverage of typed-`/loop` expansion.
 pub async fn handle_submit_line(
     st: &mut AppState,
     line: &str,
     dispatcher: &dyn traits::SlashCommandDispatcher,
-) -> bool {
+) -> SubmitDisposition {
     if let Some(cmd) = line.strip_prefix('/') {
         // Local intercepts (M5-09 stubs don't yet do these).
         let trimmed = cmd.split_whitespace().next().unwrap_or("");
@@ -687,11 +735,11 @@ pub async fn handle_submit_line(
                 // (`has_shown_overage_notification` deliberately NOT reset —
                 // TS component state survives transcript clears).
                 st.last_rate_limit_text = None;
-                return false;
+                return SubmitDisposition::Handled;
             }
             "exit" | "quit" => {
                 st.should_exit = true;
-                return false;
+                return SubmitDisposition::Handled;
             }
             _ => {}
         }
@@ -705,14 +753,21 @@ pub async fn handle_submit_line(
                     timestamp: chrono::Utc::now().timestamp(),
                     is_error: false,
                 });
+                return SubmitDisposition::Handled;
+            }
+            // A prompt-expanding command (`/loop`, Markdown/Plugin): the expanded
+            // prompt becomes the user turn (claude-code `type: "prompt"`), so the
+            // caller runs the model with it instead of printing it.
+            traits::SlashDispatchResult::RunAsTurn { prompt } => {
+                return SubmitDisposition::RunExpanded(prompt);
             }
             traits::SlashDispatchResult::NotASlashCommand => {
                 // Shouldn't happen — we stripped the leading "/" already.
             }
         }
-        return false;
+        return SubmitDisposition::Handled;
     }
-    true // plain text — caller runs `orchestrator.run_turn`
+    SubmitDisposition::RunTyped // plain text — caller runs `orchestrator.run_turn`
 }
 
 /// Build the full `ReplScreen` element from an `AppState` snapshot for
@@ -1241,10 +1296,14 @@ pub async fn run_one_submit(
     orch: &dyn ConversationOrchestratorTrait,
     dispatcher: &dyn traits::SlashCommandDispatcher,
 ) {
-    let should_run = handle_submit_line(st, submitted, dispatcher).await;
-    if !should_run {
-        return;
-    }
+    // A `type: "prompt"` command (`/loop`, Markdown/Plugin) yields an
+    // already-expanded prompt to run verbatim; plain text runs the typed line
+    // (after paste/image expansion); everything else is fully handled.
+    let expanded_override = match handle_submit_line(st, submitted, dispatcher).await {
+        SubmitDisposition::Handled => return,
+        SubmitDisposition::RunTyped => None,
+        SubmitDisposition::RunExpanded(prompt) => Some(prompt),
+    };
     let cancel = tokio_util::sync::CancellationToken::new();
     let turn_id = next_turn_id();
     st.in_flight_turn = Some(crate::state::TurnInFlight {
@@ -1257,7 +1316,6 @@ pub async fn run_one_submit(
     // paste registry (images AND pasted-text pairs), so pasted-text must be
     // drained first or it's lost.
     let pasted_texts = st.paste.take_pasted_texts();
-    let expanded = crate::components::prompt_input::expand_pasted_text_refs(submitted, &pasted_texts);
     // (MULTIMODAL.1) Consume any pasted/dragged image paths captured in the
     // prompt's paste registry so they ride along to the model as real image
     // content blocks (the `[Image #N]` placeholders in `submitted` point back
@@ -1267,6 +1325,13 @@ pub async fn run_one_submit(
     // pasted the list is empty and the trait's default delegates to the
     // text-only `run_turn`, byte-identical to the prior behavior.
     let image_paths = st.paste.take_image_paths();
+    // A `RunAsTurn` command supplies the final prompt directly (no paste-pill
+    // expansion — the builder already produced the text); plain text gets the
+    // normal paste-ref expansion of the typed line.
+    let expanded = match expanded_override {
+        Some(prompt) => prompt,
+        None => crate::components::prompt_input::expand_pasted_text_refs(submitted, &pasted_texts),
+    };
     let outcome = orch
         .run_turn_with_images(&expanded, &image_paths, cancel)
         .await;
@@ -1720,8 +1785,8 @@ mod dispatch_tests {
         assert_eq!(st.messages.len(), 1);
 
         let disp = dispatcher();
-        let should_run = handle_submit_line(&mut st, "/clear", &disp).await;
-        assert!(!should_run);
+        let disp_result = handle_submit_line(&mut st, "/clear", &disp).await;
+        assert_eq!(disp_result, SubmitDisposition::Handled);
         assert!(st.messages.is_empty());
     }
 
@@ -1731,6 +1796,46 @@ mod dispatch_tests {
         let disp = dispatcher();
         handle_submit_line(&mut st, "/exit", &disp).await;
         assert!(st.should_exit);
+    }
+
+    /// A `type: "prompt"` command (Markdown here; bundled `/loop` shares the
+    /// path) yields its EXPANDED prompt as a `RunExpanded` disposition — the
+    /// caller runs the model with it — while a builtin stays display-only
+    /// (`Handled`). Proves Item #2's routing distinction at the TUI surface.
+    #[tokio::test]
+    async fn prompt_command_runs_as_turn_builtin_stays_display() {
+        use command_api::model::{
+            CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind,
+        };
+        use command_api::{CommandRegistry, RegistrySlashDispatcher};
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        let mut reg = CommandRegistry::new();
+        // A builtin stub (display-only) + a markdown prompt command.
+        command_core::register_all_builtin_commands(&mut reg);
+        reg.register_command(SlashCommand {
+            name: "deploy".to_string(),
+            description: "Deploy".to_string(),
+            source: CommandSource::Project,
+            kind: SlashCommandKind::Markdown {
+                file_path: std::path::PathBuf::from("/tmp/deploy.md"),
+                frontmatter: CommandFrontmatter::default(),
+                prompt_template: "Ship $ARGUMENTS".to_string(),
+            },
+            ..SlashCommand::default()
+        });
+        let disp = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
+
+        // Markdown prompt command → RunExpanded with the expanded body.
+        let mut st = s();
+        let r = handle_submit_line(&mut st, "/deploy prod", &disp).await;
+        assert_eq!(r, SubmitDisposition::RunExpanded("Ship prod".to_string()));
+
+        // A builtin (`/help`) stays display-only — never runs a turn.
+        let mut st2 = s();
+        let r2 = handle_submit_line(&mut st2, "/help", &disp).await;
+        assert_eq!(r2, SubmitDisposition::Handled);
     }
 
     #[test]

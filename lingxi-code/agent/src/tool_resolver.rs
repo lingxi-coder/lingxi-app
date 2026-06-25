@@ -59,21 +59,44 @@ impl AgentToolResolver {
     /// v2.1.186 `HDd` ant-gates it exactly like `Agent`).
     #[must_use]
     pub fn all_agent_disallowed_tools(is_ant: bool) -> Vec<&'static str> {
+        // PARITY: binary 2.1.191 `_qd(e)` (cc_all.txt:16041079):
+        //   `function _qd(e){return new Set([eW,WD,Kz,nm,Kst,tHe,
+        //                                    ...e!=="ant"?[av]:[],Kh])}`
+        // resolving the minified consts (grounded in the same binary):
+        //   eW="TaskOutput"  WD="ExitPlanMode"  Kz="EnterPlanMode"
+        //   nm="AskUserQuestion"  Kst="ConnectGitHub"  tHe="WaitForMcpServers"
+        //   av="Workflow" (non-ant only)  Kh="ScheduleWakeup"
+        // `nHe=_qd("external")` is the set the subagent tool-filter consults
+        // (`if(nHe.has(a.name))return!1`, cc_all.txt:19974083) — so ScheduleWakeup,
+        // ConnectGitHub and WaitForMcpServers ARE flatly denied to every subagent.
+        // ScheduleWakeup denial is load-bearing here: the WakeupSchedulerCell is
+        // process-global, so an un-denied ScheduleWakeup would let a default
+        // subagent schedule a real wakeup. (The companion advisory `nke`/NKE_BASE
+        // in runner.rs is only a message; the real removal happens HERE.)
         let mut names = vec![
             "TaskOutput",
             "ExitPlanMode",
             "EnterPlanMode",
             "AskUserQuestion",
+            "ConnectGitHub",
+            "WaitForMcpServers",
+            "ScheduleWakeup",
+            // PORT DIVERGENCE (pre-existing, intentionally retained): the 2.1.191
+            // `_qd` set does NOT contain `TaskStop` or `Agent`; the binary instead
+            // (a) allows `TaskStop` to subagents and (b) depth-GATES `Agent` via
+            // `if(Xl(a,is))return s<TFt` (TFt=5), cc_all.txt:19974083 — NOT a flat
+            // denial. The port has no per-spawn recursion-depth counter, so it
+            // keeps the conservative flat-deny of `Agent` (non-ant) below and
+            // `TaskStop` here to prevent unbounded subagent recursion / cross-
+            // thread task-stop. See PARITY-TODO.
+            // PARITY-TODO: port the binary's Agent recursion-depth gate (s<TFt=5)
+            // and allow `TaskStop` in subagents to match `_qd` exactly; until then
+            // these two entries are a safe superset of the binary's denials.
             "TaskStop",
         ];
-        // claude: `...(process.env.USER_TYPE === 'ant' ? [] : [AGENT_TOOL_NAME])`
-        // and, in the same agent-disallowed set (binary v2.1.186 `HDd`/`nke`),
-        // `...(USER_TYPE !== 'ant' ? [WORKFLOW_TOOL_NAME] : [])`. Both gate on the
-        // EXACT `USER_TYPE === 'ant'` flag, so non-ant subagents may not recurse
-        // into either `Agent` or `Workflow`; ant subagents keep both. The
-        // `Workflow` tool is now registered in the LingXi registry (it was not
-        // when this list was first written), so it MUST be dropped here to honour
-        // the explicit-opt-in contract and prevent recursive workflow fan-out.
+        // claude: `...(USER_TYPE !== 'ant' ? [WORKFLOW_TOOL_NAME] : [])` (`av`,
+        // non-ant only) — ant subagents keep `Workflow`. `Agent` is the port's
+        // conservative stand-in for the binary's depth gate (see above).
         if !is_ant {
             names.push("Agent");
             names.push("Workflow");
@@ -384,6 +407,23 @@ mod tests {
         assert!(set.contains(&"TaskStop"));
         // non-ant: Workflow is dropped from subagent pools (binary HDd ant-gate).
         assert!(set.contains(&"Workflow"));
+    }
+
+    /// The binary's `_qd`/`nHe` set (cc_all.txt:16041079) flatly denies
+    /// `ScheduleWakeup`, `ConnectGitHub`, and `WaitForMcpServers` to every
+    /// subagent. Denying `ScheduleWakeup` is load-bearing: the process-global
+    /// `WakeupSchedulerCell` means an un-denied call would schedule a real wakeup.
+    #[test]
+    fn core_denies_schedule_wakeup_and_friends() {
+        for is_ant in [false, true] {
+            let set = AgentToolResolver::all_agent_disallowed_tools(is_ant);
+            assert!(
+                set.contains(&"ScheduleWakeup"),
+                "ScheduleWakeup must be denied to subagents (is_ant={is_ant})"
+            );
+            assert!(set.contains(&"ConnectGitHub"));
+            assert!(set.contains(&"WaitForMcpServers"));
+        }
     }
 
     #[test]

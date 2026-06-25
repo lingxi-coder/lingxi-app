@@ -10,10 +10,22 @@ use async_trait::async_trait;
 /// Result of [`SlashCommandDispatcher::dispatch`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashDispatchResult {
-    /// Handler ran and returned a display string.
+    /// Handler ran and returned a display string. The host PRINTS this (e.g.
+    /// `/help`, `/model`, builtins) — it is NOT fed back to the model. Mirrors
+    /// claude-code's `type: "local" | "local-jsx"` commands.
     Handled {
         /// Text the dispatcher wants to surface to the user.
         display: String,
+    },
+    /// A prompt-expanding slash command (claude-code `type: "prompt"`: bundled
+    /// skills like `/loop`, plus Markdown/Plugin prompt commands). The host must
+    /// feed `prompt` to its `run_turn` path AS the user turn — running the model
+    /// — rather than printing it. This is what makes a typed `/loop 5m /foo`
+    /// actually schedule + execute, matching the binary which injects the
+    /// `getPromptForCommand` result as the user message.
+    RunAsTurn {
+        /// The expanded prompt text to submit as the user turn.
+        prompt: String,
     },
     /// Input did not start with `/` — treat as a regular user prompt.
     NotASlashCommand,

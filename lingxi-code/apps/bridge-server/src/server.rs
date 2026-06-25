@@ -456,6 +456,57 @@ impl BridgeConnection {
                 self.resolve_permission(request_id, PermissionResponseDto::Deny)
                     .await;
             }
+            // A slash command may be a `type: "prompt"` command (`/loop`,
+            // Markdown/Plugin): claude-code injects its expanded prompt as the
+            // user turn. Pre-dispatch via the router's dispatcher (which the
+            // connection cannot reach otherwise) so a `RunAsTurn` result is fed
+            // through the SAME enqueue-or-spawn turn path as a `SendPrompt` (the
+            // connection owns the driver + queue + turn-running flag). Display-
+            // only / unknown / no-dispatcher cases fall back to the router's
+            // text-surface path.
+            ClientCommand::RunSlashCommand { raw } => {
+                let disposition = match self.router.as_ref() {
+                    Some(router) => router.dispatch_slash(&raw).await,
+                    None => None,
+                };
+                match disposition {
+                    Some(traits::SlashDispatchResult::RunAsTurn { prompt }) => {
+                        // Run the expanded prompt exactly like a direct user
+                        // prompt (enqueue-or-spawn; no images).
+                        self.handle_send_prompt(prompt, Vec::new()).await;
+                    }
+                    // Display-only / unknown result: surface the SAME dispatch
+                    // result's text directly. We must NOT re-`route()` here —
+                    // `route(RunSlashCommand)` calls `dispatcher.dispatch()` a
+                    // SECOND time (router.rs), which would re-run the builtin's
+                    // `handle()` (and any of its `EmitEffects`/`InjectMessage`
+                    // side effects) twice and discard the first result. Reuse
+                    // the already-computed disposition instead.
+                    Some(traits::SlashDispatchResult::Handled { display })
+                    | Some(traits::SlashDispatchResult::Unknown { display, .. }) => {
+                        self.event_sink()
+                            .emit(ClientEvent::TextDelta { text: display })
+                            .await;
+                    }
+                    Some(traits::SlashDispatchResult::NotASlashCommand) => {
+                        self.event_sink()
+                            .emit(ClientEvent::TextDelta {
+                                text: format!("not a slash command: {raw}"),
+                            })
+                            .await;
+                    }
+                    // No dispatcher wired: delegate to the router's text-surface
+                    // path, which emits the "no slash-command dispatcher wired"
+                    // error (unchanged behavior). It dispatches at most once.
+                    None => {
+                        if let Some(router) = self.router.clone() {
+                            router
+                                .route(ClientCommand::RunSlashCommand { raw }, self.event_sink())
+                                .await;
+                        }
+                    }
+                }
+            }
             // The FULL command surface (model, listings, slash, tasks, session
             // control) is delegated to the bound [`CommandRouter`] (F2-08), which
             // reaches the engine handles and pushes replies out through the
@@ -715,6 +766,113 @@ mod tests {
         assert_eq!(
             got.1, images,
             "the SendPrompt images must reach run_turn_with_images, not be dropped"
+        );
+    }
+
+    /// A [`CommandRouter`] that returns a fixed dispatch result for
+    /// `dispatch_slash` and records whether the display-only `route` fallback was
+    /// taken. Lets a test prove a `type: "prompt"` slash command (`RunAsTurn`)
+    /// reaches `handle_send_prompt` (driving the [`TurnDriver`]) while a display-
+    /// only result instead goes through `route`.
+    struct StubRouter {
+        result: traits::SlashDispatchResult,
+        routed: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl crate::router::CommandRouter for StubRouter {
+        async fn route(
+            &self,
+            _command: ClientCommand,
+            _sink: Arc<dyn client_adapter::ClientEventSink>,
+        ) {
+            self.routed.store(true, Ordering::SeqCst);
+        }
+        async fn dispatch_slash(&self, _raw: &str) -> Option<traits::SlashDispatchResult> {
+            Some(self.result.clone())
+        }
+    }
+
+    /// A `RunSlashCommand` whose dispatcher yields `RunAsTurn` (a `type: "prompt"`
+    /// command like `/loop`) must be fed through the SAME enqueue-or-spawn turn
+    /// path as a `SendPrompt` — driving the bound `TurnDriver` with the EXPANDED
+    /// prompt — and must NOT take the display-only `route` fallback.
+    #[tokio::test]
+    async fn run_slash_command_run_as_turn_drives_turn() {
+        let captured = Arc::new(Mutex::new(None));
+        let notify = Arc::new(Notify::new());
+        let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
+            captured: captured.clone(),
+            notify: notify.clone(),
+        });
+        let routed = Arc::new(AtomicBool::new(false));
+        let router: Arc<dyn crate::router::CommandRouter> = Arc::new(StubRouter {
+            result: traits::SlashDispatchResult::RunAsTurn {
+                prompt: "EXPANDED /loop prompt".to_string(),
+            },
+            routed: routed.clone(),
+        });
+        let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
+        let connection = BridgeConnection::new()
+            .bind(gate, driver)
+            .bind_router(router);
+
+        connection
+            .dispatch(ClientCommand::RunSlashCommand {
+                raw: "/loop 5m /babysit-prs".to_string(),
+            })
+            .await;
+
+        // `dispatch` SPAWNS the turn; wait for the recording driver to fire.
+        notify.notified().await;
+        let got = captured.lock().await.clone().expect("driver must run");
+        assert_eq!(got.0, "EXPANDED /loop prompt");
+        assert!(
+            !routed.load(Ordering::SeqCst),
+            "a RunAsTurn result must NOT take the display-only route fallback"
+        );
+    }
+
+    /// A `RunSlashCommand` whose dispatcher yields a display-only `Handled` result
+    /// (a `type: "local"` command like `/help`) must surface the dispatch result's
+    /// text DIRECTLY and must NOT drive a turn — and crucially must NOT re-`route()`
+    /// (which would call `dispatcher.dispatch()` a SECOND time, re-running the
+    /// builtin's `handle()` and any of its side effects). Reusing the already-
+    /// computed `dispatch_slash` disposition is the no-double-dispatch fix.
+    #[tokio::test]
+    async fn run_slash_command_handled_surfaces_text_without_redispatch() {
+        let captured = Arc::new(Mutex::new(None));
+        let notify = Arc::new(Notify::new());
+        let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
+            captured: captured.clone(),
+            notify,
+        });
+        let routed = Arc::new(AtomicBool::new(false));
+        let router: Arc<dyn crate::router::CommandRouter> = Arc::new(StubRouter {
+            result: traits::SlashDispatchResult::Handled {
+                display: "help text".to_string(),
+            },
+            routed: routed.clone(),
+        });
+        let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
+        let connection = BridgeConnection::new()
+            .bind(gate, driver)
+            .bind_router(router);
+
+        connection
+            .dispatch(ClientCommand::RunSlashCommand {
+                raw: "/help".to_string(),
+            })
+            .await;
+
+        assert!(
+            !routed.load(Ordering::SeqCst),
+            "a display-only Handled result must NOT re-route (no double-dispatch); \
+             the already-computed disposition's text is surfaced directly"
+        );
+        assert!(
+            captured.lock().await.is_none(),
+            "a display-only command must NOT drive a turn"
         );
     }
 

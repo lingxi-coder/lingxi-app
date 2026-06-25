@@ -185,6 +185,33 @@ where
             | SlashDispatchResult::Unknown { display, .. } => {
                 sink.command_output(input, &display).await;
             }
+            // A prompt-expanding command (`/loop`, Markdown/Plugin) runs AS a
+            // turn: feed the expanded prompt to the model instead of printing it
+            // (claude-code `type: "prompt"`). This makes a typed `/loop 5m /foo`
+            // actually schedule the cron + execute now.
+            SlashDispatchResult::RunAsTurn { prompt } => {
+                let token = CancellationToken::new();
+                let _sigint_guard = sigint.arm_for_turn(token.clone());
+                sink.turn_start().await;
+                let outcome = run_turn_fn(prompt, token).await;
+                match outcome {
+                    Ok(TurnOutcome::EndTurn) => {}
+                    Ok(TurnOutcome::MaxTurns) => {
+                        sink.text("[turn ended: reached MAX_TURNS_PER_CONVERSATION]\n")
+                            .await;
+                    }
+                    Ok(TurnOutcome::Cancelled) => {
+                        let _ = stderr
+                            .write_all(
+                                b"^C (turn cancelled; press Ctrl+C again or Ctrl+D to exit)\n",
+                            )
+                            .await;
+                    }
+                    Err(e) => {
+                        sink.error("runtime", &e.to_string()).await;
+                    }
+                }
+            }
             SlashDispatchResult::NotASlashCommand => {
                 // Dispatcher contract: won't happen for "/" prefixed input.
             }
@@ -516,6 +543,94 @@ mod tests {
             1,
             "run_turn_fn must have locked the shared reader and read `y\\n` — \
              proving step dropped the guard before the turn"
+        );
+    }
+
+    /// Dispatcher that returns a fixed `SlashDispatchResult` for any slash input
+    /// — lets a test drive the RunAsTurn / Handled arms deterministically.
+    struct FixedDispatcher(SlashDispatchResult);
+    #[async_trait::async_trait]
+    impl SlashCommandDispatcher for FixedDispatcher {
+        async fn dispatch(&self, _raw: &str) -> SlashDispatchResult {
+            self.0.clone()
+        }
+    }
+
+    /// Run `step` once with the given dispatcher + a `run_turn_fn` that records
+    /// every prompt it is invoked with. Returns `(outcome, recorded_prompts)`.
+    async fn run_step_slash(
+        dispatcher: &dyn SlashCommandDispatcher,
+        line: &str,
+    ) -> (StepOutcome, Arc<Mutex<Vec<String>>>) {
+        let (mut writer, client) = duplex(64);
+        let stdin = shared_stdin(client);
+        let mut stderr = Vec::new();
+        let handle: Arc<dyn OrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
+        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new());
+        let sigint = SigintSource::spawn();
+
+        let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+        let prompts_for_turn = prompts.clone();
+        let run_turn_fn = move |prompt: String, _token: CancellationToken| {
+            let p = prompts_for_turn.clone();
+            Box::pin(async move {
+                p.lock().await.push(prompt);
+                Ok(TurnOutcome::EndTurn)
+            }) as BoxFuture<'static, Result<TurnOutcome, OrchestratorError>>
+        };
+
+        let line_owned = format!("{line}\n");
+        let writer_task = tokio::spawn(async move {
+            let _ = writer.write_all(line_owned.as_bytes()).await;
+            let _ = writer.flush().await;
+            writer
+        });
+
+        let outcome = step(
+            stdin,
+            &mut stderr,
+            dispatcher,
+            handle,
+            sink,
+            &sigint,
+            None,
+            run_turn_fn,
+        )
+        .await;
+        let _ = writer_task.await;
+        (outcome, prompts)
+    }
+
+    /// A prompt-expanding command (`/loop`, Markdown/Plugin) → the expanded
+    /// prompt is fed to `run_turn` verbatim, not printed. PARITY: claude-code
+    /// `getPromptForCommand` result becomes the user turn.
+    #[tokio::test]
+    async fn run_as_turn_feeds_expanded_prompt_to_run_turn() {
+        let dispatcher = FixedDispatcher(SlashDispatchResult::RunAsTurn {
+            prompt: "EXPANDED /loop body".to_string(),
+        });
+        let (outcome, prompts) = run_step_slash(&dispatcher, "/loop 5m /foo").await;
+        assert_eq!(outcome, StepOutcome::Continue);
+        let recorded = prompts.lock().await.clone();
+        assert_eq!(
+            recorded,
+            vec!["EXPANDED /loop body".to_string()],
+            "RunAsTurn must invoke run_turn_fn with the expanded prompt exactly once"
+        );
+    }
+
+    /// A display-only builtin (`/help`, `/model`) stays display-only — it must
+    /// NOT run a turn.
+    #[tokio::test]
+    async fn handled_builtin_stays_display_only() {
+        let dispatcher = FixedDispatcher(SlashDispatchResult::Handled {
+            display: "Available commands: ...".to_string(),
+        });
+        let (outcome, prompts) = run_step_slash(&dispatcher, "/help").await;
+        assert_eq!(outcome, StepOutcome::Continue);
+        assert!(
+            prompts.lock().await.is_empty(),
+            "a Handled (display-only) command must NOT invoke run_turn_fn"
         );
     }
 }

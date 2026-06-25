@@ -1066,6 +1066,20 @@ pub async fn run_slash_command(input: &str, runtime: &Runtime, sink: &dyn Output
             sink.command_output("", &display).await;
             exit_codes::SUCCESS
         }
+        // A prompt-expanding command (`/loop`, Markdown/Plugin): run the expanded
+        // prompt AS a turn through the orchestrator (claude-code `type: "prompt"`)
+        // instead of just printing it, so a `/loop` invocation actually schedules
+        // + executes.
+        SlashDispatchResult::RunAsTurn { prompt } => {
+            sink.turn_start().await;
+            match runtime.orchestrator.run_turn(&prompt).await {
+                Ok(_outcome) => exit_codes::SUCCESS,
+                Err(e) => {
+                    sink.error("runtime", &e.to_string()).await;
+                    exit_codes::RUNTIME_ERROR
+                }
+            }
+        }
         SlashDispatchResult::Unknown { name: _, display } => {
             sink.command_output("", &display).await;
             exit_codes::RUNTIME_ERROR

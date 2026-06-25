@@ -15,18 +15,25 @@
     clippy::doc_markdown,
     clippy::manual_let_else
 )]
+pub mod autonomous_loop;
 pub mod cron_delete;
 pub mod cron_list;
 pub mod remote_trigger;
 pub mod schedule_cron;
 pub mod wakeup;
+pub use autonomous_loop::{
+    is_autonomous_loop_sentinel, is_loop_default_sentinel, is_loop_file_sentinel, read_loop_file,
+    reset_autonomous_loop_delivered, resolve_autonomous_loop_fire, resolve_loop_default_fire,
+    resolve_loop_file_fire, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL, AUTONOMOUS_LOOP_PREAMBLE,
+    AUTONOMOUS_LOOP_SENTINEL, LOOP_FILE_DYNAMIC_SENTINEL, LOOP_FILE_SENTINEL,
+};
 pub use cron_delete::CronDeleteTool;
 pub use cron_list::CronListTool;
 pub use remote_trigger::{ClaudeAiAuthProvider, RemoteTriggerTool};
 pub use schedule_cron::CronCreateTool;
 pub use wakeup::{
     clamp_delay_seconds, resolve_wakeup_prompt, ScheduleWakeupTool, WakeupScheduler,
-    WakeupSchedulerCell, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL, SCHEDULE_WAKEUP_TOOL_NAME,
+    WakeupSchedulerCell, SCHEDULE_WAKEUP_TOOL_NAME,
 };
 /// Register the cron scheduling tools against `reg`.
 ///
@@ -61,8 +68,12 @@ pub fn register_all_with_auth(
     // `ScheduleWakeup` (/loop dynamic mode) — registered with an EMPTY set-once
     // wakeup cell; the cell clone is returned so the composition root can fill it
     // once the per-connection queue + spawner exist (`boot::assemble`).
-    // Subagent gating is handled in `agent/src/runner.rs` (`NKE_BASE`), so the
-    // tool is refused inside subagents and only effective in the MAIN loop.
+    // Subagent gating is handled in `agent/src/tool_resolver.rs`
+    // (`all_agent_disallowed_tools`, the binary `_qd`/`nHe` removal set which
+    // includes `ScheduleWakeup`), so the tool is STRIPPED from a subagent's
+    // resolved pool and only effective in the MAIN loop. (`NKE_BASE` in
+    // `runner.rs` is only the companion advisory note appended to a refusal — it
+    // performs no filtering; the actual removal is in `tool_resolver.rs`.)
     //
     // DECISION: registered on BOTH desktop and mobile through this shared path.
     // On mobile (and any host that owns no per-connection queue) the cell is

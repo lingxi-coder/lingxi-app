@@ -30,9 +30,13 @@ fn register_loop_skill(reg: &mut CommandRegistry, cron_enabled: bool) {
         return;
     }
     reg.register_command(SlashCommand {
-        // loop.ts:76.
+        // PARITY: binary `_Zm` (cc_all.txt:521920) `name:"loop"`.
         name: "loop".into(),
-        // loop.ts:77-78.
+        // PARITY: binary `_Zm` `get description(){if(q_e())return"…self-pace.";
+        // return"…defaults to 10m)"}` (cc_all.txt:521920). `q_e()` =
+        // `tengu_kairos_loop_dynamic` defaults FALSE and is ABSENT from the
+        // port's `features` crate (no flag backend) → the cron variant, which is
+        // the shipped binary default.
         description:
             "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo, defaults to 10m)"
                 .into(),
@@ -44,17 +48,28 @@ fn register_loop_skill(reg: &mut CommandRegistry, cron_enabled: bool) {
         // Sets `is_bundled` in the skill listing + satisfies the listing's
         // loadedFrom ∈ {bundled,…} filter.
         loaded_from: Some("bundled".into()),
-        // loop.ts:79-80.
+        // PARITY: binary `_Zm` `aliases:["proactive"]` (cc_all.txt:521920).
+        aliases: vec!["proactive".into()],
+        // PARITY: binary `_Zm` `whenToUse` (cc_all.txt:521920).
         when_to_use: Some(
             "When the user wants to set up a recurring task, poll for status, or run something repeatedly on an interval (e.g. \"check the deploy every 5 minutes\", \"keep running /babysit-prs\"). Do NOT invoke for one-off tasks."
                 .into(),
         ),
-        // loop.ts:81.
+        // PARITY: binary `_Zm` `get argumentHint(){if(isLoopDefaultPromptEnabled())
+        // return"[interval] [prompt]";return"[interval] <prompt>"}`
+        // (cc_all.txt:521920). `isLoopDefaultPromptEnabled()` =
+        // `tengu_kairos_loop_prompt` defaults FALSE / absent → the cron variant.
         argument_hint: Some("[interval] <prompt>".into()),
-        // loop.ts:82.
+        // PARITY: binary `_Zm` `userInvocable:!0` (cc_all.txt:521920).
         user_invocable: Some(true),
         // Explicit description ⇒ listing-eligible.
         has_user_specified_description: true,
+        // PARITY-TODO: binary `_Zm` also carries
+        // `menuDescription:"Repeat a prompt or command on an interval (e.g. /loop
+        // 5m /foo)"` (cc_all.txt:521920). The port's `SlashCommand` struct
+        // (`command-api/src/model.rs`) has no `menu_description` field, so this
+        // field is dropped. Add the field + wire it through the picker to close
+        // this gap.
         ..SlashCommand::default()
     });
 }

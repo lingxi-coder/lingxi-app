@@ -292,7 +292,12 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
                         command.source,
                     )
                     .await;
-                    SlashDispatchResult::Handled { display: content }
+                    // claude-code bundled skills are `type: "prompt"` /
+                    // `userInvocable: true` (cc_all.txt:480599): the expanded
+                    // prompt becomes the user TURN, not display text. A typed
+                    // `/loop 5m /foo` must actually run the model so the cron is
+                    // scheduled + the prompt executed now.
+                    SlashDispatchResult::RunAsTurn { prompt: content }
                 }
                 None => SlashDispatchResult::Unknown {
                     name: parsed.name.clone(),
@@ -327,8 +332,14 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
                         command.source,
                     )
                     .await;
-                    SlashDispatchResult::Handled { display: content }
+                    // claude-code Markdown / Plugin prompt commands are
+                    // `type: "prompt"`: the expanded body is submitted as the
+                    // user turn (the model runs it), not printed. Mirrors the
+                    // bundled-skill path above.
+                    SlashDispatchResult::RunAsTurn { prompt: content }
                 }
+                // Expansion FAILURE stays display-only (there is no prompt to
+                // run) — surface the error text to the user instead.
                 Err(e) => SlashDispatchResult::Handled {
                     display: format!("{} expansion failed: {e}", command.name),
                 },
@@ -445,9 +456,10 @@ mod tests {
             ..SlashCommand::default()
         });
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
+        // Markdown prompt commands run AS a turn (claude-code `type: "prompt"`).
         match d.dispatch("/demo this").await {
-            SlashDispatchResult::Handled { display } => assert_eq!(display, "Use this"),
-            other => panic!("expected markdown command to dispatch, got {other:?}"),
+            SlashDispatchResult::RunAsTurn { prompt } => assert_eq!(prompt, "Use this"),
+            other => panic!("expected markdown command to run-as-turn, got {other:?}"),
         }
     }
 
@@ -481,17 +493,19 @@ mod tests {
             ..SlashCommand::default()
         });
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
-        // Non-empty args → built prompt.
+        // Non-empty args → built prompt, run AS a turn (claude-code bundled
+        // skills are `type: "prompt"` / `userInvocable`).
         match d.dispatch("/loop 5m /babysit-prs").await {
-            SlashDispatchResult::Handled { display } => {
-                assert_eq!(display, "BUILT[5m /babysit-prs]");
+            SlashDispatchResult::RunAsTurn { prompt } => {
+                assert_eq!(prompt, "BUILT[5m /babysit-prs]");
             }
-            other => panic!("expected bundled skill to dispatch, got {other:?}"),
+            other => panic!("expected bundled skill to run-as-turn, got {other:?}"),
         }
-        // Empty args → usage (still Handled, never Unknown).
+        // Empty args → usage. Still RunAsTurn (the model receives the usage as
+        // its prompt and surfaces it) — never Unknown.
         match d.dispatch("/loop").await {
-            SlashDispatchResult::Handled { display } => assert_eq!(display, "USAGE"),
-            other => panic!("expected usage, got {other:?}"),
+            SlashDispatchResult::RunAsTurn { prompt } => assert_eq!(prompt, "USAGE"),
+            other => panic!("expected usage run-as-turn, got {other:?}"),
         }
     }
 
@@ -515,8 +529,8 @@ mod tests {
         });
         let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
         match d.dispatch("/commit now").await {
-            SlashDispatchResult::Handled { display } => assert_eq!(display, "Custom now"),
-            other => panic!("expected custom markdown dispatch, got {other:?}"),
+            SlashDispatchResult::RunAsTurn { prompt } => assert_eq!(prompt, "Custom now"),
+            other => panic!("expected custom markdown run-as-turn, got {other:?}"),
         }
     }
 
@@ -825,8 +839,8 @@ mod tests {
 
         // Expansion still produces the body, AND the hook fires.
         match d.dispatch("/demo this and that").await {
-            SlashDispatchResult::Handled { display } => {
-                assert_eq!(display, "Use this and that")
+            SlashDispatchResult::RunAsTurn { prompt } => {
+                assert_eq!(prompt, "Use this and that")
             }
             other => panic!("expected markdown expansion, got {other:?}"),
         }
@@ -896,7 +910,7 @@ mod tests {
         let d = RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::Project));
 
         match d.dispatch("/demo x").await {
-            SlashDispatchResult::Handled { display } => assert_eq!(display, "Use x"),
+            SlashDispatchResult::RunAsTurn { prompt } => assert_eq!(prompt, "Use x"),
             other => panic!("expected markdown expansion, got {other:?}"),
         }
 

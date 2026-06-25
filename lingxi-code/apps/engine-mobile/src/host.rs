@@ -1451,18 +1451,43 @@ impl MobileEngineHandle {
                 Ok(())
             }
 
-            // ── Slash commands (LOSSY: display surfaced as a TextDelta) ─────
+            // ── Slash commands ──────────────────────────────────────────────
+            // Display-only (`type: "local"`) commands surface as a TextDelta; a
+            // `type: "prompt"` command (`/loop`, Markdown/Plugin) runs its
+            // expanded prompt AS a turn through the SAME streaming path as
+            // `SendPrompt` (claude-code injects the expanded prompt as the user
+            // message), so a typed `/loop` actually schedules + executes.
             ClientCommand::RunSlashCommand { raw } => {
-                let display = match self.inner.dispatcher.dispatch(&raw).await {
-                    traits::SlashDispatchResult::Handled { display }
-                    | traits::SlashDispatchResult::Unknown { display, .. } => display,
-                    traits::SlashDispatchResult::NotASlashCommand => {
-                        format!("not a slash command: {raw}")
+                match self.inner.dispatcher.dispatch(&raw).await {
+                    traits::SlashDispatchResult::RunAsTurn { prompt } => {
+                        let cancel = CancellationToken::new();
+                        *self.active_cancel.lock().await = Some(cancel.clone());
+                        let wrapper = TurnWrapper::new(self.event_sink.clone());
+                        wrapper.emit_turn_started(None).await;
+                        let orch = self.inner.orchestrator.clone();
+                        let sink = self.event_sink.clone();
+                        self.runtime.spawn(async move {
+                            if let Err(err) =
+                                orch.run_turn_streaming_with_cancel(&prompt, cancel).await
+                            {
+                                sink.emit(client_adapter::map_orchestrator_error(&err)).await;
+                            }
+                        });
                     }
-                };
-                self.event_sink
-                    .emit(ClientEvent::TextDelta { text: display })
-                    .await;
+                    traits::SlashDispatchResult::Handled { display }
+                    | traits::SlashDispatchResult::Unknown { display, .. } => {
+                        self.event_sink
+                            .emit(ClientEvent::TextDelta { text: display })
+                            .await;
+                    }
+                    traits::SlashDispatchResult::NotASlashCommand => {
+                        self.event_sink
+                            .emit(ClientEvent::TextDelta {
+                                text: format!("not a slash command: {raw}"),
+                            })
+                            .await;
+                    }
+                }
                 Ok(())
             }
 

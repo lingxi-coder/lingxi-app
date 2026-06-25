@@ -944,6 +944,37 @@ pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEnt
     entries
 }
 
+/// Cancel-safety guard for [`PoolSubagentSpawner::spawn`]. The runner runs as a
+/// DETACHED pool task (`allocate` spawns it via the `RuntimeSpawner`); the
+/// `spawn` future only pumps events and calls `deallocate` on the terminal
+/// event. If a caller races `spawn` against a `CancellationToken` and DROPS the
+/// future before that terminal event (timeout / cancel), `deallocate` would
+/// never run and the detached runner would keep executing tools + leak its
+/// slot. This guard deallocates (which `runtime.cancel`s the task) on early
+/// drop; it is disarmed on the normal terminal path.
+struct SpawnDeallocGuard {
+    pool: Arc<StateMachinePool>,
+    agent_id: AgentId,
+    armed: bool,
+}
+
+impl Drop for SpawnDeallocGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // `deallocate` is async; hand it to the current runtime best-effort. If
+        // no runtime is active (shutdown) there is nothing left to clean up.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let pool = self.pool.clone();
+            let id = self.agent_id;
+            handle.spawn(async move {
+                let _ = pool.deallocate(&id).await;
+            });
+        }
+    }
+}
+
 #[async_trait]
 impl SubagentSpawner for PoolSubagentSpawner {
     async fn spawn(
@@ -971,6 +1002,16 @@ impl SubagentSpawner for PoolSubagentSpawner {
             .allocate(ctx)
             .await
             .map_err(|e| SubagentSpawnError::Runtime(e.to_string()))?;
+
+        // Cancel-safety: deallocate the detached runner if THIS future is
+        // dropped before reaching a terminal event (disarmed on the normal
+        // path below). Without this a cancelled/timed-out spawn orphans the
+        // runner and leaks its pool slot.
+        let mut dealloc_guard = SpawnDeallocGuard {
+            pool: self.pool.clone(),
+            agent_id,
+            armed: true,
+        };
 
         // Pump the slot until terminal. The runner emits Progress/Message
         // events as it streams turns; we ignore those here and surface only
@@ -1060,6 +1101,9 @@ impl SubagentSpawner for PoolSubagentSpawner {
             }
         };
 
+        // Normal terminal path: deallocate explicitly and disarm the guard so
+        // it does not double-deallocate on drop.
+        dealloc_guard.armed = false;
         // Best-effort deallocate; failures here don't change the surfaced
         // result.
         let _ = self.pool.deallocate(&agent_id).await;

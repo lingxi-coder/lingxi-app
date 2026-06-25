@@ -40,21 +40,44 @@
 //!   cost/telemetry seam. The real candidate loop is a marked
 //!   `// TODO(multi-agent):` seam ([`orchestrator::TodoLlmCandidateRunner`]).
 //!
-// TODO(multi-agent): Phases 5-7 add review/revision/arbiter,
-// finalizer/verification, and CLI/TUI wiring.
+//! Phase 5 lands cross-review / revision / arbitration:
+//!
+//! - [`review`] — read-only cross-review via [`sidequery::SideQueryClient`]
+//!   (empty tool set ⇒ reviewer cannot write), bounded by
+//!   [`config::ReviewConfig::max_review_rounds`] (single source of truth); a
+//!   review timeout writes a `*.error.md` marker and the run continues.
+//! - [`revision`] — author-only revision: each author revises ONLY its own
+//!   worktree ([`revision::Reviser`] seam); a revision timeout/error keeps the
+//!   pre-revision patch.
+//! - [`arbiter`] — single-shot structured arbitration with a 1-retry then
+//!   deterministic-fallback ladder; `reject_both` requests the user (never a
+//!   silent single-agent fallback). Deterministic decisions are tagged
+//!   `decision_source=deterministic_fallback`.
+//!
+// TODO(multi-agent): Phases 6-7 add finalizer/verification and CLI/TUI wiring.
 
 #![forbid(unsafe_code)]
 
+pub mod arbiter;
 pub mod artifacts;
 pub mod config;
 pub mod error;
 pub mod orchestrator;
 pub mod prompts;
 pub mod providers;
+pub mod review;
+pub mod revision;
 pub mod router;
 pub mod state;
 pub mod worktrees;
 
+pub use arbiter::deterministic_fallback;
+pub use arbiter::Arbiter;
+pub use arbiter::Arbitration;
+pub use arbiter::CandidateSummary;
+pub use arbiter::Decision;
+pub use arbiter::DecisionSource;
+pub use arbiter::Slot;
 pub use artifacts::cleanup_worktree_fail_closed;
 pub use artifacts::ArtifactStore;
 pub use artifacts::CleanupOutcome;
@@ -74,6 +97,16 @@ pub use orchestrator::TodoLlmCandidateRunner;
 pub use orchestrator::UsageSink;
 pub use providers::ModelResolver;
 pub use providers::ResolvedCandidate;
+pub use review::CrossReviewer;
+pub use review::ReviewDocument;
+pub use review::ReviewOutcome;
+pub use review::ReviewTarget;
+pub use review::Severity;
+pub use revision::revise_author;
+pub use revision::Reviser;
+pub use revision::RevisionContext;
+pub use revision::RevisionResult;
+pub use revision::TodoLlmReviser;
 pub use router::route;
 pub use router::ExecutionRoute;
 pub use router::RouteInput;

@@ -2671,9 +2671,12 @@ name = "multi-agent"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cost",
  "llm-client",
+ "protocol",
  "serde",
  "serde_json",
+ "sidequery",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

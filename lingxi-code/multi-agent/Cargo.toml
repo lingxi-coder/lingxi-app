@@ -11,6 +11,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 traits = { path = "../traits" }
 llm-client = { path = "../llm-client" }
+sidequery = { path = "../sidequery" }
+protocol = { path = "../protocol" }
+cost = { path = "../cost" }
 async-trait = { workspace = true }
 tokio = { version = "1", features = ["time", "sync", "macros", "rt"] }
 tokio-util = { workspace = true }

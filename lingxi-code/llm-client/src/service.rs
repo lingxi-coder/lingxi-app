@@ -1107,16 +1107,15 @@ impl ApiService {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        // Capture the Anthropic `request-id` response header (`req_…`) on every
-        // recorded response — the SDK's `response._request_id`, which claude-code
-        // persists as the assistant line's top-level `requestId`. Prefer the
-        // canonical `request-id`, falling back to `x-request-id` (mirrors the
-        // transport's `request_id()` helper). `None` clears it when neither is
+        // Capture the server-side request id on every recorded response — the
+        // SDK's `response._request_id`, which claude-code persists as the
+        // assistant line's top-level `requestId`. Provider-aware: tries each
+        // provider's canonical id header (Anthropic `request-id`, OpenAI
+        // `x-request-id`, Azure `apim-request-id`, Bedrock `x-amzn-requestid`,
+        // …) via the shared transport extractor. `None` clears it when none is
         // present (so a stale id never leaks onto a later line).
-        *self.last_request_id.lock().unwrap() = headers
-            .get("request-id")
-            .or_else(|| headers.get("x-request-id"))
-            .cloned();
+        *self.last_request_id.lock().unwrap() =
+            crate::transport_bridge::extract_response_request_id(headers);
         // Task 2 (llm-client future-work batch 5): track the raw per-window
         // snapshot on EVERY recorded headers pass — `rawUtilization =
         // extractRawUtilization(headersToUse)` (claudeAiLimits.ts:476), NOT

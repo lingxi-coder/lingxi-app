@@ -125,11 +125,41 @@ fn lowercase_headers(headers: &[(String, String)]) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn request_id(headers: &BTreeMap<String, String>) -> Option<String> {
-    headers
-        .get("request-id")
-        .or_else(|| headers.get("x-request-id"))
+/// Response header names (lowercased) that carry a provider's server-side
+/// request id, in priority order. The transport lowercases all header names
+/// before lookup (see [`lowercase_headers`]), so every candidate here is
+/// lowercase. A provider that doesn't emit any of these simply yields `None`.
+///
+/// claude-code is single-provider and only ever reads Anthropic's `request-id`
+/// (`x-request-id` fallback). LingXi is multi-provider, so the canonical id
+/// header differs per provider — without this list Gemini / Bedrock / Azure
+/// responses would report no request id at all (so the assistant transcript's
+/// `requestId` would be blank for them).
+pub const REQUEST_ID_HEADER_CANDIDATES: &[&str] = &[
+    "request-id",        // Anthropic (req_…) — also the SDK's response._request_id
+    "x-request-id",      // OpenAI / OpenAI-compatible (DeepSeek, GLM, Copilot), generic
+    "apim-request-id",   // Azure OpenAI (APIM gateway)
+    "x-ms-request-id",   // Azure
+    "x-amzn-requestid",  // AWS Bedrock (`x-amzn-RequestId`)
+    "x-amzn-request-id", // AWS Bedrock (alternate spelling)
+    "x-goog-request-id", // Google / Vertex (best-effort)
+];
+
+/// Extract a provider's server-side request id from a (lowercased) response
+/// header map, trying [`REQUEST_ID_HEADER_CANDIDATES`] in priority order.
+///
+/// Keys are expected to be lowercase (the transport normalizes them before this
+/// runs); pass a lowercased map.
+#[must_use]
+pub fn extract_response_request_id(headers: &BTreeMap<String, String>) -> Option<String> {
+    REQUEST_ID_HEADER_CANDIDATES
+        .iter()
+        .find_map(|name| headers.get(*name))
         .cloned()
+}
+
+fn request_id(headers: &BTreeMap<String, String>) -> Option<String> {
+    extract_response_request_id(headers)
 }
 
 fn to_provider_response(response: &HttpResponse) -> ProviderResponse {
@@ -399,4 +429,62 @@ impl FrameStream for BodyFrame {
 #[must_use]
 pub fn from_http<T: traits::HttpTransport + 'static>(http: T) -> Arc<dyn crate::Transport> {
     Arc::new(LlmTransportBridge::new(http))
+}
+
+#[cfg(test)]
+mod request_id_tests {
+    use super::*;
+
+    fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn extracts_each_providers_id_header() {
+        // Anthropic
+        assert_eq!(
+            extract_response_request_id(&map(&[("request-id", "req_abc")])),
+            Some("req_abc".to_string())
+        );
+        // OpenAI / OpenAI-compatible
+        assert_eq!(
+            extract_response_request_id(&map(&[("x-request-id", "oai-1")])),
+            Some("oai-1".to_string())
+        );
+        // Azure OpenAI
+        assert_eq!(
+            extract_response_request_id(&map(&[("apim-request-id", "az-1")])),
+            Some("az-1".to_string())
+        );
+        // Bedrock
+        assert_eq!(
+            extract_response_request_id(&map(&[("x-amzn-requestid", "aws-1")])),
+            Some("aws-1".to_string())
+        );
+        // Google / Vertex
+        assert_eq!(
+            extract_response_request_id(&map(&[("x-goog-request-id", "g-1")])),
+            Some("g-1".to_string())
+        );
+    }
+
+    #[test]
+    fn prefers_canonical_anthropic_over_generic() {
+        let h = map(&[("x-request-id", "generic"), ("request-id", "canonical")]);
+        assert_eq!(
+            extract_response_request_id(&h),
+            Some("canonical".to_string())
+        );
+    }
+
+    #[test]
+    fn none_when_no_known_header() {
+        assert_eq!(
+            extract_response_request_id(&map(&[("content-type", "application/json")])),
+            None
+        );
+    }
 }

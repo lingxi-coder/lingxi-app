@@ -454,6 +454,55 @@ impl StreamJsonStream {
         self.enqueue(&frame);
     }
 
+    /// Build the `user` tool_result frame Value.
+    ///
+    /// claude-code's stream-json (SDK V2) tool_result block carries the
+    /// MODEL-FACING STRING in `content` (what the model/API sees), with the full
+    /// structured result on a SEPARATE top-level `toolUseResult` field on the
+    /// user message (verified vs the 2.1.191 binary, which builds
+    /// `…,toolUseResult:<data>,…` on the SDK user message). LingXi previously put
+    /// the whole `data` object where the string belongs and omitted
+    /// `toolUseResult`, so an SDK consumer saw a JSON blob instead of the tool's
+    /// output. The string is derived from the data exactly as
+    /// `orchestrator::tool_result_to_model_text` does (`model_content ?? content
+    /// ?? result`), plus `error` for the dispatch's `{error: …}` wrapper;
+    /// structured-only results (no string field) keep the object as a last
+    /// resort.
+    ///
+    /// Pure builder (modulo the fresh `uuid`/`timestamp`) — does not write to
+    /// stdout. Call `emit_tool_result` to build + emit.
+    async fn build_tool_result_frame(&self, tool_use_id: &str, result: &Value) -> Value {
+        let is_error = result.get("error").is_some();
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let session_id = self.session_id.lock().await.clone();
+        let content_value = result
+            .get("model_content")
+            .and_then(Value::as_str)
+            .or_else(|| result.get("content").and_then(Value::as_str))
+            .or_else(|| result.get("result").and_then(Value::as_str))
+            .or_else(|| result.get("error").and_then(Value::as_str))
+            .map_or_else(|| result.clone(), |s| json!(s));
+        let content_block = json!({
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": content_value,
+            "is_error": is_error
+        });
+        json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [content_block]
+            },
+            "session_id": session_id,
+            "parent_tool_use_id": null,
+            "toolUseResult": result,
+            "uuid": uuid,
+            "timestamp": timestamp
+        })
+    }
+
     /// Build the success result frame Value (exact 20-key golden order).
     ///
     /// Pure builder — does not write to stdout. Call `emit_result_success`
@@ -739,29 +788,7 @@ impl OutputStream for StreamJsonStream {
         if self.suppress_frames {
             return;
         }
-        // Emit a `user` frame with a tool_result content block.
-        let tool_use_id = _id.as_str();
-        let is_error = result.get("error").is_some();
-        let uuid = uuid::Uuid::new_v4().to_string();
-        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let session_id = self.session_id.lock().await.clone();
-        let content_block = json!({
-            "type": "tool_result",
-            "tool_use_id": tool_use_id,
-            "content": result,
-            "is_error": is_error
-        });
-        let frame = json!({
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": [content_block]
-            },
-            "session_id": session_id,
-            "parent_tool_use_id": null,
-            "uuid": uuid,
-            "timestamp": timestamp
-        });
+        let frame = self.build_tool_result_frame(_id.as_str(), result).await;
         self.enqueue(&frame);
     }
 
@@ -1196,6 +1223,45 @@ mod tests {
         let acc = stream.accum.lock().await;
         assert!(acc.blocks.is_empty(), "blocks should be cleared after boundary");
         assert!(acc.message_id.is_empty(), "message_id should be cleared");
+    }
+
+    /// The tool_result `user` frame carries the MODEL-FACING STRING in
+    /// `content` (not a JSON dump of the data) and the full structured result on
+    /// a separate top-level `toolUseResult` field — 1:1 with claude-code's SDK
+    /// user message.
+    #[tokio::test]
+    async fn tool_result_frame_uses_model_text_and_carries_tooluseresult() {
+        let stream = StreamJsonStream::new(make_params("sess"));
+        let tuid = "toolu_x";
+
+        // WebFetch-shaped: the model-facing string lives in `result`.
+        let data = json!({
+            "bytes": 5, "code": 200, "codeText": "OK",
+            "result": "# Page\n\nbody", "durationMs": 3, "url": "https://e/"
+        });
+        let frame = stream.build_tool_result_frame(tuid, &data).await;
+        let tr = &frame["message"]["content"][0];
+        assert_eq!(tr["type"], "tool_result");
+        assert_eq!(tr["tool_use_id"], tuid);
+        assert_eq!(tr["content"], "# Page\n\nbody", "content is the model text, not a JSON dump");
+        assert_eq!(tr["is_error"], false);
+        assert_eq!(frame["toolUseResult"], data, "full structured result on the top-level field");
+
+        // Bash-shaped: `model_content` wins over the raw stdout/exit_code.
+        let bash = json!({ "model_content": "out\n", "stdout": "out\n", "exit_code": 0 });
+        let f2 = stream.build_tool_result_frame(tuid, &bash).await;
+        assert_eq!(f2["message"]["content"][0]["content"], "out\n");
+        assert_eq!(f2["toolUseResult"], bash);
+
+        // Error wrapper `{error}`: content is the error string + is_error true.
+        let err = json!({ "error": "Permission to use Bash has been denied." });
+        let f3 = stream.build_tool_result_frame(tuid, &err).await;
+        assert_eq!(
+            f3["message"]["content"][0]["content"],
+            "Permission to use Bash has been denied."
+        );
+        assert_eq!(f3["message"]["content"][0]["is_error"], true);
+        assert_eq!(f3["toolUseResult"], err);
     }
 
     /// Verify U+2028/U+2029 escaping.

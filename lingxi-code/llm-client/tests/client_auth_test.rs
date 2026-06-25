@@ -45,6 +45,7 @@ async fn chatgpt_oauth_injects_bearer_and_account_id_headers() {
                 request_model: "p-model".to_string(),
                 billing_model: "p-model".to_string(),
                 aliases: vec![],
+                description: None,
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -113,6 +114,7 @@ fn profile(
             request_model: "p-model".to_string(),
             billing_model: "p-model".to_string(),
             aliases: vec![],
+            description: None,
             capabilities: Capabilities {
                 streaming: true,
                 tools: true,
@@ -357,6 +359,7 @@ async fn sigv4_without_signing_config_fails_at_prepare() {
                 request_model: "p-model".to_string(),
                 billing_model: "p-model".to_string(),
                 aliases: vec![],
+                description: None,
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -437,6 +440,7 @@ async fn azure_token_injects_api_key_header() {
                 request_model: "p-model".to_string(),
                 billing_model: "p-model".to_string(),
                 aliases: vec![],
+                description: None,
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -663,6 +667,7 @@ async fn sigv4_null_body_content_sha256_via_client() {
                 request_model: "p-model".to_string(),
                 billing_model: "p-model".to_string(),
                 aliases: vec![],
+                description: None,
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -799,6 +804,7 @@ async fn sigv4_exact_authorization_header_with_fixed_clock() {
                 request_model: "p-model".to_string(),
                 billing_model: "p-model".to_string(),
                 aliases: vec![],
+                description: None,
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,

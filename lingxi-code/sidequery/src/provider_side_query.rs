@@ -159,6 +159,7 @@ fn sidequery_model_table() -> Vec<ModelProfile> {
             request_model: display.to_string(),
             billing_model: billing.to_string(),
             aliases: aliases.iter().map(|s| (*s).to_string()).collect(),
+            description: None,
             capabilities: Capabilities {
                 streaming: false,
                 tools: true,

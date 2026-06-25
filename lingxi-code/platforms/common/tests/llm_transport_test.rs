@@ -361,6 +361,7 @@ async fn bridge_drives_llm_client_event_stream_end_to_end() {
                 request_model: "claude-sonnet-4-20250514".to_string(),
                 billing_model: "claude-sonnet-4".to_string(),
                 aliases: vec![],
+                description: None,
                 capabilities: llm_client::Capabilities {
                     streaming: true,
                     tools: true,

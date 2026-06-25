@@ -182,6 +182,7 @@ mod tests {
                     request_model: "claude-sonnet-4-20250514".to_string(),
                     billing_model: "claude-sonnet-4".to_string(),
                     aliases: vec!["claude".to_string()],
+                    description: None,
                     capabilities: Capabilities {
                         streaming: true,
                         tools: true,
@@ -213,6 +214,7 @@ mod tests {
                     request_model: "gpt-4".to_string(),
                     billing_model: "gpt-4".to_string(),
                     aliases: vec!["gpt".to_string()],
+                    description: None,
                     capabilities: Capabilities {
                         streaming: true,
                         tools: true,

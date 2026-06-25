@@ -126,7 +126,20 @@ pub struct ResumeState {
     /// (case-insensitive substring). Empty = show all (claude-code
     /// `LogSelector` search box).
     pub query: String,
+    /// (resume-old-form-vs-logselector) `true` while the `/`-activated search
+    /// box is focused — claude-code `LogSelector` `viewMode === "search"`
+    /// (vs the default `"list"` browse mode). Gates the search-box line, the
+    /// overflow counter (hidden in search mode), and the footer wording.
+    pub in_search_mode: bool,
 }
+
+/// (resume-old-form-vs-logselector) Conservative lower bound on how many rows
+/// fit in a typical viewport. The overflow `(idx of N)` counter is shown only
+/// when the filtered list is longer than this — mirroring claude-code's
+/// `displayedLogs.length > visibleCount` gate (whose `visibleCount` derives
+/// from terminal height; LingXi has no height in props here, so a fixed
+/// lower bound is used).
+pub const VISIBLE_ROWS: usize = 10;
 
 impl ResumeState {
     /// Build from display rows. Selects the first row.
@@ -136,6 +149,7 @@ impl ResumeState {
             rows,
             selected: 0,
             query: String::new(),
+            in_search_mode: false,
         }
     }
 
@@ -212,19 +226,37 @@ pub fn handle_resume_key(state: &mut ResumeState, key: KeyEvent) -> ResumeOutcom
             Some(uuid) => ResumeOutcome::Resume(uuid),
             None => ResumeOutcome::Cancel,
         },
-        // Esc clears an active query first, then cancels.
+        // (resume-old-form-vs-logselector) Esc behaviour mirrors the
+        // `LogSelector` search box: in search mode the first Esc clears the
+        // query and drops back to the list (`viewMode "search" -> "list"`);
+        // once the query is empty (or in plain list mode) Esc cancels.
         KeyCode::Esc => {
             if state.query.is_empty() {
-                ResumeOutcome::Cancel
+                if state.in_search_mode {
+                    state.in_search_mode = false;
+                    ResumeOutcome::Stay
+                } else {
+                    ResumeOutcome::Cancel
+                }
             } else {
                 state.query.clear();
                 state.selected = 0;
+                state.in_search_mode = false;
                 ResumeOutcome::Stay
             }
         }
         KeyCode::Backspace => {
             state.query.pop();
             state.selected = 0;
+            ResumeOutcome::Stay
+        }
+        // (resume-old-form-vs-logselector) `/` activates the search box when in
+        // list mode (claude-code `enterSearchMode`); inside search mode it is a
+        // literal character typed into the query like any other printable char.
+        KeyCode::Char('/')
+            if !state.in_search_mode && key.modifiers == KeyModifiers::NONE =>
+        {
+            state.in_search_mode = true;
             ResumeOutcome::Stay
         }
         // Type-to-search: printable chars filter the list.
@@ -244,13 +276,20 @@ pub fn handle_resume_key(state: &mut ResumeState, key: KeyEvent) -> ResumeOutcom
 pub struct ResumeScreenProps {
     /// The screen state (rows + selection). Cloned from `active_screen`.
     pub state: ResumeState,
+    /// (review) Active theme — the "Resume Session" header uses
+    /// `theme.suggestion` (claude-code `LogSelector` `color="suggestion"`),
+    /// so it recolors with the picker instead of a hardcoded blue.
+    pub theme: crate::theme::Theme,
 }
 
-/// iocraft component: header, the session list (or empty-state), and a
-/// preview pane for the selected row. Footer hint matches the key handler.
+/// iocraft component: bold suggestion-colored "Resume Session" header (with an
+/// overflow `(idx of N)` counter), an optional `/`-activated search box, the
+/// session list (title + dim metadata line per row), and a dim Byline footer.
+/// No always-on preview pane (resume-preview-pane-not-in-shipped).
 #[component]
 pub fn ResumeScreen(props: &ResumeScreenProps) -> impl Into<AnyElement<'static>> {
     let state = props.state.clone();
+    let theme = props.theme;
 
     if state.is_empty() {
         return element! {
@@ -270,14 +309,19 @@ pub fn ResumeScreen(props: &ResumeScreenProps) -> impl Into<AnyElement<'static>>
     let selected = state.selected;
     let filtered = state.filtered();
     let n = filtered.len();
-    // (resume-old-form) Bold header + a "(idx of N)" position counter.
-    let header = if n > 0 {
-        format!("Resume Session ({} of {})", selected + 1, n)
-    } else {
-        "Resume Session".to_string()
-    };
-    // (resume-old-form) Type-to-search box, shown when a query is active.
-    let search_line = (!state.query.is_empty()).then(|| format!("Search: {}", state.query));
+    // (resume-old-form-vs-logselector) Bold suggestion-colored "Resume Session"
+    // header. The "(idx of N)" position counter is appended (dim) ONLY in list
+    // mode when the list overflows the viewport — claude-code renders it under
+    // `viewMode === "list" && displayedLogs.length > visibleCount`. `selected`
+    // is 0-based (range `0..n`); the counter shows the 1-based position via
+    // `selected + 1` to match claude-code's 1-based `focusedIndex` display.
+    let show_counter = !state.in_search_mode && n > VISIBLE_ROWS;
+    let counter = show_counter.then(|| format!(" ({} of {})", selected + 1, n));
+    // (resume-old-form-vs-logselector) `/`-activated search box, rendered only
+    // while in search mode (claude-code `SearchBox`, `viewMode === "search"`).
+    let search_line = state
+        .in_search_mode
+        .then(|| format!("Search: {}", state.query));
     // (resume-metadata) Each row is a title line + a dim metadata line below it
     // (`<relative time> · <N> messages`, paddingLeft 2). Rows are filtered by
     // the search query.
@@ -294,15 +338,25 @@ pub fn ResumeScreen(props: &ResumeScreenProps) -> impl Into<AnyElement<'static>>
         .collect();
 
     // (resume-preview-pane-not-in-shipped) No always-on preview pane.
-    // (resume-footer-hint-wording) claude-code's LogSelector footer is a dim
-    // Byline of shortcut hints. LingXi keeps type-to-search; Ctrl+V preview /
-    // Ctrl+R rename hints are added when those features land. The `↑↓
-    // select`/`Enter resume` verbs are dropped to match the Byline shape.
-    let footer = "Type to search \u{00B7} Esc cancel".to_string();
+    // (resume-old-form-vs-logselector) Dim Byline footer, context-dependent on
+    // the mode. claude-code's search footer reads `Type to Search · Enter
+    // select · Esc clear`; the list footer carries the `Type to search · Esc
+    // cancel` verbs (Ctrl+V preview / Ctrl+R rename hints land with those
+    // features).
+    let footer = if state.in_search_mode {
+        "Type to Search \u{00B7} Enter select \u{00B7} Esc clear".to_string()
+    } else {
+        "Type to search \u{00B7} Esc cancel".to_string()
+    };
 
     element! {
         View(flex_direction: FlexDirection::Column, padding: 1) {
-            Text(content: header, weight: Weight::Bold)
+            View(flex_direction: FlexDirection::Row) {
+                Text(content: "Resume Session".to_string(), weight: Weight::Bold, color: theme.suggestion)
+                #(counter.map(|c| element! {
+                    Text(content: c, color: Color::DarkGrey)
+                }))
+            }
             #(search_line.map(|s| element! {
                 View(flex_direction: FlexDirection::Row) {
                     Text(content: s, color: Color::DarkGrey)
@@ -399,13 +453,130 @@ mod tests {
         assert_eq!(st.query, "alph");
         assert_eq!(st.filtered().len(), 2);
         // Backspace shrinks the query.
-        handle_resume_key(&mut st, k(KeyCode::Backspace));
+        let _ = handle_resume_key(&mut st, k(KeyCode::Backspace));
         assert_eq!(st.query, "alp");
         // Esc clears the query first (Stay), then a second Esc cancels.
         assert_eq!(handle_resume_key(&mut st, k(KeyCode::Esc)), ResumeOutcome::Stay);
         assert!(st.query.is_empty());
         assert_eq!(st.filtered().len(), 3);
         assert_eq!(handle_resume_key(&mut st, k(KeyCode::Esc)), ResumeOutcome::Cancel);
+    }
+
+    #[test]
+    fn slash_activates_search_mode() {
+        let mut st = ResumeState::new(vec![ResumeRow::from_meta(&meta("a", 0, 1))]);
+        assert!(!st.in_search_mode);
+        assert_eq!(
+            handle_resume_key(&mut st, k(KeyCode::Char('/'))),
+            ResumeOutcome::Stay
+        );
+        assert!(st.in_search_mode);
+        // `/` is consumed by activation, not typed into the query.
+        assert!(st.query.is_empty());
+        // Subsequent chars type into the query.
+        let _ = handle_resume_key(&mut st, k(KeyCode::Char('x')));
+        assert_eq!(st.query, "x");
+    }
+
+    #[test]
+    fn slash_in_search_mode_is_literal_char_not_reactivation() {
+        let mut st = ResumeState::new(vec![ResumeRow::from_meta(&meta("a", 0, 1))]);
+        st.in_search_mode = true;
+        let _ = handle_resume_key(&mut st, k(KeyCode::Char('/')));
+        // Already in search mode: `/` is a literal query char.
+        assert_eq!(st.query, "/");
+        assert!(st.in_search_mode);
+    }
+
+    #[test]
+    fn search_mode_esc_clears_query_then_exits_then_cancels() {
+        let mut st = ResumeState::new(vec![
+            ResumeRow::from_meta(&meta("alpha", 0, 1)),
+            ResumeRow::from_meta(&meta("beta", 0, 1)),
+        ]);
+        st.in_search_mode = true;
+        st.query = "alp".to_string();
+        // First Esc clears the query AND drops back to list mode (Stay).
+        assert_eq!(
+            handle_resume_key(&mut st, k(KeyCode::Esc)),
+            ResumeOutcome::Stay
+        );
+        assert!(st.query.is_empty());
+        assert!(!st.in_search_mode);
+        // Second Esc (now plain list mode, empty query) cancels.
+        assert_eq!(
+            handle_resume_key(&mut st, k(KeyCode::Esc)),
+            ResumeOutcome::Cancel
+        );
+    }
+
+    #[test]
+    fn empty_query_in_search_mode_esc_exits_to_list_not_cancel() {
+        let mut st = ResumeState::new(vec![ResumeRow::from_meta(&meta("a", 0, 1))]);
+        st.in_search_mode = true;
+        // Empty query but in search mode: Esc exits search mode (Stay), not Cancel.
+        assert_eq!(
+            handle_resume_key(&mut st, k(KeyCode::Esc)),
+            ResumeOutcome::Stay
+        );
+        assert!(!st.in_search_mode);
+    }
+
+    #[test]
+    fn header_renders_counter_only_when_overflow() {
+        // Few rows (<= VISIBLE_ROWS): no counter.
+        let few = ResumeState::new(
+            (0..3)
+                .map(|i| ResumeRow::from_meta(&meta(&format!("s{i}"), 0, 1)))
+                .collect(),
+        );
+        let mut el = element! { ResumeScreen(state: few) };
+        let frame = el.to_string();
+        assert!(frame.contains("Resume Session"), "got: {frame}");
+        assert!(!frame.contains(" of "), "no counter expected, got: {frame}");
+
+        // Many rows (> VISIBLE_ROWS): counter "(1 of N)".
+        let n = VISIBLE_ROWS + 5;
+        let many = ResumeState::new(
+            (0..n)
+                .map(|i| ResumeRow::from_meta(&meta(&format!("s{i}"), 0, 1)))
+                .collect(),
+        );
+        let mut el = element! { ResumeScreen(state: many) };
+        let frame = el.to_string();
+        assert!(
+            frame.contains(&format!("(1 of {n})")),
+            "counter expected, got: {frame}"
+        );
+    }
+
+    #[test]
+    fn search_mode_renders_search_box_line() {
+        let n = VISIBLE_ROWS + 5;
+        let mut st = ResumeState::new(
+            (0..n)
+                .map(|i| ResumeRow::from_meta(&meta(&format!("s{i}"), 0, 1)))
+                .collect(),
+        );
+        st.in_search_mode = true;
+        st.query = "s1".to_string();
+        let mut el = element! { ResumeScreen(state: st) };
+        let frame = el.to_string();
+        assert!(frame.contains("Search: s1"), "got: {frame}");
+        // In search mode the overflow counter is suppressed.
+        assert!(!frame.contains(" of "), "no counter in search mode, got: {frame}");
+        // Search-mode footer wording.
+        assert!(frame.contains("Type to Search"), "got: {frame}");
+        assert!(frame.contains("Esc clear"), "got: {frame}");
+    }
+
+    #[test]
+    fn list_mode_has_no_search_box_and_cancel_footer() {
+        let st = ResumeState::new(vec![ResumeRow::from_meta(&meta("a", 0, 1))]);
+        let mut el = element! { ResumeScreen(state: st) };
+        let frame = el.to_string();
+        assert!(!frame.contains("Search:"), "no search box in list mode, got: {frame}");
+        assert!(frame.contains("Type to search \u{00b7} Esc cancel"), "got: {frame}");
     }
 
     #[test]

@@ -21,6 +21,7 @@ pub mod settings;
 pub mod skills;
 pub mod stats;
 pub mod theme;
+pub mod transcript;
 
 /// Which full-page screen currently overlays the REPL. `None` ⇒ REPL is live.
 /// Established by M7-11; M7-12/13/14 add `Resume`/`Settings`/`Memory`.
@@ -174,4 +175,15 @@ pub enum Screen {
     /// GitHub Copilot device-flow (the host drives `CopilotLogin`; this screen
     /// renders the code + spinner). Esc cancels either flow.
     Connect(connect::ConnectScreenState),
+    /// (RRS-06) The Ctrl+O transcript toggle — claude-code `app:toggleTranscript`.
+    /// A read-only, scrollable verbose dump of the FULL message log (every
+    /// message, not the live-REPL folded/capped view), captured at open time.
+    /// Interactive like Help/Skills/Stats (read-only): `root::handle_screen_key`
+    /// runs the pure `transcript::handle_transcript_key` (scroll keys via the
+    /// embedded `ScrollState`; Ctrl+O toggles off / Esc closes). Opened by the
+    /// Ctrl+O open-binding in `handle_live_key`; this makes the compact-boundary's
+    /// `(ctrl+o for history)` hint functional. Reuses the same `render_transcript`
+    /// formatter `/export` writes, so the on-screen dump and the exported `.txt`
+    /// are byte-identical.
+    Transcript(transcript::TranscriptScreenState),
 }

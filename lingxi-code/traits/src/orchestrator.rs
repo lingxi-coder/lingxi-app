@@ -319,6 +319,11 @@ pub struct ModelListing {
     pub provider_id: String,
     /// Human provider header (e.g. "`DeepSeek`", "`GitHub` Copilot").
     pub provider_label: String,
+    /// Optional one-line model description, rendered as a dimmed line beneath the
+    /// row in the `/model` picker (claude-code `ListItem` renders it under the
+    /// label with `paddingLeft={2}` + `color="inactive"`). `None` ⇒ no extra line.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// Parse a (possibly `profile/model`) text reference against the live model
@@ -347,6 +352,7 @@ mod parse_model_ref_tests {
             request_model: request_model.to_string(),
             provider_id: provider_id.to_string(),
             provider_label: provider_id.to_string(),
+            description: None,
         }
     }
     fn fixture() -> Vec<ModelListing> {

@@ -30,6 +30,10 @@ pub struct Model {
     pub id: String,
     /// Human-facing label.
     pub name: String,
+    /// Optional one-line description, surfaced as a dimmed sub-line in the
+    /// `/model` picker. models.dev carries this for some models; absent ⇒ `None`.
+    #[serde(default)]
+    pub description: Option<String>,
     /// Whether the model supports native tool calls.
     #[serde(default)]
     pub tool_call: bool,

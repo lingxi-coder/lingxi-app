@@ -171,6 +171,7 @@ mod tests {
                 request_model: request_model.to_string(),
                 provider_id: provider_id.to_string(),
                 provider_label: provider_id.to_string(),
+                description: None,
             }
         }
 

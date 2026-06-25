@@ -17,6 +17,9 @@ pub struct ModelListing {
     pub billing_model: String,
     /// Alternate names accepted by registry resolution.
     pub aliases: Vec<String>,
+    /// Optional one-line model description (dimmed sub-line in the `/model`
+    /// picker); carried through from the configured [`ModelProfile`].
+    pub description: Option<String>,
     /// Model capabilities for this listing.
     pub capabilities: Capabilities,
 }
@@ -70,6 +73,7 @@ impl ModelRegistry {
                     request_model: model.request_model.clone(),
                     billing_model: model.billing_model.clone(),
                     aliases: model.aliases.clone(),
+                    description: model.description.clone(),
                     capabilities: model.capabilities,
                 })
             })

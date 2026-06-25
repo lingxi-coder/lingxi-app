@@ -192,6 +192,11 @@ pub struct ModelProfile {
     /// Alternate names accepted by registry resolution.
     #[serde(default)]
     pub aliases: Vec<String>,
+    /// Optional one-line human description, surfaced as a dimmed sub-line in the
+    /// `/model` picker. Sourced from the catalog (models.dev `description`) when
+    /// present; `None` otherwise.
+    #[serde(default)]
+    pub description: Option<String>,
     /// Model capabilities used for preflight validation.
     #[serde(default)]
     pub capabilities: Capabilities,

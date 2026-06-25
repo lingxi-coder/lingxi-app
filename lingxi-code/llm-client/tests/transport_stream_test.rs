@@ -109,6 +109,7 @@ fn client(protocol: ProtocolFamily, provider_id: ProviderId, base_url: &str) -> 
                 request_model: "p-model".to_string(),
                 billing_model: "p-model".to_string(),
                 aliases: vec![],
+                description: None,
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -158,6 +159,7 @@ fn openai_responses_websocket_client() -> DefaultLlmClient {
                 request_model: "p-model".to_string(),
                 billing_model: "p-model".to_string(),
                 aliases: vec![],
+                description: None,
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,

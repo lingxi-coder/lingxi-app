@@ -21,6 +21,7 @@ fn test_config() -> ClientConfig {
                 request_model: "anthropic/claude-sonnet-4".to_string(),
                 billing_model: "claude-sonnet-4".to_string(),
                 aliases: vec!["or-sonnet".to_string()],
+                description: None,
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,

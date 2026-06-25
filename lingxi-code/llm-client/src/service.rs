@@ -2635,6 +2635,7 @@ mod tests {
                         request_model: "claude-sonnet-4-20250514".to_string(),
                         billing_model: "claude-sonnet-4".to_string(),
                         aliases: vec!["claude".to_string()],
+                        description: None,
                         capabilities: Capabilities {
                             streaming: true,
                             tools: true,
@@ -2685,6 +2686,7 @@ mod tests {
                         request_model: "claude-sonnet-4-20250514".to_string(),
                         billing_model: "claude-sonnet-4".to_string(),
                         aliases: vec!["claude".to_string()],
+                        description: None,
                         capabilities: Capabilities {
                             streaming: true,
                             tools: true,
@@ -2743,6 +2745,7 @@ mod tests {
                         request_model: "model".to_string(),
                         billing_model: "model".to_string(),
                         aliases: Vec::new(),
+                        description: None,
                         capabilities: Capabilities {
                             streaming: true,
                             tools: true,
@@ -5038,6 +5041,7 @@ mod tests {
                             request_model: "claude-opus-4-6".to_string(),
                             billing_model: "claude-opus-4-6".to_string(),
                             aliases: vec![],
+                            description: None,
                             capabilities: Capabilities {
                                 streaming: true,
                                 tools: true,
@@ -5050,6 +5054,7 @@ mod tests {
                             request_model: "claude-haiku-4-20250307".to_string(),
                             billing_model: "claude-haiku-4".to_string(),
                             aliases: vec![],
+                            description: None,
                             capabilities: Capabilities {
                                 streaming: true,
                                 tools: true,
@@ -5062,6 +5067,7 @@ mod tests {
                             request_model: "claude-sonnet-4-20250514".to_string(),
                             billing_model: "claude-sonnet-4".to_string(),
                             aliases: vec!["claude".to_string()],
+                            description: None,
                             capabilities: Capabilities {
                                 streaming: true,
                                 tools: true,
@@ -5950,6 +5956,7 @@ mod tests {
                         request_model: "claude-sonnet-4-20250514".to_string(),
                         billing_model: "claude-sonnet-4".to_string(),
                         aliases: vec![],
+                        description: None,
                         capabilities: Capabilities {
                             streaming: true,
                             tools: true,

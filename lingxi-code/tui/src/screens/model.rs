@@ -37,6 +37,29 @@ pub struct ModelRow {
     /// sibling availability map at build time (spec §8); a provider absent from
     /// that map defaults to `true`. Drives the Connect badge + select-launches-`/connect`.
     pub available: bool,
+    /// Optional one-line description, rendered as a dimmed line beneath the row
+    /// (claude-code `ListItem`: `paddingLeft={2}` + `color="inactive"`). For
+    /// catalog rows it's the listing's `description`; for routable/built-in rows
+    /// it falls back to [`model_description`]. `None` ⇒ no sub-line.
+    pub description: Option<String>,
+}
+
+/// Known one-line description for a built-in model wire id, mirroring the
+/// claude-code `/model` picker blurbs. Matched by a case-insensitive family
+/// substring so dated ids (`claude-opus-4-7`) and aliases (`opus`) both resolve.
+/// `None` for unrecognized ids (the row then renders with no sub-line).
+#[must_use]
+fn model_description(request_model: &str) -> Option<String> {
+    let id = request_model.to_ascii_lowercase();
+    if id.contains("opus") {
+        Some("Most capable for complex work".to_string())
+    } else if id.contains("haiku") {
+        Some("Fastest for quick answers".to_string())
+    } else if id.contains("sonnet") {
+        Some("Best for everyday tasks".to_string())
+    } else {
+        None
+    }
 }
 
 /// Human header for an EXISTING (`list_available_models`) provider prefix.
@@ -79,6 +102,7 @@ pub fn build_model_entries(
         if !seen.insert(id.clone()) {
             continue;
         }
+        let description = model_description(&id);
         let row = if let Some(rest) = id.strip_prefix('@') {
             ModelRow {
                 display_model: format!("@{rest}"),
@@ -86,6 +110,7 @@ pub fn build_model_entries(
                 provider_id: "alias".to_string(),
                 provider_label: "Aliases".to_string(),
                 available: true,
+                description,
             }
         } else if let Some((p, m)) = id.split_once('/') {
             ModelRow {
@@ -94,6 +119,7 @@ pub fn build_model_entries(
                 provider_id: p.to_string(),
                 provider_label: existing_provider_label(p),
                 available: avail(p),
+                description,
             }
         } else if let Some((profile, label)) = model_providers.get(&id) {
             // Authoritative engine mapping (typically a USER-defined provider):
@@ -105,6 +131,7 @@ pub fn build_model_entries(
                 provider_id: profile.clone(),
                 provider_label: label.clone(),
                 available: avail(profile),
+                description,
             }
         } else {
             // Genuinely unknown bare id (no mapping): default to Built-in/true.
@@ -114,6 +141,7 @@ pub fn build_model_entries(
                 provider_id: "builtin".to_string(),
                 provider_label: "Built-in".to_string(),
                 available: true,
+                description,
             }
         };
         rows.push(row);
@@ -124,12 +152,16 @@ pub fn build_model_entries(
             continue;
         }
         let available = avail(&m.provider_id);
+        // Prefer the catalog-carried description; fall back to the built-in
+        // family blurb keyed on the wire id.
+        let description = m.description.or_else(|| model_description(&m.request_model));
         rows.push(ModelRow {
             display_model: m.display_model,
             request_model: m.request_model,
             provider_id: m.provider_id,
             provider_label: m.provider_label,
             available,
+            description,
         });
     }
     rows
@@ -367,6 +399,22 @@ pub fn render_model_to_string(state: &ModelScreenState) -> String {
                     out.push_str(" (current)");
                 }
                 out.push('\n');
+                // (model-no-row-descriptions) A dimmed one-line description below
+                // the row, indented by 2 (claude-code `ListItem`:
+                // `<Box paddingLeft={2}><Text color="inactive">{description}</Text>`).
+                // The component layer dims it; this oracle carries the 2-space
+                // indent + text. Empty/absent descriptions emit no extra line.
+                // A catalog-sourced description could carry a newline; clamp to
+                // its first line so a multi-line value can't break the 2-space
+                // indent / column alignment of the following rows.
+                if let Some(desc) = row.description.as_deref() {
+                    let desc = desc.lines().next().unwrap_or("");
+                    if !desc.is_empty() {
+                        out.push_str("  ");
+                        out.push_str(desc);
+                        out.push('\n');
+                    }
+                }
                 item_pos += 1;
             }
         }
@@ -395,12 +443,14 @@ mod reducer_tests {
                     request_model: "deepseek-chat".to_string(),
                     provider_id: "deepseek".to_string(),
                     provider_label: "DeepSeek".to_string(),
+                    description: None,
                 },
                 traits::orchestrator::ModelListing {
                     display_model: "GPT-5.4 nano".to_string(),
                     request_model: "gpt-5.4-nano".to_string(),
                     provider_id: "github-copilot".to_string(),
                     provider_label: "GitHub Copilot".to_string(),
+                    description: None,
                 },
             ],
             &std::collections::BTreeMap::new(),
@@ -471,6 +521,7 @@ mod reducer_tests {
                 request_model: "gpt-5.4-nano".to_string(),
                 provider_id: "github-copilot".to_string(),
                 provider_label: "GitHub Copilot".to_string(),
+                description: None,
             }],
             &avail,
             &std::collections::BTreeMap::new(),
@@ -500,6 +551,7 @@ mod render_tests {
                 request_model: "deepseek-chat".to_string(),
                 provider_id: "deepseek".to_string(),
                 provider_label: "DeepSeek".to_string(),
+                description: None,
             }],
             &std::collections::BTreeMap::new(),
             &std::collections::BTreeMap::new(),
@@ -515,8 +567,83 @@ mod render_tests {
         assert!(out.contains("\nDeepSeek\n"));
         assert!(out.contains("\u{276F} claude-opus-4-7  \u{00B7} Built-in (current)\n"));
         assert!(out.contains("  DeepSeek Chat  \u{00B7} DeepSeek\n"));
+        // (model-no-row-descriptions) The opus row carries a built-in blurb,
+        // rendered as a 2-space-indented dimmed sub-line directly below its row.
+        assert!(
+            out.contains(
+                "\u{276F} claude-opus-4-7  \u{00B7} Built-in (current)\n  Most capable for complex work\n"
+            ),
+            "{out}"
+        );
         // (model-footer-static-vs-byline) Byline-style footer.
         assert!(out.ends_with("type to search \u{00B7} Enter to select \u{00B7} Esc to cancel"));
+    }
+
+    #[test]
+    fn catalog_description_renders_and_overrides_fallback() {
+        // A catalog row carrying an explicit description renders it verbatim as a
+        // 2-space-indented sub-line; an absent description on a known family id
+        // falls back to the built-in blurb; an unknown id with no description
+        // renders no sub-line.
+        let rows = build_model_entries(
+            vec![],
+            vec![
+                traits::orchestrator::ModelListing {
+                    display_model: "DeepSeek Chat".to_string(),
+                    request_model: "deepseek-chat".to_string(),
+                    provider_id: "deepseek".to_string(),
+                    provider_label: "DeepSeek".to_string(),
+                    description: Some("Fast and cheap".to_string()),
+                },
+                traits::orchestrator::ModelListing {
+                    display_model: "Sonnet".to_string(),
+                    request_model: "claude-sonnet-4-6".to_string(),
+                    provider_id: "anthropic".to_string(),
+                    provider_label: "Anthropic".to_string(),
+                    description: None,
+                },
+                traits::orchestrator::ModelListing {
+                    display_model: "Mystery".to_string(),
+                    request_model: "mystery-1".to_string(),
+                    provider_id: "deepseek".to_string(),
+                    provider_label: "DeepSeek".to_string(),
+                    description: None,
+                },
+            ],
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+        );
+        let out = render_model_to_string(&ModelScreenState::new(rows, vec![], "x".to_string()));
+        // Explicit catalog description (the first row is highlighted, so it carries
+        // the `❯ ` marker; the description sub-line follows directly below).
+        assert!(out.contains("DeepSeek Chat  \u{00B7} DeepSeek\n  Fast and cheap\n"), "{out}");
+        // Fallback blurb for a sonnet id with no catalog description.
+        assert!(out.contains("  Sonnet  \u{00B7} Anthropic\n  Best for everyday tasks\n"), "{out}");
+        // Unknown id, no description ⇒ no sub-line (the line after the row is NOT a
+        // 2-space-indented description; it's the next row/header/blank line).
+        assert!(out.contains("  Mystery  \u{00B7} DeepSeek\n"), "{out}");
+        assert!(!out.contains("  Mystery  \u{00B7} DeepSeek\n  "), "{out}");
+    }
+
+    #[test]
+    fn multiline_catalog_description_clamps_to_first_line() {
+        // (review) A catalog description carrying a newline must not break the
+        // 2-space-indent contract — only its first line is rendered.
+        let rows = build_model_entries(
+            vec![],
+            vec![traits::orchestrator::ModelListing {
+                display_model: "Multi".to_string(),
+                request_model: "multi-1".to_string(),
+                provider_id: "deepseek".to_string(),
+                provider_label: "DeepSeek".to_string(),
+                description: Some("First line\nSecond line".to_string()),
+            }],
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+        );
+        let out = render_model_to_string(&ModelScreenState::new(rows, vec![], "x".to_string()));
+        assert!(out.contains("\n  First line\n"), "first line only, got: {out}");
+        assert!(!out.contains("Second line"), "second line dropped, got: {out}");
     }
 
     #[test]
@@ -540,6 +667,7 @@ mod render_tests {
                 request_model: "gpt-5.4-nano".to_string(),
                 provider_id: "github-copilot".to_string(),
                 provider_label: "GitHub Copilot".to_string(),
+                description: None,
             }],
             &avail,
             &std::collections::BTreeMap::new(),
@@ -573,6 +701,7 @@ mod entries_tests {
             request_model: "deepseek-chat".to_string(),
             provider_id: "deepseek".to_string(),
             provider_label: "DeepSeek".to_string(),
+            description: None,
         }];
         let rows = build_model_entries(
             existing,
@@ -602,6 +731,7 @@ mod entries_tests {
                 request_model: "deepseek-chat".to_string(),
                 provider_id: "deepseek".to_string(),
                 provider_label: "DeepSeek".to_string(),
+                description: None,
             }],
             &std::collections::BTreeMap::new(),
             &std::collections::BTreeMap::new(),
@@ -621,12 +751,14 @@ mod entries_tests {
                 request_model: "deepseek-chat".to_string(),
                 provider_id: "deepseek".to_string(),
                 provider_label: "DeepSeek".to_string(),
+                description: None,
             },
             ModelListing {
                 display_model: "GPT-5.4 nano".to_string(),
                 request_model: "gpt-5.4-nano".to_string(),
                 provider_id: "github-copilot".to_string(),
                 provider_label: "GitHub Copilot".to_string(),
+                description: None,
             },
         ];
         let mut avail = BTreeMap::new();
@@ -652,6 +784,7 @@ mod entries_tests {
                 request_model: "deepseek-chat".to_string(),
                 provider_id: "deepseek".to_string(),
                 provider_label: "DeepSeek".to_string(),
+                description: None,
             }],
             &BTreeMap::new(),
             &BTreeMap::new(),
@@ -709,5 +842,45 @@ mod entries_tests {
         assert_eq!(opus.provider_id, "builtin");
         assert_eq!(opus.provider_label, "Built-in");
         assert!(opus.available);
+    }
+
+    #[test]
+    fn descriptions_populate_from_catalog_and_family_fallback() {
+        // Existing (routable) rows pick up the built-in family blurb by id family;
+        // catalog rows prefer their own description, else fall back to the family
+        // blurb; an unrecognized id with no description stays `None`.
+        let rows = build_model_entries(
+            vec!["claude-opus-4-7".to_string(), "openai/gpt-4o".to_string()],
+            vec![
+                ModelListing {
+                    display_model: "DeepSeek Chat".to_string(),
+                    request_model: "deepseek-chat".to_string(),
+                    provider_id: "deepseek".to_string(),
+                    provider_label: "DeepSeek".to_string(),
+                    description: Some("Fast and cheap".to_string()),
+                },
+                ModelListing {
+                    display_model: "Haiku".to_string(),
+                    request_model: "claude-haiku-4-5".to_string(),
+                    provider_id: "anthropic".to_string(),
+                    provider_label: "Anthropic".to_string(),
+                    description: None,
+                },
+            ],
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+        );
+        // Existing opus → family fallback.
+        let opus = rows.iter().find(|r| r.request_model == "claude-opus-4-7").unwrap();
+        assert_eq!(opus.description.as_deref(), Some("Most capable for complex work"));
+        // Non-family existing id → no description.
+        let gpt = rows.iter().find(|r| r.request_model == "openai/gpt-4o").unwrap();
+        assert_eq!(gpt.description, None);
+        // Catalog row with explicit description wins.
+        let ds = rows.iter().find(|r| r.request_model == "deepseek-chat").unwrap();
+        assert_eq!(ds.description.as_deref(), Some("Fast and cheap"));
+        // Catalog row, no description, haiku family → fallback blurb.
+        let haiku = rows.iter().find(|r| r.request_model == "claude-haiku-4-5").unwrap();
+        assert_eq!(haiku.description.as_deref(), Some("Fastest for quick answers"));
     }
 }

@@ -20,6 +20,7 @@ async fn client_builds_routes_from_config_and_lists_models() {
                 request_model: "gpt-4o".to_string(),
                 billing_model: "gpt-4o".to_string(),
                 aliases: vec!["fast".to_string()],
+                description: None,
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -55,6 +56,7 @@ async fn prepare_returns_route_identity_and_encodes_resolved_request_model() {
                 request_model: "gpt-4o".to_string(),
                 billing_model: "gpt-4o".to_string(),
                 aliases: vec!["fast".to_string()],
+                description: None,
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -97,6 +99,7 @@ fn duplicate_profile_names_are_rejected_during_client_construction() {
                     request_model: "gpt-4o".to_string(),
                     billing_model: "gpt-4o".to_string(),
                     aliases: vec!["fast".to_string()],
+                    description: None,
                     capabilities: Capabilities {
                         streaming: true,
                         tools: true,
@@ -122,6 +125,7 @@ fn duplicate_profile_names_are_rejected_during_client_construction() {
                     request_model: "claude-sonnet-4-20250514".to_string(),
                     billing_model: "claude-sonnet-4-20250514".to_string(),
                     aliases: vec![],
+                    description: None,
                     capabilities: Capabilities {
                         streaming: true,
                         tools: true,
@@ -159,6 +163,7 @@ async fn openai_responses_profile_prepares_post_to_responses_endpoint() {
                 request_model: "gpt-4o".to_string(),
                 billing_model: "gpt-4o".to_string(),
                 aliases: vec![],
+                description: None,
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -212,6 +217,7 @@ async fn openai_responses_websocket_capability_selects_stream_transport_only_for
                 request_model: "gpt-5".to_string(),
                 billing_model: "gpt-5".to_string(),
                 aliases: vec![],
+                description: None,
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -263,6 +269,7 @@ fn websocket_capability_is_rejected_for_non_responses_protocols() {
                 request_model: "gpt-4o".to_string(),
                 billing_model: "gpt-4o".to_string(),
                 aliases: vec![],
+                description: None,
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -300,6 +307,7 @@ async fn response_format_is_rejected_when_selected_model_lacks_structured_output
                 request_model: "gpt-4o".to_string(),
                 billing_model: "gpt-4o".to_string(),
                 aliases: vec!["fast".to_string()],
+                description: None,
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,

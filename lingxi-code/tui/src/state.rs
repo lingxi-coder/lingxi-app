@@ -569,6 +569,26 @@ impl Default for StreamingState {
 /// migrate.
 pub type StreamingTurn = StreamingState;
 
+/// (SS-08) The session's currently-active todo, threaded into the streaming
+/// spinner so its verb reflects what the leader is doing right now
+/// (claude-code `Spinner.tsx:162` — `currentTodo = tasksV2?.find(t =>
+/// t.status !== 'pending' && t.status !== 'completed')`). Populated from the
+/// live `TodoWrite` tool input (see [`crate::streaming::apply_event`]); the
+/// spinner's `leaderVerb` resolves `active_form ?? subject ?? random`
+/// (`Spinner.tsx:169`). A minimal local mirror of the task tool's `TodoTask`
+/// — only the two fields the spinner reads — so the TUI stays decoupled from
+/// the `task` crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentTodo {
+    /// The todo's imperative content (claude-code `subject`/`content`). Used
+    /// as the spinner verb when `active_form` is absent.
+    pub subject: String,
+    /// The present-continuous form shown in the spinner while the todo is
+    /// active (claude-code `activeForm`, e.g. "Running tests"). Preferred over
+    /// `subject`.
+    pub active_form: Option<String>,
+}
+
 /// Root TUI state. Owned by the `App` root component.
 // Many independent UI flags map 1:1 to claude-code's React state fields; collapsing
 // them into enums would diverge from the reference layout and churn the public API.
@@ -623,6 +643,13 @@ pub struct AppState {
     /// `true`, the streaming spinner pins its glyph and stops animating.
     /// Loaded from settings.json at startup; defaults to `false`.
     pub reduced_motion: bool,
+    /// (SS-08) The currently-active todo (first non-pending/non-completed
+    /// item from the latest `TodoWrite`), or `None` when no todo is active.
+    /// Drives the streaming spinner's verb (`active_form ?? subject ??`
+    /// random), mirroring claude-code `Spinner.tsx:162`/`:169`. Updated by
+    /// [`crate::streaming::apply_event`] on each `TodoWrite` tool call and
+    /// cleared when a turn ends.
+    pub current_todo: Option<CurrentTodo>,
     /// `Some` while a turn is being driven by the orchestrator.
     pub in_flight_turn: Option<TurnInFlight>,
     /// Timestamp of the first idle Ctrl-C/Ctrl-D press; cleared after
@@ -1026,6 +1053,7 @@ impl AppState {
             theme_setting: ThemeSetting::Auto,
             syntax_highlighting_disabled: false,
             reduced_motion: false,
+            current_todo: None,
             in_flight_turn: None,
             sigint_armed_at: None,
             sigint_armed_key: "Ctrl-C",

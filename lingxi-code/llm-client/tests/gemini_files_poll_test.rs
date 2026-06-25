@@ -83,6 +83,7 @@ fn gemini_client() -> DefaultLlmClient {
                 request_model: "gemini-2.0-flash".to_string(),
                 billing_model: "gemini-2.0-flash".to_string(),
                 aliases: vec!["gemini".to_string()],
+                description: None,
                 capabilities: Capabilities {
                     streaming: true,
                     tools: true,
@@ -117,6 +118,7 @@ fn anthropic_client() -> DefaultLlmClient {
                 request_model: "claude-sonnet-4-20250514".to_string(),
                 billing_model: "claude-sonnet-4".to_string(),
                 aliases: vec!["claude".to_string()],
+                description: None,
                 capabilities: Capabilities::default(),
             }],
             pricing: PricingConfig::default(),

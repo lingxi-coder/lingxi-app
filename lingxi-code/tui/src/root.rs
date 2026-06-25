@@ -569,6 +569,11 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
         // `Scroll` only: the native PageUp/PageDown/Home/End scroll keys, with
         // Esc/`q` falling through to the reducer's native close.
         Some(Screen::Skills(_)) => &["Scroll"],
+        // (RRS-06) The Ctrl+O transcript is a read-only SCROLL pager (no tabs,
+        // no selection) — same as Skills. `Scroll` gives the native
+        // PageUp/PageDown/Home/End keys; Ctrl+O / Esc fall through to the
+        // reducer's native close.
+        Some(Screen::Transcript(_)) => &["Scroll"],
         Some(
             Screen::Mcp(_)
             | Screen::Hooks(_)
@@ -903,6 +908,23 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                 HelpOutcome::Stay => {}
             }
         }
+        Some(Screen::Transcript(state)) => {
+            // (RRS-06) The Ctrl+O transcript toggle (read-only). The pure
+            // `handle_transcript_key` reducer first closes on the Ctrl+O toggle
+            // chord (the same chord that opened it), then delegates scroll keys
+            // to the embedded `ScrollState`, then closes on Esc. It needs the
+            // FULL `KeyEvent` (the Ctrl+O modifier check + the scroll bindings),
+            // so we pass the bridged crossterm-0.28 event, mirroring the
+            // Skills/Help arms.
+            //   - Close → back to REPL (the shared `close_screen` path).
+            //   - Stay  → scrolled or inert; keep open.
+            use crate::screens::transcript::{handle_transcript_key, TranscriptOutcome};
+            let ct = iocraft_to_crossterm028_key(k);
+            match handle_transcript_key(state, ct) {
+                TranscriptOutcome::Close => st.close_screen(),
+                TranscriptOutcome::Stay => {}
+            }
+        }
         None => {}
     }
 }
@@ -1100,6 +1122,33 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
         return;
     }
     // === end Ctrl-T open binding ===
+
+    // === Priority 3 open binding: Ctrl-O opens the transcript screen (RRS-06,
+    // claude-code `app:toggleTranscript`). A read-only, scrollable verbose dump
+    // of the FULL message log; this makes the compact-boundary's
+    // `(ctrl+o for history)` hint functional. Same mutual-exclusion gating as
+    // Ctrl-R / Ctrl-T: only fires when no other priority-3 overlay
+    // (palette/completion/history-search/message-selector) is open, so the open
+    // bindings stay mutually exclusive. (`active_screen` is already `None` here —
+    // the priority-2 gate above returns whenever a screen is open — so opening
+    // can never clobber one.) Captures a snapshot of the current scrollback. ===
+    if !st.palette.open
+        && !st.completion.open
+        && st.history_search.is_none()
+        && !st.message_selector.open
+        && matches!(k.code, KeyCode::Char('o'))
+        && k.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        st.active_screen = Some(crate::screens::Screen::Transcript(
+            crate::screens::transcript::TranscriptScreenState::with_viewport(
+                &st.messages,
+                viewport.max(1),
+            ),
+        ));
+        crate::telemetry::screen_opened("transcript");
+        return;
+    }
+    // === end Ctrl-O open binding ===
 
     // === Priority 3 open binding: Shift+Down opens the background-tasks dialog
     // (M9-05, claude-code `BackgroundTaskStatus.tsx` ` · ↓ to view`). Mirrors
@@ -3448,6 +3497,7 @@ mod tests {
             provider_id: "anthropic".into(),
             provider_label: "Anthropic".into(),
             available: true,
+            description: None,
         }];
         let mut st = AppState::new(crate::state::StatusSnapshot::default());
         st.active_screen = Some(Screen::Model(ModelScreenState {
@@ -3638,6 +3688,86 @@ mod tests {
         ctrl_d.modifiers = KeyModifiers::CONTROL;
         handle_live_key(&mut st, &ctrl_d, 24);
         assert!(!st.should_exit, "Ctrl+D with text must not exit");
+    }
+
+    /// (RRS-06) Ctrl+O from the live REPL opens the transcript screen, capturing
+    /// the full scrollback. This makes the compact-boundary's `(ctrl+o for
+    /// history)` hint functional.
+    #[test]
+    fn ctrl_o_opens_transcript_screen() {
+        use crate::screens::Screen;
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.push_message(crate::state::RenderedMessage::UserText {
+            body: "first question".into(),
+            timestamp: 0,
+        });
+        st.push_message(crate::state::RenderedMessage::AssistantText {
+            body: "first answer".into(),
+            timestamp: 0,
+        });
+        assert!(st.active_screen.is_none());
+
+        let mut ctrl_o = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('o'));
+        ctrl_o.modifiers = KeyModifiers::CONTROL;
+        handle_live_key(&mut st, &ctrl_o, 24);
+
+        match &st.active_screen {
+            Some(Screen::Transcript(tr)) => {
+                // The captured dump carries every message (the verbose view).
+                let body = crate::screens::transcript::render_transcript_to_string(tr);
+                assert!(body.contains("> first question"), "user line, got: {body}");
+                assert!(body.contains("first answer"), "assistant line, got: {body}");
+            }
+            other => panic!("expected Transcript screen, got {other:?}"),
+        }
+    }
+
+    /// (RRS-06) Ctrl+O inside the transcript toggles it OFF (the same chord that
+    /// opened it closes it), returning to the live REPL.
+    #[test]
+    fn ctrl_o_toggles_transcript_closed() {
+        use crate::screens::Screen;
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.active_screen = Some(Screen::Transcript(
+            crate::screens::transcript::TranscriptScreenState::new(&st.messages),
+        ));
+        let mut ctrl_o = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('o'));
+        ctrl_o.modifiers = KeyModifiers::CONTROL;
+        handle_screen_key(&mut st, &ctrl_o);
+        assert!(
+            st.active_screen.is_none(),
+            "Ctrl+O must toggle the transcript closed"
+        );
+    }
+
+    /// (RRS-06) Esc inside the transcript closes it back to the live REPL.
+    #[test]
+    fn esc_closes_transcript_screen() {
+        use crate::screens::Screen;
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.active_screen = Some(Screen::Transcript(
+            crate::screens::transcript::TranscriptScreenState::new(&st.messages),
+        ));
+        let esc = KeyEvent::new(KeyEventKind::Press, KeyCode::Esc);
+        handle_screen_key(&mut st, &esc);
+        assert!(st.active_screen.is_none(), "Esc must close the transcript");
+    }
+
+    /// (RRS-06) Ctrl+O does NOT open the transcript while a priority-3 overlay
+    /// (here the message selector) owns keys — the open bindings stay mutually
+    /// exclusive.
+    #[test]
+    fn ctrl_o_does_not_open_transcript_under_overlay() {
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.message_selector.open();
+        let mut ctrl_o = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('o'));
+        ctrl_o.modifiers = KeyModifiers::CONTROL;
+        handle_live_key(&mut st, &ctrl_o, 24);
+        assert!(
+            st.active_screen.is_none(),
+            "Ctrl+O must not open the transcript while the selector overlay is open"
+        );
+        assert!(st.message_selector.open, "the selector stays open");
     }
 
     /// (GAP D fix — tab navigators, TDD) The Stats screen is a TAB NAVIGATOR

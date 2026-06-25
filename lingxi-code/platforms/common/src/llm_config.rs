@@ -857,6 +857,7 @@ mod tests {
                 request_model: "llama-3.3-70b".to_string(),
                 billing_model: "llama-3.3-70b".to_string(),
                 aliases: vec!["llama".to_string()],
+                description: None,
                 capabilities: llm_client::Capabilities {
                     streaming: true,
                     tools: true,

@@ -791,7 +791,7 @@ pub fn render_screen(
             }
             Screen::Resume(rs) => {
                 use crate::screens::resume::ResumeScreen;
-                element! { ResumeScreen(state: rs.clone()) }.into_any()
+                element! { ResumeScreen(state: rs.clone(), theme: state.theme) }.into_any()
             }
             Screen::Settings(ss) => {
                 use crate::screens::settings::SettingsScreen;
@@ -1031,6 +1031,23 @@ pub fn render_screen(
                 }
                 .into_any()
             }
+            Screen::Transcript(tr) => {
+                // (RRS-06) The Ctrl+O transcript renders the pure
+                // `render_transcript_to_string` body (the verbose scrollback dump
+                // window + scroll indicator + footer) line-by-line in a column
+                // View. Mirrors the Skills/Help arms.
+                use crate::screens::transcript::render_transcript_to_string;
+                let body = render_transcript_to_string(tr);
+                let lines: Vec<String> = body.lines().map(str::to_string).collect();
+                element! {
+                    View(flex_direction: FlexDirection::Column, padding: 1) {
+                        #(lines.into_iter().map(|line| element! {
+                            Text(content: line)
+                        }))
+                    }
+                }
+                .into_any()
+            }
         };
     }
     // (M7-14) Message search overlay renders over the REPL at priority 3 (after
@@ -1159,6 +1176,8 @@ pub fn render_screen(
             }),
             // (SS-06) reduced-motion → static spinner.
             reduced_motion: state.reduced_motion,
+            // (SS-08) Active todo → drives the spinner's leader verb.
+            current_todo: state.current_todo.clone(),
         )
     }
     .into_any()

@@ -746,6 +746,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reviser_only_writes_its_own_worktree_diff_is_own_worktree_derived() {
+        // Two independent real git worktrees. The reviser is pinned to repo_a's
+        // cwd; the mock writes (as the agent would) ONLY into `request.cwd`. The
+        // host derives the post-revision diff from `git diff --cached` of THAT
+        // cwd, so the produced patch must describe repo_a's change and repo_b
+        // (the sibling author's worktree) must be left pristine — proving the
+        // cwd-pin confines both the edit and the diff to the author's own
+        // worktree (design doc §安全约束 #1 / §Worktree 隔离).
+        let repo_a = init_repo();
+        let repo_b = init_repo();
+        let (inherit, _ti, _bud) = inheritance();
+        let spawner = Arc::new(RecordingSpawner::new(SpawnScript::WriteThenComplete {
+            file: "owned.rs".into(),
+            contents: "// only in author a's worktree\n".into(),
+            content: serde_json::Value::String("revised a".into()),
+            usage: SubagentUsage::default(),
+        }));
+        let reviser = SpawnerReviser { spawner: spawner.clone(), inherit };
+        let ctx = RevisionContext {
+            candidate_id: "candidate-a".into(),
+            task_brief: "t".into(),
+            review_feedback: "fix".into(),
+            cwd: repo_a.path().to_path_buf(),
+            pre_revision_patch: "diff --git a/x b/x\n+old\n".into(),
+            cancel: CancellationToken::new(),
+        };
+        let out = reviser.revise(&ctx).await.expect("revise");
+
+        // The diff is derived from repo_a's worktree and names the file written
+        // there.
+        assert!(out.patch_diff.contains("owned.rs"), "diff = {}", out.patch_diff);
+        assert!(out.patch_diff.contains("only in author a's worktree"));
+
+        // The spawn was pinned to repo_a, NOT repo_b.
+        let req = spawner.last_request.lock().unwrap().clone().unwrap();
+        assert_eq!(req.cwd.as_deref(), Some(repo_a.path().to_string_lossy().as_ref()));
+
+        // The author's own worktree carries the new file; the sibling worktree
+        // was never touched.
+        assert!(repo_a.path().join("owned.rs").is_file());
+        assert!(!repo_b.path().join("owned.rs").exists());
+        // repo_b is still pristine (only the baseline README.md, no staged diff).
+        let b_diff = worktree_diff(repo_b.path()).await.expect("b diff");
+        assert!(b_diff.trim().is_empty(), "sibling worktree b must be untouched: {b_diff}");
+    }
+
+    #[tokio::test]
     async fn reviser_failure_is_recoverable_error() {
         let repo = init_repo();
         let (inherit, _ti, _bud) = inheritance();

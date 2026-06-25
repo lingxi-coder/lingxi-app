@@ -2206,7 +2206,16 @@ pub async fn build(
         if has_api_key { Some(cfg.api_key.clone()) } else { None },
         oauth_delegates,
     );
-    client = client.with_credential_provider(Arc::new(composite));
+    // GitHub Copilot needs a short-lived token minted from the raw OAuth token
+    // (api.githubcopilot.com rejects the raw token). Wrap the composite so the
+    // `github-copilot` credential is exchanged + cached; every other credential
+    // id passes straight through unchanged.
+    let copilot_creds = llm_client::CopilotExchangeCredentialProvider::new(
+        Arc::new(composite),
+        Arc::new(connect::PosixCopilotHttp::new()),
+        "github-copilot",
+    );
+    client = client.with_credential_provider(Arc::new(copilot_creds));
     let llm_client = Arc::new(client);
 
     // 3c-T3: build the cost estimator from the assembled pricing catalog so

@@ -182,6 +182,14 @@ impl ExchangedToken {
         self.secret
     }
 
+    /// The exchanged Copilot bearer string. `pub(crate)` so the credential layer
+    /// ([`crate::CopilotExchangeCredentialProvider`]) can hand it to the
+    /// authenticator; never logged (the wrapping types stay redacting).
+    #[must_use]
+    pub(crate) fn bearer(&self) -> &str {
+        self.secret.token_for_storage()
+    }
+
     /// True if the token is still safely usable at `now_unix_secs`, i.e. it does
     /// not expire within [`COPILOT_TOKEN_REFRESH_SKEW_SECS`]. The host caches the
     /// token and calls [`exchange_copilot_token`] again once this returns false.

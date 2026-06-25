@@ -54,8 +54,8 @@ pub use copilot::{
 };
 pub use cost::{CostEstimator, PricingCatalog, PricingPolicy, TokenPricing};
 pub use credentials::{
-    Credential, CredentialProvider, CredentialScope, EnvCredentialProvider,
-    StaticCredentialProvider,
+    CopilotExchangeCredentialProvider, Credential, CredentialProvider, CredentialScope,
+    EnvCredentialProvider, StaticCredentialProvider,
 };
 pub use error::LlmError;
 pub use eventstream::{crc32, EventStreamMessage, EventStreamSplitter};

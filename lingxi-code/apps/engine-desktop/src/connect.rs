@@ -121,6 +121,38 @@ impl CopilotHttp for PosixCopilotHttp {
                 .map_err(|e| LlmError::Transport { message: format!("copilot json: {e}") })
         })
     }
+
+    fn get_json<'a>(
+        &'a self,
+        url: &'a str,
+        headers: &'a [(&'a str, String)],
+    ) -> BoxFuture<'a, Result<Value, LlmError>> {
+        Box::pin(async move {
+            // Base headers (Accept/User-Agent) the seam requires, plus the
+            // caller-supplied ones (e.g. `Authorization: token <oauth>` for the
+            // Copilot token exchange).
+            let mut hdrs = vec![
+                ("Accept".to_string(), "application/json".to_string()),
+                ("User-Agent".to_string(), "LingXi-Code".to_string()),
+            ];
+            hdrs.extend(headers.iter().map(|(k, v)| ((*k).to_string(), v.clone())));
+            let req = HttpRequest {
+                method: HttpMethod::Get,
+                url: url.to_string(),
+                headers: hdrs,
+                body: None,
+                body_bytes: None,
+                timeout: None,
+            };
+            let resp = self
+                .http
+                .request(req)
+                .await
+                .map_err(|e| LlmError::Transport { message: e.to_string() })?;
+            serde_json::from_str(&resp.body)
+                .map_err(|e| LlmError::Transport { message: format!("copilot json: {e}") })
+        })
+    }
 }
 
 /// Sleep port so the poll loop is testable without real time.

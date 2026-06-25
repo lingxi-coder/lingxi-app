@@ -44,6 +44,67 @@ use tokio_util::sync::CancellationToken;
 
 use crate::server::TurnDriver;
 
+/// A msgqueue-backed [`orchestrator::prompt::mid_turn_input::MidTurnInputSource`].
+///
+/// Bridges the orchestrator's queue-agnostic mid-turn drain seam to the
+/// connection's [`msgqueue::MessageQueueManager`]: each
+/// [`MidTurnInputSource::take_mid_turn_input`] snapshots the `Next`-priority
+/// MAIN-THREAD, NON-slash prompts, joins the consecutive ones via
+/// [`msgqueue::join_prompt_values`], REMOVES the consumed commands from the
+/// queue (so the between-turn drain doesn't re-run them), and returns the joined
+/// text for injection as a meta user message. Returns `None` when nothing
+/// batchable is queued.
+///
+/// `Now`-priority commands are deliberately EXCLUDED: a `Now` enqueue aborts the
+/// in-flight turn (via the queue's now-abort hook) and must survive to the
+/// between-turn drain so it runs as its own interrupting turn, rather than being
+/// silently folded into the running turn as injected mid-turn text.
+///
+/// This is the composition-root half of the seam — it lives in the bridge (which
+/// owns the per-connection queue) so the `orchestrator` crate keeps NO
+/// dependency on `msgqueue`. Twin of claude-code's query.ts ~1570-1580
+/// snapshot+`joinPromptValues`+inject path.
+pub struct MsgQueueMidTurnInput {
+    queue: Arc<msgqueue::MessageQueueManager>,
+}
+
+impl MsgQueueMidTurnInput {
+    /// Build the adapter over the connection's queue.
+    #[must_use]
+    pub fn new(queue: Arc<msgqueue::MessageQueueManager>) -> Self {
+        Self { queue }
+    }
+}
+
+#[async_trait]
+impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTurnInput {
+    async fn take_mid_turn_input(&self) -> Option<String> {
+        // Snapshot the highest-priority main-thread, non-slash prompts for
+        // mid-turn injection, preserving priority+FIFO order. SCOPE TO `Next`
+        // ONLY: a `Now`-priority command must NOT be consumed here — it has
+        // already aborted the in-flight turn (via the queue's now-abort hook
+        // firing the registered cancel token) and must remain in the queue so
+        // the between-turn drain runs it as its own interrupting turn. The
+        // `Next` threshold already excludes `Later`; the equality predicate
+        // additionally excludes `Now` (since `Later < Next < Now`).
+        let batch = self
+            .queue
+            .get_by_max_priority(msgqueue::QueuePriority::Next, |c| {
+                c.is_main_thread()
+                    && !c.is_slash_command()
+                    && c.priority == msgqueue::QueuePriority::Next
+            })
+            .await;
+        let (joined, consumed) = msgqueue::join_prompt_values(&batch)?;
+        // Consume-once: remove the merged commands so the between-turn drain
+        // never re-runs them.
+        self.queue
+            .remove(&consumed, "drained mid-turn into running turn")
+            .await;
+        Some(joined)
+    }
+}
+
 /// A production [`TurnDriver`] backed by a real [`ConversationOrchestrator`].
 ///
 /// Wraps the orchestrator (whose [`client_adapter::AdapterOutputStream`] is already
@@ -57,6 +118,18 @@ pub struct OrchestratorTurnDriver {
     /// Used solely to emit a terminal [`ClientEvent::Error`] on turn failure;
     /// `None` to drop errors silently (e.g. tests that only assert success).
     error_sink: Option<Arc<dyn ClientEventSink>>,
+    /// The connection's message queue, wired so each turn's fresh
+    /// [`CancellationToken`] is REGISTERED with the queue at turn start (so a
+    /// `Now`-priority enqueue aborts the in-flight turn) and CLEARED at turn end.
+    /// `None` ⇒ no registration; the turn runs uninterruptibly by the queue
+    /// (the test drivers and any caller that builds the driver without a queue).
+    queue: Option<Arc<msgqueue::MessageQueueManager>>,
+    /// The abort-reason flag the orchestrator reads to tell a `Now`-command abort
+    /// from a user interrupt. RESET to `UserInterrupt` at each turn start so a
+    /// stale `QueueNowCommand` from a prior turn cannot mislabel this one. `None`
+    /// when no queue is wired. The queue's now-abort hook sets it to
+    /// `QueueNowCommand` right before firing the token.
+    cancel_reason: Option<orchestrator::prompt::mid_turn_input::CancelReasonFlag>,
 }
 
 impl OrchestratorTurnDriver {
@@ -71,7 +144,27 @@ impl OrchestratorTurnDriver {
         Self {
             orchestrator,
             error_sink: None,
+            queue: None,
+            cancel_reason: None,
         }
+    }
+
+    /// Wire the connection's message queue + abort-reason flag so each turn's
+    /// cancel token is registered with the queue (a `Now` enqueue aborts the
+    /// in-flight turn) and the reason flag is reset at turn start. Additive over
+    /// [`Self::new`] / [`Self::with_error_sink`]: a driver built without this
+    /// behaves exactly as before (no queue-driven abort). The composition root
+    /// (`boot::assemble`) calls this with the [`crate::server::BridgeConnection`]'s
+    /// per-connection queue and the SAME flag wired into the orchestrator.
+    #[must_use]
+    pub fn with_queue(
+        mut self,
+        queue: Arc<msgqueue::MessageQueueManager>,
+        cancel_reason: orchestrator::prompt::mid_turn_input::CancelReasonFlag,
+    ) -> Self {
+        self.queue = Some(queue);
+        self.cancel_reason = Some(cancel_reason);
+        self
     }
 
     /// Construct a driver that surfaces a turn-level failure as a
@@ -90,6 +183,8 @@ impl OrchestratorTurnDriver {
         Self {
             orchestrator,
             error_sink: Some(error_sink),
+            queue: None,
+            cancel_reason: None,
         }
     }
 
@@ -138,14 +233,32 @@ impl OrchestratorTurnDriver {
     /// [`TurnDriver::run_turn_with_images`]; an empty `sources` vector is
     /// byte-identical to the pre-MULTIMODAL.1 text-only turn.
     async fn drive_turn(&self, prompt: String, sources: Vec<ImageSource>) {
-        // Each turn gets its own cancel token. Nothing trips it today; it is the
-        // seam a future per-turn cancel command fires.
+        // Each turn gets its own cancel token. A `Now`-priority enqueue fires it
+        // (via the queue's registered active-turn token) to abort the in-flight
+        // turn so the urgent command runs next; a future per-turn cancel command
+        // can fire the same seam.
         let cancel = CancellationToken::new();
-        match self
+        // NOW-ABORT wiring: register this turn's token with the queue so a `Now`
+        // enqueue aborts it, and RESET the abort-reason flag to `UserInterrupt`
+        // so a stale `QueueNowCommand` from the previous turn can't mislabel this
+        // one. Both no-ops when no queue is wired (the test drivers).
+        if let Some(reason) = self.cancel_reason.as_ref() {
+            reason.reset();
+        }
+        if let Some(queue) = self.queue.as_ref() {
+            queue.register_active_turn(cancel.clone()).await;
+        }
+        let result = self
             .orchestrator
             .run_turn_streaming_with_cancel_image_sources(&prompt, sources, cancel)
-            .await
-        {
+            .await;
+        // Clear the active-turn token at turn end (graceful OR error): a later
+        // `Now` enqueue between turns then has nothing to abort and simply waits
+        // for the between-turn drain. No-op when no queue is wired.
+        if let Some(queue) = self.queue.as_ref() {
+            queue.clear_active_turn().await;
+        }
+        match result {
             // Success / cancellation / max-turns all already produced their
             // terminal events through the orchestrator's output stream
             // (`TurnEnded`, etc.) — nothing more to push here.
@@ -361,5 +474,139 @@ mod tests {
                 .all(|b| !matches!(b, ContentBlock::Image { .. })),
             "the text-only path carries no image blocks: {plain:?}"
         );
+    }
+
+    // ========================================================================
+    // §27 mid-turn drain adapter (`MsgQueueMidTurnInput`) + Now-abort wiring.
+    // ========================================================================
+
+    use msgqueue::{
+        MessageQueueManager, QueuePriority, QueueSource, QueuedCommand, QueuedCommandContent,
+    };
+    use orchestrator::prompt::mid_turn_input::MidTurnInputSource;
+    use std::time::SystemTime;
+    use tokio_util::sync::CancellationToken;
+
+    fn user_cmd(uuid: &str, prio: QueuePriority, text: &str) -> QueuedCommand {
+        QueuedCommand {
+            uuid: uuid.to_string(),
+            content: QueuedCommandContent::UserInput { text: text.to_string() },
+            priority: prio,
+            queued_at: SystemTime::now(),
+            source: QueueSource::PromptInput,
+            agent_id: None,
+            skip_slash_commands: false,
+            is_meta: false,
+        }
+    }
+
+    /// The adapter joins consecutive `Next` main-thread prompts, returns the
+    /// joined text, and REMOVES the consumed commands from the queue (consume-once
+    /// so the between-turn drain never re-runs them).
+    #[tokio::test]
+    async fn mid_turn_adapter_joins_and_consumes_queued_prompts() {
+        let queue = Arc::new(MessageQueueManager::new());
+        queue.enqueue(user_cmd("a", QueuePriority::Next, "first")).await;
+        queue.enqueue(user_cmd("b", QueuePriority::Next, "second")).await;
+        let adapter = super::MsgQueueMidTurnInput::new(queue.clone());
+
+        let joined = adapter.take_mid_turn_input().await;
+        assert_eq!(joined.as_deref(), Some("first\nsecond"));
+        // Consumed — the queue is now empty, so a second drain yields None.
+        assert!(queue.is_empty().await);
+        assert_eq!(adapter.take_mid_turn_input().await, None);
+    }
+
+    /// A `Now`-priority command is EXCLUDED from the mid-turn drain: it has
+    /// already aborted the in-flight turn and must be PRESERVED in the queue for
+    /// the between-turn drain to run as its own interrupting turn, not folded
+    /// into the running turn as injected text. The drain still consumes the
+    /// `Next` prompt that precedes it.
+    #[tokio::test]
+    async fn mid_turn_adapter_excludes_now_and_preserves_it() {
+        let queue = Arc::new(MessageQueueManager::new());
+        queue.enqueue(user_cmd("a", QueuePriority::Next, "first")).await;
+        queue.enqueue(user_cmd("urgent", QueuePriority::Now, "do it now")).await;
+        let adapter = super::MsgQueueMidTurnInput::new(queue.clone());
+
+        // Only the `Next` prompt is drained mid-turn; the `Now` command is left.
+        let joined = adapter.take_mid_turn_input().await;
+        assert_eq!(joined.as_deref(), Some("first"));
+
+        // The `Now` command survives for the between-turn drain.
+        assert_eq!(queue.len().await, 1);
+        let remaining = queue
+            .get_by_max_priority(QueuePriority::Now, |_| true)
+            .await;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].uuid, "urgent");
+        assert_eq!(remaining[0].priority, QueuePriority::Now);
+
+        // A second mid-turn drain finds nothing batchable (Now stays excluded).
+        assert_eq!(adapter.take_mid_turn_input().await, None);
+        assert_eq!(queue.len().await, 1);
+    }
+
+    /// A slash command is EXCLUDED from the mid-turn drain (it is routed
+    /// post-turn), so the adapter returns `None` when only a slash command waits.
+    #[tokio::test]
+    async fn mid_turn_adapter_excludes_slash_commands() {
+        let queue = Arc::new(MessageQueueManager::new());
+        queue.enqueue(user_cmd("s", QueuePriority::Next, "/clear")).await;
+        let adapter = super::MsgQueueMidTurnInput::new(queue.clone());
+        assert_eq!(adapter.take_mid_turn_input().await, None);
+        // The slash command is left in the queue for the post-turn path.
+        assert_eq!(queue.len().await, 1);
+    }
+
+    /// A subagent-scoped command (has an `agent_id`) is EXCLUDED by the
+    /// main-thread filter, so it never leaks into the coordinator's mid-turn drain.
+    #[tokio::test]
+    async fn mid_turn_adapter_scopes_to_main_thread() {
+        let queue = Arc::new(MessageQueueManager::new());
+        let mut sub = user_cmd("sub", QueuePriority::Next, "subagent input");
+        sub.agent_id = Some(protocol::AgentId::new());
+        queue.enqueue(sub).await;
+        let adapter = super::MsgQueueMidTurnInput::new(queue.clone());
+        assert_eq!(adapter.take_mid_turn_input().await, None);
+        assert_eq!(queue.len().await, 1);
+    }
+
+    /// A `Now`-priority enqueue, with the driver having registered the turn's
+    /// cancel token via `with_queue`, fires the token AND sets the reason flag —
+    /// proving the end-to-end Now-abort wiring (the driver registers, the queue
+    /// hook records the reason, the token trips).
+    #[tokio::test]
+    async fn with_queue_registers_token_and_now_enqueue_aborts_with_reason() {
+        use orchestrator::prompt::mid_turn_input::{CancelReason, CancelReasonFlag};
+
+        let queue = Arc::new(MessageQueueManager::new());
+        let reason = CancelReasonFlag::new();
+        // Install the now-abort hook exactly as boot::assemble does.
+        {
+            let r = reason.clone();
+            queue
+                .set_now_abort_hook(Arc::new(move || r.set(CancelReason::QueueNowCommand)))
+                .await;
+        }
+
+        // Register a turn token (what drive_turn does at turn start).
+        let token = CancellationToken::new();
+        queue.register_active_turn(token.clone()).await;
+        assert!(!token.is_cancelled());
+        assert_eq!(reason.get(), CancelReason::UserInterrupt);
+
+        // A Now enqueue trips the token AND records the reason.
+        queue.enqueue(user_cmd("urgent", QueuePriority::Now, "do it now")).await;
+        assert!(token.is_cancelled(), "Now enqueue must abort the active turn");
+        assert_eq!(
+            reason.get(),
+            CancelReason::QueueNowCommand,
+            "the now-abort hook must record QueueNowCommand before firing"
+        );
+
+        // Build a driver wired with the queue + reason to prove the API compiles
+        // and the seam is reachable (smoke).
+        let _driver = build_driver(streaming_one_turn()).with_queue(queue, reason);
     }
 }

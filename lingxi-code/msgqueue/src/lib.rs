@@ -6,8 +6,10 @@
 
 pub mod operations;
 pub mod queue;
+pub mod telemetry_recorder;
 
 pub use operations::{QueueOperation, QueueOperationRecorder, VecRecorder};
+pub use telemetry_recorder::TelemetryQueueRecorder;
 pub use queue::{
     join_prompt_values, MessageQueueManager, NotificationMode, QueuePriority, QueueSource,
     QueuedCommand, QueuedCommandContent,

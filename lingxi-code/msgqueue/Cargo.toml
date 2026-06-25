@@ -12,6 +12,13 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# Used ONLY by the string-lock test that guards the event-name literals in
+# `telemetry_recorder` against `telemetry::tengu::queue::*` drift. NOT a runtime
+# dependency — msgqueue stays a leaf crate with no hard telemetry dependency.
+telemetry = { path = "../telemetry" }
 
 [lints]
 workspace = true

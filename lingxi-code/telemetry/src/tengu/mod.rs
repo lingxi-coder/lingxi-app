@@ -18,6 +18,10 @@ pub mod migration;
 pub mod oauth;
 pub mod orchestrator;
 pub mod permission;
+/// Queue-operation telemetry event names (NOT in `ALL_EVENT_NAMES` — these are
+/// LingXi-native `lingxi_queue_*` observability events, kept apart from the
+/// count-locked `tengu_*` set; mirrors `workflow`).
+pub mod queue;
 pub mod release;
 pub mod session;
 pub mod settings;

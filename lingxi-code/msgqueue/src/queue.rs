@@ -207,6 +207,13 @@ pub struct MessageQueueManager {
     /// The active turn's cancel token, if a turn is running. A `Now`-priority
     /// enqueue cancels it (twin of `subscribeToCommandQueue` ⇒ abort).
     active_turn: Arc<RwLock<Option<CancellationToken>>>,
+    /// Optional hook run RIGHT BEFORE the active turn's token is fired by a
+    /// `Now`-priority enqueue. The composition root uses this to record the
+    /// abort REASON (so the turn loop can tell a `Now`-command abort from a user
+    /// Ctrl+C) on a flag of its own type — keeping `msgqueue` free of any
+    /// dependency on the orchestrator's reason enum. `None` ⇒ no reason
+    /// bookkeeping (the default; the token still fires).
+    on_now_abort: Arc<RwLock<Option<Arc<dyn Fn() + Send + Sync>>>>,
 }
 
 impl MessageQueueManager {
@@ -218,7 +225,35 @@ impl MessageQueueManager {
             notify: Arc::new(Notify::new()),
             recorder: Arc::new(RwLock::new(None)),
             active_turn: Arc::new(RwLock::new(None)),
+            on_now_abort: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Construct an empty queue with the operation recorder pre-installed
+    /// synchronously at build time. Equivalent to [`Self::new`] followed by
+    /// [`Self::set_recorder`], but usable from a synchronous composition root
+    /// (e.g. `BridgeConnection::new`) where no async runtime is yet available to
+    /// `.await set_recorder`. All other fields match [`Self::new`] exactly, so a
+    /// queue built this way is byte-identical to a freshly-`new`'d one except for
+    /// the recorder being present.
+    #[must_use]
+    pub fn with_recorder(recorder: Arc<dyn QueueOperationRecorder>) -> Self {
+        Self {
+            queue: Arc::new(RwLock::new(VecDeque::new())),
+            notify: Arc::new(Notify::new()),
+            recorder: Arc::new(RwLock::new(Some(recorder))),
+            active_turn: Arc::new(RwLock::new(None)),
+            on_now_abort: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Install the `Now`-abort reason hook: a callback run synchronously right
+    /// before the active turn's token is fired by a `Now`-priority enqueue.
+    /// The composition root captures its own abort-reason flag in this closure
+    /// so the turn loop can distinguish a `Now`-command abort from a user
+    /// interrupt — without `msgqueue` knowing the reason type. Idempotent.
+    pub async fn set_now_abort_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self.on_now_abort.write().await = Some(hook);
     }
 
     /// Install the operation recorder (twin of wiring `recordQueueOperation`).
@@ -261,6 +296,12 @@ impl MessageQueueManager {
         self.notify.notify_one();
         if is_now {
             if let Some(token) = self.active_turn.read().await.as_ref() {
+                // Record the abort REASON before firing so the turn loop reads
+                // `QueueNowCommand` (not a user interrupt) when it observes the
+                // cancellation. No-op when no hook is wired.
+                if let Some(hook) = self.on_now_abort.read().await.as_ref() {
+                    hook();
+                }
                 token.cancel();
             }
         }
@@ -421,7 +462,14 @@ impl MessageQueueManager {
     }
 
     async fn record(&self, op: QueueOperation) {
-        if let Some(rec) = self.recorder.read().await.as_ref() {
+        // Clone the Arc and drop the read guard BEFORE awaiting so the lock is
+        // not held across `record`'s await point (avoids blocking `set_recorder`
+        // writers and prevents deadlock if a recorder ever becomes truly async).
+        let rec_opt = {
+            let r = self.recorder.read().await;
+            r.as_ref().map(Arc::clone)
+        };
+        if let Some(rec) = rec_opt {
             rec.record(op).await;
         }
     }
@@ -601,6 +649,28 @@ mod tests {
         q.register_active_turn(token2.clone()).await;
         q.enqueue(mk(QueuePriority::Next, "calm")).await;
         assert!(!token2.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn now_abort_hook_runs_before_token_fires() {
+        use std::sync::atomic::{AtomicBool, Ordering as O};
+        let q = MessageQueueManager::new();
+        let token = CancellationToken::new();
+        q.register_active_turn(token.clone()).await;
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran2 = ran.clone();
+        q.set_now_abort_hook(Arc::new(move || ran2.store(true, O::SeqCst)))
+            .await;
+
+        // A Next enqueue does NOT trigger the hook or the cancel.
+        q.enqueue(mk(QueuePriority::Next, "calm")).await;
+        assert!(!ran.load(O::SeqCst));
+        assert!(!token.is_cancelled());
+
+        // A Now enqueue runs the hook AND fires the token.
+        q.enqueue(mk(QueuePriority::Now, "urgent")).await;
+        assert!(ran.load(O::SeqCst), "hook must run on Now enqueue");
+        assert!(token.is_cancelled());
     }
 
     #[tokio::test]

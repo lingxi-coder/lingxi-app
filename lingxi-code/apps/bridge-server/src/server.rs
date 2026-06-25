@@ -57,7 +57,7 @@ use client_protocol::permission::{
 };
 use msgqueue::{
     join_prompt_values, MessageQueueManager, QueuePriority, QueueSource, QueuedCommand,
-    QueuedCommandContent,
+    QueuedCommandContent, TelemetryQueueRecorder,
 };
 use tokio::sync::Mutex;
 
@@ -278,7 +278,15 @@ impl BridgeConnection {
             router: None,
             handshaken: Arc::new(AtomicBool::new(false)),
             handshake_refused: Arc::new(AtomicBool::new(false)),
-            queue: Arc::new(MessageQueueManager::new()),
+            // Install the telemetry recorder synchronously at construction so
+            // every queue mutation (enqueue/dequeue/remove/clear) is forwarded
+            // to the tracing observability sink — the Rust twin of claude-code
+            // wiring `recordQueueOperation` (messageQueueManager.ts). Per-
+            // connection isolation is preserved: each connection owns its own
+            // queue + recorder.
+            queue: Arc::new(MessageQueueManager::with_recorder(Arc::new(
+                TelemetryQueueRecorder::new(),
+            ))),
             turn_running: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -323,6 +331,15 @@ impl BridgeConnection {
     pub fn bind_router(mut self, router: Arc<dyn CommandRouter>) -> Self {
         self.router = Some(router);
         self
+    }
+
+    /// A clone of this connection's message queue, so the composition root can
+    /// wire the SAME per-connection queue into the turn driver (for active-turn
+    /// registration) and into the orchestrator's mid-turn input adapter. The
+    /// queue is `Arc`-shared, so all three see the same items.
+    #[must_use]
+    pub fn queue_handle(&self) -> Arc<MessageQueueManager> {
+        self.queue.clone()
     }
 
     /// A clone of the gate handle, for tests that need to observe the parked /

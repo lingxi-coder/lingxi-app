@@ -800,6 +800,24 @@ pub struct ConversationOrchestrator {
     /// root from the `TaskRegistry`.
     pub(crate) task_notifications:
         Option<Arc<dyn crate::prompt::task_notification::TaskNotificationProvider>>,
+    /// Mid-turn drain seam: source of queued user input to inject WITHIN a
+    /// running streaming turn (claude-code's query.ts mid-turn injection,
+    /// ~1570-1580). Empty ⇒ the streaming loop's mid-turn drain is a strict
+    /// no-op (the default — keeps the locked fixtures byte-identical). Wired at
+    /// the composition root from the `MessageQueueManager` via a msgqueue-backed
+    /// adapter, so the orchestrator keeps NO dependency on `msgqueue`. A
+    /// [`std::sync::OnceLock`] so it can be set on `&self` AFTER the orchestrator
+    /// is shared as an `Arc` (the bridge wires it post-build with its
+    /// per-connection queue). See
+    /// [`crate::prompt::mid_turn_input::MidTurnInputSource`].
+    pub(crate) mid_turn_input:
+        std::sync::OnceLock<Arc<dyn crate::prompt::mid_turn_input::MidTurnInputSource>>,
+    /// Abort-reason flag shared with the queue adapter so the streaming loop can
+    /// distinguish a `Now`-command abort from a user Ctrl+C/ESC interrupt at the
+    /// cancel-check points. Unset ⇒ every abort is treated as a user interrupt
+    /// (today's behavior). Wired alongside [`Self::mid_turn_input`] at the
+    /// composition root. See [`crate::prompt::mid_turn_input::CancelReasonFlag`].
+    pub(crate) cancel_reason: std::sync::OnceLock<crate::prompt::mid_turn_input::CancelReasonFlag>,
     /// Finding #73: source of the V2 task list for the per-turn `task_reminder`
     /// (the binary's `B4p` reading `p9(KF())`). `None` ⇒ the V2 reminder renders
     /// with its base text only (no items appended), matching an empty store.
@@ -956,6 +974,8 @@ impl ConversationOrchestrator {
             skill_listing: None,
             async_hook_responses: None,
             task_notifications: None,
+            mid_turn_input: std::sync::OnceLock::new(),
+            cancel_reason: std::sync::OnceLock::new(),
             todo_reminder_tasks: None,
             conditional_rules_cache: tokio::sync::OnceCell::new(),
             sent_conditional_rules: Mutex::new(std::collections::HashSet::new()),
@@ -1213,6 +1233,93 @@ impl ConversationOrchestrator {
     ) -> Self {
         self.task_notifications = Some(provider);
         self
+    }
+
+    /// Wire the mid-turn input source consulted by the streaming turn loop at
+    /// each cancel-check point to drain queued user input WITHIN the running turn
+    /// (claude-code's query.ts mid-turn injection). Without it the mid-turn drain
+    /// is a strict no-op, so a turn with no source wired is byte-identical to
+    /// today. Builder form (fresh construction). See
+    /// [`Self::set_mid_turn_input`] for the post-`Arc` (`&self`) form the bridge
+    /// uses with its per-connection queue.
+    #[must_use]
+    pub fn with_mid_turn_input(
+        self,
+        source: Arc<dyn crate::prompt::mid_turn_input::MidTurnInputSource>,
+    ) -> Self {
+        self.set_mid_turn_input(source);
+        self
+    }
+
+    /// Set the mid-turn input source on a SHARED orchestrator (`&self`), so the
+    /// bridge can wire its per-connection queue adapter AFTER `engine_desktop::build`
+    /// returns the orchestrator as an `Arc`. Set-once: a second call is ignored
+    /// (the first wiring wins). See [`Self::with_mid_turn_input`].
+    pub fn set_mid_turn_input(
+        &self,
+        source: Arc<dyn crate::prompt::mid_turn_input::MidTurnInputSource>,
+    ) {
+        let _ = self.mid_turn_input.set(source);
+    }
+
+    /// Wire the abort-reason flag shared with the queue adapter so the streaming
+    /// loop can tell a `Now`-command abort from a user Ctrl+C/ESC interrupt.
+    /// Without it every abort is labeled a user interrupt (today's behavior).
+    /// Builder form. See [`Self::set_cancel_reason`] for the `&self` form.
+    #[must_use]
+    pub fn with_cancel_reason(
+        self,
+        flag: crate::prompt::mid_turn_input::CancelReasonFlag,
+    ) -> Self {
+        self.set_cancel_reason(flag);
+        self
+    }
+
+    /// Set the abort-reason flag on a SHARED orchestrator (`&self`). Set-once.
+    /// See [`Self::with_cancel_reason`].
+    pub fn set_cancel_reason(&self, flag: crate::prompt::mid_turn_input::CancelReasonFlag) {
+        let _ = self.cancel_reason.set(flag);
+    }
+
+    /// Read the active turn's [`crate::prompt::mid_turn_input::CancelReason`] from
+    /// the wired flag, defaulting to `UserInterrupt` when no flag is wired (so an
+    /// un-wired turn always takes the user-interrupt branch — today's behavior).
+    fn cancel_reason_now(&self) -> crate::prompt::mid_turn_input::CancelReason {
+        self.cancel_reason
+            .get()
+            .map_or(crate::prompt::mid_turn_input::CancelReason::UserInterrupt, |f| f.get())
+    }
+
+    /// Mid-turn drain step: pull any queued main-thread, non-slash input from the
+    /// wired source and inject it as a META user message so the next sampling
+    /// sees it. A strict no-op when no source is wired (the default) or the queue
+    /// is empty. Returns `true` if anything was injected (for the caller's
+    /// observability — the loop continues regardless). Mirrors claude-code's
+    /// `joinPromptValues` + meta-prompt injection at query.ts ~1570-1580.
+    async fn drain_mid_turn_input(&self) -> bool {
+        let Some(source) = self.mid_turn_input.get() else {
+            return false;
+        };
+        let mut injected = false;
+        // Loop so a burst of consecutive enqueues all land before the next call.
+        // The production source ([`MsgQueueMidTurnInput`]) is consume-once — it
+        // REMOVES the commands it returns each call — so it self-terminates after
+        // it has drained the queue. The bound below is a defensive guard against a
+        // MALFUNCTIONING source impl (the trait is public; a buggy impl that fails
+        // to consume could otherwise return `Some` forever and hang the turn loop):
+        // we cap the per-iteration drain at a generous fixed number of batches so a
+        // single drain step can never spin unboundedly.
+        const MAX_DRAIN_BATCHES: usize = 1024;
+        for _ in 0..MAX_DRAIN_BATCHES {
+            match source.take_mid_turn_input().await {
+                Some(text) => {
+                    self.inject_meta_user_message(&text).await;
+                    injected = true;
+                }
+                None => break,
+            }
+        }
+        injected
     }
 
     /// Finding #73: wire the V2 task source consulted by the per-turn
@@ -3849,6 +3956,30 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             }
             turn_count = turn_count.saturating_add(1);
 
+            // MID-TURN DRAIN (claude-code query.ts ~1570-1580): BEFORE the
+            // top-of-loop cancel guard, pull any queued main-thread, non-slash
+            // user input and inject it as a meta user message so this iteration's
+            // model call sees it. A strict no-op when no source is wired (the
+            // default) — the locked streaming fixtures are unaffected. Drained
+            // BEFORE the cancel check so the injected input is in history even if
+            // the very next thing observed is a `Now`-driven cancellation. A
+            // mid-turn drain pulls `Next`+`Now` text; the separate `Now`-abort
+            // branch below handles the urgent-command-aborts-the-turn UX.
+            //
+            // ORDERING IS LOAD-BEARING — DO NOT REORDER past the cancel guard
+            // below. The drain MUST run before the cancel check on EVERY iteration
+            // so that any `Next`/`Now` text enqueued during the previous
+            // iteration's streaming is folded into history before this iteration
+            // can observe the (possibly already-cancelled) token and break. The
+            // abort-reason flag read by the cancel guard is set at ENQUEUE time
+            // (by the queue adapter, before it fires the token) and reset at TURN
+            // START (driver `reset()`), never by this drain — so it is monotonic
+            // within a turn and the guard never reads a stale value regardless of
+            // when the drain consumes. A `Now`-priority command is intentionally
+            // NOT mid-turn-injected here; it aborts the turn and is run by the
+            // between-turn drain, so leaving it queued past this point is correct.
+            self.drain_mid_turn_input().await;
+
             // DEFERRED-3 / esc-interrupt FIX: top-of-loop user-interrupt guard
             // (faithful port of claude-code `query.ts:1015` — the `aborted_streaming`
             // return). If the user-interrupt token is already set when we reach the
@@ -3867,12 +3998,19 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             {
                 let cost = self.snapshot_cost_real().await;
                 self.output.emit_end_turn("aborted_streaming", &cost).await;
-                // claude-code `query.ts:1046-1050`: inject the non-tool-use
-                // interrupt message so the next request can read the context
-                // (TS `createUserInterruptionMessage({toolUse: false})`).
-                // No `signal.reason !== 'interrupt'` guard needed — LingXi's
-                // `CancellationToken` carries no reason, so we always inject.
-                self.inject_meta_user_message(INTERRUPT_MESSAGE).await;
+                // NOW-ABORT disambiguation: when the cancellation was driven by a
+                // `Now`-priority enqueue (not a user Ctrl+C/ESC), the urgent
+                // command IS the "interruption" and will be run next by the
+                // between-turn drain — so DON'T inject the user-interrupt message
+                // (which would mislabel the abort and pollute context). For a
+                // plain user interrupt (the default when no reason flag is wired)
+                // behavior is byte-identical to before: inject the message.
+                // claude-code `query.ts:1046-1050`: `createUserInterruptionMessage`.
+                if self.cancel_reason_now()
+                    != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
+                {
+                    self.inject_meta_user_message(INTERRUPT_MESSAGE).await;
+                }
                 final_message_id = last_message_id;
                 break;
             }
@@ -4619,12 +4757,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             {
                 let cost = self.snapshot_cost_real().await;
                 self.output.emit_end_turn("aborted_tools", &cost).await;
-                // claude-code `query.ts:1501-1505`: inject the tool-use
-                // interrupt message so the next request has context
-                // (TS `createUserInterruptionMessage({toolUse: true})`).
-                // No `signal.reason !== 'interrupt'` guard needed — LingXi's
-                // `CancellationToken` carries no reason, so we always inject.
-                self.inject_meta_user_message(INTERRUPT_MESSAGE_FOR_TOOL_USE).await;
+                // NOW-ABORT disambiguation (post-tools twin): a `Now`-driven
+                // cancellation means the urgent queued command will run next via
+                // the between-turn drain — DON'T inject the user-interrupt
+                // message. For a plain user interrupt (the default with no reason
+                // flag wired) inject as before — byte-identical to today.
+                // claude-code `query.ts:1501-1505`: `createUserInterruptionMessage`.
+                if self.cancel_reason_now()
+                    != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
+                {
+                    self.inject_meta_user_message(INTERRUPT_MESSAGE_FOR_TOOL_USE).await;
+                }
                 final_message_id = assistant_id;
                 break;
             }
@@ -4967,8 +5110,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             if cancel.is_cancelled() {
                 // claude-code `query.ts:1046-1050`: inject the non-tool-use
                 // interrupt message on a loop-top pre-cancel (ESC fired before
-                // we even called the model this iteration).
-                self.inject_meta_user_message(INTERRUPT_MESSAGE).await;
+                // we even called the model this iteration). NOW-ABORT
+                // disambiguation: skip the message when the cancel was a
+                // `Now`-command (the urgent command runs next); default behavior
+                // (no reason flag wired) is byte-identical to before.
+                if self.cancel_reason_now()
+                    != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
+                {
+                    self.inject_meta_user_message(INTERRUPT_MESSAGE).await;
+                }
                 return Ok(TurnOutcome::Cancelled);
             }
             if self.config.max_turns != 0 && turn_count >= self.config.max_turns {
@@ -4994,7 +5144,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // claude-code `query.ts:1046-1050`: inject the non-tool-use
                     // interrupt message when the cancel fires mid-API-call
                     // (model was in-flight, no tool_use blocks produced yet).
-                    self.inject_meta_user_message(INTERRUPT_MESSAGE).await;
+                    // NOW-ABORT disambiguation: skip the message for a
+                    // `Now`-command abort (default behavior unchanged).
+                    if self.cancel_reason_now()
+                        != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
+                    {
+                        self.inject_meta_user_message(INTERRUPT_MESSAGE).await;
+                    }
                     return Ok(TurnOutcome::Cancelled);
                 }
             };

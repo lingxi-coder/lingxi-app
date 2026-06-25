@@ -319,12 +319,38 @@ pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
             .to_string()
     })?;
 
+    // §27 mid-turn drain + Now-abort wiring. The per-connection queue is shared
+    // (Arc) across THREE consumers: (1) the orchestrator's mid-turn input source
+    // (injects queued `Next`/`Now` prompts WITHIN a running turn), (2) the turn
+    // driver (registers each turn's cancel token so a `Now` enqueue aborts it),
+    // and (3) the existing between-turn `drain_main_thread` loop. A
+    // `CancelReasonFlag` is shared between the orchestrator (reads it to tell a
+    // `Now`-command abort from a user interrupt) and the queue's now-abort hook
+    // (sets it to `QueueNowCommand` right before firing the active-turn token).
+    let queue = connection.queue_handle();
+    let cancel_reason = orchestrator::prompt::mid_turn_input::CancelReasonFlag::new();
+    runtime
+        .orchestrator
+        .set_mid_turn_input(Arc::new(crate::driver::MsgQueueMidTurnInput::new(
+            queue.clone(),
+        )));
+    runtime.orchestrator.set_cancel_reason(cancel_reason.clone());
+    {
+        let reason = cancel_reason.clone();
+        queue
+            .set_now_abort_hook(Arc::new(move || {
+                reason.set(orchestrator::prompt::mid_turn_input::CancelReason::QueueNowCommand);
+            }))
+            .await;
+    }
+
     // Production turn driver: errors surface as a terminal `ClientEvent::Error`
-    // through the SAME connection-scoped event sink.
-    let driver = Arc::new(OrchestratorTurnDriver::with_error_sink(
-        runtime.orchestrator.clone(),
-        event_sink,
-    ));
+    // through the SAME connection-scoped event sink. Wired with the connection's
+    // queue + the shared reason flag so each turn registers its cancel token.
+    let driver = Arc::new(
+        OrchestratorTurnDriver::with_error_sink(runtime.orchestrator.clone(), event_sink)
+            .with_queue(queue, cancel_reason),
+    );
 
     // The full command-routing seam over the real engine handles.
     let handle: Arc<dyn OrchestratorHandle> = runtime.orchestrator.clone();

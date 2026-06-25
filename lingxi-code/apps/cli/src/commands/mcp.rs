@@ -1199,11 +1199,17 @@ fn run_reset_project_choices() -> i32 {
     });
     match result {
         Ok(_) => {
-            // Byte-exact two-line message (claude mcp.tsx / live 2.1.191 binary).
             println!(
                 "Project-scoped (.mcp.json) server approvals and rejections stored for this project have been reset."
             );
-            println!("You will be prompted for approval next time you start Claude Code.");
+            // The binary prints the "prompted next time" line ONLY when the
+            // project `.mcp.json` actually has servers to re-approve. Verified vs
+            // live 2.1.191: a missing / empty / `{}` / empty-`mcpServers` .mcp.json
+            // ⇒ first line only; ≥1 project server ⇒ both lines. (The approval
+            // keys cleared above in ~/.claude.json do NOT affect this.)
+            if project_mcp_json_has_servers() {
+                println!("You will be prompted for approval next time you start Claude Code.");
+            }
             SUCCESS
         }
         Err(e) => {
@@ -1211,6 +1217,17 @@ fn run_reset_project_choices() -> i32 {
             RUNTIME_ERROR
         }
     }
+}
+
+/// Whether the project `.mcp.json` exists and declares at least one server.
+/// `mcp reset-project-choices` only prints its "prompted next time" follow-up
+/// line when there are project servers that will need re-approval.
+fn project_mcp_json_has_servers() -> bool {
+    project_mcp_json_path()
+        .filter(|p| p.exists())
+        .and_then(|p| read_json_object(&p).ok())
+        .and_then(|m| m.get("mcpServers").and_then(|v| v.as_object()).cloned())
+        .is_some_and(|m| !m.is_empty())
 }
 
 // ──────────────────────────────────────────────────────────────────────────

@@ -923,16 +923,18 @@ pub struct SessionMemoryHandle {
     pub runtime: Arc<dyn traits::RuntimeSpawner>,
 }
 
-/// Find the assistant `tool_use` with `tool_use_id` that has NO matching
-/// `tool_result` anywhere in `history`, returning its `(name, input,
-/// provider_id)`. 1:1 with claude-code's `findUnresolvedToolUse`
+/// Find the assistant message carrying a `tool_use` with `tool_use_id` that has
+/// NO matching `tool_result` anywhere in `history`, returning a CLONE of that
+/// assistant message. 1:1 with claude-code's `findUnresolvedToolUse`
 /// (`sessionStorage.ts:4478-4519`): a `tool_result` for the same id (in any user
-/// message) means the call already resolved → `None`. Used by
+/// message) means the call already resolved → `None`. The full message is
+/// returned (not just the matched block) so the caller can re-emit it as a
+/// stream frame, mirroring the TS `yield sdkAssistantMessage`. Used by
 /// [`ConversationOrchestrator::run_orphaned_permission`].
 fn find_unresolved_tool_use_in_history(
     history: &[protocol::ConversationMessage],
     tool_use_id: &protocol::ToolUseId,
-) -> Option<(String, serde_json::Value, Option<String>)> {
+) -> Option<protocol::ConversationMessage> {
     use protocol::{ContentBlock, ConversationMessage};
     // A matching `tool_result` anywhere ⇒ already resolved (bail, like the TS
     // early `return null` when a tool_result block is found).
@@ -945,24 +947,12 @@ fn find_unresolved_tool_use_in_history(
     if resolved {
         return None;
     }
-    for m in history {
-        if let ConversationMessage::Assistant { content, .. } = m {
-            for b in content {
-                if let ContentBlock::ToolUse {
-                    id,
-                    name,
-                    input,
-                    provider_id,
-                } = b
-                {
-                    if id == tool_use_id {
-                        return Some((name.clone(), input.clone(), provider_id.clone()));
-                    }
-                }
-            }
-        }
-    }
-    None
+    history.iter().find(|m| match m {
+        ConversationMessage::Assistant { content, .. } => content.iter().any(
+            |b| matches!(b, ContentBlock::ToolUse { id, .. } if id == tool_use_id),
+        ),
+        _ => false,
+    }).cloned()
 }
 
 impl ConversationOrchestrator {
@@ -2814,32 +2804,93 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// persists the resulting `tool_result`, completing the `tool_use →
     /// tool_result` chain.
     ///
-    /// Returns `Ok(true)` when a tool was recovered + executed, `Ok(false)` when
-    /// no unresolved `tool_use` with this id exists (already resolved, or absent)
-    /// — the caller sets its once-per-session "handled" gate
-    /// (`QueryEngine.ts:190` `hasHandledOrphanedPermission`) only on a real
-    /// recovery, matching claude-code (which enqueues only when found).
+    /// Returns `Ok(true)` when this id was handled (executed, OR short-circuited
+    /// because its tool is no longer registered), `Ok(false)` when no unresolved
+    /// `tool_use` with this id exists (already resolved, or absent). The caller
+    /// records the id in its per-toolUseID "handled" set (twin of
+    /// `handledOrphanedToolUseIds`) only on `Ok(true)`, so a not-found delivery
+    /// can still recover later — matching claude-code (which adds to the set only
+    /// when `findUnresolvedToolUse` succeeds).
     pub async fn run_orphaned_permission(
         &self,
         tool_use_id: &protocol::ToolUseId,
         decision: traits::permission_gate::PermissionOutcome,
     ) -> Result<bool, OrchestratorError> {
-        use protocol::{ConversationMessage, MessageId};
+        use protocol::{ContentBlock, ConversationMessage, MessageId};
 
-        // 1. Locate the orphaned assistant `tool_use` and confirm it is UNRESOLVED
-        //    (no matching `tool_result`) — `findUnresolvedToolUse`
-        //    (sessionStorage.ts:4478-4519). Snapshot its fields under the lock.
+        // 1. Locate the orphaned assistant message and confirm its `tool_use` is
+        //    UNRESOLVED (no matching `tool_result`) — `findUnresolvedToolUse`
+        //    (sessionStorage.ts:4478-4519). Snapshot a clone under the lock.
         let found = {
             let s = self.session.lock().await;
             find_unresolved_tool_use_in_history(&s.history, tool_use_id)
         };
-        let Some((name, input, provider_id)) = found else {
+        let Some(assistant_msg) = found else {
             // Already resolved (a tool_result exists) or never present — no-op,
             // exactly like claude-code's `findUnresolvedToolUse → null`.
             return Ok(false);
         };
 
-        // 2. Apply `updatedInput` on an allow (queryHelpers.ts:262-276): an allow
+        // Extract the matching `tool_use` block (queryHelpers.ts:238-251). The
+        // lookup guarantees one exists; bail defensively otherwise.
+        let Some((name, input, provider_id)) = (match &assistant_msg {
+            ConversationMessage::Assistant { content, .. } => content.iter().find_map(|b| match b {
+                ContentBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    provider_id,
+                } if id == tool_use_id => Some((name.clone(), input.clone(), provider_id.clone())),
+                _ => None,
+            }),
+            _ => None,
+        }) else {
+            return Ok(false);
+        };
+
+        // Unknown-tool guard (queryHelpers.ts:256-259 `findToolByName → return`):
+        // if the orphaned tool is no longer registered, emit NOTHING and push NO
+        // tool_result, but still report recovery (`Ok(true)`) so the caller marks
+        // this id handled — the TS sets `hasHandledOrphanedPermission` BEFORE
+        // `handleOrphanedPermission` runs, so the gate is consumed even here.
+        if self.tools.find_by_name(&name).is_none() {
+            return Ok(true);
+        }
+
+        // 2. Re-emit the recovered assistant message as a self-contained stream
+        //    frame (twin of `yield sdkAssistantMessage`, queryHelpers.ts:314-319)
+        //    so a stream-json consumer sees the `tool_use` before its
+        //    `tool_result`. Default-no-op sinks (TUI/tests) ignore the
+        //    message_start/boundary envelope.
+        {
+            let model = self.session.lock().await.model.clone();
+            let (msg_id, stop_reason) = match &assistant_msg {
+                ConversationMessage::Assistant { id, stop_reason, .. } => {
+                    (id.to_string(), stop_reason.clone())
+                }
+                _ => (assistant_msg.id().to_string(), None),
+            };
+            self.output.emit_message_start(&msg_id, &model).await;
+            if let ConversationMessage::Assistant { content, .. } = &assistant_msg {
+                for b in content {
+                    match b {
+                        ContentBlock::Text { text } => self.output.emit_text(text).await,
+                        ContentBlock::ToolUse {
+                            id, name, input, ..
+                        } => self.output.emit_tool_call(id, name, input).await,
+                        ContentBlock::Thinking { thinking, signature } => {
+                            self.output.emit_thinking(thinking, signature.as_deref()).await;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            self.output
+                .emit_message_boundary(stop_reason.as_deref(), None)
+                .await;
+        }
+
+        // 4. Apply `updatedInput` on an allow (queryHelpers.ts:262-276): an allow
         //    carries the host's possibly-rewritten input; a deny keeps the
         //    original (it will not run anyway).
         let (forced, final_input) = match decision {
@@ -2858,7 +2909,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // (queryHelpers.ts:299-312) — it is NOT re-pushed or re-persisted; only
         // the new `tool_result` below is appended.
 
-        // 3. Force the recovered decision past the permission gate for this one
+        // 5. Force the recovered decision past the permission gate for this one
         //    `tool_use`, then run it through the SAME dispatch the normal turn
         //    loop uses (the `runTools` analog). The gate consumes (removes) the
         //    forced entry; clear any residue defensively.
@@ -2872,7 +2923,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         self.orphan_forced_decisions.lock().await.remove(tool_use_id);
         let (tool_results, _prevent, injected_messages, context_modifiers) = dispatch_result?;
 
-        // 4. Append + persist the `tool_result` user message and any
+        // 6. Append + persist the `tool_result` user message and any
         //    tool-injected follow-ups — mirroring the batched turn loop's
         //    post-dispatch block (`execute_one_turn`), the `recordTranscript`
         //    per-result twin (queryHelpers.ts:328-332).

@@ -3618,6 +3618,124 @@ mod read_file_state_tests {
         assert!(orch.session().lock().await.history.is_empty());
     }
 
+    #[tokio::test]
+    async fn orphaned_permission_unknown_tool_returns_handled_without_result() {
+        // The recovered tool is no longer registered (findToolByName → return,
+        // queryHelpers.ts:256-259): emit/push NOTHING but report handled
+        // (`Ok(true)`) so the caller's per-id gate is consumed.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tool = Arc::new(StubFileTool {
+            name: "Read",
+            cwd: dir.path().to_path_buf(),
+        });
+        let orch = orch_with_tools(dir.path().to_path_buf(), vec![tool]);
+
+        let tuid = ToolUseId::new();
+        {
+            let sess = orch.session();
+            let mut s = sess.lock().await;
+            s.history
+                .push(assistant_with_tool_use(&tuid, "Ghost", json!({"x":1})));
+        }
+        let before = orch.session().lock().await.history.len();
+        let recovered = orch
+            .run_orphaned_permission(
+                &tuid,
+                traits::permission_gate::PermissionOutcome::Allow {
+                    updated_input: None,
+                    permission_updates: vec![],
+                },
+            )
+            .await
+            .expect("recovery");
+        assert!(recovered, "unknown tool consumes the gate (Ok(true))");
+        assert_eq!(
+            orch.session().lock().await.history.len(),
+            before,
+            "unknown tool must push NO tool_result"
+        );
+    }
+
+    #[tokio::test]
+    async fn orphaned_permission_distinct_ids_each_recover() {
+        // A --resume that lost TWO can_use_tool requests must recover BOTH
+        // (no spurious single-orphan cap). Per-id idempotency lives in the
+        // history found-check; the run-loop gate is a per-id Set on top.
+        let dir = tempfile::tempdir().expect("tempdir");
+        tokio::fs::write(dir.path().join("a.txt"), "AAA").await.unwrap();
+        tokio::fs::write(dir.path().join("b.txt"), "BBB").await.unwrap();
+        let tool = Arc::new(StubFileTool {
+            name: "Read",
+            cwd: dir.path().to_path_buf(),
+        });
+        let orch = orch_with_tools(dir.path().to_path_buf(), vec![tool]);
+
+        let (id1, id2) = (ToolUseId::new(), ToolUseId::new());
+        {
+            let sess = orch.session();
+            let mut s = sess.lock().await;
+            s.history
+                .push(assistant_with_tool_use(&id1, "Read", json!({"file_path":"a.txt"})));
+            s.history
+                .push(assistant_with_tool_use(&id2, "Read", json!({"file_path":"b.txt"})));
+        }
+        let allow = || traits::permission_gate::PermissionOutcome::Allow {
+            updated_input: None,
+            permission_updates: vec![],
+        };
+        assert!(orch.run_orphaned_permission(&id1, allow()).await.unwrap());
+        assert!(orch.run_orphaned_permission(&id2, allow()).await.unwrap());
+
+        let sess = orch.session();
+        let s = sess.lock().await;
+        let results: Vec<&str> = s
+            .history
+            .iter()
+            .filter_map(|m| match m {
+                protocol::ConversationMessage::User { content, .. } => {
+                    content.iter().find_map(|b| match b {
+                        protocol::ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(results.iter().any(|c| c.contains("AAA")), "id1 recovered");
+        assert!(results.iter().any(|c| c.contains("BBB")), "id2 recovered");
+    }
+
+    #[tokio::test]
+    async fn orphaned_permission_same_id_second_call_is_noop() {
+        // After recovery pushes a tool_result, a same-id re-delivery finds the
+        // call resolved (findUnresolvedToolUse → null) and no-ops — the real
+        // same-id dedup, independent of the run-loop gate.
+        let dir = tempfile::tempdir().expect("tempdir");
+        tokio::fs::write(dir.path().join("real.txt"), "ONCE").await.unwrap();
+        let tool = Arc::new(StubFileTool {
+            name: "Read",
+            cwd: dir.path().to_path_buf(),
+        });
+        let orch = orch_with_tools(dir.path().to_path_buf(), vec![tool]);
+
+        let tuid = ToolUseId::new();
+        {
+            let sess = orch.session();
+            let mut s = sess.lock().await;
+            s.history
+                .push(assistant_with_tool_use(&tuid, "Read", json!({"file_path":"real.txt"})));
+        }
+        let allow = || traits::permission_gate::PermissionOutcome::Allow {
+            updated_input: None,
+            permission_updates: vec![],
+        };
+        assert!(orch.run_orphaned_permission(&tuid, allow()).await.unwrap());
+        assert!(
+            !orch.run_orphaned_permission(&tuid, allow()).await.unwrap(),
+            "second same-id recovery must no-op (already resolved)"
+        );
+    }
+
     // ----- JSON-schema input-validation gate -------------------------------
     // (claude-code `toolExecution.ts:615` `inputSchema.safeParse`). BEHAVIORAL
     // parity only — the message bytes intentionally differ from claude-code's

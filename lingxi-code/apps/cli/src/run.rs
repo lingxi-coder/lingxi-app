@@ -493,20 +493,19 @@ fn orphan_decision_from_payload(
 /// Re-run a single ORPHANED tool: dequeued between turns, this looks the
 /// unresolved `tool_use` up in the (resumed) session history and executes it
 /// with the recovered permission decision. 1:1 with claude-code's
-/// `handleOrphanedPermission` (queryHelpers.ts:224-343), gated once per session
-/// by `handled_orphan` (`QueryEngine.ts:190` `hasHandledOrphanedPermission`):
-/// only the FIRST recoverable orphan runs; the gate is set ONLY on a real
-/// recovery, so a not-found orphan leaves a later one able to recover (matching
-/// claude-code, which enqueues — and consumes the gate — only when found).
+/// `handleOrphanedPermission` (queryHelpers.ts:224-343). Deduped per-toolUseID
+/// via `handled_orphans` (twin of `handledOrphanedToolUseIds`, print.ts:2766):
+/// a given id recovers once, but DISTINCT orphans each recover. An id is marked
+/// handled ONLY on a real recovery (`Ok(true)`, which also covers the
+/// unknown-tool case where the gate is consumed but nothing runs), so a
+/// not-found orphan (`Ok(false)`) leaves a later same-id delivery able to
+/// recover — matching claude-code, which adds to the Set only when
+/// `findUnresolvedToolUse` succeeds.
 async fn recover_orphaned_permission(
     runtime: &Runtime,
     cmd: msgqueue::QueuedCommand,
-    handled_orphan: &mut bool,
+    handled_orphans: &mut std::collections::HashSet<protocol::ToolUseId>,
 ) {
-    if *handled_orphan {
-        tracing::debug!("ignoring orphaned permission; one already handled this session");
-        return;
-    }
     let msgqueue::QueuedCommandContent::OrphanedPermission {
         tool_use_id,
         permission_decision_json,
@@ -515,6 +514,13 @@ async fn recover_orphaned_permission(
     else {
         return;
     };
+    if handled_orphans.contains(&tool_use_id) {
+        tracing::debug!(
+            "ignoring duplicate orphaned permission for toolUseID={} (already handled)",
+            tool_use_id.as_str()
+        );
+        return;
+    }
     let decision = orphan_decision_from_payload(&permission_decision_json);
     match runtime
         .orchestrator
@@ -522,7 +528,7 @@ async fn recover_orphaned_permission(
         .await
     {
         Ok(true) => {
-            *handled_orphan = true;
+            handled_orphans.insert(tool_use_id.clone());
             tracing::info!(
                 "recovered orphaned permission for toolUseID={}",
                 tool_use_id.as_str()
@@ -828,9 +834,15 @@ pub async fn run_stream_json_input_loop(
     let betas: Vec<String> = vec![];
     let mut last_turn_err: Option<String> = None;
     let mut had_any_turn = false;
-    // Once-per-session orphaned-permission gate (`QueryEngine.ts:190`
-    // `hasHandledOrphanedPermission`): only the FIRST recoverable orphan re-runs.
-    let mut handled_orphan = false;
+    // Per-toolUseID orphaned-permission dedup (twin of claude-code's
+    // `handledOrphanedToolUseIds` Set, print.ts:2766/5272/5287): each DISTINCT
+    // unresolved tool_use recovers once; a same-id re-delivery is skipped. NOT a
+    // session-wide single-shot — a `--resume` that lost several `can_use_tool`
+    // requests recovers each of them, matching claude-code (whose
+    // `hasHandledOrphanedPermission` boolean is a per-command QueryEngine field,
+    // not a cross-command cap).
+    let mut handled_orphans: std::collections::HashSet<protocol::ToolUseId> =
+        std::collections::HashSet::new();
     // Disable the orphan `select!` branch once its channel closes (all senders
     // dropped) so a perpetually-ready `recv() → None` can't busy-spin the loop.
     let mut orphan_closed = false;
@@ -845,7 +857,7 @@ pub async fn run_stream_json_input_loop(
             // concurrently with a turn, since both mutate `session.history`).
             recv = orphan_rx.recv(), if !orphan_closed => match recv {
                 Some(cmd) => {
-                    recover_orphaned_permission(runtime, cmd, &mut handled_orphan).await;
+                    recover_orphaned_permission(runtime, cmd, &mut handled_orphans).await;
                     continue;
                 }
                 None => {

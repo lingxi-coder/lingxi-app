@@ -45,7 +45,7 @@ impl SkillRegistry {
         self.skills.get(name)
     }
 
-    /// All registered skill names (unsorted). Used by `skill-builtin` and the
+    /// All registered skill names (unsorted). Used by the `builtin` module and the
     /// composition-root snapshot tests to lock the assembled skill set.
     #[must_use]
     pub fn names(&self) -> Vec<&str> {

@@ -4,13 +4,15 @@
 //!
 //! Extracted from the former monolithic `skills` crate. The model-visible
 //! `Skill` *tool* lives in `tool-skill` (P7); compiled-in builtin skill
-//! templates live in `skill-builtin` (P8). This crate is the shared
-//! abstraction both depend on — the skill analogue of `tool-api`.
+//! templates + their registration entry points live in the [`builtin`] module
+//! (folded in from the former `skill-builtin` crate). This crate is the shared
+//! skill abstraction — the skill analogue of `tool-api`.
 //!
 //! See spec §18 for the Skill subsystem overview.
 
 #![forbid(unsafe_code)]
 
+pub mod builtin;
 pub mod frontmatter;
 pub mod listing;
 pub mod mcp_builders;
@@ -18,6 +20,7 @@ pub mod model;
 pub mod prefetch;
 pub mod registry;
 
+pub use builtin::{register_desktop, register_mobile};
 pub use frontmatter::{parse_skill_markdown, SkillLoadError};
 pub use listing::{
     load_file_skill_sections, load_file_skill_sections_with_roots, FileSkillRow, FileSkillSection,

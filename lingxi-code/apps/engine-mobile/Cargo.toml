@@ -174,8 +174,7 @@ tool-shell-mobile = { path = "../../tools/shell-mobile" }
 # Android-only Git tool (P4). Self-gates on ctx.android_git.enabled; registering
 # it here keeps it reachable while keeping iOS/desktop unaffected.
 tool-git-mobile = { path = "../../tools/git-mobile" }
-# Skill + command sets.
-skill-builtin = { path = "../../skills/builtin" }
+# Command sets.
 command-core = { path = "../../commands/core" }
 
 # Platform impls are target-gated: only linked when building for the device.

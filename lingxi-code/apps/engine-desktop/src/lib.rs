@@ -968,14 +968,14 @@ pub fn register_desktop_tools(
 
 /// Assemble the desktop builtin **skill** registry.
 ///
-/// Delegates to `skill_builtin::register_desktop`, the single place that names
+/// Delegates to `skill_api::register_desktop`, the single place that names
 /// the desktop builtin skill set. Empty in M8 (no Rust-bundled skills yet —
 /// skills are markdown loaded from disk by the session loader); the mobile
-/// composition root will call `skill_builtin::register_mobile` instead.
+/// composition root will call `skill_api::register_mobile` instead.
 #[must_use]
 pub fn desktop_skill_registry() -> SkillRegistry {
     let mut reg = SkillRegistry::new();
-    skill_builtin::register_desktop(&mut reg);
+    skill_api::register_desktop(&mut reg);
     reg
 }
 

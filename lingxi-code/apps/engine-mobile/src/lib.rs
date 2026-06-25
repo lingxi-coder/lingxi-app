@@ -181,7 +181,7 @@ pub fn mobile_tool_registry_with_skill_loader(
 #[must_use]
 pub fn mobile_skill_registry() -> SkillRegistry {
     let mut reg = SkillRegistry::new();
-    skill_builtin::register_mobile(&mut reg);
+    skill_api::register_mobile(&mut reg);
     reg
 }
 

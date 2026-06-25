@@ -10,8 +10,8 @@
 //! (cross-platform core), exposing a `register()` entry point the composition
 //! roots call. Platform-specific desktop/mobile command handlers, when added,
 //! are registered directly in the respective composition root (engine-desktop /
-//! engine-mobile). This mirrors the `tool-api` / `tool-*` and `skill-api` /
-//! `skill-builtin` splits.
+//! engine-mobile). This mirrors the `tool-api` / `tool-*` and `skill-api`
+//! patterns.
 //!
 //! See spec §19 for the broader slash-command design.
 

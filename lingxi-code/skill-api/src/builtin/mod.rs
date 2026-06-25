@@ -1,20 +1,19 @@
-//! `skill-builtin` (M8-P8) — compiled-in builtin skill templates plus the
-//! `register_desktop` / `register_mobile` entry points the composition roots
+//! Compiled-in builtin skill templates plus the `register_desktop` /
+//! `register_mobile` entry points the composition roots
 //! (`apps/engine-{desktop,mobile}`) call to assemble their skill set.
 //!
-//! There are no Rust-bundled skills today (skills are markdown loaded from
-//! disk), so [`bundled::BUILTIN_DESKTOP`] / [`bundled::BUILTIN_MOBILE`] are
-//! empty and both registration entry points produce an empty registry. The
-//! loader plumbing (`parse_builtin`) is in place so adding a template later is
-//! a one-line const entry — no wiring changes.
-
-#![forbid(unsafe_code)]
+//! Folded in from the former standalone `skill-builtin` crate (its only deps
+//! were on this crate). There are no Rust-bundled skills today (skills are
+//! markdown loaded from disk), so [`bundled::BUILTIN_DESKTOP`] /
+//! [`bundled::BUILTIN_MOBILE`] are empty and both registration entry points
+//! produce an empty registry. The loader plumbing (`parse_builtin`) is in place
+//! so adding a template later is a one-line const entry — no wiring changes.
 
 mod bundled;
 
+use crate::model::{LoadedFrom, SkillSource};
+use crate::{parse_skill_markdown, Skill, SkillRegistry};
 use bundled::{BUILTIN_DESKTOP, BUILTIN_MOBILE};
-use skill_api::model::{LoadedFrom, SkillSource};
-use skill_api::{parse_skill_markdown, Skill, SkillRegistry};
 
 /// Register the desktop builtin skill set into `reg`.
 pub fn register_desktop(reg: &mut SkillRegistry) {

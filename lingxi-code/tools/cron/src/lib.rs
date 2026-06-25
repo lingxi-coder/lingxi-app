@@ -19,10 +19,15 @@ pub mod cron_delete;
 pub mod cron_list;
 pub mod remote_trigger;
 pub mod schedule_cron;
+pub mod wakeup;
 pub use cron_delete::CronDeleteTool;
 pub use cron_list::CronListTool;
 pub use remote_trigger::{ClaudeAiAuthProvider, RemoteTriggerTool};
 pub use schedule_cron::CronCreateTool;
+pub use wakeup::{
+    clamp_delay_seconds, resolve_wakeup_prompt, ScheduleWakeupTool, WakeupScheduler,
+    AUTONOMOUS_LOOP_DYNAMIC_SENTINEL, SCHEDULE_WAKEUP_TOOL_NAME,
+};
 /// Register the cron scheduling tools against `reg`.
 ///
 /// `RemoteTrigger` is registered WITHOUT an OAuth auth provider (`None`), so its
@@ -46,5 +51,15 @@ pub fn register_all_with_auth(
     reg.register_builtin(Arc::new(CronCreateTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(CronDeleteTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(CronListTool::new(ctx.clone())));
+    // `ScheduleWakeup` (/loop dynamic mode) — registered WITHOUT a wakeup
+    // scheduler here, so a host that wires one calls `with_scheduler` itself.
+    // Subagent gating is handled in `agent/src/runner.rs` (`NKE_BASE`), so the
+    // tool is refused inside subagents and only effective in the MAIN loop.
+    //
+    // DECISION: registered on BOTH desktop and mobile through this shared path.
+    // On mobile (and any host that owns no per-connection queue) no scheduler is
+    // wired, so the tool is an honest no-op (see `ScheduleWakeupTool::call`) —
+    // harmless and avoids forking the registration API.
+    reg.register_builtin(Arc::new(ScheduleWakeupTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(RemoteTriggerTool::new(ctx, auth)));
 }

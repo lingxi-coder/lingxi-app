@@ -28,6 +28,7 @@ expression: names
 - Read
 - ReadMcpResourceTool
 - RemoteTrigger
+- ScheduleWakeup
 - SendMessage
 - SendUserMessage
 - Skill

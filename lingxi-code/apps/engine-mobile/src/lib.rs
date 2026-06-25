@@ -194,6 +194,13 @@ pub fn mobile_command_registry(
 ) -> CommandRegistry {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
+    // Bundled programmatic skills (`/loop`), mirroring desktop. Gated on the cron
+    // kill-switch (loop.ts:83); mobile starts no cron scheduler so a scheduled
+    // job is inert, but the skill's listing/usage path is harmless and faithful.
+    let cron_enabled = !traits::env::is_env_truthy(
+        std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref(),
+    );
+    command_core::register_bundled_skills(&mut reg, cron_enabled);
     register_core_batch_1(&mut reg, handle.clone());
     register_core_batch_2(&mut reg, handle.clone(), auth);
     register_core_batch_4(&mut reg, handle.clone());

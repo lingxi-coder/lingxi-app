@@ -91,9 +91,29 @@ impl AgentSkillLoader {
                 prompt_template,
                 ..
             } => (frontmatter, prompt_template),
-            // Builtin / MCP commands are not prompt-based skills (claude
-            // `skill.type !== 'prompt'`).
-            SlashCommandKind::Builtin { .. } | SlashCommandKind::Mcp { .. } => return None,
+            // Bundled programmatic skill (`/loop`): prompt-typed, but the body is
+            // produced by the dynamic builder with empty args (claude
+            // `getPromptForCommand('')`). `${CLAUDE_SESSION_ID}` still applies.
+            SlashCommandKind::Bundled {
+                prompt_fn: Some(builder),
+                ..
+            } => {
+                let body = builder.build("");
+                let body = match &self.session_id {
+                    Some(sid) => body.replace("${CLAUDE_SESSION_ID}", sid),
+                    None => body,
+                };
+                return Some(SkillLoad {
+                    display_name: display_name.to_string(),
+                    progress_message: None,
+                    content: vec![ContentBlock::Text { text: body }],
+                });
+            }
+            // Builtin / MCP / inert-bundled commands are not prompt-based skills
+            // (claude `skill.type !== 'prompt'`).
+            SlashCommandKind::Builtin { .. }
+            | SlashCommandKind::Mcp { .. }
+            | SlashCommandKind::Bundled { .. } => return None,
         };
         // Empty-args argument substitution (claude `getPromptForCommand('', …)`;
         // matches the `Skill` tool's call: `Some(""), append=true`).

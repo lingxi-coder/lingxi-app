@@ -17,6 +17,7 @@ expression: names
 - NotebookEdit
 - Read
 - RemoteTrigger
+- ScheduleWakeup
 - SendMessage
 - SendUserMessage
 - Skill

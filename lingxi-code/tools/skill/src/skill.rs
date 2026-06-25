@@ -124,6 +124,13 @@ pub struct SkillDescriptor {
     /// descriptor rather than the frozen `BuiltinToolContext` (whose mobile
     /// construction site cannot be extended).
     pub session_id: Option<String>,
+    /// Dynamic prompt builder for bundled skills (port of the reference
+    /// `getPromptForCommand`, `loop.ts:84`). When `Some`, [`SkillTool::call`]
+    /// calls it with the raw args to produce the prompt INSTEAD of
+    /// `substitute_arguments_faithful` over `body` — letting a bundled skill
+    /// branch on empty vs non-empty args. `None` for all file/MCP skills (the
+    /// byte-identical static path).
+    pub dynamic_body: Option<std::sync::Arc<dyn command_api::BundledPromptFn>>,
 }
 
 impl Default for SkillDescriptor {
@@ -141,6 +148,7 @@ impl Default for SkillDescriptor {
             skip_shell_expansion: false,
             skill_root: None,
             session_id: None,
+            dynamic_body: None,
         }
     }
 }
@@ -738,23 +746,32 @@ ALREADY been loaded - follow the instructions directly instead of calling this t
         // `${CLAUDE_SESSION_ID}` token replacements (steps 2-3) run between
         // argument substitution and shell expansion — see just below.
         let args_for_expansion = args.as_deref().unwrap_or("");
-        let expanded_prompt = match command_api::substitute_arguments_faithful(
-            &desc.body,
-            Some(args_for_expansion),
-            true,
-            &desc.argument_names,
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                emit_failed(
-                    &bus,
-                    "expansion_error",
-                    started.elapsed().as_millis() as u64,
-                )
-                .await;
-                return Err(ToolError::Internal(format!(
-                    "Skill {command_name} expansion failed: {e}"
-                )));
+        let expanded_prompt = if let Some(builder) = desc.dynamic_body.as_ref() {
+            // SKILLEXEC.3 (bundled): the dynamic builder replaces static
+            // templating — mirrors the reference `getPromptForCommand(args)`
+            // (`loop.ts:84`). The builder does its own arg handling
+            // (empty→usage, else→buildPrompt(trimmed)), so `$ARGUMENTS`/`$N`
+            // substitution is bypassed entirely.
+            builder.build(args_for_expansion)
+        } else {
+            match command_api::substitute_arguments_faithful(
+                &desc.body,
+                Some(args_for_expansion),
+                true,
+                &desc.argument_names,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    emit_failed(
+                        &bus,
+                        "expansion_error",
+                        started.elapsed().as_millis() as u64,
+                    )
+                    .await;
+                    return Err(ToolError::Internal(format!(
+                        "Skill {command_name} expansion failed: {e}"
+                    )));
+                }
             }
         };
 
@@ -1325,6 +1342,73 @@ mod tests {
         match &out.new_messages[0] {
             protocol::ConversationMessage::User { content, .. } => match content.first() {
                 Some(protocol::ContentBlock::Text { text }) => assert_eq!(text, "Hello world"),
+                other => panic!("expected leading Text block, got {other:?}"),
+            },
+            other => panic!("expected injected User message, got {other:?}"),
+        }
+    }
+
+    /// SKILLEXEC.3 (bundled): when a descriptor carries `dynamic_body`, the Skill
+    /// tool calls the builder with the raw args INSTEAD of static templating, so
+    /// the bundled-skill two-branch behavior (empty→usage, else→buildPrompt) is
+    /// honored end-to-end (port of `getPromptForCommand`, loop.ts:84). The
+    /// descriptor `body` is ignored on this path.
+    #[tokio::test]
+    async fn dynamic_body_replaces_static_templating() {
+        // Test builder mirroring loop.ts's empty→usage vs non-empty branch.
+        struct TestBuilder;
+        impl command_api::BundledPromptFn for TestBuilder {
+            fn build(&self, args: &str) -> String {
+                let t = args.trim();
+                if t.is_empty() {
+                    "USAGE".into()
+                } else {
+                    format!("BUILT[{t}]")
+                }
+            }
+        }
+        let desc = SkillDescriptor {
+            // `body` carries a `$ARGUMENTS` placeholder that MUST be ignored.
+            body: "STATIC $ARGUMENTS".into(),
+            dynamic_body: Some(Arc::new(TestBuilder)),
+            ..prompt_desc("loop")
+        };
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc.clone()))),
+        );
+
+        // Empty args → usage branch.
+        let out = tool
+            .call(json!({"skill": "loop"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        match &out.new_messages[0] {
+            protocol::ConversationMessage::User { content, .. } => match content.first() {
+                Some(protocol::ContentBlock::Text { text }) => assert_eq!(text, "USAGE"),
+                other => panic!("expected leading Text block, got {other:?}"),
+            },
+            other => panic!("expected injected User message, got {other:?}"),
+        }
+
+        // Non-empty args → buildPrompt branch; raw args reach the builder.
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
+        let out = tool
+            .call(
+                json!({"skill": "loop", "args": "  check the deploy  "}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        match &out.new_messages[0] {
+            protocol::ConversationMessage::User { content, .. } => match content.first() {
+                Some(protocol::ContentBlock::Text { text }) => {
+                    assert_eq!(text, "BUILT[check the deploy]");
+                }
                 other => panic!("expected leading Text block, got {other:?}"),
             },
             other => panic!("expected injected User message, got {other:?}"),

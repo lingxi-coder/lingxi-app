@@ -105,6 +105,95 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
     }
 }
 
+/// A msgqueue-backed [`tool_cron::WakeupScheduler`] — the composition-root impl
+/// of the `/loop` dynamic-mode one-shot self-wakeup seam (Phase 2).
+///
+/// Twin of [`MsgQueueMidTurnInput`]: it lives in the bridge (which owns the
+/// per-connection queue + the [`traits::RuntimeSpawner`]) so the `tool-cron`
+/// crate — and the orchestrator — keep NO knowledge of how a wakeup is delivered.
+/// [`WakeupScheduler::schedule`] spawns ONE background task that
+/// [`RuntimeSpawner::sleep`]s for `delay`, resolves the autonomous sentinel via
+/// [`tool_cron::resolve_wakeup_prompt`], and ENQUEUEs the resolved prompt at
+/// [`msgqueue::QueuePriority::Next`] so the between-turn / mid-turn drain folds
+/// it into the session as its own follow-up turn.
+///
+/// `Next` (not `Now`) is deliberate: a self-wakeup should resume work between
+/// turns, not abort an in-flight turn the user may be watching.
+///
+/// WIRING STATUS (Phase-2 boundary): this adapter is real and unit-tested, but
+/// it is NOT yet auto-attached to the registered `ScheduleWakeupTool`. The tool
+/// is constructed deep inside `engine_desktop::build` (via
+/// `tool_cron::register_all_with_auth`) BEFORE the per-connection queue +
+/// spawner exist at `boot::assemble`, and the `ToolRegistry` exposes no
+/// replace-builtin seam to swap in a `with_scheduler(..)` instance afterward.
+/// See `boot::assemble` for the wiring TODO.
+pub struct MsgQueueWakeupScheduler {
+    queue: Arc<msgqueue::MessageQueueManager>,
+    runtime: Arc<dyn traits::RuntimeSpawner>,
+}
+
+impl MsgQueueWakeupScheduler {
+    /// Build the adapter over the connection's queue + the host runtime spawner.
+    #[must_use]
+    pub fn new(
+        queue: Arc<msgqueue::MessageQueueManager>,
+        runtime: Arc<dyn traits::RuntimeSpawner>,
+    ) -> Self {
+        Self { queue, runtime }
+    }
+}
+
+#[async_trait]
+impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
+    async fn schedule(&self, delay: std::time::Duration, prompt: String, reason: String) {
+        let queue = self.queue.clone();
+        let runtime = self.runtime.clone();
+        // Spawn a detached one-shot timer (engine code must not call
+        // `tokio::spawn` directly — D17 — so go through the runtime seam).
+        let _ = runtime
+            .clone()
+            .spawn(
+                "loop-wakeup",
+                Box::pin(async move {
+                    runtime.sleep(delay).await;
+                    // Resolve the `<<autonomous-loop-dynamic>>` sentinel at fire
+                    // time (else passthrough).
+                    let resolved = tool_cron::resolve_wakeup_prompt(&prompt);
+                    queue
+                        .enqueue(msgqueue::QueuedCommand {
+                            uuid: format!("loop-wakeup-{}", uuid_like(&reason)),
+                            content: msgqueue::QueuedCommandContent::UserInput { text: resolved },
+                            priority: msgqueue::QueuePriority::Next,
+                            queued_at: std::time::SystemTime::now(),
+                            source: msgqueue::QueueSource::Cron,
+                            agent_id: None,
+                            // The resolved text is a /loop input meant for the
+                            // model (it may begin with `/`); the dynamic-mode
+                            // contract re-fires the same input, so route it as a
+                            // slash command when applicable — leave the default
+                            // (false) so a leading `/` IS treated as a slash
+                            // command, matching how the user originally typed it.
+                            skip_slash_commands: false,
+                            is_meta: false,
+                        })
+                        .await;
+                }),
+            )
+            .await;
+    }
+}
+
+/// Cheap pseudo-unique suffix for the wakeup command uuid, derived from the
+/// reason + the current nanos. Not cryptographic — only needs to disambiguate
+/// concurrent wakeups for trace correlation.
+fn uuid_like(reason: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{nanos}-{}", reason.len())
+}
+
 /// A production [`TurnDriver`] backed by a real [`ConversationOrchestrator`].
 ///
 /// Wraps the orchestrator (whose [`client_adapter::AdapterOutputStream`] is already
@@ -608,5 +697,96 @@ mod tests {
         // Build a driver wired with the queue + reason to prove the API compiles
         // and the seam is reachable (smoke).
         let _driver = build_driver(streaming_one_turn()).with_queue(queue, reason);
+    }
+
+    /// A minimal real-spawning `RuntimeSpawner` for the wakeup-adapter test: it
+    /// spawns the future on the current tokio runtime and uses real `sleep`.
+    struct TestRuntime;
+    #[async_trait::async_trait]
+    impl traits::RuntimeSpawner for TestRuntime {
+        async fn spawn(
+            &self,
+            name: &str,
+            task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) -> Result<traits::BackgroundTaskHandle, traits::runtime::RuntimeError> {
+            tokio::spawn(task);
+            Ok(traits::BackgroundTaskHandle {
+                task_name: name.to_string(),
+                task_id: 0,
+            })
+        }
+        async fn sleep(&self, duration: std::time::Duration) {
+            tokio::time::sleep(duration).await;
+        }
+        async fn cancel(
+            &self,
+            _handle: &traits::BackgroundTaskHandle,
+        ) -> Result<(), traits::runtime::RuntimeError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn wakeup_scheduler_enqueues_resolved_prompt_after_delay() {
+        use super::MsgQueueWakeupScheduler;
+        use tool_cron::WakeupScheduler;
+
+        let queue = Arc::new(MessageQueueManager::new());
+        let runtime: Arc<dyn traits::RuntimeSpawner> = Arc::new(TestRuntime);
+        let sched = MsgQueueWakeupScheduler::new(queue.clone(), runtime);
+
+        // Schedule a 0-delay wakeup carrying the autonomous sentinel — it must be
+        // resolved to the instruction block before being enqueued.
+        sched
+            .schedule(
+                std::time::Duration::from_millis(0),
+                "<<autonomous-loop-dynamic>>".to_string(),
+                "idle tick".to_string(),
+            )
+            .await;
+
+        // Give the spawned timer a moment to fire + enqueue.
+        for _ in 0..50 {
+            if queue.len().await > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        let cmd = queue
+            .dequeue()
+            .await
+            .expect("wakeup must have enqueued one command");
+        assert_eq!(cmd.priority, QueuePriority::Next);
+        assert_eq!(cmd.source, msgqueue::QueueSource::Cron);
+        let text = cmd.text().expect("user-input text");
+        // The sentinel resolved to the synthesized autonomous-loop block.
+        assert_ne!(text, "<<autonomous-loop-dynamic>>");
+        assert!(text.contains("autonomous"));
+        assert!(text.contains("ScheduleWakeup"));
+    }
+
+    #[tokio::test]
+    async fn wakeup_scheduler_passthrough_prompt() {
+        use super::MsgQueueWakeupScheduler;
+        use tool_cron::WakeupScheduler;
+
+        let queue = Arc::new(MessageQueueManager::new());
+        let runtime: Arc<dyn traits::RuntimeSpawner> = Arc::new(TestRuntime);
+        let sched = MsgQueueWakeupScheduler::new(queue.clone(), runtime);
+        sched
+            .schedule(
+                std::time::Duration::from_millis(0),
+                "5m /babysit-prs".to_string(),
+                "repeat loop".to_string(),
+            )
+            .await;
+        for _ in 0..50 {
+            if queue.len().await > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        let cmd = queue.dequeue().await.expect("enqueued");
+        assert_eq!(cmd.text(), Some("5m /babysit-prs"));
     }
 }

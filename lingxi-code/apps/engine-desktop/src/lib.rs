@@ -1328,6 +1328,14 @@ pub async fn desktop_command_registry(
 ) -> CommandRegistry {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
+    // Bundled programmatic skills (`/loop`), port of `registerBundledSkills`.
+    // Gated on the same cron kill-switch the scheduler uses
+    // (`isKairosCronEnabled` ↔ `cron_scheduler_enabled(CLAUDE_CODE_DISABLE_CRON)`,
+    // loop.ts:83). Registered AFTER builtins; `/loop` is not a builtin name so no
+    // shadow conflict.
+    let cron_enabled =
+        cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref());
+    command_core::register_bundled_skills(&mut reg, cron_enabled);
     register_core_batch_1(&mut reg, handle.clone());
     register_core_batch_2(&mut reg, handle.clone(), auth);
     register_core_batch_4(&mut reg, handle.clone());
@@ -1771,7 +1779,10 @@ impl orchestrator::prompt::skill_listing::SkillListingProvider for RegistrySkill
             .filter(|c| {
                 matches!(
                     c.kind,
-                    SlashCommandKind::Markdown { .. } | SlashCommandKind::Plugin { .. }
+                    SlashCommandKind::Markdown { .. }
+                        | SlashCommandKind::Plugin { .. }
+                        // Bundled programmatic skills (`/loop`) are model-invocable.
+                        | SlashCommandKind::Bundled { .. }
                 )
             })
             // TS `cmd.source !== 'builtin'`.

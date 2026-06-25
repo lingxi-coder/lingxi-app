@@ -41,6 +41,9 @@ orchestrator = { path = "../../orchestrator" }
 # it as a follow-up turn — the parity twin of print.ts run()'s `running` guard +
 # do/while drainCommandQueue loop.
 msgqueue = { path = "../../msgqueue" }
+# Phase-2 /loop: the composition-root `WakeupScheduler` impl (one-shot delayed
+# self-wakeup → enqueue) implements the `tool_cron::WakeupScheduler` seam.
+tool-cron = { path = "../../tools/cron" }
 # S2: the real binary resolves a DesktopConfig from env/argv and assembles the
 # production runtime through the desktop composition root. app→app is permitted
 # by the dependency gate (apps are leaves; the rule only forbids non-leaf→leaf).

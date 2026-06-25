@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agents;
+pub mod bundled;
 pub mod clear;
 pub mod commit;
 pub mod commit_push_pr;
@@ -52,6 +53,7 @@ pub mod version;
 mod core_placeholders;
 
 pub use agents::AgentsHandler;
+pub use bundled::register_bundled_skills;
 pub use clear::ClearHandler;
 pub use commit::CommitHandler;
 pub use commit_push_pr::CommitPushPrHandler;

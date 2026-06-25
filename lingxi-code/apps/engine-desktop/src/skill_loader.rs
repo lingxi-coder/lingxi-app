@@ -58,6 +58,7 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
             skip_shell_expansion: false,
             skill_root: cmd.skill_root.clone(),
             session_id,
+            dynamic_body: None,
         },
         // Builtin handlers are not prompt-based skills.
         SlashCommandKind::Builtin { .. } => SkillDescriptor {
@@ -67,6 +68,29 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
             command_type: SkillCommandType::Other,
             session_id,
             ..SkillDescriptor::default()
+        },
+        // Bundled programmatic skills (the `/loop` family, port of
+        // `registerBundledSkill`). Prompt-typed and model-invocable; the body is
+        // produced dynamically by `prompt_fn` at call time (`getPromptForCommand`,
+        // loop.ts:84), so `body` is left empty and `dynamic_body` carries the
+        // builder.
+        SlashCommandKind::Bundled {
+            frontmatter,
+            prompt_fn,
+        } => SkillDescriptor {
+            name: cmd.name.clone(),
+            description: cmd.description.clone(),
+            body: String::new(),
+            disable_model_invocation: cmd.disable_model_invocation,
+            command_type: SkillCommandType::Prompt,
+            model: frontmatter.model.clone(),
+            allowed_tools: frontmatter.allowed_tools.clone().unwrap_or_default(),
+            argument_names: Vec::new(),
+            shell: frontmatter.shell,
+            skip_shell_expansion: false,
+            skill_root: None,
+            session_id,
+            dynamic_body: prompt_fn.clone(),
         },
         // MCP-prompt bridges are not prompt-based skills AND are remote/untrusted:
         // mark `skip_shell_expansion` so their body is never shell-expanded (TS
@@ -258,6 +282,45 @@ mod tests {
             .expect("present");
         assert!(desc.session_id.is_none());
         assert!(desc.skill_root.is_none());
+    }
+
+    #[tokio::test]
+    async fn bundled_command_maps_to_prompt_with_dynamic_body() {
+        use command_api::BundledPromptFn;
+        struct B;
+        impl BundledPromptFn for B {
+            fn build(&self, args: &str) -> String {
+                format!("built:{args}")
+            }
+        }
+        let mut reg = CommandRegistry::new();
+        reg.register_command(SlashCommand {
+            name: "loop".to_string(),
+            description: "loopy".to_string(),
+            source: CommandSource::Bundled,
+            kind: SlashCommandKind::Bundled {
+                frontmatter: CommandFrontmatter {
+                    model: Some("opus".to_string()),
+                    allowed_tools: Some(vec!["CronCreate".to_string()]),
+                    ..CommandFrontmatter::default()
+                },
+                prompt_fn: Some(Arc::new(B)),
+            },
+            loaded_from: Some("bundled".to_string()),
+            ..SlashCommand::default()
+        });
+        let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(reg)));
+        let desc = loader
+            .load("loop")
+            .await
+            .expect("load ok")
+            .expect("present");
+        assert_eq!(desc.command_type, SkillCommandType::Prompt);
+        assert_eq!(desc.description, "loopy");
+        assert_eq!(desc.model.as_deref(), Some("opus"));
+        assert_eq!(desc.allowed_tools, vec!["CronCreate".to_string()]);
+        let builder = desc.dynamic_body.as_ref().expect("dynamic_body carried");
+        assert_eq!(builder.build("x"), "built:x");
     }
 
     #[tokio::test]

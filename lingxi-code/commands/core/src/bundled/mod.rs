@@ -1,0 +1,106 @@
+//! Bundled (programmatically-registered) skills — port of the reference
+//! `registerBundledSkill` / `registerBundledSkills` family
+//! (`claude-code/src/skills/bundledSkills.ts`). Today the only bundled skill is
+//! [`loop_skill`] (`/loop`).
+
+use std::sync::Arc;
+
+use command_api::{
+    CommandFrontmatter, CommandRegistry, CommandSource, SlashCommand, SlashCommandKind,
+};
+
+pub mod loop_skill;
+
+/// Register all bundled skills onto `reg` (port of `registerBundledSkills`,
+/// `bundledSkills.ts`).
+///
+/// `cron_enabled` is the host's `isKairosCronEnabled` equivalent
+/// (`cron_scheduler_enabled(CLAUDE_CODE_DISABLE_CRON)` on desktop). When `false`
+/// the `/loop` skill is not registered — mirroring the reference
+/// `isEnabled: isKairosCronEnabled` gate (loop.ts:83).
+pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
+    register_loop_skill(reg, cron_enabled);
+}
+
+/// Register the `/loop` bundled skill (loop.ts:74-92). Metadata is byte-faithful
+/// to `registerBundledSkill({ … })` (loop.ts:75-82).
+fn register_loop_skill(reg: &mut CommandRegistry, cron_enabled: bool) {
+    // loop.ts:83 — `isEnabled: isKairosCronEnabled`.
+    if !cron_enabled {
+        return;
+    }
+    reg.register_command(SlashCommand {
+        // loop.ts:76.
+        name: "loop".into(),
+        // loop.ts:77-78.
+        description:
+            "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo, defaults to 10m)"
+                .into(),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter::default(),
+            prompt_fn: Some(Arc::new(loop_skill::LoopPromptFn)),
+        },
+        // Sets `is_bundled` in the skill listing + satisfies the listing's
+        // loadedFrom ∈ {bundled,…} filter.
+        loaded_from: Some("bundled".into()),
+        // loop.ts:79-80.
+        when_to_use: Some(
+            "When the user wants to set up a recurring task, poll for status, or run something repeatedly on an interval (e.g. \"check the deploy every 5 minutes\", \"keep running /babysit-prs\"). Do NOT invoke for one-off tasks."
+                .into(),
+        ),
+        // loop.ts:81.
+        argument_hint: Some("[interval] <prompt>".into()),
+        // loop.ts:82.
+        user_invocable: Some(true),
+        // Explicit description ⇒ listing-eligible.
+        has_user_specified_description: true,
+        ..SlashCommand::default()
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registers_loop_when_cron_enabled() {
+        let mut reg = CommandRegistry::new();
+        register_bundled_skills(&mut reg, true);
+        let cmd = reg.resolve("loop").expect("loop registered");
+        assert_eq!(cmd.source, CommandSource::Bundled);
+        assert_eq!(cmd.loaded_from.as_deref(), Some("bundled"));
+        assert_eq!(cmd.user_invocable, Some(true));
+        assert_eq!(cmd.argument_hint.as_deref(), Some("[interval] <prompt>"));
+        assert!(cmd.has_user_specified_description);
+        assert!(matches!(cmd.kind, SlashCommandKind::Bundled { .. }));
+        assert_eq!(
+            cmd.description,
+            "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo, defaults to 10m)"
+        );
+    }
+
+    #[test]
+    fn skips_loop_when_cron_disabled() {
+        // loop.ts:83 — `isEnabled: isKairosCronEnabled`. Disabled ⇒ not registered.
+        let mut reg = CommandRegistry::new();
+        register_bundled_skills(&mut reg, false);
+        assert!(reg.resolve("loop").is_none());
+    }
+
+    #[test]
+    fn registered_loop_carries_dynamic_prompt_fn() {
+        let mut reg = CommandRegistry::new();
+        register_bundled_skills(&mut reg, true);
+        let cmd = reg.resolve("loop").expect("loop registered");
+        match &cmd.kind {
+            SlashCommandKind::Bundled { prompt_fn, .. } => {
+                let f = prompt_fn.as_ref().expect("prompt_fn set");
+                // Empty args → usage; non-empty → buildPrompt.
+                assert!(f.build("").starts_with("Usage: /loop"));
+                assert!(f.build("5m /x").starts_with("# /loop"));
+            }
+            other => panic!("expected Bundled kind, got {other:?}"),
+        }
+    }
+}

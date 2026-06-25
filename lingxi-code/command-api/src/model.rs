@@ -5,6 +5,29 @@ use crate::parser::ParsedSlashCommand;
 use protocol::{Effect, McpConnectionId, PluginId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
+
+/// Port of the reference bundled-skill `getPromptForCommand(args)` seam
+/// (`claude-code/src/skills/bundledSkills.ts` → `loop.ts:84`). Builds the
+/// model-facing prompt dynamically from the raw (untrimmed) args, enabling the
+/// empty→usage vs non-empty→buildPrompt two-branch behavior that static
+/// `$ARGUMENTS` templating cannot express (the two texts share no template).
+///
+/// Carried on [`SlashCommandKind::Bundled`] and projected onto the Skill tool's
+/// descriptor; [`SkillTool::call`] invokes `build(args)` INSTEAD of the static
+/// argument substitution when it is present.
+pub trait BundledPromptFn: Send + Sync {
+    /// Produce the model-facing prompt for the given raw args string. The
+    /// implementation does its own trimming/branching (mirrors the reference's
+    /// `args.trim()` inside `getPromptForCommand`, `loop.ts:85`).
+    fn build(&self, args: &str) -> String;
+}
+
+impl std::fmt::Debug for dyn BundledPromptFn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BundledPromptFn")
+    }
+}
 
 /// A registered slash command (built-in, markdown-defined, plugin-supplied,
 /// or MCP-derived).
@@ -119,6 +142,21 @@ pub enum SlashCommandKind {
         /// Prompt name to fetch via `prompts/get`.
         prompt_name: String,
     },
+    /// Programmatically-registered bundled skill (port of the reference
+    /// `registerBundledSkill`, `bundledSkills.ts`). Unlike [`Self::Markdown`],
+    /// its body is produced dynamically by `prompt_fn.build(args)` rather than
+    /// templated, so it can branch on empty vs non-empty args (`loop.ts:84-90`).
+    Bundled {
+        /// Carries `model` / `allowed_tools` for descriptor parity with
+        /// [`Self::Markdown`] (the reference bundled-skill spec also accepts
+        /// these fields).
+        frontmatter: CommandFrontmatter,
+        /// Dynamic prompt builder. `#[serde(skip)]` keeps `SlashCommandKind`
+        /// (de)serializable — bundled commands are reconstructed at boot, never
+        /// loaded from disk, so a deserialized one is inert (`None`) by design.
+        #[serde(skip)]
+        prompt_fn: Option<Arc<dyn BundledPromptFn>>,
+    },
 }
 
 impl Default for SlashCommandKind {
@@ -193,6 +231,10 @@ pub enum CommandSource {
     Managed,
     /// Derived from an MCP server prompt.
     Mcp,
+    /// Programmatically-registered bundled skill (TS `loadedFrom: 'bundled'` /
+    /// `registerBundledSkill`). Model-invocable; never truncated in the skill
+    /// listing.
+    Bundled,
 }
 
 /// Possible outcomes from invoking a slash command.

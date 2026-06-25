@@ -58,6 +58,28 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
             skip_shell_expansion: false,
             skill_root: cmd.skill_root.clone(),
             session_id,
+            dynamic_body: None,
+        },
+        // Bundled programmatic skills (the `/loop` family, port of
+        // `registerBundledSkill`). Prompt-typed; body produced dynamically by
+        // `prompt_fn` at call time (`getPromptForCommand`, loop.ts:84).
+        SlashCommandKind::Bundled {
+            frontmatter,
+            prompt_fn,
+        } => SkillDescriptor {
+            name: cmd.name.clone(),
+            description: cmd.description.clone(),
+            body: String::new(),
+            disable_model_invocation: cmd.disable_model_invocation,
+            command_type: SkillCommandType::Prompt,
+            model: frontmatter.model.clone(),
+            allowed_tools: frontmatter.allowed_tools.clone().unwrap_or_default(),
+            argument_names: Vec::new(),
+            shell: frontmatter.shell,
+            skip_shell_expansion: false,
+            skill_root: None,
+            session_id,
+            dynamic_body: prompt_fn.clone(),
         },
         // Builtin handlers are not prompt-based skills.
         SlashCommandKind::Builtin { .. } => SkillDescriptor {

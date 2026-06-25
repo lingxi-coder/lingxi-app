@@ -58,6 +58,8 @@ fn command_source_str(source: CommandSource) -> &'static str {
         CommandSource::Plugin => "plugin",
         CommandSource::Managed => "managed",
         CommandSource::Mcp => "mcp",
+        // Programmatic bundled skills (TS `source: 'bundled'`).
+        CommandSource::Bundled => "bundled",
     }
 }
 

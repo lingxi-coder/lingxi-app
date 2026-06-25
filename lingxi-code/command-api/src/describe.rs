@@ -27,15 +27,19 @@ use crate::model::{CommandSource, SlashCommand};
 #[must_use]
 pub fn format_description_with_source(cmd: &SlashCommand) -> String {
     // TS: `if (cmd.source === 'bundled') return `${cmd.description} (bundled)``.
-    // The core model has no `bundled` CommandSource variant; bundled origin is
-    // carried via `loaded_from` instead.
+    // Bundled origin is carried via `loaded_from` (and, for programmatic
+    // bundled skills, also via `CommandSource::Bundled` below).
     if cmd.loaded_from.as_deref() == Some("bundled") {
         return format!("{} (bundled)", cmd.description);
     }
 
     match cmd.source {
         // TS: `if (cmd.source === 'builtin' || cmd.source === 'mcp') return cmd.description`.
-        CommandSource::Builtin | CommandSource::Mcp => cmd.description.clone(),
+        // `Bundled` renders its bare description too (matched here only when
+        // `loaded_from != "bundled"`, e.g. a programmatic skill without the tag).
+        CommandSource::Builtin | CommandSource::Mcp | CommandSource::Bundled => {
+            cmd.description.clone()
+        }
         // TS: plugin → `(name) desc` when the manifest name is known, else `desc (plugin)`.
         CommandSource::Plugin => format!("{} (plugin)", cmd.description),
         // TS: `getSettingSourceName` mapping for the SettingSource cases.

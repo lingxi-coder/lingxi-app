@@ -342,6 +342,29 @@ pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
             .await;
     }
 
+    // Phase-2 /loop dynamic mode (ScheduleWakeup) — KNOWN GAP, NOT auto-wired.
+    //
+    // The composition-root one-shot wakeup adapter
+    // [`crate::driver::MsgQueueWakeupScheduler`] is real and unit-tested (it does
+    // `RuntimeSpawner::sleep(delay)` → `tool_cron::resolve_wakeup_prompt` →
+    // `queue.enqueue(..)` at `Next`). It is NOT constructed/attached here because
+    // BOTH of its inputs are out of reach at this seam:
+    //   1. the registered `ScheduleWakeupTool` is built deep inside
+    //      `engine_desktop::build` (via `tool_cron::register_all_with_auth`) with
+    //      NO scheduler, BEFORE this per-connection `queue` exists, and
+    //      `ToolRegistry` exposes no replace-builtin API to swap in a
+    //      `ScheduleWakeupTool::with_scheduler(ctx, wakeup)` instance afterward; and
+    //   2. the session `RuntimeSpawner` is owned inside `build` and is not
+    //      surfaced on `DesktopRuntime`.
+    // Until a replace-builtin (or deferred-scheduler-cell) seam threads both into
+    // `build`, `ScheduleWakeup` runs as the honest no-op (it clamps + reports "no
+    // wakeup scheduler is wired"). See `MsgQueueWakeupScheduler` for the adapter
+    // that makes the eventual wiring a one-liner.
+    //
+    // TODO(loop-phase2): wire `MsgQueueWakeupScheduler::new(queue, spawner)` into
+    //   the registered `ScheduleWakeupTool` once the registry replace-builtin seam
+    //   + a surfaced session spawner exist.
+
     // Production turn driver: errors surface as a terminal `ClientEvent::Error`
     // through the SAME connection-scoped event sink. Wired with the connection's
     // queue + the shared reason flag so each turn registers its cancel token.

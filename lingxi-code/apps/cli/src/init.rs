@@ -433,11 +433,15 @@ pub(crate) fn resolve_desktop_config(
         session_id_override: argv.session_id.clone(),
         // CLI `--disable-slash-commands`: empties the command/skill registry.
         disable_slash_commands: argv.disable_slash_commands,
+        // CLI `--add-dir <directories...>`: extra tool-access directories,
+        // unioned into the permission working-dir set in `build()`.
+        add_dir: argv.add_dir.clone().unwrap_or_default(),
     }
-    // TODO(add-dir): wire `argv.add_dir` into the memory provider so extra
-    // directories are searched for CLAUDE.md files. Currently requires a new
-    // `real_provider_with_excludes_and_dirs(excludes, dirs)` seam in
-    // `orchestrator::prompt::memory_block`. Parsing is wired; behavior is not.
+    // NOTE: claude-code's `--add-dir` is "Additional directories to allow TOOL
+    // ACCESS to" (NOT CLAUDE.md search — an earlier comment here misread it). It
+    // is now wired above into `DesktopConfig.add_dir`, which `engine_desktop::
+    // build` unions into the permission policy's working-dir set (parity with a
+    // settings `permissions.additionalDirectories` entry).
 }
 
 

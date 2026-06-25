@@ -246,6 +246,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         session_id_override: None,
         // The Electron bridge has no --disable-slash-commands flag.
         disable_slash_commands: false,
+        // The Electron bridge has no --add-dir flag.
+        add_dir: Vec::new(),
     }
 }
 
@@ -526,6 +528,7 @@ mod tests {
             append_system_prompt: None,
             session_id_override: None,
             disable_slash_commands: false,
+            add_dir: Vec::new(),
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.

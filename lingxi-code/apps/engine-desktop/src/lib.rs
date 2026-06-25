@@ -1040,6 +1040,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     append_system_prompt: None,
 ///     session_id_override: None,
 ///     disable_slash_commands: false,
+///     add_dir: Vec::new(),
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -1180,6 +1181,12 @@ pub struct DesktopConfig {
     /// loader (which share the registry `Arc`) observe zero commands/skills.
     /// `false` (the default) keeps the full command set.
     pub disable_slash_commands: bool,
+    /// CLI `--add-dir <directories...>` (claude-code "Additional directories to
+    /// allow tool access to"). Unioned into the permission policy's
+    /// working-directory set exactly like a settings-tier
+    /// `permissions.additionalDirectories` entry, so file tools (Read/Edit/Bash)
+    /// may operate outside `cwd`. Empty (the default) ⟶ no extra dirs.
+    pub add_dir: Vec<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for DesktopConfig {
@@ -1232,6 +1239,7 @@ impl std::fmt::Debug for DesktopConfig {
             .field("append_system_prompt", &self.append_system_prompt)
             .field("session_id_override", &self.session_id_override)
             .field("disable_slash_commands", &self.disable_slash_commands)
+            .field("add_dir", &self.add_dir)
             .finish()
     }
 }
@@ -1262,6 +1270,7 @@ impl Default for DesktopConfig {
             append_system_prompt: None,
             session_id_override: None,
             disable_slash_commands: false,
+            add_dir: Vec::new(),
         }
     }
 }
@@ -2768,6 +2777,11 @@ pub async fn build(
                     raw_tiers.push(raw); // ascending priority preserved for sandbox derivation
                 }
             }
+            // CLI `--add-dir <directories...>`: union the host-provided dirs into
+            // the working-dir set, exactly like a settings-tier
+            // `additionalDirectories` entry (claude-code "Additional directories
+            // to allow tool access to").
+            additional_working_dirs.extend(cfg.add_dir.iter().cloned());
             let rule_count = rules.len();
             // Phase 3a: supply the filesystem roots so file-path CONTENT rules
             // (`Edit(src/**)`, `Read(./secrets/**)`) match the input path. Roots
@@ -4810,6 +4824,7 @@ mod tests {
             append_system_prompt: None,
             session_id_override: None,
             disable_slash_commands: false,
+            add_dir: Vec::new(),
         };
         (tmp, cfg)
     }

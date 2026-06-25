@@ -173,11 +173,12 @@ pub struct Argv {
     #[arg(long = "tools", value_name = "tools", num_args = 1..)]
     pub tools: Option<Vec<String>>,
 
-    /// Add a directory to search for CLAUDE.md files
+    /// Additional directories to allow tool access to
     ///
-    /// Additional directories (beyond cwd and ~/.claude) to search for CLAUDE.md
-    /// files and include in the system prompt context.
-    #[arg(long = "add-dir", value_name = "directory", num_args = 1..)]
+    /// claude-code `--add-dir <directories...>`. Unioned into the permission
+    /// policy's working-directory set (like `permissions.additionalDirectories`)
+    /// so file tools (Read/Edit/Bash) may operate outside `cwd`.
+    #[arg(long = "add-dir", value_name = "directories", num_args = 1..)]
     pub add_dir: Option<Vec<PathBuf>>,
 
     /// Load settings from a JSON file or JSON string

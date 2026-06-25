@@ -94,6 +94,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         append_system_prompt: None,
         session_id_override: None,
         disable_slash_commands: false,
+        add_dir: Vec::new(),
     };
     (tmp, cfg)
 }

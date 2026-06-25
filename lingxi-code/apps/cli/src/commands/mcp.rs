@@ -167,11 +167,20 @@ pub struct AddArgs {
     #[arg(short = 'H', long = "header", value_name = "header")]
     pub header: Vec<String>,
     /// Configuration scope (local, user, or project)
+    // Parsed as a raw string (NOT a clap `ValueEnum`) so an invalid/non-writable
+    // scope produces claude's exact custom message (`Invalid scope: …` /
+    // `Cannot add MCP server to scope: …`) instead of clap's enum error, and so
+    // claude's full accepted set (local/user/project/dynamic/enterprise/claudeai/
+    // managed/agent) is recognized before the writable-scope check. Validated in
+    // `run_add` via [`parse_add_scope`].
     #[arg(short = 's', long = "scope", value_name = "scope", default_value = "local")]
-    pub scope: Scope,
+    pub scope: String,
     /// Transport type (stdio, sse, http). Defaults to stdio if not specified.
+    // Raw string (not a `ValueEnum`) so `streamable-http` is accepted as an
+    // `http` alias and an invalid value yields claude's exact `Invalid transport
+    // type: …` message. Validated in `run_add` via [`parse_add_transport`].
     #[arg(short = 't', long = "transport", value_name = "transport", default_value = "stdio")]
-    pub transport: Transport,
+    pub transport: String,
 }
 
 /// `mcp add-from-claude-desktop` options.
@@ -322,10 +331,10 @@ fn project_mcp_json_path() -> Option<PathBuf> {
 ///
 /// stdio  → `{ "type": "stdio", "command": <cmd>, "args": [...], "env": {} }`
 /// sse/http → `{ "type": <t>, "url": <url>[, "headers": {...}] }`
-fn build_add_entry(a: &AddArgs) -> Result<serde_json::Value, String> {
+fn build_add_entry(a: &AddArgs, transport: Transport) -> Result<serde_json::Value, String> {
     let env_map = parse_kv_pairs(&a.env)?;
     let header_map = parse_header_pairs(&a.header)?;
-    match a.transport {
+    match transport {
         Transport::Stdio => {
             let mut obj = serde_json::Map::new();
             obj.insert("type".into(), "stdio".into());
@@ -345,7 +354,7 @@ fn build_add_entry(a: &AddArgs) -> Result<serde_json::Value, String> {
             Ok(serde_json::Value::Object(obj))
         }
         Transport::Sse | Transport::Http => {
-            let ty = if matches!(a.transport, Transport::Sse) { "sse" } else { "http" };
+            let ty = if matches!(transport, Transport::Sse) { "sse" } else { "http" };
             let mut obj = serde_json::Map::new();
             obj.insert("type".into(), ty.into());
             obj.insert("url".into(), a.command_or_url.clone().into());
@@ -365,9 +374,86 @@ fn build_add_entry(a: &AddArgs) -> Result<serde_json::Value, String> {
     }
 }
 
+/// Validate `mcp add`'s `--scope` string the way claude does (in the action
+/// handler, not the parser): the writable scopes (local/user/project) map to a
+/// [`Scope`]; the other recognized config scopes (dynamic/enterprise/claudeai/
+/// managed/agent) are rejected with `Cannot add MCP server to scope: …`; an
+/// unrecognized value with `Invalid scope: …. Must be one of: …`.
+fn parse_add_scope(s: &str) -> Result<Scope, String> {
+    const RECOGNIZED: [&str; 8] =
+        ["local", "user", "project", "dynamic", "enterprise", "claudeai", "managed", "agent"];
+    match s {
+        "local" => Ok(Scope::Local),
+        "user" => Ok(Scope::User),
+        "project" => Ok(Scope::Project),
+        other if RECOGNIZED.contains(&other) => {
+            Err(format!("Cannot add MCP server to scope: {other}"))
+        }
+        other => Err(format!(
+            "Invalid scope: {other}. Must be one of: local, user, project, dynamic, enterprise, claudeai, managed, agent"
+        )),
+    }
+}
+
+/// Validate `mcp add`'s `--transport` string the way claude does: stdio/sse/http
+/// map directly, `streamable-http` is an alias for `http`, and anything else is
+/// rejected with claude's exact `Invalid transport type: …` message.
+fn parse_add_transport(t: &str) -> Result<Transport, String> {
+    match t {
+        "stdio" => Ok(Transport::Stdio),
+        "sse" => Ok(Transport::Sse),
+        "http" | "streamable-http" => Ok(Transport::Http),
+        other => Err(format!(
+            "Invalid transport type: {other}. Must be one of: stdio, sse, http (or streamable-http)"
+        )),
+    }
+}
+
+/// claude's `mcp add` success output for an sse/http server WITH `-H` headers:
+/// a pretty-printed JSON object in `-H` INSERTION order (NOT sorted), printed
+/// between the `Added …` line and the `File modified:` line. `None` when there
+/// are no headers (then no block is printed). Built from the ordered pairs so
+/// the key order matches claude even though the stored JSON map may sort.
+fn headers_display_block(headers: &[String]) -> Option<String> {
+    let pairs = parse_header_pairs(headers).ok()?; // validation already passed in build_add_entry
+    if pairs.is_empty() {
+        return None;
+    }
+    let mut s = String::from("Headers: {\n");
+    for (i, (k, v)) in pairs.iter().enumerate() {
+        let comma = if i + 1 < pairs.len() { "," } else { "" };
+        s.push_str(&format!(
+            "  {}: {}{comma}\n",
+            serde_json::Value::String(k.clone()),
+            serde_json::Value::String(v.clone()),
+        ));
+    }
+    s.push('}');
+    Some(s)
+}
+
 /// Implement `mcp add`.
 fn run_add(a: &AddArgs) -> i32 {
-    let entry = match build_add_entry(a) {
+    // claude validates the `--scope` and `--transport` strings in the action
+    // handler (with its own messages), not via the arg parser. Order matters for
+    // combined-invalid input: claude reports the SCOPE error first, THEN
+    // transport, THEN the env/header config build (verified against 2.1.191).
+    let scope = match parse_add_scope(&a.scope) {
+        Ok(s) => s,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return RUNTIME_ERROR;
+        }
+    };
+    let transport = match parse_add_transport(&a.transport) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return RUNTIME_ERROR;
+        }
+    };
+
+    let entry = match build_add_entry(a, transport) {
         Ok(e) => e,
         Err(msg) => {
             eprintln!("{msg}");
@@ -375,10 +461,10 @@ fn run_add(a: &AddArgs) -> i32 {
         }
     };
 
-    match write_server(&a.name, &entry, a.scope) {
+    match write_server(&a.name, &entry, scope) {
         Ok(WriteOutcome::Added(path)) => {
             // Byte-faithful success string per transport (see live-binary probe).
-            match a.transport {
+            match transport {
                 Transport::Stdio => {
                     // claude's template is `${p} ${i.join(" ")}` — the space after
                     // the command is ALWAYS emitted, so with no args there is a
@@ -388,11 +474,11 @@ fn run_add(a: &AddArgs) -> i32 {
                         "Added stdio MCP server {} with command: {} to {} config",
                         a.name,
                         cmd,
-                        a.scope.label()
+                        scope.label()
                     );
                 }
                 Transport::Sse | Transport::Http => {
-                    let kind = if matches!(a.transport, Transport::Sse) { "SSE" } else { "HTTP" };
+                    let kind = if matches!(transport, Transport::Sse) { "SSE" } else { "HTTP" };
                     // claude displays the URL through `kme()`: clear userinfo/query/
                     // fragment then strip a trailing slash. This redacts any
                     // `user:secret@` credentials and normalizes the byte output;
@@ -402,16 +488,21 @@ fn run_add(a: &AddArgs) -> i32 {
                         kind,
                         a.name,
                         redact_url_for_display(&a.command_or_url),
-                        a.scope.label()
+                        scope.label()
                     );
+                    // When `-H` headers were supplied, claude echoes the stored
+                    // header map as a `Headers: {…}` block before `File modified:`.
+                    if let Some(block) = headers_display_block(&a.header) {
+                        println!("{block}");
+                    }
                 }
             }
-            print_file_modified(a.scope, &path);
+            print_file_modified(scope, &path);
             SUCCESS
         }
         Ok(WriteOutcome::AlreadyExists) => {
             // claude routes the duplicate as an error: stderr + exit 1.
-            eprintln!("MCP server {} already exists in {}", a.name, a.scope.exists_suffix());
+            eprintln!("MCP server {} already exists in {}", a.name, scope.exists_suffix());
             RUNTIME_ERROR
         }
         Err(msg) => {
@@ -421,19 +512,65 @@ fn run_add(a: &AddArgs) -> i32 {
     }
 }
 
+/// Whether a parsed `mcp add-json` value satisfies claude's server-config
+/// schema. claude validates the JSON and emits ONE root-level message for any
+/// failure, so callers only need a boolean. Rules (verified against the live
+/// 2.1.191 binary): must be an object; `type` defaults to `stdio` and must be
+/// one of stdio/sse/http/streamable-http (any other value, or a non-string
+/// type, fails); stdio requires a string `command` (with optional array `args`
+/// and object `env`); sse/http/streamable-http require a string `url` (with
+/// optional object `headers`). Unknown extra fields are allowed.
+fn mcp_json_config_is_valid(v: &serde_json::Value) -> bool {
+    let Some(obj) = v.as_object() else {
+        return false;
+    };
+    let ty = match obj.get("type") {
+        None => "stdio",
+        Some(serde_json::Value::String(s)) => s.as_str(),
+        Some(_) => return false,
+    };
+    match ty {
+        "stdio" => {
+            if !matches!(obj.get("command"), Some(serde_json::Value::String(_))) {
+                return false;
+            }
+            if obj.get("args").is_some_and(|a| !a.is_array()) {
+                return false;
+            }
+            if obj.get("env").is_some_and(|e| !e.is_object()) {
+                return false;
+            }
+            true
+        }
+        "sse" | "http" | "streamable-http" => {
+            if !matches!(obj.get("url"), Some(serde_json::Value::String(_))) {
+                return false;
+            }
+            if obj.get("headers").is_some_and(|h| !h.is_object()) {
+                return false;
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Implement `mcp add-json`.
 fn run_add_json(a: &AddJsonArgs) -> i32 {
+    // claude parses the JSON and validates it against its server-config schema;
+    // a parse error, a non-object, or any schema violation all surface as the
+    // same root-level message on stderr (exit 1).
     let entry: serde_json::Value = match serde_json::from_str(&a.json) {
-        Ok(v @ serde_json::Value::Object(_)) => v,
-        Ok(_) => {
-            eprintln!("Invalid JSON: expected an object describing the server config");
-            return RUNTIME_ERROR;
-        }
-        Err(e) => {
-            eprintln!("Invalid JSON: {e}");
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("Invalid configuration: : Invalid input");
             return RUNTIME_ERROR;
         }
     };
+    if !mcp_json_config_is_valid(&entry) {
+        eprintln!("Invalid configuration: : Invalid input");
+        return RUNTIME_ERROR;
+    }
 
     // Transport label for the success string mirrors claude: read the `type`
     // field (default "stdio") and lowercase it.
@@ -1060,7 +1197,9 @@ fn parse_kv_pairs(pairs: &[String]) -> Result<Vec<(String, String)>, String> {
     let mut out = Vec::with_capacity(pairs.len());
     for p in pairs {
         let Some((k, v)) = p.split_once('=') else {
-            return Err(format!("Invalid environment variable (expected KEY=value): {p}"));
+            return Err(format!(
+                "Invalid environment variable format: {p}, environment variables should be added as: -e KEY1=value1 -e KEY2=value2"
+            ));
         };
         out.push((k.to_string(), v.to_string()));
     }
@@ -1072,7 +1211,10 @@ fn parse_header_pairs(pairs: &[String]) -> Result<Vec<(String, String)>, String>
     let mut out = Vec::with_capacity(pairs.len());
     for p in pairs {
         let Some((k, v)) = p.split_once(':') else {
-            return Err(format!("Invalid header (expected Name: Value): {p}"));
+            return Err(format!(
+                "Invalid header format: {}. Expected format: \"Header-Name: value\"",
+                serde_json::Value::String(p.clone())
+            ));
         };
         out.push((k.trim().to_string(), v.trim().to_string()));
     }

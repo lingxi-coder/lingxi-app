@@ -402,6 +402,8 @@ pub(crate) fn resolve_desktop_config(
         // either `None` or a valid UUID string. `build()` parses it into the
         // boot-canonical MAIN session id (else mints a fresh one).
         session_id_override: argv.session_id.clone(),
+        // CLI `--disable-slash-commands`: empties the command/skill registry.
+        disable_slash_commands: argv.disable_slash_commands,
     }
     // TODO(add-dir): wire `argv.add_dir` into the memory provider so extra
     // directories are searched for CLAUDE.md files. Currently requires a new

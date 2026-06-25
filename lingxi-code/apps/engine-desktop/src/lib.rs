@@ -1039,6 +1039,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     system_prompt_override: None,
 ///     append_system_prompt: None,
 ///     session_id_override: None,
+///     disable_slash_commands: false,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -1173,6 +1174,12 @@ pub struct DesktopConfig {
     /// claude-code `--session-id`. The host (`apps/cli` / `apps/bridge-server`)
     /// validates UUID-ness + the cross-flag rules before setting this.
     pub session_id_override: Option<String>,
+    /// CLI `--disable-slash-commands` (claude-code "Disable all skills"). When
+    /// `true`, the shared command registry is emptied AFTER all builtin + plugin
+    /// + skill registration, so the slash dispatcher and the `Skill` tool's
+    /// loader (which share the registry `Arc`) observe zero commands/skills.
+    /// `false` (the default) keeps the full command set.
+    pub disable_slash_commands: bool,
 }
 
 impl std::fmt::Debug for DesktopConfig {
@@ -1224,6 +1231,7 @@ impl std::fmt::Debug for DesktopConfig {
             .field("system_prompt_override", &self.system_prompt_override)
             .field("append_system_prompt", &self.append_system_prompt)
             .field("session_id_override", &self.session_id_override)
+            .field("disable_slash_commands", &self.disable_slash_commands)
             .finish()
     }
 }
@@ -1253,6 +1261,7 @@ impl Default for DesktopConfig {
             system_prompt_override: None,
             append_system_prompt: None,
             session_id_override: None,
+            disable_slash_commands: false,
         }
     }
 }
@@ -4201,6 +4210,15 @@ pub async fn build(
     // session id + cwd from the orchestrator (`expansion_hook_context`), matching
     // the base hook input the orchestrator's own lifecycle hooks build. A strict
     // no-op unless a `UserPromptExpansion` hook is registered.
+    // `--disable-slash-commands` (claude-code "Disable all skills"): after ALL
+    // builtin + plugin + skill registration, replace the shared command registry
+    // with an empty one so the dispatcher AND the `Skill` tool's loader (which
+    // share this `Arc`) observe zero commands/skills. Plugin MCP servers / hooks
+    // / tools live in other registries and are intentionally unaffected (claude's
+    // flag disables skills/commands only).
+    if cfg.disable_slash_commands {
+        *shared_command_registry.write().await = CommandRegistry::new();
+    }
     let expansion_ctx_orch = orch.clone();
     let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
         .with_expansion_hooks(
@@ -4791,6 +4809,7 @@ mod tests {
             system_prompt_override: None,
             append_system_prompt: None,
             session_id_override: None,
+            disable_slash_commands: false,
         };
         (tmp, cfg)
     }

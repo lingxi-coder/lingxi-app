@@ -244,6 +244,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // The Electron bridge has no --session-id flag (the SDK/bridge path mints
         // its own ids); always a fresh session id.
         session_id_override: None,
+        // The Electron bridge has no --disable-slash-commands flag.
+        disable_slash_commands: false,
     }
 }
 
@@ -523,6 +525,7 @@ mod tests {
             system_prompt_override: None,
             append_system_prompt: None,
             session_id_override: None,
+            disable_slash_commands: false,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.

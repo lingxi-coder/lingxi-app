@@ -1,8 +1,16 @@
 //! Synchronous GitHub Copilot request authenticator + redacting token wrapper.
 //!
-//! opencode parity: the GitHub OAuth-App token is used DIRECTLY as the bearer
-//! credential (no `copilot_internal/v2/token` exchange), so authentication is
-//! pure header injection and fits the synchronous [`Authenticator`] trait.
+//! [`CopilotAuthenticator::apply`] is pure header injection so it fits the
+//! synchronous [`Authenticator`] trait: it stamps the Copilot header set and
+//! uses [`CopilotSecret`] as the bearer.
+//!
+//! `api.githubcopilot.com` requires a SHORT-LIVED Copilot token, not the raw
+//! GitHub OAuth-App token. That token is minted by the asynchronous exchange in
+//! [`crate::copilot::login::exchange_copilot_token`] and must be cached with its
+//! `expires_at` and re-exchanged near expiry by the host. The authenticator is
+//! deliberately credential-agnostic: it bearers whatever [`CopilotSecret`] it is
+//! constructed with, so the host wires the freshly-exchanged token here. See
+//! `login.rs` for the exchange + the host-wiring contract.
 
 use crate::{Authenticator, LlmError, ProviderRequest};
 
@@ -10,6 +18,15 @@ use crate::{Authenticator, LlmError, ProviderRequest};
 pub const COPILOT_API_VERSION: &str = "2026-06-01";
 /// `User-Agent` sent to GitHub Copilot.
 pub const COPILOT_USER_AGENT: &str = "LingXi-Code";
+/// `Copilot-Integration-Id` header — Copilot rejects requests without a known
+/// integration id. `vscode-chat` is the integration id used by the OpenAI-
+/// compatible chat endpoint.
+pub const COPILOT_INTEGRATION_ID: &str = "vscode-chat";
+/// `Editor-Version` header value. Copilot expects an `<editor>/<version>` token;
+/// we send a stable identifier for this client.
+pub const COPILOT_EDITOR_VERSION: &str = "LingXi-Code/1.0";
+/// `Editor-Plugin-Version` header value (the Copilot plugin/extension version).
+pub const COPILOT_EDITOR_PLUGIN_VERSION: &str = "LingXi-Code/1.0";
 
 /// GitHub OAuth token used directly as the Copilot bearer credential.
 ///
@@ -77,6 +94,19 @@ impl Authenticator for CopilotAuthenticator {
         );
         // LingXi is an agentic client; per-request user/agent refinement is deferred.
         headers.insert("x-initiator".to_string(), "agent".to_string());
+        // Copilot rejects requests without a known integration id + editor version.
+        headers.insert(
+            "Copilot-Integration-Id".to_string(),
+            COPILOT_INTEGRATION_ID.to_string(),
+        );
+        headers.insert(
+            "Editor-Version".to_string(),
+            COPILOT_EDITOR_VERSION.to_string(),
+        );
+        headers.insert(
+            "Editor-Plugin-Version".to_string(),
+            COPILOT_EDITOR_PLUGIN_VERSION.to_string(),
+        );
         Ok(request)
     }
 }
@@ -117,6 +147,18 @@ mod tests {
             Some(&"LingXi-Code".to_string())
         );
         assert_eq!(signed.headers.get("x-initiator"), Some(&"agent".to_string()));
+        assert_eq!(
+            signed.headers.get("Copilot-Integration-Id"),
+            Some(&"vscode-chat".to_string())
+        );
+        assert_eq!(
+            signed.headers.get("Editor-Version"),
+            Some(&"LingXi-Code/1.0".to_string())
+        );
+        assert_eq!(
+            signed.headers.get("Editor-Plugin-Version"),
+            Some(&"LingXi-Code/1.0".to_string())
+        );
         assert!(!signed.headers.contains_key("x-api-key"));
     }
 

@@ -15,8 +15,14 @@ pub const COPILOT_CLIENT_ID: &str = "Ov23li8tweQw6odWQebz";
 
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
+/// GitHub endpoint that exchanges a GitHub OAuth token for a short-lived
+/// Copilot bearer token used against `api.githubcopilot.com`.
+pub const COPILOT_TOKEN_EXCHANGE_URL: &str = "https://api.github.com/copilot_internal/v2/token";
+/// Re-exchange the Copilot token this many seconds before its `expires_at` so a
+/// request never rides an about-to-expire token. See [`ExchangedToken::is_fresh`].
+pub const COPILOT_TOKEN_REFRESH_SKEW_SECS: u64 = 300;
 
-/// Minimal JSON-POST seam for the two device-flow calls.
+/// Minimal JSON seam for the device-flow calls + the Copilot token exchange.
 ///
 /// Host implementations MUST send `Accept: application/json` (GitHub otherwise
 /// form-encodes the response) and a `User-Agent`. Transport/TLS/timeout failures
@@ -28,6 +34,27 @@ pub trait CopilotHttp: Send + Sync {
         url: &'a str,
         body: &'a Value,
     ) -> BoxFuture<'a, Result<Value, LlmError>>;
+
+    /// GET `url` with the supplied request headers; return the parsed JSON
+    /// response. Used by the Copilot token exchange, which requires an
+    /// `Authorization: token <oauth>` header rather than a JSON body.
+    ///
+    /// Defaulted to keep existing device-flow-only hosts compiling; a host that
+    /// wants Copilot token exchange MUST override this.
+    fn get_json<'a>(
+        &'a self,
+        url: &'a str,
+        _headers: &'a [(&'a str, String)],
+    ) -> BoxFuture<'a, Result<Value, LlmError>> {
+        let url = url.to_string();
+        Box::pin(async move {
+            Err(LlmError::InvalidRequest {
+                message: format!(
+                    "CopilotHttp::get_json not implemented by host (needed for {url})"
+                ),
+            })
+        })
+    }
 }
 
 /// Device-code grant returned by [`CopilotLogin::begin`].
@@ -129,6 +156,93 @@ impl<H: CopilotHttp> CopilotLogin<H> {
     }
 }
 
+/// A short-lived Copilot bearer token minted from a GitHub OAuth token.
+///
+/// The bearer is held in a redacting [`CopilotSecret`]; only `expires_at` (a
+/// Unix-seconds timestamp) and the freshness math are public. The host caches
+/// this and re-exchanges when [`ExchangedToken::is_fresh`] turns false.
+#[derive(Clone)]
+pub struct ExchangedToken {
+    /// The Copilot bearer token to send to `api.githubcopilot.com`.
+    secret: CopilotSecret,
+    /// Unix-seconds expiry as reported by GitHub (`expires_at`).
+    pub expires_at: u64,
+}
+
+impl ExchangedToken {
+    /// The bearer credential, ready to hand to [`crate::copilot::auth::CopilotAuthenticator`].
+    #[must_use]
+    pub fn secret(&self) -> &CopilotSecret {
+        &self.secret
+    }
+
+    /// Consume into the bearer credential.
+    #[must_use]
+    pub fn into_secret(self) -> CopilotSecret {
+        self.secret
+    }
+
+    /// True if the token is still safely usable at `now_unix_secs`, i.e. it does
+    /// not expire within [`COPILOT_TOKEN_REFRESH_SKEW_SECS`]. The host caches the
+    /// token and calls [`exchange_copilot_token`] again once this returns false.
+    #[must_use]
+    pub fn is_fresh(&self, now_unix_secs: u64) -> bool {
+        self.expires_at > now_unix_secs.saturating_add(COPILOT_TOKEN_REFRESH_SKEW_SECS)
+    }
+}
+
+impl std::fmt::Debug for ExchangedToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never leak the bearer; only the non-sensitive expiry.
+        f.debug_struct("ExchangedToken")
+            .field("secret", &self.secret)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+/// Exchange a GitHub OAuth token for a short-lived Copilot bearer token.
+///
+/// GETs [`COPILOT_TOKEN_EXCHANGE_URL`] with `Authorization: token <oauth_token>`
+/// and parses the `{ "token": "...", "expires_at": <unix_secs>, ... }` body via
+/// [`parse_exchange_response`]. The returned [`ExchangedToken`] should be cached
+/// with its `expires_at` and re-exchanged once [`ExchangedToken::is_fresh`] is
+/// false (see [`COPILOT_TOKEN_REFRESH_SKEW_SECS`]).
+///
+/// `oauth_token` is the raw GitHub OAuth token (from
+/// [`CopilotSecret::token_for_storage`]); it is sent only in the `Authorization`
+/// header and never logged.
+pub async fn exchange_copilot_token<H: CopilotHttp + ?Sized>(
+    http: &H,
+    oauth_token: &str,
+) -> Result<ExchangedToken, LlmError> {
+    let headers = [("Authorization", format!("token {oauth_token}"))];
+    let v = http.get_json(COPILOT_TOKEN_EXCHANGE_URL, &headers).await?;
+    parse_exchange_response(&v)
+}
+
+/// Parse a `copilot_internal/v2/token` JSON body into an [`ExchangedToken`].
+///
+/// Requires a non-empty `token`; `expires_at` is the Unix-seconds expiry.
+fn parse_exchange_response(v: &Value) -> Result<ExchangedToken, LlmError> {
+    let token = str_field(v, "token")?;
+    if token.is_empty() {
+        return Err(LlmError::InvalidRequest {
+            message: "copilot token-exchange response had an empty 'token'".to_string(),
+        });
+    }
+    let expires_at = v
+        .get("expires_at")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| LlmError::InvalidRequest {
+            message: "copilot token-exchange response missing numeric 'expires_at'".to_string(),
+        })?;
+    Ok(ExchangedToken {
+        secret: CopilotSecret::new(token),
+        expires_at,
+    })
+}
+
 fn str_field(v: &Value, key: &str) -> Result<String, LlmError> {
     v.get(key)
         .and_then(Value::as_str)
@@ -222,5 +336,91 @@ mod tests {
             PollOutcome::Failed { error } => assert_eq!(error, "access_denied"),
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_exchange_response_extracts_token_and_expiry() {
+        let v = json!({
+            "token": "tid=abc;exp=123;sku=copilot",
+            "expires_at": 1_900_000_000_u64,
+            "refresh_in": 1500
+        });
+        let exchanged = parse_exchange_response(&v).expect("parses");
+        assert_eq!(exchanged.expires_at, 1_900_000_000);
+        // Bearer is usable but never leaked via Debug.
+        assert_eq!(exchanged.secret().token_for_storage(), "tid=abc;exp=123;sku=copilot");
+        assert!(!format!("{exchanged:?}").contains("tid=abc"));
+    }
+
+    #[test]
+    fn parse_exchange_response_rejects_missing_fields() {
+        // Missing token.
+        assert!(parse_exchange_response(&json!({ "expires_at": 1_u64 })).is_err());
+        // Empty token.
+        assert!(parse_exchange_response(&json!({ "token": "", "expires_at": 1_u64 })).is_err());
+        // Missing / non-numeric expires_at.
+        assert!(parse_exchange_response(&json!({ "token": "x" })).is_err());
+        assert!(parse_exchange_response(&json!({ "token": "x", "expires_at": "soon" })).is_err());
+    }
+
+    #[test]
+    fn exchanged_token_freshness_respects_skew() {
+        let t = parse_exchange_response(&json!({ "token": "x", "expires_at": 1000_u64 }))
+            .expect("parses");
+        // Far before expiry (minus skew) => fresh.
+        assert!(t.is_fresh(1000 - COPILOT_TOKEN_REFRESH_SKEW_SECS - 1));
+        // Inside the skew window => stale, should re-exchange.
+        assert!(!t.is_fresh(1000 - COPILOT_TOKEN_REFRESH_SKEW_SECS));
+        assert!(!t.is_fresh(2000));
+    }
+
+    struct GetMock {
+        body: Value,
+        seen_auth: std::sync::Mutex<Option<String>>,
+    }
+    impl CopilotHttp for GetMock {
+        fn post_json<'a>(
+            &'a self,
+            _url: &'a str,
+            _body: &'a Value,
+        ) -> BoxFuture<'a, Result<Value, LlmError>> {
+            Box::pin(async { unreachable!("exchange uses get_json") })
+        }
+        fn get_json<'a>(
+            &'a self,
+            _url: &'a str,
+            headers: &'a [(&'a str, String)],
+        ) -> BoxFuture<'a, Result<Value, LlmError>> {
+            *self.seen_auth.lock().unwrap() = headers
+                .iter()
+                .find(|(k, _)| *k == "Authorization")
+                .map(|(_, v)| v.clone());
+            let v = self.body.clone();
+            Box::pin(async move { Ok(v) })
+        }
+    }
+
+    #[tokio::test]
+    async fn exchange_sends_token_auth_header_and_parses() {
+        let mock = GetMock {
+            body: json!({ "token": "copilot-bearer", "expires_at": 1_900_000_000_u64 }),
+            seen_auth: std::sync::Mutex::new(None),
+        };
+        let exchanged = exchange_copilot_token(&mock, "ght_oauth").await.expect("ok");
+        assert_eq!(exchanged.expires_at, 1_900_000_000);
+        assert_eq!(exchanged.secret().token_for_storage(), "copilot-bearer");
+        // Auth header is the GitHub `token <oauth>` scheme, not `Bearer`.
+        assert_eq!(
+            mock.seen_auth.lock().unwrap().as_deref(),
+            Some("token ght_oauth")
+        );
+    }
+
+    #[tokio::test]
+    async fn default_get_json_errors_for_device_flow_only_hosts() {
+        // The device-flow MockHttp does not override get_json; exchange must fail
+        // cleanly rather than silently succeed.
+        let res = exchange_copilot_token(&MockHttp(json!({})), "ght_oauth").await;
+        assert!(res.is_err());
     }
 }

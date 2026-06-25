@@ -33,11 +33,10 @@ impl WireCodec for OpenAiChatCodec {
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
         reject_unsupported_content_blocks(request)?;
 
-        if request.reasoning.is_some() {
-            return Err(LlmError::InvalidRequest {
-                message: "OpenAiChatCodec does not encode reasoning budgets yet".to_string(),
-            });
-        }
+        // chat-completions reasoning is driven by the model id (e.g. deepseek-reasoner,
+        // GLM, openrouter o-series), not by a per-request budget field — there is no
+        // wire slot for it here. So the resolved reasoning intent is intentionally not
+        // serialized: we drop any `request.reasoning` budget gracefully rather than error.
 
         let mut messages = Vec::new();
 
@@ -96,6 +95,18 @@ impl WireCodec for OpenAiChatCodec {
         provider_request
             .headers
             .insert("content-type".to_string(), "application/json".to_string());
+
+        // OpenRouter's optional attribution headers (surfaces LingXi on their app
+        // leaderboard). Gated strictly on the base_url substring so other providers
+        // sharing this codec (deepseek/zai/github-copilot) are unaffected.
+        if self.base_url.contains("openrouter.ai") {
+            provider_request
+                .headers
+                .insert("HTTP-Referer".to_string(), "https://lingxi.dev".to_string());
+            provider_request
+                .headers
+                .insert("X-Title".to_string(), "LingXi-Code".to_string());
+        }
 
         Ok(provider_request)
     }
@@ -437,6 +448,10 @@ fn encode_message(message: &crate::Message) -> Vec<Value> {
                     },
                 }));
             }
+            // Reasoning / RedactedThinking are skipped so they are omitted from the
+            // outgoing `messages`: chat-completions APIs reject reasoning_content as
+            // input, so a Reasoning block carried over from a prior turn's history must
+            // not be serialized back.
             ContentBlock::Reasoning { .. }
             | ContentBlock::RedactedThinking { .. }
             | ContentBlock::ServerToolUse { .. }
@@ -541,11 +556,10 @@ fn reject_unsupported_content_blocks(request: &LlmRequest) -> Result<(), LlmErro
         for block in &message.content {
             match block {
                 // Image, ImageUrl, and Document are now encoded as content parts.
-                ContentBlock::Reasoning { .. } | ContentBlock::RedactedThinking { .. } => {
-                    return Err(LlmError::InvalidRequest {
-                        message: "OpenAiChatCodec does not encode reasoning blocks yet".to_string(),
-                    });
-                }
+                // Reasoning / RedactedThinking are intentionally NOT rejected: the stream
+                // decoder emits Reasoning blocks into history, and chat-completions APIs
+                // reject reasoning_content as input (deepseek docs say not to send it back),
+                // so encode_message simply skips them. Erroring here would break turn 2+.
                 ContentBlock::ServerToolUse { .. }
                 | ContentBlock::ConnectorText { .. }
                 | ContentBlock::AdvisorToolResult { .. } => {
@@ -578,6 +592,21 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
         })?;
 
     let mut content = Vec::new();
+
+    // Symmetric with the streaming decoder's handle_reasoning: deepseek-reasoner / GLM /
+    // openrouter o-series report chain-of-thought in `message.reasoning_content`. Emit it
+    // as a Reasoning block (no signature on the chat-completions wire) before text/tools.
+    if let Some(reasoning) = message
+        .get("reasoning_content")
+        .and_then(Value::as_str)
+        .filter(|reasoning| !reasoning.is_empty())
+    {
+        content.push(ContentBlock::Reasoning {
+            text: reasoning.to_string(),
+            signature: None,
+        });
+    }
+
     match message.get("content") {
         Some(Value::String(text)) if !text.is_empty() => {
             content.push(ContentBlock::Text {
@@ -687,4 +716,128 @@ fn string_field(value: &Value, field: &str) -> Result<String, LlmError> {
         .ok_or_else(|| LlmError::InvalidRequest {
             message: format!("OpenAI response missing {field}"),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{Message, ReasoningConfig};
+
+    fn body_of(request: &ProviderRequest) -> &Value {
+        &request.body_json
+    }
+
+    /// (a) A request carrying a reasoning budget no longer errors, and the
+    /// chat-completions body has no reasoning/budget field (there is no wire slot).
+    #[test]
+    fn reasoning_budget_is_dropped_not_rejected() {
+        let mut request = LlmRequest::new("deepseek-reasoner");
+        request.reasoning = Some(ReasoningConfig::Enabled { budget_tokens: 4096 });
+        request.messages.push(Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "hi".to_string(),
+                cache_control: None,
+            }],
+        });
+
+        let codec = OpenAiChatCodec::new("https://api.deepseek.com");
+        let provider_request = codec.encode_request(&request).expect("reasoning budget must not error");
+
+        let body = body_of(&provider_request).as_object().expect("body is an object");
+        assert!(!body.contains_key("reasoning"), "no reasoning field on the wire");
+        assert!(!body.contains_key("reasoning_content"), "no reasoning_content field");
+        assert!(!body.contains_key("budget_tokens"), "no budget_tokens field");
+    }
+
+    /// (b) History containing a Reasoning block (emitted by the stream decoder on a
+    /// prior turn) encodes successfully and is omitted from the outgoing messages.
+    #[test]
+    fn reasoning_block_in_history_is_omitted_not_rejected() {
+        let mut request = LlmRequest::new("deepseek-reasoner");
+        request.messages.push(Message {
+            role: "assistant".to_string(),
+            content: vec![
+                ContentBlock::Reasoning {
+                    text: "let me think".to_string(),
+                    signature: None,
+                },
+                ContentBlock::Text {
+                    text: "the answer is 42".to_string(),
+                    cache_control: None,
+                },
+            ],
+        });
+
+        let codec = OpenAiChatCodec::new("https://api.deepseek.com");
+        let provider_request = codec.encode_request(&request).expect("reasoning block must not error");
+
+        let messages = body_of(&provider_request)
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages array");
+        // The assistant message keeps its text but never serializes the reasoning.
+        let serialized = serde_json::to_string(messages).expect("serialize messages");
+        assert!(serialized.contains("the answer is 42"), "text survives");
+        assert!(!serialized.contains("let me think"), "reasoning is omitted");
+        assert!(!serialized.contains("reasoning_content"), "no reasoning_content key");
+    }
+
+    /// (c) Non-streaming decode of a message carrying `reasoning_content` yields a
+    /// Reasoning content block ahead of the text block (symmetric with streaming).
+    #[test]
+    fn decode_emits_reasoning_block_from_reasoning_content() {
+        let body = serde_json::json!({
+            "id": "chatcmpl-1",
+            "model": "deepseek-reasoner",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "step-by-step thoughts",
+                    "content": "final answer"
+                },
+                "finish_reason": "stop"
+            }]
+        });
+
+        let response = decode_response_body(body).expect("decode succeeds");
+        assert!(matches!(
+            response.content.first(),
+            Some(ContentBlock::Reasoning { text, signature: None }) if text == "step-by-step thoughts"
+        ));
+        assert!(matches!(
+            response.content.get(1),
+            Some(ContentBlock::Text { text, .. }) if text == "final answer"
+        ));
+    }
+
+    /// (d) An openrouter base_url adds the attribution headers; other providers
+    /// sharing this codec do not.
+    #[test]
+    fn openrouter_base_url_adds_attribution_headers() {
+        let mut request = LlmRequest::new("openrouter/auto");
+        request.messages.push(Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "hi".to_string(),
+                cache_control: None,
+            }],
+        });
+
+        let openrouter = OpenAiChatCodec::new("https://openrouter.ai/api/v1");
+        let with_attribution = openrouter.encode_request(&request).expect("encode");
+        assert_eq!(
+            with_attribution.headers.get("HTTP-Referer").map(String::as_str),
+            Some("https://lingxi.dev")
+        );
+        assert_eq!(
+            with_attribution.headers.get("X-Title").map(String::as_str),
+            Some("LingXi-Code")
+        );
+
+        let deepseek = OpenAiChatCodec::new("https://api.deepseek.com");
+        let without_attribution = deepseek.encode_request(&request).expect("encode");
+        assert!(!without_attribution.headers.contains_key("HTTP-Referer"));
+        assert!(!without_attribution.headers.contains_key("X-Title"));
+    }
 }

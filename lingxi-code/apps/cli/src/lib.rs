@@ -99,23 +99,174 @@ fn first_missing_required_arg(e: &clap::Error) -> Option<String> {
     (!cleaned.is_empty()).then_some(cleaned)
 }
 
+/// One value out of a clap error context slot (the first, if it is a list).
+fn ctx_string(e: &clap::Error, kind: clap::error::ContextKind) -> Option<String> {
+    match e.get(kind)? {
+        clap::error::ContextValue::String(s) => Some(s.clone()),
+        clap::error::ContextValue::Strings(v) => v.first().cloned(),
+        _ => None,
+    }
+}
+
+/// Damerau-Levenshtein edit distance, faithful to commander's `editDistance`
+/// (suggestSimilar.js): includes the transposition rule AND the early-out
+/// `|len(a)-len(b)| > maxDistance ⇒ max(len)` so clap's different default
+/// metric can't pick a different "Did you mean" candidate than the oracle.
+fn edit_distance(a: &str, b: &str, max_distance: usize) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (la, lb) = (a.len(), b.len());
+    if la.abs_diff(lb) > max_distance {
+        return la.max(lb);
+    }
+    let mut d = vec![vec![0usize; lb + 1]; la + 1];
+    for (i, row) in d.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for j in 0..=lb {
+        d[0][j] = j;
+    }
+    for i in 1..=la {
+        for j in 1..=lb {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut m = (d[i - 1][j] + 1).min(d[i][j - 1] + 1).min(d[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                m = m.min(d[i - 2][j - 2] + 1);
+            }
+            d[i][j] = m;
+        }
+    }
+    d[la][lb]
+}
+
+/// commander's `suggestSimilar`: among `candidates`, keep those with similarity
+/// `(maxLen-dist)/maxLen > 0.4` at the minimum edit distance (≤ 3), sorted; emit
+/// `(Did you mean X?)` for one or `(Did you mean one of A, B?)` for several.
+/// `None` when nothing is close enough (commander then prints no suggestion).
+fn suggest_similar(word: &str, candidates: &[String]) -> Option<String> {
+    const MAX_DISTANCE: usize = 3;
+    const MIN_SIMILARITY: f64 = 0.4;
+    let mut seen = std::collections::HashSet::new();
+    let mut best: Vec<String> = Vec::new();
+    let mut best_distance = MAX_DISTANCE;
+    for cand in candidates {
+        if !seen.insert(cand.as_str()) || cand.chars().count() <= 1 {
+            continue;
+        }
+        let distance = edit_distance(word, cand, MAX_DISTANCE);
+        let length = word.chars().count().max(cand.chars().count());
+        if length == 0 {
+            continue;
+        }
+        let similarity = (length - distance) as f64 / length as f64;
+        if similarity > MIN_SIMILARITY {
+            if distance < best_distance {
+                best_distance = distance;
+                best = vec![cand.clone()];
+            } else if distance == best_distance {
+                best.push(cand.clone());
+            }
+        }
+    }
+    best.sort();
+    match best.len() {
+        0 => None,
+        1 => Some(format!("(Did you mean {}?)", best[0])),
+        _ => Some(format!("(Did you mean one of {}?)", best.join(", "))),
+    }
+}
+
+/// Subcommand names valid at the point where an invalid subcommand was typed —
+/// the candidate set for [`suggest_similar`]. Walks the clap command tree along
+/// the subcommand tokens in `args` up to the bad token, then lists that node's
+/// subcommands (matching commander's candidate set, which includes `help`).
+fn invalid_subcommand_candidates(args: &[OsString], bad: &str) -> Vec<String> {
+    use clap::CommandFactory;
+    let mut cmd = Argv::command();
+    for tok in args.iter().skip(1) {
+        let t = tok.to_string_lossy();
+        if t == bad {
+            break;
+        }
+        if let Some(sub) = cmd.find_subcommand(t.as_ref()) {
+            cmd = sub.clone();
+        }
+    }
+    cmd.get_subcommands().map(|s| s.get_name().to_string()).collect()
+}
+
+/// Reformat the clap argv errors that claude-code (commander) renders
+/// differently, to commander's exact single-/two-line form (stderr, exit 1).
+/// Returns `None` for kinds we leave to clap's own rendering (the remaining
+/// clap-vs-commander help-block layout difference).
+fn commander_error(e: &clap::Error, args: &[OsString]) -> Option<String> {
+    use clap::error::{ContextKind, ErrorKind};
+    match e.kind() {
+        // `error: missing required argument '<name>'` (FIRST missing positional).
+        ErrorKind::MissingRequiredArgument => {
+            first_missing_required_arg(e).map(|n| format!("error: missing required argument '{n}'"))
+        }
+        // `error: unknown option '--flag'`. clap also raises `UnknownArgument`
+        // for EXCESS POSITIONALS, but commander silently ignores those — so only
+        // reformat when the offending token is a flag (`-`-prefixed); a bare
+        // positional falls through to clap (excess-positional parity is separate).
+        ErrorKind::UnknownArgument => {
+            let arg = ctx_string(e, ContextKind::InvalidArg)?;
+            arg.starts_with('-')
+                .then(|| format!("error: unknown option '{arg}'"))
+        }
+        // `error: unknown command '<cmd>'` + optional `(Did you mean <x>?)`. The
+        // suggestion is computed with commander's own algorithm/candidate set
+        // (NOT clap's, which picks different candidates — e.g. `ad`⇒`add-json`
+        // vs commander's `add`).
+        ErrorKind::InvalidSubcommand => {
+            let cmd = ctx_string(e, ContextKind::InvalidSubcommand)?;
+            let mut msg = format!("error: unknown command '{cmd}'");
+            let candidates = invalid_subcommand_candidates(args, &cmd);
+            if let Some(s) = suggest_similar(&cmd, &candidates) {
+                msg.push('\n');
+                msg.push_str(&s);
+            }
+            Some(msg)
+        }
+        // `error: option '<flag> <placeholder>' argument '<value>' is invalid.
+        // Allowed choices are <choices>.` — clap's choices (`ValidValue`) are
+        // already in declared order, matching commander. clap renders an
+        // optional-value placeholder as `[<x>]`; commander uses `[x]`, so strip
+        // the inner angle brackets.
+        ErrorKind::InvalidValue => {
+            let flag = ctx_string(e, ContextKind::InvalidArg)?
+                .replace("[<", "[")
+                .replace(">]", "]");
+            let value = ctx_string(e, ContextKind::InvalidValue)?;
+            let choices = match e.get(ContextKind::ValidValue)? {
+                clap::error::ContextValue::Strings(v) => v.clone(),
+                clap::error::ContextValue::String(s) => vec![s.clone()],
+                _ => return None,
+            };
+            Some(format!(
+                "error: option '{flag}' argument '{value}' is invalid. Allowed choices are {}.",
+                choices.join(", ")
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// Top-level entrypoint. Returns the process exit code.
 pub async fn run_cli(args: Vec<OsString>) -> i32 {
-    let parsed = match Argv::from_iter(args) {
+    let parsed = match Argv::from_iter(args.clone()) {
         Ok(a) => a,
         Err(e) => {
-            // claude-code (commander) renders a missing required positional as a
-            // single line `error: missing required argument '<name>'` (stderr,
-            // exit 1), reporting only the FIRST missing one. clap's default is a
-            // multi-line "the following required arguments were not provided: …\n
-            // Usage: …" block listing all of them — so for this one kind we
-            // reformat to match commander byte-for-byte. All other clap errors
-            // keep clap's own rendering (the known clap-vs-commander help layout).
-            if e.kind() == ErrorKind::MissingRequiredArgument {
-                if let Some(name) = first_missing_required_arg(&e) {
-                    eprintln!("error: missing required argument '{name}'");
-                    return exit_codes::ARGV_ERROR;
-                }
+            // claude-code (commander) renders several argv errors differently
+            // from clap — a single/two-line message with no "Usage:"/"For more
+            // information" block. Reformat the ones we can match byte-for-byte
+            // (missing-arg, unknown-option, unknown-command + suggestion);
+            // everything else keeps clap's rendering (the remaining
+            // clap-vs-commander help-block layout difference).
+            if let Some(msg) = commander_error(&e, &args) {
+                eprintln!("{msg}");
+                return exit_codes::ARGV_ERROR;
             }
             // clap prints its own help/usage; we just return the locked
             // code. Help/version are not errors.

@@ -357,7 +357,9 @@ pub struct Argv {
     /// downstream as unreachable defense-in-depth).
     #[arg(
         long = "permission-mode",
-        value_name = "MODE",
+        // lowercase placeholder so the help line and the commander-style
+        // invalid-value error read `--permission-mode <mode>` (not `<MODE>`).
+        value_name = "mode",
         value_parser = ["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"]
     )]
     pub permission_mode: Option<String>,

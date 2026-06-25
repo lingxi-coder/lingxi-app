@@ -364,6 +364,32 @@ impl VerificationFixer for SpawnerVerificationFixer {
     }
 }
 
+/// Select the [`VerificationFixer`] the fix loop should use, replacing the
+/// crate's `NoopFixer` "no verification fixer wired" default with the REAL
+/// spawner-backed fixer whenever there is a fix budget (P11).
+///
+/// `max_iterations` is [`multi_agent::verification::verify_with_fix_loop`]'s
+/// budget ([`multi_agent::config::LimitConfig::max_iterations`]):
+/// - `0` ⇒ verification runs exactly once with no fix attempt, so the loop
+///   never invokes a fixer. We hand back the genuine
+///   [`multi_agent::verification::NoopFixer`] (never spawns a model) — this is
+///   the documented `max_iterations == 0` case the seam keeps available.
+/// - `> 0` ⇒ the loop may hand a failure to the fixer; we return the real
+///   [`SpawnerVerificationFixer`] driving the session's subagent spawner against
+///   the final workspace / winner worktree.
+#[must_use]
+pub fn fixer_for(
+    max_iterations: u32,
+    spawner: std::sync::Arc<dyn SubagentSpawner>,
+    inherit: SubagentInheritance,
+) -> std::sync::Arc<dyn VerificationFixer> {
+    if max_iterations == 0 {
+        std::sync::Arc::new(multi_agent::verification::NoopFixer)
+    } else {
+        std::sync::Arc::new(SpawnerVerificationFixer { spawner, inherit })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -849,5 +875,60 @@ mod tests {
         };
         let err = fixer.fix(&ctx).await.unwrap_err();
         assert!(matches!(err, MultiAgentError::FinalizerFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn fixer_for_zero_iterations_is_noop_and_never_spawns() {
+        // P11: with a 0-iteration fix budget the verification loop runs once and
+        // never invokes a fixer; the selector must hand back the genuine no-op
+        // (NOT the spawner-backed fixer) so even a stray call cannot trigger a
+        // model spawn. We prove that by giving it a spawner that would PANIC if
+        // ever asked to spawn (it returns Failed, which the real fixer turns into
+        // an Err), yet `fix()` returns Ok and the spawn count stays 0.
+        let (inherit, _ti, _bud) = inheritance();
+        let spawner = Arc::new(RecordingSpawner::new(SpawnScript::Failed("must not spawn".into())));
+        let fixer = fixer_for(0, spawner.clone(), inherit);
+        let ctx = FixContext {
+            attempt: 1,
+            workspace: PathBuf::from("/does/not/matter"),
+            failure_log: "irrelevant".into(),
+        };
+        // No-op fixer always succeeds and performs no spawn.
+        fixer.fix(&ctx).await.expect("noop fix is Ok");
+        assert_eq!(
+            spawner.spawn_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the 0-iteration fixer must never spawn a model"
+        );
+    }
+
+    #[tokio::test]
+    async fn fixer_for_positive_iterations_drives_the_real_spawner() {
+        // P11: with iterations remaining the selector must hand back the REAL
+        // spawner-backed fixer — it drives one spawn in the workspace and an
+        // agent failure surfaces as the Err that stops the loop.
+        let repo = init_repo();
+        let (inherit, _ti, _bud) = inheritance();
+        let spawner = Arc::new(RecordingSpawner::new(SpawnScript::WriteThenComplete {
+            file: "fixed.rs".into(),
+            contents: "// repaired\n".into(),
+            content: serde_json::Value::Null,
+            usage: SubagentUsage::default(),
+        }));
+        let fixer = fixer_for(2, spawner.clone(), inherit);
+        let ctx = FixContext {
+            attempt: 1,
+            workspace: repo.path().to_path_buf(),
+            failure_log: "error[E0277]".into(),
+        };
+        fixer.fix(&ctx).await.expect("real fix ok");
+        assert_eq!(
+            spawner.spawn_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the real fixer drives exactly one spawn"
+        );
+        let req = spawner.last_request.lock().unwrap().clone().unwrap();
+        assert_eq!(req.cwd.as_deref(), Some(repo.path().to_string_lossy().as_ref()));
+        assert!(req.prompt.contains("error[E0277]"));
     }
 }

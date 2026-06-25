@@ -109,6 +109,22 @@ impl PricingCatalog {
             .insert(PricingKey::new(provider_id, billing_model), pricing);
     }
 
+    /// Look up the [`TokenPricing`] for a `(provider_id, billing_model)` pair,
+    /// preferring an override over the built-in entry. Returns `None` when the
+    /// catalog has no price for that model.
+    ///
+    /// Used by the host cost-catalog bridge (`provider-config::cost_translate`)
+    /// to source real per-model prices from the models.dev presets instead of
+    /// the Claude `$5/$25` default-unknown tier.
+    #[must_use]
+    pub fn get(&self, provider_id: &ProviderId, billing_model: &str) -> Option<TokenPricing> {
+        let key = PricingKey::new(provider_id.clone(), billing_model.to_string());
+        self.overrides
+            .get(&key)
+            .copied()
+            .or_else(|| self.prices.get(&key).copied())
+    }
+
     fn lookup(&self, pricing_model: &PricingModelRef) -> Option<(TokenPricing, &'static str)> {
         let key = PricingKey::new(
             pricing_model.pricing_provider_id.clone(),

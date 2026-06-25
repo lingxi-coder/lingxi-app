@@ -134,6 +134,24 @@ fn canonical_name(model: &str) -> String {
     name
 }
 
+/// `true` when `model` resolves to a first-party Claude family — including
+/// Claude served via Bedrock/Vertex/OpenRouter, whose canonical name still
+/// begins `claude-` (e.g. `anthropic/claude-3-5-sonnet`).
+///
+/// LingXi is multi-provider, but the window / max-output tables ported below are
+/// byte-faithful to claude-code and only correct for Claude. This gate keeps
+/// those tables authoritative for Claude while letting non-Claude models draw
+/// their real limits from the catalog-fed [`model_limits`](super::model_limits)
+/// registry. Anything whose canonical name is not a `claude-*` family (gpt-*,
+/// gemini-*, deepseek-*, glm-*, …) is treated as non-Claude.
+///
+/// Also used by the request builder to gate Anthropic-shaped thinking/reasoning
+/// (the `Adaptive` intent) off non-Claude routes.
+#[must_use]
+pub fn is_claude_family(model: &str) -> bool {
+    canonical_name(model).starts_with("claude")
+}
+
 /// Returns the context window size for `model`, honoring `betas`.
 ///
 /// Mirrors `getContextWindowForModel` (`utils/context.ts:51-98`), minus the
@@ -160,6 +178,15 @@ pub fn context_window_for_model(model: &str, betas: &[String]) -> u64 {
         return 1_000_000;
     }
 
+    // Multi-provider fix: non-Claude models use their real catalog window
+    // (models.dev `Limit.context`) instead of the Claude 200k default. Claude
+    // ids bypass this so their byte-faithful behavior above is untouched.
+    if !is_claude_family(model) {
+        if let Some(limits) = crate::model::model_limits::lookup(model) {
+            return limits.context_window;
+        }
+    }
+
     MODEL_CONTEXT_WINDOW_DEFAULT
 }
 
@@ -168,6 +195,16 @@ pub fn context_window_for_model(model: &str, betas: &[String]) -> u64 {
 /// Ports `getModelMaxOutputTokens` (`utils/context.ts:149-210`), minus the
 /// ant-model and model-capability branches (see module docs).
 fn model_max_output_tokens(model: &str) -> (u64, u64) {
+    // Multi-provider fix: non-Claude models draw their real max-output limit
+    // (models.dev `Limit.output`) from the catalog registry rather than the
+    // Claude 32k/128k fallback. Both the default and the upper limit collapse to
+    // the model's true output cap. Claude ids fall through to the table below.
+    if !is_claude_family(model) {
+        if let Some(limits) = crate::model::model_limits::lookup(model) {
+            return (limits.max_output_tokens, limits.max_output_tokens);
+        }
+    }
+
     let m = canonical_name(model);
     // Binary `YCe` (v2.1.183 getModelMaxOutputTokens): fable-5/mythos-5/opus-4-8/
     // opus-4-7/opus-4-6 → 64k/128k; sonnet-4-6 → 32k/128k; opus-4-5/sonnet-4-0/4-5/
@@ -331,6 +368,47 @@ mod tests {
         assert_eq!(max_output_tokens_for_model("claude-3-7-sonnet-20250219"), 32_000);
         // Unknown model → default.
         assert_eq!(max_output_tokens_for_model("mystery-model"), 32_000);
+    }
+
+    #[test]
+    fn registry_drives_non_claude_window_and_output() {
+        use crate::model::model_limits::{register, ModelLimits};
+        // A non-Claude id with real (large) limits registered from the catalog.
+        let id = "gpt-test-bigwindow-9";
+        register(
+            id,
+            ModelLimits {
+                context_window: 1_050_000,
+                max_output_tokens: 128_000,
+            },
+        );
+        assert_eq!(context_window_for_model(id, &[]), 1_050_000);
+        assert_eq!(max_output_tokens_for_model(id), 128_000);
+        // Thinking ceiling follows the real output, not the Claude 128k-1.
+        assert_eq!(max_thinking_tokens_for_model(id), 127_999);
+
+        // A Claude id MUST ignore the registry and keep byte-faithful tables,
+        // even if (defensively) something registered a bogus value for it.
+        register(
+            "claude-opus-4-8-20260115",
+            ModelLimits {
+                context_window: 999,
+                max_output_tokens: 999,
+            },
+        );
+        assert_eq!(
+            context_window_for_model("claude-opus-4-8-20260115", &[]),
+            200_000
+        );
+        assert_eq!(max_output_tokens_for_model("claude-opus-4-8-20260115"), 64_000);
+    }
+
+    #[test]
+    fn unregistered_non_claude_still_falls_back_to_claude_defaults() {
+        // Parity: an unknown, unregistered non-Claude id keeps the 200k / 32k
+        // defaults (the claude-code behavior) — the registry is additive only.
+        assert_eq!(context_window_for_model("totally-unregistered-xyz", &[]), 200_000);
+        assert_eq!(max_output_tokens_for_model("totally-unregistered-xyz"), 32_000);
     }
 
     #[test]

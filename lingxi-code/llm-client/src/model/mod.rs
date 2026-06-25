@@ -3,6 +3,7 @@ pub mod betas;
 pub mod context_window;
 pub mod count_tokens;
 pub mod fallback;
+pub mod model_limits;
 pub mod overflow;
 pub mod prompt_too_long;
 pub mod rate_limit;

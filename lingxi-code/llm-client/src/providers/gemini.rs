@@ -143,8 +143,74 @@ pub(crate) fn decode_error_response(response: &ProviderResponse) -> LlmError {
             retry_after,
             scope: None,
         },
-        "INVALID_ARGUMENT" | "FAILED_PRECONDITION" => LlmError::InvalidRequest { message },
+        "INVALID_ARGUMENT" | "FAILED_PRECONDITION" => {
+            // Google returns prompt-over-context as HTTP 400 INVALID_ARGUMENT
+            // (not 413), e.g. "The input token count (N) exceeds the maximum
+            // number of tokens allowed (M)." Classifying it as InvalidRequest
+            // would kill the turn terminally; mapping it to ContextOverflow lets
+            // the orchestrator's PTL head-truncation recovery engage (the same
+            // path Claude gets). token_gap:0 → the truncator's 20% heuristic,
+            // matching the Anthropic `request_too_large` path.
+            if is_context_overflow_message(&message) {
+                LlmError::ContextOverflow { token_gap: 0 }
+            } else {
+                LlmError::InvalidRequest { message }
+            }
+        }
         _ => super::map_error_status(response.status, message, retry_after),
+    }
+}
+
+/// `true` when a Gemini `INVALID_ARGUMENT` message is actually a
+/// prompt-exceeds-context rejection (token count over the model limit), as
+/// opposed to a genuine bad-request. Tight match (`token` + `exceed`) to avoid
+/// misrouting unrelated argument errors into the overflow-recovery loop.
+fn is_context_overflow_message(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("token") && m.contains("exceed")
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn err(status: u16, google_status: &str, message: &str) -> LlmError {
+        decode_error_response(&ProviderResponse::json(
+            status,
+            json!({"error": {"status": google_status, "message": message}}),
+        ))
+    }
+
+    #[test]
+    fn over_context_invalid_argument_maps_to_context_overflow() {
+        let e = err(
+            400,
+            "INVALID_ARGUMENT",
+            "The input token count (1290000) exceeds the maximum number of tokens allowed (1048576).",
+        );
+        assert!(
+            matches!(e, LlmError::ContextOverflow { .. }),
+            "expected ContextOverflow, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn ordinary_invalid_argument_stays_invalid_request() {
+        let e = err(400, "INVALID_ARGUMENT", "Invalid value for field 'temperature'.");
+        assert!(
+            matches!(e, LlmError::InvalidRequest { .. }),
+            "expected InvalidRequest, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn resource_exhausted_still_rate_limited() {
+        let e = err(429, "RESOURCE_EXHAUSTED", "Quota exceeded for tokens");
+        assert!(
+            matches!(e, LlmError::RateLimited { .. }),
+            "expected RateLimited, got {e:?}"
+        );
     }
 }
 

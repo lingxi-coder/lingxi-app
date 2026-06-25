@@ -775,25 +775,52 @@ impl ApiService {
             let has_thinking = self.thinking != ThinkingConfig::Disabled
                 && !is_thinking_env_disabled("CLAUDE_CODE_DISABLE_THINKING");
 
-            req.reasoning = if has_thinking && model_supports_thinking(model) {
-                if !is_thinking_env_disabled("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING")
-                    && model_supports_adaptive_thinking(model)
-                {
-                    Some(ReasoningConfig::Adaptive)
-                } else {
-                    let mut budget =
-                        crate::model::context_window::max_thinking_tokens_for_model(model);
-                    if let ThinkingConfig::Enabled { budget_tokens } = self.thinking {
-                        budget = budget_tokens;
+            // The byte-faithful claude-code thinking shape (Adaptive default,
+            // canonical max-output budget cap) is Anthropic-specific. The
+            // OpenAI/Gemini codecs mistranslate `Adaptive` to a forced
+            // `effort="high"` / `thinkingBudget=0`, so it must NOT be applied to
+            // non-Claude models. We therefore branch on the model family.
+            let is_claude = crate::model::context_window::is_claude_family(model);
+
+            req.reasoning = if !has_thinking {
+                None
+            } else if is_claude {
+                // Claude path — unchanged from claude-code.
+                if model_supports_thinking(model) {
+                    if !is_thinking_env_disabled("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING")
+                        && model_supports_adaptive_thinking(model)
+                    {
+                        Some(ReasoningConfig::Adaptive)
+                    } else {
+                        let mut budget =
+                            crate::model::context_window::max_thinking_tokens_for_model(model);
+                        if let ThinkingConfig::Enabled { budget_tokens } = self.thinking {
+                            budget = budget_tokens;
+                        }
+                        // budget_tokens must stay strictly below max_tokens.
+                        budget = budget.min(req.max_tokens.unwrap_or(u32::MAX).saturating_sub(1));
+                        Some(ReasoningConfig::Enabled {
+                            budget_tokens: budget,
+                        })
                     }
-                    // budget_tokens must stay strictly below max_tokens.
-                    budget = budget.min(req.max_tokens.unwrap_or(u32::MAX).saturating_sub(1));
-                    Some(ReasoningConfig::Enabled {
-                        budget_tokens: budget,
-                    })
+                } else {
+                    None
                 }
             } else {
-                None
+                // Non-Claude: only honor an EXPLICIT fixed budget. The default
+                // (`Adaptive`, "let the model decide" — an Anthropic intent)
+                // sends no reasoning field, so the provider applies its own
+                // reasoning default instead of a forced high-effort / zero-budget.
+                match self.thinking {
+                    ThinkingConfig::Enabled { budget_tokens } => {
+                        let budget =
+                            budget_tokens.min(req.max_tokens.unwrap_or(u32::MAX).saturating_sub(1));
+                        Some(ReasoningConfig::Enabled {
+                            budget_tokens: budget,
+                        })
+                    }
+                    _ => None,
+                }
             };
 
             // temperature:1 ONLY when thinking is disabled AND the model is in the
@@ -855,6 +882,40 @@ impl ApiService {
             .with_effort(has_effort)
     }
 
+    /// `true` for protocols that speak to Anthropic models (first-party or via
+    /// Bedrock/Vertex). Only these get the `claude-cli/<ver>` User-Agent;
+    /// OpenAI / Gemini / Azure / Copilot routes get a neutral UA so we don't
+    /// announce ourselves as Anthropic's official CLI to third-party providers.
+    fn is_anthropic_family_protocol(protocol: &crate::ProtocolFamily) -> bool {
+        matches!(
+            protocol,
+            crate::ProtocolFamily::AnthropicMessages
+                | crate::ProtocolFamily::BedrockClaude
+                | crate::ProtocolFamily::VertexClaude
+        )
+    }
+
+    /// Provider-aware User-Agent. Anthropic-family routes keep the byte-faithful
+    /// `claude-cli/...` UA. Other routes get a neutral `LingXi-Code/<ver>` UA —
+    /// but only when an authenticator hasn't already set one (e.g. Copilot's
+    /// `User-Agent: LingXi-Code`), which avoids shipping two conflicting UA
+    /// headers on a case-sensitive header map.
+    fn apply_user_agent(&self, prepared: &mut crate::PreparedLlmCall) {
+        if Self::is_anthropic_family_protocol(&prepared.route.protocol) {
+            prepared.provider_request.headers.insert(
+                "user-agent".to_string(),
+                user_agent(&self.ua, &self.version),
+            );
+        } else if !prepared.provider_request.headers.contains_key("user-agent")
+            && !prepared.provider_request.headers.contains_key("User-Agent")
+        {
+            prepared.provider_request.headers.insert(
+                "user-agent".to_string(),
+                format!("LingXi-Code/{}", self.version),
+            );
+        }
+    }
+
     fn inject_headers(&self, prepared: &mut crate::PreparedLlmCall, request_id: &str) {
         // Anthropic beta headers are protocol-specific. OpenAI/Gemini/Vertex/
         // Bedrock/Azure routes must not receive Anthropic beta headers.
@@ -871,11 +932,8 @@ impl ApiService {
                 self.effective_subscriber().is_subscriber,
             );
         }
-        // User-Agent (Task 3).
-        prepared.provider_request.headers.insert(
-            "user-agent".to_string(),
-            user_agent(&self.ua, &self.version),
-        );
+        // User-Agent (Task 3) — provider-aware (see apply_user_agent).
+        self.apply_user_agent(prepared);
         // Client-traceable request id (matches api-client header name).
         prepared
             .provider_request
@@ -898,10 +956,7 @@ impl ApiService {
                 self.effective_subscriber().is_subscriber,
             );
         }
-        prepared.provider_request.headers.insert(
-            "user-agent".to_string(),
-            user_agent(&self.ua, &self.version),
-        );
+        self.apply_user_agent(prepared);
         prepared
             .provider_request
             .headers
@@ -934,7 +989,13 @@ impl ApiService {
         if let Some(d) = crate::model::rate_limit::parse_anthropic_ratelimit_reset(&hvec, now) {
             return d;
         }
-        // 4. Fallback: 1 s.
+        // 4. OpenAI x-ratelimit-reset-requests / -tokens (Go-duration). Without
+        // this a non-Anthropic 429 falls to the 1s blind wait and hammers the
+        // still-exhausted window. Provider-neutral: only matches when present.
+        if let Some(d) = crate::model::rate_limit::parse_openai_reset(&hvec) {
+            return d;
+        }
+        // 5. Fallback: 1 s.
         std::time::Duration::from_secs(1)
     }
 
@@ -2763,6 +2824,45 @@ mod tests {
     }
 
     #[test]
+    fn thinking_is_provider_aware() {
+        use crate::model::thinking::ThinkingConfig;
+        use crate::ReasoningConfig;
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let build = |model: &str| {
+            adapter
+                .build_request(model, None, None, vec![text_user_msg("hi")], vec![], false, None)
+                .expect("build_request")
+                .reasoning
+        };
+
+        // Claude with the default (Adaptive) thinking → Adaptive, byte-faithful.
+        assert_eq!(
+            build("claude-opus-4-8-20260115"),
+            Some(ReasoningConfig::Adaptive)
+        );
+        // Non-Claude with the default (Adaptive) → NO reasoning field (provider
+        // applies its own default instead of a forced high-effort / budget-0).
+        assert_eq!(build("gpt-5"), None);
+        assert_eq!(build("gemini-2.5-pro"), None);
+        assert_eq!(build("deepseek-reasoner"), None);
+
+        // An EXPLICIT fixed budget on a non-Claude model is still honored.
+        let adapter_fixed = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )))
+        .with_thinking(ThinkingConfig::Enabled {
+            budget_tokens: 4096,
+        });
+        let r = adapter_fixed
+            .build_request("gpt-5", None, None, vec![text_user_msg("hi")], vec![], false, None)
+            .expect("build_request")
+            .reasoning;
+        assert_eq!(r, Some(ReasoningConfig::Enabled { budget_tokens: 4096 }));
+    }
+
+    #[test]
     fn build_request_omits_cache_breakpoints_when_disabled() {
         use crate::ContentBlock as LlmContentBlock;
         let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -3621,6 +3721,66 @@ mod tests {
                 Some("req_test")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn user_agent_is_provider_aware() {
+        // Anthropic-family routes keep the byte-faithful claude-cli UA.
+        for (proto, pid, url) in [
+            (
+                ProtocolFamily::AnthropicMessages,
+                ProviderId::AnthropicFirstParty,
+                "https://api.anthropic.com",
+            ),
+            (
+                ProtocolFamily::BedrockClaude,
+                ProviderId::BedrockClaude,
+                "https://bedrock-runtime.us-east-1.amazonaws.com",
+            ),
+        ] {
+            let h = headers_after_inject_for_protocol(proto, pid, url).await;
+            let ua = h.get("user-agent").expect("ua");
+            assert!(ua.starts_with("claude-cli/"), "anthropic-family UA: {ua}");
+        }
+
+        // Non-Anthropic routes get a neutral UA, never claude-cli.
+        let h = headers_after_inject_for_protocol(
+            ProtocolFamily::OpenAiChat,
+            ProviderId::OpenAICompatible {
+                name: "openai".to_string(),
+            },
+            "https://api.openai.com/v1",
+        )
+        .await;
+        let ua = h.get("user-agent").expect("ua");
+        assert!(ua.starts_with("LingXi-Code/"), "neutral UA expected: {ua}");
+        assert!(!ua.contains("claude-cli"), "must not leak claude-cli: {ua}");
+    }
+
+    #[tokio::test]
+    async fn authenticator_user_agent_is_not_duplicated() {
+        // Simulate the Copilot authenticator having set `User-Agent` during
+        // prepare(): inject_headers must NOT add a second lowercase `user-agent`.
+        let adapter = make_adapter_for_protocol(
+            ProtocolFamily::OpenAiChat,
+            ProviderId::OpenAICompatible {
+                name: "github-copilot".to_string(),
+            },
+            "https://api.githubcopilot.com",
+        );
+        let request = LlmRequest::new("model").with_user_text("hi");
+        let mut prepared = adapter.client.prepare(&request).await.expect("prepare");
+        prepared
+            .provider_request
+            .headers
+            .insert("User-Agent".to_string(), "LingXi-Code".to_string());
+        adapter.inject_headers(&mut prepared, "req_test");
+        let h = &prepared.provider_request.headers;
+        assert_eq!(h.get("User-Agent").map(String::as_str), Some("LingXi-Code"));
+        assert!(
+            !h.contains_key("user-agent"),
+            "no duplicate lowercase user-agent: {h:?}"
+        );
     }
 
     /// Plan test: budget terminates after DEFAULT_MAX_RETRIES + 1 executions.

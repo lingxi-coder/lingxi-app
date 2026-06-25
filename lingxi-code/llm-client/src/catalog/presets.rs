@@ -159,6 +159,23 @@ pub fn builtin_presets() -> BuiltinCatalog {
             if let Some(price) = to_pricing(model) {
                 pricing = pricing.with_price(preset.provider_id.clone(), model.id.clone(), price);
             }
+            // Multi-provider fix: register the model's real token limits so the
+            // window / max-output functions return them for non-Claude models
+            // instead of the Claude 200k / 32k defaults. Keyed by both the wire
+            // id and the display name so whichever string the session carries
+            // resolves. Claude ids ignore the registry (see context_window).
+            if let Some(limit) = model.limit {
+                // Skip degenerate slices (e.g. image models with context:0) so
+                // they fall back to the default window rather than reporting 0.
+                if limit.context > 0 && limit.output > 0 {
+                    let limits = crate::model::model_limits::ModelLimits {
+                        context_window: limit.context,
+                        max_output_tokens: limit.output,
+                    };
+                    crate::model::model_limits::register(&model.id, limits);
+                    crate::model::model_limits::register(&model.name, limits);
+                }
+            }
         }
         providers.push(ProviderProfile {
             provider_id: preset.provider_id.clone(),
@@ -192,6 +209,19 @@ pub fn builtin_presets() -> BuiltinCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_presets_register_real_model_limits() {
+        use crate::model::context_window::{context_window_for_model, max_output_tokens_for_model};
+        // Assembling the catalog registers each model's real limits.
+        let _ = builtin_presets();
+        // deepseek-chat: real 1,000,000 / 384,000 — NOT the Claude 200k / 32k.
+        assert_eq!(context_window_for_model("deepseek-chat", &[]), 1_000_000);
+        assert_eq!(max_output_tokens_for_model("deepseek-chat"), 384_000);
+        // gpt-4.1: real 1,047,576 / 32,768.
+        assert_eq!(context_window_for_model("gpt-4.1", &[]), 1_047_576);
+        assert_eq!(max_output_tokens_for_model("gpt-4.1"), 32_768);
+    }
 
     #[test]
     fn every_preset_yields_expected_model_counts() {

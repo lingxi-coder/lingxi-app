@@ -47,6 +47,72 @@ pub fn parse_retry_after(headers: &[(String, String)]) -> Option<Duration> {
     raw.parse::<u64>().ok().map(Duration::from_secs)
 }
 
+/// Parse a Go-duration string (e.g. `"6m0s"`, `"1.5s"`, `"880ms"`,
+/// `"2m59.56s"`, `"1h2m3s"`) into a [`Duration`]. A bare number with no unit is
+/// treated as seconds. Returns `None` on a malformed value.
+#[must_use]
+pub fn parse_go_duration(raw: &str) -> Option<Duration> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut idx = 0;
+    let mut total_secs = 0f64;
+    let mut saw_component = false;
+    while idx < bytes.len() {
+        let num_start = idx;
+        while idx < bytes.len() && (bytes[idx].is_ascii_digit() || bytes[idx] == b'.') {
+            idx += 1;
+        }
+        if idx == num_start {
+            return None; // a unit with no preceding number
+        }
+        let num: f64 = s[num_start..idx].parse().ok()?;
+        let unit_start = idx;
+        while idx < bytes.len() && !bytes[idx].is_ascii_digit() && bytes[idx] != b'.' {
+            idx += 1;
+        }
+        let mult = match &s[unit_start..idx] {
+            "h" => 3600.0,
+            "m" => 60.0,
+            "s" => 1.0,
+            "ms" => 0.001,
+            "us" | "µs" => 0.000_001,
+            "ns" => 0.000_000_001,
+            "" => 1.0, // bare number → seconds
+            _ => return None,
+        };
+        total_secs += num * mult;
+        saw_component = true;
+    }
+    if !saw_component || !total_secs.is_finite() {
+        return None;
+    }
+    Some(Duration::from_secs_f64(total_secs.max(0.0)))
+}
+
+/// Resolve an OpenAI-style 429 reset delay from the `x-ratelimit-reset-requests`
+/// / `x-ratelimit-reset-tokens` headers (Go-duration values).
+///
+/// OpenAI returns the time until each limited bucket refills here rather than as
+/// a plain `Retry-After`, so without parsing these the retry driver falls back
+/// to a 1s blind wait and hammers the still-exhausted window. When both are
+/// present we wait the LONGER of the two (the binding bucket) to avoid retrying
+/// into a window that hasn't refilled.
+#[must_use]
+pub fn parse_openai_reset(headers: &[(String, String)]) -> Option<Duration> {
+    let one = |name: &str| header_value(headers, name).and_then(parse_go_duration);
+    match (
+        one("x-ratelimit-reset-requests"),
+        one("x-ratelimit-reset-tokens"),
+    ) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (None, None) => None,
+    }
+}
+
 /// Parse `anthropic-ratelimit-requests-reset` (ISO8601 `YYYY-MM-DDTHH:MM:SSZ`)
 /// into a `Duration` relative to `now`. Negative diffs (past timestamps)
 /// clamp to `Duration::ZERO`. Non-conforming values return `None`.
@@ -1088,6 +1154,38 @@ mod tests {
             Some("spend_limit")
         );
         assert_eq!(overage_disabled_reason(&[]), None);
+    }
+
+    #[test]
+    fn go_duration_forms_parse() {
+        assert_eq!(parse_go_duration("6m0s"), Some(Duration::from_secs(360)));
+        assert_eq!(parse_go_duration("1.5s"), Some(Duration::from_millis(1500)));
+        assert_eq!(parse_go_duration("880ms"), Some(Duration::from_millis(880)));
+        assert_eq!(
+            parse_go_duration("1h2m3s"),
+            Some(Duration::from_secs(3600 + 120 + 3))
+        );
+        assert_eq!(parse_go_duration("60"), Some(Duration::from_secs(60)));
+        assert_eq!(parse_go_duration(""), None);
+        assert_eq!(parse_go_duration("soon"), None);
+    }
+
+    #[test]
+    fn openai_reset_waits_for_binding_bucket() {
+        let headers = vec![
+            ("x-ratelimit-reset-requests".to_string(), "1s".to_string()),
+            ("x-ratelimit-reset-tokens".to_string(), "6m0s".to_string()),
+        ];
+        // Wait the longer (tokens) bucket, not the 1s requests one.
+        assert_eq!(parse_openai_reset(&headers), Some(Duration::from_secs(360)));
+        // Only one present.
+        assert_eq!(
+            parse_openai_reset(&h("x-ratelimit-reset-tokens", "30s")),
+            Some(Duration::from_secs(30))
+        );
+        // None present (Anthropic-only response) → None, so the 1s fallback path
+        // in resolve_retry_after is unchanged for Anthropic.
+        assert_eq!(parse_openai_reset(&h("retry-after", "5")), None);
     }
 
     #[test]

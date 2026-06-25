@@ -45,7 +45,9 @@ pub struct Model {
     /// Per-million-token costs (absent → unpriced).
     #[serde(default)]
     pub cost: Option<Cost>,
-    /// Token limits (context window etc.). Parsed for fidelity; unused in P1.
+    /// Token limits (context window + max output). Registered into the
+    /// `model::model_limits` registry at catalog assembly so non-Claude models
+    /// report their real window / max-output instead of the Claude defaults.
     #[serde(default)]
     pub limit: Option<Limit>,
     /// Catalog status (`alpha`/`beta`/`deprecated`), when present.

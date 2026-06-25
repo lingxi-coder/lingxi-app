@@ -100,6 +100,19 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     logging::init(parsed.debug_enabled());
     tracing::debug!(?parsed, "argv parsed");
 
+    // `--cwd <dir>` must apply BEFORE the subcommand dispatch, not just for
+    // session modes: the subcommands resolve their target project from the LIVE
+    // process cwd (mcp via `current_dir()` → project key + `<cwd>/.mcp.json`,
+    // doctor, and — destructively — `project purge`, whose default target is the
+    // current dir). If we chdir only after dispatch, `--cwd /other mcp add …`
+    // writes the WRONG project's config and `--cwd /other project purge` deletes
+    // the WRONG project's transcripts. `apply_cwd` only validates + `set_current_dir`
+    // (no other side effects), so it is safe to run first for all modes.
+    if let Err(e) = cwd::apply_cwd(parsed.cwd.as_deref()) {
+        eprintln!("lingxi-cli: {e}");
+        return exit_codes::RUNTIME_ERROR;
+    }
+
     // Top-level subcommand dispatch (mcp/auth/plugin/project/setup-token/agents/
     // install/update/doctor/auto-mode/ultrareview). When clap matched a leading
     // command token, run that family and exit — this is what stops a bare `mcp`/
@@ -148,10 +161,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         }
     }
 
-    if let Err(e) = cwd::apply_cwd(parsed.cwd.as_deref()) {
-        eprintln!("lingxi-cli: {e}");
-        return exit_codes::RUNTIME_ERROR;
-    }
+    // (`cwd::apply_cwd` already ran above, before the subcommand dispatch.)
 
     // (Item B) Resolve the session permission mode from CLI flags + settings,
     // run the bypass safety guards, and capture the startup notice. This must

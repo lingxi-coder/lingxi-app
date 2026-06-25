@@ -257,24 +257,6 @@ fn load_provider_profiles(include_user: bool, include_project: bool) -> Option<s
         .and_then(|eff| eff.settings.providers)
 }
 
-/// Load the merged `settings.multiAgent` raw JSON block (project + user + env
-/// layers) for the LingXi-only dual-LLM multi-agent feature. Mirrors
-/// [`load_provider_profiles`] but reads the `multiAgent` field. `None` on any
-/// load failure or when no `multiAgent` block is set ⇒ the feature stays off and
-/// the composition root never builds a `MultiAgentRuntime`.
-fn load_multi_agent_settings() -> Option<serde_json::Value> {
-    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = engine::settings::LoadInputs {
-        env: &env,
-        project_dir: &project_dir,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    };
-    engine::settings::Settings::load(inputs)
-        .ok()
-        .and_then(|eff| eff.settings.multi_agent)
-}
-
 /// Load the merged `settings.claudeMdExcludes` (project + user + env layers) —
 /// glob patterns / absolute paths of `CLAUDE.md` files to exclude from the
 /// system prompt (claude-code `isClaudeMdExcluded`). Empty when unset.
@@ -492,13 +474,11 @@ pub(crate) fn resolve_desktop_config(
         // CLI `--exclude-dynamic-system-prompt-sections`: move per-machine env
         // sections out of the cacheable system prompt into the first user message.
         exclude_dynamic_system_prompt_sections: argv.exclude_dynamic_system_prompt_sections,
-        // LingXi-only dual-LLM multi-agent feature (off by default): thread the
-        // merged `settings.multiAgent` block + the explicit CLI override into the
-        // composition root, which assembles the gated `MultiAgentRuntime` from the
-        // session's real subagent spawner. `None` settings ⇒ feature off ⇒ the
-        // baseline single-agent turn loop is byte-identical to before.
-        multi_agent: load_multi_agent_settings(),
-        explicit_multi_agent: argv.explicit_multi_agent(),
+        // `--setting-sources` scope: also gate the engine-side hook + permission
+        // tier loaders in `build()` (not just the provider/routing/claudeMdExcludes
+        // loaders above), so `--setting-sources project` does NOT load user-level
+        // hooks or permission rules. `(true, true)` when the flag is absent.
+        setting_source_scope: (incl_user, incl_project),
     }
     // NOTE: claude-code's `--add-dir` is "Additional directories to allow TOOL
     // ACCESS to" (NOT CLAUDE.md search — an earlier comment here misread it). It

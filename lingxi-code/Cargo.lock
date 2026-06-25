@@ -1281,7 +1281,6 @@ dependencies = [
  "lsp",
  "mcp",
  "migrations",
- "multi-agent",
  "nix",
  "orchestrator",
  "outputstyles",
@@ -2671,24 +2670,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
-]
-
-[[package]]
-name = "multi-agent"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "cost",
- "llm-client",
- "protocol",
- "serde",
- "serde_json",
- "sidequery",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "traits",
 ]
 
 [[package]]

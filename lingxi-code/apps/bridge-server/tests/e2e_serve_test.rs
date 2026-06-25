@@ -70,8 +70,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         add_dir: Vec::new(),
         cli_mcp_servers: Vec::new(),
         exclude_dynamic_system_prompt_sections: false,
-        multi_agent: None,
-        explicit_multi_agent: None,
+        setting_source_scope: (true, true),
     };
     (tmp, cfg)
 }

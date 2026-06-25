@@ -5787,7 +5787,18 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // identical across machines (prompt-cache reuse) while the model still
         // sees the env. Built from the SAME `build_prompt_context` the system
         // prompt uses. (`false` ⟶ skipped, byte-identical to before this flag.)
-        if self.config.exclude_dynamic_system_prompt_sections {
+        //
+        // claude-code: "Only applies with the default system prompt (ignored with
+        // --system-prompt)." A custom system prompt already bypasses the static
+        // env block, so re-emitting it here under `--system-prompt` would leak
+        // per-machine env into the first user message that the oracle never sends.
+        // Gate the env-block re-emission on the absence of a system-prompt override
+        // so the exclude-dynamic flag is a complete no-op when a custom prompt is
+        // active. (The claudeMd / userEmail / currentDate entries below stay
+        // unconditional — they are unrelated to this flag.)
+        if self.config.exclude_dynamic_system_prompt_sections
+            && self.config.system_prompt_override.is_none()
+        {
             let ctx = self.build_prompt_context().await;
             let env = crate::prompt::env_block::format(&ctx);
             // `env_block::format` already begins with its own `# Environment\n`

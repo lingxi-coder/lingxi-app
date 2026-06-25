@@ -81,7 +81,6 @@ fn field_presence(layer: &SettingsJson) -> Vec<(&'static str, bool)> {
         ("model", layer.model.is_some()),
         ("providers", layer.providers.is_some()),
         ("routing", layer.routing.is_some()),
-        ("multiAgent", layer.multi_agent.is_some()),
     ]
 }
 

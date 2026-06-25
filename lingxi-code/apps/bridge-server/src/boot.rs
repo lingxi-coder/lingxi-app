@@ -252,10 +252,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         cli_mcp_servers: Vec::new(),
         // The Electron bridge has no --exclude-dynamic-system-prompt-sections flag.
         exclude_dynamic_system_prompt_sections: false,
-        // The bridge does not expose the LingXi-only dual-LLM multi-agent
-        // feature; it stays off (byte-identical to before this field).
-        multi_agent: None,
-        explicit_multi_agent: None,
+        // The bridge has no `--setting-sources` flag; load all tiers.
+        setting_source_scope: (true, true),
     }
 }
 
@@ -565,8 +563,7 @@ mod tests {
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
             exclude_dynamic_system_prompt_sections: false,
-            multi_agent: None,
-            explicit_multi_agent: None,
+            setting_source_scope: (true, true),
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.

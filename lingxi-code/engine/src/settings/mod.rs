@@ -437,52 +437,6 @@ mod load_tests {
     }
 
     #[test]
-    fn multi_agent_env_overrides_and_deep_merges_with_user_settings() {
-        use serde_json::json;
-        let _guard = HOME_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let tmp = tempfile::tempdir().unwrap();
-        let project_dir = tmp.path();
-        let user_dir = tmp.path().join("home_ma").join(".claude");
-        std::fs::create_dir_all(&user_dir).unwrap();
-        std::fs::create_dir_all(project_dir.join(".claude")).unwrap();
-
-        // User layer sets mode=auto + candidates; env should override mode and
-        // ADD enabled while KEEPING the user-layer candidates (deep-merge).
-        let mut uf = std::fs::File::create(user_dir.join("settings.json")).unwrap();
-        writeln!(
-            uf,
-            r#"{{"multiAgent": {{"mode": "auto", "candidates": [{{"id": "fast", "model": "p/m"}}]}}}}"#
-        )
-        .unwrap();
-        std::env::set_var("HOME", tmp.path().join("home_ma"));
-
-        let mut env = BTreeMap::new();
-        env.insert("LINGXI_MULTI_AGENT".to_string(), "force".to_string());
-        env.insert("LINGXI_MULTI_AGENT_ENABLED".to_string(), "true".to_string());
-
-        let eff = Settings::load(LoadInputs {
-            env: &env,
-            project_dir,
-            defaults: schema::SettingsJson::default(),
-        })
-        .unwrap();
-
-        let ma = eff.settings.multi_agent.as_ref().expect("multiAgent present");
-        // env overrides the scalar `mode`
-        assert_eq!(ma.get("mode"), Some(&json!("force")));
-        // env adds `enabled`
-        assert_eq!(ma.get("enabled"), Some(&json!(true)));
-        // user-layer `candidates` survive the env overlay (deep-merge)
-        assert_eq!(ma.get("candidates"), Some(&json!([{"id": "fast", "model": "p/m"}])));
-
-        // Provenance: highest contributor for multiAgent is Env.
-        let prov = eff.effective_for("multiAgent").expect("provenance");
-        assert_eq!(prov.contributors.last(), Some(&tracer::Source::Env));
-    }
-
-    #[test]
     fn user_beats_project_when_no_env() {
         let _guard = HOME_LOCK
             .lock()

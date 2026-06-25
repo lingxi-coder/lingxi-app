@@ -324,10 +324,11 @@ fn print_status_text(
     if !logged_in {
         // claude's exact not-logged-in line (branding kept as lingxi-cli).
         println!("Not logged in. Run lingxi-cli auth login to authenticate.");
-    } else if !printed_any {
-        // Authenticated but no surfaced property (e.g. a stored managed key).
-        println!("Authenticated.");
     }
+    // No `Authenticated.` fallback: claude's `authStatus` text branch emits only
+    // surfaced properties, the optional `API key:` line, and (when not logged in)
+    // the not-logged-in line — nothing extra when logged in with no property.
+    let _ = printed_any;
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

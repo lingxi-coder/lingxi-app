@@ -30,11 +30,6 @@ mod agent_skill_loader;
 mod background_agent;
 mod connect;
 pub mod file_changed_watch;
-/// Composition-root adapter binding the `multi-agent` crate's injected seams
-/// (`CandidateRunner` / `Reviser` / `VerificationFixer`) to the session's real
-/// `traits::SubagentSpawner`. LingXi-only; constructed only behind the gated
-/// dual-LLM dispatch (off by default).
-pub mod multi_agent_runtime;
 pub mod settings_watch;
 mod skill_loader;
 
@@ -1048,8 +1043,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     add_dir: Vec::new(),
 ///     cli_mcp_servers: Vec::new(),
 ///     exclude_dynamic_system_prompt_sections: false,
-///     multi_agent: None,
-///     explicit_multi_agent: None,
+///     setting_source_scope: (true, true),
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -1208,21 +1202,17 @@ pub struct DesktopConfig {
     /// per-machine env block out of the (cacheable) system prompt and into the
     /// first user message. `false` (the default) ⟶ unchanged.
     pub exclude_dynamic_system_prompt_sections: bool,
-    /// LingXi-only: the raw `settings.multiAgent` JSON block (merged
-    /// project/user/env layers). When `Some`, `build()` parses it and assembles
-    /// the gated dual-LLM [`multi_agent_runtime::MultiAgentRuntime`] from the
-    /// session's real subagent spawner + inheritance, surfaced on
-    /// [`DesktopRuntime::multi_agent`]. `None` (the default) ⇒ the feature is
-    /// OFF and the build is byte-identical to before (no runtime constructed,
-    /// baseline single-agent turn loop untouched). A malformed block fails soft
-    /// (logged, treated as off). NOT a claude-code parity field.
-    pub multi_agent: Option<serde_json::Value>,
-    /// LingXi-only: the explicit multi-agent CLI override
-    /// (`--multi-agent`/`--dual-llm` ⇒ `Some(true)`, `--no-multi-agent` ⇒
-    /// `Some(false)`, unset ⇒ `None`), threaded from
-    /// `apps/cli argv.explicit_multi_agent()`. Only consulted when
-    /// `multi_agent` is `Some`. NOT a claude-code parity field.
-    pub explicit_multi_agent: Option<bool>,
+    /// CLI `--setting-sources <user,project,local>` scope as `(include_user,
+    /// include_project)`. Gates which on-disk settings TIERS `build()` reads for
+    /// hook registration and permission rules (defaultMode / allow-deny rules /
+    /// additionalDirectories): skip the user tier when `!include_user`, skip the
+    /// project + local tiers when `!include_project`. This mirrors the
+    /// `Settings::load_scoped` gating the CLI already applies to provider /
+    /// routing / claudeMdExcludes loaders, so `--setting-sources project` no
+    /// longer loads user-level hooks or permission rules. `(true, true)` (the
+    /// default, also the absent-flag case) ⟶ all tiers load, byte-identical to
+    /// before this field.
+    pub setting_source_scope: (bool, bool),
 }
 
 impl std::fmt::Debug for DesktopConfig {
@@ -1281,8 +1271,6 @@ impl std::fmt::Debug for DesktopConfig {
                 "exclude_dynamic_system_prompt_sections",
                 &self.exclude_dynamic_system_prompt_sections,
             )
-            .field("multi_agent", &self.multi_agent)
-            .field("explicit_multi_agent", &self.explicit_multi_agent)
             .finish()
     }
 }
@@ -1316,8 +1304,8 @@ impl Default for DesktopConfig {
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
             exclude_dynamic_system_prompt_sections: false,
-            multi_agent: None,
-            explicit_multi_agent: None,
+            // Default: all setting tiers load (absent `--setting-sources`).
+            setting_source_scope: (true, true),
         }
     }
 }
@@ -1475,16 +1463,6 @@ pub struct DesktopRuntime {
     /// the model's result here; the print path reads it after each turn to
     /// validate against the schema and retry. `None` for every normal run.
     pub structured_output_slot: Option<orchestrator::structured_output::StructuredOutputSlot>,
-    /// LingXi-only dual-LLM multi-agent runtime (gated, off by default).
-    /// `Some` ONLY when `DesktopConfig.multi_agent` carried a well-formed
-    /// `settings.multiAgent` block; it holds the parsed config, the resolved
-    /// explicit CLI flag, and the REAL spawner-backed candidate/reviser/fixer
-    /// adapters bound to this session's subagent spawner. A host that opts a turn
-    /// into the dual-LLM path reads it (via
-    /// [`multi_agent_runtime::MultiAgentRuntime::decide`]) to build the
-    /// `DualLlm` pipeline. `None` (the default) ⇒ the feature is off and the
-    /// baseline single-agent turn loop is untouched.
-    pub multi_agent: Option<multi_agent_runtime::MultiAgentRuntime>,
 }
 
 /// Errors surfaced while building a [`DesktopRuntime`].
@@ -2726,13 +2704,25 @@ pub async fn build(
     let mut hook_registry = hooks::HookRegistry::new();
     let project_settings_path = cwd.join(".claude").join("settings.json");
     let user_settings_path = cfg.claude_home.join("settings.json");
-    for (path, source) in [
-        (user_settings_path, hooks::definition::HookSource::User),
+    // `--setting-sources` scope (default `(true, true)` = all tiers): skip the
+    // user tier when `!include_user` and the project tier when `!include_project`
+    // so e.g. `--setting-sources project` does NOT register user-level hooks.
+    let (incl_user_settings, incl_project_settings) = cfg.setting_source_scope;
+    for (path, source, included) in [
+        (
+            user_settings_path,
+            hooks::definition::HookSource::User,
+            incl_user_settings,
+        ),
         (
             project_settings_path,
             hooks::definition::HookSource::Project,
+            incl_project_settings,
         ),
     ] {
+        if !included {
+            continue;
+        }
         if let Ok(raw) = tokio::fs::read_to_string(&path).await {
             match hooks::parse_hooks_from_settings_json(&raw, source) {
                 Ok(hooks_vec) => {
@@ -2825,20 +2815,33 @@ pub async fn build(
             // and honored on the next enforced boot (closing the persist↔enforce
             // round-trip); rules from every tier accumulate (bucketed by source,
             // `authorize` walks them by priority).
-            for (path, source) in [
+            // `--setting-sources` scope (default `(true, true)` = all tiers):
+            // gate the user tier on `include_user` and the project + local tiers
+            // on `include_project` (local folds into project, mirroring the
+            // `Settings::load_scoped` semantics the CLI already applies to the
+            // provider/routing loaders), so e.g. `--setting-sources project` does
+            // NOT load user-level permission rules / defaultMode.
+            let (incl_user_settings, incl_project_settings) = cfg.setting_source_scope;
+            for (path, source, included) in [
                 (
                     cfg.claude_home.join("settings.json"),
                     permission::PermissionRuleSource::UserSettings,
+                    incl_user_settings,
                 ),
                 (
                     cwd.join(".claude").join("settings.json"),
                     permission::PermissionRuleSource::ProjectSettings,
+                    incl_project_settings,
                 ),
                 (
                     cwd.join(".claude").join("settings.local.json"),
                     permission::PermissionRuleSource::LocalSettings,
+                    incl_project_settings,
                 ),
             ] {
+                if !included {
+                    continue;
+                }
                 if let Ok(raw) = tokio::fs::read_to_string(&path).await {
                     match permission::permission_rules_from_settings_json(&raw, source) {
                         Ok(mut r) => rules.append(&mut r),
@@ -3440,15 +3443,6 @@ pub async fn build(
     //        exists): a workflow's `agent()` calls inherit this invoker so their
     //        child runners dispatch tools through the parent registry.
     let local_workflow_invoker = Arc::new(DeferredToolInvoker::new());
-    // (5.46e-multi-agent) LingXi-only dual-LLM feature: the tool-invoker the
-    //        gated `MultiAgentRuntime` adapters hand to each spawned
-    //        candidate/reviser/fixer subagent (via `SubagentInheritance`), so a
-    //        dual-LLM child dispatches its Edit/Write/Bash through the SAME parent
-    //        registry under the recursion-lock + boot gate — same deferred pattern
-    //        as the invokers above, bound at (5.5a) once `tools` exists. Only the
-    //        gate (`cfg.multi_agent.is_some()` + the route decision) ever drives a
-    //        spawn through it, so an unconfigured session leaves it inert.
-    let multi_agent_invoker = Arc::new(DeferredToolInvoker::new());
     // Shared `budget.spent()` pool: published once the orchestrator exists
     // (built below) — the same `Arc<AtomicU64>` the main loop feeds per response,
     // so a workflow's `spent()` reads main loop + all workflows. Same deferred
@@ -3720,15 +3714,11 @@ pub async fn build(
         provider: tool_provider,
         default_model: orch_cfg.model.clone(),
         worktree: Arc::new(PosixWorktreeManager::new(cwd.clone())),
-        // Cloned (not moved) so the gated LingXi-only `MultiAgentRuntime` below
-        // can inherit the SAME spawner Arc the orchestrator holds.
         subagent_spawner: Some(subagent_spawner.clone()),
         task_registry: Some(
             task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>
         ),
         mailbox_router: coordinator_mailbox,
-        // Cloned (not moved) so the gated `MultiAgentRuntime` below inherits the
-        // SAME budget enforcer Arc.
         budget_enforcer: Some(budget_enforcer.clone()),
         coordinator_mode: Some(
             coordinator_mode.clone() as Arc<dyn traits::coordinator_mode::CoordinatorModeHandle>
@@ -3961,14 +3951,6 @@ pub async fn build(
     //        workflow's `agent()` subagents dispatch their tools through the
     //        parent registry under the same recursion-lock + boot gate.
     local_workflow_invoker.set(Arc::new(
-        tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone()).with_gate(perms.clone()),
-    ));
-
-    // (5.5a-multi-agent) LingXi-only: bind the dual-LLM feature's
-    //        `DeferredToolInvoker` to the real `RegistryToolInvoker` now that
-    //        `tools` exists — same recursion-lock invariant + boot gate as the
-    //        invokers above. Inert unless a turn is routed into the dual-LLM path.
-    multi_agent_invoker.set(Arc::new(
         tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone()).with_gate(perms.clone()),
     ));
 
@@ -4490,25 +4472,6 @@ pub async fn build(
         .entry("anthropic".to_string())
         .or_insert(has_api_key || has_oauth);
 
-    // LingXi-only dual-LLM multi-agent feature (GATED, off by default): assemble
-    // the runtime ONLY when a `settings.multiAgent` block was threaded in. It
-    // binds the REAL session subagent spawner + the inheritance Arcs (the
-    // dual-LLM tool-invoker bound at (5.5a) + the shared budget enforcer) — the
-    // same plumbing built subagents inherit. `None` settings (every default
-    // session) ⇒ `None` runtime ⇒ the baseline single-agent turn loop is
-    // byte-identical to before this wiring. A malformed block fails soft inside
-    // `MultiAgentRuntime::build` (logged, treated as off).
-    let multi_agent = multi_agent_runtime::MultiAgentRuntime::build(
-        cfg.multi_agent.as_ref(),
-        cfg.explicit_multi_agent,
-        subagent_spawner.clone(),
-        traits::subagent_spawn::SubagentInheritance {
-            tool_invoker: multi_agent_invoker.clone()
-                as Arc<dyn traits::tool_invoker::ToolInvoker>,
-            budget: budget_enforcer.clone(),
-        },
-    );
-
     Ok(DesktopRuntime {
         orchestrator: orch,
         dispatcher,
@@ -4525,7 +4488,6 @@ pub async fn build(
         provider_adapter: provider_adapter_handle,
         credentials,
         structured_output_slot,
-        multi_agent,
     })
 }
 
@@ -4952,8 +4914,7 @@ mod tests {
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
             exclude_dynamic_system_prompt_sections: false,
-            multi_agent: None,
-            explicit_multi_agent: None,
+            setting_source_scope: (true, true),
         };
         (tmp, cfg)
     }

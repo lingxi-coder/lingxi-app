@@ -562,10 +562,31 @@ pub fn UserToolResultMessage(props: &UserToolResultProps) -> impl Into<AnyElemen
                 .into_any()
             })
             .collect();
+        // (diff-07) claude-code's `DiffFrame`: a top+bottom-only dashed
+        // 'subtle' border wraps ONLY the diff rows (the "Added N line(s)"
+        // summary header is FileEditToolUpdatedMessage's, rendered above the
+        // frame, not inside it). No `subtle` token in LingXi's Theme;
+        // `theme.dim` is the closest existing mapping.
         return element! {
             View(flex_direction: FlexDirection::Column) {
                 Text(content: header, color: TuiTheme::DIM)
-                #(row_elements)
+                View(
+                    flex_direction: FlexDirection::Column,
+                    border_style: BorderStyle::Custom(BorderCharacters {
+                        top: '\u{254C}',
+                        bottom: '\u{254C}',
+                        left: ' ',
+                        right: ' ',
+                        top_left: ' ',
+                        top_right: ' ',
+                        bottom_left: ' ',
+                        bottom_right: ' ',
+                    }),
+                    border_edges: Edges::Top | Edges::Bottom,
+                    border_color: TuiTheme::DIM,
+                ) {
+                    #(row_elements)
+                }
             }
         };
     }

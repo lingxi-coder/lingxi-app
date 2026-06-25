@@ -371,6 +371,8 @@ impl TuiTheme {
     pub const SUCCESS: Color = Theme::dark().success;
     /// Dim text (system hints, footnotes) — `Theme::dark().dim`.
     pub const DIM: Color = Theme::dark().dim;
+    /// Warning text (e.g. an empty-state line) — `Theme::dark().warning`.
+    pub const WARNING: Color = Theme::dark().warning;
 }
 
 #[cfg(test)]

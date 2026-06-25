@@ -972,13 +972,22 @@ pub fn render_screen(
                 // `render_stats_to_string` body (tab header + active-tab body +
                 // sparkline/heatmap, snapshot-tested) line-by-line in a column
                 // View. Mirrors the Skills/Agents arms.
-                use crate::screens::stats::render_stats_to_string;
+                use crate::screens::stats::{render_stats_to_string, EMPTY_LINE, MODELS_EMPTY_LINE};
+                use crate::theme::TuiTheme;
                 let body = render_stats_to_string(sts);
                 let lines: Vec<String> = body.lines().map(str::to_string).collect();
                 element! {
                     View(flex_direction: FlexDirection::Column, padding: 1) {
-                        #(lines.into_iter().map(|line| element! {
-                            Text(content: line)
+                        // (stats-empty-state-color, partial) claude-code colors
+                        // the empty-state line `warning`; everything else
+                        // (metric values, etc.) needs per-line-type
+                        // classification this plain-line render can't do yet.
+                        #(lines.into_iter().map(|line| {
+                            let is_empty_state = line == EMPTY_LINE || line == MODELS_EMPTY_LINE;
+                            let color = if is_empty_state { TuiTheme::WARNING } else { Color::Reset };
+                            element! {
+                                Text(content: line, color: color)
+                            }
                         }))
                     }
                 }

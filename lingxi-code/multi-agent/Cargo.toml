@@ -15,7 +15,7 @@ sidequery = { path = "../sidequery" }
 protocol = { path = "../protocol" }
 cost = { path = "../cost" }
 async-trait = { workspace = true }
-tokio = { version = "1", features = ["time", "sync", "macros", "rt"] }
+tokio = { version = "1", features = ["time", "sync", "macros", "rt", "process", "io-util"] }
 tokio-util = { workspace = true }
 
 [dev-dependencies]

@@ -366,7 +366,7 @@ mod tests {
                 removed: std::sync::Mutex::new(Vec::new()),
             }
         }
-        fn with_summary(mut self, s: Option<WorktreeChangeSummary>) -> Self {
+        fn with_summary(self, s: Option<WorktreeChangeSummary>) -> Self {
             *self.summary.lock().unwrap() = Some(s);
             self
         }

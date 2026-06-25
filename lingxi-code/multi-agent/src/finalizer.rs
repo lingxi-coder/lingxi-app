@@ -111,8 +111,7 @@ impl FinalizePlan {
 
 /// Applies (and dry-runs) patches against the main workspace. Abstracted so the
 /// finalizer is testable without a real git repository. The real implementation
-/// wraps `git apply` (`--check` for dry-run); see the marked seam
-/// [`TodoGitPatchApplier`].
+/// wraps `git apply` (`--check` for dry-run); see [`GitPatchApplier`].
 #[async_trait]
 pub trait PatchApplier: Send + Sync {
     /// Report workspace-relative paths in the main workspace that currently
@@ -293,33 +292,146 @@ fn render_paths(paths: &[PathBuf]) -> String {
     }
 }
 
-// TODO(multi-agent): real `git apply` backend. `dirty_paths` = `git status
-// --porcelain` (uncommitted tracked changes), `dry_run` = `git apply --check
-// -`, `apply` = `git apply -`. Must run with the main-workspace cwd and surface
-// rejected files from git's stderr. This is a compiling seam so the crate stays
-// green until that lands.
-/// Placeholder real applier — every method errors. Replaced by a real
-/// `git apply` backend in a later pass.
+/// Real [`PatchApplier`] backed by the `git` CLI run with the main-workspace as
+/// cwd (design doc §Finalizer, §安全约束 #3):
+///
+/// - [`dirty_paths`](PatchApplier::dirty_paths) = `git status --porcelain`
+///   (any tracked-but-modified or untracked path that a patch could clobber).
+/// - [`dry_run`](PatchApplier::dry_run) = `git apply --check -` (patch on stdin,
+///   no mutation).
+/// - [`apply`](PatchApplier::apply) = `git apply -` (patch on stdin).
+///
+/// A failure to even run `git` (binary missing, not a repo, …) surfaces as
+/// [`ApplyError::Backend`]; a non-zero `git apply` exit surfaces as
+/// [`ApplyError::Conflict`] with the rejecting files parsed from git's stderr.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct TodoGitPatchApplier;
+pub struct GitPatchApplier;
+
+impl GitPatchApplier {
+    /// Run `git <args>` in `workspace`, optionally feeding `stdin`. Returns the
+    /// completed output or a [`ApplyError::Backend`] if git could not be run.
+    async fn run_git(
+        workspace: &Path,
+        args: &[&str],
+        stdin: Option<&str>,
+    ) -> Result<std::process::Output, ApplyError> {
+        use tokio::io::AsyncWriteExt;
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.current_dir(workspace)
+            .args(args)
+            .stdin(if stdin.is_some() {
+                std::process::Stdio::piped()
+            } else {
+                std::process::Stdio::null()
+            })
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| ApplyError::Backend(format!("could not spawn git: {e}")))?;
+        if let Some(data) = stdin {
+            let mut sink = child
+                .stdin
+                .take()
+                .ok_or_else(|| ApplyError::Backend("git stdin unavailable".to_string()))?;
+            sink.write_all(data.as_bytes())
+                .await
+                .map_err(|e| ApplyError::Backend(format!("writing patch to git stdin: {e}")))?;
+            // Drop the handle to send EOF so `git apply` stops reading.
+            drop(sink);
+        }
+        child
+            .wait_with_output()
+            .await
+            .map_err(|e| ApplyError::Backend(format!("waiting for git: {e}")))
+    }
+
+    /// Map a non-zero `git apply` invocation to a [`ApplyError`]: a clean
+    /// success is `Ok`, a non-zero exit is a `Conflict` carrying the rejecting
+    /// files parsed from stderr.
+    fn apply_result(out: std::process::Output) -> Result<(), ApplyError> {
+        if out.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        Err(ApplyError::Conflict { files: parse_rejected_files(&stderr) })
+    }
+}
 
 #[async_trait]
-impl PatchApplier for TodoGitPatchApplier {
-    async fn dirty_paths(&self, _workspace: &Path) -> Result<Vec<PathBuf>, ApplyError> {
-        Err(ApplyError::Backend(
-            "real git patch applier not yet wired (TODO(multi-agent))".to_string(),
-        ))
+impl PatchApplier for GitPatchApplier {
+    async fn dirty_paths(&self, workspace: &Path) -> Result<Vec<PathBuf>, ApplyError> {
+        let out = Self::run_git(workspace, &["status", "--porcelain"], None).await?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(ApplyError::Backend(format!(
+                "git status failed: {}",
+                stderr.trim()
+            )));
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        Ok(parse_porcelain_paths(&stdout))
     }
-    async fn dry_run(&self, _workspace: &Path, _patch: &str) -> Result<(), ApplyError> {
-        Err(ApplyError::Backend(
-            "real git patch applier not yet wired (TODO(multi-agent))".to_string(),
-        ))
+
+    async fn dry_run(&self, workspace: &Path, patch: &str) -> Result<(), ApplyError> {
+        let out = Self::run_git(workspace, &["apply", "--check", "-"], Some(patch)).await?;
+        Self::apply_result(out)
     }
-    async fn apply(&self, _workspace: &Path, _patch: &str) -> Result<(), ApplyError> {
-        Err(ApplyError::Backend(
-            "real git patch applier not yet wired (TODO(multi-agent))".to_string(),
-        ))
+
+    async fn apply(&self, workspace: &Path, patch: &str) -> Result<(), ApplyError> {
+        let out = Self::run_git(workspace, &["apply", "-"], Some(patch)).await?;
+        Self::apply_result(out)
     }
+}
+
+/// Parse `git status --porcelain` output into the set of paths that carry
+/// uncommitted changes (tracked-modified, staged, or untracked). Rename entries
+/// (`R  old -> new`) contribute the new path.
+fn parse_porcelain_paths(stdout: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for line in stdout.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        // Porcelain v1: 2 status chars + space, then the path.
+        let rest = &line[3..];
+        let path = match rest.split_once(" -> ") {
+            Some((_old, new)) => new, // rename: the new path is what would clobber
+            None => rest,
+        };
+        let path = path.trim().trim_matches('"');
+        if !path.is_empty() {
+            paths.push(PathBuf::from(path));
+        }
+    }
+    paths
+}
+
+/// Extract the rejecting file paths from `git apply` stderr. git emits lines
+/// like `error: patch failed: src/a.rs:12` and
+/// `error: src/a.rs: patch does not apply`.
+fn parse_rejected_files(stderr: &str) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for line in stderr.lines() {
+        let line = line.trim();
+        let path = if let Some(rest) = line.strip_prefix("error: patch failed: ") {
+            // `<path>:<line>` — strip the trailing `:<line>`.
+            rest.rsplit_once(':').map(|(p, _)| p).unwrap_or(rest)
+        } else if let Some(rest) = line.strip_prefix("error: ") {
+            // `<path>: patch does not apply`
+            match rest.strip_suffix(": patch does not apply") {
+                Some(p) => p,
+                None => continue,
+            }
+        } else {
+            continue;
+        };
+        let path = PathBuf::from(path.trim());
+        if !files.contains(&path) {
+            files.push(path);
+        }
+    }
+    files
 }
 
 #[cfg(test)]
@@ -587,11 +699,114 @@ mod tests {
         assert_eq!(applier2.applied.lock().unwrap().len(), 1);
     }
 
+}
+
+/// Real-git backend tests. These shell out to `git` against throwaway repos to
+/// prove the [`GitPatchApplier`] honours the [`PatchApplier`] contract.
+#[cfg(test)]
+mod git_applier_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(dir: &Path, args: &[&str]) -> std::process::Output {
+        Command::new("git").current_dir(dir).args(args).output().expect("spawn git")
+    }
+
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let out = git(dir, args);
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A repo with one committed file `a.txt` = "line1\nline2\nline3\n".
+    fn init_repo() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path();
+        git_ok(p, &["init", "-q"]);
+        git_ok(p, &["config", "user.email", "t@example.com"]);
+        git_ok(p, &["config", "user.name", "Tester"]);
+        std::fs::write(p.join("a.txt"), "line1\nline2\nline3\n").unwrap();
+        git_ok(p, &["add", "."]);
+        git_ok(p, &["commit", "-q", "-m", "init"]);
+        tmp
+    }
+
+    /// A patch that edits `a.txt` line 2 -> CHANGED, leaving the worktree clean.
+    fn patch_editing_a(dir: &Path) -> String {
+        std::fs::write(dir.join("a.txt"), "line1\nCHANGED\nline3\n").unwrap();
+        let out = git(dir, &["diff"]);
+        let patch = String::from_utf8(out.stdout).unwrap();
+        git_ok(dir, &["checkout", "--", "a.txt"]);
+        assert!(!patch.trim().is_empty(), "expected a non-empty diff");
+        patch
+    }
+
     #[tokio::test]
-    async fn todo_git_applier_is_a_compiling_seam() {
-        let applier = TodoGitPatchApplier;
-        assert!(applier.dirty_paths(Path::new("/ws")).await.is_err());
-        assert!(applier.dry_run(Path::new("/ws"), "diff").await.is_err());
-        assert!(applier.apply(Path::new("/ws"), "diff").await.is_err());
+    async fn dirty_paths_empty_on_clean_repo() {
+        let tmp = init_repo();
+        let dirty = GitPatchApplier.dirty_paths(tmp.path()).await.unwrap();
+        assert!(dirty.is_empty(), "clean repo reported dirty = {dirty:?}");
+    }
+
+    #[tokio::test]
+    async fn dirty_paths_reports_uncommitted_edit() {
+        let tmp = init_repo();
+        std::fs::write(tmp.path().join("a.txt"), "edited\n").unwrap();
+        let dirty = GitPatchApplier.dirty_paths(tmp.path()).await.unwrap();
+        assert_eq!(dirty, vec![PathBuf::from("a.txt")]);
+    }
+
+    #[tokio::test]
+    async fn dirty_paths_reports_untracked_file() {
+        let tmp = init_repo();
+        std::fs::write(tmp.path().join("new.txt"), "x\n").unwrap();
+        let dirty = GitPatchApplier.dirty_paths(tmp.path()).await.unwrap();
+        assert_eq!(dirty, vec![PathBuf::from("new.txt")]);
+    }
+
+    #[tokio::test]
+    async fn dry_run_ok_does_not_mutate_workspace() {
+        let tmp = init_repo();
+        let patch = patch_editing_a(tmp.path());
+        GitPatchApplier.dry_run(tmp.path(), &patch).await.unwrap();
+        // dry-run must not touch the file.
+        let content = std::fs::read_to_string(tmp.path().join("a.txt")).unwrap();
+        assert_eq!(content, "line1\nline2\nline3\n");
+    }
+
+    #[tokio::test]
+    async fn apply_mutates_workspace() {
+        let tmp = init_repo();
+        let patch = patch_editing_a(tmp.path());
+        GitPatchApplier.apply(tmp.path(), &patch).await.unwrap();
+        let content = std::fs::read_to_string(tmp.path().join("a.txt")).unwrap();
+        assert_eq!(content, "line1\nCHANGED\nline3\n");
+    }
+
+    #[tokio::test]
+    async fn dry_run_conflict_reports_rejecting_file() {
+        let tmp = init_repo();
+        let patch = patch_editing_a(tmp.path());
+        // Move the base content out from under the patch so it cannot apply.
+        std::fs::write(tmp.path().join("a.txt"), "totally\ndifferent\ncontent\n").unwrap();
+        git_ok(tmp.path(), &["commit", "-aqm", "diverge base"]);
+
+        let err = GitPatchApplier.dry_run(tmp.path(), &patch).await.unwrap_err();
+        match err {
+            ApplyError::Conflict { files } => {
+                assert!(files.contains(&PathBuf::from("a.txt")), "files = {files:?}");
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dirty_paths_backend_error_on_non_repo() {
+        let tmp = tempfile::tempdir().unwrap(); // not a git repo
+        let err = GitPatchApplier.dirty_paths(tmp.path()).await.unwrap_err();
+        assert!(matches!(err, ApplyError::Backend(_)), "got {err:?}");
     }
 }

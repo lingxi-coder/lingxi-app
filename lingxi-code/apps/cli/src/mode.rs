@@ -220,6 +220,13 @@ pub(crate) async fn build_tui_runtime(
     // dispatcher in place on `tui_build.runtime` (read before `turn_tx`,
     // a disjoint field, is moved out below — no borrow/move conflict).
     let command_registry = tui_build.runtime.dispatcher.registry();
+    // Thread the SAME fully-wired slash dispatcher (incl. its UserPromptExpansion
+    // hooks) into the TUI so the live submit path can expand a typed `/loop` (and
+    // Markdown/Plugin prompt commands) and run it as a turn — matching the CLI
+    // repl. `.registry()` above already cloned the shared registry Arc; the
+    // dispatcher field is otherwise unused in TUI mode, so move it out here.
+    let slash_dispatcher: Arc<dyn traits::SlashCommandDispatcher> =
+        Arc::new(tui_build.runtime.dispatcher);
     // (Plan 3c §8 / I1/I2) Project the engine-computed provider maps off the
     // runtime (disjoint fields, read before `turn_tx` is moved out below) so the
     // `/model` picker can badge unconfigured providers + resolve a bare
@@ -239,6 +246,7 @@ pub(crate) async fn build_tui_runtime(
         .with_turn_tx(tui_build.turn_tx)
         .with_permission_rx(tui_build.permission_rx)
         .with_command_registry(command_registry)
+        .with_dispatcher(slash_dispatcher)
         .with_provider_availability(provider_availability)
         .with_model_providers(model_providers)
         .with_provider_key_store(provider_key_store)

@@ -696,9 +696,17 @@ pub struct AppState {
     /// image paths (`PasteState::take_image_paths`), DROPS the lock, and calls
     /// `app::spawn_streaming_turn` — which forwards the paths to
     /// `OrchestratorHandle::run_turn_streaming_with_images`. Mirrors
-    /// `pending_open_settings`. `None` between submits. Slash commands NEVER set
-    /// this — they intercept + return earlier in the `Submit` arm.
+    /// `pending_open_settings`. `None` between submits. A non-intercepted slash
+    /// command sets [`Self::pending_slash`] instead (so the async pump can
+    /// consult the dispatcher); plain text sets this.
     pub pending_turn: Option<String>,
+    /// A user-typed slash command that the sync `Submit` arm did NOT intercept
+    /// (e.g. `/loop`, Markdown/Plugin prompt commands, or an unknown command).
+    /// The sync path holds no slash `dispatcher`, so it raises the raw line
+    /// here; the async `root::pump_slash` dispatches it (RunAsTurn → run the
+    /// expanded prompt; Handled/Unknown → display the text). `None` between
+    /// submits.
+    pub pending_slash: Option<String>,
     /// (M6-04) Currently focused tool block (Up/Down in scroll mode walks
     /// this through the `AssistantToolUse` entries in scrollback order).
     pub focused_tool_id: Option<ToolUseId>,
@@ -1063,6 +1071,7 @@ impl AppState {
             pending_open_settings: None,
             pending_compact: false,
             pending_turn: None,
+            pending_slash: None,
             focused_tool_id: None,
             expanded: HashMap::new(),
             tool_call_inputs: HashMap::new(),

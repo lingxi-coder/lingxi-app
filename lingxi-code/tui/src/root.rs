@@ -97,6 +97,15 @@ pub struct TuiRootProps {
     /// bridge) makes the turn-spawn pump inert — the live loop echoes the user
     /// line but spawns no turn, correct for those mounts.
     pub turn_tx: Option<UnboundedSender<TurnEvent>>,
+    /// Slash-command dispatcher for the live submit path. A user-typed slash
+    /// command that is not one of the sync screen-launch intercepts is raised
+    /// as `AppState.pending_slash`; the async `pump_slash` consults this
+    /// dispatcher so `/loop` (and Markdown/Plugin prompt commands) expand and
+    /// run as a turn (`RunAsTurn`), and display-only / unknown commands surface
+    /// their text — matching the CLI/bridge/mobile surfaces. `None` (resume
+    /// picker / smoke / bridge-less mounts) makes `pump_slash` run the raw line
+    /// as a turn, preserving the pre-dispatch behavior for those mounts.
+    pub dispatcher: Option<Arc<dyn traits::SlashCommandDispatcher>>,
     /// (TUI-PERM) Receiver for `TuiPermissionGate` exchanges. `None` for
     /// bridge-less mounts (resume picker / smoke gates) — the pump stays inert.
     pub permission_rx: Option<PermissionRxSlot>,
@@ -1548,6 +1557,79 @@ pub async fn pump_turn(
     true
 }
 
+/// Live-key slash-command submit pump — the production wiring of
+/// [`traits::SlashDispatchResult::RunAsTurn`] for the TUI.
+///
+/// The sync `app::dispatch(KeyAction::Submit)` raises a non-intercepted slash
+/// command (`/loop`, Markdown/Plugin prompt commands, or an unknown command) as
+/// [`AppState::pending_slash`] because it cannot `.await` the async dispatcher.
+/// This pump — on the same 100ms ticker as [`pump_turn`], under the SAME
+/// permission/screen/streaming priority guard — drains the flag, dispatches it,
+/// and:
+/// - `RunAsTurn { prompt }` → [`spawn_streaming_turn`] with the EXPANDED prompt
+///   (so a typed `/loop 5m /foo` schedules + runs, matching the CLI/bridge/mobile
+///   surfaces). No paste-image expansion (a slash command carries no images).
+/// - `Handled` / `Unknown` → push the display text as a `SystemText` row.
+///
+/// When `dispatcher` is `None` (resume picker / smoke / bridge-less mounts) the
+/// raw line is run as a turn — the pre-dispatch behavior. Returns `true` iff it
+/// took the pending flag (a turn was spawned or a row was pushed).
+pub async fn pump_slash(
+    state: &Arc<Mutex<AppState>>,
+    handle: &Arc<dyn traits::OrchestratorHandle>,
+    dispatcher: Option<&Arc<dyn traits::SlashCommandDispatcher>>,
+    turn_tx: &UnboundedSender<TurnEvent>,
+) -> bool {
+    // 1) Take the request under the lock, respecting the same priority guard as
+    //    `pump_turn` (never while a permission dialog / screen owns the surface
+    //    or a turn is already streaming).
+    let line = {
+        let mut st = state.lock().await;
+        if st.pending_slash.is_none() {
+            return false;
+        }
+        if st.pending_permission.is_some()
+            || st.active_screen.is_some()
+            || st.streaming.is_some()
+        {
+            return false;
+        }
+        st.pending_slash.take().expect("checked is_some")
+    };
+
+    // 2) No dispatcher wired: run the raw line as a turn (pre-dispatch behavior).
+    let Some(disp) = dispatcher else {
+        let cancel = spawn_streaming_turn(handle.clone(), line, Vec::new(), turn_tx.clone());
+        state.lock().await.cancel_token = Some(cancel);
+        return true;
+    };
+
+    // 3) Dispatch OUTSIDE the lock (it may resolve + expand a bundled skill).
+    match disp.dispatch(&line).await {
+        traits::SlashDispatchResult::RunAsTurn { prompt } => {
+            let cancel =
+                spawn_streaming_turn(handle.clone(), prompt, Vec::new(), turn_tx.clone());
+            state.lock().await.cancel_token = Some(cancel);
+        }
+        traits::SlashDispatchResult::Handled { display }
+        | traits::SlashDispatchResult::Unknown { display, .. } => {
+            let mut st = state.lock().await;
+            st.push_message(crate::state::RenderedMessage::SystemText {
+                body: display,
+                timestamp: chrono::Utc::now().timestamp(),
+                is_error: false,
+            });
+        }
+        // `pending_slash` always holds a '/'-prefixed line, so the dispatcher
+        // never returns `NotASlashCommand`; run it raw if it somehow does.
+        traits::SlashDispatchResult::NotASlashCommand => {
+            let cancel = spawn_streaming_turn(handle.clone(), line, Vec::new(), turn_tx.clone());
+            state.lock().await.cancel_token = Some(cancel);
+        }
+    }
+    true
+}
+
 /// (M9-08) Async agent-discovery open pump.
 ///
 /// Mirrors `pump_open_settings`. The sync `/agents` submit path raises
@@ -2832,6 +2914,9 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         // (`pump_turn`). `None` (resume picker / smoke gates) makes the pump
         // inert — the live loop echoes the user line but spawns no turn.
         let turn_tx = props.turn_tx.clone();
+        // Slash dispatcher for the live submit path's `pump_slash` (typed
+        // `/loop` etc. expand + run as a turn). `None` for bridge-less mounts.
+        let dispatcher = props.dispatcher.clone();
         // (`/color`) Session id for the agent-color persistence pump. `Copy`, so
         // capturing it here does not disturb the key handler's own use.
         let ticker_session_id = session_id;
@@ -2909,6 +2994,14 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 // supplies both; resume/smoke mounts pass `None` → inert).
                 if let (Some(handle), Some(tx)) = (orchestrator.as_ref(), turn_tx.as_ref()) {
                     if pump_turn(&state, handle, tx).await {
+                        needs_redraw = true;
+                    }
+                    // Slash-command submit pump: a typed `/loop` (or Markdown/
+                    // Plugin prompt command) raised `pending_slash`; dispatch it
+                    // and either run the expanded prompt as a turn (`RunAsTurn`)
+                    // or surface its display text. Same handle+tx gate as
+                    // `pump_turn`; `dispatcher` may be `None` (runs the line raw).
+                    if pump_slash(&state, handle, dispatcher.as_ref(), tx).await {
                         needs_redraw = true;
                     }
                 }
@@ -3252,6 +3345,99 @@ fn viewport_width(cols: u16) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- pump_slash: the production wiring of RunAsTurn on the TUI surface ----
+
+    /// A canned slash dispatcher: records the raw line it was handed and returns
+    /// a preset disposition. Lets the test prove `pump_slash` (a) consults the
+    /// dispatcher with the typed line and (b) routes each disposition correctly.
+    struct CannedDispatcher {
+        got: std::sync::Mutex<Option<String>>,
+        result: traits::SlashDispatchResult,
+    }
+    impl CannedDispatcher {
+        fn new(result: traits::SlashDispatchResult) -> Self {
+            Self {
+                got: std::sync::Mutex::new(None),
+                result,
+            }
+        }
+    }
+    #[async_trait::async_trait]
+    impl traits::SlashCommandDispatcher for CannedDispatcher {
+        async fn dispatch(&self, raw: &str) -> traits::SlashDispatchResult {
+            *self.got.lock().unwrap() = Some(raw.to_string());
+            self.result.clone()
+        }
+    }
+
+    fn mock_handle() -> Arc<dyn traits::OrchestratorHandle> {
+        Arc::new(orchestrator::test_support::MockOrchestratorHandle::new())
+    }
+
+    #[tokio::test]
+    async fn pump_slash_run_as_turn_spawns_expanded_prompt() {
+        // A typed `/loop 5m /foo` → dispatcher returns the EXPANDED prompt as
+        // RunAsTurn → pump_slash spawns a turn with the EXPANDED text (not the
+        // raw `/loop` line), clears the flag, stores the cancel token, and emits
+        // TurnStarted — exactly like a plain-prompt submit.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TurnEvent>();
+        // Hold the concrete type for readback; pass a coerced clone into the pump.
+        let canned = Arc::new(CannedDispatcher::new(traits::SlashDispatchResult::RunAsTurn {
+            prompt: "EXPANDED LOOP PROMPT".to_string(),
+        }));
+        let disp: Arc<dyn traits::SlashCommandDispatcher> = canned.clone();
+        let st = Arc::new(Mutex::new(AppState::new(crate::state::StatusSnapshot::default())));
+        st.lock().await.pending_slash = Some("/loop 5m /foo".to_string());
+
+        let acted = pump_slash(&st, &mock_handle(), Some(&disp), &tx).await;
+
+        assert!(acted, "pump_slash must act when a slash command is pending");
+        let g = st.lock().await;
+        assert!(g.pending_slash.is_none(), "flag consumed (no double-spawn)");
+        assert!(g.cancel_token.is_some(), "a turn was spawned → cancel token set");
+        drop(g);
+        // The dispatcher was consulted with the TYPED line (proves it expands
+        // rather than sending the raw text); its RunAsTurn prompt is what runs.
+        assert_eq!(
+            canned.got.lock().unwrap().clone(),
+            Some("/loop 5m /foo".to_string()),
+            "dispatcher must receive the typed slash line"
+        );
+        // TurnStarted emitted synchronously by spawn_streaming_turn.
+        assert!(matches!(rx.try_recv(), Ok(TurnEvent::TurnStarted)));
+    }
+
+    #[tokio::test]
+    async fn pump_slash_unknown_displays_text_without_running_a_turn() {
+        // An unknown / display-only command surfaces its text and does NOT spawn
+        // a turn (no cancel token, no TurnStarted) — builtins stay display-only.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TurnEvent>();
+        let disp: Arc<dyn traits::SlashCommandDispatcher> =
+            Arc::new(CannedDispatcher::new(traits::SlashDispatchResult::Unknown {
+                name: "nope".to_string(),
+                display: "Unknown command: /nope".to_string(),
+            }));
+        let st = Arc::new(Mutex::new(AppState::new(crate::state::StatusSnapshot::default())));
+        st.lock().await.pending_slash = Some("/nope".to_string());
+
+        let acted = pump_slash(&st, &mock_handle(), Some(&disp), &tx).await;
+
+        assert!(acted);
+        let g = st.lock().await;
+        assert!(g.pending_slash.is_none());
+        assert!(g.cancel_token.is_none(), "display-only command must NOT spawn a turn");
+        assert!(
+            matches!(
+                g.messages.last(),
+                Some(crate::state::RenderedMessage::SystemText { body, .. })
+                    if body == "Unknown command: /nope"
+            ),
+            "the display text must be surfaced as a SystemText row"
+        );
+        drop(g);
+        assert!(rx.try_recv().is_err(), "no TurnStarted for a display-only command");
+    }
 
     #[test]
     fn viewport_height_reserves_fixed_chrome_plus_single_prompt_row() {

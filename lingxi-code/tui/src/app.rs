@@ -486,25 +486,26 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
             // (`st.paste` stays untouched here so they reach that turn), and calls
             // `spawn_streaming_turn`.
             //
-            // NOTE: only the FIXED LIST of display-only builtins above (`/doctor`,
-            // `/memory`, `/theme`, `/export`, `/config`, `/status`, `/copy`,
-            // `/agents`, `/mcp`, `/hooks`, `/permissions`, `/model`, `/vim`,
-            // `/skills`, `/stats`, `/tasks`, `/help`, `/clear`, `/compact`,
-            // `/exit`) intercepts before this point. ANY OTHER slash input —
-            // including prompt-commands like `/loop` and Markdown/Plugin commands —
-            // falls through here and is sent to the model AS RAW TEXT.
-            // PARITY-TODO: the live TUI submit path does NOT consult the slash
-            // `dispatcher`, so a typed `/loop 5m /foo` is delivered verbatim
-            // instead of being expanded into the bundled-skill prompt and run as a
-            // turn (the `SlashDispatchResult::RunAsTurn` wiring in
-            // `handle_submit_line` / `run_one_submit` is exercised only by tests;
-            // it has no live caller — `pump_turn` is the production path and holds
-            // only an `OrchestratorHandle`, which exposes NO slash-dispatch seam).
-            // Closing this needs a dispatcher threaded into the TUI session (or a
-            // `dispatch_slash` method on `OrchestratorHandle`) so `pump_turn` can
-            // expand a `RunAsTurn` prompt before `spawn_streaming_turn`. The CLI,
-            // bridge, and mobile surfaces ARE correctly wired; only the TUI is not.
-            st.pending_turn = Some(line.clone());
+            // The FIXED LIST of screen-launch / display builtins above
+            // (`/doctor`, `/memory`, `/theme`, `/export`, `/config`, `/status`,
+            // `/copy`, `/agents`, `/mcp`, `/hooks`, `/permissions`, `/model`,
+            // `/vim`, `/skills`, `/stats`, `/tasks`, `/help`, `/clear`,
+            // `/compact`, `/exit`) intercept before this point. ANY OTHER slash
+            // input — prompt-commands like `/loop` and Markdown/Plugin commands,
+            // or an unknown command — falls through here.
+            //
+            // The sync dispatcher holds no slash `dispatcher` (it can't `.await`
+            // `dispatch()`), so a slash command is raised as `pending_slash` and
+            // the async `root::pump_slash` consults the dispatcher: `RunAsTurn`
+            // runs the expanded prompt as a turn, `Handled`/`Unknown` surface
+            // their text. Plain (non-slash) text is raised as `pending_turn` and
+            // run verbatim by `pump_turn`. Both echo the typed line as `UserText`.
+            // (Matches how the CLI/bridge/mobile surfaces route a typed slash.)
+            if line.starts_with('/') {
+                st.pending_slash = Some(line.clone());
+            } else {
+                st.pending_turn = Some(line.clone());
+            }
             st.push_message(RenderedMessage::UserText {
                 body: line,
                 timestamp: chrono::Utc::now().timestamp(),

@@ -65,6 +65,11 @@ pub struct Runtime {
     /// progressive argument-hint map. `None` (smoke gates / no-CLI mounts) leaves
     /// the hint map empty — correct (no builtin declares argNames).
     pub command_registry: Option<Arc<tokio::sync::RwLock<command_api::CommandRegistry>>>,
+    /// Slash-command dispatcher, threaded into the root so the live submit path
+    /// can expand a typed `/loop` (and Markdown/Plugin prompt commands) and run
+    /// it as a turn. `None` (smoke gates / resume picker / no-CLI mounts) makes
+    /// `root::pump_slash` run a typed slash line raw — the pre-dispatch behavior.
+    pub dispatcher: Option<Arc<dyn traits::SlashCommandDispatcher>>,
     /// Prior conversation, mapped to scrollback rows, that a RESUMED session
     /// seeds into `AppState.messages` BEFORE the first render — the Rust analog
     /// of claude-code's REPL `initialMessages` prop (`main.tsx` →
@@ -121,6 +126,7 @@ impl Runtime {
             multiagent_feed: None,
             turn_tx: None,
             command_registry: None,
+            dispatcher: None,
             resumed_messages: Vec::new(),
             subscription: None,
             status_line_config: None,
@@ -146,6 +152,7 @@ impl Runtime {
             multiagent_feed: None,
             turn_tx: None,
             command_registry: None,
+            dispatcher: None,
             resumed_messages: Vec::new(),
             subscription: None,
             status_line_config: None,
@@ -212,6 +219,19 @@ impl Runtime {
         registry: Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
     ) -> Self {
         self.command_registry = Some(registry);
+        self
+    }
+
+    /// Attach the slash-command dispatcher, threaded into the root so the live
+    /// submit path expands a typed `/loop` (and Markdown/Plugin prompt commands)
+    /// and runs it as a turn. `None` leaves `root::pump_slash` running a typed
+    /// slash line raw — the pre-dispatch behavior for bridge-less mounts.
+    #[must_use]
+    pub fn with_dispatcher(
+        mut self,
+        dispatcher: Arc<dyn traits::SlashCommandDispatcher>,
+    ) -> Self {
+        self.dispatcher = Some(dispatcher);
         self
     }
 
@@ -439,6 +459,7 @@ pub async fn run_tui_session(
             multiagent_tx: multiagent_tx,
             multiagent_feed: runtime.multiagent_feed.clone(),
             turn_tx: runtime.turn_tx.clone(),
+            dispatcher: runtime.dispatcher.clone(),
         )
     }
     .fullscreen()

@@ -69,9 +69,37 @@ pub fn StatusTab(props: &StatusTabProps) -> impl Into<AnyElement<'static>> {
         .data
         .as_ref()
         .map_or_else(String::new, render_status_to_string);
+    // (settings-status-label-bold) claude-code's per-row `<Box gap={1}><Text
+    // bold>{label}:</Text><PropertyValue/></Box>` — split each "Label: value"
+    // line so the label renders bold and the value at normal weight (neither
+    // dim). A line without "label: " (the trailing "Esc to close" footer)
+    // renders as plain default-weight text, matching its TS counterpart.
+    let rows: Vec<AnyElement<'static>> = body
+        .lines()
+        .map(|line| match line.split_once(": ") {
+            // (claude-code Status.tsx:22) the "Session name" placeholder
+            // value is dim — LingXi has no session-title surface, so this
+            // row is ALWAYS the placeholder.
+            Some(("Session name", value)) => element! {
+                View(flex_direction: FlexDirection::Row, gap: 1) {
+                    Text(content: "Session name:", weight: Weight::Bold)
+                    Text(content: value.to_string(), color: TuiTheme::DIM)
+                }
+            }
+            .into_any(),
+            Some((label, value)) => element! {
+                View(flex_direction: FlexDirection::Row, gap: 1) {
+                    Text(content: format!("{label}:"), weight: Weight::Bold)
+                    Text(content: value.to_string())
+                }
+            }
+            .into_any(),
+            None => element! { Text(content: line.to_string()) }.into_any(),
+        })
+        .collect();
     element! {
         View(flex_direction: FlexDirection::Column) {
-            Text(content: body, color: TuiTheme::DIM)
+            #(rows)
         }
     }
 }

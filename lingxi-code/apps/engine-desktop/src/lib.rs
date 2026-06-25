@@ -3889,11 +3889,18 @@ pub async fn build(
     // cycle. Injected here (the desktop composition root) only — `engine-mobile`
     // never registers the shell tools, so the mobile path keeps the no-firer
     // BashTool.
+    // Shared mutable-cwd cell: the firer writes the new dir on each Bash `cd`,
+    // and the orchestrator (below, via `with_current_cwd`) reads it for hook
+    // payloads — so a PreToolUse/PostToolUse/lifecycle hook sees the post-`cd`
+    // directory, 1:1 with claude-code's single global `getCwd()`/`setCwdState`.
+    let current_cwd_cell =
+        std::sync::Arc::new(std::sync::Mutex::new(cwd.clone()));
     let cwd_changed_firer: hooks::OptionalCwdChangedFirer = Some(Arc::new(
         orchestrator::OrchestratorCwdChangedFirer::new(
             hooks.clone(),
             cwd.clone(),
             main_transcript_path.clone(),
+            current_cwd_cell.clone(),
         ),
     ));
     // The wakeup cell for the registered `ScheduleWakeup` tool — surfaced on
@@ -4077,6 +4084,9 @@ pub async fn build(
     // (every `with_jsonl_writer` call site is a test). Without this every
     // PreToolUse / PostToolBatch / lifecycle hook fired with an empty path.
     .with_config_home(cfg.claude_home.clone())
+    // Share the SAME mutable-cwd cell the `cwd_changed_firer` writes on a Bash
+    // `cd`, so hook payloads read the post-`cd` directory (claude-code parity).
+    .with_current_cwd(current_cwd_cell)
     // FIX A/B/C: adopt the boot-canonical session id so the orchestrator's LIVE
     // session matches the id baked into the leaf firers' `transcript_path` and the
     // subagent spawner's subagents dir — one consistent session id end-to-end.

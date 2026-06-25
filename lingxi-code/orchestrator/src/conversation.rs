@@ -572,6 +572,17 @@ pub struct ConversationOrchestrator {
     /// CLI will plumb `--cwd`; until then, callers pass the platform
     /// caller's cwd here.
     pub(crate) cwd: std::path::PathBuf,
+    /// The CURRENT working directory — the session-init `cwd` by default, but
+    /// MUTATED when a `cd` inside a Bash call moves the persistent shell cwd
+    /// (the desktop composition root shares this exact `Arc` with the
+    /// [`crate::OrchestratorCwdChangedFirer`], which writes the new path on every
+    /// `CwdChanged` fire). Hook payloads read THIS (not the static `cwd`) so a
+    /// PreToolUse/PostToolUse/lifecycle hook sees the post-`cd` directory — 1:1
+    /// with claude-code, where every hook reads the single global `getCwd()`
+    /// that `cd` mutates (`Shell.ts:409` `setCwdState` → `cwd.ts:19` `getCwd`).
+    /// Defaults to a private `Arc` over `cwd` (no firer wired ⇒ never moves ⇒
+    /// hooks read the static cwd exactly as before).
+    pub(crate) current_cwd: Arc<std::sync::Mutex<std::path::PathBuf>>,
     /// Resolved `$CLAUDE_CONFIG_DIR ?? ~/.claude` dir (the claude-home root).
     /// Used by [`Self::computed_transcript_path`] to deterministically derive the
     /// session's transcript path (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`,
@@ -988,6 +999,7 @@ impl ConversationOrchestrator {
             output,
             session: Arc::new(Mutex::new(session)),
             memory,
+            current_cwd: Arc::new(std::sync::Mutex::new(cwd.clone())),
             cwd,
             config_home: None,
             jsonl_writer: None,
@@ -1050,6 +1062,30 @@ impl ConversationOrchestrator {
     pub fn with_config_home(mut self, config_home: std::path::PathBuf) -> Self {
         self.config_home = Some(config_home);
         self
+    }
+
+    /// Share the composition root's mutable-cwd cell — the SAME `Arc` the
+    /// [`crate::OrchestratorCwdChangedFirer`] writes on a Bash `cd` — so hook
+    /// payloads read the post-`cd` directory. Builder-style; wired at the
+    /// desktop composition root. Without it the default private cell (over the
+    /// static `cwd`) never moves, so hooks read the init cwd exactly as before.
+    #[must_use]
+    pub fn with_current_cwd(
+        mut self,
+        cell: Arc<std::sync::Mutex<std::path::PathBuf>>,
+    ) -> Self {
+        self.current_cwd = cell;
+        self
+    }
+
+    /// The CURRENT working directory for hook payloads (the post-`cd` shell cwd
+    /// when a firer is wired, else the static init `cwd`). Clones out of the
+    /// shared cell so no lock is held across an await; a poisoned lock falls
+    /// back to the static `cwd`.
+    pub(crate) fn current_cwd(&self) -> std::path::PathBuf {
+        self.current_cwd
+            .lock()
+            .map_or_else(|_| self.cwd.clone(), |g| g.clone())
     }
 
     /// Override the orchestrator's session id. Builder-style — used at the
@@ -2123,6 +2159,25 @@ impl ConversationOrchestrator {
         // because we have done no snip work yet at the call site.
         if !compaction::should_auto_compact(estimate, 0, compactor.autocompact_threshold) {
             return;
+        }
+
+        // #7 consecutive-failures breaker (`bin/claude.exe` `ewo` step 2): a
+        // tripped breaker (`consecutiveFailures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES`)
+        // makes compaction a guaranteed no-op, so RETURN HERE — BEFORE the
+        // fixed-prefix overflow probe below. The binary's `ewo` runs
+        // `if(o?.consecutiveFailures>=Swo) return {wasCompacted:!1}` (Swo=3)
+        // ahead of `Wom` (the prefix-overflow probe that emits
+        // `tengu_auto_compact_prefix_overflow`), so a breaker-tripped,
+        // over-threshold session emits NO prefix-overflow event. Without this
+        // early return our code fired a spurious `tengu_auto_compact_prefix_overflow`
+        // (`wouldHaveBlocked:true`) every turn for such a session.
+        {
+            let tracking = self.compaction_tracking.lock().await;
+            if tracking.consecutive_failures
+                >= compaction::thresholds::MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES
+            {
+                return;
+            }
         }
 
         // #55 fixed-prefix overflow guard (`a3p`, `bin/claude.exe` offset
@@ -3317,7 +3372,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .unwrap_or_else(|| self.computed_transcript_path(&session_id));
         HookContext {
             session_id,
-            cwd: self.cwd.clone(),
+            cwd: self.current_cwd(),
             transcript_path,
             permission_mode: Some(if plan_mode { "plan" } else { "default" }.to_string()),
             stop_hook_active,
@@ -3418,9 +3473,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .await;
         let disposition = if agg.prevent_continuation {
             StopHookDisposition::Prevent
-        } else if matches!(agg.decision, Some(hooks::response::HookDecision::Block))
-            && !stop_hook_active
-        {
+        } else if matches!(agg.decision, Some(hooks::response::HookDecision::Block)) {
+            // #2: ANY Block yields Continue — the consecutive-block CAP is no
+            // longer the old `!stop_hook_active` boolean (which let a blocking
+            // hook drive exactly ONE extra turn). The binary carries a
+            // `stopHookBlockingCount` and only ends after it exceeds
+            // `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` (default 8); that counter cap is
+            // enforced in `handle_stop_at_end`, not here. `stop_hook_active` is
+            // still threaded into the hook CONTEXT above so the hook can read it
+            // and return success while it is true (the documented escape hatch).
+            //
             // Source the continuation from the hook's blocking REASON
             // (`blockingError.blockingError`), NOT the transcript-only
             // `system_messages`. `agg.reason` is `None` when the hook omits a
@@ -3478,10 +3540,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         &self,
         stop_reason: &str,
         stop_hook_active: &mut bool,
+        stop_hook_blocking_count: &mut u32,
         turn_count: u32,
         final_message_id: MessageId,
     ) -> StopHookFlow {
-        if stop_reason == "prompt_too_long" {
+        if matches!(
+            stop_reason,
+            "prompt_too_long" | "blocking_limit" | "rapid_refill_breaker"
+        ) {
             // RECOV.2: this turn ended on an API error — the model never produced
             // a real response, so fire the `StopFailure` hooks (NOT the `Stop`
             // hooks) before ending. 1:1 with TS `query.ts:1262-1264` (the
@@ -3489,7 +3555,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // returns) and `query.ts:1174/1181` (PTL recovery exhausted). Running
             // the normal `Stop` hooks here would risk the death-spiral TS warns
             // against (error → hook blocking → retry → error → …). The wire
-            // `error` is `"invalid_request"`, matching TS
+            // `error` is `"invalid_request"` for ALL THREE — the proactive
+            // blocking-limit preempt and the rapid-refill breaker both surface an
+            // assistant message whose api-error field is `invalid_request`
+            // (binary `Ol({...,error:"invalid_request"})`), even though their
+            // TERMINAL reasons (`blocking_limit` / `rapid_refill_breaker`) differ
+            // from the reactive `prompt_too_long`. Matching TS
             // `createAssistantAPIErrorMessage({ …, error: 'invalid_request' })`
             // (`query.ts:642-644`).
             self.fire_stop_failure("invalid_request").await;
@@ -3505,12 +3576,79 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 })
             }
             StopHookDisposition::Continue(reason) => {
+                // #2/#4 consecutive-block cap (binary `let ar=Z+1; if(bo>0&&ar>bo)
+                // …return {reason:"completed"}`). `Z` is the carried
+                // `stopHookBlockingCount`; `ar` the would-be next count.
+                let next_count = stop_hook_blocking_count.saturating_add(1);
+                // `parseInt(process.env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP??"",10)`
+                // with `Number.isNaN(jr)?8:jr` ⇒ unset / non-numeric → 8. A
+                // `cap <= 0` disables the cap (binary `if(bo>0&&…)`), letting a
+                // blocking hook drive until the max_turns top-of-loop guard ends it.
+                let cap: i64 = std::env::var("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<i64>().ok())
+                    .unwrap_or(8);
+                if cap > 0 && i64::from(next_count) > cap {
+                    // Cap exceeded: log `tengu_stop_hook_block_count{hit_cap:true}`,
+                    // surface the byte-exact override warning (em-dash U+2014;
+                    // binary `yield Dc(…,"warning")`), and END the turn (binary
+                    // returns `{reason:"completed"}` ⇒ our `FallThrough` runs the
+                    // normal end-of-turn tail). NOTE: `is_subagent` is hard-coded
+                    // `false` — the orchestrator does not thread subagent identity
+                    // (`Boolean(N.agentId)`); the main-loop value is `false`.
+                    self.fire_stop_hook_block_count(next_count, false, true).await;
+                    let warning = format!(
+                        "A hook blocked the turn from ending {next_count} consecutive times — overriding and ending turn. For Stop/SubagentStop hooks, check stop_hook_active in the input and return success while it's true. Set CLAUDE_CODE_STOP_HOOK_BLOCK_CAP to raise this limit."
+                    );
+                    self.output.emit_text(&warning).await;
+                    return StopHookFlow::FallThrough;
+                }
                 self.append_stop_hook_feedback(&reason).await;
                 *stop_hook_active = true;
+                *stop_hook_blocking_count = next_count;
                 StopHookFlow::LoopAgain
             }
-            StopHookDisposition::Pass => StopHookFlow::FallThrough,
+            StopHookDisposition::Pass => {
+                // #4: a previously-blocking Stop hook finally let the turn end —
+                // log the final consecutive-block count (binary
+                // `if(Z>0&&Un.blockingErrors.length===0) W("tengu_stop_hook_block_count",
+                // {count:Z,hit_max_turns:!1,hit_cap:!1})`). No-op when the hook
+                // never blocked this turn (`count == 0`).
+                if *stop_hook_blocking_count > 0 {
+                    self.fire_stop_hook_block_count(*stop_hook_blocking_count, false, false)
+                        .await;
+                }
+                StopHookFlow::FallThrough
+            }
         }
+    }
+
+    /// Fire the `tengu_stop_hook_block_count` analytics event (hooks B4, binary
+    /// `bin/claude.exe` offset ~208046100). Emitted in three forms: on the
+    /// block-cap end (`hit_cap:true`), on the max-turns-via-stop-hook end
+    /// (`hit_max_turns:true`), and when a previously-blocking hook finally lets
+    /// the turn end (both `false`). `is_subagent` is hard-coded `false` — the
+    /// orchestrator does not model subagent identity (`Boolean(N.agentId)`).
+    /// Strict no-op when no analytics bus is wired.
+    async fn fire_stop_hook_block_count(&self, count: u32, hit_max_turns: bool, hit_cap: bool) {
+        let Some(bus) = self.analytics_bus.as_ref() else {
+            return;
+        };
+        let mut metadata = telemetry::LogEventMetadata::new();
+        metadata.insert(
+            "count".into(),
+            telemetry::AnalyticsValue::Int(i64::from(count)),
+        );
+        metadata.insert(
+            "is_subagent".into(),
+            telemetry::AnalyticsValue::Bool(false),
+        );
+        metadata.insert(
+            "hit_max_turns".into(),
+            telemetry::AnalyticsValue::Bool(hit_max_turns),
+        );
+        metadata.insert("hit_cap".into(), telemetry::AnalyticsValue::Bool(hit_cap));
+        bus.log_event("tengu_stop_hook_block_count", metadata).await;
     }
 
     /// Fire the `PreCompact` lifecycle hooks immediately BEFORE a compaction
@@ -3921,6 +4059,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // hooks B4: Stop-hook re-entry guard. Set true after a Stop hook blocks
         // and we loop once more; a second block then passes (no infinite loop).
         let mut stop_hook_active = false;
+        // #2 consecutive Stop-hook block counter (binary `stopHookBlockingCount`):
+        // bumped per block; ends the turn via the cap once it would exceed
+        // CLAUDE_CODE_STOP_HOOK_BLOCK_CAP (default 8). Fresh per turn-driver run.
+        let mut stop_hook_blocking_count: u32 = 0;
         // A3: token-budget continuation bookkeeping. `Some` only when the gate
         // is enabled AND a budget is set; otherwise the budget check is a
         // NO-OP and the loop stops at the first `end_turn` (parity default).
@@ -3968,7 +4110,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // (order: recovery → stop-hooks → token-budget, TS
                     // `query.ts:1262-1308`).
                     match self
-                        .handle_stop_at_end(&stop_reason, &mut stop_hook_active, turn_count, id)
+                        .handle_stop_at_end(&stop_reason, &mut stop_hook_active, &mut stop_hook_blocking_count, turn_count, id)
                         .await
                     {
                         StopHookFlow::Terminate(outcome) => return Ok(outcome),
@@ -4117,6 +4259,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let mut recovery = RecoveryState::default();
         // hooks B4: Stop-hook re-entry guard (streaming twin).
         let mut stop_hook_active = false;
+        // #2 consecutive Stop-hook block counter (binary `stopHookBlockingCount`):
+        // bumped per block; ends the turn via the cap once it would exceed
+        // CLAUDE_CODE_STOP_HOOK_BLOCK_CAP (default 8). Fresh per turn-driver run.
+        let mut stop_hook_blocking_count: u32 = 0;
         // A3: token-budget continuation bookkeeping (streaming twin). `Some`
         // only when the gate is enabled AND a budget is set; otherwise the
         // budget check is a NO-OP and the loop stops at the first `end_turn`.
@@ -4399,13 +4545,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     "prompt at blocking limit — preempting before stream"
                 );
                 let id = surface_prompt_too_long(self).await;
-                // RECOV.2 chokepoint: `handle_stop_at_end` fires the `StopFailure`
-                // hooks for this `"prompt_too_long"` api-error end; its guard always
-                // returns `FallThrough` for that reason (it short-circuits before
-                // the `Stop` hooks), so the directive is discarded and the normal
+                // PROACTIVE preempt ⇒ terminal reason `"blocking_limit"` (distinct
+                // from the reactive-exhausted `prompt_too_long`), mirroring the
+                // batched path's `PtlCallOutcome::BlockingLimit`. RECOV.2 chokepoint:
+                // `handle_stop_at_end` treats `"blocking_limit"` as an api-error end
+                // (fires `StopFailure`, skips the normal `Stop` hooks, returns
+                // `FallThrough`), so the directive is discarded and the normal
                 // end-of-turn tail runs — exactly mirroring the batched path.
                 let _ = self
-                    .handle_stop_at_end("prompt_too_long", &mut stop_hook_active, turn_count, id)
+                    .handle_stop_at_end("blocking_limit", &mut stop_hook_active, &mut stop_hook_blocking_count, turn_count, id)
                     .await;
                 if self
                     .maybe_continue_for_budget(budget.as_mut(), &mut recovery, global_turn_tokens)
@@ -4414,7 +4562,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     continue;
                 }
                 let cost = self.snapshot_cost_real().await;
-                self.output.emit_end_turn("prompt_too_long", &cost).await;
+                self.output.emit_end_turn("blocking_limit", &cost).await;
                 final_message_id = id;
                 break;
             }
@@ -4547,13 +4695,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             OpenOutcome::Recovered(pumped_from_recovery)
                         }
                         PtlCallOutcome::PromptTooLong => {
-                            // Recovery exhausted — end the turn EXACTLY like the
-                            // proactive blocking-limit preempt above.
+                            // Reactive recovery exhausted — end with the reactive
+                            // terminal reason `prompt_too_long` (`query.ts:1175`).
                             let id = surface_prompt_too_long(self).await;
                             let _ = self
                                 .handle_stop_at_end(
                                     "prompt_too_long",
                                     &mut stop_hook_active,
+                                    &mut stop_hook_blocking_count,
                                     turn_count,
                                     id,
                                 )
@@ -4573,20 +4722,55 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             final_message_id = id;
                             break;
                         }
+                        PtlCallOutcome::BlockingLimit => {
+                            // The recovery's own PROACTIVE step-1 preempt fired on
+                            // the re-snapshotted history ⇒ terminal `"blocking_limit"`
+                            // (distinct from reactive-exhausted `prompt_too_long`),
+                            // mirroring the batched path's `BlockingLimit` arm.
+                            let id = surface_prompt_too_long(self).await;
+                            let _ = self
+                                .handle_stop_at_end(
+                                    "blocking_limit",
+                                    &mut stop_hook_active,
+                                    &mut stop_hook_blocking_count,
+                                    turn_count,
+                                    id,
+                                )
+                                .await;
+                            if self
+                                .maybe_continue_for_budget(
+                                    budget.as_mut(),
+                                    &mut recovery,
+                                    global_turn_tokens,
+                                )
+                                .await
+                            {
+                                continue;
+                            }
+                            let cost = self.snapshot_cost_real().await;
+                            self.output.emit_end_turn("blocking_limit", &cost).await;
+                            final_message_id = id;
+                            break;
+                        }
                         PtlCallOutcome::RapidRefillBreaker => {
                             // #54 reactive trip — surface the thrashing message and
-                            // end with `invalid_request`, mirroring the batched path.
+                            // end with the terminal reason `rapid_refill_breaker`
+                            // (the MESSAGE still carries api-error `invalid_request`),
+                            // mirroring the batched path.
                             let id = surface_rapid_refill_thrashing(self).await;
                             let _ = self
                                 .handle_stop_at_end(
-                                    "invalid_request",
+                                    "rapid_refill_breaker",
                                     &mut stop_hook_active,
+                                    &mut stop_hook_blocking_count,
                                     turn_count,
                                     id,
                                 )
                                 .await;
                             let cost = self.snapshot_cost_real().await;
-                            self.output.emit_end_turn("invalid_request", &cost).await;
+                            self.output
+                                .emit_end_turn("rapid_refill_breaker", &cost)
+                                .await;
                             final_message_id = id;
                             break;
                         }
@@ -4854,6 +5038,27 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // tool_result whose tool_use id is missing from the map (defensive).
             let assistant_uuid = self.last_jsonl_uuid.lock().await.clone();
 
+            // #5 aborted_streaming vs aborted_tools disambiguation (faithful port
+            // of claude-code's TWO distinct abort checkpoints): query.ts:1015 runs
+            // RIGHT AFTER `callModel`, BEFORE the tool-completion drive — an abort
+            // observed there is `aborted_streaming` + `createUserInterruptionMessage({toolUse:false})`
+            // (`[Request interrupted by user]`). query.ts:1485 runs AFTER the tool
+            // drive — an abort observed only there is `aborted_tools` +
+            // `createUserInterruptionMessage({toolUse:true})`
+            // (`[Request interrupted by user for tool use]`). Capture the
+            // checkpoint-1015 state HERE (before the drive); the single post-drive
+            // abort check below picks the reason/message from it. The common
+            // "interrupt during thinking/streaming" case (incl. no-tool responses)
+            // lands as `aborted_streaming`, not the previous mislabel
+            // `aborted_tools`. `None` token (plain `run_turn_streaming`) → always
+            // false → byte-identical to before. The drive loop below still flushes
+            // synthetic REJECT_MESSAGE tool_results (the executor was built with the
+            // cancel token, so pending/queued tools reject rather than execute) —
+            // matching ref's `getRemainingResults()` at the 1015 path.
+            let aborted_during_stream = user_cancel
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled);
+
             // 5. Drive tools through the StreamingToolExecutor (faithful port of
             //    claude-code's `StreamingToolExecutor` + `query.ts:826-862`).
             //    Each tool runs the same hook + permission + registry pipeline
@@ -4943,36 +5148,48 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 crate::turn_loop::apply_model_context_modifiers(self, all_modifiers).await;
             }
 
-            // DEFERRED-3 / esc-interrupt FIX: "we were aborted during tool calls"
-            // (faithful port of claude-code `query.ts:1485` — the `aborted_tools`
-            // return). Once the user-interrupt token has fired, the executor above
-            // already drained the bare REJECT_MESSAGE `tool_result`s into history
-            // (model-visible). The turn MUST now STOP — claude-code returns
-            // `aborted_tools` with NO further `callModel`, honoring REJECT_MESSAGE's
-            // "STOP what you are doing and wait for the user". Looping into the
-            // `Some("tool_use") => continue` arm below would (1) issue a wasted
-            // extra round-trip after every ESC-during-tools and (2) let a
+            // DEFERRED-3 / esc-interrupt FIX: "we were aborted" — the single
+            // post-drive abort checkpoint. Once the user-interrupt token has fired,
+            // the executor above already drained the bare REJECT_MESSAGE
+            // `tool_result`s into history (model-visible). The turn MUST now STOP —
+            // claude-code returns with NO further `callModel`, honoring
+            // REJECT_MESSAGE's "STOP what you are doing and wait for the user".
+            // Looping into the `Some("tool_use") => continue` arm below would (1)
+            // issue a wasted extra round-trip after every ESC and (2) let a
             // Block-behavior tool emitted on that continuation actually EXECUTE
             // (`abort_reason_for` returns `None` for Block tools) despite the
             // interrupt — both of which claude-code structurally prevents by
             // returning here first. `None` token (plain `run_turn_streaming`) →
             // never fires → identical to before.
+            //
+            // #5: the terminal reason + interrupt message depend on WHICH ref
+            // checkpoint observed the abort (captured in `aborted_during_stream`
+            // before the drive): an abort already set when the stream ended is
+            // `aborted_streaming` / `[Request interrupted by user]` (query.ts:1015,
+            // `toolUse:false`); an abort that fired only DURING the tool drive is
+            // `aborted_tools` / `[Request interrupted by user for tool use]`
+            // (query.ts:1485, `toolUse:true`).
             if user_cancel
                 .as_ref()
                 .is_some_and(CancellationToken::is_cancelled)
             {
                 let cost = self.snapshot_cost_real().await;
-                self.output.emit_end_turn("aborted_tools", &cost).await;
-                // NOW-ABORT disambiguation (post-tools twin): a `Now`-driven
-                // cancellation means the urgent queued command will run next via
-                // the between-turn drain — DON'T inject the user-interrupt
-                // message. For a plain user interrupt (the default with no reason
-                // flag wired) inject as before — byte-identical to today.
-                // claude-code `query.ts:1501-1505`: `createUserInterruptionMessage`.
+                let (abort_reason, interrupt_message) = if aborted_during_stream {
+                    ("aborted_streaming", INTERRUPT_MESSAGE)
+                } else {
+                    ("aborted_tools", INTERRUPT_MESSAGE_FOR_TOOL_USE)
+                };
+                self.output.emit_end_turn(abort_reason, &cost).await;
+                // NOW-ABORT disambiguation: a `Now`-driven cancellation means the
+                // urgent queued command will run next via the between-turn drain —
+                // DON'T inject the user-interrupt message. For a plain user
+                // interrupt (the default with no reason flag wired) inject as
+                // before. claude-code `query.ts:1046-1050`/`1501-1505`:
+                // `createUserInterruptionMessage`.
                 if self.cancel_reason_now()
                     != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
                 {
-                    self.inject_meta_user_message(INTERRUPT_MESSAGE_FOR_TOOL_USE).await;
+                    self.inject_meta_user_message(interrupt_message).await;
                 }
                 final_message_id = assistant_id;
                 break;
@@ -4980,6 +5197,19 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 
             // 6. Decide loop disposition.
             match pumped.stop_reason.as_deref() {
+                // #1 needsFollowUp gate (claude-code `query.ts:554-558`/`832-835`/
+                // `1062`): continuation is keyed on tool-block PRESENCE, NOT the raw
+                // `stop_reason` string (the ref notes `stop_reason == "tool_use"` is
+                // "unreliable"). Any response that dispatched tool_use blocks runs
+                // the tools (already driven above) AND continues — feeding the
+                // tool_results back — regardless of whether the stop_reason was
+                // `tool_use`, `end_turn`, `stop_sequence`, or a truncated
+                // `max_tokens` that still carried a complete tool block. Fires only
+                // when tools were dispatched; a withheld `max_output_tokens`
+                // response carries NO tool_uses and falls through to the recovery/
+                // terminal arms below. Subsumes the former
+                // `Some("tool_use") if !pumped.tool_uses.is_empty()` arm.
+                _ if !pumped.tool_uses.is_empty() => continue,
                 Some("end_turn") => {
                     // #78 thinking-only nudge (claude-code `bin/claude.exe`
                     // offset ~202946760): an `end_turn` response with no visible
@@ -5004,6 +5234,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         .handle_stop_at_end(
                             "end_turn",
                             &mut stop_hook_active,
+                            &mut stop_hook_blocking_count,
                             turn_count,
                             assistant_id,
                         )
@@ -5040,7 +5271,6 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     final_message_id = assistant_id;
                     break;
                 }
-                Some("tool_use") if !pumped.tool_uses.is_empty() => continue,
                 // #77 malformed-tool-use retry (claude-code `bin/claude.exe`
                 // offset ~202945837): `stop_reason == "tool_use"` but the
                 // assistant produced ZERO tool_use blocks (a malformed /
@@ -5193,6 +5423,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         .handle_stop_at_end(
                             "end_turn",
                             &mut stop_hook_active,
+                            &mut stop_hook_blocking_count,
                             turn_count,
                             assistant_id,
                         )
@@ -5300,6 +5531,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let mut recovery = RecoveryState::default();
         // hooks B4: Stop-hook re-entry guard (cancelable twin).
         let mut stop_hook_active = false;
+        // #2 consecutive Stop-hook block counter (binary `stopHookBlockingCount`):
+        // bumped per block; ends the turn via the cap once it would exceed
+        // CLAUDE_CODE_STOP_HOOK_BLOCK_CAP (default 8). Fresh per turn-driver run.
+        let mut stop_hook_blocking_count: u32 = 0;
         // A3: token-budget continuation bookkeeping (no-op unless gated + set).
         let mut budget = self.new_budget_tracker();
         let mut global_turn_tokens: u64 = 0;
@@ -5376,7 +5611,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // working) loops. `handle_stop_at_end` already emits the
                     // end-turn on Terminate, so we don't re-emit there.
                     match self
-                        .handle_stop_at_end(&stop_reason, &mut stop_hook_active, turn_count, id)
+                        .handle_stop_at_end(&stop_reason, &mut stop_hook_active, &mut stop_hook_blocking_count, turn_count, id)
                         .await
                     {
                         StopHookFlow::Terminate(_) => return Ok(TurnOutcome::EndTurn),
@@ -6914,6 +7149,54 @@ mod turn_recovery_tests {
         Arc::new(exec)
     }
 
+    /// A Stop hook that blocks EXACTLY ONCE, then passes. Used by tests that need
+    /// precisely one stop-hook continuation, isolated from the consecutive-block
+    /// CAP (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`, default 8): a block-every-time hook
+    /// would now drive up to 8 continuations, so a test asserting a single
+    /// continuation must bound the blocking deterministically.
+    struct BlockOnceStopHandler {
+        blocked: std::sync::atomic::AtomicBool,
+    }
+    #[async_trait]
+    impl BuiltinHookHandler for BlockOnceStopHandler {
+        fn id(&self) -> &str {
+            "block-stop"
+        }
+        async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
+            let first = matches!(event, HookEvent::Stop { .. })
+                && !self
+                    .blocked
+                    .swap(true, std::sync::atomic::Ordering::SeqCst);
+            let response = first.then(|| HookResponse {
+                decision: Some(HookDecision::Block),
+                reason: Some("keep going".into()),
+                system_message: Some("[stop-hook] please continue".into()),
+                ..Default::default()
+            });
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                response,
+            }
+        }
+    }
+
+    async fn exec_block_once_stop() -> Arc<HookExecutorImpl> {
+        let registry = Arc::new(RwLock::new(HookRegistry::new()));
+        registry
+            .write()
+            .await
+            .register(builtin_hook("block-stop", HookEventType::Stop));
+        let mut exec =
+            HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(BlockOnceStopHandler {
+            blocked: std::sync::atomic::AtomicBool::new(false),
+        }));
+        Arc::new(exec)
+    }
+
     /// Seed a history far past the hard blocking limit. The default model
     /// (`claude-opus-4-7`, 200k window) blocks around ~177k tokens; 2M chars ≈
     /// 500k tokens (estimator is chars/4), comfortably over.
@@ -6970,7 +7253,11 @@ mod turn_recovery_tests {
             "the blocking-limit preempt must NOT open the stream"
         );
 
-        // The byte-exact prompt-too-long message + an EndTurn("prompt_too_long").
+        // The byte-exact prompt-too-long message + an EndTurn("blocking_limit").
+        // The PROACTIVE blocking-limit preempt ends with the DISTINCT terminal
+        // reason `blocking_limit` (the binary keeps it separate from the
+        // reactive-exhausted `prompt_too_long`); the surfaced message text is
+        // still the byte-exact "Prompt is too long".
         let events = output.snapshot().await;
         assert!(
             events
@@ -6980,9 +7267,9 @@ mod turn_recovery_tests {
         );
         assert!(
             events.iter().any(
-                |e| matches!(e, OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "prompt_too_long")
+                |e| matches!(e, OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "blocking_limit")
             ),
-            "the turn must end with stop_reason prompt_too_long; events={events:#?}"
+            "the proactive preempt must end with stop_reason blocking_limit; events={events:#?}"
         );
     }
 
@@ -7086,9 +7373,10 @@ mod turn_recovery_tests {
 
     #[tokio::test]
     async fn recov2_stop_failure_fires_on_api_error_end_and_stop_does_not() {
-        // A history over the blocking limit ⇒ the batched preempt surfaces
-        // prompt_too_long, which is an api-error end. `StopFailure` must fire
-        // (error == "invalid_request"); the normal `Stop` hooks must NOT.
+        // A history over the blocking limit ⇒ the batched proactive preempt ends
+        // with terminal reason `blocking_limit`, which is an api-error end (the
+        // surfaced message's api-error field is `invalid_request`). `StopFailure`
+        // must fire (error == "invalid_request"); the normal `Stop` hooks must NOT.
         let log = Arc::new(StdMutex::new(Vec::<String>::new()));
         let hooks = exec_recording(
             log.clone(),
@@ -7346,7 +7634,12 @@ mod turn_recovery_tests {
             OrchestratorConfig::default(),
             api.clone(),
             Arc::new(ToolRegistry::new()),
-            exec_blocking_stop().await,
+            // Block-ONCE: this test isolates the recovery-reset on a SINGLE
+            // stop-hook continuation. A block-every-time hook would now (post
+            // #2 cap-counter) also block the final recovery-exhaustion end and
+            // drive further continuations up to CLAUDE_CODE_STOP_HOOK_BLOCK_CAP
+            // (default 8), exhausting the scripted responses.
+            exec_block_once_stop().await,
             Arc::new(NoOpPermissionGate),
             Arc::new(MockOutputStream::new()),
             Arc::new(StaticMemoryProvider::empty()),

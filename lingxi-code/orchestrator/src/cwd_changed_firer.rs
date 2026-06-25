@@ -51,6 +51,13 @@ pub struct OrchestratorCwdChangedFirer {
     /// `getTranscriptPathForSession`), stamped on the `CwdChanged` hook payload's
     /// `transcript_path` (FIX B). Empty for builds wiring neither.
     transcript_path: PathBuf,
+    /// The orchestrator's shared mutable-cwd cell. On every fire (each Bash `cd`
+    /// that moved the persistent shell cwd) `fire.new` is written here BEFORE the
+    /// hook fires, so the orchestrator's subsequent PreToolUse/PostToolUse/
+    /// lifecycle hook payloads read the post-`cd` directory — 1:1 with
+    /// claude-code, where `setCwdState(new)` (`Shell.ts:409`) updates the single
+    /// global cwd every later `getCwd()` reads.
+    current_cwd: Arc<std::sync::Mutex<PathBuf>>,
 }
 
 impl OrchestratorCwdChangedFirer {
@@ -59,11 +66,17 @@ impl OrchestratorCwdChangedFirer {
     /// the orchestrator so the `CwdChanged` hook rides the identical registry /
     /// async / sandbox plumbing.
     #[must_use]
-    pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf, transcript_path: PathBuf) -> Self {
+    pub fn new(
+        hooks: Arc<HookExecutorImpl>,
+        cwd: PathBuf,
+        transcript_path: PathBuf,
+        current_cwd: Arc<std::sync::Mutex<PathBuf>>,
+    ) -> Self {
         Self {
             hooks,
             cwd,
             transcript_path,
+            current_cwd,
         }
     }
 }
@@ -71,6 +84,12 @@ impl OrchestratorCwdChangedFirer {
 #[async_trait]
 impl CwdChangedFirer for OrchestratorCwdChangedFirer {
     async fn fire(&self, fire: CwdChangedFire) {
+        // Update the orchestrator's shared current-cwd FIRST (mirrors
+        // `setCwdState(new)` firing BEFORE `executeCwdChangedHooks` in
+        // Shell.ts:409), so any hook that fires AFTER this `cd` reads the new dir.
+        if let Ok(mut g) = self.current_cwd.lock() {
+            g.clone_from(&fire.new);
+        }
         // Map the fire's old/new shell cwd onto the `HookEvent::CwdChanged`
         // variant (`old` / `new`); the envelope builder serializes these as the
         // wire `old_cwd` / `new_cwd` (executor.rs build_lifecycle_envelope_body).
@@ -115,6 +134,7 @@ mod tests {
             noop_hook_executor(),
             PathBuf::from("/work"),
             PathBuf::from("/work/.t.jsonl"),
+            Arc::new(Mutex::new(PathBuf::from("/work"))),
         );
         firer
             .fire(CwdChangedFire {
@@ -228,10 +248,12 @@ mod tests {
         );
         exec.register_builtin(handler);
 
+        let current_cwd = Arc::new(Mutex::new(PathBuf::from("/work")));
         let firer = OrchestratorCwdChangedFirer::new(
             Arc::new(exec),
             PathBuf::from("/work"),
             PathBuf::from("/home/.claude/projects/-work/abc.jsonl"),
+            current_cwd.clone(),
         );
         firer
             .fire(CwdChangedFire {
@@ -239,6 +261,14 @@ mod tests {
                 new: PathBuf::from("/work/new"),
             })
             .await;
+
+        // The shared current-cwd cell is advanced to the new dir, so later hooks
+        // read the post-`cd` directory.
+        assert_eq!(
+            *current_cwd.lock().unwrap(),
+            PathBuf::from("/work/new"),
+            "the firer must advance the shared current_cwd to fire.new"
+        );
 
         let got = seen.lock().unwrap().clone();
         assert_eq!(

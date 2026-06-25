@@ -645,14 +645,36 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                 0,
             ));
         }
+        PtlCallOutcome::BlockingLimit => {
+            // PROACTIVE blocking-limit preempt: surface the prompt-too-long
+            // message (its api-error field is `invalid_request`, like the
+            // binary's `Ol({...,error:"invalid_request"})`) but end the turn with
+            // the DISTINCT terminal reason `"blocking_limit"` — the binary's
+            // `{reason:"blocking_limit"}` (offset ~208021400), kept separate from
+            // the reactive-exhausted `prompt_too_long` so SDK/stream-json
+            // consumers categorize the two preempt origins distinctly.
+            let assistant_id = surface_prompt_too_long(orch).await;
+            return Ok((
+                TurnStepOutcome::Ended {
+                    final_message_id: assistant_id,
+                    stop_reason: "blocking_limit".to_string(),
+                },
+                0,
+            ));
+        }
         PtlCallOutcome::RapidRefillBreaker => {
-            // #54 reactive trip: surface the thrashing message + end the turn
-            // with `invalid_request` (the binary's `reason:"rapid_refill_breaker"`).
+            // #54 reactive trip: surface the thrashing message (api-error field
+            // `invalid_request`, matching the binary `Ol({...,error:"invalid_request"})`)
+            // but end the turn with the terminal reason `"rapid_refill_breaker"`
+            // — the binary's loop returns `{reason:"rapid_refill_breaker"}` even
+            // though the assistant MESSAGE carries `error:"invalid_request"`
+            // (`bin/claude.exe` offset ~208016504; terminal-reason enum lists
+            // `rapid_refill_breaker`, never `invalid_request`).
             let assistant_id = surface_rapid_refill_thrashing(orch).await;
             return Ok((
                 TurnStepOutcome::Ended {
                     final_message_id: assistant_id,
-                    stop_reason: "invalid_request".to_string(),
+                    stop_reason: "rapid_refill_breaker".to_string(),
                 },
                 0,
             ));
@@ -849,6 +871,23 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         }
     } else {
         match response.stop_reason.as_deref() {
+            // #1 needsFollowUp gate (claude-code `query.ts:554-558`, `832-835`,
+            // `1062`): continuation is keyed on tool-block PRESENCE, NOT the raw
+            // `stop_reason` string — the ref explicitly notes `stop_reason ==
+            // "tool_use"` "is unreliable -- it's not always set correctly", so it
+            // sets `needsFollowUp = true` whenever the assistant message carried
+            // ANY tool_use block (regardless of stop_reason) and `if (!needsFollowUp)`
+            // is the SOLE end-vs-continue gate. So a response that dispatched tools
+            // but reported a non-`tool_use` stop_reason (e.g. `end_turn`,
+            // `stop_sequence`, or a truncated `max_tokens` that still carried a
+            // complete tool block) must run the tools AND continue, feeding the
+            // tool_results back — NOT end the turn. This leading arm fires only when
+            // tools were dispatched (`!tool_uses.is_empty()`); a withheld
+            // `max_output_tokens` response carries NO tool_uses, so it falls through
+            // to the recovery/terminal arms below unchanged. The common `tool_use`+
+            // tools case (previously handled by the `_ => Continue` fallback) is
+            // unaffected.
+            _ if !tool_uses.is_empty() => TurnStepOutcome::Continue,
             // #77 malformed-tool-use retry (batched twin): `stop_reason ==
             // "tool_use"` but the response produced ZERO tool_use blocks. Only
             // the recovery-aware drivers participate (the per-turn guard lives on
@@ -928,9 +967,19 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
 pub(crate) enum PtlCallOutcome {
     /// The API call (or a retry after truncation/compaction) succeeded.
     Response(Box<LlmResponse>),
-    /// The blocking-limit preempt fired, or the PTL retry budget +
-    /// reactive-compact fallback were all exhausted. End the turn.
+    /// The PTL retry budget + reactive-compact fallback were all exhausted.
+    /// End the turn with terminal reason `"prompt_too_long"` (the REACTIVE
+    /// exhaustion path, `query.ts:1175`).
     PromptTooLong,
+    /// The PROACTIVE blocking-limit preempt fired: the prompt was already at
+    /// the hard blocking limit (`token_usage >= effective_window −
+    /// MANUAL_COMPACT_BUFFER_TOKENS`) BEFORE the call, so the turn ends with
+    /// the DISTINCT terminal reason `"blocking_limit"` — not the reactive
+    /// `"prompt_too_long"`. The binary keeps these two terminals separate
+    /// (`bin/claude.exe` offset ~208021400: the proactive arm returns
+    /// `{reason:"blocking_limit"}` while the reactive arm returns
+    /// `{reason:"prompt_too_long"}`; the terminal-reason enum lists both).
+    BlockingLimit,
     /// #54: the rapid-refill (thrashing) breaker tripped on the reactive PTL
     /// path — re-compacting cannot help, so surface the byte-exact thrashing
     /// message and end the turn with `reason:"rapid_refill_breaker"`
@@ -1035,7 +1084,9 @@ pub(crate) async fn call_api_with_ptl_recovery(
             model,
             "prompt at blocking limit — preempting before API call"
         );
-        return Ok(PtlCallOutcome::PromptTooLong);
+        // PROACTIVE preempt ⇒ terminal reason `"blocking_limit"` (distinct from
+        // the reactive-exhausted `PromptTooLong` returned at the tail).
+        return Ok(PtlCallOutcome::BlockingLimit);
     }
 
     // (2) Initial call. When an Opus-fallback model is configured, route the
@@ -2015,7 +2066,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         let permission_mode = Some(if plan_mode { "plan" } else { "default" }.to_string());
         let hook_ctx = HookContext {
             session_id,
-            cwd: orch.cwd.clone(),
+            cwd: orch.current_cwd(),
             transcript_path,
             permission_mode,
             ..Default::default()
@@ -3040,7 +3091,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             .unwrap_or_else(|| orch.computed_transcript_path(&session_id));
         let batch_ctx = HookContext {
             session_id,
-            cwd: orch.cwd.clone(),
+            cwd: orch.current_cwd(),
             transcript_path,
             permission_mode: Some(if plan_mode { "plan" } else { "default" }.to_string()),
             ..Default::default()

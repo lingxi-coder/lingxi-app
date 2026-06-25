@@ -1001,17 +1001,12 @@ pub fn sparkline(values: &[u64]) -> String {
         .collect()
 }
 
-/// A GitHub-style activity heatmap of `daily` (`date -> message count`), as a
-/// `Vec` of rows — a structural port of claude-code `generateHeatmap`. We keep
-/// it COMPACT (a single intensity strip ordered by date, one glyph per active
-/// day) since the screen is a string-render overlay without the Ink fixed-width
-/// week grid; the glyph set + the `Less … More` legend match the TS heatmap.
+/// (stats-heatmap-grid) `today`-defaulting wrapper around
+/// [`heatmap_with_today`] — the live render path's entry point (`today` is
+/// `Local::now()`'s date; the parameterized form exists purely for
+/// deterministic tests).
 ///
 /// Returns `[]` when there is no activity (caller omits the section).
-///
-/// Structural invariant (unit-tested): the strip has exactly `daily.len()`
-/// glyphs (one per active day), each one of `· ░ ▒ ▓ █`, and the legend line is
-/// present.
 #[must_use]
 pub fn heatmap(daily: &BTreeMap<String, u64>) -> Vec<String> {
     heatmap_with_today(daily, chrono::Local::now().date_naive())

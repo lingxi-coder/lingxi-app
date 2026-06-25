@@ -156,13 +156,20 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let mut out: Vec<HookInfo> = g
             .all_hooks()
             .into_iter()
-            .map(|h| HookInfo {
-                name: h.name.clone(),
-                event: h.events.first().map_or("Unknown", event_str).to_string(),
-                matcher: h.if_condition.as_ref().map(|c| c.pattern.clone()),
-                timeout_ms: h.timeout.map_or(60_000_u64, |d| {
-                    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
-                }),
+            .map(|h| {
+                let (hook_type, content) = hook_executor_type_and_content(&h.executor);
+                HookInfo {
+                    name: h.name.clone(),
+                    event: h.events.first().map_or("Unknown", event_str).to_string(),
+                    matcher: h.if_condition.as_ref().map(|c| c.pattern.clone()),
+                    timeout_ms: h.timeout.map_or(60_000_u64, |d| {
+                        u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+                    }),
+                    hook_type,
+                    source: hook_source_description(h.source),
+                    content,
+                    status_message: h.status_message.clone(),
+                }
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -450,6 +457,48 @@ fn event_str(et: &hooks::events::HookEventType) -> &'static str {
         E::UserPromptExpansion => "UserPromptExpansion",
         E::MessageDisplay => "MessageDisplay",
     }
+}
+
+/// (hooks-detail-fields-divergent) `config.type` + the primary content field
+/// (claude-code `getContentFieldLabel`/`getContentFieldValue`,
+/// `ViewHookMode.tsx`). `Builtin` has no TS analogue (an in-process Rust
+/// handler) — surfaced as `"builtin"` with the handler id as its content.
+fn hook_executor_type_and_content(executor: &hooks::HookExecutor) -> (String, String) {
+    use hooks::HookExecutor as Ex;
+    match executor {
+        Ex::Command { command, args, .. } => {
+            let content = if args.is_empty() {
+                command.clone()
+            } else {
+                format!("{command} {}", args.join(" "))
+            };
+            ("command".to_string(), content)
+        }
+        Ex::Http { url, .. } => ("http".to_string(), url.clone()),
+        Ex::Agent { prompt, .. } => ("agent".to_string(), prompt.clone()),
+        Ex::Prompt { prompt, .. } => ("prompt".to_string(), prompt.clone()),
+        Ex::Builtin { handler_id } => ("builtin".to_string(), handler_id.clone()),
+    }
+}
+
+/// (hooks-detail-fields-divergent) claude-code
+/// `hookSourceDescriptionDisplayString` (`utils/hooks/hooksSettings.ts`).
+/// `Managed`/`FrontMatter`/`Skill` have no TS analogue (LingXi-only source
+/// kinds) — given a parallel, sensible description rather than the TS
+/// fallback (`source as string`, the bare enum name).
+fn hook_source_description(source: hooks::HookSource) -> String {
+    use hooks::HookSource as S;
+    match source {
+        S::User => "User settings (~/.claude/settings.json)",
+        S::Project => "Project settings (.claude/settings.json)",
+        S::Local => "Local settings (.claude/settings.local.json)",
+        S::Managed => "Managed settings (enterprise policy)",
+        S::Plugin => "Plugin hooks (~/.claude/plugins/*/hooks/hooks.json)",
+        S::FrontMatter => "Agent front matter",
+        S::Session => "Session hooks (in-memory, temporary)",
+        S::Skill => "Skill bundle",
+    }
+    .to_string()
 }
 
 /// Touch + spawn an editor on `target`. If the target does not yet exist,

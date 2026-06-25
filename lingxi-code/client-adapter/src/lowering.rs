@@ -544,6 +544,7 @@ mod tests {
             event: "PreToolUse".to_string(),
             matcher: Some("Bash.*".to_string()),
             timeout_ms: 5_000,
+            ..HookInfo::default()
         };
         let dto = lower_hook_info(&with);
         assert_eq!(dto.name, "guard");

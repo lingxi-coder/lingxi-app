@@ -23,6 +23,17 @@ pub struct HookRow {
     pub matcher: Option<String>,
     /// Timeout in milliseconds.
     pub timeout_ms: u64,
+    /// (hooks-detail-fields-divergent) Executor kind: `"command"` / `"http"`
+    /// / `"agent"` / `"prompt"` / the LingXi-only `"builtin"`.
+    pub hook_type: String,
+    /// (hooks-detail-fields-divergent) Human-readable origin, e.g. `"User
+    /// settings (~/.claude/settings.json)"`.
+    pub source: String,
+    /// (hooks-detail-fields-divergent) The executor's primary content
+    /// (command line / URL / prompt / handler id).
+    pub content: String,
+    /// (hooks-detail-fields-divergent) Custom status message, if set.
+    pub status_message: Option<String>,
 }
 
 /// `(event, summary)` catalog (claude-code `HookEventMetadata`), in the canonical
@@ -73,6 +84,9 @@ pub enum HooksDialogMode {
     EventList,
     /// Viewing the hooks configured for one event.
     EventHooks,
+    /// (hooks-detail-fields-divergent) Viewing one hook's full detail
+    /// (claude-code `ViewHookMode`).
+    HookDetail,
 }
 
 /// Screen state.
@@ -120,6 +134,15 @@ impl HooksScreenState {
             None => Vec::new(),
         }
     }
+
+    /// (hooks-detail-fields-divergent) The hook `selected` indexes into
+    /// within [`Self::hooks_for_selected_event`] — the open `HookDetail`.
+    #[must_use]
+    pub fn selected_hook(&self) -> Option<&HookRow> {
+        self.hooks_for_selected_event()
+            .into_iter()
+            .nth(self.selected)
+    }
 }
 
 /// Controller outcome after a key.
@@ -164,10 +187,36 @@ pub fn handle_hooks_key(
             _ => HooksOutcome::Stay,
         },
         HooksDialogMode::EventHooks => match key {
+            KeyCode::Up => {
+                state.selected = state.selected.saturating_sub(1);
+                HooksOutcome::Stay
+            }
+            KeyCode::Down => {
+                let max = state.hooks_for_selected_event().len();
+                if max > 0 {
+                    state.selected = (state.selected + 1).min(max - 1);
+                }
+                HooksOutcome::Stay
+            }
+            // (hooks-detail-fields-divergent) Enter drills into the
+            // selected hook's full detail (claude-code `ViewHookMode`).
+            KeyCode::Enter => {
+                if !state.hooks_for_selected_event().is_empty() {
+                    state.mode = HooksDialogMode::HookDetail;
+                }
+                HooksOutcome::Stay
+            }
             KeyCode::Esc | KeyCode::Left => {
                 state.mode = HooksDialogMode::EventList;
                 state.selected_event = None;
                 state.selected = 0;
+                HooksOutcome::Stay
+            }
+            _ => HooksOutcome::Stay,
+        },
+        HooksDialogMode::HookDetail => match key {
+            KeyCode::Esc | KeyCode::Left => {
+                state.mode = HooksDialogMode::EventHooks;
                 HooksOutcome::Stay
             }
             _ => HooksOutcome::Stay,
@@ -215,10 +264,40 @@ pub fn render_hooks_to_string(state: &HooksScreenState) -> String {
             if !summary.is_empty() {
                 out.push_str(&format!("{summary}\n"));
             }
-            for row in &hooks {
+            for (i, row) in hooks.iter().enumerate() {
+                let marker = if i == state.selected { "\u{276F} " } else { "  " };
                 let matcher = row.matcher.as_deref().unwrap_or("(all)");
-                out.push_str(&format!("  {} \u{00B7} {matcher}\n", row.name));
+                out.push_str(&format!("{marker}{} \u{00B7} {matcher}\n", row.name));
             }
+            out.push_str(
+                "Press \u{2191}\u{2193} to navigate \u{00B7} Enter for details \u{00B7} Esc to go back",
+            );
+            out
+        }
+        // (hooks-detail-fields-divergent) claude-code `ViewHookMode`.
+        HooksDialogMode::HookDetail => {
+            let Some(row) = state.selected_hook() else {
+                return "Hook details\n(hook no longer available)".to_string();
+            };
+            let mut out = String::from("Hook details\n");
+            out.push_str(&format!("Event: {}\n", row.event));
+            let matcher = row.matcher.as_deref().unwrap_or("(all)");
+            out.push_str(&format!("Matcher: {matcher}\n"));
+            out.push_str(&format!("Type: {}\n", row.hook_type));
+            out.push_str(&format!("Source: {}\n", row.source));
+            let content_label = match row.hook_type.as_str() {
+                "command" => "Command",
+                "http" => "URL",
+                "agent" | "prompt" => "Prompt",
+                _ => "Content",
+            };
+            out.push_str(&format!("{content_label}: {}\n", row.content));
+            if let Some(msg) = row.status_message.as_deref() {
+                out.push_str(&format!("Status message: {msg}\n"));
+            }
+            out.push_str(
+                "To modify or remove this hook, edit settings.json directly or ask Claude to help.\n",
+            );
             out.push_str("Esc to go back");
             out
         }
@@ -236,6 +315,7 @@ mod tests {
             event: event.into(),
             matcher: None,
             timeout_ms: 60_000,
+            ..HookRow::default()
         }
     }
 
@@ -291,6 +371,7 @@ mod tests {
                     event: "PreToolUse".into(),
                     matcher: Some("Edit|Write".into()),
                     timeout_ms: 0,
+                    ..HookRow::default()
                 },
                 row("guard", "PreToolUse"),
             ],
@@ -301,7 +382,7 @@ mod tests {
         let out = render_hooks_to_string(&s);
         assert_eq!(
             out,
-            "PreToolUse hooks\nBefore tool execution\n  fmt \u{00B7} Edit|Write\n  guard \u{00B7} (all)\nEsc to go back"
+            "PreToolUse hooks\nBefore tool execution\n\u{276F} fmt \u{00B7} Edit|Write\n  guard \u{00B7} (all)\nPress \u{2191}\u{2193} to navigate \u{00B7} Enter for details \u{00B7} Esc to go back"
         );
     }
 
@@ -309,6 +390,44 @@ mod tests {
     fn empty_list_shows_locked_empty_state() {
         let out = render_hooks_to_string(&HooksScreenState::default());
         assert_eq!(out, "Hooks\nNo hooks configured.");
+    }
+
+    #[test]
+    fn enter_on_a_hook_opens_detail_with_all_fields() {
+        // (hooks-detail-fields-divergent)
+        let mut s = HooksScreenState {
+            rows: vec![HookRow {
+                name: "fmt".into(),
+                event: "PreToolUse".into(),
+                matcher: Some("Edit|Write".into()),
+                timeout_ms: 5_000,
+                hook_type: "command".into(),
+                source: "Project settings (.claude/settings.json)".into(),
+                content: "prettier --write".into(),
+                status_message: Some("Formatting…".into()),
+            }],
+            mode: HooksDialogMode::EventHooks,
+            selected_event: Some("PreToolUse".into()),
+            ..HooksScreenState::default()
+        };
+        assert_eq!(handle_hooks_key(&mut s, KeyCode::Enter), HooksOutcome::Stay);
+        assert_eq!(s.mode, HooksDialogMode::HookDetail);
+        let out = render_hooks_to_string(&s);
+        assert_eq!(
+            out,
+            "Hook details\n\
+             Event: PreToolUse\n\
+             Matcher: Edit|Write\n\
+             Type: command\n\
+             Source: Project settings (.claude/settings.json)\n\
+             Command: prettier --write\n\
+             Status message: Formatting\u{2026}\n\
+             To modify or remove this hook, edit settings.json directly or ask Claude to help.\n\
+             Esc to go back"
+        );
+        // Esc backs out to the per-event list, NOT the top-level event list.
+        assert_eq!(handle_hooks_key(&mut s, KeyCode::Esc), HooksOutcome::Stay);
+        assert_eq!(s.mode, HooksDialogMode::EventHooks);
     }
 
     #[test]

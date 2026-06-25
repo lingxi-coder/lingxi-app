@@ -179,6 +179,7 @@ async fn hooks_dispatch() {
         event: "PostToolUse".into(),
         matcher: None,
         timeout_ms: 60_000,
+        ..HookInfo::default()
     }]);
     let r = d.dispatch("/hooks").await;
     if let SlashDispatchResult::Handled { display } = r {

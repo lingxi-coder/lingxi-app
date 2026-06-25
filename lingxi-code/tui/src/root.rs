@@ -1609,6 +1609,10 @@ pub async fn pump_open_hooks(
             event: i.event,
             matcher: i.matcher,
             timeout_ms: i.timeout_ms,
+            hook_type: i.hook_type,
+            source: i.source,
+            content: i.content,
+            status_message: i.status_message,
         })
         .collect();
 

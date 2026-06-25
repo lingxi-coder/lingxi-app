@@ -91,6 +91,7 @@ async fn non_empty_hooks_matches_fixture() {
         event: "PreToolUse".into(),
         matcher: Some("Write|Edit".into()),
         timeout_ms: 30_000,
+        ..HookInfo::default()
     }]);
     let r = HooksHandler::new(mock).handle(&args("hooks")).await;
     let expected = fixture["non_empty_sample"]["hooks"]["output"]

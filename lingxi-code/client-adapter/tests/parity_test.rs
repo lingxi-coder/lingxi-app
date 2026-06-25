@@ -278,12 +278,14 @@ fn hook_info_parity() {
         event: "PreToolUse".to_string(),
         matcher: Some("Bash.*".to_string()),
         timeout_ms: 5_000,
+        ..HookInfo::default()
     };
     let without_matcher = HookInfo {
         name: "stop-logger".to_string(),
         event: "Stop".to_string(),
         matcher: None,
         timeout_ms: 60_000,
+        ..HookInfo::default()
     };
 
     let with_dto = lower_hook_info(&with_matcher);

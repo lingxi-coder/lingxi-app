@@ -159,7 +159,7 @@ pub enum McpStatus {
 }
 
 /// One hook entry returned by [`OrchestratorHandle::list_hooks`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HookInfo {
     /// Hook identifier.
     pub name: String,
@@ -169,6 +169,22 @@ pub struct HookInfo {
     pub matcher: Option<String>,
     /// Timeout in milliseconds (default `60_000` if unset).
     pub timeout_ms: u64,
+    /// (hooks-detail-fields-divergent) Executor kind (claude-code
+    /// `config.type`): `"command"` / `"http"` / `"agent"` / `"prompt"`, or the
+    /// LingXi-only `"builtin"` (an in-process Rust handler; no TS analogue).
+    pub hook_type: String,
+    /// (hooks-detail-fields-divergent) Human-readable origin (claude-code
+    /// `hookSourceDescriptionDisplayString`), e.g. `"User settings
+    /// (~/.claude/settings.json)"`.
+    pub source: String,
+    /// (hooks-detail-fields-divergent) The executor's primary content field
+    /// (claude-code `getContentFieldValue`): the shell command line for
+    /// `"command"`, the URL for `"http"`, the prompt for `"agent"`/`"prompt"`,
+    /// the handler id for the LingXi-only `"builtin"`.
+    pub content: String,
+    /// (hooks-detail-fields-divergent) Custom status message shown while the
+    /// hook runs, if the definition set one.
+    pub status_message: Option<String>,
 }
 
 /// One subagent entry returned by [`OrchestratorHandle::list_agents`].
@@ -1064,6 +1080,7 @@ mod tests {
             event: "PostToolUse".to_string(),
             matcher: Some("Write|Edit".to_string()),
             timeout_ms: 60_000,
+            ..HookInfo::default()
         };
         assert_eq!(info.timeout_ms, 60_000);
         assert_eq!(info.matcher.as_deref(), Some("Write|Edit"));

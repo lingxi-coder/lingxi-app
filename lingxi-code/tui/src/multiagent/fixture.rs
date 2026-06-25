@@ -47,6 +47,7 @@ mod tests {
                     task_type: "local_bash".into(),
                     status: "running".into(),
                     description: "x".into(),
+                    command: None,
                 })
                 .collect(),
         )]

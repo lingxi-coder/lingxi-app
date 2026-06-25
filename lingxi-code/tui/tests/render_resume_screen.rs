@@ -23,20 +23,23 @@ fn meta(title: &str, secs: u64, count: usize) -> SessionMetadata {
 
 #[test]
 fn snapshot_resume_three_sessions_with_preview() {
+    // Fixed `now` (UNIX_EPOCH + 900s) for deterministic relative-time metadata.
+    let now = UNIX_EPOCH + Duration::from_secs(900);
     let st = ResumeState::new(vec![
-        ResumeRow::from_meta(&meta("first session", 300, 5)),
-        ResumeRow::from_meta(&meta("second session", 200, 2)),
-        ResumeRow::from_meta(&meta("third session", 100, 1)),
+        ResumeRow::from_meta_at(&meta("first session", 300, 5), now),
+        ResumeRow::from_meta_at(&meta("second session", 200, 2), now),
+        ResumeRow::from_meta_at(&meta("third session", 100, 1), now),
     ]);
     let mut element = element! { ResumeScreen(state: st) };
     let frame = element.to_string();
     insta::assert_snapshot!("resume_three_sessions_with_preview", &frame);
-    assert!(frame.contains("Resume which session?"), "got: {frame}");
-    assert!(frame.contains("> 1. first session"), "got: {frame}");
-    assert!(frame.contains("(5 messages)"), "got: {frame}");
-    assert!(frame.contains("(1 message)"), "got: {frame}");
-    // Preview pane shows the selected (first) row's title.
-    assert!(frame.contains("Title:    first session"), "got: {frame}");
+    assert!(frame.contains("Resume Session"), "got: {frame}");
+    assert!(frame.contains("> first session"), "got: {frame}");
+    assert!(frame.contains("10 minutes ago \u{00b7} 5 messages"), "got: {frame}");
+    // Third session's metadata uses the singular "1 message" (no parens).
+    assert!(frame.contains("13 minutes ago \u{00b7} 1 message"), "got: {frame}");
+    // (resume-preview-pane-not-in-shipped) No always-on preview pane.
+    assert!(!frame.contains("Title:    first session"), "got: {frame}");
 }
 
 #[test]

@@ -39,8 +39,10 @@ pub use history_search::{
 
 pub mod image_paste;
 pub use image_paste::{
-    apply_paste_block, format_image_ref, is_image_path, process_paste, Attachment, AttachmentKind,
-    PasteApply, PasteCoalescer, PasteOutcome, PasteState, BURST_WINDOW,
+    apply_paste_block, expand_pasted_text_refs, format_image_ref, format_pasted_text_ref,
+    is_image_path, paste_text_ref_num_lines, process_paste, Attachment, AttachmentKind,
+    PasteApply, PasteCoalescer, PasteOutcome, PasteState, BURST_WINDOW, MAX_PASTE_LINES,
+    PASTE_THRESHOLD,
 };
 
 pub mod vim;

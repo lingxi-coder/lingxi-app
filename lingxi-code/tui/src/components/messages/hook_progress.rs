@@ -4,10 +4,13 @@
 //! `Running {event} hook…` / `Running {event} hooks…`; transcript summary
 //! (Pre/PostToolUse) → `{n} {event} hook ran` / `{n} {event} hooks ran`.
 //! Singular when `count == 1`. `{event}` is bold dim; the rest dim.
+//! (hook-progress-missing-gutter) Wrapped in the `MessageResponse` `  ⎿  `
+//! gutter, same as `user_tool_result.rs`.
 #![allow(clippy::needless_pass_by_value)]
 
 use iocraft::prelude::*;
 
+use crate::components::messages::user_tool_result::MARKER;
 use crate::theme::Theme;
 
 /// Props for [`HookProgressMessage`].
@@ -24,20 +27,20 @@ pub struct HookProgressProps {
     pub theme: Theme,
 }
 
-/// Pure-string renderer.
+/// Pure-string renderer. (hook-progress-missing-gutter) `  ⎿  ` gutter prefix.
 #[must_use]
 pub fn render_hook_progress_to_string(props: HookProgressProps) -> String {
     let event = &props.event;
     if props.transcript_summary {
         let unit = if props.count == 1 { "hook" } else { "hooks" };
-        format!("{n} {event} {unit} ran", n = props.count)
+        format!("{MARKER}{n} {event} {unit} ran", n = props.count)
     } else {
         let unit = if props.count == 1 {
             "hook\u{2026}"
         } else {
             "hooks\u{2026}"
         };
-        format!("Running {event} {unit}")
+        format!("{MARKER}Running {event} {unit}")
     }
 }
 

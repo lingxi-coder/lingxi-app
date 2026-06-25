@@ -194,6 +194,187 @@ pub async fn persist_permission_update(
     Ok(true)
 }
 
+/// Remove `rule`'s string form from `permissions.{behavior}` of `raw` settings
+/// JSON (the inverse of [`apply_rule_to_settings_json`]). Returns:
+/// - `Ok(Some(new_json))` — at least one matching entry was removed; `new_json`
+///   is the pretty-printed updated settings (trailing newline).
+/// - `Ok(None)` — no matching entry (nothing to write).
+/// - `Err(())` — `raw` is non-empty and not a JSON object (caller maps to
+///   [`PersistError::BrokenJson`] and must NOT overwrite).
+///
+/// Matching is canonical (both sides normalized via `PermissionRuleValue`), so a
+/// legacy on-disk alias of the same rule is removed too.
+fn remove_rule_from_settings_json(raw: &str, rule: &PermissionRule) -> Result<Option<String>, ()> {
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    let mut root: Value = serde_json::from_str(raw).map_err(|_| ())?;
+    let obj = root.as_object_mut().ok_or(())?;
+    let Some(perms) = obj.get_mut("permissions") else {
+        return Ok(None);
+    };
+    let perms_obj = perms.as_object_mut().ok_or(())?;
+    let key = behavior_key(rule.behavior);
+    let Some(arr) = perms_obj.get_mut(key) else {
+        return Ok(None);
+    };
+    let arr_vec = arr.as_array_mut().ok_or(())?;
+
+    let target = rule.value.to_rule_string();
+    let before = arr_vec.len();
+    arr_vec.retain(|existing| {
+        existing.as_str().is_none_or(|s| {
+            PermissionRuleValue::from_rule_string(s).to_rule_string() != target
+        })
+    });
+    if arr_vec.len() == before {
+        return Ok(None); // nothing matched.
+    }
+    let serialized = serde_json::to_string_pretty(&root).map_err(|_| ())?;
+    Ok(Some(serialized + "\n"))
+}
+
+/// Remove `update.rule` from its destination settings file — the inverse of
+/// [`persist_permission_update`], for the interactive `/permissions` delete
+/// (PERM-1). Best-effort + idempotent: `Ok(true)` when an entry was removed,
+/// `Ok(false)` when the destination is not persistable or no entry matched.
+///
+/// # Errors
+/// [`PersistError::BrokenJson`] if the destination is non-empty and not valid
+/// JSON (left untouched); [`PersistError::Io`] on a read/write failure.
+pub async fn remove_permission_update(
+    update: &PermissionUpdate,
+    paths: &PermissionPaths,
+) -> Result<bool, PersistError> {
+    let Some(path) = paths.destination_path(update.destination) else {
+        return Ok(false);
+    };
+    let raw = match tokio::fs::read_to_string(&path).await {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            return Err(PersistError::Io {
+                path: path.clone(),
+                source: e,
+            })
+        }
+    };
+    let Some(new_json) = remove_rule_from_settings_json(&raw, &update.rule)
+        .map_err(|()| PersistError::BrokenJson(path.clone()))?
+    else {
+        return Ok(false);
+    };
+    tokio::fs::write(&path, new_json)
+        .await
+        .map_err(|e| PersistError::Io {
+            path: path.clone(),
+            source: e,
+        })?;
+    Ok(true)
+}
+
+/// (PERM-1 Workspace tab) Add or remove `dir` in
+/// `permissions.additionalDirectories` of `raw` settings JSON. Returns:
+/// - `Ok(Some(new_json))` — the array changed; pretty-printed + trailing
+///   newline, preserving every other key.
+/// - `Ok(None)` — no change needed (add: already present; remove: absent).
+/// - `Err(())` — `raw` is non-empty and not a JSON object, or
+///   `permissions`/`additionalDirectories` is the wrong type (caller maps to
+///   [`PersistError::BrokenJson`] and must NOT overwrite).
+///
+/// Directory entries are compared verbatim (claude-code stores the path
+/// string as-typed; no canonicalization).
+fn apply_directory_to_settings_json(raw: &str, dir: &str, add: bool) -> Result<Option<String>, ()> {
+    if !add && raw.trim().is_empty() {
+        return Ok(None);
+    }
+    let mut root: Value = if raw.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(raw).map_err(|_| ())?
+    };
+    let obj = root.as_object_mut().ok_or(())?;
+
+    if add {
+        let perms = obj.entry("permissions").or_insert_with(|| json!({}));
+        let perms_obj = perms.as_object_mut().ok_or(())?;
+        let arr = perms_obj
+            .entry("additionalDirectories")
+            .or_insert_with(|| json!([]));
+        let arr_vec = arr.as_array_mut().ok_or(())?;
+        if arr_vec.iter().filter_map(Value::as_str).any(|d| d == dir) {
+            return Ok(None); // already present.
+        }
+        arr_vec.push(json!(dir));
+    } else {
+        let Some(perms) = obj.get_mut("permissions") else {
+            return Ok(None);
+        };
+        let perms_obj = perms.as_object_mut().ok_or(())?;
+        let Some(arr) = perms_obj.get_mut("additionalDirectories") else {
+            return Ok(None);
+        };
+        let arr_vec = arr.as_array_mut().ok_or(())?;
+        let before = arr_vec.len();
+        arr_vec.retain(|d| d.as_str() != Some(dir));
+        if arr_vec.len() == before {
+            return Ok(None); // nothing matched.
+        }
+    }
+    let serialized = serde_json::to_string_pretty(&root).map_err(|_| ())?;
+    Ok(Some(serialized + "\n"))
+}
+
+/// (PERM-1 Workspace tab) Add (`add = true`) or remove (`add = false`) a
+/// workspace directory in the destination settings file's
+/// `permissions.additionalDirectories` array. Best-effort + idempotent:
+/// `Ok(true)` when the file changed, `Ok(false)` when the destination is not
+/// persistable or no change was needed.
+///
+/// # Errors
+/// [`PersistError::BrokenJson`] if the destination is non-empty and not valid
+/// JSON (left untouched); [`PersistError::Io`] on a read/create/write failure.
+pub async fn persist_workspace_directory(
+    dir: &str,
+    add: bool,
+    dest: PermissionUpdateDestination,
+    paths: &PermissionPaths,
+) -> Result<bool, PersistError> {
+    let Some(path) = paths.destination_path(dest) else {
+        return Ok(false);
+    };
+    let raw = match tokio::fs::read_to_string(&path).await {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if !add {
+                return Ok(false); // nothing to remove from a missing file.
+            }
+            String::new()
+        }
+        Err(e) => {
+            return Err(PersistError::Io {
+                path: path.clone(),
+                source: e,
+            })
+        }
+    };
+    let Some(new_json) = apply_directory_to_settings_json(&raw, dir, add)
+        .map_err(|()| PersistError::BrokenJson(path.clone()))?
+    else {
+        return Ok(false);
+    };
+    if let Some(parent) = path.parent() {
+        ensure_dir(parent, &path).await?;
+    }
+    tokio::fs::write(&path, new_json)
+        .await
+        .map_err(|e| PersistError::Io {
+            path: path.clone(),
+            source: e,
+        })?;
+    Ok(true)
+}
+
 async fn ensure_dir(parent: &Path, path: &Path) -> Result<(), PersistError> {
     tokio::fs::create_dir_all(parent)
         .await
@@ -264,6 +445,49 @@ mod tests {
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["permissions"]["allow"], json!(["Bash"]));
         assert_eq!(v["model"], json!("x"));
+    }
+
+    // ── remove (PERM-1) ──────────────────────────────────────────────────
+
+    #[test]
+    fn removes_rule_preserving_others() {
+        let raw = r#"{ "model": "x", "permissions": { "allow": ["Read", "Edit(src/**)"], "deny": ["Bash(rm:*)"] } }"#;
+        let rule = allow_rule("Read", PermissionUpdateDestination::LocalSettings).rule;
+        let out = remove_rule_from_settings_json(raw, &rule).unwrap().unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["permissions"]["allow"], json!(["Edit(src/**)"]));
+        assert_eq!(v["permissions"]["deny"], json!(["Bash(rm:*)"]));
+        assert_eq!(v["model"], json!("x"));
+        assert!(out.ends_with('\n'));
+    }
+
+    #[test]
+    fn remove_is_noop_when_absent_or_empty() {
+        // Rule not present → None.
+        let raw = r#"{ "permissions": { "allow": ["Read"] } }"#;
+        let rule = allow_rule("Bash", PermissionUpdateDestination::LocalSettings).rule;
+        assert!(remove_rule_from_settings_json(raw, &rule).unwrap().is_none());
+        // Empty / missing permissions → None.
+        assert!(remove_rule_from_settings_json("", &rule).unwrap().is_none());
+        assert!(remove_rule_from_settings_json(r#"{ "model": "x" }"#, &rule)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn remove_matches_legacy_alias() {
+        // On-disk "Task" normalizes to "Agent"; removing "Agent" removes it.
+        let raw = r#"{ "permissions": { "allow": ["Task", "Read"] } }"#;
+        let agent = allow_rule("Agent", PermissionUpdateDestination::LocalSettings).rule;
+        let out = remove_rule_from_settings_json(raw, &agent).unwrap().unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["permissions"]["allow"], json!(["Read"]));
+    }
+
+    #[test]
+    fn remove_broken_json_errors_without_write() {
+        let rule = allow_rule("Bash", PermissionUpdateDestination::LocalSettings).rule;
+        assert!(remove_rule_from_settings_json("{not json", &rule).is_err());
     }
 
     #[test]
@@ -369,6 +593,96 @@ mod tests {
         // File left untouched.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ broken");
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── (PERM-1 Workspace tab) additionalDirectories add/remove ──────────
+
+    #[test]
+    fn adds_directory_to_empty_settings() {
+        let out = apply_directory_to_settings_json("", "/extra/dir", true)
+            .unwrap()
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["permissions"]["additionalDirectories"],
+            json!(["/extra/dir"])
+        );
+        assert!(out.ends_with('\n'));
+    }
+
+    #[test]
+    fn adds_directory_preserving_other_keys_and_dedups() {
+        let raw = r#"{ "model": "x", "permissions": { "allow": ["Read"], "additionalDirectories": ["/a"] } }"#;
+        let out = apply_directory_to_settings_json(raw, "/b", true)
+            .unwrap()
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["permissions"]["additionalDirectories"],
+            json!(["/a", "/b"])
+        );
+        assert_eq!(v["permissions"]["allow"], json!(["Read"]));
+        assert_eq!(v["model"], json!("x"));
+        // Adding an already-present dir is a no-op.
+        assert!(apply_directory_to_settings_json(raw, "/a", true)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn removes_directory_and_noop_when_absent() {
+        let raw = r#"{ "permissions": { "additionalDirectories": ["/a", "/b"] } }"#;
+        let out = apply_directory_to_settings_json(raw, "/a", false)
+            .unwrap()
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["permissions"]["additionalDirectories"], json!(["/b"]));
+        // Removing an absent dir is a no-op.
+        assert!(apply_directory_to_settings_json(raw, "/nope", false)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn directory_broken_json_errors_without_overwrite() {
+        assert!(apply_directory_to_settings_json("{ broken", "/x", true).is_err());
+    }
+
+    #[tokio::test]
+    async fn persist_workspace_directory_roundtrips_to_local_settings() {
+        let tmp = std::env::temp_dir().join(format!("lx-ws-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("proj")).unwrap();
+        let paths = PermissionPaths {
+            claude_home: tmp.join("home/.claude"),
+            cwd: tmp.join("proj"),
+        };
+        // Add → file created with the dir.
+        let added = persist_workspace_directory(
+            "/work/extra",
+            true,
+            PermissionUpdateDestination::LocalSettings,
+            &paths,
+        )
+        .await
+        .unwrap();
+        assert!(added);
+        let path = tmp.join("proj/.claude/settings.local.json");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("/work/extra"));
+        // Remove → gone.
+        let removed = persist_workspace_directory(
+            "/work/extra",
+            false,
+            PermissionUpdateDestination::LocalSettings,
+            &paths,
+        )
+        .await
+        .unwrap();
+        assert!(removed);
+        let body2 = std::fs::read_to_string(&path).unwrap();
+        assert!(!body2.contains("/work/extra"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

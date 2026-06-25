@@ -1,9 +1,10 @@
 ---
 source: tui/tests/render_virtual_window.rs
+assertion_line: 40
 expression: element.to_string()
 ---
 > short user line
-● first
+⏺ first
   second
   third
   fourth

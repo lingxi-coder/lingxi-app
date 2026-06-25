@@ -96,3 +96,28 @@ fn slash_theme_opens_picker_screen() {
         "/theme must not echo as a user message"
     );
 }
+
+#[test]
+fn ctrl_t_toggles_syntax_highlighting_disabled() {
+    // (theme-syntax-toggle) Ctrl+T flips both the picker state and AppState's
+    // session-level `syntax_highlighting_disabled`; the picker stays open.
+    use crossterm::event::KeyModifiers;
+    let mut app = AppState::default_for_tests();
+    app.open_theme_picker();
+    let Some(Screen::Theme(mut st)) = app.active_screen.clone() else {
+        panic!("theme picker open");
+    };
+    assert!(!st.syntax_disabled);
+    assert!(!app.syntax_highlighting_disabled);
+
+    let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+    let out = theme_picker_handle_key(&mut st, &mut app, ctrl_t);
+    assert_eq!(out, ThemePickerOutcome::Stay, "Ctrl+T keeps the picker open");
+    assert!(st.syntax_disabled, "picker state flipped");
+    assert!(app.syntax_highlighting_disabled, "AppState flipped");
+
+    // Toggling again restores it.
+    theme_picker_handle_key(&mut st, &mut app, KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    assert!(!st.syntax_disabled);
+    assert!(!app.syntax_highlighting_disabled);
+}

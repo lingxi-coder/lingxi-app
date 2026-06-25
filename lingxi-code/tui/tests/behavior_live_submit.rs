@@ -357,21 +357,34 @@ mod slash_routing {
     }
 
     #[test]
-    fn live_quit_submits_on_a_single_enter_no_palette_match() {
-        // No builtin command name contains 'q', so the fuzzy filter yields zero
-        // rows → palette Enter is PassThrough → dispatch fires on the FIRST Enter.
+    fn live_quit_alias_fills_exit_then_submits() {
+        // (cp-03) `quit` is an alias of `exit`, so the palette now surfaces
+        // `/exit (quit)`. Like every matched command, the first Enter ACCEPTS the
+        // suggestion (fills `/exit `, closing the palette since the trailing
+        // space is past the command token); the second Enter submits → exit.
+        // (Previously `/quit` had no match and exited on a single PassThrough Enter.)
         let mut st = fresh_state();
         for ch in "/quit".chars() {
             handle_live_key(&mut st, &key(KeyCode::Char(ch)), 24);
         }
         assert!(st.palette.open, "the leading / opens the palette");
         assert!(
-            st.palette.rows().is_empty(),
-            "no name matches 'quit' → zero rows"
+            st.palette
+                .rows()
+                .iter()
+                .any(|r| r.name == "exit" && r.matched_alias == Some("quit")),
+            "/quit surfaces /exit via its alias"
         );
 
+        // First Enter accepts the suggestion → fills `/exit `, no exit yet.
         handle_live_key(&mut st, &key(KeyCode::Enter), 24);
-        assert!(st.should_exit, "single Enter ran /quit");
+        assert!(!st.should_exit, "first Enter accepts the suggestion, not submit");
+        assert_eq!(st.prompt_text, "/exit ");
+        assert!(!st.palette.open, "the trailing space closes the palette");
+
+        // Second Enter submits `/exit` → exit.
+        handle_live_key(&mut st, &key(KeyCode::Enter), 24);
+        assert!(st.should_exit, "second Enter runs /exit");
         assert!(st.prompt_text.is_empty());
     }
 

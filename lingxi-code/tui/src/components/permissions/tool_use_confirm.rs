@@ -23,6 +23,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use iocraft::prelude::*;
 
 use super::{DialogFocus, DialogResolution};
+use crate::theme::TuiTheme;
 
 /// Mutable state carried across renders for this dialog.
 #[derive(Debug, Clone, Default)]
@@ -34,15 +35,24 @@ pub struct ToolUseConfirmState {
 /// Props for [`ToolUseConfirm`].
 #[derive(Default, Props)]
 pub struct ToolUseConfirmProps {
-    /// Tool name shown in the header (e.g. `"Bash"`).
+    /// Tool name (mapped through `user_facing_name` for display).
     pub tool_name: String,
-    /// Pretty-printed JSON input shown under the header.
-    pub tool_input_pretty: String,
+    /// Raw tool input — rendered through `render_tool_use_message` for the
+    /// human tool-use preview body (claude-code `renderToolUseMessage`).
+    pub tool_input: serde_json::Value,
+    /// Session cwd — drives `getDisplayPath` path-shortening in the preview and
+    /// the `… in {cwd}` always-allow label.
+    pub cwd: std::path::PathBuf,
     /// Which button to highlight on this render.
     pub focus: DialogFocus,
-    /// (M9-07) Worker badge `● @name` prepended when worker-originated.
-    /// `None` (the live default) leaves the dialog byte-identical to before.
-    pub worker_badge: Option<String>,
+    /// (perm-09) Worker name, when worker-originated — rendered as a dim
+    /// `· @name` suffix on the title row (claude-code
+    /// `PermissionRequestTitle`'s `workerBadge`), not a separate line. `None`
+    /// (the live default) leaves the dialog byte-identical to before.
+    pub worker_name: Option<String>,
+    /// (perm-05) Active palette — drives the top-border + title accent
+    /// (claude-code `PermissionDialog`'s default `color="permission"`).
+    pub theme: crate::theme::Theme,
 }
 
 /// Pure key handler. Returns `Some(resolution)` when the user picks an
@@ -67,33 +77,116 @@ pub fn handle_key(state: &mut ToolUseConfirmState, key: KeyEvent) -> Option<Dial
 }
 
 /// iocraft component rendering the dialog frame + 3 buttons.
+///
+/// (perm-03) Titled `Tool use` dialog: the rendered tool-use message + a
+/// `Do you want to proceed?` question — NOT "Claude needs your permission to
+/// use {tool}" + "Input: {json}". (perm-01) Options are `Yes` / `Yes, and don't
+/// ask again for {tool} commands in {cwd}` / `No` (no `[1]`/`[2]`/`[N]`
+/// numbered prefixes; the 1/2/n keys remain as hidden accelerators). (perm-05)
+/// Top-only round border colored `theme.permission` (claude-code
+/// `PermissionDialog`'s `borderLeft/Right/Bottom=false`), not a full round
+/// box. (perm-09) The worker name renders as a dim `· @name` suffix on the
+/// title row (claude-code `PermissionRequestTitle`), not a separate line.
 #[component]
 pub fn ToolUseConfirm(props: &ToolUseConfirmProps) -> impl Into<AnyElement<'static>> {
-    let header = format!("Claude needs your permission to use {}", props.tool_name);
-    let input_line = format!("Input: {}", props.tool_input_pretty);
+    use crate::components::messages::assistant_tool_use::{
+        render_tool_use_message, user_facing_name,
+    };
+    use crate::components::messages::user_tool_result::{
+        is_diff_tool, render_edit_write_diff_lines,
+    };
+    let name = user_facing_name(&props.tool_name).to_string();
+    // The tool-use preview body, e.g. `Read(src/x.rs)` / `Bash(npm test)`.
+    let body = match render_tool_use_message(&props.tool_name, &props.tool_input, &props.cwd) {
+        Some(s) if s.is_empty() => name.clone(),
+        Some(s) => format!("{name}({s})"),
+        None => format!("{name}({})", props.tool_input),
+    };
+    // (perm-02) File-edit tools render the structured diff inside the dialog so
+    // the user sees the exact change before approving (claude-code's per-tool
+    // permission confirmation shows the FileEdit diff, not just the tool name).
+    let diff_rows: Vec<AnyElement<'static>> = if is_diff_tool(&props.tool_name) {
+        let inp = &props.tool_input;
+        let s = |k: &str| inp.get(k).and_then(serde_json::Value::as_str);
+        let path = s("file_path");
+        let (old, new) = if props.tool_name == "Write" {
+            (None, s("content"))
+        } else {
+            (s("old_string"), s("new_string"))
+        };
+        if old.is_some() || new.is_some() {
+            render_edit_write_diff_lines(
+                &props.tool_name,
+                old,
+                new,
+                path,
+                crate::theme::ThemeName::Dark,
+            )
+            .into_iter()
+            .map(|line| {
+                let spans: Vec<AnyElement<'static>> = line
+                    .spans
+                    .into_iter()
+                    .map(|sp| {
+                        let color = sp.style.fg.to_iocraft();
+                        let bg = sp.style.bg.to_iocraft();
+                        let weight = if sp.style.bold {
+                            Weight::Bold
+                        } else {
+                            Weight::Normal
+                        };
+                        element! {
+                            View(background_color: bg) {
+                                Text(content: sp.text, color: color, weight: weight)
+                            }
+                        }
+                        .into_any()
+                    })
+                    .collect();
+                element! { View(flex_direction: FlexDirection::Row) { #(spans) } }.into_any()
+            })
+            .collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    let cwd_disp = props.cwd.display().to_string();
     let focus = props.focus;
-    let worker_badge = props.worker_badge.clone();
-    let button_label = move |for_focus: DialogFocus, label: &str| -> String {
+    let worker_name = props.worker_name.clone();
+    let accent = props.theme.permission;
+    let button_label = move |for_focus: DialogFocus, label: String| -> String {
         if for_focus == focus {
             format!("> {label}")
         } else {
             format!("  {label}")
         }
     };
-    let allow_once = button_label(DialogFocus::AllowOnce, "[1] Allow Once");
-    let allow_always = button_label(DialogFocus::AllowAlways, "[2] Allow Always");
-    let deny = button_label(DialogFocus::Deny, "[N] Deny");
+    let allow_once = button_label(DialogFocus::AllowOnce, "Yes".to_string());
+    let allow_always = button_label(
+        DialogFocus::AllowAlways,
+        format!("Yes, and don't ask again for {name} commands in {cwd_disp}"),
+    );
+    let deny = button_label(DialogFocus::Deny, "No".to_string());
     element! {
         View(
             flex_direction: FlexDirection::Column,
             border_style: BorderStyle::Round,
-            padding: 1,
+            border_color: accent,
+            border_edges: Edges::Top,
+            padding_left: 1,
+            padding_right: 1,
         ) {
-            #(worker_badge.as_deref().map(|badge| element! {
-                Text(content: badge.to_string())
-            }))
-            Text(content: header)
-            Text(content: input_line)
+            View(flex_direction: FlexDirection::Row, gap: 1) {
+                Text(content: "Tool use".to_string(), weight: Weight::Bold, color: accent)
+                #(worker_name.as_deref().map(|n| element! {
+                    Text(content: format!("\u{00B7} @{n}"), color: TuiTheme::DIM)
+                }))
+            }
+            Text(content: body)
+            #(diff_rows)
+            Text(content: "Do you want to proceed?".to_string())
             View(flex_direction: FlexDirection::Column, padding_top: 1) {
                 Text(content: allow_once)
                 Text(content: allow_always)

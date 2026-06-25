@@ -32,6 +32,17 @@ fn load() -> Value {
     serde_json::from_str(FIXTURE).expect("tui_renderers.json parses")
 }
 
+/// (ma-03) The fixtures store the `BLACK_CIRCLE` marker as `●`; on macOS the
+/// renderers emit `⏺` (U+23FA). Normalise the fixture's `●` to the platform
+/// glyph so the parity assertions stay cross-platform.
+fn platform_dot(expected: &str) -> String {
+    if cfg!(target_os = "macos") {
+        expected.replace('\u{25CF}', "\u{23FA}")
+    } else {
+        expected.to_string()
+    }
+}
+
 #[test]
 fn status_line_fixed_state_renders_to_locked_text() {
     let f = load();
@@ -99,7 +110,7 @@ fn assistant_text_message_renders_to_locked_text() {
     };
     assert_eq!(
         render_entry_to_string(&entry, false, false),
-        m["expected_rendered_text"].as_str().unwrap(),
+        platform_dot(m["expected_rendered_text"].as_str().unwrap()),
     );
 }
 
@@ -115,7 +126,7 @@ fn assistant_tool_use_collapsed_renders_to_locked_text() {
     // collapsed = not expanded, not focused
     assert_eq!(
         render_entry_to_string(&entry, false, false),
-        m["expected_rendered_text"].as_str().unwrap(),
+        platform_dot(m["expected_rendered_text"].as_str().unwrap()),
     );
 }
 

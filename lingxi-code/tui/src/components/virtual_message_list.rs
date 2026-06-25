@@ -134,9 +134,10 @@ fn render_text_for_measure(msg: &RenderedMessage, width: usize) -> String {
         }
         // Single dim+italic line `✻ Thinking…`.
         RenderedMessage::AssistantRedactedThinking => "\u{273B} Thinking\u{2026}".to_string(),
-        // Single dim boundary line (counts not rendered — claude-code parity).
+        // (compact-boundary-marginy) dim boundary line + blank row above/below
+        // (counts not rendered — claude-code parity).
         RenderedMessage::CompactBoundary { .. } => {
-            "\u{273B} Conversation compacted (ctrl+o for history)".to_string()
+            "\n\u{273B} Conversation compacted (ctrl+o for history)\n".to_string()
         }
         // Info → body verbatim; warning/error → `● ` marker (cols) + body.
         RenderedMessage::SystemTextRich { body, level } => match level {
@@ -171,11 +172,16 @@ fn render_text_for_measure(msg: &RenderedMessage, width: usize) -> String {
             ));
             out
         }
-        // error text + optional dim upsell line.
-        RenderedMessage::RateLimit { text, upsell } => match upsell {
-            Some(u) => format!("{text}\n{u}"),
-            None => text.clone(),
-        },
+        // (rate-limit-missing-gutter) `  ⎿  ` gutter + error text + optional
+        // dim upsell line (indented to match).
+        RenderedMessage::RateLimit { text, upsell } => {
+            crate::components::messages::rate_limit::render_rate_limit_to_string(
+                crate::components::messages::rate_limit::RateLimitProps {
+                    text: text.clone(),
+                    upsell: upsell.clone(),
+                },
+            )
+        }
         // header + optional `Reason:` line + (rejected) tail line.
         RenderedMessage::Shutdown {
             from,
@@ -213,24 +219,19 @@ fn render_text_for_measure(msg: &RenderedMessage, width: usize) -> String {
                 },
             )
         }
-        // Single dim line (running or transcript summary).
+        // (hook-progress-missing-gutter) `  ⎿  ` gutter + single dim line.
         RenderedMessage::HookProgress {
             event,
             count,
             transcript_summary,
-        } => {
-            if *transcript_summary {
-                let unit = if *count == 1 { "hook" } else { "hooks" };
-                format!("{count} {event} {unit} ran")
-            } else {
-                let unit = if *count == 1 {
-                    "hook\u{2026}"
-                } else {
-                    "hooks\u{2026}"
-                };
-                format!("Running {event} {unit}")
-            }
-        }
+        } => crate::components::messages::hook_progress::render_hook_progress_to_string(
+            crate::components::messages::hook_progress::HookProgressProps {
+                event: event.clone(),
+                count: *count,
+                transcript_summary: *transcript_summary,
+                ..Default::default()
+            },
+        ),
         // Mirrors `render_plan_approval_to_string`.
         RenderedMessage::PlanApproval { kind } => match kind {
             crate::state::PlanApprovalKind::Request {
@@ -712,6 +713,21 @@ pub fn VirtualMessageList(props: &VirtualMessageListProps) -> impl Into<AnyEleme
     let focused_tool_id = props.focused_tool_id.clone();
     let theme = props.theme;
     let theme_name = props.theme_name;
+    // (ma-02) Resolution map: every tool result in the FULL log (not just the
+    // window — a tool-use block can be visible while its result paginates in)
+    // keyed by `tool_use_id` → `is_error`. Drives the `●` dot color
+    // (claude-code `ToolUseLoader`: dim unresolved / green success / red error).
+    let resolved: std::collections::HashMap<ToolUseId, bool> = props
+        .messages
+        .iter()
+        .filter_map(|m| match m {
+            crate::state::RenderedMessage::UserToolResult { id, result, .. } => Some((
+                id.clone(),
+                crate::components::messages::user_tool_result::tool_result_error(result).is_some(),
+            )),
+            _ => None,
+        })
+        .collect();
     // (A2) Thread the cache's render width into each message so markdown TABLES
     // in assistant bodies lay out to the live viewport width. The cache was
     // built at this same width, so measurement and render agree.
@@ -721,7 +737,17 @@ pub fn VirtualMessageList(props: &VirtualMessageListProps) -> impl Into<AnyEleme
     } else {
         win.indices()
             .filter_map(|i| props.messages.get(i).cloned())
-            .map(|m| render_message(m, &expanded, focused_tool_id.clone(), theme, theme_name, width))
+            .map(|m| {
+                render_message(
+                    m,
+                    &expanded,
+                    focused_tool_id.clone(),
+                    theme,
+                    theme_name,
+                    width,
+                    &resolved,
+                )
+            })
             .collect()
     };
     element! {
@@ -885,12 +911,13 @@ mod tests {
             expanded: false,
         };
         assert_eq!(measured_height(&collapsed, 80), 1);
-        // Expanded → header `∴ Thinking…` (1) + 2 body lines (indented 2) = 3.
+        // Expanded → header `∴ Thinking…` (1) + gap=1 blank row (1) + 2 body
+        // lines (indented 2) = 4.
         let expanded = RenderedMessage::AssistantThinking {
             thinking: "Step one.\nStep two.".into(),
             expanded: true,
         };
-        assert_eq!(measured_height(&expanded, 80), 3);
+        assert_eq!(measured_height(&expanded, 80), 4);
     }
 
     // ---- (M7-04 review) measurement == render for markdown bodies --------
@@ -956,12 +983,13 @@ mod tests {
 
     #[test]
     fn measured_height_pins_compact_boundary_m7_04() {
-        // Single boundary line; counts are not rendered.
+        // (compact-boundary-marginy) boundary line + blank row above/below =
+        // 3 rows; counts are not rendered.
         let m = RenderedMessage::CompactBoundary {
             messages_before: 50,
             messages_after: 5,
         };
-        assert_eq!(measured_height(&m, 80), 1);
+        assert_eq!(measured_height(&m, 80), 3);
     }
 
     #[test]

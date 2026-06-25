@@ -28,9 +28,11 @@ use crate::components::prompt_input::{
 use crate::events::keymap::{CursorMove, KeyAction, ScrollDir};
 use crate::state::{AppState, RenderedMessage};
 
-/// Idle Ctrl-C re-arm window: the second Ctrl-C confirms exit only when
-/// the first was within this many seconds. Matches the M5-13 stdio REPL.
-pub const SIGINT_WINDOW_SECS: u64 = 2;
+/// (RRS-08) Double-press re-arm window (Ctrl-C exit confirm, and Ctrl-D —
+/// RRS-07 — which shares this same window): the second press confirms only
+/// when the first was within this many milliseconds. claude-code
+/// `hooks/useDoublePress.ts`'s default.
+pub const SIGINT_WINDOW_MS: u64 = 800;
 
 /// Crate version string surfaced to the placeholder line.
 ///
@@ -496,26 +498,30 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 if let Some(tif) = &st.in_flight_turn {
                     tif.cancel.cancel();
                 }
-                st.push_message(RenderedMessage::SystemText {
-                    body: "^C interrupted by user".into(),
+                // (RRS-08) claude-code's INTERRUPT_MESSAGE — a UserText body,
+                // not a SystemText line; UserTextMessage special-cases it to
+                // render the InterruptedByUser line. Mirrors the Esc-interrupt
+                // branch (root.rs).
+                st.push_message(RenderedMessage::UserText {
+                    body: crate::components::messages::user_tool_result::INTERRUPT_MESSAGE
+                        .to_string(),
                     timestamp: chrono::Utc::now().timestamp(),
-                    is_error: false,
                 });
             } else if !st.prompt_text.is_empty() {
                 st.prompt_text.clear();
                 st.prompt_cursor = 0;
             } else {
                 match st.sigint_armed_at {
-                    Some(t) if t.elapsed().as_secs() < SIGINT_WINDOW_SECS => {
+                    Some(t) if t.elapsed().as_millis() < u128::from(SIGINT_WINDOW_MS) => {
                         st.should_exit = true;
                     }
                     _ => {
+                        // (RRS-08) claude-code renders this as a transient
+                        // footer hint ("Press {key} again to exit"), not a
+                        // scrollback line — see PromptInputFooter's
+                        // sigint_armed_at-driven exit_hint.
                         st.sigint_armed_at = Some(Instant::now());
-                        st.push_message(RenderedMessage::SystemText {
-                            body: "^C (press Ctrl-C again or type /exit to quit)".into(),
-                            timestamp: chrono::Utc::now().timestamp(),
-                            is_error: false,
-                        });
+                        st.sigint_armed_key = "Ctrl-C";
                     }
                 }
             }
@@ -742,19 +748,18 @@ pub fn render_screen(
                 tool_input,
                 ..
             } => {
-                let pretty = serde_json::to_string_pretty(tool_input).unwrap_or_default();
                 let tool_name = tool_name.clone();
+                let tool_input = tool_input.clone();
                 let focus = state.tool_use_dialog_state.focus;
-                let worker_badge = pp
-                    .worker
-                    .as_ref()
-                    .map(|w| crate::components::permissions::worker::render_worker_badge(&w.name));
+                let worker_name = pp.worker.as_ref().map(|w| w.name.clone());
                 element! {
                     ToolUseConfirm(
                         tool_name: tool_name,
-                        tool_input_pretty: pretty,
+                        tool_input: tool_input,
+                        cwd: std::env::current_dir().unwrap_or_default(),
                         focus: focus,
-                        worker_badge: worker_badge,
+                        worker_name: worker_name,
+                        theme: state.theme,
                     )
                 }
                 .into_any()
@@ -831,7 +836,14 @@ pub fn render_screen(
                 // tested) line-by-line. The list it browses lives in
                 // `AppState.multiagent.tasks`, kept fresh by the MultiAgent pump.
                 use crate::screens::background_tasks::render_background_tasks_to_string;
-                let body = render_background_tasks_to_string(bts, &state.multiagent.tasks);
+                // (BASH-ROW-NO-TRUNCATION) claude-code's
+                // `maxActivityWidth = Math.max(30, columns - 26)`.
+                let max_activity_width = viewport_width.saturating_sub(26).max(30);
+                let body = render_background_tasks_to_string(
+                    bts,
+                    &state.multiagent.tasks,
+                    max_activity_width,
+                );
                 let lines: Vec<String> = body.lines().map(str::to_string).collect();
                 element! {
                     View(flex_direction: FlexDirection::Column, padding: 1) {
@@ -895,12 +907,25 @@ pub fn render_screen(
                 // (highlight-only single-select, snapshot-tested) line-by-line in
                 // a column View. Mirrors the Mcp/Hooks arm.
                 use crate::screens::model::render_model_to_string;
+                use crate::theme::TuiTheme;
                 let body = render_model_to_string(m);
                 let lines: Vec<String> = body.lines().map(str::to_string).collect();
+                // (model-header-not-bold-no-subheader) claude-code's
+                // <Text color="remember" bold>Select model</Text> then a dim
+                // sub-header line — both are ALWAYS lines 0/1 of the oracle's
+                // fixed layout. LingXi's Theme has no "remember" (blue) token;
+                // `suggestion` is the closest existing accent color.
                 element! {
                     View(flex_direction: FlexDirection::Column, padding: 1) {
-                        #(lines.into_iter().map(|line| element! {
-                            Text(content: line)
+                        #(lines.into_iter().enumerate().map(|(i, line)| {
+                            let (color, weight) = match i {
+                                0 => (state.theme.suggestion, Weight::Bold),
+                                1 => (TuiTheme::DIM, Weight::Normal),
+                                _ => (Color::Reset, Weight::Normal),
+                            };
+                            element! {
+                                Text(content: line, color: color, weight: weight)
+                            }
                         }))
                     }
                 }
@@ -960,13 +985,22 @@ pub fn render_screen(
                 // `render_stats_to_string` body (tab header + active-tab body +
                 // sparkline/heatmap, snapshot-tested) line-by-line in a column
                 // View. Mirrors the Skills/Agents arms.
-                use crate::screens::stats::render_stats_to_string;
+                use crate::screens::stats::{render_stats_to_string, EMPTY_LINE, MODELS_EMPTY_LINE};
+                use crate::theme::TuiTheme;
                 let body = render_stats_to_string(sts);
                 let lines: Vec<String> = body.lines().map(str::to_string).collect();
                 element! {
                     View(flex_direction: FlexDirection::Column, padding: 1) {
-                        #(lines.into_iter().map(|line| element! {
-                            Text(content: line)
+                        // (stats-empty-state-color, partial) claude-code colors
+                        // the empty-state line `warning`; everything else
+                        // (metric values, etc.) needs per-line-type
+                        // classification this plain-line render can't do yet.
+                        #(lines.into_iter().map(|line| {
+                            let is_empty_state = line == EMPTY_LINE || line == MODELS_EMPTY_LINE;
+                            let color = if is_empty_state { TuiTheme::WARNING } else { Color::Reset };
+                            element! {
+                                Text(content: line, color: color)
+                            }
                         }))
                     }
                 }
@@ -982,10 +1016,16 @@ pub fn render_screen(
                 use crate::screens::help::render_help_to_string_with;
                 let body = render_help_to_string_with(h, state.keymap.bindings());
                 let lines: Vec<String> = body.lines().map(str::to_string).collect();
+                // (help-6) claude-code's HelpV2 dismiss hint (`{chord} to
+                // cancel`) is italic. It's the final line of the body.
+                let footer = crate::screens::help::FOOTER;
                 element! {
                     View(flex_direction: FlexDirection::Column, padding: 1) {
-                        #(lines.into_iter().map(|line| element! {
-                            Text(content: line)
+                        #(lines.into_iter().map(|line| {
+                            let italic = line == footer;
+                            element! {
+                                Text(content: line, italic: italic)
+                            }
                         }))
                     }
                 }
@@ -1111,6 +1151,14 @@ pub fn render_screen(
                 .map_or(0, |c| c.padding),
             // (TokenWarning) live context-pressure banner above the prompt.
             context_pressure: state.context_pressure.clone(),
+            // (RRS-08) Footer-left override while the double-press exit
+            // window is armed and not yet expired.
+            exit_hint: state.sigint_armed_at.and_then(|t| {
+                (t.elapsed().as_millis() < u128::from(SIGINT_WINDOW_MS))
+                    .then_some(state.sigint_armed_key)
+            }),
+            // (SS-06) reduced-motion → static spinner.
+            reduced_motion: state.reduced_motion,
         )
     }
     .into_any()
@@ -1185,6 +1233,12 @@ pub async fn run_one_submit(
         cancel: cancel.clone(),
     });
 
+    // (PIC-05) Expand any `[Pasted text #N]` pills back to their original
+    // content BEFORE draining images — `take_image_paths` resets the WHOLE
+    // paste registry (images AND pasted-text pairs), so pasted-text must be
+    // drained first or it's lost.
+    let pasted_texts = st.paste.take_pasted_texts();
+    let expanded = crate::components::prompt_input::expand_pasted_text_refs(submitted, &pasted_texts);
     // (MULTIMODAL.1) Consume any pasted/dragged image paths captured in the
     // prompt's paste registry so they ride along to the model as real image
     // content blocks (the `[Image #N]` placeholders in `submitted` point back
@@ -1195,7 +1249,7 @@ pub async fn run_one_submit(
     // text-only `run_turn`, byte-identical to the prior behavior.
     let image_paths = st.paste.take_image_paths();
     let outcome = orch
-        .run_turn_with_images(submitted, &image_paths, cancel)
+        .run_turn_with_images(&expanded, &image_paths, cancel)
         .await;
     st.in_flight_turn = None;
     match outcome {
@@ -1308,11 +1362,14 @@ pub fn scroll_with_viewport(st: &mut AppState, dir: ScrollDir, viewport_height: 
     let total = st.height_cache.total_lines();
     let max = total.saturating_sub(viewport_height) as i64;
     let cur = st.scroll_offset as i64;
+    // (RRS-01) PageUp/PageDown move HALF a viewport (claude-code), not a full
+    // one. Step = max(1, viewport/2) via viewport.max(2)/2.
+    let page = (viewport_height.max(2) / 2) as i64;
     let new = match dir {
         ScrollDir::LineUp => cur + 1,
         ScrollDir::LineDown => cur - 1,
-        ScrollDir::PageUp => cur + viewport_height as i64,
-        ScrollDir::PageDown => cur - viewport_height as i64,
+        ScrollDir::PageUp => cur + page,
+        ScrollDir::PageDown => cur - page,
         ScrollDir::Top => max,
         ScrollDir::Bottom => 0,
     };
@@ -1440,10 +1497,11 @@ mod dispatch_tests {
                 timestamp: 0,
             });
         }
+        // (RRS-01) PageUp steps HALF a viewport: 10/2 = 5.
+        scroll_with_viewport(&mut st, ScrollDir::PageUp, 10);
+        assert_eq!(st.scroll_offset, 5);
         scroll_with_viewport(&mut st, ScrollDir::PageUp, 10);
         assert_eq!(st.scroll_offset, 10);
-        scroll_with_viewport(&mut st, ScrollDir::PageUp, 10);
-        assert_eq!(st.scroll_offset, 20);
     }
 
     #[test]
@@ -1454,6 +1512,43 @@ mod dispatch_tests {
         dispatch(KeyAction::Cancel, &mut st);
         assert_eq!(st.prompt_text, "");
         assert!(st.sigint_armed_at.is_none());
+    }
+
+    /// (RRS-08) Ctrl+C on an in-flight turn cancels the token and pushes
+    /// claude-code's INTERRUPT_MESSAGE as a UserText body (not the old
+    /// invented "^C interrupted by user" SystemText), mirroring the Esc
+    /// branch (root.rs).
+    #[test]
+    fn ctrl_c_interrupts_in_flight_turn_with_claude_code_marker() {
+        let mut st = s();
+        let token = tokio_util::sync::CancellationToken::new();
+        st.in_flight_turn = Some(crate::state::TurnInFlight { turn_id: 1, cancel: token.clone() });
+        dispatch(KeyAction::Cancel, &mut st);
+        assert!(token.is_cancelled(), "Ctrl+C must cancel the in-flight turn token");
+        assert!(
+            st.messages.iter().any(|m| matches!(
+                m,
+                RenderedMessage::UserText { body, .. }
+                    if body == crate::components::messages::user_tool_result::INTERRUPT_MESSAGE
+            )),
+            "Ctrl+C must push the INTERRUPT_MESSAGE marker, got: {:?}",
+            st.messages
+        );
+    }
+
+    #[test]
+    fn idle_ctrl_c_arms_without_pushing_a_scrollback_message() {
+        // (RRS-08) The "Press Ctrl-C again to exit" confirmation is a
+        // transient footer hint (PromptInputFooter.exit_hint), not a pushed
+        // scrollback line.
+        let mut st = s();
+        let before = st.messages.len();
+        dispatch(KeyAction::Cancel, &mut st);
+        assert!(st.sigint_armed_at.is_some(), "first idle Ctrl+C arms");
+        assert_eq!(st.sigint_armed_key, "Ctrl-C");
+        assert_eq!(st.messages.len(), before, "no scrollback message pushed");
+        dispatch(KeyAction::Cancel, &mut st);
+        assert!(st.should_exit, "second idle Ctrl+C within the window exits");
     }
 
     #[test]
@@ -1628,8 +1723,15 @@ mod dispatch_tests {
         });
         let mut element = render_screen(&st, 5, 80);
         let rendered = element.to_string();
-        assert!(rendered.contains("● hi"), "got: {rendered}");
-        assert!(rendered.contains("claude-sonnet-4.5"));
+        // (ma-03) marker glyph is platform-conditional (⏺ macOS / ● else).
+        let marker = crate::components::messages::assistant_text::MARKER;
+        assert!(rendered.contains(&format!("{marker}hi")), "got: {rendered}");
+        // (SS-01) No built-in status row renders without a custom statusLine
+        // command, so the model id no longer appears in the chrome.
+        assert!(
+            !rendered.contains("claude-sonnet-4.5"),
+            "built-in status row must not render: {rendered}"
+        );
     }
 
     #[test]
@@ -1973,6 +2075,29 @@ mod image_submit_tests {
         assert!(images.is_empty(), "no captured images → empty path list");
         // Registry was already default; remains default (no observable change).
         assert_eq!(st.paste, PasteState::default());
+    }
+
+    #[tokio::test]
+    async fn submit_expands_pasted_text_pill_back_to_full_content() {
+        // (PIC-05) The model must see the ORIGINAL pasted text, not the
+        // `[Pasted text #N]` placeholder — unlike images, pasted text has no
+        // separate attachment channel.
+        use crate::components::prompt_input::PASTE_THRESHOLD;
+        let mut st = s();
+        let original = "y".repeat(PASTE_THRESHOLD + 1);
+        st.paste = process_paste(&original, st.paste.clone()).state;
+        assert_eq!(st.paste.pasted_texts, vec![(1, original.clone())]);
+
+        let orch = RecordingOrch::default();
+        let disp = dispatcher();
+        run_one_submit(&mut st, "before [Pasted text #1] after", &orch, &disp).await;
+
+        let sent = orch.prompt.lock().unwrap().clone().expect("a turn ran");
+        assert_eq!(sent, format!("before {original} after"));
+        assert!(
+            st.paste.pasted_texts.is_empty(),
+            "pasted-text registry drained on submit"
+        );
     }
 
     #[tokio::test]

@@ -8,6 +8,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use protocol::ToolUseId;
 use tui::app::dispatch;
+use tui::components::messages::assistant_tool_use::MARKER;
 use tui::components::messages::render_entry_to_string;
 use tui::events::keymap::map_key;
 use tui::state::{AppState, RenderedMessage, StatusSnapshot};
@@ -87,7 +88,7 @@ fn dispatcher_routes_tool_call_and_result() {
         input: serde_json::json!({"file_path": "/tmp/x"}),
     };
     let s = render_entry_to_string(&call, false, false);
-    assert!(s.starts_with("● Read("), "got: {s}");
+    assert!(s.starts_with(&format!("{MARKER} Read(")), "got: {s}");
     let result = RenderedMessage::UserToolResult {
         id: id.clone(),
         tool: "Read".into(),
@@ -97,5 +98,5 @@ fn dispatcher_routes_tool_call_and_result() {
         file_path: None,
     };
     let s2 = render_entry_to_string(&result, false, false);
-    assert!(s2.starts_with("└ hi"), "got: {s2}");
+    assert!(s2.starts_with("  \u{23BF}  hi"), "got: {s2}");
 }

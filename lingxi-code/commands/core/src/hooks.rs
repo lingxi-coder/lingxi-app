@@ -83,12 +83,14 @@ mod tests {
                 event: "PostToolUse".into(),
                 matcher: Some("Write|Edit".into()),
                 timeout_ms: 60_000,
+                ..HookInfo::default()
             },
             HookInfo {
                 name: "lint".into(),
                 event: "Stop".into(),
                 matcher: None,
                 timeout_ms: 30_000,
+                ..HookInfo::default()
             },
         ]);
         let h = HooksHandler::new(mock);

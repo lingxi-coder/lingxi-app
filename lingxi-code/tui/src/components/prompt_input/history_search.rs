@@ -156,9 +156,15 @@ pub struct HistorySearchOverlayProps {
 
 /// One row rendered above the prompt while search is active. Mirrors
 /// claude-code `HistorySearchInput.tsx`: a dim label (`search prompts:` /
-/// `no matching prompt:`) and the query after a one-space gap.
+/// `no matching prompt:`) and the query after a one-space gap. (PIC-14) The
+/// query carries a block cursor at its end (claude-code's `TextInput
+/// showCursor cursorOffset={value.length}`), matching `PromptInput`'s own
+/// cursor-chunk rendering (no reverse-video primitive in iocraft, so this
+/// swaps fg/bg the same way).
 #[component]
 pub fn HistorySearchOverlay(props: &HistorySearchOverlayProps) -> impl Into<AnyElement<'static>> {
+    use crate::components::prompt_input::render_line_with_cursor;
+    use unicode_width::UnicodeWidthStr;
     // Literal lock (parent spec §2.8): the two labels are byte-for-byte from
     // claude-code `HistorySearchInput.tsx:18`.
     let label = if props.failed_match {
@@ -166,10 +172,22 @@ pub fn HistorySearchOverlay(props: &HistorySearchOverlayProps) -> impl Into<AnyE
     } else {
         "search prompts:"
     };
-    let line = format!("{label} {}", props.query);
+    let cursor_col = UnicodeWidthStr::width(props.query.as_str());
+    let chunks = render_line_with_cursor(&props.query, Some(cursor_col));
     element! {
         View(flex_direction: FlexDirection::Row, height: 1) {
-            Text(content: line, color: crate::theme::TuiTheme::DIM)
+            Text(content: format!("{label} "), color: crate::theme::TuiTheme::DIM)
+            #(chunks.into_iter().map(|(seg, is_cursor)| {
+                if is_cursor {
+                    element! {
+                        View(background_color: Color::White) {
+                            Text(content: seg, color: Color::Black)
+                        }
+                    }.into_any()
+                } else {
+                    element! { Text(content: seg, color: crate::theme::TuiTheme::DIM) }.into_any()
+                }
+            }))
         }
     }
 }
@@ -178,6 +196,32 @@ pub fn HistorySearchOverlay(props: &HistorySearchOverlayProps) -> impl Into<AnyE
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn overlay_cursor_split_preserves_text() {
+        // (PIC-14) The query's trailing cursor block (color-swapped View/
+        // Text) is emitted as a separate span, but iocraft's plain
+        // `to_string()` strips styling, so all visible characters still
+        // appear in order. The per-chunk split itself is pinned by
+        // `render_line_with_cursor`'s own unit tests.
+        let mut el = element! {
+            HistorySearchOverlay(query: "cargo".to_string(), failed_match: false)
+        };
+        let out = el.to_string();
+        assert!(out.contains("search prompts: cargo"), "got: {out}");
+    }
+
+    #[test]
+    fn overlay_empty_query_still_renders_label() {
+        // Cursor-at-EOL on an empty query renders a synthetic space chunk
+        // (render_line_with_cursor's EOL branch) — must not panic or drop
+        // the label.
+        let mut el = element! {
+            HistorySearchOverlay(query: String::new(), failed_match: false)
+        };
+        let out = el.to_string();
+        assert!(out.contains("search prompts:"), "got: {out}");
+    }
 
     #[test]
     fn open_snapshots_prompt_and_starts_empty() {

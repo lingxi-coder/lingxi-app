@@ -544,6 +544,7 @@ mod tests {
             event: "PreToolUse".to_string(),
             matcher: Some("Bash.*".to_string()),
             timeout_ms: 5_000,
+            ..HookInfo::default()
         };
         let dto = lower_hook_info(&with);
         assert_eq!(dto.name, "guard");
@@ -564,6 +565,8 @@ mod tests {
             name: "reviewer".to_string(),
             description: "Reviews code".to_string(),
             tools_allowed: vec!["Read".to_string(), "Grep".to_string()],
+            wildcard_tools: false,
+            ..AgentInfo::default()
         };
         let dto = lower_agent_info(&info);
         assert_eq!(dto.name, "reviewer");
@@ -591,6 +594,7 @@ mod tests {
             started_at: "2026-06-02T00:00:00Z".to_string(),
             cwd: PathBuf::from("/work/proj"),
             active_workers: 2,
+            setting_sources: Vec::new(),
         };
         let dto = lower_status_snapshot(&snap);
         assert_eq!(dto.session_id, "sess-1");

@@ -41,6 +41,7 @@
 
 use std::collections::BTreeMap;
 
+use chrono::{Datelike, Duration as ChronoDuration, NaiveDate};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 
@@ -66,10 +67,11 @@ pub const MODELS_EMPTY_LINE: &str = "No model usage data available";
 /// Locked tokens-chart heading (claude-code `ModelsTab`).
 pub const TOKENS_PER_DAY: &str = "Tokens per Day";
 /// Locked footer hint. claude-code's footer is
-/// `Esc to cancel · r to cycle dates · ctrl+s to copy`; the `r`/`ctrl+s`
-/// controls are deferred (see module docs), so only the Esc + Tab affordances
-/// this screen actually implements are shown.
-pub const FOOTER: &str = "Tab to switch · Esc to close";
+/// `Esc to cancel · r to cycle dates · ctrl+s to copy`. The `r`-cycle now
+/// works (`StatsState::cycle_range`), so its hint is rendered; `ctrl+s` copy
+/// is still deferred (no clipboard seam). The Rust-invented `Tab to switch`
+/// is NOT rendered — tab switching is discoverable from the tab headers.
+pub const FOOTER: &str = "Esc to cancel \u{00B7} r to cycle dates";
 
 /// Per-model aggregated token usage (claude-code `ModelUsage`, the subset this
 /// screen reads). Counts are monotonic sums across every `assistant` row that
@@ -113,6 +115,26 @@ pub struct StatsData {
     pub first_date: Option<String>,
     /// Latest session date seen (`YYYY-MM-DD`), if any.
     pub last_date: Option<String>,
+    /// (session-duration) Longest single-session duration in milliseconds
+    /// (claude-code `longestSession.duration`), 0 when no session had a
+    /// measurable span. `#[serde(default)]` so a pre-field cache still loads.
+    #[serde(default)]
+    pub longest_session_ms: u64,
+    /// (stats-overview-missing-fields) The fun factoid line shown under the
+    /// Overview (claude-code `generateFunFactoid`), `None` when no comparison
+    /// applies. Picked once at aggregate time.
+    #[serde(default)]
+    pub factoid: Option<String>,
+    /// (stats-date-range) Per-session `(date, duration_ms)`, retained so a
+    /// date-range view can recount sessions + recompute the longest within the
+    /// window. One entry per counted (non-subagent, dated) session.
+    #[serde(default)]
+    pub sessions: Vec<(String, u64)>,
+    /// (stats-date-range) `date -> model -> usage` with the In/Out/cache splits
+    /// (unlike `daily_model_tokens`, which is date→model→TOTAL), so the Models
+    /// tab can be recomputed for a date window.
+    #[serde(default)]
+    pub daily_model_usage: BTreeMap<String, BTreeMap<String, ModelUsage>>,
 }
 
 impl StatsData {
@@ -127,6 +149,27 @@ impl StatsData {
     #[must_use]
     pub fn active_days(&self) -> usize {
         self.daily_messages.len()
+    }
+
+    /// Total span of days covered (first→last activity date, inclusive) — the
+    /// `/N` denominator on the "Active days" line. Falls back to
+    /// [`active_days`](Self::active_days) when the dates are missing/unparsable.
+    #[must_use]
+    pub fn range_days(&self) -> usize {
+        match (self.first_date.as_deref(), self.last_date.as_deref()) {
+            (Some(f), Some(l)) => {
+                match (
+                    NaiveDate::parse_from_str(f, "%Y-%m-%d"),
+                    NaiveDate::parse_from_str(l, "%Y-%m-%d"),
+                ) {
+                    (Ok(fd), Ok(ld)) => usize::try_from((ld - fd).num_days() + 1)
+                        .unwrap_or(0)
+                        .max(1),
+                    _ => self.active_days(),
+                }
+            }
+            _ => self.active_days(),
+        }
     }
 
     /// The day with the most messages (claude-code `peakActivityDay`). Ties
@@ -187,6 +230,12 @@ pub struct SessionContribution {
     /// The session's date bucket (`YYYY-MM-DD` from the first main-chain
     /// message timestamp), if one was found.
     pub date: Option<String>,
+    /// Raw ISO-8601 timestamp of the FIRST main-chain message (session start),
+    /// used with [`Self::last_ts`] to compute the session duration
+    /// (claude-code `lastTimestamp - firstTimestamp`).
+    pub first_ts: Option<String>,
+    /// Raw ISO-8601 timestamp of the LAST main-chain message (session end).
+    pub last_ts: Option<String>,
     /// `model -> usage` accumulated from this file's `assistant` rows.
     pub model_usage: BTreeMap<String, ModelUsage>,
     /// `model -> total tokens` for this file's date bucket.
@@ -239,6 +288,13 @@ pub fn parse_session(content: &str, is_subagent: bool) -> SessionContribution {
                 if let Some(d) = date_bucket(&v) {
                     out.date = Some(d);
                 }
+            }
+            // (session-duration) Track first + last main-chain timestamp.
+            if let Some(ts) = v.get("timestamp").and_then(serde_json::Value::as_str) {
+                if out.first_ts.is_none() {
+                    out.first_ts = Some(ts.to_string());
+                }
+                out.last_ts = Some(ts.to_string());
             }
             out.message_count += 1;
         }
@@ -329,6 +385,23 @@ pub fn aggregate(contribs: &[SessionContribution]) -> StatsData {
                 data.total_messages += c.message_count;
                 *data.daily_messages.entry(date.clone()).or_default() += c.message_count as u64;
                 track_date(&mut data, date);
+                // (session-duration) longest session = max(last_ts - first_ts).
+                let dur = match (&c.first_ts, &c.last_ts) {
+                    (Some(first), Some(last)) => session_duration_ms(first, last),
+                    _ => 0,
+                };
+                data.longest_session_ms = data.longest_session_ms.max(dur);
+                // (stats-date-range) retain per-session (date, duration) +
+                // dated per-model usage with In/Out splits.
+                data.sessions.push((date.clone(), dur));
+                let day = data.daily_model_usage.entry(date.clone()).or_default();
+                for (model, usage) in &c.model_usage {
+                    let slot = day.entry(model.clone()).or_default();
+                    slot.input_tokens = slot.input_tokens.saturating_add(usage.input_tokens);
+                    slot.output_tokens = slot.output_tokens.saturating_add(usage.output_tokens);
+                    slot.cache_read_tokens =
+                        slot.cache_read_tokens.saturating_add(usage.cache_read_tokens);
+                }
             }
         }
         // Merge per-model usage (subagent files contribute here too).
@@ -347,7 +420,206 @@ pub fn aggregate(contribs: &[SessionContribution]) -> StatsData {
             }
         }
     }
+    // (stats-overview-missing-fields) Pick the fun factoid from the final totals.
+    data.factoid = pick_factoid(data.total_tokens(), data.longest_session_ms);
     data
+}
+
+impl StatsData {
+    /// (stats-date-range) A view of this data restricted to `range` ending at
+    /// `today`. `All` returns the data unchanged; `Last7`/`Last30` keep only the
+    /// dated rows on/after the cutoff and RE-derive every displayed field
+    /// (sessions, longest session, daily messages, per-model usage, chart,
+    /// factoid) from that window — claude-code `aggregateClaudeCodeStatsForRange`.
+    #[must_use]
+    pub fn for_range(&self, range: StatsRange, today: chrono::NaiveDate) -> StatsData {
+        let Some(days) = range.window_days() else {
+            return self.clone();
+        };
+        // Inclusive window: `today - (days-1) ..= today`.
+        let cutoff = today - chrono::Duration::days(days - 1);
+        let cutoff_str = cutoff.format("%Y-%m-%d").to_string();
+        let in_range = |date: &str| *date >= *cutoff_str.as_str();
+
+        let mut out = StatsData::default();
+        // Daily messages.
+        for (date, &n) in &self.daily_messages {
+            if in_range(date) {
+                out.daily_messages.insert(date.clone(), n);
+                out.total_messages += usize::try_from(n).unwrap_or(0);
+                track_date(&mut out, date);
+            }
+        }
+        // Sessions (count + longest).
+        for (date, dur) in &self.sessions {
+            if in_range(date) {
+                out.total_sessions += 1;
+                out.longest_session_ms = out.longest_session_ms.max(*dur);
+                out.sessions.push((date.clone(), *dur));
+            }
+        }
+        // Per-model usage (In/Out splits) + the per-day chart totals.
+        for (date, models) in &self.daily_model_usage {
+            if !in_range(date) {
+                continue;
+            }
+            let day_chart = out.daily_model_tokens.entry(date.clone()).or_default();
+            for (model, usage) in models {
+                out.daily_model_usage
+                    .entry(date.clone())
+                    .or_default()
+                    .insert(model.clone(), usage.clone());
+                let agg = out.model_usage.entry(model.clone()).or_default();
+                agg.input_tokens = agg.input_tokens.saturating_add(usage.input_tokens);
+                agg.output_tokens = agg.output_tokens.saturating_add(usage.output_tokens);
+                agg.cache_read_tokens =
+                    agg.cache_read_tokens.saturating_add(usage.cache_read_tokens);
+                let total = usage.input_tokens.saturating_add(usage.output_tokens);
+                if total > 0 {
+                    let slot = day_chart.entry(model.clone()).or_default();
+                    *slot = slot.saturating_add(total);
+                }
+            }
+        }
+        out.factoid = pick_factoid(out.total_tokens(), out.longest_session_ms);
+        out
+    }
+}
+
+/// Milliseconds between two ISO-8601 timestamps (`last - first`), clamped to 0
+/// when either fails to parse or the span is negative (claude-code
+/// `lastTimestamp.getTime() - firstTimestamp.getTime()`).
+#[must_use]
+pub fn session_duration_ms(first: &str, last: &str) -> u64 {
+    let parse = |s: &str| chrono::DateTime::parse_from_rfc3339(s).ok();
+    match (parse(first), parse(last)) {
+        (Some(a), Some(b)) => {
+            let ms = b.signed_duration_since(a).num_milliseconds();
+            u64::try_from(ms).unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
+
+/// Human-readable duration (claude-code `formatDuration`, no options): `0s`,
+/// `{s}s` under a minute, then `{m}m {s}s` / `{h}h {m}m {s}s` / `{d}d {h}h {m}m`
+/// with rounding carry-over.
+#[must_use]
+pub fn format_duration(ms: u64) -> String {
+    if ms < 60_000 {
+        return format!("{}s", ms / 1000);
+    }
+    let mut days = ms / 86_400_000;
+    let mut hours = (ms % 86_400_000) / 3_600_000;
+    let mut minutes = (ms % 3_600_000) / 60_000;
+    // `Math.round((ms % 60000) / 1000)` — round to nearest second.
+    let mut seconds = ((ms % 60_000) as f64 / 1000.0).round() as u64;
+    if seconds == 60 {
+        seconds = 0;
+        minutes += 1;
+    }
+    if minutes == 60 {
+        minutes = 0;
+        hours += 1;
+    }
+    if hours == 24 {
+        hours = 0;
+        days += 1;
+    }
+    if days > 0 {
+        format!("{days}d {hours}h {minutes}m")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m {seconds}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+/// `(book, tokens)` comparisons for the fun factoid (claude-code
+/// `BOOK_COMPARISONS`), ascending by token count.
+const BOOK_COMPARISONS: &[(&str, u64)] = &[
+    ("The Little Prince", 22_000),
+    ("The Old Man and the Sea", 35_000),
+    ("A Christmas Carol", 37_000),
+    ("Animal Farm", 39_000),
+    ("Fahrenheit 451", 60_000),
+    ("The Great Gatsby", 62_000),
+    ("Slaughterhouse-Five", 64_000),
+    ("Brave New World", 83_000),
+    ("The Catcher in the Rye", 95_000),
+    ("Harry Potter and the Philosopher's Stone", 103_000),
+    ("The Hobbit", 123_000),
+    ("1984", 123_000),
+    ("To Kill a Mockingbird", 130_000),
+    ("Pride and Prejudice", 156_000),
+    ("Dune", 244_000),
+    ("Moby-Dick", 268_000),
+    ("Crime and Punishment", 274_000),
+    ("A Game of Thrones", 381_000),
+    ("Anna Karenina", 468_000),
+    ("Don Quixote", 520_000),
+    ("The Lord of the Rings", 576_000),
+    ("The Count of Monte Cristo", 603_000),
+    ("Les Misérables", 689_000),
+    ("War and Peace", 730_000),
+];
+
+/// `(activity, minutes)` comparisons for the fun factoid (claude-code
+/// `TIME_COMPARISONS`).
+const TIME_COMPARISONS: &[(&str, u64)] = &[
+    ("a TED talk", 18),
+    ("an episode of The Office", 22),
+    ("listening to Abbey Road", 47),
+    ("a yoga class", 60),
+    ("a World Cup soccer match", 90),
+    ("a half marathon (average time)", 120),
+    ("the movie Inception", 148),
+    ("a transatlantic flight", 420),
+    ("a full night of sleep", 480),
+];
+
+/// The fun-factoid candidates (claude-code `generateFunFactoid`): token-vs-book
+/// + longest-session-vs-activity comparisons. The live caller picks one;
+/// claude-code picks at random, this picks deterministically by `total_tokens`
+/// (testable; the cosmetic factoid stays stable per stats load either way).
+#[must_use]
+pub fn generate_factoids(total_tokens: u64, longest_session_ms: u64) -> Vec<String> {
+    let mut out = Vec::new();
+    if total_tokens > 0 {
+        for (name, tokens) in BOOK_COMPARISONS.iter().filter(|(_, t)| total_tokens >= *t) {
+            let times = total_tokens / tokens;
+            if times >= 2 {
+                out.push(format!("You've used ~{times}x more tokens than {name}"));
+            } else {
+                out.push(format!("You've used the same number of tokens as {name}"));
+            }
+        }
+    }
+    if longest_session_ms > 0 {
+        let session_minutes = longest_session_ms / 60_000;
+        for (name, minutes) in TIME_COMPARISONS.iter() {
+            let ratio = session_minutes / minutes;
+            if ratio >= 2 {
+                out.push(format!("Your longest session is ~{ratio}x longer than {name}"));
+            }
+        }
+    }
+    out
+}
+
+/// Deterministic factoid pick (`generate_factoids` indexed by `total_tokens`),
+/// or `None` when there are no candidates.
+#[must_use]
+pub fn pick_factoid(total_tokens: u64, longest_session_ms: u64) -> Option<String> {
+    let factoids = generate_factoids(total_tokens, longest_session_ms);
+    if factoids.is_empty() {
+        None
+    } else {
+        let idx = usize::try_from(total_tokens).unwrap_or(0) % factoids.len();
+        Some(factoids[idx].clone())
+    }
 }
 
 /// Update `first_date`/`last_date` with `date` (lexicographic order is
@@ -422,7 +694,7 @@ impl HistoryFingerprint {
 /// the [`PersistedStatsCache`] / [`StatsData`] shape changes so a stale file is
 /// rejected by [`decode_stats_cache`] and falls back to a full walk. This is our
 /// OWN counter — see the module-section note above for why it is not `3`.
-pub const STATS_CACHE_VERSION: u32 = 1;
+pub const STATS_CACHE_VERSION: u32 = 3;
 
 /// The on-disk cache envelope (claude-code `PersistedStatsCache`): the schema
 /// version, the [`HistoryFingerprint`] the [`StatsData`] was computed from, and
@@ -476,6 +748,50 @@ pub enum StatsTab {
     Models,
 }
 
+/// Date-range filter for the stats view (claude-code `StatsDateRange`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StatsRange {
+    /// All time (no filter).
+    #[default]
+    All,
+    /// Last 7 days (inclusive of today).
+    Last7,
+    /// Last 30 days (inclusive of today).
+    Last30,
+}
+
+impl StatsRange {
+    /// Cycle order (claude-code `DATE_RANGE_ORDER` = all → 7d → 30d → all).
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            StatsRange::All => StatsRange::Last7,
+            StatsRange::Last7 => StatsRange::Last30,
+            StatsRange::Last30 => StatsRange::All,
+        }
+    }
+
+    /// Display label (claude-code `DATE_RANGE_LABELS`).
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            StatsRange::All => "All time",
+            StatsRange::Last7 => "Last 7 days",
+            StatsRange::Last30 => "Last 30 days",
+        }
+    }
+
+    /// Inclusive day-count of the window, or `None` for `All`.
+    #[must_use]
+    fn window_days(self) -> Option<i64> {
+        match self {
+            StatsRange::All => None,
+            StatsRange::Last7 => Some(7),
+            StatsRange::Last30 => Some(30),
+        }
+    }
+}
+
 impl StatsTab {
     /// The other tab (Tab / Shift-Tab both toggle between the two).
     #[must_use]
@@ -510,6 +826,8 @@ pub struct StatsState {
     /// blocking pool; the screen shows a "computing" line until [`set_data`]
     /// fills it. Opening via [`loading`](StatsState::loading) sets this.
     pub loading: bool,
+    /// (stats-date-range) Active date-range filter, cycled by `r`.
+    pub range: StatsRange,
 }
 
 impl StatsState {
@@ -518,13 +836,36 @@ impl StatsState {
     #[must_use]
     pub fn new(data: StatsData) -> Self {
         let tab = StatsTab::Overview;
+        // Default range = All → `view()` == data, so size on `data` directly.
         let len = body_lines(&data, tab).len();
         Self {
             data,
             tab,
             scroll: ScrollState::new(len, VIEWPORT),
             loading: false,
+            range: StatsRange::All,
         }
+    }
+
+    /// (stats-date-range) The data restricted to the active range. `All` (the
+    /// default) returns it unchanged; `Last7`/`Last30` filter against the local
+    /// `today`. The cutoff uses wall-clock now (like the streak computation).
+    #[must_use]
+    pub fn view(&self) -> StatsData {
+        if self.range == StatsRange::All {
+            self.data.clone()
+        } else {
+            self.data
+                .for_range(self.range, chrono::Local::now().date_naive())
+        }
+    }
+
+    /// (stats-date-range) Cycle to the next range (`r`), re-anchoring the scroll
+    /// to the (possibly different) filtered body length.
+    fn cycle_range(&mut self) {
+        self.range = self.range.next();
+        let len = body_lines(&self.view(), self.tab).len();
+        self.scroll = ScrollState::new(len, VIEWPORT);
     }
 
     /// Open in the LOADING state (empty data) while the background aggregation
@@ -541,8 +882,9 @@ impl StatsState {
     /// Replace the aggregated data (clears `loading`, re-anchors the scroll to
     /// the current tab's body length).
     pub fn set_data(&mut self, data: StatsData) {
-        let len = body_lines(&data, self.tab).len();
         self.data = data;
+        // Size on the active range's view (range is `All` by default → == data).
+        let len = body_lines(&self.view(), self.tab).len();
         self.scroll = ScrollState::new(len, VIEWPORT);
         self.loading = false;
     }
@@ -552,7 +894,7 @@ impl StatsState {
     /// switch).
     fn set_tab(&mut self, tab: StatsTab) {
         self.tab = tab;
-        let len = body_lines(&self.data, tab).len();
+        let len = body_lines(&self.view(), tab).len();
         self.scroll = ScrollState::new(len, VIEWPORT);
     }
 }
@@ -579,6 +921,11 @@ pub fn handle_stats_key(state: &mut StatsState, key: KeyEvent) -> StatsOutcome {
         }
         KeyCode::Esc => StatsOutcome::Close,
         KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => StatsOutcome::Close,
+        // (stats-date-range) `r` cycles the date range (All → 7d → 30d → All).
+        KeyCode::Char('r') if key.modifiers == KeyModifiers::NONE => {
+            state.cycle_range();
+            StatsOutcome::Stay
+        }
         _ => {
             // Scroll keys consume Up/Down/Page/Home/End; anything else is inert.
             let _ = state.scroll.handle_scroll_key(key);
@@ -654,36 +1001,98 @@ pub fn sparkline(values: &[u64]) -> String {
         .collect()
 }
 
-/// A GitHub-style activity heatmap of `daily` (`date -> message count`), as a
-/// `Vec` of rows — a structural port of claude-code `generateHeatmap`. We keep
-/// it COMPACT (a single intensity strip ordered by date, one glyph per active
-/// day) since the screen is a string-render overlay without the Ink fixed-width
-/// week grid; the glyph set + the `Less … More` legend match the TS heatmap.
+/// (stats-heatmap-grid) `today`-defaulting wrapper around
+/// [`heatmap_with_today`] — the live render path's entry point (`today` is
+/// `Local::now()`'s date; the parameterized form exists purely for
+/// deterministic tests).
 ///
 /// Returns `[]` when there is no activity (caller omits the section).
-///
-/// Structural invariant (unit-tested): the strip has exactly `daily.len()`
-/// glyphs (one per active day), each one of `· ░ ▒ ▓ █`, and the legend line is
-/// present.
 #[must_use]
 pub fn heatmap(daily: &BTreeMap<String, u64>) -> Vec<String> {
+    heatmap_with_today(daily, chrono::Local::now().date_naive())
+}
+
+/// GitHub-style 7-row × N-week activity grid — a faithful port of claude-code
+/// `generateHeatmap` (`utils/heatmap.ts`). The grid ends at `today`'s week
+/// (anchored on that week's Sunday) and walks back `width-1` weeks; future days
+/// are blank, past days carry their intensity glyph (`·` for no activity).
+/// Output rows: a month-label line, the 7 weekday rows (`Mon`/`Wed`/`Fri`
+/// labels on rows 1/3/5), a blank line, and the `Less … More` legend.
+/// `today` is injected so the layout is deterministic in tests.
+#[must_use]
+pub fn heatmap_with_today(daily: &BTreeMap<String, u64>, today: NaiveDate) -> Vec<String> {
     if daily.is_empty() {
         return Vec::new();
     }
+    const TERMINAL_WIDTH: i64 = 80;
+    const DAY_LABEL_WIDTH: i64 = 4;
+    // width = min(52, max(10, terminalWidth - dayLabelWidth)).
+    let width = (TERMINAL_WIDTH - DAY_LABEL_WIDTH).clamp(10, 52) as usize;
+
     let counts: Vec<u64> = daily.values().copied().filter(|&c| c > 0).collect();
     let pct = percentiles(&counts);
-    // One glyph per day, ascending by date (BTreeMap iteration order).
-    let strip: String = daily
-        .values()
-        .map(|&c| heatmap_char(intensity(c, pct)))
+
+    // Sunday of the current week, then back (width-1) weeks.
+    let dow = i64::from(today.weekday().num_days_from_sunday());
+    let current_week_start = today - ChronoDuration::days(dow);
+    let start_date = current_week_start - ChronoDuration::days((width as i64 - 1) * 7);
+
+    let mut grid = vec![vec![' '; width]; 7];
+    let mut month_order: Vec<u32> = Vec::new();
+    let mut last_month: i32 = -1;
+    let mut current = start_date;
+    for week in 0..width {
+        for day in 0..7usize {
+            if current > today {
+                grid[day][week] = ' ';
+            } else {
+                let date_str = current.format("%Y-%m-%d").to_string();
+                let count = daily.get(&date_str).copied().unwrap_or(0);
+                if day == 0 {
+                    let month = current.month0();
+                    if month as i32 != last_month {
+                        month_order.push(month);
+                        last_month = month as i32;
+                    }
+                }
+                grid[day][week] = heatmap_char(intensity(count, pct));
+            }
+            current += ChronoDuration::days(1);
+        }
+    }
+
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    let mut lines: Vec<String> = Vec::new();
+
+    // Month labels: each unique month, padEnd(floor(width / max(months,1))).
+    let label_w = width / month_order.len().max(1);
+    let labels: String = month_order
+        .iter()
+        .map(|&m| format!("{:<w$}", MONTHS[m as usize], w = label_w))
         .collect();
-    vec![
-        strip,
-        format!(
-            "Less {} {} {} {} More",
-            '\u{2591}', '\u{2592}', '\u{2593}', '\u{2588}'
-        ),
-    ]
+    lines.push(format!("    {labels}"));
+
+    // 7 weekday rows; labels only on Mon(1)/Wed(3)/Fri(5).
+    for day in 0..7usize {
+        let label = if day == 1 || day == 3 || day == 5 {
+            format!("{:<3}", DAYS[day])
+        } else {
+            "   ".to_string()
+        };
+        let row: String = grid[day].iter().collect();
+        lines.push(format!("{label} {row}"));
+    }
+
+    // Legend (blank line + 4-space indent).
+    lines.push(String::new());
+    lines.push(format!(
+        "    Less {} {} {} {} More",
+        '\u{2591}', '\u{2592}', '\u{2593}', '\u{2588}'
+    ));
+    lines
 }
 
 /// `(p25, p50, p75)` of `counts` (claude-code `calculatePercentiles`, which
@@ -759,13 +1168,52 @@ fn format_peak_day(date: &str) -> String {
 /// The Overview tab's body lines (heatmap + headline fields), claude-code
 /// `OverviewTab` order: heatmap, then Favorite model / Total tokens / Sessions
 /// / Active days / Most active day.
+/// Consecutive-active-day streaks (claude-code `calculateStreaks`): `(longest,
+/// current)`. `longest` = the longest run of consecutive calendar days that are
+/// all active; `current` = the run of consecutive active days ending at `today`
+/// (0 when `today` itself is inactive). `today` is injected for tests.
+#[must_use]
+pub fn streaks(daily: &BTreeMap<String, u64>, today: NaiveDate) -> (u64, u64) {
+    use std::collections::BTreeSet;
+    let active: BTreeSet<NaiveDate> = daily
+        .keys()
+        .filter_map(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+        .collect();
+    if active.is_empty() {
+        return (0, 0);
+    }
+    // Current streak: walk back from today while each day is active.
+    let mut current = 0u64;
+    let mut check = today;
+    while active.contains(&check) {
+        current += 1;
+        match check.pred_opt() {
+            Some(p) => check = p,
+            None => break,
+        }
+    }
+    // Longest streak: longest run of consecutive days in the sorted active set.
+    let sorted: Vec<NaiveDate> = active.into_iter().collect();
+    let (mut longest, mut temp) = (1u64, 1u64);
+    for w in sorted.windows(2) {
+        if (w[1] - w[0]).num_days() == 1 {
+            temp += 1;
+            longest = longest.max(temp);
+        } else {
+            temp = 1;
+        }
+    }
+    (longest, current)
+}
+
 fn overview_lines(data: &StatsData) -> Vec<String> {
     let mut out = Vec::new();
     for row in heatmap(&data.daily_messages) {
         out.push(row);
     }
     if let Some(fav) = data.favorite_model() {
-        out.push(format!("Favorite model: {fav}"));
+        // (stats-model-name-raw) friendly display name (renderModelName).
+        out.push(format!("Favorite model: {}", crate::render::model_name::render_model_name(fav)));
     }
     out.push(format!(
         "Total tokens: {}",
@@ -775,9 +1223,27 @@ fn overview_lines(data: &StatsData) -> Vec<String> {
         "Sessions: {}",
         format_number(data.total_sessions as u64)
     ));
-    out.push(format!("Active days: {}", data.active_days()));
+    // (stats-overview-missing-fields) Longest session duration, `N/A` when no
+    // session had a measurable span (claude-code `Longest session`).
+    let longest = if data.longest_session_ms > 0 {
+        format_duration(data.longest_session_ms)
+    } else {
+        "N/A".to_string()
+    };
+    out.push(format!("Longest session: {longest}"));
+    // (stats-overview-missing-fields) Active days `/rangeDays` + streaks.
+    out.push(format!("Active days: {}/{}", data.active_days(), data.range_days()));
+    let (longest, current) = streaks(&data.daily_messages, chrono::Local::now().date_naive());
+    let plural = |n: u64| if n == 1 { "day" } else { "days" };
+    out.push(format!("Longest streak: {longest} {}", plural(longest)));
+    out.push(format!("Current streak: {current} {}", plural(current)));
     if let Some(day) = data.peak_activity_day() {
         out.push(format!("Most active day: {}", format_peak_day(day)));
+    }
+    // (stats-overview-missing-fields) The fun factoid (claude-code shows it in
+    // the suggestion accent below the overview).
+    if let Some(factoid) = &data.factoid {
+        out.push(factoid.clone());
     }
     out
 }
@@ -812,7 +1278,14 @@ fn models_lines(data: &StatsData) -> Vec<String> {
 
     let total = data.total_tokens();
     for (model, usage) in entries {
-        out.push(format!("{model} ({}%)", format_pct(usage.total(), total)));
+        // (stats-models-row-bullet) figures.bullet (●) prefix; bold name + dim
+        // (pct%) await a structured render. (stats-model-name-raw) friendly
+        // display name via renderModelName.
+        out.push(format!(
+            "\u{25CF} {} ({}%)",
+            crate::render::model_name::render_model_name(model),
+            format_pct(usage.total(), total)
+        ));
         out.push(format!(
             "  In: {} \u{00B7} Out: {}",
             format_number(usage.input_tokens),
@@ -843,6 +1316,26 @@ fn tab_header(active: StatsTab) -> String {
     format!("{} {}", mark(StatsTab::Overview), mark(StatsTab::Models))
 }
 
+/// (stats-date-range-selector) All three range options joined by ` · `, the
+/// active one bracketed (claude-code `DateRangeSelector`: active bold+claude,
+/// others dim — color/bold are invisible in the string oracle, so the
+/// active one is `[…]`-bracketed, matching [`tab_header`]).
+fn range_selector_line(active: StatsRange) -> String {
+    let mark = |r: StatsRange| -> String {
+        if r == active {
+            format!("[{}]", r.label())
+        } else {
+            r.label().to_string()
+        }
+    };
+    format!(
+        "{} \u{00B7} {} \u{00B7} {}",
+        mark(StatsRange::All),
+        mark(StatsRange::Last7),
+        mark(StatsRange::Last30),
+    )
+}
+
 /// Pure render oracle: tab header + the active tab's visible body window +
 /// (when scrolled) a scroll indicator + the footer.
 ///
@@ -857,8 +1350,15 @@ pub fn render_stats_to_string(state: &StatsState) -> String {
     }
     let mut out = tab_header(state.tab);
     out.push('\n');
+    // (stats-date-range-selector) claude-code's DateRangeSelector renders ALL
+    // three range options joined by ` · `, the active one bold+claude (the
+    // string oracle marks it with `[…]` brackets, like tab_header — color is
+    // invisible here). The `r`-cycle hint moves to the footer.
+    out.push_str(&range_selector_line(state.range));
+    out.push('\n');
 
-    let lines = body_lines(&state.data, state.tab);
+    let view = state.view();
+    let lines = body_lines(&view, state.tab);
     for line in visible_slice(&lines, &state.scroll) {
         out.push_str(line);
         out.push('\n');
@@ -1030,7 +1530,7 @@ mod tests {
         let out = render_stats_to_string(&s);
         assert_eq!(
             out,
-            "No stats available yet. Start using Claude Code!\nTab to switch · Esc to close"
+            "No stats available yet. Start using Claude Code!\nEsc to cancel \u{00B7} r to cycle dates"
         );
     }
 
@@ -1071,9 +1571,31 @@ mod tests {
         assert!(out.contains("Favorite model: claude-opus"), "got: {out}");
         assert!(out.contains("Total tokens: 150"), "got: {out}");
         assert!(out.contains("Sessions: 1"), "got: {out}");
-        assert!(out.contains("Active days: 1"), "got: {out}");
-        assert!(out.contains("Most active day: May 1"), "got: {out}");
+        assert!(out.contains("Active days: 1/1"), "got: {out}");
         assert!(out.ends_with(FOOTER), "got: {out}");
+        // The taller overview (heatmap grid + streaks) pushes the lower fields
+        // below the fold; assert them against the full body.
+        let body = overview_lines(&st.data).join("\n");
+        assert!(body.contains("Most active day: May 1"), "body: {body}");
+        assert!(body.contains("Longest streak:"), "body: {body}");
+        assert!(body.contains("Current streak:"), "body: {body}");
+    }
+
+    #[test]
+    fn streaks_longest_and_current() {
+        let mut daily = BTreeMap::new();
+        // A 3-day run, a gap, then a 2-day run ending on the 10th.
+        for d in ["2026-06-01", "2026-06-02", "2026-06-03", "2026-06-09", "2026-06-10"] {
+            daily.insert(d.to_string(), 1u64);
+        }
+        // today = 2026-06-10 → current streak = 2 (09, 10); longest = 3.
+        let today = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap();
+        assert_eq!(streaks(&daily, today), (3, 2));
+        // today = 2026-06-12 (inactive) → current streak = 0.
+        let today2 = NaiveDate::from_ymd_opt(2026, 6, 12).unwrap();
+        assert_eq!(streaks(&daily, today2), (3, 0));
+        // Empty → (0, 0).
+        assert_eq!(streaks(&BTreeMap::new(), today), (0, 0));
     }
 
     #[test]
@@ -1186,24 +1708,31 @@ mod tests {
     }
 
     #[test]
-    fn heatmap_strip_has_one_glyph_per_day_plus_legend() {
-        let valid: &[char] = &['\u{00B7}', '\u{2591}', '\u{2592}', '\u{2593}', '\u{2588}'];
+    fn heatmap_renders_7row_grid_with_labels_and_legend() {
         let mut daily = BTreeMap::new();
         daily.insert("2026-05-01".to_string(), 1u64);
         daily.insert("2026-05-02".to_string(), 5u64);
-        daily.insert("2026-05-03".to_string(), 9u64);
-        let rows = heatmap(&daily);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].chars().count(), 3);
-        assert!(
-            rows[0].chars().all(|c| valid.contains(&c)),
-            "got: {}",
-            rows[0]
-        );
-        assert!(rows[1].starts_with("Less "));
-        assert!(rows[1].ends_with(" More"));
+        daily.insert("2026-06-03".to_string(), 9u64);
+        let today = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
+        let rows = heatmap_with_today(&daily, today);
+        // month-label line + 7 weekday rows + blank + legend = 10 rows.
+        assert_eq!(rows.len(), 10, "got: {rows:#?}");
+        // Output rows: 0=months, 1=Sun, 2=Mon, 3=Tue, 4=Wed, 5=Thu, 6=Fri, 7=Sat.
+        assert!(rows[2].starts_with("Mon"), "Mon label: {}", rows[2]);
+        assert!(rows[4].starts_with("Wed"), "Wed label: {}", rows[4]);
+        assert!(rows[6].starts_with("Fri"), "Fri label: {}", rows[6]);
+        assert!(rows[1].starts_with("   "), "Sun has blank label: {}", rows[1]);
+        // Each weekday row's grid is `width` glyphs (52 weeks at terminalWidth=80).
+        let valid: &[char] = &[' ', '\u{00B7}', '\u{2591}', '\u{2592}', '\u{2593}', '\u{2588}'];
+        let grid: String = rows[2].chars().skip(4).collect();
+        assert_eq!(grid.chars().count(), 52, "Mon row grid width");
+        assert!(grid.chars().all(|c| valid.contains(&c)), "glyphs: {grid}");
+        // Legend.
+        assert!(rows[8].is_empty(), "blank line before legend");
+        assert!(rows[9].starts_with("    Less "));
+        assert!(rows[9].ends_with(" More"));
         // Empty -> no rows.
-        assert!(heatmap(&BTreeMap::new()).is_empty());
+        assert!(heatmap_with_today(&BTreeMap::new(), today).is_empty());
     }
 
     #[test]
@@ -1352,5 +1881,135 @@ mod tests {
         let json = serde_json::to_string(&data).expect("serialize StatsData");
         let back: StatsData = serde_json::from_str(&json).expect("deserialize StatsData");
         assert_eq!(back, data);
+    }
+
+    #[test]
+    fn format_duration_matches_claude_code() {
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(30_000), "30s");
+        assert_eq!(format_duration(59_000), "59s");
+        assert_eq!(format_duration(90_000), "1m 30s");
+        assert_eq!(format_duration(3_661_000), "1h 1m 1s");
+        assert_eq!(format_duration(90_061_000), "1d 1h 1m");
+        // Rounding carry: 59.5s under a minute → still <60000 → floor "59s".
+        assert_eq!(format_duration(59_500), "59s");
+    }
+
+    #[test]
+    fn session_duration_from_iso_timestamps() {
+        let d = session_duration_ms("2026-05-25T14:00:00.000Z", "2026-05-25T15:30:00.000Z");
+        assert_eq!(d, 90 * 60 * 1000); // 1h30m
+        // Negative / unparseable → 0.
+        assert_eq!(session_duration_ms("2026-05-25T15:00:00Z", "2026-05-25T14:00:00Z"), 0);
+        assert_eq!(session_duration_ms("bad", "also-bad"), 0);
+    }
+
+    #[test]
+    fn factoid_compares_tokens_to_books_and_session_to_activities() {
+        // 250k tokens ≥ several books; ~11x The Little Prince (22k).
+        let f = generate_factoids(250_000, 0);
+        assert!(
+            f.iter().any(|s| s == "You've used ~11x more tokens than The Little Prince"),
+            "got: {f:?}"
+        );
+        // A book just under 2x → "same number of tokens as".
+        let f2 = generate_factoids(40_000, 0);
+        assert!(
+            f2.iter().any(|s| s == "You've used the same number of tokens as Animal Farm"),
+            "got: {f2:?}"
+        );
+        // 60-minute session is ~3x a TED talk (18m), ~2x an Office episode (22m).
+        let f3 = generate_factoids(0, 60 * 60 * 1000);
+        assert!(
+            f3.iter().any(|s| s == "Your longest session is ~3x longer than a TED talk"),
+            "got: {f3:?}"
+        );
+        // No tokens, no session → empty.
+        assert!(generate_factoids(0, 0).is_empty());
+        // pick_factoid is deterministic + within bounds.
+        assert!(pick_factoid(250_000, 0).is_some());
+        assert!(pick_factoid(0, 0).is_none());
+    }
+
+    #[test]
+    fn for_range_filters_sessions_and_tokens_by_window() {
+        use chrono::NaiveDate;
+        let today = NaiveDate::from_ymd_opt(2026, 6, 24).unwrap();
+        let recent = "2026-06-22"; // 2 days before today → within Last7 + Last30
+        let old = "2026-05-10"; // > 30 days → outside both windows
+        let mk = |date: &str, inp: u64, out: u64| {
+            parse_session(
+                &format!(
+                    "{}\n{}\n",
+                    user_line(date),
+                    assistant_line(date, "claude-opus-4-6", inp, out)
+                ),
+                false,
+            )
+        };
+        let data = aggregate(&[mk(recent, 100, 50), mk(old, 999, 999)]);
+        assert_eq!(data.total_sessions, 2);
+
+        // All → unchanged.
+        assert_eq!(data.for_range(StatsRange::All, today).total_sessions, 2);
+        // Last7 / Last30 → only the recent session + its tokens.
+        let l7 = data.for_range(StatsRange::Last7, today);
+        assert_eq!(l7.total_sessions, 1);
+        assert_eq!(l7.total_tokens(), 150);
+        assert_eq!(data.for_range(StatsRange::Last30, today).total_sessions, 1);
+    }
+
+    #[test]
+    fn r_key_cycles_the_date_range() {
+        let mut st = StatsState::new(StatsData::default());
+        assert_eq!(st.range, StatsRange::All);
+        let _ = handle_stats_key(&mut st, k(KeyCode::Char('r')));
+        assert_eq!(st.range, StatsRange::Last7);
+        let _ = handle_stats_key(&mut st, k(KeyCode::Char('r')));
+        assert_eq!(st.range, StatsRange::Last30);
+        let _ = handle_stats_key(&mut st, k(KeyCode::Char('r')));
+        assert_eq!(st.range, StatsRange::All);
+    }
+
+    #[test]
+    fn render_shows_active_range_label() {
+        let data = aggregate(&[parse_session(
+            &format!(
+                "{}\n{}\n",
+                user_line("2026-05-01"),
+                assistant_line("2026-05-01", "claude-opus-4-6", 10, 5)
+            ),
+            false,
+        )]);
+        let mut st = StatsState::new(data);
+        // (stats-date-range-selector) all three options; active bracketed.
+        assert!(
+            render_stats_to_string(&st)
+                .contains("[All time] \u{00B7} Last 7 days \u{00B7} Last 30 days"),
+            "got: {}",
+            render_stats_to_string(&st)
+        );
+        st.cycle_range();
+        assert!(render_stats_to_string(&st)
+            .contains("All time \u{00B7} [Last 7 days] \u{00B7} Last 30 days"));
+        // (stats-footer-text) the r-cycle hint now lives in the footer.
+        assert!(render_stats_to_string(&st).contains("Esc to cancel \u{00B7} r to cycle dates"));
+    }
+
+    #[test]
+    fn longest_session_flows_into_overview() {
+        // A transcript whose first→last main-chain timestamps span 2 hours.
+        let content = [
+            r#"{"type":"user","timestamp":"2026-05-25T10:00:00.000Z","message":{"role":"user","content":"hi"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-05-25T12:00:00.000Z","message":{"model":"claude-opus-4-6","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+        ]
+        .join("\n");
+        let contrib = parse_session(&content, false);
+        assert_eq!(contrib.first_ts.as_deref(), Some("2026-05-25T10:00:00.000Z"));
+        assert_eq!(contrib.last_ts.as_deref(), Some("2026-05-25T12:00:00.000Z"));
+        let data = aggregate(&[contrib]);
+        assert_eq!(data.longest_session_ms, 2 * 60 * 60 * 1000);
+        let overview = overview_lines(&data).join("\n");
+        assert!(overview.contains("Longest session: 2h 0m 0s"), "got: {overview}");
     }
 }

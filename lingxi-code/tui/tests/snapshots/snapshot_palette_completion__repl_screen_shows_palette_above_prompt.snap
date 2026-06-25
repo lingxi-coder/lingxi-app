@@ -1,13 +1,12 @@
 ---
 source: tui/tests/snapshot_palette_completion.rs
+assertion_line: 62
 expression: out
 ---
- . $0.0000 0% default
-/copy – (unimplemented in v0.6.0)
-/color – (unimplemented in v0.6.0)
-/commit – (unimplemented in v0.6.0)
-/config – Open settings
-/compact – Free up context by summarizing the conversation
-❯o/co 
+/copy                  Copy Claude's last response to c…
+/color                 Set the prompt bar color for thi…
+/commit                Create a git commit
+/config                Open settings
+/compact               Free up context by summarizing t…
+❯ /co 
 ❯
-? for shortcuts     shift + ⏎ for newline

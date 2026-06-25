@@ -88,6 +88,11 @@ fn system_api_error_singular_second_and_truncated() {
     insta::assert_snapshot!("system_api_error_singular_second_and_truncated", s);
 }
 
+// (ma-09) The API_TIMEOUT_MS-hint behavior is covered by an in-crate unit
+// test (system_api_error.rs) against the pure, env-free helper — mutating
+// the real process env var here would race this binary's other
+// render_system_api_error_to_string calls (which read the SAME global env).
+
 #[test]
 fn rate_limit_with_upsell() {
     let s = render_rate_limit_to_string(RateLimitProps {

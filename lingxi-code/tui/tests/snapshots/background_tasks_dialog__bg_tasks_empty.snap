@@ -1,7 +1,7 @@
 ---
 source: tui/tests/background_tasks_dialog.rs
-assertion_line: 26
+assertion_line: 38
 expression: "render_background_tasks_to_string(&state, &[])"
 ---
 Background tasks
-(no background tasks)
+No tasks currently running

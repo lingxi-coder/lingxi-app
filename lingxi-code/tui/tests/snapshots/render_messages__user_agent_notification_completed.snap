@@ -1,6 +1,6 @@
 ---
 source: tui/tests/render_messages.rs
-assertion_line: 62
+assertion_line: 109
 expression: element.to_string()
 ---
-● Background task finished
+⏺ Background task finished

@@ -363,6 +363,17 @@ pub async fn run_tui_session(
     if let Some(setting) = crate::theme_persist::load_theme_setting() {
         initial_state.set_theme(setting);
     }
+    // (theme-missing-syntax-toggle) Apply the stored `syntaxHighlightingDisabled`
+    // flag (best-effort; absent → session-default `false`), so the first frame's
+    // diff/code rendering honors the persisted Ctrl+T toggle.
+    if let Some(disabled) = crate::theme_persist::load_syntax_highlighting_disabled() {
+        initial_state.syntax_highlighting_disabled = disabled;
+    }
+    // (SS-06) Apply the stored `prefersReducedMotion` flag (best-effort; absent
+    // → `false`), so the streaming spinner honors reduced-motion from frame one.
+    if let Some(reduced) = crate::theme_persist::load_prefers_reduced_motion() {
+        initial_state.reduced_motion = reduced;
+    }
     // (GAP D) Install the runtime keybindings keymap (merged default + user
     // `~/.claude/keybindings.json`), which the live PRIMARY dispatch consults
     // before the hardcoded `map_iocraft_key` table. The customization gate is

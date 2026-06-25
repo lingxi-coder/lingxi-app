@@ -45,15 +45,17 @@ fn fixture_state(tab: SettingsTab) -> SettingsState {
 fn tab_nav_cycles_all_four_then_wraps() {
     let mut st = fixture_state(SettingsTab::Config);
     assert_eq!(st.tab, SettingsTab::Config);
+    // New order: Status → Config → Usage → Settings. From Config, Right cycles
+    // Config → Usage → Settings → Status → Config.
     let next = |st: &mut SettingsState| apply_settings_key(st, crossterm_right());
     assert_eq!(next(&mut st), SettingsOutcome::Stay);
+    assert_eq!(st.tab, SettingsTab::Usage);
+    next(&mut st);
     assert_eq!(st.tab, SettingsTab::Settings);
     next(&mut st);
     assert_eq!(st.tab, SettingsTab::Status);
     next(&mut st);
-    assert_eq!(st.tab, SettingsTab::Usage);
-    next(&mut st);
-    assert_eq!(st.tab, SettingsTab::Config, "wraps Usage → Config");
+    assert_eq!(st.tab, SettingsTab::Config, "wraps Status → Config");
 }
 
 #[test]
@@ -85,7 +87,8 @@ fn tab_through_dispatcher_advances_without_closing() {
     app.open_settings(fixture_state(SettingsTab::Config));
     handle_live_key(&mut app, &key(KeyCode::Tab), 24);
     match &app.active_screen {
-        Some(Screen::Settings(ss)) => assert_eq!(ss.tab, SettingsTab::Settings),
+        // New order: Config → Usage.
+        Some(Screen::Settings(ss)) => assert_eq!(ss.tab, SettingsTab::Usage),
         other => panic!("expected Settings tab advanced, got {other:?}"),
     }
 }

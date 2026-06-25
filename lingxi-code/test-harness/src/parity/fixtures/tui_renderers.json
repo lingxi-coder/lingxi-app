@@ -33,12 +33,12 @@
     "assistant_tool_use_collapsed": {
       "tool": "Read",
       "input": { "file_path": "/etc/hosts" },
-      "expected_rendered_text": "● Read({\"file_path\": \"/etc/hosts\"})"
+      "expected_rendered_text": "● Read(/etc/hosts)"
     },
     "user_tool_result_collapsed": {
       "tool": "Read",
       "result": { "content": "127.0.0.1 localhost\n::1 localhost" },
-      "expected_rendered_text": "└ 127.0.0.1 localhost (+1 lines)"
+      "expected_rendered_text": "  ⎿  127.0.0.1 localhost (+1 lines)"
     }
   }
 }

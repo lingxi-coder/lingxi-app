@@ -67,11 +67,15 @@ impl SettingsTab {
     /// All tabs in display order.
     #[must_use]
     pub fn all() -> [SettingsTab; 4] {
+        // (settings-tab-order) claude-code order is Status → Config → Usage; the
+        // Rust-only `Settings` provenance tab follows after Usage. The OPEN tab
+        // is passed explicitly via `OpenSettings(tab)`, so `/status` and
+        // `/config` still land on their tab regardless of this cycle order.
         [
-            SettingsTab::Config,
-            SettingsTab::Settings,
             SettingsTab::Status,
+            SettingsTab::Config,
             SettingsTab::Usage,
+            SettingsTab::Settings,
         ]
     }
 
@@ -281,10 +285,13 @@ mod tests {
 
     #[test]
     fn tab_cycles_with_wraparound() {
-        assert_eq!(SettingsTab::Config.next(), SettingsTab::Settings);
-        assert_eq!(SettingsTab::Usage.next(), SettingsTab::Config);
-        assert_eq!(SettingsTab::Config.prev(), SettingsTab::Usage);
-        assert_eq!(SettingsTab::Settings.prev(), SettingsTab::Config);
+        // New order: Status → Config → Usage → Settings → Status.
+        assert_eq!(SettingsTab::Status.next(), SettingsTab::Config);
+        assert_eq!(SettingsTab::Config.next(), SettingsTab::Usage);
+        assert_eq!(SettingsTab::Usage.next(), SettingsTab::Settings);
+        assert_eq!(SettingsTab::Settings.next(), SettingsTab::Status);
+        assert_eq!(SettingsTab::Config.prev(), SettingsTab::Status);
+        assert_eq!(SettingsTab::Status.prev(), SettingsTab::Settings);
     }
 
     #[test]
@@ -297,28 +304,30 @@ mod tests {
 
     #[test]
     fn tab_right_advances_with_wrap() {
+        // Usage → Settings (wrap region) under the new order.
         let mut st = fixture_state(SettingsTab::Usage);
         let outcome = apply_settings_key(&mut st, k(KeyCode::Right));
-        assert_eq!(st.tab, SettingsTab::Config);
+        assert_eq!(st.tab, SettingsTab::Settings);
         assert_eq!(outcome, SettingsOutcome::Stay, "Tab nav must not close");
-        // `l` and Tab alias Right.
+        // `l` and Tab alias Right: Config → Usage.
         let mut st2 = fixture_state(SettingsTab::Config);
         let _ = apply_settings_key(&mut st2, k(KeyCode::Char('l')));
-        assert_eq!(st2.tab, SettingsTab::Settings);
+        assert_eq!(st2.tab, SettingsTab::Usage);
         let mut st3 = fixture_state(SettingsTab::Config);
         let _ = apply_settings_key(&mut st3, k(KeyCode::Tab));
-        assert_eq!(st3.tab, SettingsTab::Settings);
+        assert_eq!(st3.tab, SettingsTab::Usage);
     }
 
     #[test]
     fn tab_left_retreats_with_wrap() {
+        // Config → Status (prev) under the new order.
         let mut st = fixture_state(SettingsTab::Config);
         let _ = apply_settings_key(&mut st, k(KeyCode::Left));
-        assert_eq!(st.tab, SettingsTab::Usage);
-        // `h` aliases Left.
+        assert_eq!(st.tab, SettingsTab::Status);
+        // `h` aliases Left: Settings → Usage.
         let mut st2 = fixture_state(SettingsTab::Settings);
         let _ = apply_settings_key(&mut st2, k(KeyCode::Char('h')));
-        assert_eq!(st2.tab, SettingsTab::Config);
+        assert_eq!(st2.tab, SettingsTab::Usage);
     }
 
     #[test]
@@ -359,11 +368,11 @@ mod tests {
     fn tab_strip_brackets_selected_tab() {
         assert_eq!(
             render_tab_strip(SettingsTab::Config),
-            "[Config]  Settings   Status   Usage "
+            " Status  [Config]  Usage   Settings "
         );
         assert_eq!(
             render_tab_strip(SettingsTab::Status),
-            " Config   Settings  [Status]  Usage "
+            "[Status]  Config   Usage   Settings "
         );
     }
 }

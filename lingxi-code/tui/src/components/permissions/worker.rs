@@ -1,7 +1,7 @@
 //! Worker-permission chrome (claude-code `WorkerBadge.tsx` +
 //! `WorkerPendingPermission.tsx`): a colored `● @name` badge and the
-//! "waiting for team lead approval" view. We lock the non-darwin
-//! `BLACK_CIRCLE` = `●` (U+25CF).
+//! "waiting for team lead approval" view. (perm-10) `BLACK_CIRCLE` is
+//! platform-dependent: `⏺` (U+23FA) on macOS, `●` (U+25CF) elsewhere.
 #![allow(clippy::needless_pass_by_value)]
 
 use iocraft::prelude::*;
@@ -9,8 +9,13 @@ use iocraft::prelude::*;
 use crate::multiagent::style::agent_color_from_name;
 use crate::theme::Theme;
 
-/// `● ` worker badge circle (`BLACK_CIRCLE` non-darwin, U+25CF + space).
-pub const BADGE_CIRCLE: &str = "\u{25CF} ";
+/// `BLACK_CIRCLE` + ` ` (claude-code `figures.ts`): `⏺` (U+23FA) on macOS,
+/// `●` (U+25CF) elsewhere.
+pub const BADGE_CIRCLE: &str = if cfg!(target_os = "macos") {
+    "\u{23FA} "
+} else {
+    "\u{25CF} "
+};
 
 /// Worker identity carried on a pending permission (TUI-side; not on the wire).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -23,7 +28,8 @@ pub struct WorkerPermissionInfo {
     pub team: Option<String>,
 }
 
-/// `● @{name}` (claude-code `WorkerBadge`). Color applied by the component.
+/// `{BADGE_CIRCLE}@{name}` (claude-code `WorkerBadge`). Color applied by the
+/// component.
 #[must_use]
 pub fn render_worker_badge(name: &str) -> String {
     format!("{BADGE_CIRCLE}@{name}")
@@ -120,8 +126,12 @@ mod tests {
 
     #[test]
     fn badge_bytes_and_format() {
+        // (perm-10) Platform-dependent glyph: ⏺ (macOS) or ● (elsewhere).
+        #[cfg(target_os = "macos")]
+        assert_eq!(BADGE_CIRCLE.as_bytes(), &[0xE2, 0x8F, 0xBA, 0x20]); // ⏺ + space
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(BADGE_CIRCLE.as_bytes(), &[0xE2, 0x97, 0x8F, 0x20]); // ● + space
-        assert_eq!(render_worker_badge("alice"), "\u{25CF} @alice");
+        assert_eq!(render_worker_badge("alice"), format!("{BADGE_CIRCLE}@alice"));
     }
 
     #[test]
@@ -136,7 +146,9 @@ mod tests {
     fn pending_full() {
         assert_eq!(
             render_worker_pending_to_string("Bash", "run ls", Some("alice"), Some("my-team")),
-            "Waiting for team lead approval\n\u{25CF} @alice\nTool: Bash\nAction: run ls\nPermission request sent to team \"my-team\" leader"
+            format!(
+                "Waiting for team lead approval\n{BADGE_CIRCLE}@alice\nTool: Bash\nAction: run ls\nPermission request sent to team \"my-team\" leader"
+            )
         );
     }
 }

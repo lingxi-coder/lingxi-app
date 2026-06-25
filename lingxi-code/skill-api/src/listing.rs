@@ -28,6 +28,11 @@ pub struct FileSkillSection {
     pub title: String,
     /// Rows sorted by name.
     pub rows: Vec<FileSkillRow>,
+    /// (skills-section-subtitle-missing) The section's skills directory —
+    /// claude-code `getSourceSubtitle`'s display-path subtitle. The nearest
+    /// (most cwd-specific) directory when a section aggregates several
+    /// ancestor dirs (project). `None` for an empty section.
+    pub path: Option<PathBuf>,
 }
 
 /// Load project and user file-based skills for display.
@@ -52,20 +57,18 @@ pub fn load_file_skill_sections_with_roots(
     additional_skill_dirs: &[PathBuf],
 ) -> Vec<FileSkillSection> {
     let mut seen: HashSet<PathBuf> = HashSet::new();
-    let managed_rows = managed_dir.map_or_else(Vec::new, |dir| {
-        load_skills_from_dirs(
-            &[dir.join(".claude").join("skills")],
-            SkillSource::Managed,
-            &mut seen,
-        )
+    let managed_skills_dir = managed_dir.map(|dir| dir.join(".claude").join("skills"));
+    let managed_rows = managed_skills_dir.as_ref().map_or_else(Vec::new, |dir| {
+        load_skills_from_dirs(std::slice::from_ref(dir), SkillSource::Managed, &mut seen)
     });
-    let project_rows = load_skills_from_dirs(
-        &project_skills_dirs(cwd, claude_home),
-        SkillSource::Project,
+    let project_dirs = project_skills_dirs(cwd, claude_home);
+    let project_rows = load_skills_from_dirs(&project_dirs, SkillSource::Project, &mut seen);
+    let user_skills_dir = claude_home.join("skills");
+    let user_rows = load_skills_from_dirs(
+        std::slice::from_ref(&user_skills_dir),
+        SkillSource::User,
         &mut seen,
     );
-    let user_rows =
-        load_skills_from_dirs(&[claude_home.join("skills")], SkillSource::User, &mut seen);
     let additional_rows =
         load_skills_from_dirs(additional_skill_dirs, SkillSource::Project, &mut seen);
 
@@ -74,24 +77,28 @@ pub fn load_file_skill_sections_with_roots(
         sections.push(FileSkillSection {
             title: "Managed skills".to_string(),
             rows: managed_rows,
+            path: managed_skills_dir,
         });
     }
     if !project_rows.is_empty() {
         sections.push(FileSkillSection {
             title: "Project skills".to_string(),
             rows: project_rows,
+            path: project_dirs.into_iter().next(),
         });
     }
     if !user_rows.is_empty() {
         sections.push(FileSkillSection {
             title: "User skills".to_string(),
             rows: user_rows,
+            path: Some(user_skills_dir),
         });
     }
     if !additional_rows.is_empty() {
         sections.push(FileSkillSection {
             title: "Additional skills".to_string(),
             rows: additional_rows,
+            path: additional_skill_dirs.first().cloned(),
         });
     }
     sections

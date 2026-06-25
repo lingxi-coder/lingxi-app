@@ -108,6 +108,7 @@ fn status_snapshot_parity() {
         started_at: "2026-05-29T10:00:00Z".to_string(),
         cwd: PathBuf::from("/home/u/proj"),
         active_workers: 0,
+        setting_sources: Vec::new(),
     };
 
     let dto = lower_status_snapshot(&snap);
@@ -146,6 +147,8 @@ fn agent_info_parity() {
         name: "explorer".to_string(),
         description: "find things".to_string(),
         tools_allowed: vec!["Read".to_string(), "Grep".to_string()],
+        wildcard_tools: false,
+        ..AgentInfo::default()
     };
 
     let dto = lower_agent_info(&info);
@@ -277,12 +280,14 @@ fn hook_info_parity() {
         event: "PreToolUse".to_string(),
         matcher: Some("Bash.*".to_string()),
         timeout_ms: 5_000,
+        ..HookInfo::default()
     };
     let without_matcher = HookInfo {
         name: "stop-logger".to_string(),
         event: "Stop".to_string(),
         matcher: None,
         timeout_ms: 60_000,
+        ..HookInfo::default()
     };
 
     let with_dto = lower_hook_info(&with_matcher);

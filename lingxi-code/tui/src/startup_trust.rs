@@ -96,6 +96,7 @@ pub fn handle_key(state: &mut TrustDialogState, key: KeyEvent) -> Option<TrustDi
 ///   - `[4]` link        `:220` security guide URL
 ///   - `[5]` option      `:228` "Yes, I trust this folder" (Accept-first)
 ///   - `[6]` option      `:231` "No, exit"
+///   - `[7]` footer      `:248` "Enter to confirm · Esc to cancel" (dimmed)
 #[must_use]
 pub fn render_lines(cwd: &Path) -> Vec<String> {
     vec![
@@ -109,6 +110,9 @@ pub fn render_lines(cwd: &Path) -> Vec<String> {
         "Security guide: https://code.claude.com/docs/en/security".to_string(),
         "Yes, I trust this folder".to_string(),
         "No, exit".to_string(),
+        // (TRUST-1) dimmed footer hint (TrustDialog.tsx:248). Rendered dim +
+        // after a spacer by `draw_dialog`.
+        "Enter to confirm \u{00B7} Esc to cancel".to_string(),
     ]
 }
 
@@ -189,9 +193,11 @@ fn draw_dialog(state: TrustDialogState, cwd: &Path) -> std::io::Result<()> {
     };
     use std::io::Write;
 
+    use crossterm::style::{Attribute, SetAttribute};
+
     let lines = render_lines(cwd);
-    // render_lines layout: [title, cwd, body1, body2, link, accept, decline].
-    let (body, accept, decline) = (&lines[..5], &lines[5], &lines[6]);
+    // render_lines layout: [title, cwd, body1, body2, link, accept, decline, footer].
+    let (body, accept, decline, footer) = (&lines[..5], &lines[5], &lines[6], &lines[7]);
 
     let mut out = std::io::stdout();
     execute!(out, Clear(ClearType::All), MoveTo(0, 0))?;
@@ -205,10 +211,16 @@ fn draw_dialog(state: TrustDialogState, cwd: &Path) -> std::io::Result<()> {
     row += 1;
     for (choice, label) in [(TrustChoice::Accept, accept), (TrustChoice::Decline, decline)] {
         execute!(out, MoveTo(0, row))?;
-        let marker = if state.selected == choice { "> " } else { "  " };
+        // (TRUST-2) figures.pointer `❯ ` on the highlighted row (CustomSelect).
+        let marker = if state.selected == choice { "\u{276F} " } else { "  " };
         write!(out, "{marker}{label}")?;
         row += 1;
     }
+    // (TRUST-1) dimmed footer hint after a spacer row.
+    row += 1;
+    execute!(out, MoveTo(0, row), SetAttribute(Attribute::Dim))?;
+    write!(out, "{footer}")?;
+    execute!(out, SetAttribute(Attribute::Reset))?;
     out.flush()
 }
 
@@ -283,5 +295,7 @@ mod tests {
         assert_eq!(lines[4], "Security guide: https://code.claude.com/docs/en/security");
         assert_eq!(lines[5], "Yes, I trust this folder");
         assert_eq!(lines[6], "No, exit");
+        // (TRUST-1) dimmed footer hint.
+        assert_eq!(lines[7], "Enter to confirm \u{00B7} Esc to cancel");
     }
 }

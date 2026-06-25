@@ -113,6 +113,7 @@ mod tests {
             started_at: "2026-05-26T10:00:00Z".into(),
             cwd: std::path::PathBuf::from("/repo"),
             active_workers: 0,
+            setting_sources: Vec::new(),
         };
         mock.set_status_snapshot(snap);
         let h = StatusHandler::new(mock);

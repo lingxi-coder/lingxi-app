@@ -24,9 +24,10 @@ fn buf_30() -> AppState {
 fn pgup_twice_offsets_by_two_viewports() {
     let mut st = buf_30();
     let vh = 8;
+    // (RRS-01) Each PageUp steps HALF a viewport (vh/2 = 4), so two = vh.
     scroll_with_viewport(&mut st, ScrollDir::PageUp, vh);
     scroll_with_viewport(&mut st, ScrollDir::PageUp, vh);
-    assert_eq!(st.scroll_offset, vh * 2);
+    assert_eq!(st.scroll_offset, vh);
 }
 
 #[test]

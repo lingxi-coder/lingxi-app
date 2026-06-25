@@ -1,8 +1,8 @@
 //! `/stats` usage-stats screen (claude-code `Stats.tsx` parity): an in-tree
 //! aggregation of the `*.jsonl` session transcripts under
 //! `<claude_home>/projects/`, presented as a two-tab overlay (`Overview` /
-//! `Models`) with a sparkline tokens-per-day chart and a GitHub-style activity
-//! heatmap.
+//! `Models`) with a multi-series asciichart tokens-per-day chart and a
+//! GitHub-style activity heatmap.
 //!
 //! Four-part split mirroring `skills.rs`/`agents.rs`/`theme.rs`: a
 //! [`StatsState`] (aggregated [`StatsData`] + active [`StatsTab`] + an embedded
@@ -1001,6 +1001,298 @@ pub fn sparkline(values: &[u64]) -> String {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// (stats-chart-sparkline-vs-asciichart) Multi-series tokens-per-day chart, a
+// port of claude-code `generateTokenChart` (`Stats.tsx`). claude-code replaced
+// the single-line sparkline with an 8-row `asciichart` plot of the top-3
+// models, a padStart(6) k/M y-axis, an x-axis date line, and a `●`-bulleted
+// legend. The asciichart glyphs + layout are byte-faithful to the npm
+// `asciichart` `plot()` algorithm (kroitor); the only forced divergence is
+// COLOR: claude-code colors each series + bullet via chalk/ANSI, but the pure
+// string oracle has no color seam, so the chart + legend render monochrome
+// (the per-series ANSI escapes are simply omitted, the box-drawing glyphs are
+// identical).
+// ---------------------------------------------------------------------------
+
+/// The chart-window width budget (claude-code `generateTokenChart`): a fixed
+/// `terminalWidth` of 80 (the screenshot path's constant) minus the 7-char
+/// y-axis gutter, clamped to `20..=52` (`Math.min(52, Math.max(20, …))`). The
+/// 52 cap aligns the chart with the heatmap's one-year width.
+const CHART_TERMINAL_WIDTH: usize = 80;
+/// Y-axis gutter width (claude-code `yAxisWidth = 7`): the 6-char label
+/// (`format(...).padStart(6)`) plus the 1-char axis rule.
+const CHART_Y_AXIS_WIDTH: usize = 7;
+/// Plot height passed to asciichart (`height: 8` in `generateTokenChart`).
+const CHART_HEIGHT: i64 = 8;
+
+/// One model's prepared chart input: its renderable display name (for the
+/// legend) and its per-day token series (one value per window column).
+struct ChartSeries {
+    /// `renderModelName(model)` — the legend label.
+    display_name: String,
+    /// Per-day total tokens across the resampled window.
+    values: Vec<u64>,
+}
+
+/// The result of [`generate_token_chart`] (claude-code `ChartOutput`): the
+/// rendered `asciichart` body rows, the x-axis date-label line, and the legend
+/// line. `None` when there is nothing to chart (claude-code returns `null`).
+struct ChartOutput {
+    /// The 8-row (height+1) asciichart body, one `String` per row.
+    chart_rows: Vec<String>,
+    /// The x-axis date labels (already y-axis-indented).
+    x_axis_labels: String,
+    /// The `● {name} · ● {name}` legend line.
+    legend: String,
+}
+
+/// The y-axis label formatter (claude-code `generateTokenChart`'s `format`):
+/// `>=1M` → `{x/1M:.1}M`, `>=1k` → `{x/1k:.0}k`, else the integer — then
+/// `padStart(6)` (always exactly 6 chars, space-padded on the left).
+#[must_use]
+fn format_y_axis_label(value: f64) -> String {
+    let label = if value >= 1_000_000.0 {
+        format!("{:.1}M", value / 1_000_000.0)
+    } else if value >= 1_000.0 {
+        format!("{:.0}k", value / 1_000.0)
+    } else {
+        format!("{value:.0}")
+    };
+    format!("{label:>6}")
+}
+
+/// Resample `dailies` (chronological `(date, model→tokens)` rows) to exactly
+/// `chart_width` columns, mirroring claude-code's window logic: when there is
+/// more data than space, keep the most recent `chart_width` days
+/// (`slice(-chartWidth)`); when there is less, repeat each day
+/// `floor(chartWidth / len)` times (so the expanded length can be `<
+/// chart_width`, exactly as the TS `repeatCount` loop produces).
+fn resample_window<'a>(
+    dailies: &[(&'a str, &'a BTreeMap<String, u64>)],
+    chart_width: usize,
+) -> Vec<(&'a str, &'a BTreeMap<String, u64>)> {
+    if dailies.len() >= chart_width {
+        dailies[dailies.len() - chart_width..].to_vec()
+    } else {
+        let repeat = chart_width / dailies.len().max(1);
+        let mut out = Vec::with_capacity(repeat * dailies.len());
+        for day in dailies {
+            for _ in 0..repeat {
+                out.push(*day);
+            }
+        }
+        out
+    }
+}
+
+/// Build the multi-series chart input (claude-code `generateTokenChart` up to
+/// the `asciichart(...)` call). `daily_model_tokens` is the per-date model
+/// token map; `models` is the token-ranked model id list (top-3 are charted).
+/// Returns `None` when there are `< 2` days, no models, or no series has any
+/// positive value (claude-code's three `null` returns).
+fn build_chart_series(
+    daily_model_tokens: &BTreeMap<String, BTreeMap<String, u64>>,
+    models: &[&str],
+) -> Option<(Vec<ChartSeries>, Vec<String>)> {
+    if daily_model_tokens.len() < 2 || models.is_empty() {
+        return None;
+    }
+    let chart_width = (CHART_TERMINAL_WIDTH - CHART_Y_AXIS_WIDTH).clamp(20, 52);
+    // BTreeMap iterates dates ascending → chronological, matching the TS
+    // `dailyModelTokens` array order.
+    let dailies: Vec<(&str, &BTreeMap<String, u64>)> = daily_model_tokens
+        .iter()
+        .map(|(d, m)| (d.as_str(), m))
+        .collect();
+    let window = resample_window(&dailies, chart_width);
+
+    let mut series = Vec::new();
+    for &model in models.iter().take(3) {
+        let values: Vec<u64> = window
+            .iter()
+            .map(|(_, day)| day.get(model).copied().unwrap_or(0))
+            .collect();
+        // Only include a series that has actual data (`data.some(v => v > 0)`).
+        if values.iter().any(|&v| v > 0) {
+            series.push(ChartSeries {
+                display_name: crate::render::model_name::render_model_name(model),
+                values,
+            });
+        }
+    }
+    if series.is_empty() {
+        return None;
+    }
+    let dates: Vec<String> = window.iter().map(|(d, _)| (*d).to_string()).collect();
+    Some((series, dates))
+}
+
+/// The full tokens-per-day chart (claude-code `generateTokenChart`): the
+/// 8-row asciichart body, the x-axis date line, and the legend. `None` when
+/// there is nothing to chart.
+#[must_use]
+fn generate_token_chart(
+    daily_model_tokens: &BTreeMap<String, BTreeMap<String, u64>>,
+    models: &[&str],
+) -> Option<ChartOutput> {
+    let (series, dates) = build_chart_series(daily_model_tokens, models)?;
+    let value_series: Vec<&[u64]> = series.iter().map(|s| s.values.as_slice()).collect();
+    let chart_rows = asciichart_plot(&value_series);
+    let x_axis_labels = generate_x_axis_labels(&dates, CHART_Y_AXIS_WIDTH);
+    let legend = series
+        .iter()
+        .map(|s| format!("\u{25CF} {}", s.display_name))
+        .collect::<Vec<_>>()
+        .join(" \u{00B7} ");
+    Some(ChartOutput {
+        chart_rows,
+        x_axis_labels,
+        legend,
+    })
+}
+
+/// asciichart's default y-axis cell offset (`cfg.offset ?? 3`). claude-code's
+/// `generateTokenChart` passes only `{height, colors, format}` — NO `offset` —
+/// so the library default `3` applies: a 6-char `format` label is written as a
+/// single string-cell at index `max(offset - 6, 0) = 0`, the axis rule sits at
+/// index `offset - 1 = 2`, and the series plot starts at index `offset = 3`.
+const CHART_OFFSET: usize = 3;
+
+/// A monochrome port of the npm `asciichart` `plot(series, {height: 8})`
+/// algorithm (kroitor). Returns one `String` per chart row (top to bottom),
+/// each beginning with the 6-char y-axis label + axis rule, then the
+/// box-drawing series glyphs.
+///
+/// Faithful to asciichart's *string-cell* grid: each grid cell holds a string
+/// (a single glyph, except the y-axis cell which holds the whole padded
+/// label), and a row is the `''`-join of its cells — so a 6-char label at cell
+/// 0 + the axis at cell 2 render as `"   588 ┤…"` exactly like the library.
+/// The only divergence is COLOR (the per-series ANSI escapes are dropped); the
+/// glyphs + layout are identical.
+///
+/// Structural (NOT byte-locked) invariants the tests assert: exactly
+/// `height + 1` rows; each row's leading 6 chars are the y-axis label; the
+/// plotted glyphs are drawn from asciichart's box-drawing set.
+#[must_use]
+fn asciichart_plot(series: &[&[u64]]) -> Vec<String> {
+    // asciichart symbols: ┼ ┤ ╶ ╴ ─ ╰ ╮ ╭ ╯ │
+    const SYM: [&str; 10] = [
+        "\u{253C}", "\u{2524}", "\u{2576}", "\u{2574}", "\u{2500}", "\u{2570}", "\u{256E}",
+        "\u{256D}", "\u{256F}", "\u{2502}",
+    ];
+    if series.is_empty() || series.iter().all(|s| s.is_empty()) {
+        return Vec::new();
+    }
+    // min/max across all series.
+    let mut min = u64::MAX;
+    let mut max = 0u64;
+    for s in series {
+        for &v in *s {
+            min = min.min(v);
+            max = max.max(v);
+        }
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let (minf, maxf) = (min as f64, max as f64);
+    let range = (maxf - minf).abs();
+    let offset = CHART_OFFSET;
+    #[allow(clippy::cast_precision_loss)]
+    let height = CHART_HEIGHT as f64;
+    let ratio = if range != 0.0 { height / range } else { 1.0 };
+    let min2 = (minf * ratio).round() as i64;
+    let max2 = (maxf * ratio).round() as i64;
+    let rows = (max2 - min2).unsigned_abs() as usize;
+
+    let series_width = series.iter().map(|s| s.len()).max().unwrap_or(0);
+    let width = series_width + offset;
+
+    // String-cell grid of (rows+1) × width, single-space cells by default.
+    let mut grid: Vec<Vec<String>> = vec![vec![" ".to_string(); width]; rows + 1];
+    let set = |grid: &mut Vec<Vec<String>>, r: usize, c: usize, v: &str| {
+        if r < grid.len() && c < grid[r].len() {
+            grid[r][c] = v.to_string();
+        }
+    };
+
+    // Y-axis labels + axis rule (`result[row][max(offset-len,0)] = label`,
+    // `result[row][offset-1] = (y==0)? ┼ : ┤`).
+    #[allow(clippy::cast_precision_loss)]
+    let rows_f = rows.max(1) as f64;
+    for y in min2..=max2 {
+        let row = (y - min2) as usize;
+        let value = maxf - ((y - min2) as f64) * range / rows_f;
+        let label = format_y_axis_label(value);
+        let label_len = label.chars().count();
+        let label_col = offset.saturating_sub(label_len);
+        set(&mut grid, row, label_col, &label);
+        set(&mut grid, row, offset - 1, if y == 0 { SYM[0] } else { SYM[1] });
+    }
+
+    // Plot each series.
+    #[allow(clippy::cast_precision_loss)]
+    let scaled = |v: u64| ((v as f64 * ratio).round() as i64) - min2;
+    let row_of = |y: i64| (rows as i64 - y).clamp(0, rows as i64) as usize;
+    for s in series {
+        if s.is_empty() {
+            continue;
+        }
+        // First point marker (`result[rows - y0][offset-1] = ┼`).
+        let r0 = row_of(scaled(s[0]));
+        set(&mut grid, r0, offset - 1, SYM[0]);
+        for i in 0..s.len().saturating_sub(1) {
+            let ya = scaled(s[i]);
+            let yb = scaled(s[i + 1]);
+            let col = i + offset;
+            if col >= width {
+                continue;
+            }
+            if ya == yb {
+                set(&mut grid, row_of(ya), col, SYM[4]);
+            } else {
+                set(&mut grid, row_of(yb), col, if ya > yb { SYM[5] } else { SYM[6] });
+                set(&mut grid, row_of(ya), col, if ya > yb { SYM[7] } else { SYM[8] });
+                let (from, to) = (ya.min(yb), ya.max(yb));
+                for y in (from + 1)..to {
+                    set(&mut grid, row_of(y), col, SYM[9]);
+                }
+            }
+        }
+    }
+
+    grid.into_iter()
+        .map(|row| row.concat().trim_end().to_string())
+        .collect()
+}
+
+/// The x-axis date-label line (claude-code `generateXAxisLabels`): 2-4 `Mon D`
+/// date labels evenly spaced across the window, prefixed by a `y_axis_offset`
+/// space gutter. `dates` is the resampled window's `YYYY-MM-DD` keys.
+#[must_use]
+fn generate_x_axis_labels(dates: &[String], y_axis_offset: usize) -> String {
+    if dates.is_empty() {
+        return String::new();
+    }
+    // numLabels = min(4, max(2, floor(len / 8))).
+    let num_labels = (dates.len() / 8).clamp(2, 4);
+    // usableLength = len - 6 (reserve ~6 chars for the last label).
+    let usable = dates.len() as i64 - 6;
+    let step = (usable / (num_labels as i64 - 1).max(1)).max(1);
+    let mut result = " ".repeat(y_axis_offset);
+    let mut current_pos: i64 = 0;
+    for i in 0..num_labels {
+        let idx = ((i as i64) * step).min(dates.len() as i64 - 1) as usize;
+        let label = format_peak_day(&dates[idx]);
+        let pos = idx as i64;
+        let spaces = (pos - current_pos).max(1);
+        for _ in 0..spaces {
+            result.push(' ');
+        }
+        result.push_str(&label);
+        current_pos = pos + label.chars().count() as i64;
+    }
+    result
+}
+
 /// (stats-heatmap-grid) `today`-defaulting wrapper around
 /// [`heatmap_with_today`] — the live render path's entry point (`today` is
 /// `Local::now()`'s date; the parameterized form exists purely for
@@ -1248,8 +1540,9 @@ fn overview_lines(data: &StatsData) -> Vec<String> {
     out
 }
 
-/// The Models tab's body lines: the `Tokens per Day` sparkline (when there are
-/// ≥2 days of token data) then one two-line block per model
+/// The Models tab's body lines: the `Tokens per Day` multi-series asciichart
+/// (when there are ≥2 days of token data) — the 8-row chart, x-axis date line,
+/// and `●`-bulleted top-3 legend — then one two-line block per model
 /// (`{model} ({pct}%)` + `  In: {n} · Out: {n}`), claude-code `ModelsTab` +
 /// `ModelEntry`. `No model usage data available` when there is no model data.
 fn models_lines(data: &StatsData) -> Vec<String> {
@@ -1259,21 +1552,20 @@ fn models_lines(data: &StatsData) -> Vec<String> {
     }
     let mut out = Vec::new();
 
-    // Tokens-per-day sparkline for the top model (claude-code charts the top
-    // models; we sparkline the favorite's daily totals). Needs ≥2 days.
-    if let Some((top, _)) = entries.first() {
-        let series: Vec<u64> = data
-            .daily_model_tokens
-            .values()
-            .map(|day| day.get(*top).copied().unwrap_or(0))
-            .collect();
-        if series.len() >= 2 {
-            let line = sparkline(&series);
-            if !line.is_empty() {
-                out.push(TOKENS_PER_DAY.to_string());
-                out.push(line);
-            }
+    // (stats-chart-sparkline-vs-asciichart) Tokens-per-day multi-series
+    // asciichart for the top-3 models (claude-code `generateTokenChart`):
+    // the 8-row chart, an x-axis date line, and a `●`-bulleted legend, all
+    // under the `Tokens per Day` heading. Rendered only when there are ≥2 days
+    // of data with at least one non-empty top-3 series (else the section is
+    // omitted, mirroring the TS `null` return).
+    let model_ids: Vec<&str> = entries.iter().map(|(m, _)| *m).collect();
+    if let Some(chart) = generate_token_chart(&data.daily_model_tokens, &model_ids) {
+        out.push(TOKENS_PER_DAY.to_string());
+        for row in chart.chart_rows {
+            out.push(row);
         }
+        out.push(chart.x_axis_labels);
+        out.push(chart.legend);
     }
 
     let total = data.total_tokens();
@@ -1705,6 +1997,191 @@ mod tests {
                                                         // Empty / all-zero -> empty string.
         assert_eq!(sparkline(&[]), "");
         assert_eq!(sparkline(&[0, 0, 0]), "");
+    }
+
+    // ---- (stats-chart-sparkline-vs-asciichart) multi-series chart ----
+
+    /// The asciichart box-drawing glyph set + the y-axis chars, for validation.
+    fn chart_glyphs() -> Vec<char> {
+        vec![
+            ' ', '\u{253C}', '\u{2524}', '\u{2576}', '\u{2574}', '\u{2500}', '\u{2570}',
+            '\u{256E}', '\u{256D}', '\u{256F}', '\u{2502}',
+            // y-axis label chars (digits, '.', 'k', 'M', minus sign).
+            '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '.', 'k', 'M', '-',
+        ]
+    }
+
+    #[test]
+    fn format_y_axis_label_pads_to_six_and_uses_k_m() {
+        // <1k → integer, padStart(6).
+        assert_eq!(format_y_axis_label(0.0), "     0");
+        assert_eq!(format_y_axis_label(42.0), "    42");
+        // 1k..1M → {x/1k:.0}k (toFixed(0)).
+        assert_eq!(format_y_axis_label(1_500.0), "    2k"); // 1.5 -> round-half-even toFixed(0)=2
+        assert_eq!(format_y_axis_label(12_000.0), "   12k");
+        // >=1M → {x/1M:.1}M.
+        assert_eq!(format_y_axis_label(2_000_000.0), "  2.0M");
+        assert_eq!(format_y_axis_label(2_500_000.0), "  2.5M");
+        // Always exactly 6 chars.
+        for v in [0.0, 999.0, 1_000.0, 999_999.0, 5_000_000.0] {
+            assert_eq!(format_y_axis_label(v).chars().count(), 6, "v={v}");
+        }
+    }
+
+    #[test]
+    fn asciichart_plot_has_height_plus_one_rows_and_valid_glyphs() {
+        // Two series of 10 columns: one climbing, one flat.
+        let climbing: Vec<u64> = (0..10).map(|i| i * 100).collect();
+        let flat: Vec<u64> = vec![500; 10];
+        let rows = asciichart_plot(&[climbing.as_slice(), flat.as_slice()]);
+        // asciichart height=8 → 9 rows.
+        assert_eq!(rows.len(), 9, "rows: {rows:#?}");
+        let valid = chart_glyphs();
+        for (r, row) in rows.iter().enumerate() {
+            assert!(
+                row.chars().all(|c| valid.contains(&c)),
+                "row {r} has invalid glyph: {row:?}"
+            );
+            // Each row's leading 6 chars are the y-axis label (space-padded).
+            let label: String = row.chars().take(6).collect();
+            assert_eq!(label.chars().count(), 6, "row {r} label width: {row:?}");
+        }
+        // Empty input → no rows.
+        assert!(asciichart_plot(&[]).is_empty());
+    }
+
+    #[test]
+    fn generate_x_axis_labels_evenly_spaced_dates() {
+        let dates: Vec<String> = (1..=30)
+            .map(|d| format!("2026-06-{d:02}"))
+            .collect();
+        let line = generate_x_axis_labels(&dates, CHART_Y_AXIS_WIDTH);
+        // Leading 7-space y-axis gutter.
+        assert!(line.starts_with("       "), "gutter: {line:?}");
+        // 30 days / 8 = 3 labels; first is the earliest date 'Jun 1'.
+        assert!(line.contains("Jun 1"), "got: {line}");
+        // 2..=4 labels → count the 'Jun ' occurrences.
+        let n = line.matches("Jun ").count();
+        assert!((2..=4).contains(&n), "label count {n}: {line}");
+        // Empty → empty.
+        assert!(generate_x_axis_labels(&[], 7).is_empty());
+    }
+
+    #[test]
+    fn generate_token_chart_none_cases() {
+        // <2 days → None.
+        let mut one_day = BTreeMap::new();
+        let mut m = BTreeMap::new();
+        m.insert("a".to_string(), 100u64);
+        one_day.insert("2026-06-01".to_string(), m);
+        assert!(generate_token_chart(&one_day, &["a"]).is_none());
+        // No models → None.
+        let mut two_day = BTreeMap::new();
+        two_day.insert("2026-06-01".to_string(), BTreeMap::new());
+        two_day.insert("2026-06-02".to_string(), BTreeMap::new());
+        assert!(generate_token_chart(&two_day, &[]).is_none());
+        // 2 days but all-zero series → None.
+        let mut z = BTreeMap::new();
+        let mut z1 = BTreeMap::new();
+        z1.insert("a".to_string(), 0u64);
+        z.insert("2026-06-01".to_string(), z1.clone());
+        z.insert("2026-06-02".to_string(), z1);
+        assert!(generate_token_chart(&z, &["a"]).is_none());
+    }
+
+    #[test]
+    fn generate_token_chart_top3_legend_and_rows() {
+        // 5 models over 4 days; only top-3 charted.
+        let mut daily = BTreeMap::new();
+        for (di, date) in ["2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04"]
+            .iter()
+            .enumerate()
+        {
+            let mut day = BTreeMap::new();
+            day.insert("model-a".to_string(), 1000 + di as u64 * 100);
+            day.insert("model-b".to_string(), 500);
+            day.insert("model-c".to_string(), 200);
+            day.insert("model-d".to_string(), 50);
+            day.insert("model-e".to_string(), 10);
+            daily.insert((*date).to_string(), day);
+        }
+        let models = ["model-a", "model-b", "model-c", "model-d", "model-e"];
+        let chart = generate_token_chart(&daily, &models).expect("chart");
+        // 8-row asciichart → 9 rows.
+        assert_eq!(chart.chart_rows.len(), 9);
+        // Legend: top-3 bullets joined by ' · '.
+        assert_eq!(chart.legend.matches('\u{25CF}').count(), 3, "legend: {}", chart.legend);
+        assert!(chart.legend.contains("model-a"), "legend: {}", chart.legend);
+        assert!(chart.legend.contains("model-c"), "legend: {}", chart.legend);
+        // model-d/e are below top-3 → not in legend.
+        assert!(!chart.legend.contains("model-d"), "legend: {}", chart.legend);
+        // x-axis line carries a 'Mon D' date.
+        assert!(chart.x_axis_labels.contains("Jun "), "xaxis: {}", chart.x_axis_labels);
+    }
+
+    #[test]
+    fn asciichart_label_then_axis_layout_is_byte_faithful() {
+        // asciichart offset=3 string-cell model: a 6-char padStart label at
+        // cell 0, a space, then the axis rule — so each row begins with the
+        // 6-char label, char[6] is a space, char[7] is the ┤/┼ axis glyph.
+        let s1: Vec<u64> = vec![200, 800, 400, 1500, 600, 2200, 900, 3000, 1200, 4000];
+        let rows = asciichart_plot(&[s1.as_slice()]);
+        assert_eq!(rows.len(), 9, "rows: {rows:#?}");
+        for row in &rows {
+            let chars: Vec<char> = row.chars().collect();
+            // Leading 6-char label field.
+            assert!(chars.len() >= 8, "row too short: {row:?}");
+            assert_eq!(chars[6], ' ', "char 6 should be the gap space: {row:?}");
+            assert!(
+                chars[7] == '\u{2524}' || chars[7] == '\u{253C}',
+                "char 7 should be the axis rule: {row:?}"
+            );
+        }
+        // Top label is the max value (4000 → "4k"), bottom is the min (200).
+        assert!(rows[0].starts_with("    4k"), "top: {:?}", rows[0]);
+        assert!(rows[rows.len() - 1].starts_with("   200"), "bottom: {:?}", rows[rows.len() - 1]);
+    }
+
+    #[test]
+    fn models_tab_renders_asciichart_above_rows() {
+        // 10 days of 3 models, descending totals → chart + legend + model rows.
+        let mut contribs = Vec::new();
+        for d in 1..=10u32 {
+            let date = format!("2026-06-{d:02}");
+            contribs.push(parse_session(
+                &format!(
+                    "{}\n{}\n{}\n",
+                    assistant_line(&date, "claude-opus", 1000, 200),
+                    assistant_line(&date, "claude-sonnet", 500, 100),
+                    assistant_line(&date, "claude-haiku", 200, 50),
+                ),
+                false,
+            ));
+        }
+        let data = aggregate(&contribs);
+        let body = models_lines(&data).join("\n");
+        // Heading + chart + legend present.
+        assert!(body.contains(TOKENS_PER_DAY), "body: {body}");
+        // Legend with 3 bullets.
+        let legend_line = body
+            .lines()
+            .find(|l| l.matches('\u{25CF}').count() == 3 && l.contains('\u{00B7}'))
+            .expect("legend line");
+        assert!(legend_line.contains("claude-opus"), "legend: {legend_line}");
+        // Model rows still follow.
+        assert!(body.contains("claude-opus (") || body.contains("Opus"), "body: {body}");
+        // The old single-line sparkline (8 contiguous block bars, no y-axis
+        // label) is gone: no line is composed purely of sparkline bars.
+        let spark_bars: &[char] = &[
+            '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}',
+            '\u{2588}',
+        ];
+        assert!(
+            !body
+                .lines()
+                .any(|l| !l.is_empty() && l.chars().all(|c| spark_bars.contains(&c))),
+            "old sparkline line still present: {body}"
+        );
     }
 
     #[test]

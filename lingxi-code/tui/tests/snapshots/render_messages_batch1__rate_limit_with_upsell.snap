@@ -1,6 +1,7 @@
 ---
-source: crates/tui/tests/render_messages_batch1.rs
+source: tui/tests/render_messages_batch1.rs
+assertion_line: 102
 expression: s
 ---
-You've hit your usage limit.
-/upgrade to increase your usage limit.
+  ⎿  You've hit your usage limit.
+     /upgrade to increase your usage limit.

@@ -42,6 +42,7 @@ async fn fixture_can_reproduce_a_poller_row() {
         task_type: "local_agent".into(),
         status: "completed".into(),
         description: "review".into(),
+        command: None,
     }])]]);
 
     match fixture.poll().await.as_slice() {

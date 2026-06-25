@@ -86,3 +86,26 @@ async fn list_agents_sorts_by_name() {
     assert_eq!(v[0].name, "alpha");
     assert_eq!(v[1].name, "zeta");
 }
+
+#[tokio::test]
+async fn list_agents_maps_source_to_group_label() {
+    // (agents-08) AgentSource → AGENT_SOURCE_GROUPS display label.
+    let mut user = mk("u", "x", vec![]);
+    user.source = AgentSource::UserDefined;
+    let mut builtin = mk("b", "x", vec![]);
+    builtin.source = AgentSource::BuiltIn;
+    let mut project = mk("p", "x", vec![]);
+    project.source = AgentSource::Project;
+    let cat = Arc::new(RwLock::new(vec![user, builtin, project]));
+    let orch = Arc::new(build_orch().with_agent_catalog(cat));
+    let v = orch.list_agents().await;
+    let group = |name: &str| {
+        v.iter()
+            .find(|a| a.name == name)
+            .map(|a| a.source_group.clone())
+            .unwrap()
+    };
+    assert_eq!(group("u"), "User agents");
+    assert_eq!(group("b"), "Built-in agents");
+    assert_eq!(group("p"), "Project agents");
+}

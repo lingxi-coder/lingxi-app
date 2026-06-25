@@ -614,10 +614,25 @@ pub struct AppState {
     /// (M7-15) Stored theme *preference* (`auto` + 6 names). `Auto` resolves
     /// to a concrete `ThemeName` for `theme`. Persisted to `settings.json`.
     pub theme_setting: ThemeSetting,
+    /// (theme-syntax-toggle) Session-level `syntaxHighlightingDisabled`
+    /// (claude-code app state). Toggled by Ctrl+T in the theme picker; drives
+    /// the picker's syntax-status line + preview. Like `theme_setting`, disk
+    /// persistence is a separate concern.
+    pub syntax_highlighting_disabled: bool,
+    /// (SS-06) `prefersReducedMotion` setting (claude-code app state) — when
+    /// `true`, the streaming spinner pins its glyph and stops animating.
+    /// Loaded from settings.json at startup; defaults to `false`.
+    pub reduced_motion: bool,
     /// `Some` while a turn is being driven by the orchestrator.
     pub in_flight_turn: Option<TurnInFlight>,
-    /// Timestamp of the first Ctrl-C while idle; cleared after 2s.
+    /// Timestamp of the first idle Ctrl-C/Ctrl-D press; cleared after
+    /// [`crate::app::SIGINT_WINDOW_MS`].
     pub sigint_armed_at: Option<Instant>,
+    /// (RRS-08) Which key armed [`Self::sigint_armed_at`] — `"Ctrl-C"` or
+    /// `"Ctrl-D"` — so the footer's "Press {key} again to exit" hint
+    /// (claude-code `exitMessage.key`) names the right key. Meaningless when
+    /// `sigint_armed_at` is `None`.
+    pub sigint_armed_key: &'static str,
     /// Set by `/exit` (or second Ctrl-C within the arming window).
     pub should_exit: bool,
     /// (M7-12) Set by the Resume screen on Enter: the session UUID the user
@@ -885,6 +900,30 @@ pub struct AppState {
     /// resolves the transcript path and appends OUTSIDE the `AppState` lock,
     /// then clears the flag. Mirrors `pending_open_stats` (no handle needed).
     pub pending_save_color: Option<String>,
+    /// (PERM-1) Set by the `/permissions` delete-confirmation: a rule the user
+    /// confirmed deleting. The async `pump_permission_delete` removes it from
+    /// settings.json (OUTSIDE the lock), reloads the rules, and re-renders the
+    /// screen, then clears the flag. `None` when no delete is pending.
+    pub pending_permission_delete: Option<crate::screens::permissions::PermRuleRow>,
+    /// (PERM-1) Set by the `/permissions` add-rule input: a new rule the user
+    /// submitted. `pump_permission_add` appends it to Local settings + reloads.
+    pub pending_permission_add: Option<crate::screens::permissions::PermRuleRow>,
+    /// (PERM-1 Workspace tab) Set by the `/permissions` Workspace-tab add /
+    /// remove: `(directory, add)` — `add == true` appends the directory to
+    /// Local settings' `additionalDirectories`, `false` removes it.
+    /// `pump_workspace_dir` performs the write + reload, then clears it.
+    pub pending_workspace_dir: Option<(String, bool)>,
+    /// (cp-05) Cached recursive project-file listing for `@`-completion,
+    /// keyed by cwd. Computed once per cwd (lazily, on first non-empty `@`
+    /// partial) rather than per keystroke — `git ls-files` is fast but not
+    /// free, and claude-code itself amortizes this via a background-refreshed
+    /// index rather than re-walking on every keystroke.
+    pub project_file_cache: Option<(std::path::PathBuf, Vec<String>)>,
+    /// (BGTASK-3) Set by the `/tasks` dialog's `x`-stop key: the task id to
+    /// kill. `pump_task_stop` calls the multiagent feed's `kill` OUTSIDE the
+    /// `AppState` lock, then clears the flag. The next poll picks up the
+    /// resulting status change — no manual refresh needed here.
+    pub pending_task_stop: Option<String>,
     /// (`/copy`) Set by the `/copy [N]` submit intercept: a request to write
     /// the selected assistant text to the system clipboard (claude-code
     /// `commands/copy/copy.tsx` → `setClipboard`). The SYNC submit path can't
@@ -985,8 +1024,11 @@ impl AppState {
             status,
             theme: theme_for(ThemeSetting::Auto.resolve()),
             theme_setting: ThemeSetting::Auto,
+            syntax_highlighting_disabled: false,
+            reduced_motion: false,
             in_flight_turn: None,
             sigint_armed_at: None,
+            sigint_armed_key: "Ctrl-C",
             should_exit: false,
             resume_request: None,
             pending_config_edit: false,
@@ -1034,6 +1076,11 @@ impl AppState {
             provider_key_store: None,
             session_agent_color: None,
             pending_save_color: None,
+            pending_permission_delete: None,
+            pending_permission_add: None,
+            pending_workspace_dir: None,
+            project_file_cache: None,
+            pending_task_stop: None,
             pending_copy_clipboard: None,
             pending_terminal_sequence: None,
             status_line_text: None,
@@ -1145,13 +1192,18 @@ impl AppState {
     /// directly from the sync `/theme` submit path.
     pub fn open_theme_picker(&mut self) {
         self.active_screen = Some(crate::screens::Screen::Theme(
-            crate::screens::theme::ThemePickerState::new(self.theme_setting),
+            crate::screens::theme::ThemePickerState::new(self.theme_setting)
+                .with_syntax_disabled(self.syntax_highlighting_disabled),
         ));
         crate::telemetry::screen_opened("theme");
     }
 
     /// (M9-08) Open the agents screen with the given catalog rows.
-    pub fn open_agents(&mut self, rows: Vec<crate::screens::agents::AgentRow>) {
+    pub fn open_agents(&mut self, mut rows: Vec<crate::screens::agents::AgentRow>) {
+        // (agents-08) Store rows in grouped display order so the section
+        // headers + selection index stay aligned (the render inserts a header
+        // at each source-group boundary).
+        crate::screens::agents::sort_into_group_order(&mut rows);
         self.active_screen = Some(crate::screens::Screen::Agents(
             crate::screens::agents::AgentsScreenState {
                 rows,
@@ -1182,7 +1234,8 @@ impl AppState {
             crate::screens::hooks::HooksScreenState {
                 rows,
                 selected: 0,
-                mode: crate::screens::hooks::HooksDialogMode::List,
+                mode: crate::screens::hooks::HooksDialogMode::EventList,
+                selected_event: None,
             },
         ));
         crate::telemetry::screen_opened("hooks");
@@ -1925,8 +1978,9 @@ mod tests {
             team: Some("alpha".to_string()),
         };
         open_permission_dialog(&mut st, req, Some(tx), Some(worker));
-        // The worker rides onto the pending permission → the dialog renders the
-        // `● @name` badge (app.rs maps `pp.worker` → `render_worker_badge`).
+        // The worker rides onto the pending permission → the dialog renders a
+        // dim `· @name` suffix on the title row (app.rs maps `pp.worker` →
+        // `ToolUseConfirm`'s `worker_name` prop — perm-09).
         let pp = st.pending_permission.as_ref().unwrap();
         assert_eq!(pp.worker.as_ref().unwrap().name, "researcher");
     }

@@ -9,7 +9,7 @@ license.workspace = true
 # discovery), markdown frontmatter loader, and MCP-derived skill builders.
 # Extracted from the former monolithic `skills` crate; mirrors the `tool-api`
 # pattern. The model-visible `Skill` *tool* lives in `tool-skill` (P7);
-# compiled-in builtin skill templates live in `skill-builtin` (P8).
+# compiled-in builtin skill templates live in this crate's `builtin` module.
 
 [dependencies]
 protocol = { path = "../protocol" }

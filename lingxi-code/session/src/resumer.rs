@@ -7,7 +7,7 @@
 
 use crate::rollout::{InitialHistory, RolloutRecorder};
 use crate::storage::{LoadedSession, SessionStorage};
-use filestate::FileStateCache;
+use crate::filestate::{self, FileStateCache};
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;

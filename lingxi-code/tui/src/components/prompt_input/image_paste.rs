@@ -18,6 +18,47 @@ pub fn format_image_ref(id: usize) -> String {
     format!("[Image #{id}]")
 }
 
+/// (PIC-05) claude-code `PASTE_THRESHOLD` (`utils/imagePaste.ts:30`) — a
+/// pasted block longer than this collapses to a `[Pasted text #N]` pill.
+pub const PASTE_THRESHOLD: usize = 800;
+
+/// (PIC-05) claude-code's `maxLines = Math.min(rows - 10, 2)` — depends on
+/// the live terminal row count, which isn't threaded through the paste path.
+/// `2` is that formula's value for every terminal taller than 12 rows (the
+/// overwhelming majority in practice), so it's used as a fixed default
+/// rather than threading viewport height through `PasteCoalescer`.
+pub const MAX_PASTE_LINES: usize = 2;
+
+/// claude-code `getPastedTextRefNumLines` (`history.ts:47-49`): the count of
+/// newline separators (`\r\n` | `\r` | `\n`), NOT the line count — a 1-line
+/// paste has 0 separators.
+#[must_use]
+pub fn paste_text_ref_num_lines(text: &str) -> usize {
+    let mut n = 0usize;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            n += 1;
+        } else if c == '\n' {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// claude-code `formatPastedTextRef(id, numLines)` (`history.ts:51-56`).
+#[must_use]
+pub fn format_pasted_text_ref(id: u32, num_lines: usize) -> String {
+    if num_lines == 0 {
+        format!("[Pasted text #{id}]")
+    } else {
+        format!("[Pasted text #{id} +{num_lines} lines]")
+    }
+}
+
 /// Supported image extensions, lowercase, including the leading dot. Mirrors
 /// claude-code `IMAGE_EXTENSION_REGEX = /\.(png|jpe?g|gif|webp)$/i`
 /// (imagePaste.ts:270).
@@ -75,6 +116,12 @@ pub struct PasteState {
     pub next_image_id: usize,
     /// Recorded attachments, in mint order.
     pub attachments: Vec<Attachment>,
+    /// (PIC-05) Next `[Pasted text #N]` id to assign (1-based).
+    pub next_text_id: u32,
+    /// (PIC-05) `(id, original_text)` pairs minted by oversized pastes, in
+    /// mint order — drained and expanded back into the prompt at submit
+    /// time by [`Self::take_pasted_texts`].
+    pub pasted_texts: Vec<(u32, String)>,
 }
 
 impl Default for PasteState {
@@ -82,6 +129,8 @@ impl Default for PasteState {
         Self {
             next_image_id: 1,
             attachments: Vec::new(),
+            next_text_id: 1,
+            pasted_texts: Vec::new(),
         }
     }
 }
@@ -103,6 +152,33 @@ impl PasteState {
         *self = Self::default();
         paths
     }
+
+    /// (PIC-05) Drain the recorded `(id, original_text)` pasted-text pairs,
+    /// resetting `next_text_id`/`pasted_texts` (but NOT the image registry —
+    /// callers needing both drain images first, since `take_image_paths`
+    /// resets the whole struct).
+    #[must_use]
+    pub fn take_pasted_texts(&mut self) -> Vec<(u32, String)> {
+        std::mem::take(&mut self.pasted_texts)
+    }
+}
+
+/// (PIC-05) Expand every `[Pasted text #N]`/`[Pasted text #N +M lines]`
+/// reference in `text` back to its original content — the submit-time
+/// counterpart to `process_paste`'s pill insertion. Unlike `[Image #N]`
+/// (whose bytes ride to the model via a separate attachment channel —
+/// `PasteState::take_image_paths`), pasted TEXT has no such channel: the
+/// model only ever sees the prompt string, so the placeholder must be
+/// substituted back in before the turn is sent.
+#[must_use]
+pub fn expand_pasted_text_refs(text: &str, pasted: &[(u32, String)]) -> String {
+    let mut out = text.to_string();
+    for (id, original) in pasted {
+        let num_lines = paste_text_ref_num_lines(original);
+        let placeholder = format_pasted_text_ref(*id, num_lines);
+        out = out.replace(&placeholder, original);
+    }
+    out
 }
 
 /// The result of processing one coalesced paste block.
@@ -159,6 +235,20 @@ fn split_paste_segments(block: &str) -> Vec<(String, &'static str)> {
 /// `Attachment`; all other segments (and the separators) are preserved.
 #[must_use]
 pub fn process_paste(block: &str, mut state: PasteState) -> PasteOutcome {
+    // (PIC-05) claude-code's `onTextPaste` checks the WHOLE pasted block
+    // against PASTE_THRESHOLD/maxLines BEFORE any per-segment image-path
+    // scan — an oversized paste collapses to ONE `[Pasted text #N]` pill,
+    // not a per-segment splice. Image-path detection (a dropped FILE PATH
+    // ending in an image extension) is a separate, normal-sized-paste-only
+    // concern, so it only runs in the `else` branch below.
+    let num_lines = paste_text_ref_num_lines(block);
+    if block.len() > PASTE_THRESHOLD || num_lines > MAX_PASTE_LINES {
+        let id = state.next_text_id;
+        state.next_text_id += 1;
+        state.pasted_texts.push((id, block.to_string()));
+        let insertion = format_pasted_text_ref(id, num_lines);
+        return PasteOutcome { insertion, state };
+    }
     let mut insertion = String::with_capacity(block.len());
     for (seg, sep) in split_paste_segments(block) {
         if !seg.is_empty() && is_image_path(&seg) {
@@ -374,6 +464,99 @@ mod tests {
         assert_eq!(out.insertion, "line one\nline two\nline three");
         assert!(out.state.attachments.is_empty());
         assert_eq!(out.state.next_image_id, 1);
+    }
+
+    #[test]
+    fn pasted_text_ref_num_lines_counts_separators_not_lines() {
+        // (PIC-05) A 1-line paste has 0 separators.
+        assert_eq!(paste_text_ref_num_lines("one line"), 0);
+        assert_eq!(paste_text_ref_num_lines("a\nb\nc"), 2);
+        assert_eq!(paste_text_ref_num_lines("a\r\nb"), 1);
+        assert_eq!(paste_text_ref_num_lines("a\rb"), 1);
+    }
+
+    #[test]
+    fn format_pasted_text_ref_matches_claude_code() {
+        assert_eq!(format_pasted_text_ref(1, 0), "[Pasted text #1]");
+        assert_eq!(format_pasted_text_ref(2, 5), "[Pasted text #2 +5 lines]");
+    }
+
+    #[test]
+    fn oversized_paste_by_length_becomes_a_pill() {
+        // (PIC-05) A single-line paste over PASTE_THRESHOLD chars pills,
+        // even with zero newlines.
+        let long = "x".repeat(PASTE_THRESHOLD + 1);
+        let st = fresh();
+        let out = process_paste(&long, st);
+        assert_eq!(out.insertion, "[Pasted text #1]");
+        assert_eq!(out.state.pasted_texts, vec![(1, long)]);
+        // The image registry is untouched by a text pill.
+        assert!(out.state.attachments.is_empty());
+    }
+
+    #[test]
+    fn oversized_paste_by_line_count_becomes_a_pill_with_line_suffix() {
+        // (PIC-05) Short in chars but over MAX_PASTE_LINES newlines.
+        let block = "a\nb\nc\nd";
+        let st = fresh();
+        let out = process_paste(block, st);
+        assert_eq!(out.insertion, "[Pasted text #1 +3 lines]");
+        assert_eq!(out.state.pasted_texts, vec![(1, block.to_string())]);
+    }
+
+    #[test]
+    fn oversized_paste_does_not_scan_for_image_paths() {
+        // (PIC-05) Even an oversized block containing what looks like an
+        // image path pills as ONE reference — image-path detection only
+        // applies to normal-sized pastes.
+        let block = format!("/tmp/a.png\n{}", "x".repeat(PASTE_THRESHOLD));
+        let st = fresh();
+        let out = process_paste(&block, st);
+        assert!(out.insertion.starts_with("[Pasted text #1"));
+        assert!(out.state.attachments.is_empty());
+    }
+
+    #[test]
+    fn pasted_text_ids_increment_independently_of_image_ids() {
+        let st = fresh();
+        let after_image = process_paste("/tmp/a.png", st).state;
+        let long = "x".repeat(PASTE_THRESHOLD + 1);
+        let out = process_paste(&long, after_image);
+        assert_eq!(out.insertion, "[Pasted text #1]");
+        assert_eq!(out.state.next_image_id, 2);
+        assert_eq!(out.state.next_text_id, 2);
+    }
+
+    #[test]
+    fn take_pasted_texts_drains_without_touching_images() {
+        let mut st = fresh();
+        st.next_text_id = 2;
+        st.pasted_texts = vec![(1, "hello".to_string())];
+        st.attachments.push(Attachment {
+            id: 1,
+            kind: AttachmentKind::Image,
+            source: "/tmp/a.png".into(),
+        });
+        let drained = st.take_pasted_texts();
+        assert_eq!(drained, vec![(1, "hello".to_string())]);
+        assert!(st.pasted_texts.is_empty());
+        // Unlike take_image_paths, this does NOT reset the image registry.
+        assert_eq!(st.attachments.len(), 1);
+    }
+
+    #[test]
+    fn expand_pasted_text_refs_round_trips() {
+        let original = "x".repeat(PASTE_THRESHOLD + 1);
+        let st = fresh();
+        let out = process_paste(&original, st);
+        let prompt = format!("before {} after", out.insertion);
+        let expanded = expand_pasted_text_refs(&prompt, &out.state.pasted_texts);
+        assert_eq!(expanded, format!("before {original} after"));
+    }
+
+    #[test]
+    fn expand_pasted_text_refs_is_a_noop_with_no_pasted_texts() {
+        assert_eq!(expand_pasted_text_refs("hello world", &[]), "hello world");
     }
 
     #[test]

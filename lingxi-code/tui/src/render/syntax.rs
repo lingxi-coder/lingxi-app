@@ -65,11 +65,24 @@ pub fn tm_theme_for(name: ThemeName) -> &'static SynTheme {
         .unwrap_or_else(|| &ts.themes["base16-ocean.dark"])
 }
 
-/// Resolve a language token from a fence info-string (preferred) or a file
-/// path extension. Returns a token suitable for syntect's
-/// `find_syntax_by_token` / `find_syntax_by_extension`. `None` → plain.
+/// Resolve a language token from a fence info-string (preferred), a file
+/// path's filename/extension, or (syntax-01) a shebang/first-line heuristic.
+/// Returns a token suitable for syntect's `find_syntax_by_token` /
+/// `find_syntax_by_extension`. `None` → plain.
 #[must_use]
 pub fn detect_language(info_string: Option<&str>, path: Option<&str>) -> Option<String> {
+    detect_language_with_first_line(info_string, path, None)
+}
+
+/// [`detect_language`] plus a (syntax-01) shebang/first-line fallback,
+/// consulted only when neither the info-string nor the filename/extension
+/// resolved a language — claude-code `detectLanguage`'s final branch.
+#[must_use]
+pub fn detect_language_with_first_line(
+    info_string: Option<&str>,
+    path: Option<&str>,
+    first_line: Option<&str>,
+) -> Option<String> {
     // Fence info-string wins. CommonMark info-strings may carry metadata
     // after the language (e.g. "rust,ignore" or "ts {1,3}"); take the first
     // whitespace/comma-delimited token.
@@ -83,15 +96,74 @@ pub fn detect_language(info_string: Option<&str>, path: Option<&str>) -> Option<
             return Some(token.to_string());
         }
     }
-    // Fall back to the file extension.
+    // (syntax-02) Filename / stem lookup BEFORE the extension fallback
+    // (claude-code `FILENAME_LANGS`): `Dockerfile`/`Makefile`/`CMakeLists.txt`/
+    // `Rakefile`/`Gemfile` carry no extension but map to a language.
     if let Some(p) = path {
+        let base = std::path::Path::new(p)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("");
+        let stem = base.split('.').next().unwrap_or("");
+        if let Some(lang) = filename_language(base).or_else(|| filename_language(stem)) {
+            return Some(lang.to_string());
+        }
+        // Fall back to the file extension.
         if let Some(ext) = std::path::Path::new(p).extension().and_then(|e| e.to_str()) {
             if !ext.is_empty() {
                 return Some(ext.to_string());
             }
         }
     }
+    if let Some(line) = first_line {
+        if let Some(lang) = shebang_language(line) {
+            return Some(lang.to_string());
+        }
+    }
     None
+}
+
+/// (syntax-01) claude-code `detectLanguage`'s shebang/first-line branch:
+/// strip a UTF-8 BOM, then match `#!` interpreter lines and the PHP/XML
+/// processing-instruction openers.
+fn shebang_language(first_line: &str) -> Option<&'static str> {
+    let line = first_line.strip_prefix('\u{feff}').unwrap_or(first_line);
+    if line.starts_with("#!") {
+        if line.contains("bash") || line.contains("/sh") {
+            return Some("bash");
+        }
+        if line.contains("python") {
+            return Some("python");
+        }
+        if line.contains("node") {
+            return Some("javascript");
+        }
+        if line.contains("ruby") {
+            return Some("ruby");
+        }
+        if line.contains("perl") {
+            return Some("perl");
+        }
+        return None;
+    }
+    if line.starts_with("<?php") {
+        return Some("php");
+    }
+    if line.starts_with("<?xml") {
+        return Some("xml");
+    }
+    None
+}
+
+/// Language for a bare filename / stem (claude-code `FILENAME_LANGS`).
+fn filename_language(name: &str) -> Option<&'static str> {
+    match name {
+        "Dockerfile" => Some("dockerfile"),
+        "Makefile" => Some("makefile"),
+        "Rakefile" | "Gemfile" => Some("ruby"),
+        "CMakeLists" => Some("cmake"),
+        _ => None,
+    }
 }
 
 /// One plain (uncolored) StyledLine per input line — the fallback when the
@@ -227,7 +299,57 @@ mod tests {
     fn no_lang_returns_none() {
         assert_eq!(detect_language(None, None), None);
         assert_eq!(detect_language(Some(""), None), None);
-        assert_eq!(detect_language(None, Some("Makefile")), None); // no extension
+        // (syntax-02) A truly extension-less, unknown filename is still None.
+        assert_eq!(detect_language(None, Some("README")), None);
+    }
+
+    #[test]
+    fn filename_based_language_detection() {
+        // (syntax-02) FILENAME_LANGS — basename and stem.
+        let d = |p: &str| detect_language(None, Some(p));
+        assert_eq!(d("Dockerfile").as_deref(), Some("dockerfile"));
+        assert_eq!(d("Makefile").as_deref(), Some("makefile"));
+        assert_eq!(d("Rakefile").as_deref(), Some("ruby"));
+        assert_eq!(d("Gemfile").as_deref(), Some("ruby"));
+        // Stem lookup: `CMakeLists.txt` → stem `CMakeLists` → cmake.
+        assert_eq!(d("path/to/CMakeLists.txt").as_deref(), Some("cmake"));
+        assert_eq!(d("Dockerfile.dev").as_deref(), Some("dockerfile"));
+        // A normal extension still wins via the fallback.
+        assert_eq!(d("main.rs").as_deref(), Some("rs"));
+    }
+
+    #[test]
+    fn shebang_first_line_detection() {
+        // (syntax-01) Only consulted when info-string AND filename/extension
+        // both fail to resolve a language.
+        let d = |line: &str| detect_language_with_first_line(None, None, Some(line));
+        assert_eq!(d("#!/bin/bash").as_deref(), Some("bash"));
+        assert_eq!(d("#!/bin/sh").as_deref(), Some("bash"));
+        assert_eq!(d("#!/usr/bin/env python3").as_deref(), Some("python"));
+        assert_eq!(d("#!/usr/bin/env node").as_deref(), Some("javascript"));
+        assert_eq!(d("#!/usr/bin/ruby").as_deref(), Some("ruby"));
+        assert_eq!(d("#!/usr/bin/perl").as_deref(), Some("perl"));
+        assert_eq!(d("<?php").as_deref(), Some("php"));
+        assert_eq!(d("<?xml version=\"1.0\"?>").as_deref(), Some("xml"));
+        // UTF-8 BOM is stripped before matching.
+        assert_eq!(d("\u{feff}#!/bin/bash").as_deref(), Some("bash"));
+        // Unrecognized shebang interpreter -> None.
+        assert_eq!(d("#!/usr/bin/env lua"), None);
+        assert_eq!(d("plain text"), None);
+    }
+
+    #[test]
+    fn shebang_only_consulted_as_last_resort() {
+        // (syntax-01) A resolved extension wins over the shebang fallback.
+        assert_eq!(
+            detect_language_with_first_line(None, Some("main.rs"), Some("#!/bin/bash")).as_deref(),
+            Some("rs")
+        );
+        // A resolved fence info-string wins too.
+        assert_eq!(
+            detect_language_with_first_line(Some("python"), None, Some("#!/bin/bash")).as_deref(),
+            Some("python")
+        );
     }
 
     #[test]

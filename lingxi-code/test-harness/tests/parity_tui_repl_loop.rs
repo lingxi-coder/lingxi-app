@@ -234,11 +234,13 @@ fn cancel_during_streaming() {
     if s["expected_cancel_token_cancelled"].as_bool().unwrap() {
         assert!(cancel.is_cancelled(), "Ctrl-C cancels the in-flight turn");
     }
-    let needle = s["expected_system_text_contains"].as_str().unwrap();
+    // (RRS-08) claude-code's INTERRUPT_MESSAGE is a UserText body (rendered
+    // as the InterruptedByUser line), not a SystemText line.
+    let needle = s["expected_user_text_contains"].as_str().unwrap();
     assert!(
         state.messages.iter().any(|m| {
-            matches!(m, RenderedMessage::SystemText { .. }) && body_of(m).contains(needle)
+            matches!(m, RenderedMessage::UserText { .. }) && body_of(m).contains(needle)
         }),
-        "expected SystemText containing {needle:?} in scrollback"
+        "expected UserText containing {needle:?} in scrollback"
     );
 }

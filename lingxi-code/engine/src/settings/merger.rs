@@ -42,6 +42,10 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         model: next.model.or(prev.model),
         providers: deep_merge_object(prev.providers, next.providers),
         routing: deep_merge_value_opt(prev.routing, next.routing),
+        // LingXi-only multi-agent config. MUST deep-merge (same treatment as
+        // `routing`) — a plain `next.or(prev)` overwrite would let a project
+        // layer's `multiAgent` swallow the user layer's whole block.
+        multi_agent: deep_merge_value_opt(prev.multi_agent, next.multi_agent),
     }
 }
 
@@ -309,5 +313,60 @@ mod tests {
         };
         let merged = merge(prev, next).providers.unwrap();
         assert!(merged.contains_key("groq") && merged.contains_key("ollama"));
+    }
+
+    #[test]
+    fn multi_agent_deep_merges_disjoint_keys_across_layers() {
+        use serde_json::json;
+        // user layer declares candidates+arbiter; project layer declares only
+        // triggers. Deep-merge must KEEP both — a plain override would drop the
+        // user layer's candidates entirely.
+        let user = SettingsJson {
+            multi_agent: Some(json!({
+                "enabled": true,
+                "candidates": [{"id": "fast", "model": "p/m"}],
+                "arbiter": {"model": "p/arb"}
+            })),
+            ..Default::default()
+        };
+        let project = SettingsJson {
+            multi_agent: Some(json!({
+                "mode": "force",
+                "triggers": {"security": true}
+            })),
+            ..Default::default()
+        };
+        // load order: user (prev/lower) then project (next/higher).
+        let merged = merge(user, project).multi_agent.unwrap();
+        // user-only keys survive
+        assert_eq!(merged.get("enabled"), Some(&json!(true)));
+        assert_eq!(
+            merged.get("candidates"),
+            Some(&json!([{"id": "fast", "model": "p/m"}])),
+            "user candidates must NOT be clobbered by project layer"
+        );
+        assert_eq!(merged.get("arbiter"), Some(&json!({"model": "p/arb"})));
+        // project keys land too
+        assert_eq!(merged.get("mode"), Some(&json!("force")));
+        assert_eq!(merged.get("triggers"), Some(&json!({"security": true})));
+    }
+
+    #[test]
+    fn multi_agent_nested_object_recurses_not_overwrites() {
+        use serde_json::json;
+        let user = SettingsJson {
+            multi_agent: Some(json!({"reviewers": {"crossReview": true, "maxReviewRounds": 1}})),
+            ..Default::default()
+        };
+        let project = SettingsJson {
+            multi_agent: Some(json!({"reviewers": {"maxReviewRounds": 2}})),
+            ..Default::default()
+        };
+        let merged = merge(user, project).multi_agent.unwrap();
+        // crossReview from user survives; maxReviewRounds overridden by project.
+        assert_eq!(
+            merged.get("reviewers"),
+            Some(&json!({"crossReview": true, "maxReviewRounds": 2}))
+        );
     }
 }

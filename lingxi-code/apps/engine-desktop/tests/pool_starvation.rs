@@ -173,6 +173,7 @@ fn parked_teammate_ctx() -> SubagentContext {
             color: AgentColor::Cyan,
             icon: None,
         },
+        model_profile: None,
         api_client: None,
         tool_invoker: None,
         tool_schemas: vec![],
@@ -209,6 +210,7 @@ fn agent_tool_request() -> SubagentSpawnRequest {
         // AgentTool spawn-surface parity params (additive optional).
         description: None,
         model: None,
+        model_profile: None,
         name: None,
         team_name: None,
         mode: None,

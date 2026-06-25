@@ -1,9 +1,10 @@
 ---
-source: crates/tui/tests/render_user_misc.rs
-assertion_line: 35
+source: tui/tests/render_user_misc.rs
+assertion_line: 37
 expression: e.to_string()
 ---
 ╭─────────────────╮
 │Plan to implement│
+│                 │
 │1. do it         │
 ╰─────────────────╯

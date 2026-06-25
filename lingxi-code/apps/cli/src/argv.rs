@@ -450,6 +450,32 @@ pub struct Argv {
     /// with `lingxi-cli agents`)
     #[arg(long = "background", visible_alias = "bg")]
     pub background: bool,
+
+    /// LingXi-only: force the dual-LLM competitive multi-agent path for this run
+    ///
+    /// Explicit ON override for the multi-agent router (design doc §配置设计).
+    /// Equivalent to `--dual-llm`. Overridden by `--no-multi-agent` when both are
+    /// present. When unset, routing falls through to env / `settings.multiAgent`
+    /// / auto-trigger / single-agent default. NOT a claude-code parity flag.
+    #[arg(long = "multi-agent")]
+    pub multi_agent: bool,
+
+    /// LingXi-only: alias of `--multi-agent` (force the dual-LLM path)
+    ///
+    /// Explicit ON override; see [`Argv::multi_agent`]. NOT a claude-code parity
+    /// flag.
+    #[arg(long = "dual-llm")]
+    pub dual_llm: bool,
+
+    /// LingXi-only: disable the multi-agent path for this run
+    ///
+    /// Explicit OFF override. Has the HIGHEST precedence: when set it wins even
+    /// if `--multi-agent` / `--dual-llm` are also present (design doc §配置设计
+    /// precedence: explicit `--no-multi-agent` > explicit `--multi-agent` /
+    /// `--dual-llm` > env > settings > auto > single-agent default). NOT a
+    /// claude-code parity flag.
+    #[arg(long = "no-multi-agent")]
+    pub no_multi_agent: bool,
 }
 
 impl Argv {
@@ -585,6 +611,39 @@ impl Argv {
             }
         }
         self.append_system_prompt.clone()
+    }
+
+    /// Resolve the explicit multi-agent override from the LingXi-only CLI flags
+    /// (`--multi-agent` / `--dual-llm` / `--no-multi-agent`).
+    ///
+    /// Implements the highest two rungs of the design-doc §配置设计 precedence
+    /// ladder, which the router then completes:
+    ///
+    /// ```text
+    /// 显式 --no-multi-agent          → Some(false)   (highest precedence)
+    /// > 显式 --multi-agent / --dual-llm → Some(true)
+    /// > env > settings > auto > single-agent default → None (fall through)
+    /// ```
+    ///
+    /// `--no-multi-agent` wins over `--multi-agent` / `--dual-llm` when both are
+    /// present. Returns:
+    /// - `Some(false)` — explicit OFF (`--no-multi-agent`),
+    /// - `Some(true)` — explicit ON (`--multi-agent` or `--dual-llm`),
+    /// - `None` — no explicit flag; the consumer falls through to env /
+    ///   `settings.multiAgent` / auto-trigger / single-agent default.
+    ///
+    /// The caller maps this to `multi_agent::router::ExplicitMultiAgentFlag`
+    /// (`Off` / `On` / `Unset`); the CLI crate stays decoupled from the
+    /// `multi-agent` crate.
+    #[must_use]
+    pub fn explicit_multi_agent(&self) -> Option<bool> {
+        if self.no_multi_agent {
+            return Some(false);
+        }
+        if self.multi_agent || self.dual_llm {
+            return Some(true);
+        }
+        None
     }
 }
 
@@ -1437,5 +1496,65 @@ mod tests {
             "lingxi-cli", "--input-format", "text", "hi",
         ]).unwrap();
         assert!(!a.is_stream_json_input());
+    }
+
+    // ── Multi-agent / dual-LLM CLI override (LingXi-only, design §配置设计) ──────
+
+    #[test]
+    fn multi_agent_flag_parses_to_explicit_on() {
+        let a = Argv::from_iter(["lingxi-cli", "--multi-agent", "fix it"]).unwrap();
+        assert!(a.multi_agent);
+        assert_eq!(a.explicit_multi_agent(), Some(true));
+    }
+
+    #[test]
+    fn dual_llm_flag_parses_to_explicit_on() {
+        let a = Argv::from_iter(["lingxi-cli", "--dual-llm", "fix it"]).unwrap();
+        assert!(a.dual_llm);
+        assert_eq!(a.explicit_multi_agent(), Some(true));
+    }
+
+    #[test]
+    fn no_multi_agent_flag_parses_to_explicit_off() {
+        let a = Argv::from_iter(["lingxi-cli", "--no-multi-agent", "fix it"]).unwrap();
+        assert!(a.no_multi_agent);
+        assert_eq!(a.explicit_multi_agent(), Some(false));
+    }
+
+    #[test]
+    fn no_multi_agent_wins_over_multi_agent() {
+        // Precedence: explicit --no-multi-agent > explicit --multi-agent.
+        let a = Argv::from_iter([
+            "lingxi-cli", "--multi-agent", "--no-multi-agent", "fix it",
+        ])
+        .unwrap();
+        assert!(a.multi_agent && a.no_multi_agent);
+        assert_eq!(a.explicit_multi_agent(), Some(false));
+    }
+
+    #[test]
+    fn no_multi_agent_wins_over_dual_llm() {
+        let a = Argv::from_iter([
+            "lingxi-cli", "--dual-llm", "--no-multi-agent", "fix it",
+        ])
+        .unwrap();
+        assert_eq!(a.explicit_multi_agent(), Some(false));
+    }
+
+    #[test]
+    fn multi_agent_and_dual_llm_together_is_on() {
+        let a = Argv::from_iter([
+            "lingxi-cli", "--multi-agent", "--dual-llm", "fix it",
+        ])
+        .unwrap();
+        assert_eq!(a.explicit_multi_agent(), Some(true));
+    }
+
+    #[test]
+    fn no_multi_agent_flags_is_unset_fallthrough() {
+        // No explicit flag → None (router falls through to env/settings/auto).
+        let a = Argv::from_iter(["lingxi-cli", "fix it"]).unwrap();
+        assert!(!a.multi_agent && !a.dual_llm && !a.no_multi_agent);
+        assert_eq!(a.explicit_multi_agent(), None);
     }
 }

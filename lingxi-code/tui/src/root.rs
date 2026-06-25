@@ -147,19 +147,10 @@ fn map_iocraft_key(
         (KeyCode::Down, _) => Some(HistoryStep(1)),
         (KeyCode::PageUp, _) => Some(ScrollStep(ScrollDir::PageUp)),
         (KeyCode::PageDown, _) => Some(ScrollStep(ScrollDir::PageDown)),
-        // Vim-style nav only when prompt is empty.
-        (KeyCode::Char('j'), m) if m == KeyModifiers::NONE && prompt_empty => {
-            Some(ScrollStep(ScrollDir::LineDown))
-        }
-        (KeyCode::Char('k'), m) if m == KeyModifiers::NONE && prompt_empty => {
-            Some(ScrollStep(ScrollDir::LineUp))
-        }
-        (KeyCode::Char('g'), m) if m == KeyModifiers::NONE && prompt_empty => {
-            Some(ScrollStep(ScrollDir::Top))
-        }
-        (KeyCode::Char('G'), m) if m == KeyModifiers::SHIFT && prompt_empty => {
-            Some(ScrollStep(ScrollDir::Bottom))
-        }
+        // (RRS-05) No empty-prompt j/k/g/G → scroll mappings: claude-code is not
+        // vim-modal by default, so those keys type the character (otherwise a
+        // message could never START with j/k/g/G). They fall through to the
+        // printable-char catch-all below.
         // (M7-13 review) Ctrl-G opens the Settings screen (Config tab). Mirrors
         // `keymap::map_key_ml`. Placed before the printable-char catch-all; the
         // CONTROL modifier means it never collides with the vim-nav `g`
@@ -607,12 +598,14 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
 
     match &mut st.active_screen {
         Some(Screen::Doctor(_)) => {
-            // (M7-11) Read-only screen: Esc / `q` close; everything else inert.
+            // (M7-11) Read-only screen. (doctor-1) Enter is the advertised
+            // dismiss affordance (claude-code `PressEnterToContinue`); Esc / `q`
+            // are kept as harmless extras.
             match k.code {
                 // (M7-16) `close_screen` emits `tengu_tui_screen_closed` on the
                 // real `Some → None` transition, so the close telemetry is wired
                 // through the shared close path (not duplicated per screen).
-                KeyCode::Esc => st.close_screen(),
+                KeyCode::Enter | KeyCode::Esc => st.close_screen(),
                 KeyCode::Char('q') if k.modifiers == KeyModifiers::NONE => st.close_screen(),
                 _ => {}
             }
@@ -704,6 +697,12 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                     // `set_theme` already applied; best-effort persist, then
                     // close (screen already taken out by `.take()` above).
                     crate::theme_persist::save_theme_setting(st.theme_setting);
+                    // (theme-missing-syntax-toggle) Persist the Ctrl+T syntax
+                    // toggle alongside the theme (claude-code persists
+                    // `syntaxHighlightingDisabled` on the picker).
+                    crate::theme_persist::save_syntax_highlighting_disabled(
+                        st.syntax_highlighting_disabled,
+                    );
                 }
                 ThemePickerOutcome::Cancel => {
                     // Prior theme/setting restored by the reducer; close (screen
@@ -721,20 +720,25 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
             //   - OpenedDetail → entered a task's detail; the ticker pump (Task 7)
             //     drives the output tail, so there is nothing to do synchronously.
             use crate::screens::background_tasks::{
-                handle_background_tasks_key, TaskDialogOutcome,
+                display_order, handle_background_tasks_key, TaskDialogOutcome,
             };
-            let ids: Vec<String> = st
-                .multiagent
-                .tasks
-                .iter()
-                .map(|t| t.task_id.clone())
-                .collect();
+            // (TASKS-DIALOG-SORT-ORDER) `state.selected` indexes the SAME
+            // section-grouped, running-first display order the renderer
+            // uses — both must call `display_order` so the highlighted row
+            // and Enter's target stay in sync with what's drawn.
+            let ordered: Vec<crate::multiagent::state::TaskRow> =
+                display_order(&st.multiagent.tasks).into_iter().cloned().collect();
             let ct = iocraft_to_crossterm028_key(k);
-            match handle_background_tasks_key(state, &ids, ct.code) {
+            match handle_background_tasks_key(state, &ordered, ct.code) {
                 TaskDialogOutcome::Close => st.close_screen(),
                 TaskDialogOutcome::Stay => { /* keep the screen open */ }
                 TaskDialogOutcome::OpenedDetail(_id) => {
                     // Tailing is driven by the ticker pump (Task 7); nothing here.
+                }
+                // (BGTASK-3) Raise the request; `pump_task_stop` (tick loop)
+                // calls the feed's kill OUTSIDE this sync key handler.
+                TaskDialogOutcome::Stop(id) => {
+                    st.pending_task_stop = Some(id);
                 }
             }
         }
@@ -780,6 +784,25 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
             match handle_permissions_key(state, ct_key.code) {
                 PermissionsOutcome::Close => st.close_screen(),
                 PermissionsOutcome::Stay => {}
+                // (PERM-1) The sync key path can't `.await` the settings write,
+                // so raise the pending delete; `pump_permission_delete` removes
+                // it + reloads the rules. The screen stays open.
+                PermissionsOutcome::DeleteRule(row) => {
+                    st.pending_permission_delete = Some(row);
+                }
+                // (PERM-1) Raise the pending add; `pump_permission_add` appends.
+                PermissionsOutcome::AddRule(row) => {
+                    st.pending_permission_add = Some(row);
+                }
+                // (PERM-1 Workspace tab) Raise the pending workspace-dir add /
+                // remove; `pump_workspace_dir` persists to Local settings +
+                // reloads. The screen stays open.
+                PermissionsOutcome::AddWorkspaceDir(dir) => {
+                    st.pending_workspace_dir = Some((dir, true));
+                }
+                PermissionsOutcome::RemoveWorkspaceDir(dir) => {
+                    st.pending_workspace_dir = Some((dir, false));
+                }
             }
         }
         Some(Screen::Model(state)) => {
@@ -1113,6 +1136,53 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
     }
     // === end teammate-view Esc ===
 
+    // === (RRS-02) Esc interrupts a streaming turn (claude-code
+    // `escape: 'chat:cancel'` → `useCancelRequest` `onCancel` when
+    // `canCancelRunningTask`). Sits AFTER the permission (1) + active_screen (2)
+    // + overlay (3) + teammate Esc traps so those still own Esc; runs BEFORE vim
+    // (3.5/4) and the default editor so Esc cancels the turn instead of leaking
+    // to the prompt buffer. Mirrors the Ctrl+C `KeyAction::Cancel` branch
+    // (cancel the token + push an interrupt marker). Only fires while a turn is
+    // in flight; otherwise Esc falls through to its normal editor behavior. ===
+    if k.code == KeyCode::Esc {
+        if let Some(tif) = &st.in_flight_turn {
+            tif.cancel.cancel();
+            // (RRS-08) claude-code's INTERRUPT_MESSAGE — a UserText body, not
+            // a SystemText line; UserTextMessage special-cases it to render
+            // the InterruptedByUser line. Mirrors the Ctrl+C branch (app.rs).
+            st.push_message(crate::state::RenderedMessage::UserText {
+                body: crate::components::messages::user_tool_result::INTERRUPT_MESSAGE
+                    .to_string(),
+                timestamp: chrono::Utc::now().timestamp(),
+            });
+            return;
+        }
+    }
+    // === end Esc-interrupt ===
+
+    // === (RRS-07) Ctrl+D double-press exit (claude-code `app:exit`), only when
+    // the prompt is empty. First press arms the window + shows a hint; a second
+    // press within the window quits. Shares the `sigint_armed_at` window with
+    // Ctrl+C. A non-empty prompt leaves Ctrl+D unbound (falls through). ===
+    if k.code == KeyCode::Char('d')
+        && k.modifiers.contains(KeyModifiers::CONTROL)
+        && st.prompt_text.is_empty()
+    {
+        match st.sigint_armed_at {
+            Some(t) if t.elapsed().as_millis() < u128::from(crate::app::SIGINT_WINDOW_MS) => {
+                st.should_exit = true;
+            }
+            _ => {
+                // (RRS-08) Transient footer hint, not a scrollback line —
+                // see PromptInputFooter's sigint_armed_at-driven exit_hint.
+                st.sigint_armed_at = Some(std::time::Instant::now());
+                st.sigint_armed_key = "Ctrl-D";
+            }
+        }
+        return;
+    }
+    // === end Ctrl+D exit ===
+
     // === PRIORITY 3.5: vim toggle (M7-08 review). The Ctrl-Alt-V binding must
     // be modal-independent — it flips `vim_enabled` from ANY vim mode (Normal or
     // Insert) or when vim is off. It sits AFTER the permission (1) and overlay
@@ -1252,20 +1322,30 @@ fn resync_overlays(st: &mut AppState) {
     st.palette.sync_from_prompt(&st.prompt_text);
     if st.palette.open {
         st.completion.open = false;
-    } else if crate::components::prompt_input::completion::active_at_token(
+    } else if let Some((_, partial)) = crate::components::prompt_input::completion::active_at_token(
         &st.prompt_text,
         st.prompt_cursor,
-    )
-    .is_some()
-    {
-        // Only an active `@` token needs the cwd listing. Reading it on every
-        // non-`@` keystroke (plain typing, arrows, Backspace) was a per-keypress
-        // `read_dir` syscall whose result `sync`'s no-`@` branch discarded — the
-        // plan computes candidates once per directory, not per keystroke.
-        let cwd_entries =
-            crate::components::prompt_input::completion::read_cwd_entries(&st.status.cwd);
+    ) {
+        // (cp-05) Bare `@` (empty partial) shows the top-level cwd listing
+        // (claude-code `getTopLevelPaths`); a real partial searches the full
+        // recursive project tree (`getPathsForSuggestions`). The recursive
+        // listing is cached per-cwd on `AppState` (not recomputed per
+        // keystroke) since it may shell out to `git ls-files`.
+        let candidates = if partial.is_empty() {
+            crate::components::prompt_input::completion::read_cwd_entries(&st.status.cwd)
+        } else {
+            let cwd = st.status.cwd.clone();
+            if st.project_file_cache.as_ref().map(|(c, _)| c) != Some(&cwd) {
+                let listing = crate::components::prompt_input::completion::list_project_paths(&cwd);
+                st.project_file_cache = Some((cwd.clone(), listing));
+            }
+            st.project_file_cache
+                .as_ref()
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
         st.completion
-            .sync(&st.prompt_text, st.prompt_cursor, &cwd_entries);
+            .sync(&st.prompt_text, st.prompt_cursor, &candidates);
     } else {
         // No `@` token: close/clear the overlay without touching the filesystem.
         // `sync` with an empty candidate slice takes its no-token branch, which
@@ -1453,6 +1533,8 @@ pub async fn pump_open_agents(
             name: i.name,
             description: i.description,
             tools: i.tools_allowed,
+            wildcard_tools: i.wildcard_tools,
+            source_group: i.source_group,
             ..Default::default()
         })
         .collect();
@@ -1492,10 +1574,12 @@ pub async fn pump_open_mcp(
     let rows: Vec<crate::screens::mcp::McpRow> = infos
         .into_iter()
         .map(|i| {
+            // (mcp-status-vocabulary) claude-code shows "failed" for both the
+            // not-connected and errored states (MCPListPanel `statusText`).
             let status = match i.status {
                 traits::orchestrator::McpStatus::Connected => "connected".to_string(),
-                traits::orchestrator::McpStatus::Disconnected => "disconnected".to_string(),
-                traits::orchestrator::McpStatus::Error(e) => format!("error: {e}"),
+                traits::orchestrator::McpStatus::Disconnected
+                | traits::orchestrator::McpStatus::Error(_) => "failed".to_string(),
             };
             crate::screens::mcp::McpRow {
                 name: i.name,
@@ -1539,6 +1623,10 @@ pub async fn pump_open_hooks(
             event: i.event,
             matcher: i.matcher,
             timeout_ms: i.timeout_ms,
+            hook_type: i.hook_type,
+            source: i.source,
+            content: i.content,
+            status_message: i.status_message,
         })
         .collect();
 
@@ -2217,6 +2305,156 @@ pub async fn pump_save_color(
     file.write_all(payload.as_bytes()).await.is_ok()
 }
 
+/// (PERM-1) Drain a pending `/permissions` delete: remove the confirmed rule
+/// from its settings file OUTSIDE the `AppState` lock, then reload the rules and
+/// refresh the open `/permissions` screen. No-op (`false`) when no delete is
+/// pending, the row isn't user-deletable, or nothing matched on disk. Mirrors
+/// [`pump_save_color`] (no handle / priority guard).
+pub async fn pump_permission_delete(state: &Arc<Mutex<AppState>>) -> bool {
+    // 1) Take the pending delete + cwd under the lock.
+    let (row, cwd) = {
+        let mut st = state.lock().await;
+        let Some(row) = st.pending_permission_delete.take() else {
+            return false;
+        };
+        (row, st.status.cwd.clone())
+    };
+    // 2) Map to a persistable update; non-deletable rows are a no-op.
+    let Some(update) = crate::screens::permissions::row_to_permission_update(&row) else {
+        return false;
+    };
+    let claude_home = claude_home_dir();
+    let paths = permission::PermissionPaths {
+        claude_home: claude_home.clone(),
+        cwd: cwd.clone(),
+    };
+    // 3) Remove from settings.json OUTSIDE the lock (best-effort — a broken file
+    //    is left untouched; a missing rule is a silent no-op).
+    if !permission::remove_permission_update(&update, &paths)
+        .await
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    // 4) Reload the rules + refresh the still-open screen (preserve the tab,
+    //    clamp the selection to the new row count).
+    let reloaded = crate::screens::permissions::load_permission_sections(&cwd, &claude_home);
+    let mut st = state.lock().await;
+    if let Some(crate::screens::Screen::Permissions(scr)) = st.active_screen.as_mut() {
+        let tab = scr.tab;
+        scr.mode = reloaded.mode;
+        scr.rows = reloaded.rows;
+        scr.tab = tab;
+        scr.dialog_mode = crate::screens::permissions::PermissionsDialogMode::List;
+        let n = scr.tab_rows().len();
+        scr.selected = scr.selected.min(n.saturating_sub(1));
+    }
+    true
+}
+
+/// (PERM-1) Drain a pending `/permissions` add: append the submitted rule to
+/// Local settings (`persist_permission_update`, OUTSIDE the lock), reload, and
+/// refresh the open screen — the add counterpart of [`pump_permission_delete`].
+pub async fn pump_permission_add(state: &Arc<Mutex<AppState>>) -> bool {
+    let (row, cwd) = {
+        let mut st = state.lock().await;
+        let Some(row) = st.pending_permission_add.take() else {
+            return false;
+        };
+        (row, st.status.cwd.clone())
+    };
+    let Some(update) = crate::screens::permissions::row_to_permission_update(&row) else {
+        return false;
+    };
+    let claude_home = claude_home_dir();
+    let paths = permission::PermissionPaths {
+        claude_home: claude_home.clone(),
+        cwd: cwd.clone(),
+    };
+    if !permission::persist_permission_update(&update, &paths)
+        .await
+        .unwrap_or(false)
+    {
+        return false; // already present / not persistable / broken file.
+    }
+    let reloaded = crate::screens::permissions::load_permission_sections(&cwd, &claude_home);
+    let mut st = state.lock().await;
+    if let Some(crate::screens::Screen::Permissions(scr)) = st.active_screen.as_mut() {
+        let tab = scr.tab;
+        scr.mode = reloaded.mode;
+        scr.rows = reloaded.rows;
+        scr.tab = tab;
+        scr.dialog_mode = crate::screens::permissions::PermissionsDialogMode::List;
+        let n = scr.tab_rows().len();
+        scr.selected = scr.selected.min(n.saturating_sub(1));
+    }
+    true
+}
+
+/// (PERM-1 Workspace tab) Persist a pending workspace-directory add/remove to
+/// Local settings' `permissions.additionalDirectories` (OUTSIDE the lock),
+/// reload, and refresh the open `/permissions` screen — the directory
+/// counterpart of [`pump_permission_add`]/[`pump_permission_delete`]. No-op
+/// (`false`) when nothing is pending or nothing changed on disk.
+pub async fn pump_workspace_dir(state: &Arc<Mutex<AppState>>) -> bool {
+    let ((dir, add), cwd) = {
+        let mut st = state.lock().await;
+        let Some(pending) = st.pending_workspace_dir.take() else {
+            return false;
+        };
+        (pending, st.status.cwd.clone())
+    };
+    let claude_home = claude_home_dir();
+    let paths = permission::PermissionPaths {
+        claude_home: claude_home.clone(),
+        cwd: cwd.clone(),
+    };
+    // Workspace dirs are added to Local settings (same destination the
+    // add-rule path defaults to).
+    if !permission::persist_workspace_directory(
+        &dir,
+        add,
+        permission::PermissionUpdateDestination::LocalSettings,
+        &paths,
+    )
+    .await
+    .unwrap_or(false)
+    {
+        return false; // already present / absent / broken file.
+    }
+    let reloaded = crate::screens::permissions::load_permission_sections(&cwd, &claude_home);
+    let mut st = state.lock().await;
+    if let Some(crate::screens::Screen::Permissions(scr)) = st.active_screen.as_mut() {
+        let tab = scr.tab;
+        scr.mode = reloaded.mode;
+        scr.rows = reloaded.rows;
+        scr.workspace_dirs = reloaded.workspace_dirs;
+        scr.tab = tab;
+        scr.dialog_mode = crate::screens::permissions::PermissionsDialogMode::List;
+        let n = scr.active_item_count();
+        scr.selected = scr.selected.min(n.saturating_sub(1));
+    }
+    true
+}
+
+/// (BGTASK-3) Drain a pending `/tasks` `x`-stop: call the multiagent feed's
+/// `kill` for the staged task id OUTSIDE the `AppState` lock. Best-effort —
+/// a failed kill (task already finished, unsupported feed) is silently
+/// dropped; the next poll's status reflects whatever's actually true.
+pub async fn pump_task_stop(
+    state: &Arc<Mutex<AppState>>,
+    feed: &dyn crate::multiagent::MultiAgentFeed,
+) -> bool {
+    let id = {
+        let mut st = state.lock().await;
+        let Some(id) = st.pending_task_stop.take() else {
+            return false;
+        };
+        id
+    };
+    feed.kill(&id).await.is_ok()
+}
+
 /// (`/copy`) Write a pending `/copy` selection to the system clipboard.
 ///
 /// Mirrors [`pump_save_color`] (no `OrchestratorHandle`, no priority guard): the
@@ -2666,6 +2904,18 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 // were already applied synchronously by the submit intercept;
                 // only the disk write is deferred here.
                 let _wrote_color = pump_save_color(&state, ticker_session_id).await;
+                // (PERM-1) `/permissions` delete + add pumps. Mutate settings.json
+                // + reload the screen; redraw on success.
+                if pump_permission_delete(&state).await {
+                    needs_redraw = true;
+                }
+                if pump_permission_add(&state).await {
+                    needs_redraw = true;
+                }
+                // (PERM-1 Workspace tab) workspace-directory add/remove pump.
+                if pump_workspace_dir(&state).await {
+                    needs_redraw = true;
+                }
                 // (`/copy`) Clipboard write pump. Runs UNCONDITIONALLY (no
                 // handle, no priority guard): a pending `/copy` selection is
                 // written to the system clipboard via the platform utility
@@ -2690,6 +2940,12 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 // is wired (the desktop mount supplies both; others pass `None`).
                 if let (Some(feed), Some(tx)) = (multiagent_feed.as_ref(), multiagent_tx.as_ref()) {
                     let _sent = crate::multiagent::pump_once(feed.as_ref(), tx).await;
+                }
+                // (BGTASK-3) `/tasks` `x`-stop pump: best-effort, fire-and-forget
+                // (the next poll above picks up the resulting status change —
+                // no redraw bump needed here).
+                if let Some(feed) = multiagent_feed.as_ref() {
+                    let _stopped = pump_task_stop(&state, feed.as_ref()).await;
                 }
                 let streaming = state.lock().await.streaming.is_some();
                 if streaming || needs_redraw {
@@ -3311,6 +3567,79 @@ mod tests {
         assert!(st.active_screen.is_none(), "Esc closes the Settings screen (fallback)");
     }
 
+    /// (RRS-02) Esc interrupts a streaming turn — claude-code
+    /// `escape: 'chat:cancel'`. With a turn in flight (and no screen/overlay/
+    /// teammate trap active) Esc cancels the token and pushes an interrupt
+    /// marker, mirroring the Ctrl+C `KeyAction::Cancel` branch.
+    #[test]
+    fn esc_interrupts_in_flight_turn() {
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        let token = tokio_util::sync::CancellationToken::new();
+        st.in_flight_turn = Some(crate::state::TurnInFlight { turn_id: 1, cancel: token.clone() });
+
+        let esc = KeyEvent::new(KeyEventKind::Press, KeyCode::Esc);
+        handle_live_key(&mut st, &esc, 24);
+
+        assert!(token.is_cancelled(), "Esc must cancel the in-flight turn token");
+        assert!(
+            st.messages.iter().any(|m| matches!(
+                m,
+                crate::state::RenderedMessage::UserText { body, .. }
+                    if body == crate::components::messages::user_tool_result::INTERRUPT_MESSAGE
+            )),
+            "Esc must push the INTERRUPT_MESSAGE marker (RRS-08)"
+        );
+    }
+
+    /// (RRS-02) Esc is a no-op interrupt when NO turn is in flight — it falls
+    /// through to normal editor behavior (no spurious interrupt marker).
+    #[test]
+    fn esc_without_in_flight_turn_does_not_interrupt() {
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        assert!(st.in_flight_turn.is_none());
+        let esc = KeyEvent::new(KeyEventKind::Press, KeyCode::Esc);
+        handle_live_key(&mut st, &esc, 24);
+        assert!(
+            !st.messages.iter().any(|m| matches!(
+                m,
+                crate::state::RenderedMessage::UserText { body, .. }
+                    if body == crate::components::messages::user_tool_result::INTERRUPT_MESSAGE
+            )),
+            "no interrupt marker when no turn is in flight"
+        );
+    }
+
+    /// (RRS-07) Ctrl+D on an empty prompt arms, then exits on a second press.
+    #[test]
+    fn ctrl_d_double_press_exits_on_empty_prompt() {
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        let ctrl_d = {
+            let mut e = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('d'));
+            e.modifiers = KeyModifiers::CONTROL;
+            e
+        };
+        handle_live_key(&mut st, &ctrl_d, 24);
+        assert!(!st.should_exit, "first Ctrl+D only arms");
+        // (RRS-08) The confirmation is a transient footer hint
+        // (PromptInputFooter.exit_hint), not a pushed scrollback message.
+        assert!(st.sigint_armed_at.is_some());
+        assert_eq!(st.sigint_armed_key, "Ctrl-D");
+        handle_live_key(&mut st, &ctrl_d, 24);
+        assert!(st.should_exit, "second Ctrl+D within the window exits");
+    }
+
+    /// (RRS-07) Ctrl+D with a non-empty prompt does NOT exit (falls through).
+    #[test]
+    fn ctrl_d_with_text_does_not_exit() {
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.prompt_text = "hi".into();
+        st.prompt_cursor = 2;
+        let mut ctrl_d = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('d'));
+        ctrl_d.modifiers = KeyModifiers::CONTROL;
+        handle_live_key(&mut st, &ctrl_d, 24);
+        assert!(!st.should_exit, "Ctrl+D with text must not exit");
+    }
+
     /// (GAP D fix — tab navigators, TDD) The Stats screen is a TAB NAVIGATOR
     /// (Overview/Models via Tab) + a keyboard SCROLL pager. It must NOT inherit
     /// the `Select` LIST context, whose `j`/`k`→select:next/previous (lowered to
@@ -3729,6 +4058,101 @@ mod tests {
         let stored = pump_store_provider_key(&state).await;
         assert!(!stored, "no store bound ⇒ pump stores nothing and returns false");
         assert!(state.lock().await.pending_store_key.is_none());
+    }
+
+    /// (BGTASK-3) `pump_task_stop` drains `pending_task_stop` and calls the
+    /// feed's `kill` for that id, OUTSIDE the lock — mirrors the
+    /// `pump_permission_delete`/`pump_save_color` take-then-act shape.
+    #[tokio::test]
+    async fn pump_task_stop_drains_pending_and_calls_feed_kill() {
+        struct RecordingFeed {
+            killed: std::sync::Mutex<Vec<String>>,
+        }
+        #[async_trait::async_trait]
+        impl crate::multiagent::MultiAgentFeed for RecordingFeed {
+            async fn poll(&self) -> Vec<crate::multiagent::MultiAgentEvent> {
+                Vec::new()
+            }
+            async fn kill(&self, task_id: &str) -> Result<(), String> {
+                self.killed.lock().unwrap().push(task_id.to_string());
+                Ok(())
+            }
+        }
+
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.pending_task_stop = Some("b00000001".to_string());
+        let state = Arc::new(Mutex::new(st));
+        let feed = RecordingFeed {
+            killed: std::sync::Mutex::new(Vec::new()),
+        };
+
+        let stopped = pump_task_stop(&state, &feed).await;
+        assert!(stopped, "pump must report a successful kill");
+        assert_eq!(feed.killed.lock().unwrap().as_slice(), ["b00000001"]);
+        assert!(state.lock().await.pending_task_stop.is_none());
+    }
+
+    /// Nothing pending → no-op, no feed call.
+    #[tokio::test]
+    async fn pump_task_stop_noop_when_nothing_pending() {
+        struct PanicsIfCalled;
+        #[async_trait::async_trait]
+        impl crate::multiagent::MultiAgentFeed for PanicsIfCalled {
+            async fn poll(&self) -> Vec<crate::multiagent::MultiAgentEvent> {
+                Vec::new()
+            }
+            async fn kill(&self, _task_id: &str) -> Result<(), String> {
+                panic!("kill must not be called when nothing is pending");
+            }
+        }
+
+        let state = Arc::new(Mutex::new(AppState::new(crate::state::StatusSnapshot::default())));
+        let stopped = pump_task_stop(&state, &PanicsIfCalled).await;
+        assert!(!stopped);
+    }
+
+    /// (PERM-1 Workspace tab) `pump_workspace_dir` persists a pending add to
+    /// the cwd's local settings, reloads, and surfaces the directory in the
+    /// open Workspace tab.
+    #[tokio::test]
+    async fn pump_workspace_dir_persists_add_and_reloads_screen() {
+        use crate::screens::permissions::{PermTab, PermissionsScreenState};
+        use crate::screens::Screen;
+
+        let tmp = std::env::temp_dir().join(format!("lx-pump-ws-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("proj")).unwrap();
+
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.status.cwd = tmp.join("proj");
+        st.active_screen = Some(Screen::Permissions(PermissionsScreenState {
+            tab: PermTab::Workspace,
+            ..PermissionsScreenState::default()
+        }));
+        st.pending_workspace_dir = Some(("/work/added".to_string(), true));
+        let state = Arc::new(Mutex::new(st));
+
+        let wrote = pump_workspace_dir(&state).await;
+        assert!(wrote, "pump must report a successful write");
+
+        // settings.local.json now carries the directory.
+        let body =
+            std::fs::read_to_string(tmp.join("proj/.claude/settings.local.json")).unwrap();
+        assert!(body.contains("/work/added"), "persisted to disk: {body}");
+
+        let g = state.lock().await;
+        assert!(g.pending_workspace_dir.is_none(), "pending cleared");
+        if let Some(Screen::Permissions(scr)) = &g.active_screen {
+            assert!(
+                scr.workspace_dirs.iter().any(|d| d == "/work/added"),
+                "reloaded screen shows the directory: {:?}",
+                scr.workspace_dirs
+            );
+        } else {
+            panic!("permissions screen must still be open");
+        }
+        drop(g);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// (Plan 3c §6.3) `pump_open_connect` opens the masked API-key screen for an

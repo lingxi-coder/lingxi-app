@@ -38,6 +38,14 @@ pub struct MemoryTierEntry {
 ///
 /// Mirrors `claude-code/src/components/memory/MemoryFileSelector.tsx`
 /// (single-user subset: auto-memory / team / agent folders are M8).
+/// `true` when `cwd` or any ancestor contains a `.git` entry (dir for a normal
+/// repo, file for a worktree/submodule) — the nearest-`.git`-ancestor scan used
+/// across the TUI (mirrors `skills.rs`). Drives the MEM-1 git-conditional
+/// project-memory description.
+fn cwd_is_in_git_repo(cwd: &Path) -> bool {
+    cwd.ancestors().any(|dir| dir.join(".git").exists())
+}
+
 #[must_use]
 pub fn memory_tiers(cwd: &Path, home: &Path) -> Vec<MemoryTierEntry> {
     let project_path = cwd.join(FILE_NAME);
@@ -50,7 +58,13 @@ pub fn memory_tiers(cwd: &Path, home: &Path) -> Vec<MemoryTierEntry> {
     let mut tiers = vec![
         MemoryTierEntry {
             label: "Project memory".to_string(),
-            description: "Checked in at ./CLAUDE.md".to_string(),
+            // (MEM-1) git-conditional, matching MemoryFileSelector.tsx:88,93:
+            // "Checked in at ./CLAUDE.md" inside a git repo, else "Saved in …".
+            description: if cwd_is_in_git_repo(cwd) {
+                "Checked in at ./CLAUDE.md".to_string()
+            } else {
+                "Saved in ./CLAUDE.md".to_string()
+            },
             exists: project_path.is_file(),
             path: project_path.clone(),
         },
@@ -74,7 +88,12 @@ pub fn memory_tiers(cwd: &Path, home: &Path) -> Vec<MemoryTierEntry> {
         let display = entry.path.display().to_string();
         tiers.push(MemoryTierEntry {
             label: display.clone(),
-            description: "@-imported".to_string(),
+            // (MEM-2) These are nested-directory discoveries (claude-code
+            // `getMemoryFilesForNestedDirectory`'s walk, `file.isNested`),
+            // not `@import`-following (`file.parent`) — so the description
+            // is "dynamically loaded", not "@-imported" (MemoryFileSelector
+            // .tsx:91-99 picks `@-imported` only when `file.parent` is set).
+            description: "dynamically loaded".to_string(),
             exists: true,
             path: entry.path,
         });
@@ -333,6 +352,53 @@ mod tests {
         let user = tiers.iter().find(|t| t.label == "User memory").unwrap();
         assert!(!user.exists);
         assert_eq!(user.path, home.join(".claude").join("CLAUDE.md"));
+    }
+
+    #[test]
+    fn discovered_parent_claude_md_says_dynamically_loaded_not_imported() {
+        // (MEM-2) An ancestor-directory CLAUDE.md (not cwd's own, not an
+        // `@import`) gets claude-code's "dynamically loaded" description —
+        // "@-imported" is reserved for `@import`-following (file.parent set).
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let cwd = tmp.path().join("repo").join("sub");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        let ancestor_md = tmp.path().join("repo").join("CLAUDE.md");
+        fs::write(&ancestor_md, b"# ancestor notes\n").unwrap();
+        fs::write(cwd.join("CLAUDE.md"), b"# project notes\n").unwrap();
+
+        let tiers = memory_tiers(&cwd, &home);
+        let discovered = tiers
+            .iter()
+            .find(|t| t.path == ancestor_md)
+            .expect("ancestor CLAUDE.md discovered as its own tier row");
+        assert_eq!(discovered.description, "dynamically loaded");
+    }
+
+    #[test]
+    fn project_description_is_git_conditional() {
+        // (MEM-1) `.git` present at cwd → "Checked in at"; absent → "Saved in".
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let cwd = tmp.path().join("repo");
+        fs::create_dir_all(&cwd).unwrap();
+        let proj_desc = |tiers: &[MemoryTierEntry]| {
+            tiers
+                .iter()
+                .find(|t| t.label == "Project memory")
+                .unwrap()
+                .description
+                .clone()
+        };
+        // No `.git` anywhere under the fresh tempdir → "Saved in".
+        assert_eq!(proj_desc(&memory_tiers(&cwd, &home)), "Saved in ./CLAUDE.md");
+        // Add a `.git` dir at cwd → "Checked in at".
+        fs::create_dir_all(cwd.join(".git")).unwrap();
+        assert_eq!(
+            proj_desc(&memory_tiers(&cwd, &home)),
+            "Checked in at ./CLAUDE.md"
+        );
     }
 
     #[test]

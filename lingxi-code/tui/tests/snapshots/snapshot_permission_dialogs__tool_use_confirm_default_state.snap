@@ -1,14 +1,13 @@
 ---
-source: crates/tui/tests/snapshot_permission_dialogs.rs
+source: tui/tests/snapshot_permission_dialogs.rs
+assertion_line: 26
 expression: "&frame"
 ---
-╭──────────────────────────────────────────╮
-│                                          │
-│ Claude needs your permission to use Bash │
-│ Input: {"command":"ls -la"}              │
-│                                          │
-│ > [1] Allow Once                         │
-│   [2] Allow Always                       │
-│   [N] Deny                               │
-│                                          │
-╰──────────────────────────────────────────╯
+───────────────────────────────────────────────────────
+ Tool use
+ Bash(ls -la)
+ Do you want to proceed?
+
+ > Yes
+   Yes, and don't ask again for Bash commands in /work
+   No

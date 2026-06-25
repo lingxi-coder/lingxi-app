@@ -1,9 +1,10 @@
 ---
-source: crates/tui/tests/render_settings_screen.rs
+source: tui/tests/render_settings_screen.rs
+assertion_line: 82
 expression: "&f"
 ---
 
-  Config  [Settings]  Status   Usage
+  Status   Config   Usage  [Settings]
 
  Settings
  model: source=user

@@ -17,20 +17,70 @@ fn snapshot_tool_use_confirm_default_state() {
     let mut element = element! {
         ToolUseConfirm(
             tool_name: "Bash".to_string(),
-            tool_input_pretty: "{\"command\":\"ls -la\"}".to_string(),
+            tool_input: serde_json::json!({"command": "ls -la"}),
+            cwd: std::path::PathBuf::from("/work"),
             focus: DialogFocus::AllowOnce,
         )
     };
     let frame = element.to_string();
     insta::assert_snapshot!("tool_use_confirm_default_state", &frame);
-    // Substring locks (insulate against snapshot-file corruption).
+    // (perm-01/perm-03) Substring locks.
+    assert!(frame.contains("Tool use"), "got: {frame}");
+    assert!(frame.contains("Bash(ls -la)"), "got: {frame}");
+    assert!(frame.contains("Do you want to proceed?"), "got: {frame}");
+    assert!(frame.contains("> Yes"), "got: {frame}");
     assert!(
-        frame.contains("Claude needs your permission to use Bash"),
+        frame.contains("Yes, and don't ask again for Bash commands in /work"),
         "got: {frame}"
     );
-    assert!(frame.contains("> [1] Allow Once"));
-    assert!(frame.contains("  [2] Allow Always"));
-    assert!(frame.contains("  [N] Deny"));
+    assert!(frame.contains("  No"), "got: {frame}");
+}
+
+#[test]
+fn tool_use_confirm_worker_name_renders_inline_on_title_row() {
+    // (perm-09) Dim `· @name` suffix on the SAME row as the bold "Tool use"
+    // title, not a separate badge line above it.
+    let mut element = element! {
+        ToolUseConfirm(
+            tool_name: "Bash".to_string(),
+            tool_input: serde_json::json!({"command": "ls -la"}),
+            cwd: std::path::PathBuf::from("/work"),
+            focus: DialogFocus::AllowOnce,
+            worker_name: Some("alice".to_string()),
+        )
+    };
+    let frame = element.to_string();
+    let title_line = frame
+        .lines()
+        .find(|l| l.contains("Tool use"))
+        .expect("a title line");
+    assert!(title_line.contains("\u{00B7} @alice"), "got: {title_line:?}");
+}
+
+#[test]
+fn snapshot_tool_use_confirm_edit_shows_diff() {
+    // (perm-02) An Edit permission request renders the structured diff inside
+    // the dialog so the user sees the change before approving.
+    let mut element = element! {
+        ToolUseConfirm(
+            tool_name: "Edit".to_string(),
+            tool_input: serde_json::json!({
+                "file_path": "/work/src/main.rs",
+                "old_string": "let x = 1;",
+                "new_string": "let x = 2;",
+            }),
+            cwd: std::path::PathBuf::from("/work"),
+            focus: DialogFocus::AllowOnce,
+        )
+    };
+    let frame = element.to_string();
+    insta::assert_snapshot!("tool_use_confirm_edit_shows_diff", &frame);
+    assert!(frame.contains("Tool use"), "got: {frame}");
+    assert!(frame.contains("Edit(src/main.rs)"), "got: {frame}");
+    // The diff body shows both the removed and added line content.
+    assert!(frame.contains("let x = 1;"), "old line in diff: {frame}");
+    assert!(frame.contains("let x = 2;"), "new line in diff: {frame}");
+    assert!(frame.contains("Do you want to proceed?"), "got: {frame}");
 }
 
 #[test]
@@ -45,10 +95,13 @@ fn snapshot_exit_plan_mode_with_5_line_plan() {
     };
     let frame = element.to_string();
     insta::assert_snapshot!("exit_plan_mode_with_5_line_plan", &frame);
-    assert!(frame.contains("Claude Code needs your approval for the plan"));
+    // (perm-06) "Ready to code?" + plan-approval options.
+    assert!(frame.contains("Ready to code?"), "got: {frame}");
     assert!(frame.contains("1. Read foo.rs"));
     assert!(frame.contains("5. Commit"));
-    assert!(frame.contains("> [1] Allow Once"));
+    assert!(frame.contains("> Yes, manually approve edits"), "got: {frame}");
+    assert!(frame.contains("Yes, auto-accept edits"), "got: {frame}");
+    assert!(frame.contains("No, keep planning"), "got: {frame}");
 }
 
 #[test]

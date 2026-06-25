@@ -36,6 +36,11 @@ command-api = { path = "../../command-api" }
 # ConversationOrchestrator's cancelable streaming entry, so `orchestrator` is now
 # a LIBRARY dependency (it was dev-only when the only driver was the test one).
 orchestrator = { path = "../../orchestrator" }
+# Input message queue (spec §27). The connection's SendPrompt path enqueues a
+# prompt that arrives while a turn is in flight and the spawned run loop drains
+# it as a follow-up turn — the parity twin of print.ts run()'s `running` guard +
+# do/while drainCommandQueue loop.
+msgqueue = { path = "../../msgqueue" }
 # S2: the real binary resolves a DesktopConfig from env/argv and assembles the
 # production runtime through the desktop composition root. app→app is permitted
 # by the dependency gate (apps are leaves; the rule only forbids non-leaf→leaf).

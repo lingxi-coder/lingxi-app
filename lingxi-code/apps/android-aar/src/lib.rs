@@ -2504,7 +2504,7 @@ mod tests {
         // The M8 smoke signal still works: `skill_count` reflects the assembled
         // mobile builtin skill set (currently empty — mobile builtin skills are
         // markdown loaded from disk, not Rust-bundled — so it is 0, matching
-        // `skill_builtin::BUILTIN_MOBILE`). The signal is that the call resolves
+        // `skill_api::builtin::BUILTIN_MOBILE`). The signal is that the call resolves
         // against the real wired handle, not that the count is non-zero.
         assert_eq!(handle.skill_count(), 0);
     }

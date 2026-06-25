@@ -203,6 +203,7 @@ mod tests {
                 color: AgentColor::Cyan,
                 icon: None,
             },
+            model_profile: None,
             api_client: None,
             tool_invoker: None,
             tool_schemas: vec![],

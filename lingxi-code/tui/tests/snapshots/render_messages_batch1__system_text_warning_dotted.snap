@@ -1,5 +1,6 @@
 ---
-source: crates/tui/tests/render_messages_batch1.rs
+source: tui/tests/render_messages_batch1.rs
+assertion_line: 64
 expression: s
 ---
-● Approaching context limit.
+⏺ Approaching context limit.

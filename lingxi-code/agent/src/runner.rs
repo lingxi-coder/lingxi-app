@@ -818,10 +818,18 @@ async fn run_subagent_loop(
             .map(crate::definition::AgentEffort::to_wire);
         let response = loop {
             let api_call = async {
+                // Provider routing (dual-LLM dual-PROVIDER): thread the
+                // per-spawn `model_profile` as the api client's `profile` so the
+                // round-trip targets the candidate's resolved provider. `None`
+                // ⇒ default/unscoped resolution (legacy). The `_in` variants
+                // default to the profile-less methods, so a client that only
+                // implements the legacy seam is unaffected.
+                let profile = ctx.model_profile.as_deref();
                 let stream = if let Some(forced) = force_structured_tool {
                     api_client
-                        .messages_create_stream_forced(
+                        .messages_create_stream_forced_in(
                             &model,
+                            profile,
                             system.as_deref(),
                             history.clone(),
                             tool_schemas.clone(),
@@ -831,8 +839,9 @@ async fn run_subagent_loop(
                         .await?
                 } else {
                     api_client
-                        .messages_create_stream(
+                        .messages_create_stream_in(
                             &model,
+                            profile,
                             system.as_deref(),
                             history.clone(),
                             tool_schemas.clone(),
@@ -1750,6 +1759,7 @@ mod tests {
                 color: AgentColor::Cyan,
                 icon: None,
             },
+            model_profile: None,
             api_client: None,
             tool_invoker: None,
             tool_schemas: vec![],

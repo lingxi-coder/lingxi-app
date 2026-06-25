@@ -45,6 +45,15 @@ pub struct SubagentSpawnRequest {
     /// (TS `model`). The spawner maps this onto the agent model override.
     #[serde(default)]
     pub model: Option<String>,
+    /// Provider profile name for routing the child's model, e.g. the candidate's
+    /// resolved profile; `None` = default/unscoped resolution. When set, the
+    /// spawner uses [`Self::model`] verbatim as the explicit wire model and
+    /// threads this profile through to the subagent api client so the round-trip
+    /// targets the named provider (the dual-LLM dual-PROVIDER routing). When
+    /// `None`, model resolution + provider selection are unchanged (the legacy
+    /// default-provider path).
+    #[serde(default)]
+    pub model_profile: Option<String>,
     /// Whether to run the spawned agent in the background (TS `run_in_background`,
     /// `AgentTool.tsx:87` `z.boolean().optional()`). claude treats it as a
     /// boolean predicate (`run_in_background === true`), so it is collapsed to a

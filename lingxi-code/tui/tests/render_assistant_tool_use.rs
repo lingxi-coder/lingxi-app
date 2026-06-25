@@ -1,9 +1,10 @@
 //! Snapshot tests for `AssistantToolUseMessage` (M6-04 Tasks 3 + 4).
 
-use insta::assert_snapshot;
+use std::path::PathBuf;
+
 use protocol::ToolUseId;
 use tui::components::messages::assistant_tool_use::{
-    render_assistant_tool_use_to_string, AssistantToolUseProps,
+    render_assistant_tool_use_to_string, AssistantToolUseProps, MARKER,
 };
 
 fn id() -> ToolUseId {
@@ -12,14 +13,19 @@ fn id() -> ToolUseId {
 
 #[test]
 fn collapsed_read_with_file_path() {
+    // (ma-01) Per-tool preview: Read shows getDisplayPath(file_path) — here
+    // cwd=/tmp shortens /tmp/x.rs to x.rs.
     let s = render_assistant_tool_use_to_string(AssistantToolUseProps {
         id: id(),
         tool: "Read".into(),
         input: serde_json::json!({"file_path": "/tmp/x.rs"}),
         expanded: false,
         focused: false,
+        cwd: PathBuf::from("/tmp"),
+        resolution: None,
     });
-    assert_snapshot!(s, @r#"● Read({"file_path": "/tmp/x.rs"})"#);
+    // (ma-03) MARKER is the platform BLACK_CIRCLE (⏺ macOS / ● else).
+    assert_eq!(s, format!("{MARKER} Read(x.rs)"));
 }
 
 #[test]
@@ -30,14 +36,13 @@ fn expanded_read_shows_pretty_json() {
         input: serde_json::json!({"file_path": "/tmp/x.rs", "limit": 100}),
         expanded: true,
         focused: false,
+        cwd: PathBuf::from("/tmp"),
+        resolution: None,
     });
-    assert_snapshot!(s, @r#"
-    ● Read({"file_path": "/tmp/x.rs", "limit": 100})
-    {
-      "file_path": "/tmp/x.rs",
-      "limit": 100
-    }
-    "#);
+    assert_eq!(
+        s,
+        format!("{MARKER} Read(x.rs)\n{{\n  \"file_path\": \"/tmp/x.rs\",\n  \"limit\": 100\n}}")
+    );
 }
 
 #[test]
@@ -48,6 +53,8 @@ fn focused_collapsed_has_arrow_prefix() {
         input: serde_json::json!({"file_path": "/tmp/x.rs"}),
         expanded: false,
         focused: true,
+        cwd: PathBuf::from("/tmp"),
+        resolution: None,
     });
-    assert_snapshot!(s, @r#"> ● Read({"file_path": "/tmp/x.rs"})"#);
+    assert_eq!(s, format!("> {MARKER} Read(x.rs)"));
 }

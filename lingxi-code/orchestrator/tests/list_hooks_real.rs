@@ -91,3 +91,35 @@ async fn list_hooks_default_timeout_is_60000ms() {
     assert_eq!(v[0].event, "Stop");
     assert!(v[0].matcher.is_none());
 }
+
+#[tokio::test]
+async fn list_hooks_maps_executor_type_content_and_source() {
+    // (hooks-detail-fields-divergent)
+    let mut reg = HookRegistry::new();
+    reg.register(HookDefinition {
+        id: HookId::new(),
+        name: "fmt".into(),
+        events: vec![HookEventType::PostToolUse],
+        if_condition: None,
+        executor: HookExecutor::Command {
+            command: "prettier".into(),
+            args: vec!["--write".into()],
+            env: std::collections::HashMap::new(),
+            cwd: None,
+        },
+        source: HookSource::Project,
+        blocking: true,
+        timeout: None,
+        priority: 0,
+        once: false,
+        status_message: Some("Formatting…".into()),
+    });
+    let reg = Arc::new(RwLock::new(reg));
+
+    let orch = Arc::new(build_orch().with_hook_registry(reg));
+    let v = orch.list_hooks().await;
+    assert_eq!(v[0].hook_type, "command");
+    assert_eq!(v[0].content, "prettier --write");
+    assert_eq!(v[0].source, "Project settings (.claude/settings.json)");
+    assert_eq!(v[0].status_message.as_deref(), Some("Formatting…"));
+}

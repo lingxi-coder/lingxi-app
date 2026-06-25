@@ -32,7 +32,7 @@
       "open_on_tab": "config",
       "expected_active_screen": "settings",
       "tab_keys": ["Right", "Right"],
-      "expected_tab_sequence": ["settings", "status"],
+      "expected_tab_sequence": ["usage", "settings"],
       "close_key": "Esc",
       "expected_active_screen_after_close": null
     },

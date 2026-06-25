@@ -59,7 +59,11 @@ pub fn render_advisor_to_string(props: AdvisorProps) -> String {
         AdvisorKind::ServerToolUse { model, input } => {
             let mut out = "Advising".to_string();
             if let Some(m) = model {
-                out.push_str(&format!(" using {m}"));
+                // (ma-07) friendly display name (renderModelName), not the raw id.
+                out.push_str(&format!(
+                    " using {}",
+                    crate::render::model_name::render_model_name(m)
+                ));
             }
             if let Some(i) = input {
                 out.push_str(&format!(" \u{00B7} {i}")); // ` · ` middot
@@ -88,7 +92,10 @@ pub fn render_advisor_to_string(props: AdvisorProps) -> String {
 pub fn AdvisorMessage(props: &AdvisorProps) -> impl Into<AnyElement<'static>> {
     let body = render_advisor_to_string(props.clone());
     let theme = props.theme;
-    // server_tool_use: bold `Advising` + dim descriptor (per-span, on one row).
+    // server_tool_use: leading dot + bold default-text `Advising` + dim
+    // descriptor (claude-code `AdvisorMessage.tsx`: `<ToolUseLoader/>` dot,
+    // `<Text bold>Advising</Text>` in DEFAULT text color, then the
+    // ` using {model}`/` · {input}` runs `<Text dimColor>`).
     if let AdvisorKind::ServerToolUse { .. } = &props.kind {
         // `body` is "Advising[ using {model}][ · {input}]"; split off the bold
         // leading "Advising" word, the remainder is the dim descriptor.
@@ -96,7 +103,14 @@ pub fn AdvisorMessage(props: &AdvisorProps) -> impl Into<AnyElement<'static>> {
         return element! {
             View(flex_direction: FlexDirection::Column) {
                 View(flex_direction: FlexDirection::Row) {
-                    Text(content: "Advising".to_string(), color: theme.dim, weight: Weight::Bold)
+                    // ToolUseLoader dot (unresolved/in-progress → dim). ma-03:
+                    // the BLACK_CIRCLE glyph is `⏺` on macOS, `●` elsewhere
+                    // (shared with the tool-use marker).
+                    Text(
+                        content: format!("{} ", crate::components::messages::assistant_tool_use::MARKER),
+                        color: theme.dim,
+                    )
+                    Text(content: "Advising".to_string(), color: theme.text, weight: Weight::Bold)
                     Text(content: descriptor, color: theme.dim)
                 }
             }

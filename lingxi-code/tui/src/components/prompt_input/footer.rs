@@ -1,12 +1,41 @@
 //! `PromptInputFooter` — the chrome below the editor: mode-indicator,
-//! placeholder, the collapsed help hint, the newline hint, and a (M7-06
-//! empty) suggestions area. Live suggestion filtering arrives in M7-07.
+//! placeholder, the collapsed help hint, and a (M7-06 empty) suggestions area.
+//! Live suggestion filtering arrives in M7-07.
 //!
 //! Literal lock (claude-code `PromptInput*`): the prompt glyph is `❯ `
-//! (figures.pointer + space), the newline hint is `shift + ⏎ for newline`,
-//! and the help hint is `? for shortcuts`.
+//! (figures.pointer + space) and the help hint is `? for shortcuts`. The hint
+//! is shown only when the buffer is empty and the vim mode-indicator is not
+//! shown (claude-code `showHint = !suppressHint && !showVim`, with
+//! `suppressHint = input.length > 0`). The `shift + ⏎ for newline` text lives
+//! ONLY on the `?` help surface (`PromptInputHelpMenu`), never in the resting
+//! footer. (PIC-07) When a turn is in flight, the SAME hint slot shows `esc
+//! to interrupt` instead (claude-code `getSpinnerHintParts`'s `isLoading`
+//! branch).
 
 use iocraft::prelude::*;
+use permission::PermissionMode;
+
+/// Footer permission-mode indicator (claude-code `ModeIndicator`):
+/// `{symbol} {title-lowercased} on (shift+tab to cycle)` for NON-default modes;
+/// `None` for the default mode (no indicator). Symbols/titles ported from
+/// `utils/permissions/PermissionMode.ts`. After SS-01 removed the built-in
+/// status line this is the only place the active permission mode is surfaced.
+#[must_use]
+pub fn perm_mode_label(mode: PermissionMode) -> Option<String> {
+    let (symbol, title) = match mode {
+        PermissionMode::Default => return None,
+        PermissionMode::Plan => ("\u{23f8}", "Plan Mode"),
+        PermissionMode::AcceptEdits => ("\u{23f5}\u{23f5}", "Accept edits"),
+        PermissionMode::BypassPermissions => ("\u{23f5}\u{23f5}", "Bypass Permissions"),
+        PermissionMode::DontAsk => ("\u{23f5}\u{23f5}", "Don't Ask"),
+        PermissionMode::Auto => ("\u{23f5}\u{23f5}", "Auto mode"),
+        PermissionMode::Bubble => ("\u{23f5}\u{23f5}", "Bubble"),
+    };
+    Some(format!(
+        "{symbol} {} on (shift+tab to cycle)",
+        title.to_lowercase()
+    ))
+}
 
 use crate::components::prompt_input::{mode_indicator, VimMode};
 use crate::theme::TuiTheme;
@@ -82,6 +111,21 @@ pub struct PromptInputFooterProps {
     /// (M7-09) Whether the active Visual selection is linewise (`V`) vs charwise
     /// (`v`). Selects `-- VISUAL LINE --` over `-- VISUAL --`.
     pub vim_visual_linewise: bool,
+    /// (PIC-10) Active permission mode — a non-default mode renders the
+    /// `{symbol} {mode} on (shift+tab to cycle)` indicator in the footer.
+    pub permission_mode: PermissionMode,
+    /// (PIC-07) A turn is in flight — when the hint isn't otherwise
+    /// suppressed, shows `esc to interrupt` in place of `? for shortcuts`
+    /// (claude-code `getSpinnerHintParts`'s `isLoading` branch).
+    pub is_loading: bool,
+    /// (RRS-08) `Some(key)` while the idle Ctrl-C/Ctrl-D double-press exit
+    /// window is armed (`AppState.sigint_armed_at` within
+    /// [`crate::app::SIGINT_WINDOW_MS`]) — `key` is `"Ctrl-C"` or `"Ctrl-D"`.
+    /// claude-code's `exitMessage.show` check is the FIRST thing
+    /// `PromptInputFooterLeftSide` does, replacing the entire footer-left
+    /// (mode indicator, hint, search box) with `"Press {key} again to
+    /// exit"` — this overrides every other row here the same way.
+    pub exit_hint: Option<&'static str>,
 }
 
 impl Default for PromptInputFooterProps {
@@ -93,26 +137,58 @@ impl Default for PromptInputFooterProps {
             vim_enabled: false,
             vim_mode: VimMode::Insert,
             vim_visual_linewise: false,
+            permission_mode: PermissionMode::Default,
+            is_loading: false,
+            exit_hint: None,
         }
     }
 }
 
 /// Render the footer: an optional `-- MODE --` row (vim), the
-/// `[glyph][placeholder?]` row, and a dim hint row
-/// (`? for shortcuts     shift + ⏎ for newline`).
+/// `[glyph][placeholder?]` row, and — only when the buffer is empty and no vim
+/// mode-indicator is shown — a dim `? for shortcuts` hint row.
 #[component]
 pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement<'static>> {
+    // (RRS-08) claude-code's `exitMessage.show` early-return — replaces the
+    // ENTIRE footer-left (mode indicator, hint, search box) with the
+    // double-press exit confirmation.
+    if let Some(key) = props.exit_hint {
+        return element! {
+            View(flex_direction: FlexDirection::Column) {
+                View(flex_direction: FlexDirection::Row) {
+                    Text(content: format!("Press {key} again to exit"), color: TuiTheme::DIM)
+                }
+            }
+        }
+        .into_any();
+    }
     let glyph = props.mode.glyph().to_string();
     let placeholder = if props.is_empty {
         props.placeholder.clone().unwrap_or_default()
     } else {
         String::new()
     };
-    // (M7-08/M7-09) Vim mode indicator: shown only when vim is enabled; the v2
-    // form distinguishes `-- VISUAL --` from `-- VISUAL LINE --`.
-    let mode_label =
-        footer_mode_label_v2(props.vim_enabled, props.vim_mode, props.vim_visual_linewise)
-            .map(str::to_string);
+    // (PIC-03) claude-code only ever renders `-- INSERT --` in the footer
+    // (`showVim`); NORMAL/VISUAL modes show NO mode label (the hint takes the
+    // slot instead). The `footer_mode_label_v2` helper is retained for callers
+    // that want the full set, but the live footer shows INSERT only.
+    let mode_label = (props.vim_enabled && props.vim_mode == VimMode::Insert)
+        .then(|| "-- INSERT --".to_string());
+    // claude-code `showHint = !suppressHint && !showVim`: the `? for shortcuts`
+    // hint is shown only when the buffer is empty (`suppressHint = input.length
+    // > 0`) and no vim mode-indicator is rendered (`showVim`). The
+    // `shift + ⏎ for newline` text never appears in the resting footer.
+    // (PIC-10) Non-default permission mode shows its indicator instead of the
+    // hint (claude-code: `modePart` present → hint not pushed).
+    let perm_part = perm_mode_label(props.permission_mode);
+    let show_hint = props.is_empty && mode_label.is_none() && perm_part.is_none();
+    // (PIC-07) Same gate as the default hint (claude-code's hintParts are
+    // computed behind the identical showHint check); isLoading swaps the text.
+    let hint_text = if props.is_loading {
+        "esc to interrupt"
+    } else {
+        "? for shortcuts"
+    };
     element! {
         View(flex_direction: FlexDirection::Column) {
             #(mode_label.map(|label| element! {
@@ -124,12 +200,19 @@ pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement
                 Text(content: glyph, color: TuiTheme::DIM)
                 Text(content: placeholder, color: TuiTheme::DIM)
             }
-            View(flex_direction: FlexDirection::Row, gap: 5) {
-                Text(content: "? for shortcuts".to_string(), color: TuiTheme::DIM)
-                Text(content: "shift + ⏎ for newline".to_string(), color: TuiTheme::DIM)
-            }
+            #(perm_part.map(|p| element! {
+                View(flex_direction: FlexDirection::Row) {
+                    Text(content: p, color: TuiTheme::DIM)
+                }
+            }))
+            #(show_hint.then(|| element! {
+                View(flex_direction: FlexDirection::Row) {
+                    Text(content: hint_text.to_string(), color: TuiTheme::DIM)
+                }
+            }))
         }
     }
+    .into_any()
 }
 
 #[cfg(test)]
@@ -139,6 +222,20 @@ mod tests {
     #[test]
     fn glyph_prompt_is_pointer() {
         assert_eq!(FooterMode::Prompt.glyph(), "❯ ");
+    }
+
+    #[test]
+    fn perm_mode_label_indicator() {
+        // (PIC-10) Default → no indicator; non-default → "{symbol} {mode} on …".
+        assert_eq!(perm_mode_label(PermissionMode::Default), None);
+        assert_eq!(
+            perm_mode_label(PermissionMode::Plan).as_deref(),
+            Some("\u{23f8} plan mode on (shift+tab to cycle)")
+        );
+        assert_eq!(
+            perm_mode_label(PermissionMode::AcceptEdits).as_deref(),
+            Some("\u{23f5}\u{23f5} accept edits on (shift+tab to cycle)")
+        );
     }
 
     #[test]

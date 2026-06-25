@@ -1,6 +1,7 @@
 ---
 source: tui/tests/render_messages.rs
+assertion_line: 53
 expression: element.to_string()
 ---
-● Title
+⏺ Title
   body text

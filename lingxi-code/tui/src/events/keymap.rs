@@ -173,19 +173,8 @@ pub fn map_key_ml(
         (KeyCode::Down, _) => Some(HistoryStep(1)),
         (KeyCode::PageUp, _) => Some(ScrollStep(ScrollDir::PageUp)),
         (KeyCode::PageDown, _) => Some(ScrollStep(ScrollDir::PageDown)),
-        // Vim-style nav only when prompt is empty.
-        (KeyCode::Char('j'), KeyModifiers::NONE) if prompt_empty => {
-            Some(ScrollStep(ScrollDir::LineDown))
-        }
-        (KeyCode::Char('k'), KeyModifiers::NONE) if prompt_empty => {
-            Some(ScrollStep(ScrollDir::LineUp))
-        }
-        (KeyCode::Char('g'), KeyModifiers::NONE) if prompt_empty => {
-            Some(ScrollStep(ScrollDir::Top))
-        }
-        (KeyCode::Char('G'), KeyModifiers::SHIFT) if prompt_empty => {
-            Some(ScrollStep(ScrollDir::Bottom))
-        }
+        // (RRS-05) No empty-prompt j/k/g/G → scroll mappings (claude-code is not
+        // vim-modal by default; those keys type the character).
         // (M7-08) Ctrl-Alt-V toggles vim mode. Placed before the printable-char
         // catch-all so the modifier combo isn't swallowed as an insert.
         (KeyCode::Char('v'), m)
@@ -384,10 +373,12 @@ mod m6_02_tests {
     }
 
     #[test]
-    fn j_scrolls_only_when_prompt_empty() {
+    fn j_inserts_whether_or_not_prompt_empty() {
+        // (RRS-05) `j` types the character regardless of prompt emptiness — no
+        // vim-style empty-prompt scroll mapping (claude-code parity).
         assert!(matches!(
             map_key(k(KeyCode::Char('j')), true, false),
-            Some(KeyAction::ScrollStep(ScrollDir::LineDown))
+            Some(KeyAction::InsertChar('j'))
         ));
         assert!(matches!(
             map_key(k(KeyCode::Char('j')), false, false),

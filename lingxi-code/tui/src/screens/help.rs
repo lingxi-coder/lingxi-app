@@ -54,15 +54,21 @@ const VIEWPORT: usize = 16;
 const KEY_WIDTH: usize = 16;
 
 /// Locked screen title (claude-code `HelpV2` `Tabs title`).
-pub const TITLE: &str = "Help";
+// (help-4) `Claude Code v<version>` (HelpV2.tsx:141), per the user's strict-1:1
+// branding call. The version is LingXi's `CARGO_PKG_VERSION` (the doctor.rs
+// `cli_version` pattern) — composed at compile time.
+pub const TITLE: &str = concat!("Claude Code v", env!("CARGO_PKG_VERSION"));
 /// Locked intro line (claude-code `HelpV2/General.tsx`).
 pub const INTRO: &str = "Claude understands your codebase, makes edits with your permission, and executes commands \u{2014} right from your terminal.";
 /// Locked `Shortcuts` section header.
 pub const SHORTCUTS_HEADER: &str = "Shortcuts";
 /// Locked `Slash commands` section header.
 pub const COMMANDS_HEADER: &str = "Slash commands";
-/// Locked footer hint (mirrors the read-only `skills.rs` footer).
-pub const FOOTER: &str = "Esc to close";
+/// Locked footer hint (claude-code `HelpV2` dismiss hint: the resolved
+/// `help:dismiss` chord + " to cancel", lowercase). Default keymap → `esc`.
+pub const FOOTER: &str = "esc to cancel";
+/// "For more help" docs pointer (claude-code `HelpV2/General.tsx`).
+pub const MORE_HELP: &str = "For more help: https://code.claude.com/docs/en/overview";
 
 /// One prompt-shortcut row.
 ///
@@ -232,6 +238,21 @@ fn format_row(key: &str, label: &str) -> String {
     format!("{key}{} {label}", " ".repeat(pad))
 }
 
+/// (help-1) claude-code `getNewlineInstructions()`'s chord half (the
+/// `"… for newline"` label is unchanged) — Apple Terminal on macOS uses
+/// native Shift+Enter detection; everywhere else LingXi has no
+/// shift-enter-keybinding-installer or `hasUsedBackslashReturn` history (no
+/// such features exist in this TUI), so it always falls to the
+/// never-used-backslash default rather than `isShiftEnterKeyBindingInstalled`
+/// / the post-first-use `"\⏎"` short form.
+fn newline_chord_for(term_program: Option<&str>, is_macos: bool) -> &'static str {
+    if is_macos && term_program == Some("Apple_Terminal") {
+        "shift + \u{23CE}"
+    } else {
+        "backslash (\\) + return (\u{23CE})"
+    }
+}
+
 /// Flatten the two sections to the body content lines (no title/intro/footer):
 /// the `Shortcuts` header + one line per shortcut (its chord resolved from
 /// `bindings` — the live keymap), then the `Slash commands` header + one line
@@ -240,6 +261,20 @@ fn content_lines(bindings: &[ParsedBinding]) -> Vec<String> {
     let mut out = Vec::with_capacity(SHORTCUTS.len() + SLASH_COMMANDS.len() + 2);
     out.push(SHORTCUTS_HEADER.to_string());
     for row in SHORTCUTS {
+        // (help-3) `ctrl + z to suspend` is non-Windows only
+        // (claude-code `getPlatform() !== 'windows'`).
+        if cfg!(windows) && row.label == "to suspend" {
+            continue;
+        }
+        // (help-1) the newline row's chord is terminal-dependent.
+        if row.label == "for newline" {
+            let chord = newline_chord_for(
+                std::env::var("TERM_PROGRAM").ok().as_deref(),
+                cfg!(target_os = "macos"),
+            );
+            out.push(format_row(chord, row.label));
+            continue;
+        }
         out.push(format_row(&row_chord(row, bindings), row.label));
     }
     out.push(COMMANDS_HEADER.to_string());
@@ -281,6 +316,9 @@ pub fn render_help_to_string_with(state: &HelpState, bindings: &[ParsedBinding])
         out.push_str(&ind);
         out.push('\n');
     }
+    // (help-5) "For more help" docs pointer, above the footer.
+    out.push_str(MORE_HELP);
+    out.push('\n');
     out.push_str(FOOTER);
     out
 }
@@ -295,10 +333,39 @@ mod tests {
     }
 
     #[test]
+    fn newline_chord_is_shift_enter_on_apple_terminal_macos() {
+        // (help-1)
+        assert_eq!(
+            newline_chord_for(Some("Apple_Terminal"), true),
+            "shift + \u{23CE}"
+        );
+    }
+
+    #[test]
+    fn newline_chord_falls_back_to_backslash_elsewhere() {
+        // (help-1) Apple_Terminal on a non-macOS platform (WSL/Linux can set
+        // the same env var) does not get the macOS-only Shift+Enter path.
+        assert_eq!(
+            newline_chord_for(Some("Apple_Terminal"), false),
+            "backslash (\\) + return (\u{23CE})"
+        );
+        assert_eq!(
+            newline_chord_for(Some("iTerm.app"), true),
+            "backslash (\\) + return (\u{23CE})"
+        );
+        assert_eq!(
+            newline_chord_for(None, true),
+            "backslash (\\) + return (\u{23CE})"
+        );
+    }
+
+    #[test]
     fn render_shows_title_intro_and_section_headers() {
         let s = HelpState::new();
         let out = render_help_to_string(&s);
-        assert!(out.starts_with("Help\n"), "got: {out}");
+        // (help-4) `Claude Code v<version>` title (version-agnostic assert).
+        assert!(out.starts_with(&format!("{TITLE}\n")), "got: {out}");
+        assert!(out.starts_with("Claude Code v"), "got: {out}");
         assert!(out.contains(INTRO), "intro line present");
         assert!(out.contains(SHORTCUTS_HEADER), "Shortcuts header present");
         assert!(out.ends_with(FOOTER), "footer present, got: {out}");
@@ -405,10 +472,28 @@ mod tests {
     fn every_shortcut_and_command_is_a_body_line() {
         let bindings = default_bindings();
         let lines = content_lines(&bindings);
+        // (help-3) the `to suspend` row is dropped on Windows only.
+        let dropped = usize::from(cfg!(windows));
         // Header + each shortcut + header + each command.
-        assert_eq!(lines.len(), SHORTCUTS.len() + SLASH_COMMANDS.len() + 2);
+        assert_eq!(
+            lines.len(),
+            SHORTCUTS.len() - dropped + SLASH_COMMANDS.len() + 2
+        );
         for row in SHORTCUTS {
-            let chord = row_chord(row, &bindings);
+            if cfg!(windows) && row.label == "to suspend" {
+                continue;
+            }
+            // (help-1) the newline row's chord is terminal-dependent, not
+            // `row_chord`'s static fallback.
+            let chord = if row.label == "for newline" {
+                newline_chord_for(
+                    std::env::var("TERM_PROGRAM").ok().as_deref(),
+                    cfg!(target_os = "macos"),
+                )
+                .to_string()
+            } else {
+                row_chord(row, &bindings)
+            };
             assert!(
                 lines
                     .iter()

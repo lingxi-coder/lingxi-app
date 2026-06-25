@@ -156,6 +156,102 @@ impl CredentialProvider for EnvCredentialProvider {
     }
 }
 
+/// A [`CredentialProvider`] decorator that mints a short-lived GitHub Copilot
+/// bearer from the raw GitHub OAuth token.
+///
+/// `api.githubcopilot.com` rejects the raw OAuth token — it requires a token
+/// minted from `copilot_internal/v2/token` (see
+/// [`crate::copilot::exchange_copilot_token`]). This decorator wraps an inner
+/// provider (which yields the raw OAuth token for the Copilot credential id);
+/// for that one credential id it exchanges + caches the short-lived bearer and
+/// re-exchanges once it is within [`crate::copilot::login::COPILOT_TOKEN_REFRESH_SKEW_SECS`]
+/// of expiry. Every other credential id passes straight through unchanged, so
+/// this can safely wrap the host's composite credential provider.
+pub struct CopilotExchangeCredentialProvider {
+    inner: std::sync::Arc<dyn CredentialProvider>,
+    http: std::sync::Arc<dyn crate::copilot::CopilotHttp>,
+    credential_id: String,
+    cached: std::sync::Mutex<Option<crate::copilot::ExchangedToken>>,
+}
+
+impl CopilotExchangeCredentialProvider {
+    /// Wrap `inner`, exchanging the raw OAuth token it resolves for
+    /// `credential_id` (e.g. `"github-copilot"`) into a short-lived Copilot
+    /// bearer via `http`.
+    #[must_use]
+    pub fn new(
+        inner: std::sync::Arc<dyn CredentialProvider>,
+        http: std::sync::Arc<dyn crate::copilot::CopilotHttp>,
+        credential_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            inner,
+            http,
+            credential_id: credential_id.into(),
+            cached: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn now_unix() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+}
+
+impl fmt::Debug for CopilotExchangeCredentialProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CopilotExchangeCredentialProvider")
+            .field("credential_id", &self.credential_id)
+            .field("inner", &self.inner)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CredentialProvider for CopilotExchangeCredentialProvider {
+    fn load<'a>(
+        &'a self,
+        scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<Credential, LlmError>> {
+        Box::pin(async move {
+            // Only the Copilot credential id is exchanged; everything else is a
+            // straight passthrough to the wrapped provider.
+            if scope.credential_id.as_deref() != Some(self.credential_id.as_str()) {
+                return self.inner.load(scope).await;
+            }
+
+            // Serve a still-fresh cached bearer with no network round-trip. The
+            // lock is scoped so it is never held across an await.
+            {
+                let guard = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(token) = guard.as_ref() {
+                    if token.is_fresh(Self::now_unix()) {
+                        return Ok(Credential::BearerToken(token.bearer().to_string()));
+                    }
+                }
+            }
+
+            // Resolve the raw GitHub OAuth token from the inner provider, then
+            // exchange it for a short-lived Copilot bearer and cache it.
+            let raw = match self.inner.load(scope).await? {
+                Credential::ApiKey(token) | Credential::BearerToken(token) => token,
+                other => {
+                    return Err(LlmError::InvalidRequest {
+                        message: format!(
+                            "copilot credential must be an api-key/bearer OAuth token, got {other:?}"
+                        ),
+                    })
+                }
+            };
+            let exchanged = crate::copilot::exchange_copilot_token(&*self.http, &raw).await?;
+            let bearer = exchanged.bearer().to_string();
+            *self.cached.lock().unwrap_or_else(|e| e.into_inner()) = Some(exchanged);
+            Ok(Credential::BearerToken(bearer))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +266,107 @@ mod tests {
         let dbg = format!("{c:?}");
         assert!(!dbg.contains("sk-secret"));
         assert!(dbg.contains("ChatGptOAuth"));
+    }
+
+    // ── CopilotExchangeCredentialProvider ────────────────────────────────────
+
+    #[derive(Debug)]
+    struct RawInner(String);
+    impl CredentialProvider for RawInner {
+        fn load<'a>(
+            &'a self,
+            _scope: &'a CredentialScope,
+        ) -> BoxFuture<'a, Result<Credential, LlmError>> {
+            let v = self.0.clone();
+            Box::pin(async move { Ok(Credential::ApiKey(v)) })
+        }
+    }
+
+    struct MockExchangeHttp {
+        calls: std::sync::Mutex<u32>,
+        expires_at: u64,
+    }
+    impl crate::copilot::CopilotHttp for MockExchangeHttp {
+        fn post_json<'a>(
+            &'a self,
+            _url: &'a str,
+            _body: &'a serde_json::Value,
+        ) -> BoxFuture<'a, Result<serde_json::Value, LlmError>> {
+            Box::pin(async { unreachable!("exchange uses get_json") })
+        }
+        fn get_json<'a>(
+            &'a self,
+            _url: &'a str,
+            _headers: &'a [(&'a str, String)],
+        ) -> BoxFuture<'a, Result<serde_json::Value, LlmError>> {
+            *self.calls.lock().unwrap() += 1;
+            let e = self.expires_at;
+            Box::pin(async move { Ok(serde_json::json!({"token": "copilot-bearer", "expires_at": e})) })
+        }
+    }
+
+    fn copilot_scope() -> CredentialScope {
+        CredentialScope::new(
+            ProviderId::OpenAICompatible { name: "github-copilot".to_string() },
+            "github-copilot",
+        )
+        .with_credential_id("github-copilot")
+    }
+
+    #[tokio::test]
+    async fn exchanges_and_caches_copilot_bearer() {
+        let http = std::sync::Arc::new(MockExchangeHttp {
+            calls: std::sync::Mutex::new(0),
+            expires_at: 9_999_999_999, // far future → cache stays fresh
+        });
+        let provider = CopilotExchangeCredentialProvider::new(
+            std::sync::Arc::new(RawInner("gho_raw_oauth".to_string())),
+            http.clone(),
+            "github-copilot",
+        );
+        let scope = copilot_scope();
+
+        let first = provider.load(&scope).await.expect("first load");
+        assert_eq!(first, Credential::BearerToken("copilot-bearer".to_string()));
+        // Second load is served from cache → no second exchange.
+        let second = provider.load(&scope).await.expect("second load");
+        assert_eq!(second, Credential::BearerToken("copilot-bearer".to_string()));
+        assert_eq!(*http.calls.lock().unwrap(), 1, "exchanged exactly once (cached)");
+    }
+
+    #[tokio::test]
+    async fn stale_token_is_re_exchanged() {
+        let http = std::sync::Arc::new(MockExchangeHttp {
+            calls: std::sync::Mutex::new(0),
+            expires_at: 1, // already past → never fresh → re-exchange each load
+        });
+        let provider = CopilotExchangeCredentialProvider::new(
+            std::sync::Arc::new(RawInner("gho_raw_oauth".to_string())),
+            http.clone(),
+            "github-copilot",
+        );
+        let scope = copilot_scope();
+        provider.load(&scope).await.expect("load 1");
+        provider.load(&scope).await.expect("load 2");
+        assert_eq!(*http.calls.lock().unwrap(), 2, "stale token re-exchanged");
+    }
+
+    #[tokio::test]
+    async fn non_copilot_scope_passes_through_without_exchange() {
+        let http = std::sync::Arc::new(MockExchangeHttp {
+            calls: std::sync::Mutex::new(0),
+            expires_at: 9_999_999_999,
+        });
+        let provider = CopilotExchangeCredentialProvider::new(
+            std::sync::Arc::new(RawInner("openai_key".to_string())),
+            http.clone(),
+            "github-copilot",
+        );
+        // A different credential id → straight passthrough (raw key, no exchange).
+        let scope = CredentialScope::new(ProviderId::OpenAI, "openai")
+            .with_credential_id("openai-api-key");
+        let got = provider.load(&scope).await.expect("passthrough");
+        assert_eq!(got, Credential::ApiKey("openai_key".to_string()));
+        assert_eq!(*http.calls.lock().unwrap(), 0, "no exchange for non-copilot");
     }
 }

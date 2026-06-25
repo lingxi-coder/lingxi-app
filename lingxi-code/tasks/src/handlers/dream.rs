@@ -302,6 +302,7 @@ impl Task for DreamHandler {
             // path sets no model/teammate/isolation/cwd override.
             description: None,
             model: None,
+            model_profile: None,
             // Dream consolidation is a synchronous subagent, never a background
             // AgentTool spawn.
             run_in_background: false,

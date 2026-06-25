@@ -244,6 +244,7 @@ mod tests {
             context_paths: vec![],
             description: Some("a bg agent".into()),
             model: None,
+            model_profile: None,
             run_in_background: true,
             name: name.map(str::to_string),
             team_name: None,

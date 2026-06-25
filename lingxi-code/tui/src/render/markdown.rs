@@ -6,8 +6,9 @@
 //!
 //! Literal reference: `claude-code/src/utils/markdown.ts` `formatToken`.
 //! Handled here: paragraphs, headings, bold (`Strong`), italic (`Emphasis`),
-//! inline code (`Code` → `theme.inline_code`), links (`text (url)`),
-//! ordered/unordered/nested lists, blockquote, fenced code (emits a
+//! inline code (`Code` → `theme.inline_code`), links (blue hyperlink text,
+//! bare email for `mailto:`), ordered/unordered/nested lists, blockquote,
+//! fenced code (emits a
 //! [`SpanKind::CodePlaceholder`] span — M7-02 highlights it). Best-effort on
 //! partial / unclosed input; never panics.
 //!
@@ -29,8 +30,60 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Par
 const DEFAULT_RENDER_WIDTH: usize = 80;
 
 /// Dim vertical bar prefixing blockquote lines. Matches claude-code's
-/// `BLOCKQUOTE_BAR` (`src/constants/figures.ts`).
-const BLOCKQUOTE_BAR: &str = "│";
+/// `BLOCKQUOTE_BAR` (`src/constants/figures.ts`) — U+258E (▎ LEFT ONE QUARTER
+/// BLOCK), NOT the box-drawing `│` (U+2502).
+const BLOCKQUOTE_BAR: &str = "\u{258e}";
+
+/// `numberToLetter` (claude-code `markdown.ts`): 1→a, 26→z, 27→aa, … (bijective
+/// base-26, lowercase).
+fn number_to_letter(mut n: u64) -> String {
+    let mut result = String::new();
+    while n > 0 {
+        n -= 1;
+        result.insert(0, char::from(b'a' + (n % 26) as u8));
+        n /= 26;
+    }
+    result
+}
+
+/// `numberToRoman` (claude-code `markdown.ts`): lowercase roman numerals.
+fn number_to_roman(mut n: u64) -> String {
+    const ROMAN: &[(u64, &str)] = &[
+        (1000, "m"),
+        (900, "cm"),
+        (500, "d"),
+        (400, "cd"),
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
+    ];
+    let mut result = String::new();
+    for &(value, numeral) in ROMAN {
+        while n >= value {
+            result.push_str(numeral);
+            n -= value;
+        }
+    }
+    result
+}
+
+/// `getListNumber` (claude-code `markdown.ts`): ordered-list marker by nesting
+/// `depth` — number at depth 0/1, lowercase letters at depth 2, lowercase roman
+/// at depth 3, number beyond.
+fn get_list_number(depth: usize, n: u64) -> String {
+    match depth {
+        0 | 1 => n.to_string(),
+        2 => number_to_letter(n),
+        3 => number_to_roman(n),
+        _ => n.to_string(),
+    }
+}
 
 /// Map a `pulldown-cmark` column [`Alignment`] to the table renderer's
 /// [`ColumnAlign`]. `None` (no explicit alignment) is markdown's left default,
@@ -127,6 +180,10 @@ struct Builder<'a> {
     pending: Vec<StyledSpan>,
     inline: InlineState,
     link_url: Option<String>,
+    /// (md-03) Index into `pending` where the active link's text starts —
+    /// lets `End(Link)` inspect/replace/recolor exactly the spans the link
+    /// pushed, regardless of any nested emphasis/code inside the link text.
+    link_start: usize,
     /// When inside `Start(Image)`/`End(Image)`: the image's destination URL.
     /// claude-code renders an image as just its href (`markdown.ts:139-140`),
     /// so the inner alt `Text` is suppressed and the URL emitted on close.
@@ -175,6 +232,7 @@ impl<'a> Builder<'a> {
             pending: Vec::new(),
             inline: InlineState::default(),
             link_url: None,
+            link_start: 0,
             image_url: None,
             list_stack: Vec::new(),
             emphasis_depth: 0,
@@ -243,12 +301,39 @@ impl<'a> Builder<'a> {
                 self.inline.code = prev;
             }
             Event::Start(Tag::Link { dest_url, .. }) => {
-                // Remember the URL to append after the link text closes.
+                // (md-03) Remember the URL + where the link's text starts in
+                // `pending`, so `End(Link)` can inspect/replace/recolor it.
                 self.link_url = Some(dest_url.to_string());
+                self.link_start = self.pending.len();
             }
             Event::End(TagEnd::Link) => {
+                // (md-03) claude-code: mailto links discard their display
+                // text entirely and show the bare email (no styling, no
+                // hyperlink). Other links are recolored blue (the
+                // `createHyperlink` text color claude-code applies whether or
+                // not the terminal supports real OSC-8 — the escape-sequence
+                // wrapping itself needs a runtime terminal-support check this
+                // port doesn't have, but the blue styling is unconditional);
+                // when the link's text is empty or equals the URL itself
+                // (claude-code shows just the URL in that case), the pushed
+                // text is replaced with the bare URL. No more " (url)" suffix.
                 if let Some(url) = self.link_url.take() {
-                    self.push_text(&format!(" ({url})"));
+                    if let Some(email) = url.strip_prefix("mailto:") {
+                        self.pending.truncate(self.link_start);
+                        self.push_text(email);
+                    } else {
+                        let plain: String = self.pending[self.link_start..]
+                            .iter()
+                            .map(|s| s.text.as_str())
+                            .collect();
+                        if plain.is_empty() || plain == url {
+                            self.pending.truncate(self.link_start);
+                            self.push_text(&url);
+                        }
+                        for span in &mut self.pending[self.link_start..] {
+                            span.style.fg = StyleColor::Named(crate::render::NamedColor::Blue);
+                        }
+                    }
                 }
             }
             Event::Start(Tag::Image { dest_url, .. }) => {
@@ -321,7 +406,9 @@ impl<'a> Builder<'a> {
                 let indent = "  ".repeat(depth);
                 let marker = match self.list_stack.last_mut() {
                     Some(Some(n)) => {
-                        let m = format!("{n}. ");
+                        // (md-02) Marker glyph by nesting depth (number / letter
+                        // / roman) per claude-code `getListNumber`.
+                        let m = format!("{}. ", get_list_number(depth, *n));
                         *n += 1;
                         m
                     }
@@ -426,7 +513,14 @@ impl<'a> Builder<'a> {
     /// `cb.lang` is the fence info-string (e.g. `rust`); empty/unknown → plain
     /// fallback. Emits one [`StyledLine`] per code line. Empty body → nothing.
     fn emit_code_block(&mut self, cb: &CodeBlockState) {
-        let lang = crate::render::syntax::detect_language(cb.lang.as_deref(), None);
+        // (syntax-01) No file path for a fenced block, but its own first
+        // line stands in for the shebang/first-line heuristic.
+        let first_line = cb.text.lines().next();
+        let lang = crate::render::syntax::detect_language_with_first_line(
+            cb.lang.as_deref(),
+            None,
+            first_line,
+        );
         let highlighted =
             crate::render::syntax::highlight(&cb.text, lang.as_deref(), self.theme.code_theme);
         if highlighted.is_empty() {
@@ -506,11 +600,51 @@ mod tests {
     }
 
     #[test]
-    fn link_renders_text_and_url() {
+    fn link_with_distinct_text_shows_only_text_colored_blue() {
+        // (md-03) Display text differs from the URL: show just the text, no
+        // " (url)" suffix, colored blue (claude-code `createHyperlink`).
         let lines = render("see [docs](https://x.io)", &theme());
         let joined = lines[0].plain_text();
         assert!(joined.contains("docs"));
+        assert!(!joined.contains("https://x.io"), "{joined:?}");
+        let link_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.text == "docs")
+            .expect("the link text span");
+        assert_eq!(link_span.style.fg, StyleColor::Named(crate::render::NamedColor::Blue));
+    }
+
+    #[test]
+    fn autolink_with_no_distinct_text_shows_bare_url_colored_blue() {
+        // (md-03) When the display text equals the URL (e.g. an autolink),
+        // claude-code shows just the URL — still blue.
+        let lines = render("see <https://x.io>", &theme());
+        let joined = lines[0].plain_text();
         assert!(joined.contains("https://x.io"));
+        let link_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.text == "https://x.io")
+            .expect("the URL span");
+        assert_eq!(link_span.style.fg, StyleColor::Named(crate::render::NamedColor::Blue));
+    }
+
+    #[test]
+    fn mailto_link_shows_bare_email_not_blue() {
+        // (md-03) mailto: links discard their display text and show the
+        // bare email, unstyled (no hyperlink coloring).
+        let lines = render("[Contact](mailto:a@b.com)", &theme());
+        let joined = lines[0].plain_text();
+        assert!(joined.contains("a@b.com"), "{joined:?}");
+        assert!(!joined.contains("Contact"), "{joined:?}");
+        assert!(!joined.contains("mailto:"), "{joined:?}");
+        let email_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.text == "a@b.com")
+            .expect("the email span");
+        assert_eq!(email_span.style.fg, StyleColor::Default);
     }
 
     #[test]
@@ -546,6 +680,43 @@ mod tests {
         let texts: Vec<String> = lines.iter().map(StyledLine::plain_text).collect();
         assert!(texts.iter().any(|t| t == "1. first"));
         assert!(texts.iter().any(|t| t == "2. second"));
+    }
+
+    #[test]
+    fn ordered_list_number_helpers() {
+        // (md-02) numberToLetter / numberToRoman parity.
+        assert_eq!(number_to_letter(1), "a");
+        assert_eq!(number_to_letter(26), "z");
+        assert_eq!(number_to_letter(27), "aa");
+        assert_eq!(number_to_roman(1), "i");
+        assert_eq!(number_to_roman(4), "iv");
+        assert_eq!(number_to_roman(9), "ix");
+        // getListNumber by depth: 0/1 number, 2 letter, 3 roman.
+        assert_eq!(get_list_number(0, 2), "2");
+        assert_eq!(get_list_number(1, 2), "2");
+        assert_eq!(get_list_number(2, 2), "b");
+        assert_eq!(get_list_number(3, 2), "ii");
+    }
+
+    #[test]
+    fn ordered_list_marker_switches_glyph_by_depth() {
+        // (md-02) Depth 0/1 = numbers, depth 2 = letters (a.), depth 3 = roman.
+        let md = "1. top\n    1. mid\n        1. deep\n            1. deeper";
+        let texts: Vec<String> = render(md, &theme())
+            .iter()
+            .map(StyledLine::plain_text)
+            .collect();
+        let joined = texts.join("\n");
+        assert!(joined.contains("1. top"), "depth0 number: {joined:?}");
+        assert!(joined.contains("1. mid"), "depth1 number: {joined:?}");
+        assert!(
+            texts.iter().any(|t| t.trim_start().starts_with("a. deep")),
+            "depth2 letter: {joined:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.trim_start().starts_with("i. deeper")),
+            "depth3 roman: {joined:?}"
+        );
     }
 
     #[test]
@@ -596,7 +767,7 @@ mod tests {
             .iter()
             .find(|l| l.plain_text().contains("quoted"))
             .unwrap();
-        assert!(line.plain_text().starts_with("│ "));
+        assert!(line.plain_text().starts_with("\u{258e} "));
         let text_span = line
             .spans
             .iter()

@@ -7,8 +7,8 @@
 pub mod operations;
 pub mod queue;
 
-pub use operations::QueueOperation;
+pub use operations::{QueueOperation, QueueOperationRecorder, VecRecorder};
 pub use queue::{
-    MessageQueueManager, NotificationMode, QueuePriority, QueueSource, QueuedCommand,
-    QueuedCommandContent,
+    join_prompt_values, MessageQueueManager, NotificationMode, QueuePriority, QueueSource,
+    QueuedCommand, QueuedCommandContent,
 };

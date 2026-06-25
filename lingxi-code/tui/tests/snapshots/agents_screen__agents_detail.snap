@@ -1,12 +1,12 @@
 ---
 source: tui/tests/agents_screen.rs
+assertion_line: 44
 expression: render_agents_to_string(&s)
 ---
 .lingxi/agents/explorer.md
 Description (tells Claude when to use this agent):
   find things
 Tools: Read, Grep
-Model: opus
+Model: Opus
 Permission mode: plan
 Color: cyan
-esc to go back

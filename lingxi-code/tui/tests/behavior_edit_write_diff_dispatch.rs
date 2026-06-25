@@ -132,6 +132,44 @@ fn write_tool_flow_renders_pure_add_diff() {
 }
 
 #[test]
+fn edit_tool_diff_is_wrapped_in_a_dashed_top_bottom_frame() {
+    // (diff-07) claude-code's DiffFrame: a top+bottom-only dashed border
+    // around the rows, NOT a full box (no left/right dashes).
+    let mut st = AppState::new(StatusSnapshot::default());
+    let id = ToolUseId::new();
+    let n = Notify::new();
+    apply_event(
+        &mut st,
+        TurnEvent::ToolUseStart {
+            id: id.clone(),
+            tool: "Edit".into(),
+            input: serde_json::json!({
+                "file_path": "/tmp/a.rs",
+                "old_string": "foo()",
+                "new_string": "bar()",
+            }),
+        },
+        &n,
+    );
+    apply_event(
+        &mut st,
+        TurnEvent::ToolUseResult {
+            id,
+            tool: "Edit".into(),
+            result: serde_json::json!({"content": "ok"}),
+        },
+        &n,
+    );
+
+    let out = render_last_result(&st);
+    assert!(out.contains('\u{254C}'), "dashed top/bottom rule, got:\n{out}");
+    assert!(
+        !out.contains('\u{254E}'),
+        "no dashed left/right side rule, got:\n{out}"
+    );
+}
+
+#[test]
 fn bash_tool_flow_does_not_render_diff() {
     // Regression guard: a non-diff tool renders as the plain `└ ` body, never a
     // diff, even though it too flows through the populated dispatch path.

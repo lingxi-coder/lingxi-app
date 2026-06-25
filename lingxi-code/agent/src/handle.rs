@@ -636,6 +636,8 @@ impl PoolSubagentSpawner {
                 color: AgentColor::Cyan,
                 icon: None,
             },
+            // Set by `build_subagent_context` from `request.model_profile`.
+            model_profile: None,
             // Set by `spawn` from `self.api_client` / `inherit.tool_invoker` /
             // `inherit.budget` just before pool allocation. `tool_schemas` +
             // `allowed_tools` are overwritten by `spawn` from `resolve_tools`
@@ -710,18 +712,31 @@ impl PoolSubagentSpawner {
         // (TS schema `model: 'sonnet' | 'opus' | 'haiku'`) takes precedence over
         // the definition's model frontmatter (AgentTool.tsx:86).
         if let Some(model_pref) = request.model.as_deref() {
-            let requested = AgentModel::Alias(model_pref.to_string());
-            def.model = match &self.default_model {
-                Some(parent) => AgentModel::Explicit(
-                    crate::model_resolution::resolve_agent_model(
-                        &requested,
-                        parent,
-                        self.permission_mode,
-                        self.model_setting.as_deref(),
+            // Dual-LLM dual-PROVIDER routing: when the caller pinned a provider
+            // profile (`model_profile`), `request.model` is ALREADY the concrete
+            // provider-local wire model (the candidate's resolved `request_model`,
+            // e.g. `gpt-4o` / `gemini-1.5-pro`). The family-alias logic in
+            // `resolve_agent_model` (alias→parent-tier matching, parent region
+            // prefix) is Claude-shaped and would mangle a foreign concrete id, so
+            // it is BYPASSED here: the model is used verbatim as `Explicit`. The
+            // `profile` (set just below from `request.model_profile`) selects the
+            // provider in `messages_create_*_in`.
+            if request.model_profile.is_some() {
+                def.model = AgentModel::Explicit(model_pref.to_string());
+            } else {
+                let requested = AgentModel::Alias(model_pref.to_string());
+                def.model = match &self.default_model {
+                    Some(parent) => AgentModel::Explicit(
+                        crate::model_resolution::resolve_agent_model(
+                            &requested,
+                            parent,
+                            self.permission_mode,
+                            self.model_setting.as_deref(),
+                        ),
                     ),
-                ),
-                None => requested,
-            };
+                    None => requested,
+                };
+            }
         }
         // Per-spawn effort override (claude-code workflow `agent({effort})` →
         // `me={...ie,effort:ae}`): a level/integer opt overrides the resolved
@@ -775,6 +790,10 @@ impl PoolSubagentSpawner {
         ctx.tool_invoker = Some(inherit.tool_invoker);
         ctx.budget = Some(inherit.budget);
         ctx.api_client.clone_from(&self.api_client);
+        // Per-spawn provider routing (dual-LLM dual-PROVIDER): the runner passes
+        // this as the `profile` arg of the api client's `messages_create_*_in`
+        // methods so the round-trip targets the candidate's resolved provider.
+        ctx.model_profile = request.model_profile.clone();
         // G4/G5: thread the runner's hook executor + skill loader + hook context
         // seed from the set-once cells (None ⇒ runner skips those steps).
         ctx.hook_executor = self.hook_executor.get().cloned();
@@ -1943,6 +1962,7 @@ mod tests {
             context_paths: vec![],
             description: None,
             model: Some("haiku".to_string()),
+            model_profile: None,
             run_in_background: false,
             name: None,
             team_name: None,
@@ -2044,6 +2064,7 @@ mod tests {
             context_paths: vec![],
             description: None,
             model: None,
+            model_profile: None,
             run_in_background: true,
             name: None,
             team_name: None,
@@ -2100,6 +2121,7 @@ mod tests {
             context_paths: vec![],
             description: None,
             model: None,
+            model_profile: None,
             run_in_background: false,
             name: None,
             team_name: None,
@@ -2233,6 +2255,7 @@ mod tests {
             context_paths: vec![],
             description: None,
             model: None,
+            model_profile: None,
             run_in_background: true,
             name: None,
             team_name: None,

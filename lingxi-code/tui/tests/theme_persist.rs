@@ -56,3 +56,50 @@ fn auto_roundtrips() {
         Some(ThemeSetting::Auto)
     );
 }
+
+#[test]
+fn syntax_highlighting_disabled_roundtrips_and_preserves_theme() {
+    // (theme-missing-syntax-toggle)
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    // Seed an existing theme so we can prove the flag write preserves it.
+    theme_persist::save_theme_setting_to(&path, ThemeSetting::Named(ThemeName::Dark)).unwrap();
+    theme_persist::save_syntax_highlighting_disabled_to(&path, true).unwrap();
+    let body = std::fs::read_to_string(&path).unwrap();
+    assert!(body.contains("\"syntaxHighlightingDisabled\""));
+    assert!(body.contains("\"theme\"")); // theme untouched
+    assert_eq!(
+        theme_persist::load_syntax_highlighting_disabled_from(&path),
+        Some(true)
+    );
+    assert_eq!(
+        theme_persist::load_theme_setting_from(&path),
+        Some(ThemeSetting::Named(ThemeName::Dark))
+    );
+}
+
+#[test]
+fn syntax_highlighting_disabled_absent_is_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(&path, "{\"theme\":\"dark\"}\n").unwrap();
+    assert_eq!(
+        theme_persist::load_syntax_highlighting_disabled_from(&path),
+        None
+    );
+}
+
+#[test]
+fn prefers_reduced_motion_loads_and_defaults_to_none() {
+    // (SS-06)
+    let dir = tempfile::tempdir().unwrap();
+    let set = dir.path().join("on.json");
+    std::fs::write(&set, "{\"prefersReducedMotion\":true}\n").unwrap();
+    assert_eq!(
+        theme_persist::load_prefers_reduced_motion_from(&set),
+        Some(true)
+    );
+    let absent = dir.path().join("absent.json");
+    std::fs::write(&absent, "{\"theme\":\"dark\"}\n").unwrap();
+    assert_eq!(theme_persist::load_prefers_reduced_motion_from(&absent), None);
+}

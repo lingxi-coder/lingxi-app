@@ -1,5 +1,6 @@
 ---
-source: crates/tui/tests/render_doctor_screen.rs
+source: tui/tests/render_doctor_screen.rs
+assertion_line: 27
 expression: rendered
 ---
 
@@ -15,4 +16,4 @@ expression: rendered
  └ Truecolor: yes
  └ Terminal size: 120x40
 
- Press Esc or q to return
+ Press Enter to continue…

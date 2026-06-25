@@ -2,11 +2,13 @@
 //!
 //! Literal lock (claude-code `RateLimitMessage.tsx` `getUpsellMessage`). Note
 //! the curly apostrophe U+2019 in "you’re" and the ellipsis U+2026 in
-//! "Opening your options…".
+//! "Opening your options…". (rate-limit-missing-gutter) Wrapped in the
+//! `MessageResponse` `  ⎿  ` gutter, same as `user_tool_result.rs`.
 #![allow(clippy::needless_pass_by_value)]
 
 use iocraft::prelude::*;
 
+use crate::components::messages::user_tool_result::{INDENT, MARKER};
 use crate::theme::TuiTheme;
 
 /// Props for [`RateLimitMessage`].
@@ -35,25 +37,26 @@ pub mod upsell {
         "/upgrade or /extra-usage to finish what you\u{2019}re working on.";
 }
 
-/// Pure-string renderer.
+/// Pure-string renderer. (rate-limit-missing-gutter) `  ⎿  ` gutter on the
+/// first row, 5-space `INDENT` on the upsell row.
 #[must_use]
 pub fn render_rate_limit_to_string(props: RateLimitProps) -> String {
     match props.upsell {
-        Some(u) => format!("{}\n{u}", props.text),
-        None => props.text,
+        Some(u) => format!("{MARKER}{}\n{INDENT}{u}", props.text),
+        None => format!("{MARKER}{}", props.text),
     }
 }
 
-/// iocraft component — error text + optional dim upsell.
+/// iocraft component — error text + optional dim upsell, gutter-wrapped.
 #[component]
 pub fn RateLimitMessage(props: &RateLimitProps) -> impl Into<AnyElement<'static>> {
-    let text = props.text.clone();
+    let text = format!("{MARKER}{}", props.text);
     // `Option<Element>` is iterable, so the `#(...)` fragment renders zero or
     // one upsell line (matches user_tool_result.rs's Vec-fragment pattern).
     let upsell: Vec<AnyElement<'static>> = props
         .upsell
         .clone()
-        .map(|u| element! { Text(content: u, color: TuiTheme::DIM) }.into_any())
+        .map(|u| element! { Text(content: format!("{INDENT}{u}"), color: TuiTheme::DIM) }.into_any())
         .into_iter()
         .collect();
     element! {

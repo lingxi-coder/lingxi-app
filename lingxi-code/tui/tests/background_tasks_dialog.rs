@@ -13,12 +13,14 @@ fn rows() -> Vec<TaskRow> {
             task_type: "local_bash".into(),
             status: "running".into(),
             description: "cargo build".into(),
+            command: None,
         },
         TaskRow {
             task_id: "b2".into(),
             task_type: "local_agent".into(),
             status: "completed".into(),
             description: "review".into(),
+            command: None,
         },
     ]
 }
@@ -28,7 +30,7 @@ fn list_mode_snapshot() {
     let state = BackgroundTasksState::default();
     insta::assert_snapshot!(
         "bg_tasks_list",
-        render_background_tasks_to_string(&state, &rows())
+        render_background_tasks_to_string(&state, &rows(), 200)
     );
 }
 
@@ -37,7 +39,7 @@ fn empty_list_snapshot() {
     let state = BackgroundTasksState::default();
     insta::assert_snapshot!(
         "bg_tasks_empty",
-        render_background_tasks_to_string(&state, &[])
+        render_background_tasks_to_string(&state, &[], 200)
     );
 }
 
@@ -56,7 +58,7 @@ fn detail_mode_snapshot() {
     };
     insta::assert_snapshot!(
         "bg_tasks_detail",
-        render_background_tasks_to_string(&state, &rows())
+        render_background_tasks_to_string(&state, &rows(), 200)
     );
 }
 
@@ -93,6 +95,7 @@ mod routing_seam {
             task_type: "local_bash".into(),
             status: "running".into(),
             description: "x".into(),
+            command: None,
         }
     }
 

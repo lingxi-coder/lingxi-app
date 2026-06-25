@@ -1,5 +1,6 @@
-//! Shared builtin command scaffolding used by every impl crate
-//! (`command-core` / `command-desktop` / `command-mobile`):
+//! Shared builtin command scaffolding used by the impl crate `command-core`
+//! (and any platform command handlers registered directly in the composition
+//! roots):
 //!
 //! - [`names`] — the locked 99-name table (`BUILTIN_COMMAND_NAMES`),
 //!   the 18-name core list (`BUILTIN_CORE_NAMES`), `core_description`, the

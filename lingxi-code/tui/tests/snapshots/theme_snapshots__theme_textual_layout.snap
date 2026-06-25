@@ -1,9 +1,10 @@
 ---
 source: tui/tests/theme_snapshots.rs
+assertion_line: 65
 expression: render_textual()
 ---
 claude-sonnet-4.5 /repo $0.0000 42% default
 > hi
-● Here is code:
+⏺ Here is code:
   
   fn main() { let x = 1; }

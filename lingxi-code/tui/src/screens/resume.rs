@@ -18,7 +18,7 @@
 //! neither frame exists — they are documented, not dead-coded.
 #![forbid(unsafe_code)]
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use iocraft::prelude::*;
 use session::jsonl::loader::{format_rfc3339_seconds, SessionMetadata};
 use uuid::Uuid;
@@ -31,9 +31,53 @@ pub struct ResumeRow {
     /// Title (already truncated to ≤ 50 chars + ellipsis by the loader).
     pub title: String,
     /// `[YYYY-MM-DDTHH:MM:SSZ]`-style timestamp body (without the brackets).
+    /// (Retained for the detail/preview surface.)
     pub modified_label: String,
     /// `(N message[s])` count label, singular for 1.
     pub count_label: String,
+    /// (resume-metadata) Dim metadata line shown under the title:
+    /// `<relative time ago> · <N> messages` (claude-code `formatLogMetadata`,
+    /// joined with ` · `, no brackets/parens). Git branch is omitted (not
+    /// carried on the session metadata).
+    pub metadata_label: String,
+}
+
+/// Relative-time-ago string (claude-code `formatRelativeTimeAgo` with
+/// `numeric:'always'`, long English units): `5 minutes ago`, `3 days ago`,
+/// `in 2 hours` (future). Largest matching unit wins.
+#[must_use]
+pub fn relative_time_ago(modified: std::time::SystemTime, now: std::time::SystemTime) -> String {
+    // Positive => in the past.
+    let diff: i64 = match now.duration_since(modified) {
+        Ok(d) => d.as_secs() as i64,
+        Err(e) => -(e.duration().as_secs() as i64),
+    };
+    const INTERVALS: &[(&str, i64)] = &[
+        ("year", 31_536_000),
+        ("month", 2_592_000),
+        ("week", 604_800),
+        ("day", 86_400),
+        ("hour", 3_600),
+        ("minute", 60),
+        ("second", 1),
+    ];
+    for &(unit, secs) in INTERVALS {
+        if diff.abs() >= secs {
+            let value = diff / secs; // truncates toward zero
+            let n = value.abs();
+            let unit_str = if n == 1 {
+                unit.to_string()
+            } else {
+                format!("{unit}s")
+            };
+            return if value >= 0 {
+                format!("{n} {unit_str} ago")
+            } else {
+                format!("in {n} {unit_str}")
+            };
+        }
+    }
+    "0 seconds ago".to_string()
 }
 
 impl ResumeRow {
@@ -45,6 +89,18 @@ impl ResumeRow {
     /// render timestamps byte-for-byte identically (no hand-copied formatter).
     #[must_use]
     pub fn from_meta(m: &SessionMetadata) -> Self {
+        Self::from_meta_at(m, std::time::SystemTime::now())
+    }
+
+    /// [`from_meta`](Self::from_meta) with an injected `now` for deterministic
+    /// relative-time tests.
+    #[must_use]
+    pub fn from_meta_at(m: &SessionMetadata, now: std::time::SystemTime) -> Self {
+        let msgs = if m.message_count == 1 {
+            "1 message".to_string()
+        } else {
+            format!("{} messages", m.message_count)
+        };
         Self {
             uuid: m.uuid,
             title: m.title.clone(),
@@ -54,6 +110,7 @@ impl ResumeRow {
             } else {
                 format!("({} messages)", m.message_count)
             },
+            metadata_label: format!("{} \u{00b7} {}", relative_time_ago(m.modified, now), msgs),
         }
     }
 }
@@ -63,28 +120,50 @@ impl ResumeRow {
 pub struct ResumeState {
     /// Display rows, newest-first (the loader already sorts mtime desc).
     pub rows: Vec<ResumeRow>,
-    /// Index into `rows` of the highlighted row. Always `< rows.len()` when
-    /// `rows` is non-empty; meaningless (0) when empty.
+    /// Index into the FILTERED rows of the highlighted row.
     pub selected: usize,
+    /// (resume-old-form) Type-to-search query — filters rows by title
+    /// (case-insensitive substring). Empty = show all (claude-code
+    /// `LogSelector` search box).
+    pub query: String,
 }
 
 impl ResumeState {
     /// Build from display rows. Selects the first row.
     #[must_use]
     pub fn new(rows: Vec<ResumeRow>) -> Self {
-        Self { rows, selected: 0 }
+        Self {
+            rows,
+            selected: 0,
+            query: String::new(),
+        }
     }
 
-    /// `true` when there are no sessions to resume (empty-state).
+    /// `true` when there are no sessions to resume at all (empty-state).
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
 
-    /// The currently selected row, if any.
+    /// Rows visible under the current [`query`](Self::query) (all rows when the
+    /// query is empty), case-insensitive title-substring match.
+    #[must_use]
+    pub fn filtered(&self) -> Vec<&ResumeRow> {
+        if self.query.is_empty() {
+            self.rows.iter().collect()
+        } else {
+            let q = self.query.to_lowercase();
+            self.rows
+                .iter()
+                .filter(|r| r.title.to_lowercase().contains(&q))
+                .collect()
+        }
+    }
+
+    /// The currently selected (filtered) row, if any.
     #[must_use]
     pub fn selected_row(&self) -> Option<&ResumeRow> {
-        self.rows.get(self.selected)
+        self.filtered().get(self.selected).copied()
     }
 
     /// The UUID of the selected row — the value Enter resolves to.
@@ -114,14 +193,18 @@ pub enum ResumeOutcome {
 /// - anything else → `Stay`.
 #[must_use]
 pub fn handle_resume_key(state: &mut ResumeState, key: KeyEvent) -> ResumeOutcome {
+    let n = state.filtered().len();
     match key.code {
-        KeyCode::Up | KeyCode::Char('k') => {
+        // (resume-old-form) Arrows navigate; j/k/q no longer have special
+        // meaning — they type into the search query (claude-code LogSelector is
+        // not vim-modal).
+        KeyCode::Up => {
             state.selected = state.selected.saturating_sub(1);
             ResumeOutcome::Stay
         }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if !state.rows.is_empty() {
-                state.selected = (state.selected + 1).min(state.rows.len() - 1);
+        KeyCode::Down => {
+            if n > 0 {
+                state.selected = (state.selected + 1).min(n - 1);
             }
             ResumeOutcome::Stay
         }
@@ -129,7 +212,29 @@ pub fn handle_resume_key(state: &mut ResumeState, key: KeyEvent) -> ResumeOutcom
             Some(uuid) => ResumeOutcome::Resume(uuid),
             None => ResumeOutcome::Cancel,
         },
-        KeyCode::Esc | KeyCode::Char('q') => ResumeOutcome::Cancel,
+        // Esc clears an active query first, then cancels.
+        KeyCode::Esc => {
+            if state.query.is_empty() {
+                ResumeOutcome::Cancel
+            } else {
+                state.query.clear();
+                state.selected = 0;
+                ResumeOutcome::Stay
+            }
+        }
+        KeyCode::Backspace => {
+            state.query.pop();
+            state.selected = 0;
+            ResumeOutcome::Stay
+        }
+        // Type-to-search: printable chars filter the list.
+        KeyCode::Char(c)
+            if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
+        {
+            state.query.push(c);
+            state.selected = 0;
+            ResumeOutcome::Stay
+        }
         _ => ResumeOutcome::Stay,
     }
 }
@@ -160,61 +265,59 @@ pub fn ResumeScreen(props: &ResumeScreenProps) -> impl Into<AnyElement<'static>>
         .into_any();
     }
 
-    let header = "Resume which session?".to_string();
+    // (resume-old-form) claude-code `LogSelector` header is the bold
+    // "Resume Session" title (not the stdio picker's "Resume which session?").
     let selected = state.selected;
-    // Build one Text per row: "> N. <title>  [<modified>]  (<count>)".
-    let row_lines: Vec<String> = state
-        .rows
+    let filtered = state.filtered();
+    let n = filtered.len();
+    // (resume-old-form) Bold header + a "(idx of N)" position counter.
+    let header = if n > 0 {
+        format!("Resume Session ({} of {})", selected + 1, n)
+    } else {
+        "Resume Session".to_string()
+    };
+    // (resume-old-form) Type-to-search box, shown when a query is active.
+    let search_line = (!state.query.is_empty()).then(|| format!("Search: {}", state.query));
+    // (resume-metadata) Each row is a title line + a dim metadata line below it
+    // (`<relative time> · <N> messages`, paddingLeft 2). Rows are filtered by
+    // the search query.
+    let row_lines: Vec<(String, String)> = filtered
         .iter()
         .enumerate()
         .map(|(i, r)| {
             let marker = if i == selected { "> " } else { "  " };
-            format!(
-                "{marker}{}. {}  [{}]  {}",
-                i + 1,
-                r.title,
-                r.modified_label,
-                r.count_label
+            (
+                format!("{marker}{}", r.title),
+                format!("  {}", r.metadata_label),
             )
         })
         .collect();
 
-    // Preview pane: title + uuid + count of the selected row (from metadata
-    // already in hand — no extra file read, no engine change).
-    let preview: Vec<String> = state
-        .selected_row()
-        .map(|r| {
-            vec![
-                format!("Title:    {}", r.title),
-                format!("Session:  {}", r.uuid),
-                format!("Messages: {}", r.count_label),
-                format!("Modified: {}", r.modified_label),
-            ]
-        })
-        .unwrap_or_default();
-
-    let footer = "Up/Down select   Enter resume   Esc cancel".to_string();
+    // (resume-preview-pane-not-in-shipped) No always-on preview pane.
+    // (resume-footer-hint-wording) claude-code's LogSelector footer is a dim
+    // Byline of shortcut hints. LingXi keeps type-to-search; Ctrl+V preview /
+    // Ctrl+R rename hints are added when those features land. The `↑↓
+    // select`/`Enter resume` verbs are dropped to match the Byline shape.
+    let footer = "Type to search \u{00B7} Esc cancel".to_string();
 
     element! {
         View(flex_direction: FlexDirection::Column, padding: 1) {
-            Text(content: header)
+            Text(content: header, weight: Weight::Bold)
+            #(search_line.map(|s| element! {
+                View(flex_direction: FlexDirection::Row) {
+                    Text(content: s, color: Color::DarkGrey)
+                }
+            }))
             View(flex_direction: FlexDirection::Column, padding_top: 1) {
-                #(row_lines.into_iter().map(|line| element! {
-                    Text(content: line)
-                }))
-            }
-            View(
-                flex_direction: FlexDirection::Column,
-                border_style: BorderStyle::Round,
-                padding: 1,
-                margin_top: 1,
-            ) {
-                #(preview.into_iter().map(|line| element! {
-                    Text(content: line)
+                #(row_lines.into_iter().map(|(title, meta)| element! {
+                    View(flex_direction: FlexDirection::Column) {
+                        Text(content: title)
+                        Text(content: meta, color: Color::DarkGrey)
+                    }
                 }))
             }
             View(margin_top: 1) {
-                Text(content: footer, color: Color::DarkGrey)
+                Text(content: footer, color: Color::DarkGrey, italic: true)
             }
         }
     }
@@ -279,6 +382,30 @@ mod tests {
 
     fn k(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn type_to_search_filters_and_esc_clears_then_cancels() {
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        let mut st = ResumeState::new(vec![
+            ResumeRow::from_meta_at(&meta("alpha project", 100, 1), now),
+            ResumeRow::from_meta_at(&meta("beta project", 200, 1), now),
+            ResumeRow::from_meta_at(&meta("alphabet", 300, 1), now),
+        ]);
+        // Type "alph" → filters to the two "alph…" titles.
+        for c in "alph".chars() {
+            assert_eq!(handle_resume_key(&mut st, k(KeyCode::Char(c))), ResumeOutcome::Stay);
+        }
+        assert_eq!(st.query, "alph");
+        assert_eq!(st.filtered().len(), 2);
+        // Backspace shrinks the query.
+        handle_resume_key(&mut st, k(KeyCode::Backspace));
+        assert_eq!(st.query, "alp");
+        // Esc clears the query first (Stay), then a second Esc cancels.
+        assert_eq!(handle_resume_key(&mut st, k(KeyCode::Esc)), ResumeOutcome::Stay);
+        assert!(st.query.is_empty());
+        assert_eq!(st.filtered().len(), 3);
+        assert_eq!(handle_resume_key(&mut st, k(KeyCode::Esc)), ResumeOutcome::Cancel);
     }
 
     #[test]
@@ -355,20 +482,41 @@ mod tests {
     }
 
     #[test]
+    fn relative_time_ago_units() {
+        let base = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let ago = |secs: u64| relative_time_ago(base - Duration::from_secs(secs), base);
+        assert_eq!(ago(30), "30 seconds ago");
+        assert_eq!(ago(60), "1 minute ago");
+        assert_eq!(ago(300), "5 minutes ago");
+        assert_eq!(ago(3600), "1 hour ago");
+        assert_eq!(ago(86_400), "1 day ago");
+        assert_eq!(ago(2 * 86_400), "2 days ago");
+        // Future.
+        assert_eq!(
+            relative_time_ago(base + Duration::from_secs(120), base),
+            "in 2 minutes"
+        );
+    }
+
+    #[test]
     fn component_renders_rows_and_selection_marker() {
+        // Fixed `now` (5 min after the first session) for deterministic
+        // relative-time metadata.
+        let now = UNIX_EPOCH + Duration::from_secs(1_748_113_392 + 300);
         let st = ResumeState::new(vec![
-            ResumeRow::from_meta(&meta("first session", 1_748_113_392, 3)),
-            ResumeRow::from_meta(&meta("second session", 1_748_113_300, 1)),
+            ResumeRow::from_meta_at(&meta("first session", 1_748_113_392, 3), now),
+            ResumeRow::from_meta_at(&meta("second session", 1_748_113_300, 1), now),
         ]);
         let mut element = element! { ResumeScreen(state: st) };
         let frame = element.to_string();
-        assert!(frame.contains("Resume which session?"), "got: {frame}");
+        assert!(frame.contains("Resume Session"), "got: {frame}");
         assert!(frame.contains("first session"), "got: {frame}");
-        assert!(frame.contains("(3 messages)"), "got: {frame}");
-        assert!(frame.contains("(1 message)"), "got: {frame}");
+        // (resume-metadata) Dim metadata line: "<relative> · <N> messages".
+        assert!(frame.contains("5 minutes ago \u{00b7} 3 messages"), "got: {frame}");
+        assert!(frame.contains("1 message"), "got: {frame}");
         // Selected (row 0) prefixed "> ", unselected "  ".
-        assert!(frame.contains("> 1."), "got: {frame}");
-        assert!(frame.contains("  2."), "got: {frame}");
+        assert!(frame.contains("> first session"), "got: {frame}");
+        assert!(frame.contains("  second session"), "got: {frame}");
     }
 
     #[test]

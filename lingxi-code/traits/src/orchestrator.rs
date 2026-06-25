@@ -165,7 +165,7 @@ pub enum McpStatus {
 }
 
 /// One hook entry returned by [`OrchestratorHandle::list_hooks`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HookInfo {
     /// Hook identifier.
     pub name: String,
@@ -175,17 +175,45 @@ pub struct HookInfo {
     pub matcher: Option<String>,
     /// Timeout in milliseconds (default `60_000` if unset).
     pub timeout_ms: u64,
+    /// (hooks-detail-fields-divergent) Executor kind (claude-code
+    /// `config.type`): `"command"` / `"http"` / `"agent"` / `"prompt"`, or the
+    /// LingXi-only `"builtin"` (an in-process Rust handler; no TS analogue).
+    pub hook_type: String,
+    /// (hooks-detail-fields-divergent) Human-readable origin (claude-code
+    /// `hookSourceDescriptionDisplayString`), e.g. `"User settings
+    /// (~/.claude/settings.json)"`.
+    pub source: String,
+    /// (hooks-detail-fields-divergent) The executor's primary content field
+    /// (claude-code `getContentFieldValue`): the shell command line for
+    /// `"command"`, the URL for `"http"`, the prompt for `"agent"`/`"prompt"`,
+    /// the handler id for the LingXi-only `"builtin"`.
+    pub content: String,
+    /// (hooks-detail-fields-divergent) Custom status message shown while the
+    /// hook runs, if the definition set one.
+    pub status_message: Option<String>,
 }
 
 /// One subagent entry returned by [`OrchestratorHandle::list_agents`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AgentInfo {
     /// Agent name (matches the markdown filename without extension).
     pub name: String,
     /// Human-readable description (may be truncated by callers).
     pub description: String,
-    /// Tool allow-list (empty = all tools).
+    /// Tool allow-list. Meaningful only when `wildcard_tools` is `false`;
+    /// empty here then means "no tools", not "all tools" (agents-03).
     pub tools_allowed: Vec<String>,
+    /// `true` when the agent's tool policy is `AgentToolPolicy::All`
+    /// (claude-code: `tools` frontmatter omitted) — distinguishes "every
+    /// tool" from an explicit empty allow-list, which `tools_allowed` alone
+    /// cannot (both lower to an empty `Vec`).
+    pub wildcard_tools: bool,
+    /// (agents-08) Source-group display label (claude-code
+    /// `AGENT_SOURCE_GROUPS`): `"User agents"`, `"Project agents"`, `"Local
+    /// agents"`, `"Managed agents"`, `"Plugin agents"`, `"CLI arg agents"`,
+    /// or `"Built-in agents"`. Drives the `/agents` list's section grouping.
+    /// Empty string defaults rows into the trailing built-in section.
+    pub source_group: String,
 }
 
 /// Aggregate diagnostic report returned by [`OrchestratorHandle::run_doctor_checks`].
@@ -269,6 +297,12 @@ pub struct StatusSnapshot {
     /// here so `/status` can echo the same scalar the PUSH
     /// `CoordinatorStatus` feed carries.
     pub active_workers: u32,
+    /// (settings-status-missing-mcp-and-setting-sources) Display strings for
+    /// every settings-file tier that currently has a file on disk (claude-code
+    /// `buildSettingSourcesProperties`'s `sourcesWithSettings` filter), e.g.
+    /// `"Project settings (.claude/settings.json)"`. Empty when none exist
+    /// (the `/status` row is omitted entirely, matching TS).
+    pub setting_sources: Vec<String>,
 }
 
 /// One model entry for the grouped `/model` picker. Sourced from the llm-client
@@ -1151,6 +1185,7 @@ mod tests {
             event: "PostToolUse".to_string(),
             matcher: Some("Write|Edit".to_string()),
             timeout_ms: 60_000,
+            ..HookInfo::default()
         };
         assert_eq!(info.timeout_ms, 60_000);
         assert_eq!(info.matcher.as_deref(), Some("Write|Edit"));
@@ -1162,6 +1197,8 @@ mod tests {
             name: "reviewer".to_string(),
             description: "review code".to_string(),
             tools_allowed: vec!["Read".to_string(), "Grep".to_string()],
+            wildcard_tools: false,
+            ..AgentInfo::default()
         };
         assert_eq!(info.tools_allowed.len(), 2);
     }

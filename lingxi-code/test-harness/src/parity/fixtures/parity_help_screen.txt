@@ -1,69 +1,69 @@
 Commands:
-  /add-dir              (unimplemented in v0.6.0)
+  /add-dir              Add a new working directory
   /agents               Manage agent configurations
-  /branch               (unimplemented in v0.6.0)
-  /bridge               (unimplemented in v0.6.0)
-  /btw                  (unimplemented in v0.6.0)
-  /chrome               (unimplemented in v0.6.0)
+  /branch               Create a branch of the current conversation at this point
+  /bridge               Connect this terminal for remote-control sessions
+  /btw                  Ask a quick side question without interrupting the main conversation
+  /chrome               Claude in Chrome (Beta) settings
   /clear                Start a new session with empty context; previous session stays on disk (resumable with /resume)
-  /color                (unimplemented in v0.6.0)
-  /commit               (unimplemented in v0.6.0)
-  /commit-push-pr       (unimplemented in v0.6.0)
+  /color                Set the prompt bar color for this session
+  /commit               Create a git commit
+  /commit-push-pr       Commit, push, and open a PR
   /compact              Free up context by summarizing the conversation so far
   /config               Open settings
-  /context              (unimplemented in v0.6.0)
-  /copy                 (unimplemented in v0.6.0)
-  /desktop              (unimplemented in v0.6.0)
-  /diff                 (unimplemented in v0.6.0)
+  /context              Visualize current context usage as a colored grid
+  /copy                 Copy Claude's last response to clipboard (or /copy N for the Nth-latest)
+  /desktop              Continue the current session in Claude Desktop
+  /diff                 View uncommitted changes and per-turn diffs
   /doctor               Diagnose and verify your Claude Code installation and settings
-  /effort               (unimplemented in v0.6.0)
+  /effort               Set effort level for model usage
   /exit                 Exit the CLI
-  /export               (unimplemented in v0.6.0)
-  /fast                 (unimplemented in v0.6.0)
-  /feedback             (unimplemented in v0.6.0)
-  /files                (unimplemented in v0.6.0)
+  /export               Export the current conversation to a file or clipboard
+  /fast                 Toggle fast mode
+  /feedback             Submit feedback about Claude Code
+  /files                List all files currently in context
   /help                 Show help and available commands
   /hooks                Manage hooks
-  /ide                  (unimplemented in v0.6.0)
+  /ide                  Manage IDE integrations and show status
   /init                 Initialize a new CLAUDE.md file with codebase documentation
-  /init-verifiers       (unimplemented in v0.6.0)
-  /insights             (unimplemented in v0.6.0)
-  /install              (unimplemented in v0.6.0)
-  /install-github-app   (unimplemented in v0.6.0)
-  /install-slack-app    (unimplemented in v0.6.0)
-  /keybindings          (unimplemented in v0.6.0)
+  /init-verifiers       Create verifier skill(s) for automated verification of code changes
+  /insights             Generate a report analyzing your Claude Code sessions
+  /install              Install Claude Code native build
+  /install-github-app   Set up Claude GitHub Actions for a repository
+  /install-slack-app    Install the Claude Slack app
+  /keybindings          Open or create your keybindings configuration file
   /login                Sign in with your Anthropic account
   /logout               Sign out from your Anthropic account
   /mcp                  Manage MCP servers
   /memory               Open a memory file in your editor
-  /mobile               (unimplemented in v0.6.0)
+  /mobile               Show QR code to download the Claude mobile app
   /model                Set the AI model for Claude Code
-  /passes               (unimplemented in v0.6.0)
+  /passes               Share a free week of Claude Code with friends and earn extra usage
   /permissions          Manage allow and deny tool permission rules
-  /plan                 (unimplemented in v0.6.0)
-  /plugin               (unimplemented in v0.6.0)
-  /privacy-settings     (unimplemented in v0.6.0)
-  /release-notes        (unimplemented in v0.6.0)
-  /reload-plugins       (unimplemented in v0.6.0)
-  /remote-env           (unimplemented in v0.6.0)
-  /remote-setup         (unimplemented in v0.6.0)
-  /rename               (unimplemented in v0.6.0)
-  /resume               (unimplemented in v0.6.0)
-  /review               (unimplemented in v0.6.0)
-  /rewind               (unimplemented in v0.6.0)
-  /sandbox-toggle       (unimplemented in v0.6.0)
-  /security-review      (unimplemented in v0.6.0)
-  /session              (unimplemented in v0.6.0)
-  /skills               (unimplemented in v0.6.0)
+  /plan                 Enable plan mode or view the current session plan
+  /plugin               Manage Claude Code plugins
+  /privacy-settings     View and update your privacy settings
+  /release-notes        View release notes
+  /reload-plugins       Activate pending plugin changes in the current session
+  /remote-env           Configure the default remote environment for teleport sessions
+  /remote-setup         Setup Claude Code on the web (requires connecting your GitHub account)
+  /rename               Rename the current conversation
+  /resume               Resume a previous conversation
+  /review               Review a pull request
+  /rewind               Restore the code and/or conversation to a previous point
+  /sandbox-toggle       Toggle sandbox mode for bash commands
+  /security-review      Complete a security review of the pending changes on the current branch
+  /session              Show remote session URL and QR code
+  /skills               List available skills
   /status               Show Claude Code status including version, model, account, API connectivity, and tool statuses
-  /statusline           (unimplemented in v0.6.0)
-  /stickers             (unimplemented in v0.6.0)
-  /tasks                (unimplemented in v0.6.0)
-  /terminal-setup       (unimplemented in v0.6.0)
-  /theme                (unimplemented in v0.6.0)
-  /ultraplan            (unimplemented in v0.6.0)
-  /upgrade              (unimplemented in v0.6.0)
+  /statusline           Set up Claude Code's status line UI
+  /stickers             Order Claude Code stickers
+  /tasks                List and manage background tasks
+  /terminal-setup       Install Shift+Enter key binding for newlines
+  /theme                Change the theme
+  /ultraplan            Claude Code on the web drafts an advanced plan you can edit and approve
+  /upgrade              Upgrade to Max for higher rate limits and more Opus
   /usage                Show session cost, plan usage, and what's contributing to your limits
   /version              Print version information
-  /voice                (unimplemented in v0.6.0)
-  /x402                 (unimplemented in v0.6.0)
+  /voice                Toggle voice mode
+  /x402                 Configure x402 crypto payments (USDC on Base)

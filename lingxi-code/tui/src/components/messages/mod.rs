@@ -53,6 +53,10 @@ use user_tool_result::{render_user_tool_result_to_string, UserToolResultProps};
 #[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (28 variants)
 pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: bool) -> String {
     match entry {
+        // (RRS-08) The interrupt marker renders the InterruptedByUser line.
+        RenderedMessage::UserText { body, .. } if body == user_tool_result::INTERRUPT_MESSAGE => {
+            format!("{}{}", user_tool_result::MARKER, user_tool_result::INTERRUPTED_LINE)
+        }
         // §A4 empty-message guard: a body that is only stripped prompt-XML
         // tags (or `(no content)`) is suppressed entirely — the component
         // returns an empty View, so the string oracle returns "" (no `"> "`
@@ -76,6 +80,8 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
                 input: input.clone(),
                 expanded,
                 focused,
+                cwd: std::env::current_dir().unwrap_or_default(),
+                resolution: None,
             })
         }
         RenderedMessage::UserToolResult {
@@ -99,6 +105,9 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
             // (M7-15) String oracle drops color; the syntect theme is
             // immaterial here. The live component path threads the real theme.
             theme_name: crate::theme::ThemeName::default(),
+            // (diff-03) No terminal width in the string oracle — 0 disables
+            // padding, matching the prior behavior.
+            width: 0,
         }),
         RenderedMessage::AssistantThinking { thinking, expanded } => {
             thinking::render_thinking_to_string(thinking::ThinkingProps {

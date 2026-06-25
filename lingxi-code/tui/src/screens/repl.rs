@@ -12,7 +12,7 @@ use iocraft::prelude::*;
 use protocol::ToolUseId;
 
 use crate::components::prompt_input::completion::{CompletionOverlay, CompletionState};
-use crate::components::prompt_input::palette::{PaletteOverlay, PaletteState, OVERLAY_MAX_ITEMS};
+use crate::components::prompt_input::palette::{PaletteOverlay, PaletteState};
 use crate::components::prompt_input::{
     HistorySearchOverlay, HistorySearchState, PromptInput, PromptInputFooter, SessionColorBanner,
     VimMode,
@@ -130,6 +130,14 @@ pub struct ReplScreenProps {
     /// warning threshold. Rendered directly above the prompt as claude-code's
     /// `<TokenWarning>` line (`PromptInput/Notifications.tsx:321`).
     pub context_pressure: Option<traits::ContextPressureBanner>,
+    /// (RRS-08) `Some(key)` while the idle Ctrl-C/Ctrl-D double-press exit
+    /// window is armed (clone of `AppState.sigint_armed_at`/`_key`, already
+    /// resolved against the window by the caller) — forwarded to
+    /// `PromptInputFooter.exit_hint`.
+    pub exit_hint: Option<&'static str>,
+    /// (SS-06) `prefersReducedMotion` — forwarded to the streaming spinner so
+    /// it pins its glyph and stops animating.
+    pub reduced_motion: bool,
 }
 
 impl Default for ReplScreenProps {
@@ -162,6 +170,8 @@ impl Default for ReplScreenProps {
             status_line_text: None,
             status_line_padding: 0,
             context_pressure: None,
+            exit_hint: None,
+            reduced_motion: false,
         }
     }
 }
@@ -174,6 +184,8 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let cost = props.status.cost.clone();
     let context_pct = props.status.context_pct;
     let permission_mode = props.status.permission_mode;
+    let exit_hint = props.exit_hint;
+    let reduced_motion = props.reduced_motion;
     // (A6) Custom status-line text + padding + width-for-truncation.
     let status_line_text = props.status_line_text.clone();
     // (TokenWarning) The live context-pressure banner, rendered above the prompt.
@@ -238,7 +250,9 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 theme_name: theme_name,
             )
             #(if show_spinner {
-                element!(SpinnerWithVerb).into_any()
+                // Glyph + verb render in the active theme's Claude accent
+                // (claude-code `Spinner` `defaultColor='claude'`).
+                element!(SpinnerWithVerb(color: Some(theme.claude), reduced_motion: reduced_motion)).into_any()
             } else {
                 element!(View).into_any()
             })
@@ -247,9 +261,12 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
             // this draws inline in the bottom zone (design D4). Only one is
             // ever open at a time (the dispatcher enforces palette-wins-on-`/`).
             #(palette.as_ref().filter(|p| p.open).map(|p| {
-                let rows: Vec<_> = p.rows().into_iter().take(OVERLAY_MAX_ITEMS).collect();
+                // (cp-08) The FULL filtered list (not just the visible window)
+                // goes in — PaletteOverlay needs every row's name width to
+                // compute the shared column width, then slices internally.
+                let rows = p.rows();
                 element! {
-                    PaletteOverlay(rows: rows, selected: p.selected, theme: theme)
+                    PaletteOverlay(rows: rows, selected: p.selected, theme: theme, width: prompt_width)
                 }
             }))
             #(completion.as_ref().filter(|c| c.open).map(|c| {
@@ -315,6 +332,15 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 vim_enabled: vim_enabled,
                 vim_mode: vim_mode,
                 vim_visual_linewise: vim_visual_linewise,
+                // (PIC-10) Surface the active permission mode in the footer
+                // (the only place it shows after SS-01 removed the status line).
+                permission_mode: permission_mode,
+                // (PIC-07) A turn in flight swaps the hint to "esc to
+                // interrupt" — same signal that gates the spinner row.
+                is_loading: show_spinner,
+                // (RRS-08) Replaces the whole footer-left with "Press {key}
+                // again to exit" while the double-press window is armed.
+                exit_hint: exit_hint,
             )
             // (M9-05) Background-task footer pill, drawn bottom-most when present
             // (claude-code `BackgroundTaskStatus`). Hidden (no row) when `None`.

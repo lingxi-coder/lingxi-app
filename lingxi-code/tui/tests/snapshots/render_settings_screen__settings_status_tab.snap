@@ -1,9 +1,10 @@
 ---
 source: tui/tests/render_settings_screen.rs
+assertion_line: 90
 expression: "&f"
 ---
 
-  Config   Settings  [Status]  Usage
+ [Status]  Config   Usage   Settings
 
  Version: lingxi-cli v0.12.0
  Session name: /rename to add a name

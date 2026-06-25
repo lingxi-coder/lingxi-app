@@ -1,5 +1,6 @@
 ---
 source: tui/tests/render_messages.rs
+assertion_line: 45
 expression: element.to_string()
 ---
-● run cargo test now
+⏺ run cargo test now

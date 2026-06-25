@@ -152,12 +152,9 @@ fn register_mobile_non_skill_tools(reg: &mut ToolRegistry, ctx: BuiltinToolConte
     tool_cron::register_all(reg, ctx.clone());
     tool_ui::register_all(reg, ctx.clone());
     // ----- mobile-exclusive tools ------------------------------------------
-    tool_camera::register_all(reg, ctx.clone());
-    tool_voice::register_all(reg, ctx.clone());
-    tool_speech::register_all(reg, ctx.clone());
-    tool_notification::register_all(reg, ctx.clone());
-    tool_clipboard::register_all(reg, ctx.clone());
-    tool_share::register_all(reg, ctx.clone());
+    // camera / voice / speech / notification / clipboard / share, folded into
+    // the single `tool-mobile` crate.
+    tool_mobile::register_all(reg, ctx.clone());
     // P3: Android-only Shell tool. Self-gates on ctx.android_shell.enabled;
     // iOS and desktop are unaffected (their ctx.android_shell is None).
     tool_shell_mobile::register_all(reg, ctx.clone());
@@ -184,7 +181,7 @@ pub fn mobile_tool_registry_with_skill_loader(
 #[must_use]
 pub fn mobile_skill_registry() -> SkillRegistry {
     let mut reg = SkillRegistry::new();
-    skill_builtin::register_mobile(&mut reg);
+    skill_api::register_mobile(&mut reg);
     reg
 }
 
@@ -201,6 +198,9 @@ pub fn mobile_command_registry(
     register_core_batch_2(&mut reg, handle.clone(), auth);
     register_core_batch_4(&mut reg, handle.clone());
     register_core_batch_5(&mut reg, handle);
-    command_mobile::register(&mut reg);
+    // Mobile-only command handlers: currently none — the mobile command names
+    // (/mobile, /voice, /share, /camera) are served as command-core
+    // unimplemented stubs. Register real mobile handlers on `reg` directly here
+    // when implemented.
     reg
 }

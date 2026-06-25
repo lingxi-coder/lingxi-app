@@ -285,6 +285,55 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
             .stream_forced(model, None, system, messages, tools, forced_tool, effort)
             .await
     }
+
+    // ── Provider-routed variants (dual-LLM dual-PROVIDER) ──────────────────
+    // These forward the per-spawn `profile` to the multi-provider service so a
+    // dual-LLM candidate's resolved provider is honored, instead of dropping the
+    // profile (which forced every subagent onto the default provider). The
+    // default-trait impls delegate to the profile-less methods above; these
+    // overrides are the single place the subagent path becomes provider-aware.
+
+    async fn messages_create_in(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Result<LlmResponse, LlmError> {
+        self.service
+            .messages_create(model, profile, system, messages, tools)
+            .await
+    }
+
+    async fn messages_create_stream_in(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        effort: Option<serde_json::Value>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        self.service
+            .stream(model, profile, system, messages, tools, effort)
+            .await
+    }
+
+    async fn messages_create_stream_forced_in(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        forced_tool: Option<&str>,
+        effort: Option<serde_json::Value>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        self.service
+            .stream_forced(model, profile, system, messages, tools, forced_tool, effort)
+            .await
+    }
 }
 
 #[async_trait]

@@ -403,6 +403,7 @@ fn make_request(default_subagent_type: &str, prompt: &str, opts_json: &str) -> S
         context_paths: Vec::new(),
         description: None,
         model: opt_str("model"),
+        model_profile: None,
         run_in_background: false,
         // `agent(prompt, { label })` → the subagent's display label.
         name: opt_str("label"),

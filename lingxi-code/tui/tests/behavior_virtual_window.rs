@@ -39,11 +39,12 @@ fn pgup_pgdn_step_by_viewport_lines() {
     push_line(&mut st, &vec!["x"; 100].join("\n"));
     st.refresh_height_cache(80);
     let vh = 8;
+    // (RRS-01) Half-viewport steps: vh/2 = 4 per page.
     scroll_with_viewport(&mut st, ScrollDir::PageUp, vh);
     scroll_with_viewport(&mut st, ScrollDir::PageUp, vh);
-    assert_eq!(st.scroll_offset, 16);
-    scroll_with_viewport(&mut st, ScrollDir::PageDown, vh);
     assert_eq!(st.scroll_offset, 8);
+    scroll_with_viewport(&mut st, ScrollDir::PageDown, vh);
+    assert_eq!(st.scroll_offset, 4);
 }
 
 #[test]

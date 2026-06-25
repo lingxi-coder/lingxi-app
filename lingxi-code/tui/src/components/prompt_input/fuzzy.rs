@@ -49,6 +49,14 @@ pub fn subsequence_match(needle: &str, haystack: &str) -> Option<i32> {
 /// deterministic so snapshots and behavior tests are stable.
 #[must_use]
 pub fn filtered_ranked<'a>(needle: &str, candidates: &'a [String]) -> Vec<&'a str> {
+    if needle.is_empty() {
+        // (cp-02) A bare `/` (empty filter) lists every candidate
+        // alphabetically, case-insensitive — claude-code's `localeCompare`
+        // ordering — NOT by name length.
+        let mut all: Vec<&'a str> = candidates.iter().map(String::as_str).collect();
+        all.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| a.cmp(b)));
+        return all;
+    }
     let mut scored: Vec<(i32, &'a str)> = candidates
         .iter()
         .filter_map(|c| subsequence_match(needle, c).map(|s| (s, c.as_str())))

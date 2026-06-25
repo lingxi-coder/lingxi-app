@@ -156,13 +156,20 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let mut out: Vec<HookInfo> = g
             .all_hooks()
             .into_iter()
-            .map(|h| HookInfo {
-                name: h.name.clone(),
-                event: h.events.first().map_or("Unknown", event_str).to_string(),
-                matcher: h.if_condition.as_ref().map(|c| c.pattern.clone()),
-                timeout_ms: h.timeout.map_or(60_000_u64, |d| {
-                    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
-                }),
+            .map(|h| {
+                let (hook_type, content) = hook_executor_type_and_content(&h.executor);
+                HookInfo {
+                    name: h.name.clone(),
+                    event: h.events.first().map_or("Unknown", event_str).to_string(),
+                    matcher: h.if_condition.as_ref().map(|c| c.pattern.clone()),
+                    timeout_ms: h.timeout.map_or(60_000_u64, |d| {
+                        u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+                    }),
+                    hook_type,
+                    source: hook_source_description(h.source),
+                    content,
+                    status_message: h.status_message.clone(),
+                }
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -181,6 +188,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 name: a.agent_type.clone(),
                 description: a.when_to_use.clone(),
                 tools_allowed: a.allowed_tools.clone(),
+                wildcard_tools: matches!(a.tools, agent::AgentToolPolicy::All { .. }),
+                source_group: agent_source_group_label(a.source).to_string(),
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -221,6 +230,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             output_tokens: cost.output_tokens,
             n_mcp_connected: 0,
             n_mcp_total: 0,
+            setting_sources: setting_sources_for(&self.cwd),
             n_hooks: 0,
             n_agents: 0,
             started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -449,6 +459,84 @@ fn event_str(et: &hooks::events::HookEventType) -> &'static str {
         E::UserPromptExpansion => "UserPromptExpansion",
         E::MessageDisplay => "MessageDisplay",
     }
+}
+
+/// (hooks-detail-fields-divergent) `config.type` + the primary content field
+/// (claude-code `getContentFieldLabel`/`getContentFieldValue`,
+/// `ViewHookMode.tsx`). `Builtin` has no TS analogue (an in-process Rust
+/// handler) — surfaced as `"builtin"` with the handler id as its content.
+fn hook_executor_type_and_content(executor: &hooks::HookExecutor) -> (String, String) {
+    use hooks::HookExecutor as Ex;
+    match executor {
+        Ex::Command { command, args, .. } => {
+            let content = if args.is_empty() {
+                command.clone()
+            } else {
+                format!("{command} {}", args.join(" "))
+            };
+            ("command".to_string(), content)
+        }
+        Ex::Http { url, .. } => ("http".to_string(), url.clone()),
+        Ex::Agent { prompt, .. } => ("agent".to_string(), prompt.clone()),
+        Ex::Prompt { prompt, .. } => ("prompt".to_string(), prompt.clone()),
+        Ex::Builtin { handler_id } => ("builtin".to_string(), handler_id.clone()),
+    }
+}
+
+/// (hooks-detail-fields-divergent) claude-code
+/// `hookSourceDescriptionDisplayString` (`utils/hooks/hooksSettings.ts`).
+/// `Managed`/`FrontMatter`/`Skill` have no TS analogue (LingXi-only source
+/// kinds) — given a parallel, sensible description rather than the TS
+/// fallback (`source as string`, the bare enum name).
+fn hook_source_description(source: hooks::HookSource) -> String {
+    use hooks::HookSource as S;
+    match source {
+        S::User => "User settings (~/.claude/settings.json)",
+        S::Project => "Project settings (.claude/settings.json)",
+        S::Local => "Local settings (.claude/settings.local.json)",
+        S::Managed => "Managed settings (enterprise policy)",
+        S::Plugin => "Plugin hooks (~/.claude/plugins/*/hooks/hooks.json)",
+        S::FrontMatter => "Agent front matter",
+        S::Session => "Session hooks (in-memory, temporary)",
+        S::Skill => "Skill bundle",
+    }
+    .to_string()
+}
+
+/// (agents-08) claude-code `AGENT_SOURCE_GROUPS` label for an
+/// [`agent::AgentSource`] (`tools/AgentTool/agentDisplay.ts:24-32` ×
+/// `getSettingSourceName`). `UserDefined`→User, `Project`→Project,
+/// `Local`→Local (LingXi has no `Local` variant yet — `localSettings` maps
+/// from `Project` in claude-code's gitignored tier, so it's absent here),
+/// `PolicySettings`→Managed, `Plugin`→Plugin, `Flag`→CLI arg, `BuiltIn`→
+/// Built-in.
+fn agent_source_group_label(source: agent::AgentSource) -> &'static str {
+    use agent::AgentSource as S;
+    match source {
+        S::UserDefined => "User agents",
+        S::Project => "Project agents",
+        S::PolicySettings => "Managed agents",
+        S::Plugin => "Plugin agents",
+        S::Flag => "CLI arg agents",
+        S::BuiltIn => "Built-in agents",
+    }
+}
+
+/// (settings-status-missing-mcp-and-setting-sources) claude-code
+/// `buildSettingSourcesProperties`: one display string per settings-file tier
+/// that currently exists on disk (`sourcesWithSettings`'s "actually have
+/// settings loaded" filter — approximated here as plain file existence,
+/// since LingXi's settings loader does no separate enterprise-policy/managed
+/// tier). Project, then User, in splice order.
+fn setting_sources_for(cwd: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if engine::settings::loader::project_settings_path(cwd).is_file() {
+        out.push("Project settings (.claude/settings.json)".to_string());
+    }
+    if engine::settings::loader::user_settings_path().is_some_and(|p| p.is_file()) {
+        out.push("User settings (~/.claude/settings.json)".to_string());
+    }
+    out
 }
 
 /// Touch + spawn an editor on `target`. If the target does not yet exist,

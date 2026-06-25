@@ -5,16 +5,18 @@
 //! `Spinner.tsx:41` (`SPINNER_FRAMES = [...DEFAULT, ...reverse(DEFAULT)]`):
 //! 6 forward chars then 6 reverse chars = 12 total.
 //!
-//! Linux platforms substitute `✳` → `*` (one frame difference); locked here
-//! as the darwin variant since macOS is our primary dev platform and the
-//! spec §2.8 requires byte-for-byte parity with claude-code. (A
-//! `cfg(target_os = "linux")` variant can be added later if needed.)
+//! (SS-09) `frame_at_index` selects the platform/`$TERM`-appropriate frame
+//! set at runtime (claude-code `getDefaultCharacters`): `TERM=xterm-ghostty`
+//! substitutes the 6th glyph `✽`→`*`; non-macOS otherwise substitutes the
+//! 3rd glyph `✳`→`*` (Linux). `SPINNER_FRAMES` stays the darwin-default
+//! constant other code/tests reference directly.
 //!
 //! The verb pool is claude-code's full [`SPINNER_VERBS`] list
 //! (`claude-code/src/constants/spinnerVerbs.ts:17-203`, 187 entries), ported
-//! byte-for-byte in source order. The live component picks a random start verb on mount
-//! ([`initial_verb_index`]) and advances every [`VERB_ROTATE_MS`], mirroring
-//! claude-code's random-on-mount behavior. Honoring a user `spinnerVerbs`
+//! byte-for-byte in source order. The live component picks a random verb on mount
+//! ([`initial_verb_index`]) and keeps it for the spinner's lifetime, mirroring
+//! claude-code's `useState(() => sample(...))` (one verb per turn, no rotation).
+//! Honoring a user `spinnerVerbs`
 //! `{mode, verbs}` setting is implemented by [`resolve_spinner_verbs`]
 //! (`spinnerVerbs.ts:3-13`); the settings *loader* plumbing is wired in only
 //! once the TUI settings reader exposes that field.
@@ -24,6 +26,27 @@ use iocraft::prelude::*;
 /// 12-frame asterisk animation (forward+reverse cycle). claude-code's
 /// darwin default characters from `Spinner/utils.ts`.
 pub const SPINNER_FRAMES: &[&str] = &["·", "✢", "✳", "✶", "✻", "✽", "✽", "✻", "✶", "✳", "✢", "·"];
+
+/// (SS-09) `TERM=xterm-ghostty` substitutes the 6th glyph `✽`→`*` (renders
+/// slightly offset in Ghostty otherwise).
+const SPINNER_FRAMES_GHOSTTY: &[&str] = &["·", "✢", "✳", "✶", "✻", "*", "*", "✻", "✶", "✳", "✢", "·"];
+
+/// (SS-09) Non-macOS, non-Ghostty (claude-code's `else` branch, covering
+/// Linux) substitutes the 3rd glyph `✳`→`*`.
+const SPINNER_FRAMES_OTHER: &[&str] = &["·", "✢", "*", "✶", "✻", "✽", "✽", "✻", "✶", "✳", "✢", "·"];
+
+/// (SS-09) claude-code `getDefaultCharacters`: select the frame set by
+/// `$TERM` (ghostty) first, else by platform (darwin vs. everything else).
+#[must_use]
+fn spinner_frames_for(term: Option<&str>, is_macos: bool) -> &'static [&'static str] {
+    if term == Some("xterm-ghostty") {
+        SPINNER_FRAMES_GHOSTTY
+    } else if is_macos {
+        SPINNER_FRAMES
+    } else {
+        SPINNER_FRAMES_OTHER
+    }
+}
 
 /// The 3-verb subset the M6 deterministic snapshot/parity fixtures lock
 /// (Crunching/Thinking/Generating). Retained only as the backing pool for
@@ -340,16 +363,19 @@ pub fn resolved_verb_at_index(verbs: &[String], index: usize) -> &str {
 /// churn under the 30fps cap.
 pub const FRAME_TICK_MS: u64 = 100;
 
-/// Time between verb rotations. Locked at 4000ms — long enough that users
-/// notice the change, short enough that it doesn't feel static. The live
-/// component advances by one verb in the full [`SPINNER_VERBS`] pool per tick.
+/// Historical verb-rotation cadence. RETAINED for reference only: the live
+/// spinner no longer rotates verbs — claude-code picks one verb on mount and
+/// keeps it for the whole turn (see [`SpinnerWithVerb`]).
 pub const VERB_ROTATE_MS: u64 = 4000;
 
-/// Get the spinner glyph for a tick index. Wraps modulo `SPINNER_FRAMES.len()`.
+/// Get the spinner glyph for a tick index. (SS-09) Selects the platform/TERM-
+/// appropriate frame set (claude-code `getDefaultCharacters`); wraps modulo
+/// its length (always 12).
 #[inline]
 #[must_use]
 pub fn frame_at_index(tick: usize) -> &'static str {
-    SPINNER_FRAMES[tick % SPINNER_FRAMES.len()]
+    let frames = spinner_frames_for(std::env::var("TERM").ok().as_deref(), cfg!(target_os = "macos"));
+    frames[tick % frames.len()]
 }
 
 /// Get the verb for a rotation index. Wraps modulo `VERBS_M6.len()`.
@@ -369,26 +395,38 @@ pub fn format_spinner_line(tick: usize, rotation: usize) -> String {
     format!("{} {}…", frame_at_index(tick), verb_at_index(rotation))
 }
 
-/// Props for [`SpinnerWithVerb`]. Both fields are hook-managed inside the
-/// component by default; pass `Some(_)` to override (used by snapshot tests).
+/// Props for [`SpinnerWithVerb`]. The frame/verb fields are hook-managed
+/// inside the component by default; pass `Some(_)` to override (used by
+/// snapshot tests).
 #[derive(Default, Props)]
 pub struct SpinnerWithVerbProps {
     /// Override the frame index. `None` (default) → component ticks
     /// internally at `FRAME_TICK_MS`.
     pub frame_override: Option<usize>,
-    /// Override the verb rotation index. `None` → internal rotation at
-    /// `VERB_ROTATE_MS`.
+    /// Override the verb index. `None` → a random verb is chosen once on
+    /// mount and kept for the spinner's lifetime (claude-code picks one verb
+    /// per turn; it does not rotate).
     pub verb_override: Option<usize>,
+    /// Accent color for the glyph + verb. `None` (default) falls back to the
+    /// dark-theme Claude accent; the REPL threads the active `theme.claude`
+    /// (claude-code `Spinner` `defaultColor='claude'`).
+    pub color: Option<Color>,
+    /// (SS-06) When `true`, the glyph is pinned to frame 0 and the animation
+    /// tick is suppressed (claude-code `reducedMotion ? 0 : Math.floor(...)`,
+    /// `useAnimationFrame(reducedMotion ? null : 50)`). Driven by the
+    /// `prefersReducedMotion` setting threaded from the REPL.
+    pub reduced_motion: bool,
 }
 
 /// Renders one line: `"{frame} {verb}…"`. While mounted, advances frames
-/// at 10fps and rotates verbs every 4s. Both intervals are constants
-/// (`FRAME_TICK_MS`, `VERB_ROTATE_MS`).
+/// at 10fps (`FRAME_TICK_MS`). The verb is fixed: a **random** index is chosen
+/// once on mount ([`initial_verb_index`] + [`live_seed`]) from claude-code's
+/// full [`SPINNER_VERBS`] pool and kept for the spinner's lifetime — matching
+/// claude-code's `useState(() => sample(getSpinnerVerbs()))`, which never
+/// re-samples (a fresh verb is picked only on the next mount, i.e. next turn).
 ///
-/// The verb is drawn from claude-code's full [`SPINNER_VERBS`] pool, starting
-/// at a **random** index chosen once on mount ([`initial_verb_index`] +
-/// [`live_seed`]) — matching claude-code's random-on-mount selection — then
-/// advancing by 1 (wrapping) each rotation.
+/// The glyph + verb render in the active theme's Claude accent (`props.color`,
+/// threaded from `theme.claude`; claude-code `Spinner` `defaultColor='claude'`).
 ///
 /// Mounting/unmounting is the caller's responsibility: the REPL screen
 /// wraps this in `if app.streaming.is_some() { <SpinnerWithVerb/> }`.
@@ -399,10 +437,16 @@ pub fn SpinnerWithVerb(
 ) -> impl Into<AnyElement<'static>> {
     let mut frame = hooks.use_state(|| 0usize);
     // Random start verb chosen once on mount (seeded from the wall clock), so
-    // each spinner mount opens on a different verb like claude-code does.
+    // each spinner mount opens on a different verb like claude-code does. It is
+    // NOT rotated thereafter — claude-code keeps one verb for the whole turn.
     let mut verb = hooks.use_state(|| initial_verb_index(SPINNER_VERBS.len(), live_seed()));
 
-    if let Some(f) = props.frame_override {
+    if props.reduced_motion {
+        // (SS-06) Pin the glyph to frame 0 and start no tick
+        // (claude-code `frame = reducedMotion ? 0 : …`). A `frame_override`
+        // still wins for deterministic snapshot tests.
+        frame.set(props.frame_override.unwrap_or(0));
+    } else if let Some(f) = props.frame_override {
         frame.set(f);
     } else {
         hooks.use_future(async move {
@@ -417,16 +461,6 @@ pub fn SpinnerWithVerb(
     }
     if let Some(v) = props.verb_override {
         verb.set(v);
-    } else {
-        hooks.use_future(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_millis(VERB_ROTATE_MS));
-            tick.tick().await;
-            loop {
-                tick.tick().await;
-                let cur = verb.get();
-                verb.set(cur.wrapping_add(1));
-            }
-        });
     }
 
     let line = format!(
@@ -434,9 +468,13 @@ pub fn SpinnerWithVerb(
         frame_at_index(frame.get()),
         pool_verb_at_index(verb.get())
     );
+    // Default fallback = dark-theme Claude accent rgb(215,119,87); the live
+    // REPL passes the active `theme.claude` so the spinner recolors per theme.
+    let color = props.color.unwrap_or(Color::Rgb { r: 215, g: 119, b: 87 });
     element! {
-        View(flex_direction: FlexDirection::Row) {
-            Text(content: line, color: Color::Cyan)
+        // (SS-05) One blank row above the spinner (claude-code `marginTop={1}`).
+        View(flex_direction: FlexDirection::Row, margin_top: 1) {
+            Text(content: line, color: color)
         }
     }
 }
@@ -464,6 +502,24 @@ mod tests {
         assert_eq!(format!("{}{}", "Crunching", '…'), "Crunching…");
         // U+2026 HORIZONTAL ELLIPSIS, NOT three ASCII dots.
         assert_eq!('…' as u32, 0x2026);
+    }
+
+    #[test]
+    fn spinner_frames_for_platform_and_term() {
+        // (SS-09) Parameterized — no env reading, so no environment coupling.
+        assert_eq!(spinner_frames_for(None, true), SPINNER_FRAMES); // macOS
+        assert_eq!(spinner_frames_for(None, false), SPINNER_FRAMES_OTHER); // Linux
+        // Ghostty wins regardless of platform.
+        assert_eq!(spinner_frames_for(Some("xterm-ghostty"), true), SPINNER_FRAMES_GHOSTTY);
+        assert_eq!(spinner_frames_for(Some("xterm-ghostty"), false), SPINNER_FRAMES_GHOSTTY);
+        assert_eq!(
+            SPINNER_FRAMES_GHOSTTY,
+            &["·", "✢", "✳", "✶", "✻", "*", "*", "✻", "✶", "✳", "✢", "·"]
+        );
+        assert_eq!(
+            SPINNER_FRAMES_OTHER,
+            &["·", "✢", "*", "✶", "✻", "✽", "✽", "✻", "✶", "✳", "✢", "·"]
+        );
     }
 
     #[test]

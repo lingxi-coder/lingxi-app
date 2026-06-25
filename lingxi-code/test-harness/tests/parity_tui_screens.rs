@@ -161,6 +161,8 @@ fn resume_list_select() {
             title: sess["summary"].as_str().unwrap().to_string(),
             modified_label: "2026-05-30T00:00:00Z".to_string(),
             count_label: "(1 message)".to_string(),
+            // (resume-metadata) dim `<ago> · N messages` line under the title.
+            metadata_label: "30 days ago \u{00b7} 1 message".to_string(),
         })
         .collect();
 

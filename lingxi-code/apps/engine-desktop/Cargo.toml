@@ -15,7 +15,6 @@ tool-api = { path = "../../tool-api" }
 traits = { path = "../../traits" }
 command-api = { path = "../../command-api" }
 command-core = { path = "../../commands/core" }
-command-desktop = { path = "../../commands/desktop" }
 # Live cron scheduler (tick loop). `tool-cron` only persists descriptors; this
 # crate runs them (see SKILLLIST.1-adjacent cron wiring in lib.rs `build`).
 cron = { path = "../../cron" }
@@ -65,6 +64,14 @@ tasks = { path = "../../tasks" }
 # stays green; deliberately NOT added to `engine-mobile` (program non-goal —
 # the InProcessTeammate dependency set is absent there).
 coordinator = { path = "../../coordinator" }
+# Dual-LLM multi-agent (LingXi-only). The composition root owns the adapter
+# (`multi_agent_runtime`) that makes the crate's injected `CandidateRunner` /
+# `Reviser` / `VerificationFixer` seams real by driving the cross-crate
+# `traits::SubagentSpawner` (the session's already-assembled `subagent_spawner`
+# + `SubagentInheritance`). The `multi-agent` crate itself stays thin +
+# trait-driven (deps: traits/llm-client/sidequery/protocol/cost only); only
+# this app-tier root binds it to the real spawner. App→engine-tier is allowed.
+multi-agent = { path = "../../multi-agent" }
 # Real posix platform: `build()` wires `PosixFileSystem` / `PosixRuntime` /
 # `PosixHttp` / `PosixClock` / secure storage, and the ConfigChange settings
 # watcher drives the full `notify`-backed `FileSystem::watch` primitive
@@ -83,6 +90,9 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = "0.1"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+# `CancellationToken` for the dual-LLM `multi_agent_runtime` adapter's
+# spawn-vs-cancel race (the multi-agent run contexts carry one).
+tokio-util = { workspace = true }
 # Phase 3a: resolve `~`-prefixed permission patterns + the home root for
 # file-path content matching (same `dirs` version as `orchestrator`).
 dirs = "5"
@@ -98,7 +108,6 @@ serde_json = { workspace = true }
 
 # Skill composition (P8): the abstraction crate + the builtin skill set.
 skill-api = { path = "../../skill-api" }
-skill-builtin = { path = "../../skills/builtin" }
 
 # The 14 desktop builtin tool crates (9 cross-platform + 5 desktop-only).
 tool-file = { path = "../../tools/file", features = ["image-read", "pdf-read", "pdf-render"] }

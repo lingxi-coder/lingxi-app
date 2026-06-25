@@ -179,6 +179,7 @@ async fn hooks_dispatch() {
         event: "PostToolUse".into(),
         matcher: None,
         timeout_ms: 60_000,
+        ..HookInfo::default()
     }]);
     let r = d.dispatch("/hooks").await;
     if let SlashDispatchResult::Handled { display } = r {
@@ -195,6 +196,8 @@ async fn agents_dispatch() {
         name: "r".into(),
         description: "x".into(),
         tools_allowed: vec![],
+        wildcard_tools: false,
+        ..AgentInfo::default()
     }]);
     let r = d.dispatch("/agents").await;
     if let SlashDispatchResult::Handled { display } = r {

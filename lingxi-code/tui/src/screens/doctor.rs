@@ -157,7 +157,7 @@ pub fn DoctorScreen(props: &DoctorScreenProps) -> impl Into<AnyElement<'static>>
             Text(content: format!("└ Truecolor: {truecolor}"))
             Text(content: format!("└ Terminal size: {size}"))
             Text(content: "")
-            Text(content: "Press Esc or q to return", color: Color::DarkGrey)
+            Text(content: "Press Enter to continue\u{2026}", color: Color::DarkGrey)
         }
     }
 }

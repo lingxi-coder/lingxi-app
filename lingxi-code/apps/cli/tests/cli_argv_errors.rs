@@ -6,13 +6,16 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+/// Byte-parity with claude-code/commander: every usage error (unknown flag,
+/// invalid choice, missing arg, cross-flag gate) exits 1, NOT the BSD
+/// `EX_USAGE` 2. Flipped 2026-06-25 (ARGV_ERROR 2 → 1).
 #[test]
-fn unknown_flag_exits_2() {
+fn unknown_flag_exits_1() {
     Command::cargo_bin("lingxi-cli")
         .unwrap()
         .arg("--nonexistent-flag")
         .assert()
-        .code(2);
+        .code(1);
 }
 
 #[test]

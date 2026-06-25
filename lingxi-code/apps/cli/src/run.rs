@@ -34,7 +34,11 @@ use traits::{FileSystem, McpStatus, OrchestratorHandle, SlashCommandDispatcher, 
 pub async fn run_oneshot(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -> i32 {
     let prompt = argv.prompt.clone().unwrap_or_default();
     if prompt.trim().is_empty() {
-        eprintln!("lingxi-cli: empty prompt");
+        // Byte-parity with claude-code print.ts: the empty-input error in print
+        // mode is this exact line, then exit 1 (ARGV_ERROR == 1 post-flip).
+        eprintln!(
+            "Error: Input must be provided either through stdin or as a prompt argument when using --print"
+        );
         return exit_codes::ARGV_ERROR;
     }
 
@@ -82,7 +86,10 @@ pub async fn run_stream_json_print(
 ) -> i32 {
     let prompt = argv.prompt.clone().unwrap_or_default();
     if prompt.trim().is_empty() {
-        eprintln!("lingxi-cli: empty prompt");
+        // Byte-parity with claude-code print.ts (see run_oneshot).
+        eprintln!(
+            "Error: Input must be provided either through stdin or as a prompt argument when using --print"
+        );
         return exit_codes::ARGV_ERROR;
     }
 
@@ -726,13 +733,14 @@ pub async fn run_stream_json_input_loop(
         let prompt = content_to_prompt(&turn.content);
 
         // Under --replay-user-messages, re-emit the inbound user frame as
-        // isReplay:true (the initial-prompt ack for each new turn).
+        // isReplay:true (the initial-prompt ack for each new turn). Echo the
+        // ORIGINAL uuid + content so the host can correlate the ack.
         if argv.replay_user_messages {
             let ack_uuid = turn
                 .uuid
                 .clone()
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            emit_replay_ack(&ack_uuid, &session_id_str);
+            emit_replay_ack(&ack_uuid, &turn.content, None, &session_id_str);
         }
 
         // Phase 1: use cancel-aware turn entry point so `interrupt` can abort

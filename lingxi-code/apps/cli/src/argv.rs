@@ -85,7 +85,10 @@ pub struct Argv {
     /// Maximum number of agentic turns before the loop early-exits (claude-code
     /// `--max-turns <turns>`, "only works with --print"). Maps to
     /// `OrchestratorConfig::max_turns`; unset (or `0`) = unbounded.
-    #[arg(long = "max-turns", value_name = "turns")]
+    ///
+    /// HIDDEN in claude-code 2.1.191 (`.hideHelp()`; absent from `claude
+    /// --help`) — mirrored here with `hide = true`.
+    #[arg(long = "max-turns", value_name = "turns", hide = true)]
     pub max_turns: Option<u32>,
 
     /// Maximum dollar amount to spend on API calls (claude-code
@@ -200,15 +203,21 @@ pub struct Argv {
     #[arg(long = "safe-mode")]
     pub safe_mode: bool,
 
-    /// Configure agent behaviors (space-separated)
-    // TODO(agents): wire into agent configuration
-    #[arg(long = "agents", value_name = "agents", num_args = 1..)]
-    pub agents: Option<Vec<String>>,
+    /// JSON object defining custom agents (e.g. '{"reviewer": {"description":
+    /// "Reviews code", "prompt": "You are a code reviewer"}}')
+    ///
+    /// claude-code `--agents <json>` takes EXACTLY ONE value (a JSON object
+    /// string parsed downstream), not a space-separated list.
+    // TODO(agents): parse the JSON + wire into agent configuration
+    #[arg(long = "agents", value_name = "json")]
+    pub agents: Option<String>,
 
-    /// Configure a single agent
+    /// Agent for the current session. Overrides the 'agent' setting.
+    ///
+    /// claude-code `--agent <agent>` takes EXACTLY ONE value.
     // TODO(agent): wire into agent configuration
-    #[arg(long = "agent", value_name = "agent", num_args = 1..)]
-    pub agent: Option<Vec<String>>,
+    #[arg(long = "agent", value_name = "agent")]
+    pub agent: Option<String>,
 
     /// Directory to load plugins from
     // TODO(plugin-dir): wire into plugin loading path
@@ -269,9 +278,20 @@ pub struct Argv {
     #[arg(long = "max-thinking-tokens", value_name = "tokens", hide = true)]
     pub max_thinking_tokens: Option<u32>,
 
-    /// Enable prompt suggestions. In print/SDK mode, emits a prompt_suggestion message after each turn (hidden flag)
+    /// Enable prompt suggestions. In print/SDK mode, emits a prompt_suggestion
+    /// message after each turn with a predicted next user prompt
+    ///
+    /// VISIBLE in claude-code 2.1.191 with a fixed choices list and preset
+    /// "true": bare `--prompt-suggestions` → "true"; an out-of-choices value
+    /// (e.g. "banana") is HARD-REJECTED. The `value_parser` below mirrors that.
     // TODO(prompt-suggestions): wire into prompt suggestion emission
-    #[arg(long = "prompt-suggestions", value_name = "value", num_args = 0..=1, default_missing_value = "true", hide = true)]
+    #[arg(
+        long = "prompt-suggestions",
+        value_name = "value",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = ["true", "false", "1", "0", "yes", "no", "on", "off"]
+    )]
     pub prompt_suggestions: Option<String>,
 
     /// Validate the final result against this JSON Schema, forcing structured
@@ -282,9 +302,17 @@ pub struct Argv {
     #[arg(long = "json-schema", value_name = "schema")]
     pub json_schema: Option<String>,
 
-    /// Enable verbose logging to stderr
-    #[arg(long = "debug")]
-    pub debug: bool,
+    /// Enable verbose logging to stderr (debug mode) with optional category
+    /// filtering (e.g. "api,hooks" or "!1p,!file")
+    ///
+    /// claude-code: `-d, --debug [filter]`. The value is OPTIONAL: bare `-d` /
+    /// `--debug` enables debug mode unfiltered (empty sentinel); `--debug
+    /// api,hooks` carries the category filter. Stored as `Option<String>`:
+    /// `None` = off, `Some("")` = on/unfiltered, `Some(filter)` = on/filtered.
+    /// `debug_enabled()` collapses it back to the old bool for callers that
+    /// only need on/off (e.g. `logging::init`).
+    #[arg(short = 'd', long = "debug", value_name = "filter", num_args = 0..=1, default_missing_value = "")]
+    pub debug: Option<String>,
 
     /// Disable TUI; use stdio REPL (line-editing fallback)
     #[arg(long = "no-tui")]
@@ -297,11 +325,115 @@ pub struct Argv {
     #[arg(long = "dangerously-skip-permissions")]
     pub dangerously_skip_permissions: bool,
 
-    /// Initial permission mode (`--permission-mode <mode>`): one of
-    /// `default`/`plan`/`acceptEdits`/`bypassPermissions`/`dontAsk`. Unknown
-    /// values resolve to `default` (claude-code `permissionModeFromString`).
-    #[arg(long = "permission-mode", value_name = "MODE")]
+    /// Initial permission mode (`--permission-mode <mode>`). claude-code 2.1.191
+    /// commander `.choices(['acceptEdits','auto','bypassPermissions','default',
+    /// 'dontAsk','plan'])` — an out-of-choices value is HARD-REJECTED at parse
+    /// time (exit 1 with an allowed-choices message), so the `value_parser`
+    /// below mirrors that. `auto` is a real choice (lingxi maps unknown→Default
+    /// downstream as unreachable defense-in-depth).
+    #[arg(
+        long = "permission-mode",
+        value_name = "MODE",
+        value_parser = ["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"]
+    )]
     pub permission_mode: Option<String>,
+
+    // ── v2.1.191 parity: previously-missing public top-level flags ───────────
+    // These are accepted by clap so `lingxi-cli` no longer HARD-ERRORS on a
+    // visible `claude --help` flag. Behavioral wiring for the not-yet-ported
+    // ones is tracked in task "Wire un-ported flag backing features"; until
+    // then they parse-and-carry (accepted, inert) so scripts/SDK callers stop
+    // breaking on contact. claude-code source: main.tsx flag registration.
+
+    /// Use a specific session ID for the conversation (must be a valid UUID)
+    ///
+    /// claude-code `--session-id <uuid>`. Overrides the generated session id.
+    #[arg(long = "session-id", value_name = "uuid")]
+    pub session_id: Option<String>,
+
+    /// Set a display name for this session (shown in the prompt box, /resume
+    /// picker, and terminal title)
+    #[arg(short = 'n', long = "name", value_name = "name")]
+    pub name: Option<String>,
+
+    /// Comma-separated list of setting sources to load (user, project, local).
+    #[arg(long = "setting-sources", value_name = "sources")]
+    pub setting_sources: Option<String>,
+
+    /// Only use MCP servers from --mcp-config, ignoring all other MCP
+    /// configurations
+    #[arg(long = "strict-mcp-config")]
+    pub strict_mcp_config: bool,
+
+    /// Move per-machine sections (cwd, env info, memory paths, git status) from
+    /// the system prompt into the first user message. Improves cross-user
+    /// prompt-cache reuse. Only applies with the default system prompt.
+    #[arg(long = "exclude-dynamic-system-prompt-sections")]
+    pub exclude_dynamic_system_prompt_sections: bool,
+
+    /// [DEPRECATED. Use --debug instead] Enable MCP debug mode (shows MCP
+    /// server errors)
+    #[arg(long = "mcp-debug")]
+    pub mcp_debug: bool,
+
+    /// Automatically connect to IDE on startup if exactly one valid IDE is
+    /// available
+    #[arg(long = "ide")]
+    pub ide: bool,
+
+    /// MCP tool to use for permission prompts (only works with --print). Hidden
+    /// SDK flag (claude-code registers it with `.hideHelp()`).
+    #[arg(long = "permission-prompt-tool", value_name = "tool", hide = true)]
+    pub permission_prompt_tool: Option<String>,
+
+    /// Enable bypassing all permission checks as an option, without it being
+    /// enabled by default. Recommended only for sandboxes with no internet
+    /// access.
+    #[arg(long = "allow-dangerously-skip-permissions")]
+    pub allow_dangerously_skip_permissions: bool,
+
+    /// Disable all skills
+    #[arg(long = "disable-slash-commands")]
+    pub disable_slash_commands: bool,
+
+    /// Enable Claude in Chrome integration
+    #[arg(long = "chrome")]
+    pub chrome: bool,
+
+    /// Disable Claude in Chrome integration
+    #[arg(long = "no-chrome")]
+    pub no_chrome: bool,
+
+    /// Render screen-reader friendly output (flat text, no decorative borders
+    /// or animations).
+    #[arg(long = "ax-screen-reader")]
+    pub ax_screen_reader: bool,
+
+    /// File resources to download at startup. Format: file_id:relative_path
+    /// (e.g. --file file_abc:doc.txt file_def:img.png)
+    #[arg(long = "file", value_name = "specs", num_args = 1..)]
+    pub file: Option<Vec<String>>,
+
+    /// Create a new git worktree for this session (optionally specify a name)
+    ///
+    /// claude-code `-w, --worktree [name]`. Value is OPTIONAL: bare `-w` mints
+    /// an auto-named worktree (empty sentinel); `-w name` names it.
+    #[arg(short = 'w', long = "worktree", value_name = "name", num_args = 0..=1, default_missing_value = "")]
+    pub worktree: Option<String>,
+
+    /// Create a tmux session for the worktree (requires --worktree). Uses iTerm2
+    /// native panes when available; use --tmux=classic for traditional tmux.
+    ///
+    /// `--tmux` alone = native (empty sentinel); `--tmux=classic` = classic.
+    /// `require_equals` so the value only binds via `=` (a bare `--tmux` won't
+    /// swallow a following prompt token), matching commander's boolean-ish flag.
+    #[arg(long = "tmux", value_name = "mode", num_args = 0..=1, require_equals = true, default_missing_value = "")]
+    pub tmux: Option<String>,
+
+    /// Start the session as a background agent and return immediately (manage
+    /// with `lingxi-cli agents`)
+    #[arg(long = "background", visible_alias = "bg")]
+    pub background: bool,
 }
 
 impl Argv {
@@ -318,6 +450,25 @@ impl Argv {
         T: Into<std::ffi::OsString> + Clone,
     {
         Self::try_parse_from(iter)
+    }
+
+    /// True iff debug mode is on (`-d`/`--debug` in any form, the deprecated
+    /// `--mcp-debug` alias, or `--debug-file` which implicitly enables it).
+    /// Collapses the new `Option<String>` filter back to the old on/off bool.
+    #[must_use]
+    pub fn debug_enabled(&self) -> bool {
+        self.debug.is_some() || self.mcp_debug || self.debug_file.is_some()
+    }
+
+    /// The `--debug` category filter (e.g. "api,hooks" or "!1p,!file"), or
+    /// `None` when debug is off or enabled without a filter. An empty string
+    /// (bare `-d`/`--debug`) means "on, unfiltered" → `None` filter.
+    #[must_use]
+    pub fn debug_filter(&self) -> Option<&str> {
+        match self.debug.as_deref() {
+            Some(f) if !f.is_empty() => Some(f),
+            _ => None,
+        }
     }
 
     /// True iff the binary should start a FRESH REPL.
@@ -641,8 +792,25 @@ mod tests {
 
     #[test]
     fn debug_flag() {
-        let a = Argv::from_iter(["lingxi-cli", "--debug", "hi"]).unwrap();
-        assert!(a.debug);
+        // Bare `--debug` → on, unfiltered (Some("")). A following OPTION token
+        // (or end-of-args) keeps it unfiltered; a following bare word is
+        // consumed as the optional filter (claude `-d, --debug [filter]`).
+        let a = Argv::from_iter(["lingxi-cli", "--debug", "--no-tui"]).unwrap();
+        assert!(a.debug.is_some());
+        assert!(a.debug_enabled());
+        assert_eq!(a.debug_filter(), None);
+        // With a category filter value.
+        let b = Argv::from_iter(["lingxi-cli", "--debug", "api,hooks"]).unwrap();
+        assert_eq!(b.debug.as_deref(), Some("api,hooks"));
+        assert_eq!(b.debug_filter(), Some("api,hooks"));
+        // Short alias `-d`.
+        let c = Argv::from_iter(["lingxi-cli", "-d", "scope"]).unwrap();
+        assert_eq!(c.debug.as_deref(), Some("scope"));
+        assert!(c.debug_enabled());
+        // Off by default.
+        let d = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
+        assert!(d.debug.is_none());
+        assert!(!d.debug_enabled());
     }
 
     #[test]
@@ -696,7 +864,7 @@ mod tests {
             "fix it",
         ])
         .unwrap();
-        assert!(a.print && a.no_stream && a.json && a.debug && a.no_tui);
+        assert!(a.print && a.no_stream && a.json && a.debug.is_some() && a.no_tui);
         assert_eq!(a.cwd, Some(PathBuf::from("/r")));
         assert_eq!(a.model.as_deref(), Some("claude-opus-4-7"));
         assert_eq!(
@@ -868,16 +1036,121 @@ mod tests {
 
     #[test]
     fn agents_parses() {
-        let a = Argv::from_iter(["lingxi-cli", "fix it", "--agents", "coder", "reviewer"]).unwrap();
-        let agents = a.agents.unwrap();
-        assert_eq!(agents, &["coder", "reviewer"]);
+        // claude `--agents <json>` is a SINGLE value (a JSON object string),
+        // not a space-separated list.
+        let json = r#"{"reviewer":{"description":"Reviews code","prompt":"You are a reviewer"}}"#;
+        let a = Argv::from_iter(["lingxi-cli", "fix it", "--agents", json]).unwrap();
+        assert_eq!(a.agents.as_deref(), Some(json));
     }
 
     #[test]
     fn agent_parses() {
+        // claude `--agent <agent>` is a SINGLE value.
         let a = Argv::from_iter(["lingxi-cli", "fix it", "--agent", "coder"]).unwrap();
-        let agent = a.agent.unwrap();
-        assert_eq!(agent, &["coder"]);
+        assert_eq!(a.agent.as_deref(), Some("coder"));
+    }
+
+    // ── v2.1.191 parity: new flags parse + choices enforcement ───────────────
+
+    #[test]
+    fn session_id_parses() {
+        let a = Argv::from_iter(["lingxi-cli", "--session-id", "00000000-0000-0000-0000-000000000001", "hi"]).unwrap();
+        assert_eq!(a.session_id.as_deref(), Some("00000000-0000-0000-0000-000000000001"));
+    }
+
+    #[test]
+    fn name_short_and_long_parse() {
+        let a = Argv::from_iter(["lingxi-cli", "-n", "my session", "hi"]).unwrap();
+        assert_eq!(a.name.as_deref(), Some("my session"));
+        let b = Argv::from_iter(["lingxi-cli", "--name", "other", "hi"]).unwrap();
+        assert_eq!(b.name.as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn setting_sources_strict_mcp_exclude_dynamic_parse() {
+        let a = Argv::from_iter([
+            "lingxi-cli", "--setting-sources", "user,project",
+            "--strict-mcp-config", "--exclude-dynamic-system-prompt-sections", "hi",
+        ]).unwrap();
+        assert_eq!(a.setting_sources.as_deref(), Some("user,project"));
+        assert!(a.strict_mcp_config);
+        assert!(a.exclude_dynamic_system_prompt_sections);
+    }
+
+    #[test]
+    fn previously_hard_erroring_flags_now_accepted() {
+        // The whole batch that used to hard-error must now parse cleanly.
+        // Positional prompt FIRST so the greedy multi-value `--file` (num_args
+        // 1..) doesn't swallow it (same convention as allowed_tools_parses).
+        let a = Argv::from_iter([
+            "lingxi-cli", "hi",
+            "--mcp-debug", "--ide", "--allow-dangerously-skip-permissions",
+            "--disable-slash-commands", "--chrome", "--ax-screen-reader",
+            "--permission-prompt-tool", "mcp__perm__prompt",
+            "--file", "file_abc:doc.txt", "file_def:img.png",
+        ]).unwrap();
+        assert_eq!(a.prompt.as_deref(), Some("hi"));
+        assert!(a.mcp_debug && a.ide && a.allow_dangerously_skip_permissions);
+        assert!(a.disable_slash_commands && a.chrome && a.ax_screen_reader);
+        assert_eq!(a.permission_prompt_tool.as_deref(), Some("mcp__perm__prompt"));
+        assert_eq!(a.file.as_deref().map(<[String]>::len), Some(2));
+    }
+
+    #[test]
+    fn no_chrome_parses() {
+        let a = Argv::from_iter(["lingxi-cli", "--no-chrome", "hi"]).unwrap();
+        assert!(a.no_chrome);
+        assert!(!a.chrome);
+    }
+
+    #[test]
+    fn worktree_optional_value() {
+        let a = Argv::from_iter(["lingxi-cli", "--worktree", "feature-x"]).unwrap();
+        assert_eq!(a.worktree.as_deref(), Some("feature-x"));
+        // Bare `-w` → empty sentinel (auto-named).
+        let b = Argv::from_iter(["lingxi-cli", "-w"]).unwrap();
+        assert_eq!(b.worktree.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn tmux_requires_equals_value() {
+        // `--tmux` alone → native (empty sentinel).
+        let a = Argv::from_iter(["lingxi-cli", "--tmux", "-w", "wt"]).unwrap();
+        assert_eq!(a.tmux.as_deref(), Some(""));
+        // `--tmux=classic` → classic.
+        let b = Argv::from_iter(["lingxi-cli", "--tmux=classic", "-w", "wt"]).unwrap();
+        assert_eq!(b.tmux.as_deref(), Some("classic"));
+    }
+
+    #[test]
+    fn background_and_bg_alias_parse() {
+        let a = Argv::from_iter(["lingxi-cli", "--background", "hi"]).unwrap();
+        assert!(a.background);
+        let b = Argv::from_iter(["lingxi-cli", "--bg", "hi"]).unwrap();
+        assert!(b.background);
+    }
+
+    #[test]
+    fn permission_mode_rejects_unknown_choice() {
+        // claude commander `.choices(...)` hard-rejects out-of-list values.
+        assert!(Argv::from_iter(["lingxi-cli", "--permission-mode", "bogus", "hi"]).is_err());
+        // `auto` is a real choice in 2.1.191.
+        let a = Argv::from_iter(["lingxi-cli", "--permission-mode", "auto", "hi"]).unwrap();
+        assert_eq!(a.permission_mode.as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn prompt_suggestions_rejects_invalid_choice() {
+        assert!(Argv::from_iter(["lingxi-cli", "--prompt-suggestions", "banana", "hi"]).is_err());
+        // Valid choices + bare preset still work.
+        assert_eq!(
+            Argv::from_iter(["lingxi-cli", "--prompt-suggestions", "off", "hi"]).unwrap().prompt_suggestions.as_deref(),
+            Some("off")
+        );
+        assert_eq!(
+            Argv::from_iter(["lingxi-cli", "--prompt-suggestions"]).unwrap().prompt_suggestions.as_deref(),
+            Some("true")
+        );
     }
 
     #[test]

@@ -93,7 +93,10 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         }
     };
 
-    logging::init(parsed.debug);
+    // `--debug` is now `Option<String>` (optional category filter); collapse to
+    // on/off for logging init. `--mcp-debug` (deprecated alias) and `--debug-file`
+    // also imply debug mode.
+    logging::init(parsed.debug_enabled());
     tracing::debug!(?parsed, "argv parsed");
 
     if let Err(e) = cwd::apply_cwd(parsed.cwd.as_deref()) {
@@ -129,6 +132,15 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // --replay-user-messages (§4.1 SPEC-inferred.md, exact error strings).
     if let Err(msg) = parsed.validate_stream_json_input_args() {
         eprintln!("Error: {msg}");
+        return exit_codes::ARGV_ERROR;
+    }
+
+    // `--include-partial-messages` requires BOTH --print and
+    // --output-format=stream-json (claude-code main.tsx:1848-1852). Byte-exact
+    // error + exit 1 (ARGV_ERROR). Without this gate lingxi silently accepted
+    // the misuse and ran a (billable) turn.
+    if parsed.include_partial_messages && !(parsed.print && parsed.is_stream_json()) {
+        eprintln!("Error: --include-partial-messages requires --print and --output-format=stream-json.");
         return exit_codes::ARGV_ERROR;
     }
 

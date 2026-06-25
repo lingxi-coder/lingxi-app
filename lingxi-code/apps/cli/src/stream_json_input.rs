@@ -110,8 +110,15 @@ pub struct UserTurn {
 pub enum FrameAction {
     /// A validated `user` turn to feed into the orchestrator.
     UserTurn(UserTurn),
-    /// A duplicate `user` frame (same uuid). Payload is the uuid for replay ack.
-    DuplicateUser { uuid: String },
+    /// A duplicate `user` frame (same uuid). Carries the ORIGINAL uuid,
+    /// content, and timestamp so the replay-ack can echo them verbatim —
+    /// claude-code's `SDKUserMessageReplaySchema` requires the original uuid +
+    /// content (re-minting them defeats the host's replay correlation).
+    DuplicateUser {
+        uuid: String,
+        content: Value,
+        timestamp: Option<String>,
+    },
     /// A `control_request` frame — routed to the control dispatcher.
     /// Carries the full parsed (normalised) frame value including `request_id`
     /// and `request` sub-object. The `request` field is guaranteed present
@@ -218,11 +225,19 @@ pub fn process_line(
                 .cloned()
                 .unwrap_or(Value::String(String::new()));
 
+            // Original timestamp (echoed verbatim on a replay-ack when present).
+            let timestamp = frame.get("timestamp").and_then(Value::as_str).map(String::from);
+
             // UUID dedup.
             let uuid = frame.get("uuid").and_then(Value::as_str).map(String::from);
             if let Some(ref u) = uuid {
                 if seen_uuids.contains(u) {
-                    return Ok(FrameAction::DuplicateUser { uuid: u.clone() });
+                    // Echo the ORIGINAL uuid + content + timestamp (not re-minted).
+                    return Ok(FrameAction::DuplicateUser {
+                        uuid: u.clone(),
+                        content,
+                        timestamp,
+                    });
                 }
                 seen_uuids.insert(u.clone());
             }
@@ -250,17 +265,24 @@ pub fn process_line(
 
 // ── Replay-ack emitter ────────────────────────────────────────────────────────
 
-/// Emit a `user` replay-ack frame to stdout (same uuid, `isReplay:true`).
-/// Used for duplicate-uuid dedup under `--replay-user-messages`.
-pub fn emit_replay_ack(uuid: &str, session_id: &str) {
-    let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let new_uuid = uuid::Uuid::new_v4().to_string();
+/// Emit a `user` replay-ack frame to stdout, echoing the ORIGINAL message so
+/// the host can correlate it (claude-code `SDKUserMessageReplaySchema`):
+/// same `uuid`, same `content`, same `timestamp` (when the inbound frame
+/// carried one — else a fresh one), `isReplay:true`.
+///
+/// `content` is the original message content (string or content-block array).
+/// `timestamp` is the original frame timestamp, if any.
+pub fn emit_replay_ack(uuid: &str, content: &Value, timestamp: Option<&str>, session_id: &str) {
+    let timestamp = timestamp.map_or_else(
+        || chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        ToString::to_string,
+    );
     let frame = json!({
         "type": "user",
-        "message": {"role": "user", "content": ""},
+        "message": {"role": "user", "content": content},
         "session_id": session_id,
         "parent_tool_use_id": null,
-        "uuid": new_uuid,
+        "uuid": uuid,
         "timestamp": timestamp,
         "isReplay": true
     });
@@ -331,10 +353,10 @@ pub fn read_input_turns(
             FrameAction::UserTurn(turn) => {
                 turns.push(turn);
             }
-            FrameAction::DuplicateUser { uuid } => {
+            FrameAction::DuplicateUser { uuid, content, timestamp } => {
                 eprintln!("Sending acknowledgment for duplicate user message: {uuid}");
                 if replay_user_messages {
-                    emit_replay_ack(&uuid, session_id);
+                    emit_replay_ack(&uuid, &content, timestamp.as_deref(), session_id);
                 }
                 // Duplicate turns are skipped — do NOT push.
             }
@@ -425,10 +447,10 @@ pub fn spawn_stdin_router(
                         break;
                     }
                 }
-                Ok(FrameAction::DuplicateUser { uuid }) => {
+                Ok(FrameAction::DuplicateUser { uuid, content, timestamp }) => {
                     eprintln!("Sending acknowledgment for duplicate user message: {uuid}");
                     if replay_user_messages {
-                        emit_replay_ack(&uuid, &session_id);
+                        emit_replay_ack(&uuid, &content, timestamp.as_deref(), &session_id);
                     }
                     // Duplicate — do NOT forward as a turn.
                 }
@@ -674,7 +696,11 @@ mod tests {
         // Second occurrence → DuplicateUser.
         let second = process_line(&line, &mut seen).unwrap();
         match second {
-            FrameAction::DuplicateUser { uuid: u } => assert_eq!(u, uuid),
+            FrameAction::DuplicateUser { uuid: u, content, .. } => {
+                assert_eq!(u, uuid);
+                // The ack must echo the ORIGINAL content, not an empty string.
+                assert_eq!(content, serde_json::json!("hi"));
+            }
             other => panic!("expected DuplicateUser, got {other:?}"),
         }
     }

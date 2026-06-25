@@ -1031,6 +1031,23 @@ pub fn render_screen(
                 }
                 .into_any()
             }
+            Screen::Transcript(tr) => {
+                // (RRS-06) The Ctrl+O transcript renders the pure
+                // `render_transcript_to_string` body (the verbose scrollback dump
+                // window + scroll indicator + footer) line-by-line in a column
+                // View. Mirrors the Skills/Help arms.
+                use crate::screens::transcript::render_transcript_to_string;
+                let body = render_transcript_to_string(tr);
+                let lines: Vec<String> = body.lines().map(str::to_string).collect();
+                element! {
+                    View(flex_direction: FlexDirection::Column, padding: 1) {
+                        #(lines.into_iter().map(|line| element! {
+                            Text(content: line)
+                        }))
+                    }
+                }
+                .into_any()
+            }
         };
     }
     // (M7-14) Message search overlay renders over the REPL at priority 3 (after

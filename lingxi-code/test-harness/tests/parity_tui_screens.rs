@@ -73,6 +73,7 @@ fn active_screen_name(st: &AppState) -> Option<&'static str> {
         Some(Screen::Help(_)) => Some("help"),
         Some(Screen::Permissions(_)) => Some("permissions"),
         Some(Screen::Connect(_)) => Some("connect"),
+        Some(Screen::Transcript(_)) => Some("transcript"),
         None => None,
     }
 }

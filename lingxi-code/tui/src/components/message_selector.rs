@@ -143,7 +143,10 @@ fn resolve_export_filename(input: &str) -> String {
 }
 
 /// Render the scrollback to a plain-text transcript.
-fn render_transcript(messages: &[RenderedMessage]) -> String {
+///
+/// Shared by `/export` (the file written here) and the Ctrl+O transcript screen
+/// (`screens::transcript`), so both surfaces dump the scrollback identically.
+pub(crate) fn render_transcript(messages: &[RenderedMessage]) -> String {
     let mut out = String::new();
     for m in messages {
         match m {

@@ -1225,6 +1225,12 @@ pub async fn run_one_submit(
         cancel: cancel.clone(),
     });
 
+    // (PIC-05) Expand any `[Pasted text #N]` pills back to their original
+    // content BEFORE draining images — `take_image_paths` resets the WHOLE
+    // paste registry (images AND pasted-text pairs), so pasted-text must be
+    // drained first or it's lost.
+    let pasted_texts = st.paste.take_pasted_texts();
+    let expanded = crate::components::prompt_input::expand_pasted_text_refs(submitted, &pasted_texts);
     // (MULTIMODAL.1) Consume any pasted/dragged image paths captured in the
     // prompt's paste registry so they ride along to the model as real image
     // content blocks (the `[Image #N]` placeholders in `submitted` point back
@@ -1235,7 +1241,7 @@ pub async fn run_one_submit(
     // text-only `run_turn`, byte-identical to the prior behavior.
     let image_paths = st.paste.take_image_paths();
     let outcome = orch
-        .run_turn_with_images(submitted, &image_paths, cancel)
+        .run_turn_with_images(&expanded, &image_paths, cancel)
         .await;
     st.in_flight_turn = None;
     match outcome {
@@ -2061,6 +2067,29 @@ mod image_submit_tests {
         assert!(images.is_empty(), "no captured images → empty path list");
         // Registry was already default; remains default (no observable change).
         assert_eq!(st.paste, PasteState::default());
+    }
+
+    #[tokio::test]
+    async fn submit_expands_pasted_text_pill_back_to_full_content() {
+        // (PIC-05) The model must see the ORIGINAL pasted text, not the
+        // `[Pasted text #N]` placeholder — unlike images, pasted text has no
+        // separate attachment channel.
+        use crate::components::prompt_input::PASTE_THRESHOLD;
+        let mut st = s();
+        let original = "y".repeat(PASTE_THRESHOLD + 1);
+        st.paste = process_paste(&original, st.paste.clone()).state;
+        assert_eq!(st.paste.pasted_texts, vec![(1, original.clone())]);
+
+        let orch = RecordingOrch::default();
+        let disp = dispatcher();
+        run_one_submit(&mut st, "before [Pasted text #1] after", &orch, &disp).await;
+
+        let sent = orch.prompt.lock().unwrap().clone().expect("a turn ran");
+        assert_eq!(sent, format!("before {original} after"));
+        assert!(
+            st.paste.pasted_texts.is_empty(),
+            "pasted-text registry drained on submit"
+        );
     }
 
     #[tokio::test]

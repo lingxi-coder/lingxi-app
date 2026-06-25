@@ -814,6 +814,11 @@ Usage notes:\n\
             .map_err(|e| ToolError::InvalidInput(format!("invalid input: {e}")))?;
         let mut parsed_url = validate_url(&parsed_input.url).map_err(ToolError::InvalidInput)?;
         let invocation_id = tool_api::util::ids::ulid_or_uuid();
+        // `durationMs` baseline for the result `data` object — claude-code stamps
+        // `durationMs: Date.now() - l` (l = the tool-call start) on EVERY path,
+        // including cache hits (which is why this is measured here, before the
+        // cache check, rather than at the redirect-loop `started` below).
+        let call_started = Instant::now();
 
         // Preapproved-URL flag (TS `isPreapprovedUrl(url)`, `utils.ts:130-137`):
         // host+path allowlist on the ORIGINAL URL, selecting the relaxed vs strict
@@ -865,12 +870,19 @@ Usage notes:\n\
                 hit.bytes,
             );
             return Ok(ToolCallResult {
+                // claude-code WebFetch result `data` (byte-faithful key set + order):
+                // `{bytes, code, codeText, result, durationMs, url}` (verified vs the
+                // 2.1.191 binary; `result` is the model-facing content, `codeText` is
+                // the HTTP reason phrase, `code` the numeric status). NOTE: the
+                // LingXi-internal `truncated` flag is NOT part of claude-code's
+                // contract and is intentionally omitted.
                 data: json!({
-                    "url": parsed_input.url,
-                    "status": hit.status,
-                    "content": out_content,
-                    "truncated": truncated,
                     "bytes": hit.bytes,
+                    "code": hit.status,
+                    "codeText": status_reason_phrase(hit.status),
+                    "result": out_content,
+                    "durationMs": call_started.elapsed().as_millis() as u64,
+                    "url": parsed_input.url,
                 }),
                 new_messages: vec![],
                 context_modifier: None,
@@ -976,12 +988,12 @@ Usage notes:\n\
                                 .await;
                             return Ok(ToolCallResult {
                                 data: json!({
-                                    "url": parsed_input.url,
-                                    "status": resp.status,
-                                    "code_text": code_text,
-                                    "content": message,
-                                    "truncated": false,
                                     "bytes": 0,
+                                    "code": resp.status,
+                                    "codeText": code_text,
+                                    "result": message,
+                                    "durationMs": call_started.elapsed().as_millis() as u64,
+                                    "url": parsed_input.url,
                                 }),
                                 new_messages: vec![],
                                 context_modifier: None,
@@ -1031,12 +1043,12 @@ Usage notes:\n\
                     .await;
                     return Ok(ToolCallResult {
                         data: json!({
-                            "url": parsed_input.url,
-                            "status": resp.status,
-                            "code_text": status_text,
-                            "content": message,
-                            "truncated": false,
                             "bytes": message.len(),
+                            "code": resp.status,
+                            "codeText": status_text,
+                            "result": message,
+                            "durationMs": call_started.elapsed().as_millis() as u64,
+                            "url": parsed_input.url,
                         }),
                         new_messages: vec![],
                         context_modifier: None,
@@ -1074,12 +1086,12 @@ Usage notes:\n\
                     .await;
                 Ok(ToolCallResult {
                     data: json!({
-                        "url": parsed_input.url,
-                        "status": resp.status,
-                        "code_text": code_text,
-                        "content": message,
-                        "truncated": false,
                         "bytes": 0,
+                        "code": resp.status,
+                        "codeText": code_text,
+                        "result": message,
+                        "durationMs": call_started.elapsed().as_millis() as u64,
+                        "url": parsed_input.url,
                     }),
                     new_messages: vec![],
                     context_modifier: None,
@@ -1177,11 +1189,12 @@ Usage notes:\n\
 
                 Ok(ToolCallResult {
                     data: json!({
-                        "url": parsed_input.url,
-                        "status": status,
-                        "content": out_content,
-                        "truncated": truncated,
                         "bytes": body_bytes,
+                        "code": status,
+                        "codeText": status_reason_phrase(status),
+                        "result": out_content,
+                        "durationMs": call_started.elapsed().as_millis() as u64,
+                        "url": parsed_input.url,
                     }),
                     new_messages: vec![],
                     context_modifier: None,
@@ -1200,12 +1213,12 @@ Usage notes:\n\
                     .await;
                 Ok(ToolCallResult {
                     data: json!({
-                        "url": parsed_input.url,
-                        "status": status,
-                        "code_text": code_text,
-                        "content": message,
-                        "truncated": false,
                         "bytes": 0,
+                        "code": status,
+                        "codeText": code_text,
+                        "result": message,
+                        "durationMs": call_started.elapsed().as_millis() as u64,
+                        "url": parsed_input.url,
                     }),
                     new_messages: vec![],
                     context_modifier: None,
@@ -1648,11 +1661,11 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             )
             .await
             .expect("500 must be Ok(result), not Err");
-        assert_eq!(result.data["status"], 500);
-        assert_eq!(result.data["code_text"], "Internal Server Error");
+        assert_eq!(result.data["code"], 500);
+        assert_eq!(result.data["codeText"], "Internal Server Error");
         assert_eq!(result.data["bytes"], 0);
         assert_eq!(
-            result.data["content"].as_str().unwrap(),
+            result.data["result"].as_str().unwrap(),
             format_http_error_message(500, None)
         );
         // The tool call COMPLETED (returned a result), so `completed` fires and
@@ -1686,10 +1699,10 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             )
             .await
             .expect("429 must be Ok(result)");
-        assert_eq!(result.data["status"], 429);
-        assert_eq!(result.data["code_text"], "Too Many Requests");
+        assert_eq!(result.data["code"], 429);
+        assert_eq!(result.data["codeText"], "Too Many Requests");
         assert_eq!(
-            result.data["content"].as_str().unwrap(),
+            result.data["result"].as_str().unwrap(),
             format_http_error_message(429, Some("30"))
         );
     }
@@ -1766,9 +1779,16 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             )
             .await
             .expect("ok response");
-        assert_eq!(res.data["status"], 200);
-        assert_eq!(res.data["content"], "hello world");
-        assert_eq!(res.data["truncated"], false);
+        assert_eq!(res.data["code"], 200);
+        assert_eq!(res.data["result"], "hello world");
+        // claude-code result schema: codeText (reason phrase) + durationMs present,
+        // and NO LingXi-internal `truncated` field.
+        assert_eq!(res.data["codeText"], "OK");
+        assert!(res.data["durationMs"].is_u64(), "durationMs present");
+        assert!(
+            res.data.get("truncated").is_none(),
+            "no `truncated` field (claude-code parity)"
+        );
         let events = sink.events().await;
         let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"tengu_tool_web_fetch_completed"));
@@ -1931,16 +1951,15 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .call(url.clone(), fresh_ctx(), fresh_tx())
             .await
             .expect("first fetch ok");
-        assert_eq!(first.data["content"], "cached body");
+        assert_eq!(first.data["result"], "cached body");
 
         let second = tool
             .call(url, fresh_ctx(), fresh_tx())
             .await
             .expect("second fetch ok (from cache)");
-        assert_eq!(second.data["content"], "cached body");
-        assert_eq!(second.data["status"], 200);
+        assert_eq!(second.data["result"], "cached body");
+        assert_eq!(second.data["code"], 200);
         assert_eq!(second.data["bytes"], "cached body".len());
-        assert_eq!(second.data["truncated"], false);
 
         // First call: preflight + fetch. Second call: cache hit, zero requests.
         assert_eq!(
@@ -2201,7 +2220,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
 
         let res = res.expect("fetch must proceed when preflight skipped");
-        assert_eq!(res.data["content"], "no preflight here");
+        assert_eq!(res.data["result"], "no preflight here");
         let reqs = http.received_requests();
         // Exactly one request — the fetch — and NO domain_info preflight.
         assert_eq!(reqs.len(), 1);
@@ -2317,9 +2336,9 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
         let res = res.expect("cross-host redirect must return Ok with the notice");
 
-        assert_eq!(res.data["status"], 301);
-        assert_eq!(res.data["code_text"], "Moved Permanently");
-        let content = res.data["content"].as_str().unwrap();
+        assert_eq!(res.data["code"], 301);
+        assert_eq!(res.data["codeText"], "Moved Permanently");
+        let content = res.data["result"].as_str().unwrap();
         assert!(
             content.starts_with("REDIRECT DETECTED: The URL redirects to a different host."),
             "unexpected content: {content}"
@@ -2371,8 +2390,8 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
         let res = res.expect("permitted redirect must be followed to the final body");
 
-        assert_eq!(res.data["status"], 200);
-        assert_eq!(res.data["content"], "final body");
+        assert_eq!(res.data["code"], 200);
+        assert_eq!(res.data["result"], "final body");
         // Two `request_no_follow` calls (start + final), zero plain `request`.
         assert_eq!(
             http.no_follow_calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -2409,9 +2428,9 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
         let res = res.expect("303 must be detected as a redirect and return Ok with the notice");
 
-        assert_eq!(res.data["status"], 303);
-        assert_eq!(res.data["code_text"], "See Other");
-        let content = res.data["content"].as_str().unwrap();
+        assert_eq!(res.data["code"], 303);
+        assert_eq!(res.data["codeText"], "See Other");
+        let content = res.data["result"].as_str().unwrap();
         assert!(
             content.starts_with("REDIRECT DETECTED: The URL redirects to a different host."),
             "303 should produce the redirect notice, got: {content}"
@@ -2443,11 +2462,11 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .await
             .expect("redirect-without-Location must be Ok(http_error result), not Err");
 
-        assert_eq!(res.data["status"], 301);
-        assert_eq!(res.data["code_text"], "Moved Permanently");
+        assert_eq!(res.data["code"], 301);
+        assert_eq!(res.data["codeText"], "Moved Permanently");
         assert_eq!(res.data["bytes"], 0);
         assert_eq!(
-            res.data["content"].as_str().unwrap(),
+            res.data["result"].as_str().unwrap(),
             format_http_error_message(301, None)
         );
     }
@@ -2504,9 +2523,9 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             let tool = WebFetchTool::new(ctx).with_side_query(capture.clone());
             let url = json!({ "url": "https://cachehit-apply.example/x", "prompt": "summarize" });
             let first = tool.call(url.clone(), fresh_ctx(), fresh_tx()).await.expect("first ok");
-            assert_eq!(first.data["content"], "APPLIED");
+            assert_eq!(first.data["result"], "APPLIED");
             let second = tool.call(url, fresh_ctx(), fresh_tx()).await.expect("second ok");
-            assert_eq!(second.data["content"], "APPLIED", "cache hit must still run the apply step");
+            assert_eq!(second.data["result"], "APPLIED", "cache hit must still run the apply step");
             let seen = capture.captured.lock().unwrap().clone().unwrap();
             assert!(seen.contains("# Doc"));
             assert_eq!(http.received_requests().len(), 2, "second call must be a cache hit (no new fetch)");
@@ -2538,7 +2557,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 .call(json!({ "url": "https://noprompt.example/x" }), fresh_ctx(), fresh_tx())
                 .await
                 .expect("ok");
-            assert_eq!(res.data["content"], "APPLIED", "apply must run with no prompt (#89)");
+            assert_eq!(res.data["result"], "APPLIED", "apply must run with no prompt (#89)");
         }
 
         // PARITY (#89): the RAW fast-path is taken ONLY when the URL is
@@ -2570,7 +2589,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 )
                 .await
                 .expect("ok");
-            assert_eq!(res.data["content"], "# Raw markdown", "preapproved+md+under-cap → raw");
+            assert_eq!(res.data["result"], "# Raw markdown", "preapproved+md+under-cap → raw");
             assert!(
                 capture.captured.lock().unwrap().is_none(),
                 "apply model must NOT be called on the raw fast-path"
@@ -2605,8 +2624,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 )
                 .await
                 .expect("ok");
-            assert_eq!(res.data["content"], "APPLIED-OVER-CAP", "over-cap md → apply, not raw");
-            assert_eq!(res.data["truncated"], true, "#88: flag set when body exceeds cap");
+            assert_eq!(res.data["result"], "APPLIED-OVER-CAP", "over-cap md → apply, not raw");
         }
 
         // PARITY (#89): a NON-preapproved text/markdown body under the cap still
@@ -2636,7 +2654,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 )
                 .await
                 .expect("ok");
-            assert_eq!(res.data["content"], "APPLIED-NONPRE", "non-preapproved md → apply");
+            assert_eq!(res.data["result"], "APPLIED-NONPRE", "non-preapproved md → apply");
         }
     }
 
@@ -2666,7 +2684,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             )
             .await
             .expect("ok");
-        assert_eq!(res.data["content"], "MODEL SUMMARY");
+        assert_eq!(res.data["result"], "MODEL SUMMARY");
         let seen = capture.captured.lock().unwrap().clone().unwrap();
         assert!(seen.contains("# Title"), "model prompt should carry markdown: {seen}");
         assert!(seen.contains("summarize"));
@@ -2695,7 +2713,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             )
             .await
             .expect("ok");
-        assert_eq!(res.data["content"], "# Hi");
+        assert_eq!(res.data["result"], "# Hi");
     }
 
     #[test]
@@ -2761,11 +2779,10 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             )
             .await
             .expect("ok");
-        let content = res.data["content"].as_str().unwrap();
+        let content = res.data["result"].as_str().unwrap();
         // FULL body, NOT truncated, NO suffix.
         assert_eq!(content.chars().count(), WEBFETCH_MAX_MARKDOWN_LEN + 5000);
         assert!(!content.ends_with(WEBFETCH_TRUNCATION_SUFFIX));
-        assert_eq!(res.data["truncated"], true, "flag reflects over-cap body");
         // The cache also holds the FULL body.
         let cached = crate::cache::cache_get("https://full-body.example/big").expect("cached");
         assert_eq!(cached.content.chars().count(), WEBFETCH_MAX_MARKDOWN_LEN + 5000);
@@ -2797,7 +2814,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             )
             .await
             .expect("ok");
-        let content = res.data["content"].as_str().unwrap();
+        let content = res.data["result"].as_str().unwrap();
         // Raw body, then the binary footer.
         assert!(content.starts_with(body));
         assert!(
@@ -2849,7 +2866,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             )
             .await
             .expect("ok");
-        let content = res.data["content"].as_str().unwrap();
+        let content = res.data["result"].as_str().unwrap();
         assert!(!content.contains("[Binary content"), "no footer for text/*");
         assert!(
             !tmp.path().join(".claude").join("tool-results").exists(),

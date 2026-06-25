@@ -131,8 +131,27 @@ fn run_purge(args: &PurgeArgs) -> i32 {
                 }
             },
         };
+        // TWO DIFFERENT KEYS for two different stores:
+        //  - the ~/.claude.json `projects` map is keyed by the GIT-ROOT config
+        //    key (`project_path_for_config`, canonicalize + walk to repo root);
+        //  - the transcript dir is keyed by the RAW cwd via the SAME writer
+        //    helper the engine uses (`session::jsonl::path::project_dir_name`,
+        //    which also applies the >200-char truncation + djb2 suffix).
+        // They DIVERGE in a worktree/subdir; using the config key for the
+        // transcript dir would delete the WRONG project's transcripts.
         let config_key = migrations::global_config::project_path_for_config(&dir);
-        let transcript_dir = projects_root.join(encode_project_dir(&config_key));
+        let dir_component = session::jsonl::path::project_dir_name(&dir.to_string_lossy());
+        // Guard: refuse when we cannot resolve a non-empty project key — e.g.
+        // `purge ""` would otherwise resolve the transcript dir to the projects
+        // ROOT and delete EVERY project's transcripts.
+        if dir_component.is_empty() || config_key.trim().is_empty() {
+            eprintln!(
+                "lingxi-cli project purge: refusing to purge — could not resolve a project key for {}",
+                dir.display()
+            );
+            return RUNTIME_ERROR;
+        }
+        let transcript_dir = projects_root.join(&dir_component);
         vec![ProjectTargets {
             config_key,
             transcript_dir,
@@ -160,7 +179,7 @@ fn run_purge(args: &PurgeArgs) -> i32 {
 
     let mut any_error = false;
     for target in &targets {
-        if !purge_one(target, global_config.as_deref(), args) {
+        if !purge_one(target, &projects_root, global_config.as_deref(), args) {
             any_error = true;
         }
     }
@@ -175,11 +194,26 @@ fn run_purge(args: &PurgeArgs) -> i32 {
 /// Purge one project's confirmable state. Returns false on a hard I/O error.
 fn purge_one(
     target: &ProjectTargets,
+    projects_root: &Path,
     global_config: Option<&Path>,
     args: &PurgeArgs,
 ) -> bool {
     let mut ok = true;
     println!("Project: {}", target.config_key);
+
+    // Defense-in-depth: NEVER `remove_dir_all` the projects root itself or any
+    // path outside it (guards against any resolution edge that collapses the
+    // encoded component to empty). The legitimate target is always a strict
+    // descendant `<projects_root>/<encoded>`.
+    let safe_target = target.transcript_dir.starts_with(projects_root)
+        && target.transcript_dir != projects_root;
+    if !safe_target {
+        eprintln!(
+            "  refusing to remove transcripts at an unsafe path: {}",
+            target.transcript_dir.display()
+        );
+        return false;
+    }
 
     // (1) Transcripts: `<config-home>/projects/<encoded>/`.
     if target.transcript_dir.exists() {
@@ -250,10 +284,16 @@ fn purge_one(
     ok
 }
 
-/// Encode a project config-key into its transcript directory name. Port of
-/// claude `sanitizePath` (`sessionStoragePortable.ts`): every non-alphanumeric
-/// character becomes `-`. Mirrors `engine-desktop`'s `sanitize_path_component`
-/// used to WRITE these dirs, so reads here align with writes there.
+/// Best-effort encode of a global-config `projects` KEY (a git-root config
+/// path) into a transcript directory name, used ONLY by the `--all` path to
+/// *try* a config-key-derived dir. NOTE: this is NOT the authoritative writer
+/// key — the engine names transcript dirs from the RAW cwd via
+/// [`session::jsonl::path::project_dir_name`] (which also truncates >200 chars +
+/// appends a djb2 suffix). The two diverge for worktrees/subdirs/long paths, so
+/// a config-key dir computed here may simply not exist (a harmless no-op); the
+/// real transcript dirs are picked up by the on-disk enumeration in
+/// [`collect_all_targets`]. The single-project `purge <path>` path does NOT use
+/// this — it keys the transcript dir off the raw cwd, matching the writer.
 fn encode_project_dir(key: &str) -> String {
     key.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })

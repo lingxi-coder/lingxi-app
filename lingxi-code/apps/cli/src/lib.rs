@@ -133,6 +133,21 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         //     than erroring.
     }
 
+    // `--setting-sources <user,project,local>` token validation (claude-code
+    // main.tsx): each comma-split token must be one of user/project/local
+    // (CASE-SENSITIVE, raw token echoed) else hard-error with the byte-exact
+    // message + exit 1. An empty string is VALID (treated as no sources).
+    if let Some(sources) = parsed.setting_sources.as_deref() {
+        for tok in sources.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+            if !matches!(tok, "user" | "project" | "local") {
+                eprintln!(
+                    "Error processing --setting-sources: Invalid setting source: {tok}. Valid options are: user, project, local"
+                );
+                return exit_codes::ARGV_ERROR;
+            }
+        }
+    }
+
     if let Err(e) = cwd::apply_cwd(parsed.cwd.as_deref()) {
         eprintln!("lingxi-cli: {e}");
         return exit_codes::RUNTIME_ERROR;

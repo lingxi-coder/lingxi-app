@@ -5362,9 +5362,18 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // LingXi concatenates the system prompt into one string, so the block is
         // appended here with the same blank-line boundary. `None` when cwd is not
         // a git repo (claude-code omits the key, so nothing is appended).
-        if let Some(block) = git_status::render_git_status_block(&self.cwd) {
-            prompt.push_str("\n\n");
-            prompt.push_str(&block);
+        //
+        // `--exclude-dynamic-system-prompt-sections`: gitStatus is a per-machine,
+        // commit-volatile section, so it is also OMITTED from the system prompt
+        // when the flag is set (claude empties systemContext). Leaving it in would
+        // churn the prompt-cache key on every commit — exactly what the flag
+        // prevents. (claude drops gitStatus entirely; it is NOT re-emitted in the
+        // user message.)
+        if !self.config.exclude_dynamic_system_prompt_sections {
+            if let Some(block) = git_status::render_git_status_block(&self.cwd) {
+                prompt.push_str("\n\n");
+                prompt.push_str(&block);
+            }
         }
         prompt
     }
@@ -5419,9 +5428,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         if self.config.exclude_dynamic_system_prompt_sections {
             let ctx = self.build_prompt_context().await;
             let env = crate::prompt::env_block::format(&ctx);
-            let env = env.trim();
-            if !env.is_empty() {
-                entries.push(format!("# env\n{env}"));
+            // `env_block::format` already begins with its own `# Environment\n`
+            // heading, so key the entry as `Environment` and strip that leading
+            // heading — the userContext renderer prepends `# {key}\n`, and a raw
+            // `# env\n{env}` would DOUBLE the heading (`# env\n# Environment\n…`).
+            let body = env
+                .strip_prefix("# Environment\n")
+                .unwrap_or(&env)
+                .trim();
+            if !body.is_empty() {
+                entries.push(format!("# Environment\n{body}"));
             }
         }
         if !claude_md.is_empty() {

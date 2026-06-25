@@ -49,13 +49,34 @@ pub enum Scope {
 }
 
 impl Scope {
-    /// Lowercase scope label used in claude's success/error strings
-    /// (`… to local config`, `… already exists in user config`).
+    /// Lowercase scope label used in claude's success strings
+    /// (`… to local config`). Project scope is `project` here (the `add`
+    /// success line is `… to project config`).
     fn label(self) -> &'static str {
         match self {
             Scope::Local => "local",
             Scope::User => "user",
             Scope::Project => "project",
+        }
+    }
+
+    /// Suffix for claude's `MCP server X already exists in <suffix>` error
+    /// (config.ts): local/user → `<scope> config`, project → `.mcp.json`.
+    fn exists_suffix(self) -> &'static str {
+        match self {
+            Scope::Local => "local config",
+            Scope::User => "user config",
+            Scope::Project => ".mcp.json",
+        }
+    }
+
+    /// Suffix for claude's `No MCP server named "X" <suffix>` not-found-in-scope
+    /// error: local/user → `in <scope> scope`, project → `in .mcp.json`.
+    fn not_found_suffix(self) -> &'static str {
+        match self {
+            Scope::Local => "in local scope",
+            Scope::User => "in user scope",
+            Scope::Project => "in .mcp.json",
         }
     }
 }
@@ -386,8 +407,9 @@ fn run_add(a: &AddArgs) -> i32 {
             SUCCESS
         }
         Ok(WriteOutcome::AlreadyExists) => {
-            println!("MCP server {} already exists in {} config", a.name, a.scope.label());
-            SUCCESS
+            // claude routes the duplicate as an error: stderr + exit 1.
+            eprintln!("MCP server {} already exists in {}", a.name, a.scope.exists_suffix());
+            RUNTIME_ERROR
         }
         Err(msg) => {
             eprintln!("{msg}");
@@ -424,8 +446,8 @@ fn run_add_json(a: &AddJsonArgs) -> i32 {
             SUCCESS
         }
         Ok(WriteOutcome::AlreadyExists) => {
-            println!("MCP server {} already exists in {} config", a.name, a.scope.label());
-            SUCCESS
+            eprintln!("MCP server {} already exists in {}", a.name, a.scope.exists_suffix());
+            RUNTIME_ERROR
         }
         Err(msg) => {
             eprintln!("{msg}");
@@ -538,10 +560,17 @@ fn run_remove(a: &RemoveArgs) -> i32 {
         None => vec![Scope::Local, Scope::Project, Scope::User],
     };
 
+    let explicit_scope = a.scope;
     for scope in scopes {
         match remove_server(&a.name, scope) {
             Ok(Some(path)) => {
-                println!("Removed MCP server {} from {} config", a.name, scope.label());
+                // claude quotes the name CONDITIONALLY: unquoted with --scope,
+                // QUOTED when auto-detecting (no --scope).
+                if explicit_scope.is_some() {
+                    println!("Removed MCP server {} from {} config", a.name, scope.label());
+                } else {
+                    println!("Removed MCP server \"{}\" from {} config", a.name, scope.label());
+                }
                 print_file_modified(scope, &path);
                 return SUCCESS;
             }
@@ -553,14 +582,19 @@ fn run_remove(a: &RemoveArgs) -> i32 {
         }
     }
 
-    // Not found in any candidate scope: claude prints the configured-server list
-    // and exits 0.
-    println!(
-        "No MCP server named \"{}\". Configured servers: {}",
-        a.name,
-        configured_server_names_csv()
-    );
-    SUCCESS
+    // Not found → stderr + exit 1 (claude exits 1, NOT 0). With an explicit
+    // --scope, the error is scope-specific (`… in user scope` / `… in .mcp.json`);
+    // without, it lists the configured servers across all scopes.
+    if let Some(scope) = explicit_scope {
+        eprintln!("No MCP server named \"{}\" {}", a.name, scope.not_found_suffix());
+    } else {
+        eprintln!(
+            "No MCP server named \"{}\". Configured servers: {}",
+            a.name,
+            configured_server_names_csv()
+        );
+    }
+    RUNTIME_ERROR
 }
 
 /// Remove a server from one scope; `Ok(Some(path))` when it existed and was
@@ -663,12 +697,13 @@ fn run_list() -> i32 {
 fn run_get(a: &GetArgs) -> i32 {
     let servers = load_all_servers();
     let Some(cfg) = servers.iter().find(|c| c.name == a.name) else {
-        println!(
+        // claude: not-found → stderr + exit 1.
+        eprintln!(
             "No MCP server named \"{}\". Configured servers: {}",
             a.name,
             configured_server_names_csv()
         );
-        return SUCCESS;
+        return RUNTIME_ERROR;
     };
 
     println!("{}:", cfg.name);
@@ -771,12 +806,14 @@ fn scope_flag_label(scope: ConfigScope) -> &'static str {
 // reset-project-choices
 // ──────────────────────────────────────────────────────────────────────────
 
-/// Implement `mcp reset-project-choices`. Clears the project's recorded
-/// approved/rejected `.mcp.json` server choices in the global config.
+/// Implement `mcp reset-project-choices`. Resets the project's recorded
+/// `.mcp.json` server choices in the global config.
 ///
-/// claude stores these under the per-project config keys
-/// `enabledMcpjsonServers` / `disabledMcpjsonServers` (and the legacy
-/// `approvedMcpjsonServers` / `rejectedMcpjsonServers`). We clear all four.
+/// claude (mcp.tsx) resets EXACTLY three per-project keys via
+/// `saveCurrentProjectConfig`: `enabledMcpjsonServers: []`,
+/// `disabledMcpjsonServers: []`, `enableAllProjectMcpServers: false`. (The
+/// `approvedMcpjsonServers`/`rejectedMcpjsonServers` keys do NOT exist in
+/// claude — an earlier port fabricated them.)
 fn run_reset_project_choices() -> i32 {
     let Some(path) = global_config_path() else {
         eprintln!("Could not resolve home directory");
@@ -787,19 +824,18 @@ fn run_reset_project_choices() -> i32 {
         return RUNTIME_ERROR;
     };
     let result = migrations::global_config::save_project_config(&path, &key, |mut proj| {
-        for k in [
-            "enabledMcpjsonServers",
-            "disabledMcpjsonServers",
-            "approvedMcpjsonServers",
-            "rejectedMcpjsonServers",
-        ] {
-            proj.remove(k);
-        }
+        proj.insert("enabledMcpjsonServers".into(), serde_json::json!([]));
+        proj.insert("disabledMcpjsonServers".into(), serde_json::json!([]));
+        proj.insert("enableAllProjectMcpServers".into(), serde_json::json!(false));
         proj
     });
     match result {
         Ok(_) => {
-            println!("Reset project-scoped (.mcp.json) server approval choices for this project");
+            // Byte-exact two-line message (claude mcp.tsx).
+            println!(
+                "All project-scoped (.mcp.json) server approvals and rejections have been reset."
+            );
+            println!("You will be prompted for approval next time you start Claude Code.");
             SUCCESS
         }
         Err(e) => {

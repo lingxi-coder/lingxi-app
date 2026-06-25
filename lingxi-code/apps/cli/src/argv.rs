@@ -30,6 +30,15 @@ fn parse_positive_budget_usd(value: &str) -> Result<f64, String> {
 #[command(name = "lingxi-cli", version, about, long_about = None)]
 #[allow(clippy::struct_excessive_bools, clippy::doc_markdown)]
 pub struct Argv {
+    /// Top-level subcommand (mcp, auth, plugin, project, setup-token, agents,
+    /// install, update, doctor, auto-mode, ultrareview). Declared BEFORE the
+    /// `prompt` positional so clap resolves a leading subcommand-name token as
+    /// the subcommand (and an optional-value global flag like `-d`/`-r` before
+    /// it can't swallow it) rather than as the chat `[prompt]`. `None` = the
+    /// normal chat / REPL / print path.
+    #[command(subcommand)]
+    pub command: Option<crate::commands::Commands>,
+
     /// The user prompt for this one-shot conversation
     ///
     /// When absent (and `--resume` is not set), enters REPL mode (M5-13).
@@ -232,7 +241,9 @@ pub struct Argv {
 
     /// Resume a session linked to a PR by PR number/URL, or open interactive picker
     // TODO(from-pr): wire into PR-linked session resume
-    #[arg(long = "from-pr", value_name = "value", num_args = 0..=1, default_missing_value = "")]
+    // `require_equals`: bind the value only via `--from-pr=123` so a bare
+    // `--from-pr` before a subcommand doesn't swallow it.
+    #[arg(long = "from-pr", value_name = "value", num_args = 0..=1, require_equals = true, default_missing_value = "")]
     pub from_pr: Option<String>,
 
     /// Effort level for the current session
@@ -312,7 +323,11 @@ pub struct Argv {
     /// `None` = off, `Some("")` = on/unfiltered, `Some(filter)` = on/filtered.
     /// `debug_enabled()` collapses it back to the old bool for callers that
     /// only need on/off (e.g. `logging::init`).
-    #[arg(short = 'd', long = "debug", value_name = "filter", num_args = 0..=1, default_missing_value = "")]
+    /// `require_equals`: the optional filter binds ONLY via `--debug=api,hooks`
+    /// (commander's optional `[value]` semantics), so a bare `--debug` before a
+    /// subcommand (`--debug mcp …`) does NOT swallow the subcommand token and
+    /// start a billable chat turn.
+    #[arg(short = 'd', long = "debug", value_name = "filter", num_args = 0..=1, require_equals = true, default_missing_value = "")]
     pub debug: Option<String>,
 
     /// Disable TUI; use stdio REPL (line-editing fallback)
@@ -435,14 +450,6 @@ pub struct Argv {
     /// with `lingxi-cli agents`)
     #[arg(long = "background", visible_alias = "bg")]
     pub background: bool,
-
-    /// Top-level subcommand (mcp, auth, plugin, project, setup-token, agents,
-    /// install, update, doctor, auto-mode, ultrareview). When a leading argv
-    /// token matches one of these, clap routes to that family instead of
-    /// treating it as the chat `[prompt]`; global flags before it still bind
-    /// here. `None` = the normal chat / REPL / print path.
-    #[command(subcommand)]
-    pub command: Option<crate::commands::Commands>,
 }
 
 impl Argv {
@@ -801,19 +808,20 @@ mod tests {
 
     #[test]
     fn debug_flag() {
-        // Bare `--debug` → on, unfiltered (Some("")). A following OPTION token
-        // (or end-of-args) keeps it unfiltered; a following bare word is
-        // consumed as the optional filter (claude `-d, --debug [filter]`).
-        let a = Argv::from_iter(["lingxi-cli", "--debug", "--no-tui"]).unwrap();
+        // Bare `--debug` → on, unfiltered (Some("")). `require_equals` means the
+        // optional filter binds ONLY via `=`, so a bare `--debug` never swallows
+        // a following token (a subcommand or the prompt).
+        let a = Argv::from_iter(["lingxi-cli", "--debug", "hi"]).unwrap();
         assert!(a.debug.is_some());
         assert!(a.debug_enabled());
         assert_eq!(a.debug_filter(), None);
-        // With a category filter value.
-        let b = Argv::from_iter(["lingxi-cli", "--debug", "api,hooks"]).unwrap();
+        assert_eq!(a.prompt.as_deref(), Some("hi"), "bare --debug must NOT eat the prompt");
+        // With a category filter value (must use `=`).
+        let b = Argv::from_iter(["lingxi-cli", "--debug=api,hooks"]).unwrap();
         assert_eq!(b.debug.as_deref(), Some("api,hooks"));
         assert_eq!(b.debug_filter(), Some("api,hooks"));
-        // Short alias `-d`.
-        let c = Argv::from_iter(["lingxi-cli", "-d", "scope"]).unwrap();
+        // Short alias `-d` (also `=`-bound).
+        let c = Argv::from_iter(["lingxi-cli", "-d=scope"]).unwrap();
         assert_eq!(c.debug.as_deref(), Some("scope"));
         assert!(c.debug_enabled());
         // Off by default.
@@ -1140,6 +1148,34 @@ mod tests {
     }
 
     #[test]
+    fn optional_value_flag_before_subcommand_routes_to_subcommand() {
+        // Regression (review P1): a bare optional-value global flag (`--debug`,
+        // `--from-pr`) before a subcommand must NOT swallow the subcommand token
+        // and start a billable chat turn. `require_equals` makes their value
+        // `=`-bound, so the next token is free to resolve as the subcommand.
+        assert!(
+            Argv::from_iter(["lingxi-cli", "--debug", "auth", "status"]).unwrap().command.is_some(),
+            "--debug must not swallow the `auth` subcommand → billable turn"
+        );
+        assert!(
+            Argv::from_iter(["lingxi-cli", "--from-pr", "auth"]).unwrap().command.is_some(),
+            "--from-pr must not swallow the `auth` subcommand"
+        );
+        // `-r mcp` is NOT a misroute: `--resume` carries an optional search term,
+        // so this is "resume, search 'mcp'" → the resume PICKER (never a billable
+        // chat turn). command stays None; resume is set.
+        let r = Argv::from_iter(["lingxi-cli", "-r", "mcp"]).unwrap();
+        assert!(r.command.is_none() && r.resume.as_deref() == Some("mcp"));
+        // Controls: a normal prompt stays command=None; the `=`-bound filter works.
+        assert!(Argv::from_iter(["lingxi-cli", "fix the bug"]).unwrap().command.is_none());
+        assert_eq!(
+            Argv::from_iter(["lingxi-cli", "--debug=api,hooks"]).unwrap().debug.as_deref(),
+            Some("api,hooks"),
+            "--debug=<filter> still binds the value"
+        );
+    }
+
+    #[test]
     fn permission_mode_rejects_unknown_choice() {
         // claude commander `.choices(...)` hard-rejects out-of-list values.
         assert!(Argv::from_iter(["lingxi-cli", "--permission-mode", "bogus", "hi"]).is_err());
@@ -1176,7 +1212,9 @@ mod tests {
 
     #[test]
     fn from_pr_with_value_parses() {
-        let a = Argv::from_iter(["lingxi-cli", "--from-pr", "123", "hi"]).unwrap();
+        // `require_equals`: the value binds via `=` (so a bare `--from-pr` before
+        // a subcommand can't swallow it).
+        let a = Argv::from_iter(["lingxi-cli", "--from-pr=123", "hi"]).unwrap();
         assert_eq!(a.from_pr.as_deref(), Some("123"));
     }
 

@@ -40,7 +40,7 @@
 //! directly on the pump; multi-client fan-out is later work.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -54,6 +54,10 @@ use client_protocol::commands::{ClientCommand, ImageRefDto};
 use client_protocol::events::ClientEvent;
 use client_protocol::permission::{
     PermissionKindDto, PermissionRequest, PermissionResponseDto,
+};
+use msgqueue::{
+    join_prompt_values, MessageQueueManager, QueuePriority, QueueSource, QueuedCommand,
+    QueuedCommandContent,
 };
 use tokio::sync::Mutex;
 
@@ -178,11 +182,84 @@ pub struct BridgeConnection {
     /// single-client skeleton predates a mandatory handshake, so a client that
     /// never sent a `hello` is the trusted local child and still routes.)
     handshake_refused: Arc<AtomicBool>,
+    /// Input message queue (spec §27). A `SendPrompt` that arrives while a turn
+    /// is in flight is ENQUEUED here instead of spawning a second concurrent
+    /// turn (which would race on the shared `session.history`); the single
+    /// drain loop runs it as a follow-up turn once the in-flight turn ends.
+    ///
+    /// This is the parity twin of claude-code's module-level command queue. The
+    /// guard is on `SendPrompt` ONLY — `ApprovePermission`/`DenyPermission` are
+    /// never queued, so the inverted permission handshake that unblocks a parked
+    /// tool `check()` keeps dispatching immediately (server design above).
+    queue: Arc<MessageQueueManager>,
+    /// Whether the single turn-drain loop is currently running. Twin of
+    /// print.ts run()'s `running` flag (L1866): the first `SendPrompt` that wins
+    /// this flag OWNS the drain loop; concurrent prompts enqueue and the owner
+    /// drains them before clearing the flag.
+    turn_running: Arc<AtomicBool>,
 }
 
 impl Default for BridgeConnection {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Build a `Next`-priority main-thread [`QueuedCommand`] for a user prompt that
+/// arrived while a turn was in flight (twin of claude-code's `enqueue` defaulting
+/// a direct prompt to `'next'`). `agent_id` is `None` (main thread) so the
+/// between-turn drain picks it up.
+fn prompt_command(text: String) -> QueuedCommand {
+    // Process-unique monotonic counter — the drain loop removes consumed
+    // commands by uuid, so each queued prompt needs a distinct id.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    QueuedCommand {
+        uuid: format!("prompt-{}", SEQ.fetch_add(1, Ordering::Relaxed)),
+        content: QueuedCommandContent::UserInput { text },
+        priority: QueuePriority::Next,
+        queued_at: std::time::SystemTime::now(),
+        source: QueueSource::PromptInput,
+        agent_id: None,
+        skip_slash_commands: false,
+        is_meta: false,
+    }
+}
+
+/// Drain every queued MAIN-THREAD prompt as a follow-up turn, coalescing
+/// consecutive prompts into one turn (twin of `joinPromptValues` /
+/// `drainCommandQueue`). Runs until no main-thread command remains.
+async fn drain_main_thread(driver: &Arc<dyn TurnDriver>, queue: &Arc<MessageQueueManager>) {
+    loop {
+        // Snapshot the highest-priority main-thread, non-slash prompts so a run
+        // of consecutive prompts merges into a single follow-up turn.
+        let batch = queue
+            .get_by_max_priority(QueuePriority::Later, |c| {
+                c.is_main_thread() && !c.is_slash_command()
+            })
+            .await;
+        let Some((joined, consumed)) = join_prompt_values(&batch) else {
+            // No batchable (non-slash) prompt left. Pop the next main-thread
+            // command and, if it carries prompt text (e.g. a slash command typed
+            // mid-turn), run it as its own follow-up turn — IDENTICAL to how the
+            // idle SendPrompt path handles the same input — so it is never
+            // silently dropped. Text-less commands (bare notifications) are just
+            // consumed. (claude-code keeps queued slash commands and routes them
+            // post-turn; running it here is the bridge's faithful equivalent
+            // since the idle path also runs slash text through run_turn.)
+            match queue.dequeue_main_thread().await {
+                Some(cmd) => {
+                    if let Some(t) = cmd.text() {
+                        if !t.is_empty() {
+                            driver.run_turn(t.to_string()).await;
+                        }
+                    }
+                    continue;
+                }
+                None => break,
+            }
+        };
+        queue.remove(&consumed, "drained into follow-up turn").await;
+        driver.run_turn(joined).await;
     }
 }
 
@@ -201,6 +278,8 @@ impl BridgeConnection {
             router: None,
             handshaken: Arc::new(AtomicBool::new(false)),
             handshake_refused: Arc::new(AtomicBool::new(false)),
+            queue: Arc::new(MessageQueueManager::new()),
+            turn_running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -348,20 +427,7 @@ impl BridgeConnection {
     async fn dispatch(&self, command: ClientCommand) {
         match command {
             ClientCommand::SendPrompt { text, images, .. } => {
-                // Spawn the turn so `on_frame` returns promptly — the read loop
-                // must stay free to service the approval that unblocks a parked
-                // permission `check()`.
-                //
-                // MULTIMODAL.1: forward the inline images so the desktop bridge no
-                // longer silently drops pasted/attached attachments. When `images`
-                // is empty `run_turn_with_images` is identical to the old
-                // `run_turn(text)` path (the override and the trait default both
-                // degrade to text-only with no images).
-                if let Some(driver) = self.driver.clone() {
-                    tokio::spawn(async move {
-                        driver.run_turn_with_images(text, images).await;
-                    });
-                }
+                self.handle_send_prompt(text, images).await;
             }
             ClientCommand::ApprovePermission {
                 request_id,
@@ -386,6 +452,71 @@ impl BridgeConnection {
                 }
             }
         }
+    }
+
+    /// Handle an inbound [`ClientCommand::SendPrompt`] (enqueue-or-spawn).
+    ///
+    /// Parity twin of print.ts run()'s `running` guard (L1866) + queue path:
+    ///
+    /// - If the single turn-drain loop is ALREADY running, the prompt is
+    ///   ENQUEUED (priority `Next`, the default for direct prompt input) rather
+    ///   than spawning a SECOND concurrent turn — two `run_turn`s would race on
+    ///   the shared `session.history`. The owning loop drains it as a follow-up.
+    /// - Otherwise this prompt WINS the `turn_running` flag and OWNS the loop:
+    ///   it runs the seed prompt, then drains every queued main-thread command
+    ///   as a follow-up turn before clearing the flag (port of print.ts:2371-2406
+    ///   `do { drainCommandQueue() } while(...)`).
+    ///
+    /// The loop is SPAWNED so `on_frame` returns promptly and the read loop
+    /// stays free to service the approval that unblocks a parked permission
+    /// `check()`. The guard is on `SendPrompt` only; permission frames are never
+    /// queued (see [`Self::resolve_permission`]).
+    ///
+    /// Follow-up turns queued mid-flight are text-only (images ride only on the
+    /// directly-dispatched seed prompt) — matching claude-code, where a queued
+    /// command's images are carried as `pastedContents`/`ContentBlockParam[]`
+    /// but the bridge run loop here drives the text-only `run_turn` entry.
+    async fn handle_send_prompt(&self, text: String, images: Vec<ImageRefDto>) {
+        let Some(driver) = self.driver.clone() else {
+            return;
+        };
+
+        // Try to win the run-loop ownership. compare_exchange fails if a turn is
+        // already running, in which case we enqueue instead of spawning.
+        if self
+            .turn_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            self.queue.enqueue(prompt_command(text)).await;
+            return;
+        }
+
+        let queue = self.queue.clone();
+        let turn_running = self.turn_running.clone();
+        tokio::spawn(async move {
+            // Seed turn — the prompt that won the loop (carries its images).
+            driver.run_turn_with_images(text, images).await;
+
+            // Between-turn drain: run queued main-thread prompts as follow-up
+            // turns until the queue is empty. Re-check after clearing the flag to
+            // close the race where a prompt enqueues between the empty-check and
+            // the flag clear (twin of print.ts recheckCommandQueue).
+            loop {
+                drain_main_thread(&driver, &queue).await;
+                turn_running.store(false, Ordering::SeqCst);
+                // If a prompt slipped in after the last drain but before the
+                // store, re-claim the loop and drain again; otherwise we're done.
+                if queue.has_main_thread_commands().await
+                    && turn_running
+                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                {
+                    continue;
+                }
+                break;
+            }
+        });
     }
 
     /// Resolve a parked permission request on the gate (the WS read task side of
@@ -475,6 +606,7 @@ impl FramePump for BridgeConnection {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     use async_trait::async_trait;
@@ -567,5 +699,106 @@ mod tests {
             got.1, images,
             "the SendPrompt images must reach run_turn_with_images, not be dropped"
         );
+    }
+
+    /// A driver whose FIRST turn parks on a barrier until the test releases it,
+    /// recording every prompt (in order) it is driven with. Lets a test prove a
+    /// second `SendPrompt` arriving mid-turn does NOT spawn a concurrent turn but
+    /// is enqueued and run as a follow-up once the first turn ends.
+    struct GatedDriver {
+        prompts: Arc<Mutex<Vec<String>>>,
+        /// Released by the test to let the FIRST turn complete.
+        release: Arc<Notify>,
+        /// Notifies the test each time a turn STARTS.
+        started: Arc<Notify>,
+        /// Notifies the test each time a turn COMPLETES.
+        completed: Arc<Notify>,
+        first_seen: AtomicBool,
+    }
+
+    #[async_trait]
+    impl TurnDriver for GatedDriver {
+        async fn run_turn(&self, prompt: String) {
+            self.prompts.lock().await.push(prompt);
+            self.started.notify_one();
+            // Only the FIRST turn parks; follow-up turns run straight through.
+            if self
+                .first_seen
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                self.release.notified().await;
+            }
+            self.completed.notify_one();
+        }
+    }
+
+    /// Two `SendPrompt`s while a turn is in flight: the second must be ENQUEUED
+    /// (not spawned concurrently) and run as a follow-up turn after the first
+    /// ends — the parity twin of print.ts run()'s `running` guard + drain loop.
+    #[tokio::test]
+    async fn second_prompt_is_queued_and_drained_after_first_turn() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let release = Arc::new(Notify::new());
+        let started = Arc::new(Notify::new());
+        let completed = Arc::new(Notify::new());
+        let driver: Arc<dyn TurnDriver> = Arc::new(GatedDriver {
+            prompts: prompts.clone(),
+            release: release.clone(),
+            started: started.clone(),
+            completed: completed.clone(),
+            first_seen: AtomicBool::new(false),
+        });
+        let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
+        let connection = Arc::new(BridgeConnection::new().bind(gate, driver));
+
+        // First prompt — wins the run loop and parks on the barrier.
+        connection
+            .dispatch(ClientCommand::SendPrompt {
+                text: "first".to_string(),
+                prompt_mode: None,
+                images: Vec::new(),
+                turn_id: None,
+            })
+            .await;
+        started.notified().await;
+
+        // While the first turn is parked, the loop owns `turn_running`; a second
+        // prompt must be ENQUEUED, not spawned. Nothing new starts.
+        assert!(connection.turn_running.load(Ordering::SeqCst));
+        connection
+            .dispatch(ClientCommand::SendPrompt {
+                text: "second".to_string(),
+                prompt_mode: None,
+                images: Vec::new(),
+                turn_id: None,
+            })
+            .await;
+        assert_eq!(
+            connection.queue.len().await,
+            1,
+            "the mid-turn prompt must be queued, not concurrently spawned"
+        );
+        // Still only ONE turn has started.
+        assert_eq!(prompts.lock().await.len(), 1);
+
+        // Release the first turn; the loop then drains the queued prompt as a
+        // follow-up turn and finally clears `turn_running`.
+        release.notify_one();
+        completed.notified().await; // first turn done
+        started.notified().await; // follow-up turn started
+        completed.notified().await; // follow-up turn done
+
+        // Drain settles: queue empty, flag cleared, both prompts ran in order.
+        // (Yield until the spawned loop finishes its post-drain bookkeeping.)
+        for _ in 0..100 {
+            if !connection.turn_running.load(Ordering::SeqCst) && connection.queue.is_empty().await {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!connection.turn_running.load(Ordering::SeqCst));
+        assert!(connection.queue.is_empty().await);
+        assert_eq!(*prompts.lock().await, vec!["first", "second"]);
     }
 }

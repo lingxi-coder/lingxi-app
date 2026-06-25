@@ -1,24 +1,106 @@
-//! `lingxi-cli doctor` — Check the health of your Claude Code auto-updater
+//! `lingxi-cli doctor` — Check the health of your Claude Code auto-updater.
 //!
-//! STUB: the clap surface + dispatch are wired; the full byte-faithful
-//! children/options and real backing are filled in by the per-family
-//! implementation pass. Until then a recognised subcommand prints a
-//! not-yet-implemented notice and exits `NOT_IMPLEMENTED` — it never starts a
-//! billable chat turn (the historical mis-dispatch this layer fixes).
+//! claude-code's `doctor` checks the NATIVE auto-updater install (the
+//! self-updating binary distribution) and, as a side effect, spawns the stdio
+//! MCP servers declared in `.mcp.json` to verify they start. The workspace
+//! trust dialog is skipped for that spawn — hence the "Only use this command
+//! in directories you trust." warning in the help text.
+//!
+//! lingxi-cli is built from source (cargo), so there is NO native auto-updater
+//! to diagnose: that portion is NOT-APPLICABLE and we say so plainly. Instead
+//! we emit a useful, fully READ-ONLY + LOCAL health summary:
+//!   * lingxi-cli version,
+//!   * config-dir (`~/.claude`) + global-config (`~/.claude.json`) presence,
+//!   * the MCP servers configured across the user/project/local scopes
+//!     (parsed from `.mcp.json` / `~/.claude.json` — we do NOT spawn them, do
+//!     NOT touch the network, and start NO LLM turn).
+//!
+//! The command exits `SUCCESS`. It has no children: a bare `doctor` runs the
+//! summary, matching claude's leaf command shape (claude's `doctor` likewise
+//! takes no subcommands, only `-h/--help`).
 
 use clap::Args;
 
-/// `doctor` args (stub — accepts any trailing tokens so `--help` works and
-/// children don't hard-error before the real surface lands).
+use crate::exit_codes::SUCCESS;
+
+/// `doctor` args. Like claude's `doctor` this is a leaf command with no
+/// children and no options beyond the implicit `-h/--help` clap injects, so
+/// `Cli` carries no fields. The byte-faithful one-line description lives on the
+/// [`crate::commands::Commands::Doctor`] variant (clap sources a subcommand's
+/// `about` from the enum-variant doc comment).
 #[derive(Debug, Clone, Args)]
-pub struct Cli {
-    /// Subcommand + options (filled in by the implementation pass).
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    pub rest: Vec<String>,
+pub struct Cli {}
+
+/// Run the `doctor` family: print a read-only, local-only health summary and
+/// exit `SUCCESS`. Never spawns MCP servers, never hits the network, never
+/// starts an LLM turn.
+pub async fn run(_cli: &Cli) -> i32 {
+    println!("lingxi-cli doctor");
+    println!();
+
+    // ── Version ───────────────────────────────────────────────────────────
+    println!("Version: lingxi-cli {}", env!("CARGO_PKG_VERSION"));
+
+    // ── Auto-updater (NOT APPLICABLE) ─────────────────────────────────────
+    // claude-code's doctor diagnoses its native self-updating binary. lingxi
+    // is a source build with no such updater, so there is nothing to check.
+    println!(
+        "Auto-updater: not applicable (lingxi-cli is built from source; no native auto-updater)"
+    );
+
+    // ── Config locations ──────────────────────────────────────────────────
+    let config_home = crate::run::claude_home_dir();
+    let config_home_exists = config_home.is_dir();
+    println!(
+        "Config directory: {} ({})",
+        config_home.display(),
+        if config_home_exists { "found" } else { "missing" }
+    );
+
+    let global_config = migrations::global_config::global_config_path();
+    match &global_config {
+        Some(path) => println!(
+            "Global config: {} ({})",
+            path.display(),
+            if path.is_file() { "found" } else { "missing" }
+        ),
+        None => println!("Global config: unavailable (no home directory)"),
+    }
+
+    // ── MCP servers (READ-ONLY — parsed, never spawned) ───────────────────
+    // Mirror the workspace's standard three-scope resolution
+    // (user `~/.claude.json` `mcpServers`, project `<cwd>/.mcp.json`, and local
+    // `~/.claude.json` `projects.<cwd>.mcpServers`) WITHOUT connecting to any
+    // server. claude's doctor *spawns* stdio servers; we deliberately do not —
+    // we only report what is configured, which is the safe, local health view.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let project_mcp_path = cwd.join(".mcp.json");
+    // `load_mcp_servers` tolerates missing files; when there is no global
+    // config path point its global slot at the (possibly absent) project file
+    // so only project-scope `.mcp.json` servers are reported.
+    let global_for_load = global_config.clone().unwrap_or_else(|| project_mcp_path.clone());
+    let servers = mcp::json_config::load_mcp_servers(&project_mcp_path, &global_for_load, &cwd);
+    report_mcp_servers(&servers);
+
+    SUCCESS
 }
 
-/// Run the `doctor` family. STUB.
-pub async fn run(_cli: &Cli) -> i32 {
-    eprintln!("lingxi-cli doctor: not yet implemented");
-    crate::exit_codes::NOT_IMPLEMENTED
+/// Print the configured MCP servers (name, transport kind, scope, enabled
+/// state). No connection is attempted — this is purely the parsed config view.
+fn report_mcp_servers(servers: &[mcp::McpServerConfig]) {
+    if servers.is_empty() {
+        println!("MCP servers: none configured");
+        return;
+    }
+    println!("MCP servers: {} configured (not spawned)", servers.len());
+    for s in servers {
+        let state = if s.disabled { "disabled" } else { "enabled" };
+        println!(
+            "  - {} [{}] scope={:?} ({})",
+            s.name,
+            s.spec.kind(),
+            s.scope,
+            state
+        );
+    }
 }

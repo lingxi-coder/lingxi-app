@@ -474,6 +474,11 @@ pub(crate) fn resolve_desktop_config(
         // CLI `--exclude-dynamic-system-prompt-sections`: move per-machine env
         // sections out of the cacheable system prompt into the first user message.
         exclude_dynamic_system_prompt_sections: argv.exclude_dynamic_system_prompt_sections,
+        // `--setting-sources` scope: also gate the engine-side hook + permission
+        // tier loaders in `build()` (not just the provider/routing/claudeMdExcludes
+        // loaders above), so `--setting-sources project` does NOT load user-level
+        // hooks or permission rules. `(true, true)` when the flag is absent.
+        setting_source_scope: (incl_user, incl_project),
     }
     // NOTE: claude-code's `--add-dir` is "Additional directories to allow TOOL
     // ACCESS to" (NOT CLAUDE.md search — an earlier comment here misread it). It

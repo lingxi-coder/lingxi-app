@@ -19,7 +19,12 @@ fn parse_positive_budget_usd(value: &str) -> Result<f64, String> {
     let amount: f64 = value.parse().map_err(|_| {
         "--max-budget-usd must be a positive number greater than 0".to_string()
     })?;
-    if amount.is_nan() || amount <= 0.0 {
+    // JS `Number("inf")` is `NaN` (rejected) and `Number("1e400")` is `Infinity`,
+    // and claude's guard is `isNaN(amount) || amount <= 0`. Rust's `f64::FromStr`
+    // instead parses "inf"/"INF"/"Infinity"/"1e400" all to `f64::INFINITY`, which
+    // is neither NaN nor `<= 0` — so reject any non-finite value to match the
+    // oracle's parse-time rejection (and bound the downstream cost cap).
+    if !amount.is_finite() || amount <= 0.0 {
         return Err("--max-budget-usd must be a positive number greater than 0".to_string());
     }
     Ok(amount)
@@ -241,9 +246,10 @@ pub struct Argv {
 
     /// Resume a session linked to a PR by PR number/URL, or open interactive picker
     // TODO(from-pr): wire into PR-linked session resume
-    // `require_equals`: bind the value only via `--from-pr=123` so a bare
-    // `--from-pr` before a subcommand doesn't swallow it.
-    #[arg(long = "from-pr", value_name = "value", num_args = 0..=1, require_equals = true, default_missing_value = "")]
+    // No `require_equals`: commander's `--from-pr [value]` consumes the next
+    // SPACE-separated token as the value (`--from-pr 123`), so we must NOT force
+    // the `--from-pr=123` form or `123` would be mis-parsed as the prompt.
+    #[arg(long = "from-pr", value_name = "value", num_args = 0..=1, default_missing_value = "")]
     pub from_pr: Option<String>,
 
     /// Effort level for the current session
@@ -323,11 +329,13 @@ pub struct Argv {
     /// `None` = off, `Some("")` = on/unfiltered, `Some(filter)` = on/filtered.
     /// `debug_enabled()` collapses it back to the old bool for callers that
     /// only need on/off (e.g. `logging::init`).
-    /// `require_equals`: the optional filter binds ONLY via `--debug=api,hooks`
-    /// (commander's optional `[value]` semantics), so a bare `--debug` before a
-    /// subcommand (`--debug mcp …`) does NOT swallow the subcommand token and
-    /// start a billable chat turn.
-    #[arg(short = 'd', long = "debug", value_name = "filter", num_args = 0..=1, require_equals = true, default_missing_value = "")]
+    /// No `require_equals`: commander's `-d, --debug [filter]` consumes the next
+    /// SPACE-separated token as the optional filter (`--debug api,hooks`), and a
+    /// bare `--debug` before a subcommand-name token binds that token as the
+    /// filter exactly as the real binary does (it does NOT route to the
+    /// subcommand and does NOT start a billable turn — the leading `command`
+    /// subcommand resolution only triggers when the FIRST token is the command).
+    #[arg(short = 'd', long = "debug", value_name = "filter", num_args = 0..=1, default_missing_value = "")]
     pub debug: Option<String>,
 
     /// Disable TUI; use stdio REPL (line-editing fallback)
@@ -770,6 +778,18 @@ mod tests {
     }
 
     #[test]
+    fn max_budget_usd_rejects_infinity_forms() {
+        // Rust's `f64::FromStr` parses these all to `f64::INFINITY`, which is
+        // neither NaN nor `<= 0`. Mirror JS: `Number("inf")`/`Number("INF")` are
+        // NaN and `Number("1e400")` is Infinity — all rejected by the finiteness
+        // guard so the cost cap can never be unbounded.
+        assert!(Argv::from_iter(["lingxi-cli", "--max-budget-usd", "inf", "hi"]).is_err());
+        assert!(Argv::from_iter(["lingxi-cli", "--max-budget-usd", "INF", "hi"]).is_err());
+        assert!(Argv::from_iter(["lingxi-cli", "--max-budget-usd", "Infinity", "hi"]).is_err());
+        assert!(Argv::from_iter(["lingxi-cli", "--max-budget-usd", "1e400", "hi"]).is_err());
+    }
+
+    #[test]
     fn json_schema_flag_parses() {
         let a = Argv::from_iter([
             "lingxi-cli",
@@ -808,22 +828,27 @@ mod tests {
 
     #[test]
     fn debug_flag() {
-        // Bare `--debug` → on, unfiltered (Some("")). `require_equals` means the
-        // optional filter binds ONLY via `=`, so a bare `--debug` never swallows
-        // a following token (a subcommand or the prompt).
-        let a = Argv::from_iter(["lingxi-cli", "--debug", "hi"]).unwrap();
-        assert!(a.debug.is_some());
-        assert!(a.debug_enabled());
-        assert_eq!(a.debug_filter(), None);
-        assert_eq!(a.prompt.as_deref(), Some("hi"), "bare --debug must NOT eat the prompt");
-        // With a category filter value (must use `=`).
+        // Bare `--debug` with no following token → on, unfiltered (Some("")).
+        let bare = Argv::from_iter(["lingxi-cli", "--debug"]).unwrap();
+        assert!(bare.debug.is_some());
+        assert!(bare.debug_enabled());
+        assert_eq!(bare.debug_filter(), None);
+        // SPACE form (matches commander `-d, --debug [filter]`): `--debug api,hooks`
+        // consumes the next token as the optional FILTER, leaving no prompt — so a
+        // user copying `claude --debug api,hooks` gets the same parse here.
+        let a = Argv::from_iter(["lingxi-cli", "--debug", "api,hooks"]).unwrap();
+        assert_eq!(a.debug_filter(), Some("api,hooks"));
+        assert_eq!(a.prompt, None, "--debug consumes the next token as the filter, not the prompt");
+        // The `=` form still binds the value too.
         let b = Argv::from_iter(["lingxi-cli", "--debug=api,hooks"]).unwrap();
         assert_eq!(b.debug.as_deref(), Some("api,hooks"));
         assert_eq!(b.debug_filter(), Some("api,hooks"));
-        // Short alias `-d` (also `=`-bound).
+        // Short alias `-d` (space and `=` forms).
         let c = Argv::from_iter(["lingxi-cli", "-d=scope"]).unwrap();
         assert_eq!(c.debug.as_deref(), Some("scope"));
         assert!(c.debug_enabled());
+        let c2 = Argv::from_iter(["lingxi-cli", "-d", "scope"]).unwrap();
+        assert_eq!(c2.debug_filter(), Some("scope"));
         // Off by default.
         let d = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
         assert!(d.debug.is_none());
@@ -1148,25 +1173,28 @@ mod tests {
     }
 
     #[test]
-    fn optional_value_flag_before_subcommand_routes_to_subcommand() {
-        // Regression (review P1): a bare optional-value global flag (`--debug`,
-        // `--from-pr`) before a subcommand must NOT swallow the subcommand token
-        // and start a billable chat turn. `require_equals` makes their value
-        // `=`-bound, so the next token is free to resolve as the subcommand.
-        assert!(
-            Argv::from_iter(["lingxi-cli", "--debug", "auth", "status"]).unwrap().command.is_some(),
-            "--debug must not swallow the `auth` subcommand → billable turn"
-        );
-        assert!(
-            Argv::from_iter(["lingxi-cli", "--from-pr", "auth"]).unwrap().command.is_some(),
-            "--from-pr must not swallow the `auth` subcommand"
-        );
-        // `-r mcp` is NOT a misroute: `--resume` carries an optional search term,
-        // so this is "resume, search 'mcp'" → the resume PICKER (never a billable
-        // chat turn). command stays None; resume is set.
+    fn optional_value_flag_consumes_next_token_like_commander() {
+        // Parity (review P1): an optional-value global flag (`--debug`, `--from-pr`,
+        // `--resume`) BEFORE a subcommand-name token consumes that token as its
+        // OWN value, exactly like commander does in the real binary. Verified
+        // side-by-side: `claude --debug auth` does NOT route to the `auth`
+        // subcommand — `auth` is eaten as the debug filter (and it then errors
+        // "Input must be provided", not a billable turn). So here too the next
+        // token binds as the value and `command` stays None.
+        let dbg = Argv::from_iter(["lingxi-cli", "--debug", "auth"]).unwrap();
+        assert!(dbg.command.is_none(), "--debug consumes `auth` as the filter, like commander");
+        assert_eq!(dbg.debug_filter(), Some("auth"));
+        let fp = Argv::from_iter(["lingxi-cli", "--from-pr", "auth"]).unwrap();
+        assert!(fp.command.is_none(), "--from-pr consumes `auth` as its value, like commander");
+        assert_eq!(fp.from_pr.as_deref(), Some("auth"));
+        // `-r mcp` is likewise "resume, search 'mcp'" → the resume PICKER (never a
+        // billable chat turn). command stays None; resume is set.
         let r = Argv::from_iter(["lingxi-cli", "-r", "mcp"]).unwrap();
         assert!(r.command.is_none() && r.resume.as_deref() == Some("mcp"));
-        // Controls: a normal prompt stays command=None; the `=`-bound filter works.
+        // A subcommand-name token as the FIRST argument still routes to the
+        // subcommand (no optional-value flag precedes it to eat it).
+        assert!(Argv::from_iter(["lingxi-cli", "auth", "status"]).unwrap().command.is_some());
+        // Controls: a normal prompt stays command=None; the `=` filter works.
         assert!(Argv::from_iter(["lingxi-cli", "fix the bug"]).unwrap().command.is_none());
         assert_eq!(
             Argv::from_iter(["lingxi-cli", "--debug=api,hooks"]).unwrap().debug.as_deref(),
@@ -1212,10 +1240,15 @@ mod tests {
 
     #[test]
     fn from_pr_with_value_parses() {
-        // `require_equals`: the value binds via `=` (so a bare `--from-pr` before
-        // a subcommand can't swallow it).
-        let a = Argv::from_iter(["lingxi-cli", "--from-pr=123", "hi"]).unwrap();
+        // SPACE form (matches commander `--from-pr [value]`): `--from-pr 123`
+        // consumes `123` as the value, leaving NO prompt — so `claude --from-pr 123`
+        // and `lingxi-cli --from-pr 123` parse identically.
+        let a = Argv::from_iter(["lingxi-cli", "--from-pr", "123"]).unwrap();
         assert_eq!(a.from_pr.as_deref(), Some("123"));
+        assert_eq!(a.prompt, None, "--from-pr consumes the next token as the value, not the prompt");
+        // The `=` form still binds the value too.
+        let b = Argv::from_iter(["lingxi-cli", "--from-pr=123"]).unwrap();
+        assert_eq!(b.from_pr.as_deref(), Some("123"));
     }
 
     #[test]

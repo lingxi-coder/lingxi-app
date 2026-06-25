@@ -1043,6 +1043,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     add_dir: Vec::new(),
 ///     cli_mcp_servers: Vec::new(),
 ///     exclude_dynamic_system_prompt_sections: false,
+///     setting_source_scope: (true, true),
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -1201,6 +1202,17 @@ pub struct DesktopConfig {
     /// per-machine env block out of the (cacheable) system prompt and into the
     /// first user message. `false` (the default) ⟶ unchanged.
     pub exclude_dynamic_system_prompt_sections: bool,
+    /// CLI `--setting-sources <user,project,local>` scope as `(include_user,
+    /// include_project)`. Gates which on-disk settings TIERS `build()` reads for
+    /// hook registration and permission rules (defaultMode / allow-deny rules /
+    /// additionalDirectories): skip the user tier when `!include_user`, skip the
+    /// project + local tiers when `!include_project`. This mirrors the
+    /// `Settings::load_scoped` gating the CLI already applies to provider /
+    /// routing / claudeMdExcludes loaders, so `--setting-sources project` no
+    /// longer loads user-level hooks or permission rules. `(true, true)` (the
+    /// default, also the absent-flag case) ⟶ all tiers load, byte-identical to
+    /// before this field.
+    pub setting_source_scope: (bool, bool),
 }
 
 impl std::fmt::Debug for DesktopConfig {
@@ -1292,6 +1304,8 @@ impl Default for DesktopConfig {
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
             exclude_dynamic_system_prompt_sections: false,
+            // Default: all setting tiers load (absent `--setting-sources`).
+            setting_source_scope: (true, true),
         }
     }
 }
@@ -2690,13 +2704,25 @@ pub async fn build(
     let mut hook_registry = hooks::HookRegistry::new();
     let project_settings_path = cwd.join(".claude").join("settings.json");
     let user_settings_path = cfg.claude_home.join("settings.json");
-    for (path, source) in [
-        (user_settings_path, hooks::definition::HookSource::User),
+    // `--setting-sources` scope (default `(true, true)` = all tiers): skip the
+    // user tier when `!include_user` and the project tier when `!include_project`
+    // so e.g. `--setting-sources project` does NOT register user-level hooks.
+    let (incl_user_settings, incl_project_settings) = cfg.setting_source_scope;
+    for (path, source, included) in [
+        (
+            user_settings_path,
+            hooks::definition::HookSource::User,
+            incl_user_settings,
+        ),
         (
             project_settings_path,
             hooks::definition::HookSource::Project,
+            incl_project_settings,
         ),
     ] {
+        if !included {
+            continue;
+        }
         if let Ok(raw) = tokio::fs::read_to_string(&path).await {
             match hooks::parse_hooks_from_settings_json(&raw, source) {
                 Ok(hooks_vec) => {
@@ -2789,20 +2815,33 @@ pub async fn build(
             // and honored on the next enforced boot (closing the persist↔enforce
             // round-trip); rules from every tier accumulate (bucketed by source,
             // `authorize` walks them by priority).
-            for (path, source) in [
+            // `--setting-sources` scope (default `(true, true)` = all tiers):
+            // gate the user tier on `include_user` and the project + local tiers
+            // on `include_project` (local folds into project, mirroring the
+            // `Settings::load_scoped` semantics the CLI already applies to the
+            // provider/routing loaders), so e.g. `--setting-sources project` does
+            // NOT load user-level permission rules / defaultMode.
+            let (incl_user_settings, incl_project_settings) = cfg.setting_source_scope;
+            for (path, source, included) in [
                 (
                     cfg.claude_home.join("settings.json"),
                     permission::PermissionRuleSource::UserSettings,
+                    incl_user_settings,
                 ),
                 (
                     cwd.join(".claude").join("settings.json"),
                     permission::PermissionRuleSource::ProjectSettings,
+                    incl_project_settings,
                 ),
                 (
                     cwd.join(".claude").join("settings.local.json"),
                     permission::PermissionRuleSource::LocalSettings,
+                    incl_project_settings,
                 ),
             ] {
+                if !included {
+                    continue;
+                }
                 if let Ok(raw) = tokio::fs::read_to_string(&path).await {
                     match permission::permission_rules_from_settings_json(&raw, source) {
                         Ok(mut r) => rules.append(&mut r),
@@ -4875,6 +4914,7 @@ mod tests {
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
             exclude_dynamic_system_prompt_sections: false,
+            setting_source_scope: (true, true),
         };
         (tmp, cfg)
     }

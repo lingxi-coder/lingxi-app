@@ -380,11 +380,10 @@ fn run_add(a: &AddArgs) -> i32 {
             // Byte-faithful success string per transport (see live-binary probe).
             match a.transport {
                 Transport::Stdio => {
-                    let mut cmd = a.command_or_url.clone();
-                    if !a.args.is_empty() {
-                        cmd.push(' ');
-                        cmd.push_str(&a.args.join(" "));
-                    }
+                    // claude's template is `${p} ${i.join(" ")}` — the space after
+                    // the command is ALWAYS emitted, so with no args there is a
+                    // DOUBLE space before ` to` (`…with command: mycmd  to … config`).
+                    let cmd = format!("{} {}", a.command_or_url, a.args.join(" "));
                     println!(
                         "Added stdio MCP server {} with command: {} to {} config",
                         a.name,
@@ -394,11 +393,15 @@ fn run_add(a: &AddArgs) -> i32 {
                 }
                 Transport::Sse | Transport::Http => {
                     let kind = if matches!(a.transport, Transport::Sse) { "SSE" } else { "HTTP" };
+                    // claude displays the URL through `kme()`: clear userinfo/query/
+                    // fragment then strip a trailing slash. This redacts any
+                    // `user:secret@` credentials and normalizes the byte output;
+                    // the STORED value (in the config) stays raw, which is correct.
                     println!(
                         "Added {} MCP server {} with URL: {} to {} config",
                         kind,
                         a.name,
-                        a.command_or_url,
+                        redact_url_for_display(&a.command_or_url),
                         a.scope.label()
                     );
                 }
@@ -555,46 +558,91 @@ fn write_project_server(name: &str, entry: &serde_json::Value) -> Result<WriteOu
 /// Implement `mcp remove`. With `--scope`, removes from that scope; without it,
 /// removes from whichever scope holds the server (local → project → user).
 fn run_remove(a: &RemoveArgs) -> i32 {
-    let scopes: Vec<Scope> = match a.scope {
-        Some(s) => vec![s],
-        None => vec![Scope::Local, Scope::Project, Scope::User],
-    };
-
-    let explicit_scope = a.scope;
-    for scope in scopes {
-        match remove_server(&a.name, scope) {
+    // With an explicit `--scope`, operate on exactly that scope.
+    if let Some(scope) = a.scope {
+        return match remove_server(&a.name, scope) {
             Ok(Some(path)) => {
-                // claude quotes the name CONDITIONALLY: unquoted with --scope,
-                // QUOTED when auto-detecting (no --scope).
-                if explicit_scope.is_some() {
-                    println!("Removed MCP server {} from {} config", a.name, scope.label());
-                } else {
-                    println!("Removed MCP server \"{}\" from {} config", a.name, scope.label());
-                }
+                println!("Removed MCP server {} from {} config", a.name, scope.label());
                 print_file_modified(scope, &path);
-                return SUCCESS;
+                SUCCESS
             }
-            Ok(None) => continue,
+            Ok(None) => {
+                eprintln!("No MCP server named \"{}\" {}", a.name, scope.not_found_suffix());
+                RUNTIME_ERROR
+            }
             Err(msg) => {
                 eprintln!("{msg}");
-                return RUNTIME_ERROR;
+                RUNTIME_ERROR
             }
-        }
+        };
     }
 
-    // Not found → stderr + exit 1 (claude exits 1, NOT 0). With an explicit
-    // --scope, the error is scope-specific (`… in user scope` / `… in .mcp.json`);
-    // without, it lists the configured servers across all scopes.
-    if let Some(scope) = explicit_scope {
-        eprintln!("No MCP server named \"{}\" {}", a.name, scope.not_found_suffix());
-    } else {
-        eprintln!(
-            "No MCP server named \"{}\". Configured servers: {}",
-            a.name,
-            configured_server_names_csv()
-        );
+    // Without `--scope`, count how many scopes hold the server. claude refuses
+    // to auto-resolve when it lives in more than one scope (otherwise the user
+    // gets a misleading exit 0 with the other copies left behind).
+    let present = scopes_containing(&a.name);
+    match present.as_slice() {
+        // Not found in any scope → not-found message + exit 1.
+        [] => {
+            eprintln!("{}", not_found_message(&a.name));
+            RUNTIME_ERROR
+        }
+        // Exactly one scope → remove it (name QUOTED in the auto-detect path).
+        [scope] => {
+            let scope = *scope;
+            match remove_server(&a.name, scope) {
+                Ok(Some(path)) => {
+                    println!("Removed MCP server \"{}\" from {} config", a.name, scope.label());
+                    print_file_modified(scope, &path);
+                    SUCCESS
+                }
+                // Race: vanished between count and remove → not-found, still exit 1.
+                Ok(None) => {
+                    eprintln!("{}", not_found_message(&a.name));
+                    RUNTIME_ERROR
+                }
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    RUNTIME_ERROR
+                }
+            }
+        }
+        // Multiple scopes → refuse and ask the user to disambiguate (no removal).
+        scopes => {
+            eprintln!("MCP server \"{}\" exists in multiple scopes:", a.name);
+            for &scope in scopes {
+                eprintln!("  - {} ({})", scope_remove_label(scope), scope_config_path_desc(scope));
+            }
+            eprintln!();
+            eprintln!("To remove from a specific scope, use:");
+            for &scope in scopes {
+                eprintln!("  claude mcp remove \"{}\" -s {}", a.name, scope.label());
+            }
+            RUNTIME_ERROR
+        }
     }
-    RUNTIME_ERROR
+}
+
+/// Human scope label for the multi-scope disambiguation list (matches claude's
+/// `getScopeLabel`).
+fn scope_remove_label(scope: Scope) -> &'static str {
+    match scope {
+        Scope::Local => "Local config (private to you in this project)",
+        Scope::User => "User config (available in all your projects)",
+        Scope::Project => "Project config (shared via .mcp.json)",
+    }
+}
+
+/// Config-file path description for the multi-scope disambiguation list
+/// (matches claude's `describeMcpConfigFilePath`).
+fn scope_config_path_desc(scope: Scope) -> String {
+    let cwd = std::env::current_dir().map(|c| c.display().to_string()).unwrap_or_default();
+    let global = global_config_path().map(|p| p.display().to_string()).unwrap_or_default();
+    match scope {
+        Scope::User => global,
+        Scope::Project => format!("{cwd}/.mcp.json"),
+        Scope::Local => format!("{global} [project: {cwd}]"),
+    }
 }
 
 /// Remove a server from one scope; `Ok(Some(path))` when it existed and was
@@ -697,12 +745,8 @@ fn run_list() -> i32 {
 fn run_get(a: &GetArgs) -> i32 {
     let servers = load_all_servers();
     let Some(cfg) = servers.iter().find(|c| c.name == a.name) else {
-        // claude: not-found → stderr + exit 1.
-        eprintln!(
-            "No MCP server named \"{}\". Configured servers: {}",
-            a.name,
-            configured_server_names_csv()
-        );
+        // claude: not-found → stderr + exit 1, via the `g$o` message builder.
+        eprintln!("{}", not_found_message(&a.name));
         return RUNTIME_ERROR;
     };
 
@@ -752,12 +796,72 @@ fn load_all_servers() -> Vec<mcp::connection::McpServerConfig> {
     mcp::json_config::load_mcp_servers(&project_mcp, &global, &cwd)
 }
 
-/// Comma-separated, name-sorted list of configured servers (used by the
-/// "No MCP server named …" message). Matches claude's sorted display.
-fn configured_server_names_csv() -> String {
+/// Sorted list of all configured server names across every scope.
+fn configured_server_names_sorted() -> Vec<String> {
     let mut names: Vec<String> = load_all_servers().into_iter().map(|c| c.name).collect();
     names.sort();
-    names.join(", ")
+    names
+}
+
+/// Build claude's not-found message (`g$o(name, names)`): when NO servers are
+/// configured, point the user at `claude mcp add`; otherwise list the
+/// configured servers, capped at 8 names with an `(and N more …)` suffix.
+fn not_found_message(name: &str) -> String {
+    let names = configured_server_names_sorted();
+    if names.is_empty() {
+        return format!("No MCP server named \"{name}\". Run `claude mcp add` to add one.");
+    }
+    const CAP: usize = 8;
+    let shown = names[..names.len().min(CAP)].join(", ");
+    let suffix = if names.len() > CAP {
+        format!(" (and {} more — run `claude mcp list` to see all)", names.len() - CAP)
+    } else {
+        String::new()
+    };
+    format!("No MCP server named \"{name}\". Configured servers: {shown}{suffix}")
+}
+
+/// Which writable scopes (local/project/user) currently hold a server named
+/// `name`. Used by `mcp remove` without `--scope` to detect the multi-scope
+/// case that claude refuses to auto-resolve.
+fn scopes_containing(name: &str) -> Vec<Scope> {
+    [Scope::Local, Scope::Project, Scope::User]
+        .into_iter()
+        .filter(|&scope| scope_contains_server(name, scope))
+        .collect()
+}
+
+/// Presence-only check for a server in one scope (no mutation). Mirrors the
+/// per-scope read in [`remove_server`]; a read error is treated as "absent" so
+/// the disambiguation logic never blocks on a transient read failure.
+fn scope_contains_server(name: &str, scope: Scope) -> bool {
+    match scope {
+        Scope::User => {
+            let Some(path) = global_config_path() else { return false };
+            migrations::global_config::read_map(&path)
+                .ok()
+                .and_then(|m| m.get("mcpServers").and_then(serde_json::Value::as_object).cloned())
+                .is_some_and(|m| m.contains_key(name))
+        }
+        Scope::Local => {
+            let Some(path) = global_config_path() else { return false };
+            let Some(key) = project_key() else { return false };
+            migrations::global_config::get_project_config(&path, &key)
+                .ok()
+                .and_then(|m| m.get("mcpServers").and_then(serde_json::Value::as_object).cloned())
+                .is_some_and(|m| m.contains_key(name))
+        }
+        Scope::Project => {
+            let Some(path) = project_mcp_json_path() else { return false };
+            if !path.exists() {
+                return false;
+            }
+            read_json_object(&path)
+                .ok()
+                .and_then(|m| m.get("mcpServers").and_then(serde_json::Value::as_object).cloned())
+                .is_some_and(|m| m.contains_key(name))
+        }
+    }
 }
 
 /// One-line transport summary for `list` (e.g. `echo hello`,
@@ -782,7 +886,7 @@ fn transport_summary(spec: &traits::McpTransportSpec) -> String {
 fn scope_detail(scope: ConfigScope) -> &'static str {
     match scope {
         ConfigScope::Local => "Local config (private to you in this project)",
-        ConfigScope::User => "User config (available across all your projects)",
+        ConfigScope::User => "User config (available in all your projects)",
         ConfigScope::Project => "Project config (shared via .mcp.json)",
         ConfigScope::Dynamic => "Dynamic",
         ConfigScope::Enterprise => "Enterprise managed config",
@@ -831,9 +935,9 @@ fn run_reset_project_choices() -> i32 {
     });
     match result {
         Ok(_) => {
-            // Byte-exact two-line message (claude mcp.tsx).
+            // Byte-exact two-line message (claude mcp.tsx / live 2.1.191 binary).
             println!(
-                "All project-scoped (.mcp.json) server approvals and rejections have been reset."
+                "Project-scoped (.mcp.json) server approvals and rejections stored for this project have been reset."
             );
             println!("You will be prompted for approval next time you start Claude Code.");
             SUCCESS
@@ -873,6 +977,55 @@ fn parse_header_pairs(pairs: &[String]) -> Result<Vec<(String, String)>, String>
     Ok(out)
 }
 
+/// Mirror claude's `kme()`: parse the URL, clear userinfo/query/fragment, and
+/// strip a trailing slash, returning the normalized/redacted string used in the
+/// `mcp add` success line. Falls back to the raw input when it does not parse as
+/// an `scheme://…` URL (matching `new URL()` throwing → claude would not reach
+/// this display, but a graceful raw fallback is the safe choice here). Only the
+/// DISPLAY is affected; the stored config value stays raw.
+fn redact_url_for_display(raw: &str) -> String {
+    // Split off the scheme (`scheme://`). Without `://` there is no authority to
+    // redact and no canonical form to compute → return the raw string.
+    let Some(scheme_end) = raw.find("://") else {
+        return raw.to_string();
+    };
+    let scheme = &raw[..scheme_end];
+    let rest = &raw[scheme_end + 3..];
+
+    // Authority ends at the first `/`, `?`, or `#`.
+    let authority_end = rest
+        .find(|c| c == '/' || c == '?' || c == '#')
+        .unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let after_authority = &rest[authority_end..];
+
+    // Drop userinfo (`user:pass@host` → `host`). A `@` inside the authority
+    // separates credentials from the host:port.
+    let host = match authority.rfind('@') {
+        Some(at) => &authority[at + 1..],
+        None => authority,
+    };
+
+    // Path = everything after the authority up to `?`/`#`; query (`?…`) and
+    // fragment (`#…`) are dropped.
+    let path_end = after_authority
+        .find(|c| c == '?' || c == '#')
+        .unwrap_or(after_authority.len());
+    let mut path = &after_authority[..path_end];
+
+    // `new URL("scheme://host").toString()` yields `scheme://host/` (a trailing
+    // slash), which kme's `.replace(/\/$/,"")` then strips. Strip a single
+    // trailing `/` from the path so `https://h/` and `https://h` both render as
+    // `https://h`.
+    if path == "/" {
+        path = "";
+    } else if let Some(stripped) = path.strip_suffix('/') {
+        path = stripped;
+    }
+
+    format!("{scheme}://{host}{path}")
+}
+
 /// Read a JSON object from `path`; missing file ⇒ empty object. Errors on
 /// malformed JSON or a non-object root.
 fn read_json_object(path: &std::path::Path) -> Result<serde_json::Map<String, serde_json::Value>, String> {
@@ -896,12 +1049,30 @@ fn write_json_object(
     path: &std::path::Path,
     map: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), String> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-    }
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
     let serialized = serde_json::to_string_pretty(&serde_json::Value::Object(map.clone()))
         .map_err(|e| format!("could not serialize JSON: {e}"))?;
-    std::fs::write(path, serialized).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    // Atomic write (mirrors the global-config writer): write to a sibling temp
+    // file in the SAME directory, then rename over `path`. A crash / disk-full /
+    // kill mid-write leaves the temp file truncated but the real `.mcp.json`
+    // (a shared, often version-controlled project file) intact. A plain
+    // truncate-in-place `std::fs::write` could corrupt it into invalid JSON,
+    // breaking every later `mcp add/remove` on that scope.
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "mcp.json".to_string());
+    let tmp = dir.join(format!(".{file_name}.tmp-{}", std::process::id()));
+    let write_result = (|| -> std::io::Result<()> {
+        std::fs::write(&tmp, serialized.as_bytes())?;
+        std::fs::rename(&tmp, path)
+    })();
+    if let Err(e) = write_result {
+        // Best-effort temp cleanup on any failure (the tmp may or may not exist).
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("could not write {}: {e}", path.display()));
+    }
     Ok(())
 }
 
@@ -921,5 +1092,33 @@ fn print_file_modified(scope: Scope, path: &std::path::Path) {
         Scope::User | Scope::Project => {
             println!("File modified: {}", path.display());
         }
+    }
+}
+
+#[cfg(test)]
+mod url_redaction_tests {
+    use super::redact_url_for_display;
+
+    #[test]
+    fn strips_userinfo_query_fragment_and_trailing_slash() {
+        // Credentials in the URL are redacted on the success line (the STORED
+        // value stays raw — only the display is affected).
+        assert_eq!(
+            redact_url_for_display("https://user:secret@host/mcp?token=abc#frag"),
+            "https://host/mcp"
+        );
+        // Trailing slash is dropped (claude's `kme().replace(/\/$/,"")`).
+        assert_eq!(redact_url_for_display("https://host/"), "https://host");
+        assert_eq!(redact_url_for_display("https://host"), "https://host");
+        // Query/fragment alone are dropped; a non-trailing-slash path is kept.
+        assert_eq!(redact_url_for_display("http://h:8080/a/b?x=1"), "http://h:8080/a/b");
+        // userinfo with no path normalizes to just the host.
+        assert_eq!(redact_url_for_display("https://u:p@host"), "https://host");
+    }
+
+    #[test]
+    fn non_url_input_falls_back_to_raw() {
+        // No `://` ⟶ return the raw string unchanged (graceful fallback).
+        assert_eq!(redact_url_for_display("not-a-url"), "not-a-url");
     }
 }

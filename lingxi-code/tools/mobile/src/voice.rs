@@ -3,7 +3,6 @@
 //! Routes to `ctx.voice` (`Arc<dyn VoiceRecorder>`). `None` on desktop; mobile
 //! composition roots wire a native Swift / Kotlin impl via `UniFFI` (P12).
 
-#![forbid(unsafe_code)]
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;

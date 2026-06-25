@@ -6,7 +6,6 @@
 //! analog of the camera/voice/share seams) — there is no user-facing UI
 //! affordance. The single action is `post` (title, body, optional tag).
 
-#![forbid(unsafe_code)]
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;

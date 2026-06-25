@@ -816,20 +816,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "command-desktop"
-version = "0.12.0"
-dependencies = [
- "command-api",
-]
-
-[[package]]
-name = "command-mobile"
-version = "0.12.0"
-dependencies = [
- "command-api",
-]
-
-[[package]]
 name = "compaction"
 version = "0.12.0"
 dependencies = [
@@ -1278,7 +1264,6 @@ dependencies = [
  "client-protocol",
  "command-api",
  "command-core",
- "command-desktop",
  "compaction",
  "coordinator",
  "cost",
@@ -1345,7 +1330,6 @@ dependencies = [
  "client-protocol",
  "command-api",
  "command-core",
- "command-mobile",
  "compaction",
  "cost",
  "hooks",
@@ -5726,7 +5710,6 @@ dependencies = [
  "dirs",
  "engine",
  "futures",
- "ignore",
  "insta",
  "iocraft",
  "memory",

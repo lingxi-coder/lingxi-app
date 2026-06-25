@@ -152,12 +152,9 @@ fn register_mobile_non_skill_tools(reg: &mut ToolRegistry, ctx: BuiltinToolConte
     tool_cron::register_all(reg, ctx.clone());
     tool_ui::register_all(reg, ctx.clone());
     // ----- mobile-exclusive tools ------------------------------------------
-    tool_camera::register_all(reg, ctx.clone());
-    tool_voice::register_all(reg, ctx.clone());
-    tool_speech::register_all(reg, ctx.clone());
-    tool_notification::register_all(reg, ctx.clone());
-    tool_clipboard::register_all(reg, ctx.clone());
-    tool_share::register_all(reg, ctx.clone());
+    // camera / voice / speech / notification / clipboard / share, folded into
+    // the single `tool-mobile` crate.
+    tool_mobile::register_all(reg, ctx.clone());
     // P3: Android-only Shell tool. Self-gates on ctx.android_shell.enabled;
     // iOS and desktop are unaffected (their ctx.android_shell is None).
     tool_shell_mobile::register_all(reg, ctx.clone());

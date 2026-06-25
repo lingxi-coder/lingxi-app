@@ -1,13 +1,14 @@
 [package]
-name = "tool-camera"
+name = "tool-mobile"
 version = "0.12.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-# M8-P11: mobile-exclusive `camera` tool. Pure Rust — routes to the
-# `Arc<dyn CameraControl>` carried in BuiltinToolContext (a Swift/Kotlin impl
-# injected via UniFFI in P12). Linked only by the engine-mobile composition root.
+# Mobile-exclusive builtin tools (camera / voice / speech / notification /
+# clipboard / share), folded from the former one-crate-per-tool split. Pure Rust
+# — each routes to an `Arc<dyn …Control>` capability in BuiltinToolContext
+# (Swift/Kotlin impl injected via UniFFI). Linked only by engine-mobile.
 
 [dependencies]
 tool-api = { path = "../../tool-api" }

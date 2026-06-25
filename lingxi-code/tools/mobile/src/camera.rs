@@ -5,7 +5,6 @@
 //! capability is unavailable; mobile composition roots wire a native Swift /
 //! Kotlin impl via `UniFFI` (P12). The Rust side is platform-agnostic.
 
-#![forbid(unsafe_code)]
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;

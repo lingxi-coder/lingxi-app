@@ -5,7 +5,6 @@
 //! native Swift / Kotlin impl via `UniFFI`. Sibling of `tool-voice` (raw mic
 //! capture) — this is recognition (`transcribe`) and synthesis (`speak`).
 
-#![forbid(unsafe_code)]
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;

@@ -6,7 +6,6 @@
 //! camera/voice/share seams) — there is no user-facing UI affordance. The two
 //! actions are `set` (write `text`) and `get` (read the current contents).
 
-#![forbid(unsafe_code)]
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;

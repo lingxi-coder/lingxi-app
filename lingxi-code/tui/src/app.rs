@@ -1016,10 +1016,16 @@ pub fn render_screen(
                 use crate::screens::help::render_help_to_string_with;
                 let body = render_help_to_string_with(h, state.keymap.bindings());
                 let lines: Vec<String> = body.lines().map(str::to_string).collect();
+                // (help-6) claude-code's HelpV2 dismiss hint (`{chord} to
+                // cancel`) is italic. It's the final line of the body.
+                let footer = crate::screens::help::FOOTER;
                 element! {
                     View(flex_direction: FlexDirection::Column, padding: 1) {
-                        #(lines.into_iter().map(|line| element! {
-                            Text(content: line)
+                        #(lines.into_iter().map(|line| {
+                            let italic = line == footer;
+                            element! {
+                                Text(content: line, italic: italic)
+                            }
                         }))
                     }
                 }
@@ -1151,6 +1157,8 @@ pub fn render_screen(
                 (t.elapsed().as_millis() < u128::from(SIGINT_WINDOW_MS))
                     .then_some(state.sigint_armed_key)
             }),
+            // (SS-06) reduced-motion → static spinner.
+            reduced_motion: state.reduced_motion,
         )
     }
     .into_any()

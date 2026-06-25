@@ -294,7 +294,11 @@ pub fn ResumeScreen(props: &ResumeScreenProps) -> impl Into<AnyElement<'static>>
         .collect();
 
     // (resume-preview-pane-not-in-shipped) No always-on preview pane.
-    let footer = "Type to search   \u{2191}\u{2193} select   Enter resume   Esc cancel".to_string();
+    // (resume-footer-hint-wording) claude-code's LogSelector footer is a dim
+    // Byline of shortcut hints. LingXi keeps type-to-search; Ctrl+V preview /
+    // Ctrl+R rename hints are added when those features land. The `↑↓
+    // select`/`Enter resume` verbs are dropped to match the Byline shape.
+    let footer = "Type to search \u{00B7} Esc cancel".to_string();
 
     element! {
         View(flex_direction: FlexDirection::Column, padding: 1) {
@@ -313,7 +317,7 @@ pub fn ResumeScreen(props: &ResumeScreenProps) -> impl Into<AnyElement<'static>>
                 }))
             }
             View(margin_top: 1) {
-                Text(content: footer, color: Color::DarkGrey)
+                Text(content: footer, color: Color::DarkGrey, italic: true)
             }
         }
     }

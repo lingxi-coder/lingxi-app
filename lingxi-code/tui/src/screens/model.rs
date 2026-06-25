@@ -371,8 +371,12 @@ pub fn render_model_to_string(state: &ModelScreenState) -> String {
             }
         }
     }
+    // (model-footer-static-vs-byline) claude-code's ModelPicker footer is a
+    // dim Byline of shortcut hints (Enter/confirm + Esc/exit), not a full
+    // sentence. LingXi keeps the search feature, so `type to search` stays;
+    // the `Press`/`to navigate`/`go back` wording is dropped.
     out.push_str(
-        "Press \u{2191}\u{2193} to navigate \u{00B7} type to search \u{00B7} Enter to select \u{00B7} Esc to go back",
+        "type to search \u{00B7} Enter to select \u{00B7} Esc to cancel",
     );
     out
 }
@@ -511,7 +515,8 @@ mod render_tests {
         assert!(out.contains("\nDeepSeek\n"));
         assert!(out.contains("\u{276F} claude-opus-4-7  \u{00B7} Built-in (current)\n"));
         assert!(out.contains("  DeepSeek Chat  \u{00B7} DeepSeek\n"));
-        assert!(out.ends_with("Esc to go back"));
+        // (model-footer-static-vs-byline) Byline-style footer.
+        assert!(out.ends_with("type to search \u{00B7} Enter to select \u{00B7} Esc to cancel"));
     }
 
     #[test]

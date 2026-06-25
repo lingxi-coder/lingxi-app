@@ -411,6 +411,11 @@ pub struct SpinnerWithVerbProps {
     /// dark-theme Claude accent; the REPL threads the active `theme.claude`
     /// (claude-code `Spinner` `defaultColor='claude'`).
     pub color: Option<Color>,
+    /// (SS-06) When `true`, the glyph is pinned to frame 0 and the animation
+    /// tick is suppressed (claude-code `reducedMotion ? 0 : Math.floor(...)`,
+    /// `useAnimationFrame(reducedMotion ? null : 50)`). Driven by the
+    /// `prefersReducedMotion` setting threaded from the REPL.
+    pub reduced_motion: bool,
 }
 
 /// Renders one line: `"{frame} {verb}…"`. While mounted, advances frames
@@ -436,7 +441,12 @@ pub fn SpinnerWithVerb(
     // NOT rotated thereafter — claude-code keeps one verb for the whole turn.
     let mut verb = hooks.use_state(|| initial_verb_index(SPINNER_VERBS.len(), live_seed()));
 
-    if let Some(f) = props.frame_override {
+    if props.reduced_motion {
+        // (SS-06) Pin the glyph to frame 0 and start no tick
+        // (claude-code `frame = reducedMotion ? 0 : …`). A `frame_override`
+        // still wins for deterministic snapshot tests.
+        frame.set(props.frame_override.unwrap_or(0));
+    } else if let Some(f) = props.frame_override {
         frame.set(f);
     } else {
         hooks.use_future(async move {

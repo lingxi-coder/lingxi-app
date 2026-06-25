@@ -135,6 +135,9 @@ pub struct ReplScreenProps {
     /// resolved against the window by the caller) — forwarded to
     /// `PromptInputFooter.exit_hint`.
     pub exit_hint: Option<&'static str>,
+    /// (SS-06) `prefersReducedMotion` — forwarded to the streaming spinner so
+    /// it pins its glyph and stops animating.
+    pub reduced_motion: bool,
 }
 
 impl Default for ReplScreenProps {
@@ -168,6 +171,7 @@ impl Default for ReplScreenProps {
             status_line_padding: 0,
             context_pressure: None,
             exit_hint: None,
+            reduced_motion: false,
         }
     }
 }
@@ -181,6 +185,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let context_pct = props.status.context_pct;
     let permission_mode = props.status.permission_mode;
     let exit_hint = props.exit_hint;
+    let reduced_motion = props.reduced_motion;
     // (A6) Custom status-line text + padding + width-for-truncation.
     let status_line_text = props.status_line_text.clone();
     // (TokenWarning) The live context-pressure banner, rendered above the prompt.
@@ -247,7 +252,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
             #(if show_spinner {
                 // Glyph + verb render in the active theme's Claude accent
                 // (claude-code `Spinner` `defaultColor='claude'`).
-                element!(SpinnerWithVerb(color: Some(theme.claude))).into_any()
+                element!(SpinnerWithVerb(color: Some(theme.claude), reduced_motion: reduced_motion)).into_any()
             } else {
                 element!(View).into_any()
             })

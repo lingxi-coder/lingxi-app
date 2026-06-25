@@ -67,11 +67,11 @@ pub const MODELS_EMPTY_LINE: &str = "No model usage data available";
 /// Locked tokens-chart heading (claude-code `ModelsTab`).
 pub const TOKENS_PER_DAY: &str = "Tokens per Day";
 /// Locked footer hint. claude-code's footer is
-/// `Esc to cancel · r to cycle dates · ctrl+s to copy`; the `r`/`ctrl+s`
-/// controls are deferred (see module docs). We render the `Esc to cancel`
-/// verb to match claude-code (NOT the Rust-invented `Tab to switch`, which has
-/// no TS equivalent — tab switching is discoverable from the tab headers).
-pub const FOOTER: &str = "Esc to cancel";
+/// `Esc to cancel · r to cycle dates · ctrl+s to copy`. The `r`-cycle now
+/// works (`StatsState::cycle_range`), so its hint is rendered; `ctrl+s` copy
+/// is still deferred (no clipboard seam). The Rust-invented `Tab to switch`
+/// is NOT rendered — tab switching is discoverable from the tab headers.
+pub const FOOTER: &str = "Esc to cancel \u{00B7} r to cycle dates";
 
 /// Per-model aggregated token usage (claude-code `ModelUsage`, the subset this
 /// screen reads). Counts are monotonic sums across every `assistant` row that
@@ -1316,6 +1316,26 @@ fn tab_header(active: StatsTab) -> String {
     format!("{} {}", mark(StatsTab::Overview), mark(StatsTab::Models))
 }
 
+/// (stats-date-range-selector) All three range options joined by ` · `, the
+/// active one bracketed (claude-code `DateRangeSelector`: active bold+claude,
+/// others dim — color/bold are invisible in the string oracle, so the
+/// active one is `[…]`-bracketed, matching [`tab_header`]).
+fn range_selector_line(active: StatsRange) -> String {
+    let mark = |r: StatsRange| -> String {
+        if r == active {
+            format!("[{}]", r.label())
+        } else {
+            r.label().to_string()
+        }
+    };
+    format!(
+        "{} \u{00B7} {} \u{00B7} {}",
+        mark(StatsRange::All),
+        mark(StatsRange::Last7),
+        mark(StatsRange::Last30),
+    )
+}
+
 /// Pure render oracle: tab header + the active tab's visible body window +
 /// (when scrolled) a scroll indicator + the footer.
 ///
@@ -1330,8 +1350,12 @@ pub fn render_stats_to_string(state: &StatsState) -> String {
     }
     let mut out = tab_header(state.tab);
     out.push('\n');
-    // (stats-date-range) the active range label + cycle hint.
-    out.push_str(&format!("{} \u{00B7} r to change range\n", state.range.label()));
+    // (stats-date-range-selector) claude-code's DateRangeSelector renders ALL
+    // three range options joined by ` · `, the active one bold+claude (the
+    // string oracle marks it with `[…]` brackets, like tab_header — color is
+    // invisible here). The `r`-cycle hint moves to the footer.
+    out.push_str(&range_selector_line(state.range));
+    out.push('\n');
 
     let view = state.view();
     let lines = body_lines(&view, state.tab);
@@ -1506,7 +1530,7 @@ mod tests {
         let out = render_stats_to_string(&s);
         assert_eq!(
             out,
-            "No stats available yet. Start using Claude Code!\nEsc to cancel"
+            "No stats available yet. Start using Claude Code!\nEsc to cancel \u{00B7} r to cycle dates"
         );
     }
 
@@ -1958,13 +1982,18 @@ mod tests {
             false,
         )]);
         let mut st = StatsState::new(data);
+        // (stats-date-range-selector) all three options; active bracketed.
         assert!(
-            render_stats_to_string(&st).contains("All time \u{00B7} r to change range"),
+            render_stats_to_string(&st)
+                .contains("[All time] \u{00B7} Last 7 days \u{00B7} Last 30 days"),
             "got: {}",
             render_stats_to_string(&st)
         );
         st.cycle_range();
-        assert!(render_stats_to_string(&st).contains("Last 7 days \u{00B7} r to change range"));
+        assert!(render_stats_to_string(&st)
+            .contains("All time \u{00B7} [Last 7 days] \u{00B7} Last 30 days"));
+        // (stats-footer-text) the r-cycle hint now lives in the footer.
+        assert!(render_stats_to_string(&st).contains("Esc to cancel \u{00B7} r to cycle dates"));
     }
 
     #[test]

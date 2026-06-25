@@ -697,6 +697,12 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                     // `set_theme` already applied; best-effort persist, then
                     // close (screen already taken out by `.take()` above).
                     crate::theme_persist::save_theme_setting(st.theme_setting);
+                    // (theme-missing-syntax-toggle) Persist the Ctrl+T syntax
+                    // toggle alongside the theme (claude-code persists
+                    // `syntaxHighlightingDisabled` on the picker).
+                    crate::theme_persist::save_syntax_highlighting_disabled(
+                        st.syntax_highlighting_disabled,
+                    );
                 }
                 ThemePickerOutcome::Cancel => {
                     // Prior theme/setting restored by the reducer; close (screen

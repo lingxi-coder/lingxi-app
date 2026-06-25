@@ -191,6 +191,16 @@ fn word_diff_spans(
 ) -> Option<Vec<StyledSpan>> {
     let wd = TextDiff::from_words(remove_text, add_text);
     // Changed fraction = changed words / total words on this side.
+    //
+    // (diff-04) claude-code's `wordDiffStrings` uses a symmetric CHAR-LENGTH
+    // ratio (changedLen / (oldLen+newLen) > 0.4) rather than this per-side
+    // word-count. Porting the ratio alone REGRESSES, because it is coupled to
+    // the TOKENIZER: `similar`'s `from_words` produces coarser tokens than
+    // TS's punctuation-splitting `tokenize` (e.g. `oldName(param)` is not
+    // split on `(`), so the char-length ratio comes out above 0.4 and skips
+    // word-diff on cases TS keeps. Matching TS requires porting its tokenizer
+    // too — the larger work tracked separately; the word-count heuristic
+    // stays until then.
     let (mut changed, mut total) = (0usize, 0usize);
     for ch in wd.iter_all_changes() {
         match ch.tag() {

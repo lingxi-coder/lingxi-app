@@ -79,11 +79,44 @@ use clap::error::ErrorKind;
 use std::ffi::OsString;
 use std::sync::Arc;
 
+/// First missing required argument's bare name from a clap
+/// `MissingRequiredArgument` error, with clap's `<…>`/`[…]`/`...` usage
+/// decoration stripped — so callers can render commander's
+/// `error: missing required argument '<name>'` (claude-code parity). clap lists
+/// the missing args in declaration order; commander reports only the first.
+fn first_missing_required_arg(e: &clap::Error) -> Option<String> {
+    use clap::error::{ContextKind, ContextValue};
+    let raw = match e.get(ContextKind::InvalidArg)? {
+        ContextValue::Strings(v) => v.first()?.clone(),
+        ContextValue::String(s) => s.clone(),
+        _ => return None,
+    };
+    let cleaned = raw
+        .trim()
+        .trim_end_matches("...")
+        .trim_matches(|c| c == '<' || c == '>' || c == '[' || c == ']')
+        .to_string();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
 /// Top-level entrypoint. Returns the process exit code.
 pub async fn run_cli(args: Vec<OsString>) -> i32 {
     let parsed = match Argv::from_iter(args) {
         Ok(a) => a,
         Err(e) => {
+            // claude-code (commander) renders a missing required positional as a
+            // single line `error: missing required argument '<name>'` (stderr,
+            // exit 1), reporting only the FIRST missing one. clap's default is a
+            // multi-line "the following required arguments were not provided: …\n
+            // Usage: …" block listing all of them — so for this one kind we
+            // reformat to match commander byte-for-byte. All other clap errors
+            // keep clap's own rendering (the known clap-vs-commander help layout).
+            if e.kind() == ErrorKind::MissingRequiredArgument {
+                if let Some(name) = first_missing_required_arg(&e) {
+                    eprintln!("error: missing required argument '{name}'");
+                    return exit_codes::ARGV_ERROR;
+                }
+            }
             // clap prints its own help/usage; we just return the locked
             // code. Help/version are not errors.
             e.print().ok();

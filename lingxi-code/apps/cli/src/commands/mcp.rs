@@ -143,6 +143,10 @@ pub enum Sub {
 #[derive(Debug, Clone, Args)]
 pub struct AddArgs {
     /// Server name.
+    // Explicit `value_name` so the usage placeholder and the
+    // `missing required argument 'name'` error read `name` (commander parity),
+    // not clap's default SCREAMING_SNAKE_CASE `<NAME>`.
+    #[arg(value_name = "name")]
     pub name: String,
     /// Command (stdio) or URL (sse/http).
     #[arg(value_name = "commandOrUrl")]
@@ -195,8 +199,13 @@ pub struct AddFromClaudeDesktopArgs {
 #[derive(Debug, Clone, Args)]
 pub struct AddJsonArgs {
     /// Server name.
+    // Explicit `value_name` so the usage placeholder and the
+    // `missing required argument 'name'` error read `name` (commander parity),
+    // not clap's default SCREAMING_SNAKE_CASE `<NAME>`.
+    #[arg(value_name = "name")]
     pub name: String,
     /// JSON server config.
+    #[arg(value_name = "json")]
     pub json: String,
     /// Prompt for OAuth client secret (or set MCP_CLIENT_SECRET env var)
     #[arg(long = "client-secret")]
@@ -210,6 +219,10 @@ pub struct AddJsonArgs {
 #[derive(Debug, Clone, Args)]
 pub struct GetArgs {
     /// Server name.
+    // Explicit `value_name` so the usage placeholder and the
+    // `missing required argument 'name'` error read `name` (commander parity),
+    // not clap's default SCREAMING_SNAKE_CASE `<NAME>`.
+    #[arg(value_name = "name")]
     pub name: String,
 }
 
@@ -217,6 +230,10 @@ pub struct GetArgs {
 #[derive(Debug, Clone, Args)]
 pub struct LoginArgs {
     /// Server name.
+    // Explicit `value_name` so the usage placeholder and the
+    // `missing required argument 'name'` error read `name` (commander parity),
+    // not clap's default SCREAMING_SNAKE_CASE `<NAME>`.
+    #[arg(value_name = "name")]
     pub name: String,
     /// Print the authorization URL instead of opening a browser (for
     /// SSH/headless sessions — paste the redirect URL back when prompted)
@@ -228,6 +245,10 @@ pub struct LoginArgs {
 #[derive(Debug, Clone, Args)]
 pub struct LogoutArgs {
     /// Server name.
+    // Explicit `value_name` so the usage placeholder and the
+    // `missing required argument 'name'` error read `name` (commander parity),
+    // not clap's default SCREAMING_SNAKE_CASE `<NAME>`.
+    #[arg(value_name = "name")]
     pub name: String,
 }
 
@@ -235,6 +256,10 @@ pub struct LogoutArgs {
 #[derive(Debug, Clone, Args)]
 pub struct RemoveArgs {
     /// Server name.
+    // Explicit `value_name` so the usage placeholder and the
+    // `missing required argument 'name'` error read `name` (commander parity),
+    // not clap's default SCREAMING_SNAKE_CASE `<NAME>`.
+    #[arg(value_name = "name")]
     pub name: String,
     /// Configuration scope (local, user, or project) - if not specified,
     /// removes from whichever scope it exists in

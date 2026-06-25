@@ -270,6 +270,37 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
             };
         }
 
+        // Programmatically-registered bundled skills (e.g. `/loop`) are
+        // user-invocable (loop.ts:82 `userInvocable: true`). They expand via the
+        // dynamic prompt builder (`getPromptForCommand`, loop.ts:84) instead of
+        // static markdown templating, so a user-typed `/loop` produces its prompt
+        // rather than resolving to Unknown (the bundled kind is not a registered
+        // handler). Same display contract + `UserPromptExpansion` firing as the
+        // markdown path below.
+        if let SlashCommandKind::Bundled { prompt_fn, .. } = &command.kind {
+            // The boot-registered instance always carries `prompt_fn`; a
+            // deserialized one is inert by design (`#[serde(skip)]`). Clone the
+            // builder so the registry lock can be dropped before building.
+            let builder = prompt_fn.clone();
+            drop(reg);
+            return match builder {
+                Some(pf) => {
+                    let content = pf.build(&parsed.raw_args);
+                    self.fire_user_prompt_expansion(
+                        &command.name,
+                        &parsed.raw_args,
+                        command.source,
+                    )
+                    .await;
+                    SlashDispatchResult::Handled { display: content }
+                }
+                None => SlashDispatchResult::Unknown {
+                    name: parsed.name.clone(),
+                    display: Self::unknown_command_literal(&parsed.name),
+                },
+            };
+        }
+
         if matches!(
             command.kind,
             SlashCommandKind::Markdown { .. } | SlashCommandKind::Plugin { .. }
@@ -417,6 +448,50 @@ mod tests {
         match d.dispatch("/demo this").await {
             SlashDispatchResult::Handled { display } => assert_eq!(display, "Use this"),
             other => panic!("expected markdown command to dispatch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatches_bundled_skill_via_dynamic_prompt_fn() {
+        // Regression: a user-typed bundled skill (`/loop`) must expand via its
+        // dynamic builder, NOT resolve to Unknown (it is not a registered
+        // handler and not a Markdown kind). Mirrors loop.ts's empty→usage vs
+        // non-empty→buildPrompt branch.
+        struct B;
+        impl crate::model::BundledPromptFn for B {
+            fn build(&self, args: &str) -> String {
+                if args.trim().is_empty() {
+                    "USAGE".to_string()
+                } else {
+                    format!("BUILT[{}]", args.trim())
+                }
+            }
+        }
+        let mut reg = CommandRegistry::new();
+        reg.register_command(SlashCommand {
+            name: "loop".to_string(),
+            description: "Loop".to_string(),
+            source: CommandSource::Bundled,
+            kind: SlashCommandKind::Bundled {
+                frontmatter: CommandFrontmatter::default(),
+                prompt_fn: Some(Arc::new(B)),
+            },
+            loaded_from: Some("bundled".to_string()),
+            user_invocable: Some(true),
+            ..SlashCommand::default()
+        });
+        let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
+        // Non-empty args → built prompt.
+        match d.dispatch("/loop 5m /babysit-prs").await {
+            SlashDispatchResult::Handled { display } => {
+                assert_eq!(display, "BUILT[5m /babysit-prs]");
+            }
+            other => panic!("expected bundled skill to dispatch, got {other:?}"),
+        }
+        // Empty args → usage (still Handled, never Unknown).
+        match d.dispatch("/loop").await {
+            SlashDispatchResult::Handled { display } => assert_eq!(display, "USAGE"),
+            other => panic!("expected usage, got {other:?}"),
         }
     }
 

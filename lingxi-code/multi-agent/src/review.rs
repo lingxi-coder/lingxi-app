@@ -130,10 +130,13 @@ impl ReviewOutcome {
 #[must_use]
 pub fn body_has_blocking(body: &str) -> bool {
     let lower = body.to_ascii_lowercase();
-    // Explicit "no blocking" statements => clean.
+    // Explicit "no blocking" statements => clean. NOTE: the zero-count guard
+    // must match a STANDALONE zero — a plain `contains("0 blocking")` also
+    // matches "10 blocking" / "20 blocking", which would mis-read a review of
+    // ten blocking findings as clean (the exact inverse of its verdict).
     if lower.contains("no blocking findings")
         || lower.contains("no blocking issues")
-        || lower.contains("0 blocking")
+        || mentions_zero_blocking(&lower)
         || lower.contains("none blocking")
     {
         return false;
@@ -150,6 +153,22 @@ pub fn body_has_blocking(body: &str) -> bool {
             return true;
         }
         i = abs + needle.len();
+    }
+    false
+}
+
+/// True only when the body states a STANDALONE zero count of blocking findings
+/// (`"0 blocking"`), not the trailing `0` of a larger count like `"10 blocking"`.
+fn mentions_zero_blocking(lower: &str) -> bool {
+    let bytes = lower.as_bytes();
+    let mut i = 0;
+    while let Some(pos) = lower[i..].find("0 blocking") {
+        let abs = i + pos;
+        let prev_is_digit = abs > 0 && bytes[abs - 1].is_ascii_digit();
+        if !prev_is_digit {
+            return true;
+        }
+        i = abs + 1;
     }
     false
 }
@@ -414,6 +433,12 @@ mod tests {
         assert!(!body_has_blocking("No blocking findings. Two suggestions follow."));
         assert!(!body_has_blocking("nothing here"));
         assert!(body_has_blocking("non-blocking: x\nblocking: y"));
+        // A standalone zero count is clean...
+        assert!(!body_has_blocking("Summary: 0 blocking findings, 3 suggestions."));
+        // ...but a multi-digit count ending in 0 is NOT clean (regression: the
+        // old `contains("0 blocking")` guard mis-read this as clean).
+        assert!(body_has_blocking("Found 10 blocking findings that must be fixed."));
+        assert!(body_has_blocking("20 blocking issues remain."));
     }
 
     #[test]

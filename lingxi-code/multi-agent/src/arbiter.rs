@@ -236,17 +236,31 @@ impl<'a> Arbiter<'a> {
         a: &CandidateSummary,
         b: &CandidateSummary,
     ) -> Arbitration {
-        let decision = if decision == Decision::SynthesizeHybrid && !self.config.allow_hybrid {
-            // Hybrid disabled (MVP): downgrade to the better single candidate
-            // by the same deterministic ordering, never silently to one agent
-            // without justification.
-            match deterministic_fallback(a, b).decision {
-                d @ (Decision::AcceptA | Decision::AcceptB) => d,
-                _ => Decision::RejectBoth,
-            }
-        } else {
-            decision
+        // Two cases force a deterministic downgrade: (1) hybrid disabled (MVP),
+        // (2) the LLM accepted a candidate that has NO viable patch — the LLM
+        // path must not bypass the validity guard the deterministic ladder
+        // enforces (else an empty/invalid candidate gets applied as a no-op
+        // "success"). Both are recorded as `deterministic_fallback`, not
+        // `arbiter`, per the audit-source contract.
+        let accepts_invalid = match decision {
+            Decision::AcceptA => !a.has_valid_patch,
+            Decision::AcceptB => !b.has_valid_patch,
+            _ => false,
         };
+        let hybrid_disabled = decision == Decision::SynthesizeHybrid && !self.config.allow_hybrid;
+        if hybrid_disabled || accepts_invalid {
+            // `deterministic_fallback` already tags source=DeterministicFallback
+            // and refuses an invalid/unverified candidate; keep its decision +
+            // source, prepend why the LLM decision was overridden.
+            let mut fb = deterministic_fallback(a, b);
+            let why = if hybrid_disabled {
+                "Hybrid disabled; downgraded to deterministic fallback."
+            } else {
+                "Arbiter accepted a candidate with no valid patch; downgraded to deterministic fallback."
+            };
+            fb.rationale = format!("{why}\n{}", fb.rationale);
+            return fb;
+        }
         Arbitration { decision, source: DecisionSource::Arbiter, rationale }
     }
 }
@@ -299,17 +313,20 @@ fn decision_from_token(token: &str) -> Option<Decision> {
 /// payload was returned). Order matters: check the most specific phrases first.
 fn decision_from_text(text: &str) -> Option<Decision> {
     let l = text.to_ascii_lowercase();
+    // Explicit accept/reject decisions are checked BEFORE "hybrid": the bare
+    // word "hybrid" appears in prose ("a hybrid is unnecessary; accept A") and
+    // must not outrank an explicit accept/reject the arbiter actually stated.
     if l.contains("reject both") || l.contains("reject_both") {
         return Some(Decision::RejectBoth);
-    }
-    if l.contains("synthesize hybrid") || l.contains("synthesize_hybrid") || l.contains("hybrid") {
-        return Some(Decision::SynthesizeHybrid);
     }
     if l.contains("accept a") || l.contains("accept_a") {
         return Some(Decision::AcceptA);
     }
     if l.contains("accept b") || l.contains("accept_b") {
         return Some(Decision::AcceptB);
+    }
+    if l.contains("synthesize hybrid") || l.contains("synthesize_hybrid") || l.contains("hybrid") {
+        return Some(Decision::SynthesizeHybrid);
     }
     None
 }
@@ -547,6 +564,57 @@ mod tests {
         assert!(matches!(err, MultiAgentError::ArbitrationFailed { .. }));
     }
 
+    #[test]
+    fn decision_from_text_prefers_explicit_accept_over_hybrid_mention() {
+        // The bare word "hybrid" in prose must not outrank an explicit accept.
+        assert_eq!(
+            decision_from_text("A hybrid approach is unnecessary; accept A."),
+            Some(Decision::AcceptA)
+        );
+        assert_eq!(decision_from_text("reject both, a hybrid won't help"), Some(Decision::RejectBoth));
+        // A genuine hybrid request still parses.
+        assert_eq!(decision_from_text("synthesize hybrid"), Some(Decision::SynthesizeHybrid));
+    }
+
+    #[tokio::test]
+    async fn finish_llm_downgrades_accept_of_invalid_candidate_to_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::new(tmp.path(), "RUN");
+        store.init().unwrap();
+        let client = Arc::new(MockClient::new(vec![]));
+        let config = cfg(true);
+        let arb = Arbiter::new(client, &store, &config, Duration::from_secs(5));
+
+        // LLM says accept A, but A has no valid patch → must NOT be trusted.
+        let mut a = summary(Slot::A, "candidate-a");
+        a.has_valid_patch = false;
+        a.patch_diff = String::new();
+        let b = summary(Slot::B, "candidate-b"); // valid
+
+        let out = arb.finish_llm((Decision::AcceptA, "llm picked A".into()), &a, &b);
+        assert_eq!(out.decision, Decision::AcceptB, "deterministic ladder picks the valid candidate");
+        assert_eq!(out.source, DecisionSource::DeterministicFallback, "must be tagged fallback, not arbiter");
+    }
+
+    #[test]
+    fn finish_llm_hybrid_disabled_is_tagged_deterministic_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::new(tmp.path(), "RUN");
+        store.init().unwrap();
+        let client = Arc::new(MockClient::new(vec![]));
+        let config = cfg(false); // hybrid disabled
+        let arb = Arbiter::new(client, &store, &config, Duration::from_secs(5));
+
+        let a = summary(Slot::A, "candidate-a");
+        let b = summary(Slot::B, "candidate-b");
+        let out = arb.finish_llm((Decision::SynthesizeHybrid, "llm wants hybrid".into()), &a, &b);
+        assert_eq!(
+            out.source,
+            DecisionSource::DeterministicFallback,
+            "a hybrid-disabled downgrade is a deterministic decision, not an arbiter one"
+        );
+    }
+
     #[tokio::test]
     async fn structured_decision_happy_path() {
         let tmp = tempfile::tempdir().unwrap();
@@ -635,7 +703,10 @@ mod tests {
 
         let res = arb.arbitrate("brief", &a, &b).await.unwrap();
         assert_eq!(res.decision, Decision::AcceptA, "hybrid downgraded to best single");
-        assert_eq!(res.source, DecisionSource::Arbiter);
+        // A hybrid-disabled downgrade is computed by the deterministic ladder,
+        // so it MUST be audited as a deterministic fallback — not as an arbiter
+        // decision (the arbiter only asked for the unavailable hybrid).
+        assert_eq!(res.source, DecisionSource::DeterministicFallback);
     }
 
     #[tokio::test]

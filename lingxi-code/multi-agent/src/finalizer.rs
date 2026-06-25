@@ -218,6 +218,21 @@ impl<'a> Finalizer<'a> {
             }
         };
 
+        // --- 1b. Refuse an empty patch. An empty diff `git apply`s as a clean
+        // no-op, so without this guard an accepted candidate that produced no
+        // changes (or an arbiter that trusted a non-viable candidate) would be
+        // reported as a successful `Applied` having written nothing. Hybrid is
+        // already guarded by `is_explicit`; this covers the accept path. ---
+        if patch_diff.trim().is_empty() {
+            self.store.write_finalizer_error(&format!(
+                "# Finalizer error: empty patch\n\nThe chosen plan ({applied_id}) carries an \
+                 empty patch; refusing to report a no-op as a successful apply.\n"
+            ))?;
+            return Err(MultiAgentError::FinalizerFailed {
+                reason: format!("chosen candidate ({applied_id}) has an empty patch"),
+            });
+        }
+
         // --- 2. Conflict check against uncommitted user changes. ---
         let dirty = self
             .applier
@@ -334,11 +349,18 @@ impl GitPatchApplier {
                 .stdin
                 .take()
                 .ok_or_else(|| ApplyError::Backend("git stdin unavailable".to_string()))?;
-            sink.write_all(data.as_bytes())
-                .await
-                .map_err(|e| ApplyError::Backend(format!("writing patch to git stdin: {e}")))?;
-            // Drop the handle to send EOF so `git apply` stops reading.
-            drop(sink);
+            let data = data.to_owned();
+            // Write stdin CONCURRENTLY with draining stdout/stderr. Writing the
+            // whole patch before `wait_with_output` deadlocks on a large patch:
+            // git can block emitting to its (un-drained) stdout/stderr pipe,
+            // stop reading stdin, and the OS stdin buffer fills mid-write.
+            let writer = async move {
+                sink.write_all(data.as_bytes()).await?;
+                sink.shutdown().await // EOF so `git apply` stops reading
+            };
+            let (w, out) = tokio::join!(writer, child.wait_with_output());
+            w.map_err(|e| ApplyError::Backend(format!("writing patch to git stdin: {e}")))?;
+            return out.map_err(|e| ApplyError::Backend(format!("waiting for git: {e}")));
         }
         child
             .wait_with_output()
@@ -347,21 +369,42 @@ impl GitPatchApplier {
     }
 
     /// Map a non-zero `git apply` invocation to a [`ApplyError`]: a clean
-    /// success is `Ok`, a non-zero exit is a `Conflict` carrying the rejecting
-    /// files parsed from stderr.
+    /// success is `Ok`. A content conflict (git names the rejecting files) is a
+    /// `Conflict`; a structural failure where git names NO files (corrupt /
+    /// malformed / empty patch — "fatal: corrupt patch", "No valid patches in
+    /// input", "patch fragment without header") is a `Backend` error, not a
+    /// phantom conflict with an empty file list.
     fn apply_result(out: std::process::Output) -> Result<(), ApplyError> {
         if out.status.success() {
             return Ok(());
         }
         let stderr = String::from_utf8_lossy(&out.stderr);
-        Err(ApplyError::Conflict { files: parse_rejected_files(&stderr) })
+        let files = parse_rejected_files(&stderr);
+        if files.is_empty() {
+            Err(ApplyError::Backend(format!(
+                "git apply failed (not a content conflict): {}",
+                stderr.trim()
+            )))
+        } else {
+            Err(ApplyError::Conflict { files })
+        }
     }
 }
 
 #[async_trait]
 impl PatchApplier for GitPatchApplier {
     async fn dirty_paths(&self, workspace: &Path) -> Result<Vec<PathBuf>, ApplyError> {
-        let out = Self::run_git(workspace, &["status", "--porcelain"], None).await?;
+        // `-z` => NUL-delimited records with NO C-quoting (paths with spaces /
+        // control chars survive verbatim); `core.quotepath=false` keeps
+        // non-ASCII bytes literal. Without these git C-quotes such paths (e.g.
+        // `"src/\303\251.rs"`), so the dirty-conflict check would fail to match
+        // them and the finalizer could overwrite the user's uncommitted work.
+        let out = Self::run_git(
+            workspace,
+            &["-c", "core.quotepath=false", "status", "--porcelain", "-z"],
+            None,
+        )
+        .await?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             return Err(ApplyError::Backend(format!(
@@ -370,7 +413,7 @@ impl PatchApplier for GitPatchApplier {
             )));
         }
         let stdout = String::from_utf8_lossy(&out.stdout);
-        Ok(parse_porcelain_paths(&stdout))
+        Ok(parse_porcelain_paths_z(&stdout))
     }
 
     async fn dry_run(&self, workspace: &Path, patch: &str) -> Result<(), ApplyError> {
@@ -384,22 +427,31 @@ impl PatchApplier for GitPatchApplier {
     }
 }
 
-/// Parse `git status --porcelain` output into the set of paths that carry
-/// uncommitted changes (tracked-modified, staged, or untracked). Rename entries
-/// (`R  old -> new`) contribute the new path.
-fn parse_porcelain_paths(stdout: &str) -> Vec<PathBuf> {
+/// Parse `git status --porcelain -z` output into the set of paths that carry
+/// uncommitted changes (tracked-modified, staged, or untracked).
+///
+/// `-z` records are NUL-terminated and NOT C-quoted, so a path is taken
+/// verbatim (spaces / unicode / control chars intact) — never split on a `" -> "`
+/// substring that could occur inside a filename. For a rename/copy (status `R`
+/// or `C`) git emits the destination path in the entry record and the ORIGIN
+/// path as the *following* NUL record; the destination is what a patch would
+/// clobber, so we keep it and consume (discard) the origin record.
+fn parse_porcelain_paths_z(stdout: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    for line in stdout.lines() {
-        if line.len() < 4 {
+    // Records are NUL-separated; the stream ends with a trailing NUL so the
+    // final split element is empty.
+    let mut records = stdout.split('\0');
+    while let Some(entry) = records.next() {
+        // Each entry is `XY <path>` (2 status chars + a space + the path).
+        if entry.len() < 4 {
             continue;
         }
-        // Porcelain v1: 2 status chars + space, then the path.
-        let rest = &line[3..];
-        let path = match rest.split_once(" -> ") {
-            Some((_old, new)) => new, // rename: the new path is what would clobber
-            None => rest,
-        };
-        let path = path.trim().trim_matches('"');
+        let status = entry.as_bytes();
+        let path = &entry[3..];
+        // Rename/copy in either index or worktree slot → consume the origin path.
+        if status[0] == b'R' || status[0] == b'C' || status[1] == b'R' || status[1] == b'C' {
+            let _origin = records.next();
+        }
         if !path.is_empty() {
             paths.push(PathBuf::from(path));
         }
@@ -492,6 +544,44 @@ mod tests {
         let s = ArtifactStore::new(tmp, "RUN");
         s.init().unwrap();
         s
+    }
+
+    #[test]
+    fn porcelain_z_handles_quoted_spaced_unicode_and_rename_paths() {
+        // NUL-delimited records (core.quotepath=false -z): a spaced path, a
+        // unicode path, a path literally containing " -> ", and a rename whose
+        // ORIGIN record must be consumed (only the destination is kept).
+        let stdout = " M src/a b.rs\0?? src/donn\u{e9}es.rs\0 M weird -> name.rs\0R  dst.rs\0orig.rs\0";
+        let got = parse_porcelain_paths_z(stdout);
+        assert!(got.contains(&PathBuf::from("src/a b.rs")), "spaced path: {got:?}");
+        assert!(got.contains(&PathBuf::from("src/donn\u{e9}es.rs")), "unicode path: {got:?}");
+        assert!(
+            got.contains(&PathBuf::from("weird -> name.rs")),
+            "a literal ' -> ' inside a filename must NOT be split: {got:?}"
+        );
+        assert!(got.contains(&PathBuf::from("dst.rs")), "rename destination kept: {got:?}");
+        assert!(!got.contains(&PathBuf::from("orig.rs")), "rename origin must be consumed: {got:?}");
+    }
+
+    #[tokio::test]
+    async fn empty_patch_is_rejected_not_reported_as_applied() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = store(tmp.path());
+        let applier = MockApplier::default();
+        let fin = Finalizer::new(&applier, &s, tmp.path());
+        // AcceptCandidate with an EMPTY patch must fail, not no-op "apply".
+        let empty = CandidatePatch {
+            candidate_id: "candidate-a".into(),
+            patch_diff: "   \n".into(),
+            changed_paths: vec![PathBuf::from("src/a.rs")],
+            worktree_path: PathBuf::from("/wt/candidate-a"),
+        };
+        let plan = FinalizePlan::AcceptCandidate(empty);
+        let err = fin.finalize(plan).await.unwrap_err();
+        assert!(matches!(err, MultiAgentError::FinalizerFailed { .. }));
+        // Never dry-ran or applied an empty patch.
+        assert_eq!(applier.dry_runs.load(Ordering::SeqCst), 0);
+        assert_eq!(applier.real_applies.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -801,6 +891,25 @@ mod git_applier_tests {
             }
             other => panic!("expected Conflict, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn dry_run_malformed_patch_is_backend_not_conflict() {
+        let tmp = init_repo();
+        // Not a diff at all → git apply fails structurally and names NO files.
+        let err = GitPatchApplier.dry_run(tmp.path(), "this is not a patch\n").await.unwrap_err();
+        assert!(
+            matches!(err, ApplyError::Backend(_)),
+            "a corrupt/empty patch must be Backend, not a phantom Conflict: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dirty_paths_reports_spaced_filename() {
+        let tmp = init_repo();
+        std::fs::write(tmp.path().join("a b.txt"), "x\n").unwrap();
+        let dirty = GitPatchApplier.dirty_paths(tmp.path()).await.unwrap();
+        assert_eq!(dirty, vec![PathBuf::from("a b.txt")], "spaced untracked path must be detected");
     }
 
     #[tokio::test]

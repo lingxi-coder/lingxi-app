@@ -37,8 +37,10 @@
 //! - [`orchestrator`] — the [`orchestrator::DualLlm`] run loop: build brief,
 //!   create worktrees, run both candidates concurrently (each cwd = its own
 //!   worktree), with timeout/cancel handling and a [`orchestrator::UsageSink`]
-//!   cost/telemetry seam. The real candidate loop is a marked
-//!   `// TODO(multi-agent):` seam ([`orchestrator::TodoLlmCandidateRunner`]).
+//!   cost/telemetry seam. The real candidate loop is the composition-root
+//!   adapter `engine_desktop::multi_agent_runtime::SpawnerCandidateRunner`
+//!   (driving `traits::SubagentSpawner`); this crate keeps only the injected
+//!   [`orchestrator::CandidateRunner`] trait + a test mock.
 //!
 //! Phase 5 lands cross-review / revision / arbitration:
 //!
@@ -123,7 +125,6 @@ pub use orchestrator::CandidateRunner;
 pub use orchestrator::DualLlm;
 pub use orchestrator::ImplementationRun;
 pub use orchestrator::NullUsageSink;
-pub use orchestrator::TodoLlmCandidateRunner;
 pub use orchestrator::UsageSink;
 pub use providers::ModelResolver;
 pub use providers::ResolvedCandidate;
@@ -136,7 +137,6 @@ pub use revision::revise_author;
 pub use revision::Reviser;
 pub use revision::RevisionContext;
 pub use revision::RevisionResult;
-pub use revision::TodoLlmReviser;
 pub use router::route;
 pub use router::ExecutionRoute;
 pub use router::RouteInput;

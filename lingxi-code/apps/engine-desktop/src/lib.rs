@@ -30,6 +30,11 @@ mod agent_skill_loader;
 mod background_agent;
 mod connect;
 pub mod file_changed_watch;
+/// Composition-root adapter binding the `multi-agent` crate's injected seams
+/// (`CandidateRunner` / `Reviser` / `VerificationFixer`) to the session's real
+/// `traits::SubagentSpawner`. LingXi-only; constructed only behind the gated
+/// dual-LLM dispatch (off by default).
+pub mod multi_agent_runtime;
 pub mod settings_watch;
 mod skill_loader;
 

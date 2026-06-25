@@ -446,17 +446,25 @@ pub trait VerificationFixer: Send + Sync {
     async fn fix(&self, ctx: &FixContext) -> Result<(), MultiAgentError>;
 }
 
-/// A fixer that performs no repair — verification runs exactly once. Useful as
-/// the default when `max_iterations == 0` or when no fixer is wired yet.
+/// A fixer that performs no repair. Used as the default when
+/// `max_iterations == 0` (verification runs exactly once with no fix attempt) —
+/// the [`verify_with_fix_loop`] never invokes a fixer in that case, so `fix`
+/// here is a genuine no-op that returns `Ok(())` (it is unreachable under a
+/// `0`-iteration budget and harmless if ever called with a larger one: the
+/// next verification re-run is the real arbiter of success).
+///
+/// The REAL repairing fixer is the composition-root adapter
+/// `engine_desktop::multi_agent_runtime::SpawnerVerificationFixer`, which drives
+/// the session's `traits::SubagentSpawner` against the final workspace / winner
+/// worktree, seeding the failure log. It lives in `engine-desktop` (not here) so
+/// this crate stays thin + trait-driven (no `agent` dep).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoopFixer;
 
 #[async_trait::async_trait]
 impl VerificationFixer for NoopFixer {
     async fn fix(&self, _ctx: &FixContext) -> Result<(), MultiAgentError> {
-        Err(MultiAgentError::FinalizerFailed {
-            reason: "no verification fixer wired (TODO(multi-agent))".to_string(),
-        })
+        Ok(())
     }
 }
 

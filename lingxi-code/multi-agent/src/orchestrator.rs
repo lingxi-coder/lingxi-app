@@ -108,33 +108,15 @@ impl UsageSink for NullUsageSink {
     }
 }
 
-// TODO(multi-agent): real candidate runner over `llm-client` + the `agent`
-// subagent multi-turn loop. It must:
-//   1. construct an `agent` runner whose cwd is `ctx.cwd` (its worktree),
-//   2. drive a tool loop with the same permission/sandbox policy as the main
-//      session (or stricter — design doc §安全约束 #4),
-//   3. honor `ctx.cancel` to abort subprocesses on cancellation,
-//   4. produce `patch.diff` (git diff of the worktree) + a structured
-//      self-report, and surface real `TokenUsage`.
-// Full real-loop integration may exceed a single pass; this is a compiling
-// seam so the crate stays green until that lands.
-/// Placeholder real runner. Always returns [`MultiAgentError::CandidateFailed`]
-/// with a `not yet wired` reason; replaced by the real `llm-client`/`agent`
-/// loop in a later pass.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct TodoLlmCandidateRunner;
-
-#[async_trait]
-impl CandidateRunner for TodoLlmCandidateRunner {
-    async fn run(&self, ctx: &CandidateRunContext) -> Result<CandidateOutcome, MultiAgentError> {
-        Err(MultiAgentError::CandidateFailed {
-            candidate_id: ctx.candidate_id.clone(),
-            phase: DualLlmPhase::ImplementCandidates,
-            reason: "real llm-client/agent candidate runner not yet wired (TODO(multi-agent))"
-                .to_string(),
-        })
-    }
-}
+// The REAL candidate runner is the composition-root adapter
+// `engine_desktop::multi_agent_runtime::SpawnerCandidateRunner`: it drives the
+// session's `traits::SubagentSpawner` with `cwd` pinned to `ctx.cwd` (the
+// candidate worktree), seeds the [`crate::prompts::IMPLEMENTER`] prompt + the
+// task brief, and host-derives `patch.diff` from `git diff` of the worktree.
+// It lives in `engine-desktop` (not here) so this crate stays thin + trait-
+// driven and does NOT depend on the `agent` engine crate — exactly the
+// discipline `review.rs` / `finalizer.rs` follow by taking injected `Arc<dyn …>`
+// collaborators. Tests in this crate use [`MockCandidateRunner`].
 
 /// Per-candidate result of the implementation phase.
 #[derive(Debug)]
@@ -899,28 +881,6 @@ mod tests {
             .await
             .expect_err("unresolvable model fails fast");
         assert!(matches!(err, MultiAgentError::ProviderUnavailable { .. }));
-    }
-
-    #[tokio::test]
-    async fn todo_real_runner_is_a_compiling_seam() {
-        // The real runner is a marked seam; it currently fails cleanly rather
-        // than panicking, so the orchestrator stays green until it's wired.
-        let ctx = CandidateRunContext {
-            candidate_id: "candidate-a".into(),
-            task_brief: "x".into(),
-            cwd: PathBuf::from("/tmp/does-not-matter"),
-            resolved: resolver()
-                .resolve_endpoint(&AgentEndpoint {
-                    id: "candidate-a".into(),
-                    label: None,
-                    model: "profile-a/model-a".into(),
-                    role: None,
-                })
-                .unwrap(),
-            cancel: CancellationToken::new(),
-        };
-        let err = TodoLlmCandidateRunner.run(&ctx).await.unwrap_err();
-        assert!(matches!(err, MultiAgentError::CandidateFailed { .. }));
     }
 
     #[test]

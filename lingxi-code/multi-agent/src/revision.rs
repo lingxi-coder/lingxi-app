@@ -67,25 +67,14 @@ pub trait Reviser: Send + Sync {
     async fn revise(&self, ctx: &RevisionContext) -> Result<RevisedOutcome, MultiAgentError>;
 }
 
-// TODO(multi-agent): real reviser over `llm-client` + the `agent` subagent
-// multi-turn loop, cwd-pinned to `ctx.cwd` (the author's own worktree), with
-// the same permission/sandbox policy as the main session. It must honor
-// `ctx.cancel` and produce the post-revision `git diff`. Compiling seam for now.
-/// Placeholder real reviser. Always returns a recoverable failure so the
-/// caller keeps the pre-revision patch; replaced by the real loop later.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct TodoLlmReviser;
-
-#[async_trait]
-impl Reviser for TodoLlmReviser {
-    async fn revise(&self, ctx: &RevisionContext) -> Result<RevisedOutcome, MultiAgentError> {
-        Err(MultiAgentError::CandidateFailed {
-            candidate_id: ctx.candidate_id.clone(),
-            phase: DualLlmPhase::AuthorRevision,
-            reason: "real llm-client/agent reviser not yet wired (TODO(multi-agent))".to_string(),
-        })
-    }
-}
+// The REAL reviser is the composition-root adapter
+// `engine_desktop::multi_agent_runtime::SpawnerReviser`: it drives the session's
+// `traits::SubagentSpawner` cwd-pinned to `ctx.cwd` (the author's OWN worktree),
+// seeds [`crate::prompts::REVISER`] + the task brief + the review feedback + the
+// pre-revision patch, and host-derives the post-revision `git diff`. It lives in
+// `engine-desktop` (not here) so this crate stays thin + trait-driven (no `agent`
+// dep). A reviser error is recoverable — [`revise_author`] keeps the
+// pre-revision patch. Tests in this crate use [`MockReviser`].
 
 /// The patch that should be carried into arbitration for a candidate after the
 /// (possibly failed / skipped) revision phase.
@@ -314,17 +303,4 @@ mod tests {
         assert_eq!(res.effective_patch, pre);
     }
 
-    #[tokio::test]
-    async fn todo_reviser_is_a_compiling_seam() {
-        let tmp = tempfile::tempdir().unwrap();
-        let res = revise_author(
-            &TodoLlmReviser,
-            ctx_in(tmp.path(), "candidate-a"),
-            Duration::from_secs(5),
-        )
-        .await;
-        // Pre-revision patch kept; not revised.
-        assert!(!res.revised);
-        assert!(res.effective_patch.contains("old"));
-    }
 }

@@ -1048,6 +1048,8 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     add_dir: Vec::new(),
 ///     cli_mcp_servers: Vec::new(),
 ///     exclude_dynamic_system_prompt_sections: false,
+///     multi_agent: None,
+///     explicit_multi_agent: None,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));

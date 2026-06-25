@@ -238,6 +238,21 @@ fn format_row(key: &str, label: &str) -> String {
     format!("{key}{} {label}", " ".repeat(pad))
 }
 
+/// (help-1) claude-code `getNewlineInstructions()`'s chord half (the
+/// `"… for newline"` label is unchanged) — Apple Terminal on macOS uses
+/// native Shift+Enter detection; everywhere else LingXi has no
+/// shift-enter-keybinding-installer or `hasUsedBackslashReturn` history (no
+/// such features exist in this TUI), so it always falls to the
+/// never-used-backslash default rather than `isShiftEnterKeyBindingInstalled`
+/// / the post-first-use `"\⏎"` short form.
+fn newline_chord_for(term_program: Option<&str>, is_macos: bool) -> &'static str {
+    if is_macos && term_program == Some("Apple_Terminal") {
+        "shift + \u{23CE}"
+    } else {
+        "backslash (\\) + return (\u{23CE})"
+    }
+}
+
 /// Flatten the two sections to the body content lines (no title/intro/footer):
 /// the `Shortcuts` header + one line per shortcut (its chord resolved from
 /// `bindings` — the live keymap), then the `Slash commands` header + one line
@@ -249,6 +264,15 @@ fn content_lines(bindings: &[ParsedBinding]) -> Vec<String> {
         // (help-3) `ctrl + z to suspend` is non-Windows only
         // (claude-code `getPlatform() !== 'windows'`).
         if cfg!(windows) && row.label == "to suspend" {
+            continue;
+        }
+        // (help-1) the newline row's chord is terminal-dependent.
+        if row.label == "for newline" {
+            let chord = newline_chord_for(
+                std::env::var("TERM_PROGRAM").ok().as_deref(),
+                cfg!(target_os = "macos"),
+            );
+            out.push(format_row(chord, row.label));
             continue;
         }
         out.push(format_row(&row_chord(row, bindings), row.label));
@@ -306,6 +330,33 @@ mod tests {
 
     fn k(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn newline_chord_is_shift_enter_on_apple_terminal_macos() {
+        // (help-1)
+        assert_eq!(
+            newline_chord_for(Some("Apple_Terminal"), true),
+            "shift + \u{23CE}"
+        );
+    }
+
+    #[test]
+    fn newline_chord_falls_back_to_backslash_elsewhere() {
+        // (help-1) Apple_Terminal on a non-macOS platform (WSL/Linux can set
+        // the same env var) does not get the macOS-only Shift+Enter path.
+        assert_eq!(
+            newline_chord_for(Some("Apple_Terminal"), false),
+            "backslash (\\) + return (\u{23CE})"
+        );
+        assert_eq!(
+            newline_chord_for(Some("iTerm.app"), true),
+            "backslash (\\) + return (\u{23CE})"
+        );
+        assert_eq!(
+            newline_chord_for(None, true),
+            "backslash (\\) + return (\u{23CE})"
+        );
     }
 
     #[test]
@@ -432,7 +483,17 @@ mod tests {
             if cfg!(windows) && row.label == "to suspend" {
                 continue;
             }
-            let chord = row_chord(row, &bindings);
+            // (help-1) the newline row's chord is terminal-dependent, not
+            // `row_chord`'s static fallback.
+            let chord = if row.label == "for newline" {
+                newline_chord_for(
+                    std::env::var("TERM_PROGRAM").ok().as_deref(),
+                    cfg!(target_os = "macos"),
+                )
+                .to_string()
+            } else {
+                row_chord(row, &bindings)
+            };
             assert!(
                 lines
                     .iter()

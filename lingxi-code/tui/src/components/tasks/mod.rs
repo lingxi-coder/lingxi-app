@@ -12,6 +12,7 @@ pub mod status_footer;
 pub mod status_text;
 
 use crate::multiagent::state::TaskRow;
+use crate::render::truncate_to_width_ellipsis;
 
 /// Render a task list row from the wire-available `TaskRow` (claude-code
 /// `BackgroundTask.tsx`). `task_type`/`status`/`description` and (for
@@ -19,18 +20,26 @@ use crate::multiagent::state::TaskRow;
 /// counts, `, unread`, activity, dream phase) are passed as defaults here
 /// (spec §2.4 — omit, never invent); the renderers accept them so
 /// fixtures/a richer feed light them up unchanged.
+///
+/// (BASH-ROW-NO-TRUNCATION) The label/command (NOT the status suffix) is
+/// truncated to `max_width` with a trailing ellipsis first — claude-code
+/// applies `truncate(label, activityLimit, true)` per-type before appending
+/// status (`BackgroundTask.tsx`'s several per-type branches all do this).
 #[must_use]
-pub fn render_task_row(row: &TaskRow) -> String {
-    let d = row.description.as_str();
+pub fn render_task_row(row: &TaskRow, max_width: usize) -> String {
+    let d = &truncate_to_width_ellipsis(&row.description, max_width);
     let s = row.status.as_str();
     match row.task_type.as_str() {
         // (BASH-ROW-USES-DESCRIPTION-NOT-COMMAND) claude-code's local_bash
         // row shows the shell command, not the description.
-        "local_bash" => shell_progress::render_shell_progress_to_string(
-            row.command.as_deref().unwrap_or(d),
-            s,
-            None,
-        ),
+        "local_bash" => {
+            let cmd = row.command.as_deref().unwrap_or(d);
+            shell_progress::render_shell_progress_to_string(
+                &truncate_to_width_ellipsis(cmd, max_width),
+                s,
+                None,
+            )
+        }
         "local_agent" => rows::render_local_agent_row(d, s, false),
         "remote_agent" => rows::render_remote_agent_row(d, s, None),
         "in_process_teammate" => rows::render_in_process_teammate_row(d, s, None),
@@ -55,7 +64,7 @@ mod tests {
             description: "Running shell command".into(),
             command: Some("cargo build".into()),
         };
-        assert!(render_task_row(&row).starts_with("cargo build"));
+        assert!(render_task_row(&row, 200).starts_with("cargo build"));
     }
 
     #[test]
@@ -67,6 +76,34 @@ mod tests {
             description: "Running shell command".into(),
             command: None,
         };
-        assert!(render_task_row(&row).starts_with("Running shell command"));
+        assert!(render_task_row(&row, 200).starts_with("Running shell command"));
+    }
+
+    #[test]
+    fn label_is_truncated_with_ellipsis_to_max_width() {
+        // (BASH-ROW-NO-TRUNCATION)
+        let row = TaskRow {
+            task_id: "b1".into(),
+            task_type: "local_agent".into(),
+            status: "running".into(),
+            description: "a very long task description that overflows the column".into(),
+            command: None,
+        };
+        let out = render_task_row(&row, 20);
+        assert!(out.starts_with("a very long task de\u{2026}"), "got: {out}");
+    }
+
+    #[test]
+    fn local_bash_command_is_truncated_with_ellipsis_too() {
+        // (BASH-ROW-NO-TRUNCATION) the command, not just the description.
+        let row = TaskRow {
+            task_id: "b1".into(),
+            task_type: "local_bash".into(),
+            status: "running".into(),
+            description: "short".into(),
+            command: Some("a very long shell command that overflows the column width".into()),
+        };
+        let out = render_task_row(&row, 20);
+        assert!(out.starts_with("a very long shell c\u{2026}"), "got: {out}");
     }
 }

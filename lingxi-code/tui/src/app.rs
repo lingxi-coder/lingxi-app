@@ -836,7 +836,14 @@ pub fn render_screen(
                 // tested) line-by-line. The list it browses lives in
                 // `AppState.multiagent.tasks`, kept fresh by the MultiAgent pump.
                 use crate::screens::background_tasks::render_background_tasks_to_string;
-                let body = render_background_tasks_to_string(bts, &state.multiagent.tasks);
+                // (BASH-ROW-NO-TRUNCATION) claude-code's
+                // `maxActivityWidth = Math.max(30, columns - 26)`.
+                let max_activity_width = viewport_width.saturating_sub(26).max(30);
+                let body = render_background_tasks_to_string(
+                    bts,
+                    &state.multiagent.tasks,
+                    max_activity_width,
+                );
                 let lines: Vec<String> = body.lines().map(str::to_string).collect();
                 element! {
                     View(flex_direction: FlexDirection::Column, padding: 1) {

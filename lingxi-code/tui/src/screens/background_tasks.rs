@@ -197,6 +197,7 @@ fn running_count_subtitle(tasks: &[TaskRow]) -> String {
 pub fn render_background_tasks_to_string(
     state: &BackgroundTasksState,
     tasks: &[TaskRow],
+    max_activity_width: usize,
 ) -> String {
     match state.mode {
         TaskDialogMode::List => {
@@ -256,7 +257,7 @@ pub fn render_background_tasks_to_string(
                 // selected row, matching the other LingXi list screens.
                 let marker = if i == state.selected { "\u{276F} " } else { "  " };
                 out.push_str(marker);
-                out.push_str(&render_task_row(row));
+                out.push_str(&render_task_row(row, max_activity_width));
                 out.push('\n');
             }
             // (TASKS-DIALOG-KEYHINTS/BGTASK-3) `↑/↓ select · Enter view ·
@@ -384,7 +385,7 @@ mod tests {
             task("a1", "local_agent", "completed"),
         ];
         let s = BackgroundTasksState::default();
-        let out = render_background_tasks_to_string(&s, &tasks);
+        let out = render_background_tasks_to_string(&s, &tasks, 200);
         assert!(out.contains("1 active shell"), "{out}");
         assert!(out.contains("  Shells (1)"), "{out}");
         assert!(out.contains("  Local agents (1)"), "{out}");
@@ -397,7 +398,7 @@ mod tests {
         // present; with only shells in the list, no header is shown.
         let tasks = vec![task("b1", "local_bash", "running"), task("b2", "local_bash", "completed")];
         let s = BackgroundTasksState::default();
-        let out = render_background_tasks_to_string(&s, &tasks);
+        let out = render_background_tasks_to_string(&s, &tasks, 200);
         assert!(!out.contains("Shells"), "{out}");
     }
 
@@ -405,7 +406,7 @@ mod tests {
     fn list_render_no_subtitle_when_nothing_running() {
         let tasks = vec![task("b1", "local_bash", "completed")];
         let s = BackgroundTasksState::default();
-        let out = render_background_tasks_to_string(&s, &tasks);
+        let out = render_background_tasks_to_string(&s, &tasks, 200);
         assert!(!out.contains("active"), "{out}");
     }
 
@@ -453,14 +454,14 @@ mod tests {
             selected: 0,
             ..Default::default()
         };
-        let out = render_background_tasks_to_string(&running_selected, &tasks);
+        let out = render_background_tasks_to_string(&running_selected, &tasks, 200);
         assert!(out.contains("x stop"), "{out}");
 
         let completed_selected = BackgroundTasksState {
             selected: 1,
             ..Default::default()
         };
-        let out2 = render_background_tasks_to_string(&completed_selected, &tasks);
+        let out2 = render_background_tasks_to_string(&completed_selected, &tasks, 200);
         assert!(!out2.contains("x stop"), "{out2}");
     }
 
@@ -472,7 +473,7 @@ mod tests {
             detail_task_id: Some("b1".into()),
             ..Default::default()
         };
-        let out = render_background_tasks_to_string(&s, &tasks);
+        let out = render_background_tasks_to_string(&s, &tasks, 200);
         assert!(out.contains("x stop"), "{out}");
     }
 }

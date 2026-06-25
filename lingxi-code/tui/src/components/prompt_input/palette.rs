@@ -22,6 +22,7 @@ use command_api::builtin_support::names::{
 use iocraft::prelude::*;
 
 use super::fuzzy::filtered_ranked;
+use crate::render::truncate_to_width_ellipsis;
 use crate::theme::Theme;
 
 /// Max dropdown rows shown at once (claude-code `OVERLAY_MAX_ITEMS`).
@@ -254,33 +255,6 @@ pub struct PaletteOverlayProps {
 fn display_text_for(row: &PaletteRow) -> String {
     let alias = row.matched_alias.map(|a| format!(" ({a})")).unwrap_or_default();
     format!("/{}{}", row.name, alias)
-}
-
-/// claude-code `truncateToWidth` (utils/truncate.ts): grapheme-safe width
-/// truncation that appends `…` when truncation occurs (unlike
-/// `status_line::truncate_to_width`, which mirrors the ellipsis-less
-/// `truncateToWidthNoEllipsis` variant used elsewhere).
-fn truncate_to_width_ellipsis(text: &str, max_width: usize) -> String {
-    use unicode_segmentation::UnicodeSegmentation;
-    use unicode_width::UnicodeWidthStr;
-    if UnicodeWidthStr::width(text) <= max_width {
-        return text.to_string();
-    }
-    if max_width <= 1 {
-        return "\u{2026}".to_string();
-    }
-    let mut width = 0usize;
-    let mut result = String::new();
-    for seg in text.graphemes(true) {
-        let seg_width = UnicodeWidthStr::width(seg);
-        if width + seg_width > max_width - 1 {
-            break;
-        }
-        result.push_str(seg);
-        width += seg_width;
-    }
-    result.push('\u{2026}');
-    result
 }
 
 /// (cp-08) claude-code `SuggestionItemRow`'s non-unified ("command") row

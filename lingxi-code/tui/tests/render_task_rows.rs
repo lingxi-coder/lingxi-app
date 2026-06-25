@@ -19,7 +19,7 @@ fn row(task_type: &str, status: &str, description: &str) -> TaskRow {
 fn task_row_local_bash() {
     insta::assert_snapshot!(
         "task_row_local_bash",
-        render_task_row(&row("local_bash", "running", "cargo build"))
+        render_task_row(&row("local_bash", "running", "cargo build"), 200)
     );
 }
 
@@ -27,7 +27,7 @@ fn task_row_local_bash() {
 fn task_row_local_agent() {
     insta::assert_snapshot!(
         "task_row_local_agent",
-        render_task_row(&row("local_agent", "completed", "review"))
+        render_task_row(&row("local_agent", "completed", "review"), 200)
     );
 }
 
@@ -35,7 +35,7 @@ fn task_row_local_agent() {
 fn task_row_remote_agent() {
     insta::assert_snapshot!(
         "task_row_remote_agent",
-        render_task_row(&row("remote_agent", "running", "deploy"))
+        render_task_row(&row("remote_agent", "running", "deploy"), 200)
     );
 }
 
@@ -43,7 +43,7 @@ fn task_row_remote_agent() {
 fn task_row_in_process_teammate() {
     insta::assert_snapshot!(
         "task_row_in_process_teammate",
-        render_task_row(&row("in_process_teammate", "running", "alice"))
+        render_task_row(&row("in_process_teammate", "running", "alice"), 200)
     );
 }
 
@@ -51,7 +51,7 @@ fn task_row_in_process_teammate() {
 fn task_row_local_workflow() {
     insta::assert_snapshot!(
         "task_row_local_workflow",
-        render_task_row(&row("local_workflow", "running", "pipeline"))
+        render_task_row(&row("local_workflow", "running", "pipeline"), 200)
     );
 }
 
@@ -59,7 +59,7 @@ fn task_row_local_workflow() {
 fn task_row_monitor_mcp() {
     insta::assert_snapshot!(
         "task_row_monitor_mcp",
-        render_task_row(&row("monitor_mcp", "running", "watch fs"))
+        render_task_row(&row("monitor_mcp", "running", "watch fs"), 200)
     );
 }
 
@@ -67,7 +67,7 @@ fn task_row_monitor_mcp() {
 fn task_row_dream() {
     insta::assert_snapshot!(
         "task_row_dream",
-        render_task_row(&row("dream", "running", "nightly"))
+        render_task_row(&row("dream", "running", "nightly"), 200)
     );
 }
 

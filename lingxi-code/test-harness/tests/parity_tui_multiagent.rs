@@ -66,7 +66,7 @@ fn task_rows_strings() {
             row["status"].as_str().unwrap(),
             row["description"].as_str().unwrap(),
         );
-        let out = render_task_row(&r);
+        let out = render_task_row(&r, 200);
         let expected = row["expected"].as_str().unwrap();
         assert!(out.contains(expected), "row `{out}` missing `{expected}`");
     }

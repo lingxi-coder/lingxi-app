@@ -319,9 +319,52 @@ pub fn split_spans_into_line_rows(spans: Vec<StyledSpan>) -> Vec<Vec<StyledSpan>
     lines
 }
 
+/// Single-line trailing-ellipsis truncation (claude-code `truncateToWidth`,
+/// `utils/truncate.ts`): display-width aware (`unicode-width`, so wide CJK
+/// glyphs count double), splits on grapheme clusters (no chopping a
+/// multi-codepoint emoji in half). `max_width <= 1` collapses to a bare `…`.
+#[must_use]
+pub fn truncate_to_width_ellipsis(text: &str, max_width: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width <= 1 {
+        return "\u{2026}".to_string();
+    }
+    let mut width = 0usize;
+    let mut result = String::new();
+    for seg in text.graphemes(true) {
+        let seg_width = UnicodeWidthStr::width(seg);
+        if width + seg_width > max_width - 1 {
+            break;
+        }
+        result.push_str(seg);
+        width += seg_width;
+    }
+    result.push('\u{2026}');
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_to_width_ellipsis_passes_short_text_through() {
+        assert_eq!(truncate_to_width_ellipsis("hi", 10), "hi");
+    }
+
+    #[test]
+    fn truncate_to_width_ellipsis_truncates_long_text() {
+        assert_eq!(truncate_to_width_ellipsis("hello world", 6), "hello\u{2026}");
+    }
+
+    #[test]
+    fn truncate_to_width_ellipsis_max_width_one_is_bare_ellipsis() {
+        assert_eq!(truncate_to_width_ellipsis("hello", 1), "\u{2026}");
+    }
 
     #[test]
     fn styled_line_holds_spans() {

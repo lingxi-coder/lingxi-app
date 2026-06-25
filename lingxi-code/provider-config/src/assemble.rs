@@ -214,7 +214,8 @@ mod tests {
     #[test]
     fn merges_anthropic_and_presets() {
         let out = assemble(anthropic_only_inputs());
-        assert_eq!(out.client_config.providers.len(), 8);
+        // anthropic + 8 built-in presets (incl. gemini).
+        assert_eq!(out.client_config.providers.len(), 9);
         let names: Vec<&str> = out
             .client_config
             .providers

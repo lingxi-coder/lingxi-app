@@ -193,6 +193,27 @@ mod tests {
     }
 
     #[test]
+    fn gemini_model_uses_real_price_not_default_unknown() {
+        // M6: with the Gemini slice vendored, gemini-2.5-pro (not in
+        // builtin_reference) bills at its real $1.25/$10 rate, not $5/$25.
+        let providers = llm_client::builtin_presets().providers;
+        let cat = pricing_for(&providers);
+        let mr = ModelRef {
+            provider: CostProviderId::GoogleGemini,
+            model: "gemini-2.5-pro".to_string(),
+        };
+        let (p, _res) = cat.resolve(&mr).expect("priced");
+        assert_eq!(
+            p.token_rates[&cost::pricing::TokenClass::Input].nano_usd_per_token,
+            1_250
+        );
+        assert_eq!(
+            p.token_rates[&cost::pricing::TokenClass::Output].nano_usd_per_token,
+            10_000
+        );
+    }
+
+    #[test]
     fn unpriced_user_model_gets_default_unknown_row() {
         let cat = pricing_for(&[user_profile("groq", "llama-3.3-70b")]);
         let mr = ModelRef {

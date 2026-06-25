@@ -42,6 +42,7 @@ const ZAI: &str = include_str!("../../data/models-dev/zai.json");
 const OPENAI: &str = include_str!("../../data/models-dev/openai.json");
 const OPENAI_CHATGPT: &str = include_str!("../../data/models-dev/openai-chatgpt.json");
 const GITHUB_COPILOT: &str = include_str!("../../data/models-dev/github-copilot.json");
+const GEMINI: &str = include_str!("../../data/models-dev/gemini.json");
 
 fn presets() -> Vec<Preset> {
     vec![
@@ -136,6 +137,20 @@ fn presets() -> Vec<Preset> {
             credential_env: Some("GITHUB_TOKEN"),
             slice_json: GITHUB_COPILOT,
         },
+        // Google Gemini (first-party): generateContent wire; API key sent as the
+        // `x-goog-api-key` header (AuthStrategy::ApiKey + GeminiGenerateContent).
+        // Vendoring this slice gives every Gemini model its real context/output
+        // limits and per-model price, instead of the Claude 200k/32k defaults and
+        // the $5/$25 default-unknown pricing tier.
+        Preset {
+            profile_name: "gemini",
+            base_url: "https://generativelanguage.googleapis.com/v1beta",
+            protocol: ProtocolFamily::GeminiGenerateContent,
+            auth: AuthStrategy::ApiKey,
+            provider_id: ProviderId::Gemini,
+            credential_env: Some("GEMINI_API_KEY"),
+            slice_json: GEMINI,
+        },
     ]
 }
 
@@ -221,12 +236,15 @@ mod tests {
         // gpt-4.1: real 1,047,576 / 32,768.
         assert_eq!(context_window_for_model("gpt-4.1", &[]), 1_047_576);
         assert_eq!(max_output_tokens_for_model("gpt-4.1"), 32_768);
+        // gemini-2.5-pro: real 1,048,576 / 65,536 (M6 — Gemini slice vendored).
+        assert_eq!(context_window_for_model("gemini-2.5-pro", &[]), 1_048_576);
+        assert_eq!(max_output_tokens_for_model("gemini-2.5-pro"), 65_536);
     }
 
     #[test]
     fn every_preset_yields_expected_model_counts() {
         let catalog = builtin_presets();
-        assert_eq!(catalog.providers.len(), 7);
+        assert_eq!(catalog.providers.len(), 8);
         let count = |name: &str| {
             catalog
                 .providers
@@ -247,6 +265,8 @@ mod tests {
         // -1: gpt-5.3-codex dropped (codex-backend-exclusive → owned by
         // openai-chatgpt so it resolves there unambiguously).
         assert_eq!(count("github-copilot"), 22);
+        // Gemini slice vendored verbatim from models.dev (google provider).
+        assert_eq!(count("gemini"), 22);
         let openai = catalog
             .providers
             .iter()

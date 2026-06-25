@@ -285,6 +285,12 @@ pub struct StatusSnapshot {
     /// here so `/status` can echo the same scalar the PUSH
     /// `CoordinatorStatus` feed carries.
     pub active_workers: u32,
+    /// (settings-status-missing-mcp-and-setting-sources) Display strings for
+    /// every settings-file tier that currently has a file on disk (claude-code
+    /// `buildSettingSourcesProperties`'s `sourcesWithSettings` filter), e.g.
+    /// `"Project settings (.claude/settings.json)"`. Empty when none exist
+    /// (the `/status` row is omitted entirely, matching TS).
+    pub setting_sources: Vec<String>,
 }
 
 /// One model entry for the grouped `/model` picker. Sourced from the llm-client

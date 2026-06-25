@@ -229,6 +229,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             output_tokens: cost.output_tokens,
             n_mcp_connected: 0,
             n_mcp_total: 0,
+            setting_sources: setting_sources_for(&self.cwd),
             n_hooks: 0,
             n_agents: 0,
             started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -499,6 +500,23 @@ fn hook_source_description(source: hooks::HookSource) -> String {
         S::Skill => "Skill bundle",
     }
     .to_string()
+}
+
+/// (settings-status-missing-mcp-and-setting-sources) claude-code
+/// `buildSettingSourcesProperties`: one display string per settings-file tier
+/// that currently exists on disk (`sourcesWithSettings`'s "actually have
+/// settings loaded" filter — approximated here as plain file existence,
+/// since LingXi's settings loader does no separate enterprise-policy/managed
+/// tier). Project, then User, in splice order.
+fn setting_sources_for(cwd: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if engine::settings::loader::project_settings_path(cwd).is_file() {
+        out.push("Project settings (.claude/settings.json)".to_string());
+    }
+    if engine::settings::loader::user_settings_path().is_some_and(|p| p.is_file()) {
+        out.push("User settings (~/.claude/settings.json)".to_string());
+    }
+    out
 }
 
 /// Touch + spawn an editor on `target`. If the target does not yet exist,

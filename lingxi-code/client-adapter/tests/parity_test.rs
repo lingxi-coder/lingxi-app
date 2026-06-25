@@ -108,6 +108,7 @@ fn status_snapshot_parity() {
         started_at: "2026-05-29T10:00:00Z".to_string(),
         cwd: PathBuf::from("/home/u/proj"),
         active_workers: 0,
+        setting_sources: Vec::new(),
     };
 
     let dto = lower_status_snapshot(&snap);

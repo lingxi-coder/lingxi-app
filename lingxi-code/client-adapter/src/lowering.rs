@@ -593,6 +593,7 @@ mod tests {
             started_at: "2026-06-02T00:00:00Z".to_string(),
             cwd: PathBuf::from("/work/proj"),
             active_workers: 2,
+            setting_sources: Vec::new(),
         };
         let dto = lower_status_snapshot(&snap);
         assert_eq!(dto.session_id, "sess-1");

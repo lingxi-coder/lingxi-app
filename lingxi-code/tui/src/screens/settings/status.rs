@@ -42,6 +42,15 @@ pub fn render_status_to_string(data: &SettingsData) -> String {
     out.push_str(&format!("Hooks: {}\n", s.n_hooks));
     out.push_str(&format!("Agents: {}\n", s.n_agents));
     out.push_str(&format!("Started: {}\n", s.started_at));
+    // (settings-status-missing-mcp-and-setting-sources) claude-code
+    // `buildSettingSourcesProperties` — omitted entirely when no settings
+    // file exists on disk (an empty row would render nothing useful).
+    if !s.setting_sources.is_empty() {
+        out.push_str(&format!(
+            "Setting sources: {}\n",
+            s.setting_sources.join(", ")
+        ));
+    }
     out.push_str("Esc to close");
     out
 }
@@ -96,6 +105,7 @@ mod tests {
                 started_at: "2026-05-29T10:00:00Z".into(),
                 cwd: PathBuf::from("/home/u/proj"),
                 active_workers: 0,
+                setting_sources: Vec::new(),
             },
             cost: CostSnapshot::default(),
         }
@@ -115,5 +125,28 @@ mod tests {
         assert!(out.contains("Session ID: sess-abc123"));
         // Empty session-name placeholder (claude-code literal).
         assert!(out.contains("Session name: /rename to add a name"));
+    }
+
+    #[test]
+    fn setting_sources_row_lists_every_existing_tier() {
+        // (settings-status-missing-mcp-and-setting-sources)
+        let mut data = fixture();
+        data.status.setting_sources = vec![
+            "Project settings (.claude/settings.json)".to_string(),
+            "User settings (~/.claude/settings.json)".to_string(),
+        ];
+        let out = render_status_to_string(&data);
+        assert!(out.contains(
+            "Setting sources: Project settings (.claude/settings.json), User settings (~/.claude/settings.json)"
+        ), "got: {out}");
+    }
+
+    #[test]
+    fn setting_sources_row_omitted_when_no_tiers_exist() {
+        // The default fixture's setting_sources is empty — the row must not
+        // appear at all (an empty "Setting sources: " row renders nothing
+        // useful, unlike claude-code's flex-wrap Box).
+        let out = render_status_to_string(&fixture());
+        assert!(!out.contains("Setting sources"), "got: {out}");
     }
 }

@@ -616,7 +616,10 @@ fn run_remove(a: &RemoveArgs) -> i32 {
             eprintln!();
             eprintln!("To remove from a specific scope, use:");
             for &scope in scopes {
-                eprintln!("  claude mcp remove \"{}\" -s {}", a.name, scope.label());
+                // claude prints the command hint with the name UNQUOTED (the
+                // surrounding message text quotes it, but the copy-paste command
+                // does not — verified against the live 2.1.191 binary).
+                eprintln!("  claude mcp remove {} -s {}", a.name, scope.label());
             }
             RUNTIME_ERROR
         }
@@ -745,8 +748,10 @@ fn run_list() -> i32 {
 fn run_get(a: &GetArgs) -> i32 {
     let servers = load_all_servers();
     let Some(cfg) = servers.iter().find(|c| c.name == a.name) else {
-        // claude: not-found → stderr + exit 1, via the `g$o` message builder.
-        eprintln!("{}", not_found_message(&a.name));
+        // claude: not-found → stderr + exit 1. `mcp get` uses the LOADED view
+        // (user + local + approved project), flagging pending `.mcp.json` servers
+        // separately — distinct from `mcp remove`'s full config-level listing.
+        eprintln!("{}", not_found_message_get(&a.name));
         return RUNTIME_ERROR;
     };
 
@@ -819,6 +824,103 @@ fn not_found_message(name: &str) -> String {
         String::new()
     };
     format!("No MCP server named \"{name}\". Configured servers: {shown}{suffix}")
+}
+
+/// User-scope (`~/.claude.json` top-level `mcpServers`) server names.
+fn user_server_names() -> Vec<String> {
+    global_config_path()
+        .and_then(|p| migrations::global_config::read_map(&p).ok())
+        .and_then(|m| m.get("mcpServers").and_then(|v| v.as_object()).cloned())
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// Local-scope (`~/.claude.json` `projects.<key>.mcpServers`) server names.
+fn local_server_names() -> Vec<String> {
+    global_config_path()
+        .zip(project_key())
+        .and_then(|(p, k)| migrations::global_config::get_project_config(&p, &k).ok())
+        .and_then(|m| m.get("mcpServers").and_then(|v| v.as_object()).cloned())
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// Partition the project `.mcp.json` servers into `(approved, pending)` using the
+/// per-project approval state in `~/.claude.json` `projects.<key>`: a server is
+/// approved iff it is NOT in `disabledMcpjsonServers` AND
+/// (`enableAllProjectMcpServers` is true OR it is in `enabledMcpjsonServers`).
+/// `pending` (unapproved) project servers are the ones claude's `mcp get`
+/// not-found message omits from the list and flags with an awaiting-approval
+/// note.
+fn project_server_approval() -> (Vec<String>, Vec<String>) {
+    let all: Vec<String> = project_mcp_json_path()
+        .filter(|p| p.exists())
+        .and_then(|p| read_json_object(&p).ok())
+        .and_then(|m| m.get("mcpServers").and_then(|v| v.as_object()).cloned())
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    if all.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let str_array = |cfg: &serde_json::Map<String, serde_json::Value>, key: &str| -> Vec<String> {
+        cfg.get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
+    let (enable_all, enabled, disabled) = global_config_path()
+        .zip(project_key())
+        .and_then(|(p, k)| migrations::global_config::get_project_config(&p, &k).ok())
+        .map(|cfg| {
+            (
+                cfg.get("enableAllProjectMcpServers").and_then(|v| v.as_bool()).unwrap_or(false),
+                str_array(&cfg, "enabledMcpjsonServers"),
+                str_array(&cfg, "disabledMcpjsonServers"),
+            )
+        })
+        .unwrap_or((false, Vec::new(), Vec::new()));
+    let mut approved = Vec::new();
+    let mut pending = Vec::new();
+    for name in all {
+        let is_approved = !disabled.contains(&name) && (enable_all || enabled.contains(&name));
+        if is_approved {
+            approved.push(name);
+        } else {
+            pending.push(name);
+        }
+    }
+    (approved, pending)
+}
+
+/// `mcp get`'s not-found message. Unlike `mcp remove` (which lists every
+/// config-level server across all scopes), claude's `mcp get` lists only the
+/// LOADED servers — user + local + APPROVED project — and, when there are
+/// pending (unapproved) `.mcp.json` servers, OMITS them from the list and
+/// appends an awaiting-approval note instead. Verified against the live 2.1.191
+/// binary.
+fn not_found_message_get(name: &str) -> String {
+    let (approved_project, pending_project) = project_server_approval();
+    let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    set.extend(user_server_names());
+    set.extend(local_server_names());
+    set.extend(approved_project);
+    let names: Vec<String> = set.into_iter().collect(); // BTreeSet ⇒ already sorted/unique
+    let clause = if pending_project.is_empty() {
+        ""
+    } else {
+        " (.mcp.json servers are awaiting approval — run `claude` in this directory to review them.)"
+    };
+    if names.is_empty() && clause.is_empty() {
+        return format!("No MCP server named \"{name}\". Run `claude mcp add` to add one.");
+    }
+    const CAP: usize = 8;
+    let shown = names[..names.len().min(CAP)].join(", ");
+    let suffix = if names.len() > CAP {
+        format!(" (and {} more — run `claude mcp list` to see all)", names.len() - CAP)
+    } else {
+        String::new()
+    };
+    format!("No MCP server named \"{name}\". Configured servers: {shown}{suffix}{clause}")
 }
 
 /// Which writable scopes (local/project/user) currently hold a server named

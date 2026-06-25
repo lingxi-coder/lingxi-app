@@ -108,6 +108,31 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         return command.run().await;
     }
 
+    // `--session-id <uuid>` validation (claude-code main.tsx:1276-1300), byte-exact
+    // messages + exit 1. Runs for every session mode (print/TUI/REPL) before any
+    // runtime is built; the validated id then threads into
+    // `DesktopConfig.session_id_override` via `resolve_desktop_config`.
+    if let Some(sid) = parsed.session_id.as_deref() {
+        // (a) cross-flag rule: pairing --session-id with --continue/--resume
+        //     requires --fork-session (else the resumed session's own id wins).
+        if (parsed.continue_session || parsed.resume.is_some()) && !parsed.fork_session {
+            eprintln!(
+                "Error: --session-id can only be used with --continue or --resume if --fork-session is also specified."
+            );
+            return exit_codes::ARGV_ERROR;
+        }
+        // (b) UUID validation (a bare UUID; `parse_prefixed` also tolerates the
+        //     `sess:`-prefixed display form).
+        if protocol::SessionId::parse_prefixed(sid).is_none() {
+            eprintln!("Error: Invalid session ID. Must be a valid UUID.");
+            return exit_codes::ARGV_ERROR;
+        }
+        // (c) DEFERRED vs claude: the "Session ID <id> is already in use" check
+        //     (sessionIdExists) needs a cross-project session-store lookup; not
+        //     yet wired. A collision currently reuses the transcript path rather
+        //     than erroring.
+    }
+
     if let Err(e) = cwd::apply_cwd(parsed.cwd.as_deref()) {
         eprintln!("lingxi-cli: {e}");
         return exit_codes::RUNTIME_ERROR;

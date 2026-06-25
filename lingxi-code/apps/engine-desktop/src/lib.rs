@@ -1038,6 +1038,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     connect_prompt: None,
 ///     system_prompt_override: None,
 ///     append_system_prompt: None,
+///     session_id_override: None,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -1165,6 +1166,13 @@ pub struct DesktopConfig {
     /// appended after the memory-hierarchy prompt (or after `system_prompt_override`
     /// when both are set). `None` (the default) keeps the assembled prompt unchanged.
     pub append_system_prompt: Option<String>,
+    /// CLI `--session-id <uuid>`: use this specific session ID for the
+    /// conversation instead of minting a fresh one. `Some` ⟶ the boot-canonical
+    /// MAIN session id is parsed from this string (a bare UUID, validated by the
+    /// host before it fills this); `None` (the default) ⟶ a fresh random id.
+    /// claude-code `--session-id`. The host (`apps/cli` / `apps/bridge-server`)
+    /// validates UUID-ness + the cross-flag rules before setting this.
+    pub session_id_override: Option<String>,
 }
 
 impl std::fmt::Debug for DesktopConfig {
@@ -1215,6 +1223,7 @@ impl std::fmt::Debug for DesktopConfig {
             )
             .field("system_prompt_override", &self.system_prompt_override)
             .field("append_system_prompt", &self.append_system_prompt)
+            .field("session_id_override", &self.session_id_override)
             .finish()
     }
 }
@@ -1243,6 +1252,7 @@ impl Default for DesktopConfig {
             connect_prompt: None,
             system_prompt_override: None,
             append_system_prompt: None,
+            session_id_override: None,
         }
     }
 }
@@ -1852,7 +1862,16 @@ pub async fn build(
     //   - handing the subagents dir to the spawner via `with_hook_context`.
     // The path helpers live in `orchestrator::transcript_paths` (a facade over
     // `session::jsonl::path`) so this app needs no direct `session` dep.
-    let main_session_id = protocol::SessionId::new();
+    // claude-code `--session-id <uuid>`: honor a host-provided session id when
+    // present (already UUID-validated by the host), else mint a fresh one. The
+    // override carries through to the transcript path, the firers' precomputed
+    // `transcript_path`, and the orchestrator's live `.with_session_id`, so a
+    // resumed/SDK-pinned id is consistent everywhere.
+    let main_session_id = cfg
+        .session_id_override
+        .as_deref()
+        .and_then(protocol::SessionId::parse_prefixed)
+        .unwrap_or_else(protocol::SessionId::new);
     let main_session_uuid = main_session_id.as_uuid().to_string();
     let main_transcript_path = orchestrator::transcript_paths::main_transcript_path(
         &cfg.claude_home,
@@ -4771,6 +4790,7 @@ mod tests {
             connect_prompt: None,
             system_prompt_override: None,
             append_system_prompt: None,
+            session_id_override: None,
         };
         (tmp, cfg)
     }

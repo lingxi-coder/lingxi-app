@@ -241,6 +241,9 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // The bridge has no --system-prompt / --append-system-prompt CLI flags.
         system_prompt_override: None,
         append_system_prompt: None,
+        // The Electron bridge has no --session-id flag (the SDK/bridge path mints
+        // its own ids); always a fresh session id.
+        session_id_override: None,
     }
 }
 
@@ -519,6 +522,7 @@ mod tests {
             json_schema: None,
             system_prompt_override: None,
             append_system_prompt: None,
+            session_id_override: None,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.

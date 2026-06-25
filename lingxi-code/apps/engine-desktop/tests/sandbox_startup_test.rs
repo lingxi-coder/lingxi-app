@@ -92,6 +92,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         json_schema: None,
         system_prompt_override: None,
         append_system_prompt: None,
+        session_id_override: None,
     };
     (tmp, cfg)
 }

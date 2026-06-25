@@ -267,13 +267,34 @@ pub(crate) fn resolve_desktop_config(
 ) -> DesktopConfig {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let claude_home = crate::run::claude_home_dir();
-    let project_mcp_path = cwd.join(".mcp.json");
+    let mut project_mcp_path = cwd.join(".mcp.json");
     // User/global-scope MCP servers live INSIDE `~/.claude.json` (top-level
     // `mcpServers`), exactly like claude-code — NOT a standalone file under the
     // OS config dir. The loader reads only that key
     // (`mcp::parse_global_config_mcp_servers`).
-    let global_mcp_path = migrations::global_config::global_config_path()
+    let mut global_mcp_path = migrations::global_config::global_config_path()
         .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
+
+    // `--strict-mcp-config` (claude-code main.tsx:1586): "Only use MCP servers
+    // from --mcp-config, ignoring all other MCP configurations." `build()` reads
+    // exactly `mcp_paths[0]` (project) + `[1]` (global), so we REPLACE the
+    // discovered project/global `.mcp.json` paths with the `--mcp-config` FILE
+    // paths (the first two), or with a nonexistent path when none are given — so
+    // NO ambient servers load (full isolation). (Inline-JSON `--mcp-config`
+    // values are not yet wired — `build()` takes file paths, not JSON strings.)
+    if argv.strict_mcp_config {
+        let nonexistent = std::path::PathBuf::from("/dev/null");
+        let files: Vec<std::path::PathBuf> = argv
+            .mcp_config
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_file())
+            .collect();
+        project_mcp_path = files.first().cloned().unwrap_or_else(|| nonexistent.clone());
+        global_mcp_path = files.get(1).cloned().unwrap_or(nonexistent);
+    }
 
     let mut default_model = DesktopConfig::default().default_model;
     if let Some(m) = &argv.model {
@@ -376,6 +397,11 @@ pub(crate) fn resolve_desktop_config(
         } else {
             None
         },
+        // CLI `--session-id <uuid>`: the host validated UUID-ness + the cross-flag
+        // rules in `run_cli` BEFORE this runs, so by here `argv.session_id` is
+        // either `None` or a valid UUID string. `build()` parses it into the
+        // boot-canonical MAIN session id (else mints a fresh one).
+        session_id_override: argv.session_id.clone(),
     }
     // TODO(add-dir): wire `argv.add_dir` into the memory provider so extra
     // directories are searched for CLAUDE.md files. Currently requires a new

@@ -65,11 +65,6 @@ pub const MERGE_STRATEGIES: &[(&str, MergeStrategy)] = &[
     // LingXi extension — deep-merge so multiple settings layers can each
     // contribute routing aliases, fallback chains, and retry policy.
     ("routing", MergeStrategy::DeepMerge),
-    // LingXi-only extension (multi-agent dual-LLM). Deep-merge so a project
-    // layer declaring e.g. `triggers` does not clobber a user layer's
-    // `candidates`/`arbiter`. Same treatment as `routing`. NOT a claude-code
-    // parity field.
-    ("multiAgent", MergeStrategy::DeepMerge),
 ];
 
 /// Look up the merge strategy for a field name.
@@ -201,24 +196,6 @@ pub struct SettingsJson {
     ///   never scaled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<Value>,
-
-    /// Object-merge field (deep-merge). LingXi-ONLY extension (claude-code has
-    /// no such key): dual-LLM multi-agent execution config. Opaque `Value` in
-    /// Phase 1; parsed into a typed `MultiAgentConfig` by the `multi-agent`
-    /// crate in a later phase (design §配置设计). Shape (abridged):
-    /// `{ "enabled": bool, "mode": "off"|"auto"|"force",
-    ///    "strategy": "dualLlmCompetitive",
-    ///    "candidates": [{ "id", "model", "role"? }, …],
-    ///    "reviewers": { "crossReview": bool, "maxReviewRounds": n, … },
-    ///    "arbiter": { "model", "allowHybrid"? },
-    ///    "triggers": { "keywords": [...], … },
-    ///    "limits": { "timeoutSeconds": n, … } }`.
-    ///
-    /// MUST deep-merge (registered `DeepMerge`, same as `routing`) so settings
-    /// layers compose instead of a later layer wholesale-overwriting an
-    /// earlier one. This is load-bearing — see `merger::merge`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub multi_agent: Option<Value>,
 }
 
 impl SettingsJson {
@@ -403,31 +380,5 @@ mod tests {
         assert!(parsed.routing.is_some());
         let back = serde_json::to_string(&parsed).expect("serialize");
         assert!(back.contains("\"routing\""));
-    }
-
-    #[test]
-    fn multi_agent_field_roundtrips() {
-        // LingXi-only field; wire name "multiAgent" (camelCase). Round-trips
-        // through serde under the opaque Value carrier.
-        let raw = r#"{"multiAgent":{"enabled":true,"mode":"auto","strategy":"dualLlmCompetitive","candidates":[{"id":"fast","model":"profile-fast/model-fast"},{"id":"deep","model":"profile-deep/model-deep"}],"arbiter":{"model":"profile-arbiter/model-arbiter"}}}"#;
-        let parsed: SettingsJson = serde_json::from_str(raw).expect("parse multiAgent");
-        assert!(parsed.multi_agent.is_some());
-        let v = parsed.multi_agent.as_ref().unwrap();
-        assert_eq!(v.get("mode").and_then(|m| m.as_str()), Some("auto"));
-        assert_eq!(
-            v.get("candidates").and_then(|c| c.as_array()).map(Vec::len),
-            Some(2)
-        );
-        let back = serde_json::to_string(&parsed).expect("serialize");
-        assert!(back.contains("\"multiAgent\""), "wire name must be camelCase");
-    }
-
-    #[test]
-    fn multi_agent_registered_as_deep_merge() {
-        // Load-bearing: must deep-merge like `routing`, never scalar-override.
-        assert!(matches!(
-            strategy_for("multiAgent"),
-            Some(MergeStrategy::DeepMerge)
-        ));
     }
 }

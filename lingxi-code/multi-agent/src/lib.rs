@@ -29,7 +29,18 @@
 //! - [`artifacts`] — fatal-on-failure run-artifact I/O and fail-closed
 //!   worktree cleanup.
 //!
-// TODO(multi-agent): Phases 4-7 add candidate runner, review/revision/arbiter,
+//! Phase 4 lands the candidate-implementation runner:
+//!
+//! - [`providers`] — resolve candidate / arbiter `profile/model` references
+//!   through the existing `provider-config` → `llm-client` routing (no
+//!   hard-coded vendor calls).
+//! - [`orchestrator`] — the [`orchestrator::DualLlm`] run loop: build brief,
+//!   create worktrees, run both candidates concurrently (each cwd = its own
+//!   worktree), with timeout/cancel handling and a [`orchestrator::UsageSink`]
+//!   cost/telemetry seam. The real candidate loop is a marked
+//!   `// TODO(multi-agent):` seam ([`orchestrator::TodoLlmCandidateRunner`]).
+//!
+// TODO(multi-agent): Phases 5-7 add review/revision/arbiter,
 // finalizer/verification, and CLI/TUI wiring.
 
 #![forbid(unsafe_code)]
@@ -37,7 +48,9 @@
 pub mod artifacts;
 pub mod config;
 pub mod error;
+pub mod orchestrator;
 pub mod prompts;
+pub mod providers;
 pub mod router;
 pub mod state;
 pub mod worktrees;
@@ -50,6 +63,17 @@ pub use config::MultiAgentConfig;
 pub use config::MultiAgentMode;
 pub use config::MultiAgentStrategyKind;
 pub use error::MultiAgentError;
+pub use orchestrator::CandidateOutcome;
+pub use orchestrator::CandidateResult;
+pub use orchestrator::CandidateRunContext;
+pub use orchestrator::CandidateRunner;
+pub use orchestrator::DualLlm;
+pub use orchestrator::ImplementationRun;
+pub use orchestrator::NullUsageSink;
+pub use orchestrator::TodoLlmCandidateRunner;
+pub use orchestrator::UsageSink;
+pub use providers::ModelResolver;
+pub use providers::ResolvedCandidate;
 pub use router::route;
 pub use router::ExecutionRoute;
 pub use router::RouteInput;

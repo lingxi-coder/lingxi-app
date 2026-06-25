@@ -10,7 +10,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 traits = { path = "../traits" }
+llm-client = { path = "../llm-client" }
 async-trait = { workspace = true }
+tokio = { version = "1", features = ["time", "sync", "macros", "rt"] }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -54,7 +54,6 @@ use multi_agent::verification::FixContext;
 use multi_agent::verification::VerificationFixer;
 use multi_agent::MultiAgentError;
 use std::path::Path;
-use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 use traits::subagent_spawn::SubagentInheritance;
 use traits::subagent_spawn::SubagentResult;
@@ -517,6 +516,7 @@ impl MultiAgentRuntime {
 mod tests {
     use super::*;
     use std::path::Path as StdPath;
+    use std::path::PathBuf;
     use std::process::Command;
     use std::sync::Arc;
     use std::sync::Mutex;

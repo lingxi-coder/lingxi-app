@@ -1601,6 +1601,7 @@ fn anthropic_models_for(
             request_model: id.clone(),
             billing_model: id,
             aliases: Vec::new(),
+            description: None,
             capabilities: caps,
         })
         .collect()
@@ -2174,6 +2175,7 @@ pub async fn build(
                 request_model: m.request_model.clone(),
                 provider_id: profile.clone(),
                 provider_label: label.clone(),
+                description: m.description.clone(),
             })
         })
         .collect();
@@ -6638,18 +6640,21 @@ mod tests {
                 request_model: "gpt-4o".to_string(),
                 provider_id: "openai".to_string(),
                 provider_label: "OpenAI".to_string(),
+                description: None,
             },
             traits::ModelListing {
                 display_model: "gpt-4o".to_string(),
                 request_model: "gpt-4o".to_string(),
                 provider_id: "github-copilot".to_string(),
                 provider_label: "GitHub Copilot".to_string(),
+                description: None,
             },
             traits::ModelListing {
                 display_model: "claude-sonnet-4-6".to_string(),
                 request_model: "claude-sonnet-4-6".to_string(),
                 provider_id: "anthropic".to_string(),
                 provider_label: "Anthropic".to_string(),
+                description: None,
             },
         ];
 

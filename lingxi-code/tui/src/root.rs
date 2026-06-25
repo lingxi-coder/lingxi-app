@@ -3448,6 +3448,7 @@ mod tests {
             provider_id: "anthropic".into(),
             provider_label: "Anthropic".into(),
             available: true,
+            description: None,
         }];
         let mut st = AppState::new(crate::state::StatusSnapshot::default());
         st.active_screen = Some(Screen::Model(ModelScreenState {

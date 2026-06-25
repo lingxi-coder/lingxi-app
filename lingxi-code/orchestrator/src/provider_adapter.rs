@@ -220,13 +220,42 @@ fn catalog_model_listings() -> Vec<traits::orchestrator::ModelListing> {
     registry
         .available_models()
         .into_iter()
-        .map(|m| traits::orchestrator::ModelListing {
-            display_model: m.display_model,
-            request_model: m.request_model,
-            provider_label: provider_label(&m.profile_name).to_string(),
-            provider_id: m.profile_name,
+        .map(|m| {
+            // Prefer the catalog's own description; fall back to a known per-model
+            // parity blurb for the built-in Claude family (models.dev carries no
+            // such string for them).
+            let description = m
+                .description
+                .clone()
+                .or_else(|| model_description(&m.request_model).map(str::to_string));
+            traits::orchestrator::ModelListing {
+                display_model: m.display_model,
+                request_model: m.request_model,
+                provider_label: provider_label(&m.profile_name).to_string(),
+                provider_id: m.profile_name,
+                description,
+            }
         })
         .collect()
+}
+
+/// Known one-line description for a built-in model wire id, mirroring the
+/// claude-code `/model` picker blurbs (`modelOptions.ts`). Matched by a
+/// case-insensitive family substring so dated ids (`claude-opus-4-7`, etc.) and
+/// short aliases (`opus`, `sonnet`, `haiku`) both resolve. Returns `None` for
+/// any id we don't recognize (then the row renders with no sub-line).
+#[must_use]
+pub(crate) fn model_description(request_model: &str) -> Option<&'static str> {
+    let id = request_model.to_ascii_lowercase();
+    if id.contains("opus") {
+        Some("Most capable for complex work")
+    } else if id.contains("haiku") {
+        Some("Fastest for quick answers")
+    } else if id.contains("sonnet") {
+        Some("Best for everyday tasks")
+    } else {
+        None
+    }
 }
 
 /// Human provider header for a catalog profile name.
@@ -422,6 +451,7 @@ mod tests {
                         request_model: "claude-sonnet-4-20250514".to_string(),
                         billing_model: "claude-sonnet-4".to_string(),
                         aliases: vec!["claude".to_string()],
+                        description: None,
                         capabilities: Capabilities {
                             streaming: true,
                             tools: true,
@@ -480,6 +510,21 @@ mod tests {
             label_for("github-copilot").as_deref(),
             Some("GitHub Copilot")
         );
+        // (model-no-row-descriptions) Claude-family ids in the catalog (e.g.
+        // openrouter's `*opus*`/`*sonnet*`/`*haiku*`) pick up a built-in blurb so
+        // the picker renders a dimmed sub-line. At least one listing carries one.
+        assert!(
+            listings.iter().any(|l| l.description.is_some()),
+            "expected at least one catalog listing to carry a description"
+        );
+    }
+
+    #[test]
+    fn model_description_matches_known_families() {
+        assert_eq!(model_description("claude-opus-4-7"), Some("Most capable for complex work"));
+        assert_eq!(model_description("anthropic/claude-sonnet-4-6"), Some("Best for everyday tasks"));
+        assert_eq!(model_description("claude-3-5-haiku"), Some("Fastest for quick answers"));
+        assert_eq!(model_description("gpt-4o"), None);
     }
 
     #[tokio::test]
@@ -620,6 +665,7 @@ mod tests {
                         request_model: "claude-sonnet-4-20250514".to_string(),
                         billing_model: "claude-sonnet-4".to_string(),
                         aliases: vec!["claude".to_string()],
+                        description: None,
                         capabilities: Capabilities {
                             streaming: true,
                             tools: true,
@@ -721,6 +767,7 @@ mod tests {
                         // billing_model not in any catalog entry
                         billing_model: "claude-future-9999".to_string(),
                         aliases: vec![],
+                        description: None,
                         capabilities: Capabilities {
                             reasoning: true,
                             ..Default::default()

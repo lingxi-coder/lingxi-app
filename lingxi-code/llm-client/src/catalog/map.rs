@@ -13,6 +13,7 @@ pub fn to_model_profile(model: &Model) -> ModelProfile {
         request_model: model.id.clone(),
         billing_model: model.id.clone(),
         aliases: Vec::new(),
+        description: model.description.clone(),
         capabilities: to_capabilities(model),
     }
 }

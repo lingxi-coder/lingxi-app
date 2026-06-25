@@ -437,6 +437,7 @@ fn parse_model_entry(provider_name: &str, value: &Value) -> Result<ModelProfile,
             request_model: id.clone(),
             billing_model: id.clone(),
             aliases: Vec::new(),
+            description: None,
             capabilities: permissive_caps(),
         }),
         Value::Object(obj) => {
@@ -457,6 +458,7 @@ fn parse_model_entry(provider_name: &str, value: &Value) -> Result<ModelProfile,
                 request_model: id.to_string(),
                 billing_model: id.to_string(),
                 aliases,
+                description: None,
                 capabilities: parse_capabilities(obj.get("capabilities")),
             })
         }
@@ -656,6 +658,7 @@ pub fn anthropic_model_profiles() -> Vec<ModelProfile> {
             request_model: display.to_string(),
             billing_model: billing.to_string(),
             aliases: aliases.iter().map(|s| (*s).to_string()).collect(),
+            description: None,
             capabilities: Capabilities {
                 streaming: true,
                 tools: true,

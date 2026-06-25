@@ -148,6 +148,7 @@ mod tests {
                 request_model: model.to_string(),
                 billing_model: model.to_string(),
                 aliases: Vec::new(),
+                description: None,
                 capabilities: Capabilities::default(),
             }],
             pricing: PricingConfig::default(),

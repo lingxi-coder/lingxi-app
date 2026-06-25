@@ -359,6 +359,7 @@ fn anthropic_models(default_model: &str) -> Vec<llm_client::ModelProfile> {
             request_model: id.clone(),
             billing_model: id,
             aliases: Vec::new(),
+            description: None,
             capabilities: caps,
         })
         .collect()
@@ -528,6 +529,7 @@ pub async fn build_mobile_inner(
                 request_model: m.request_model.clone(),
                 provider_id: profile.clone(),
                 provider_label: profile.clone(),
+                description: m.description.clone(),
             })
         })
         .collect();
@@ -3004,18 +3006,21 @@ mod tests {
                 request_model: "gpt-5.2".to_string(),
                 provider_id: "openai".to_string(),
                 provider_label: "openai".to_string(),
+                description: None,
             },
             traits::ModelListing {
                 display_model: "gpt-5.2".to_string(),
                 request_model: "gpt-5.2".to_string(),
                 provider_id: "github-copilot".to_string(),
                 provider_label: "github-copilot".to_string(),
+                description: None,
             },
             traits::ModelListing {
                 display_model: "claude-sonnet-4-20250514".to_string(),
                 request_model: "claude-sonnet-4-20250514".to_string(),
                 provider_id: "anthropic".to_string(),
                 provider_label: "anthropic".to_string(),
+                description: None,
             },
         ];
 

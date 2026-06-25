@@ -98,6 +98,7 @@ fn two_profile_client() -> llm_client::client::DefaultLlmClient {
         request_model: "gpt-5.2".to_string(),
         billing_model: "gpt-5.2".to_string(),
         aliases: vec![],
+        description: None,
         capabilities: Capabilities {
             streaming: true,
             tools: true,

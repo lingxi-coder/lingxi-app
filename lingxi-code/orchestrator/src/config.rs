@@ -67,6 +67,18 @@ pub struct OrchestratorConfig {
     /// sends NO system prompt — the model receives only `messages`).
     pub system_prompt_override: Option<String>,
 
+    /// CLI `--exclude-dynamic-system-prompt-sections`. When `true`, the
+    /// per-machine `env_block` (cwd / env info / git status / OS / shell) is
+    /// OMITTED from the assembled system prompt and instead emitted in the
+    /// first-user-message context reminder (`additional_context_message`), so
+    /// the static system prompt is identical across machines/users and stays
+    /// prompt-cacheable. `false` (the default) keeps the env block in the
+    /// system prompt — byte-identical to before this field existed (only
+    /// applies with the default assembled prompt; ignored under
+    /// `system_prompt_override`).
+    #[serde(default)]
+    pub exclude_dynamic_system_prompt_sections: bool,
+
     /// When `true`, M5-12 CLI binary wires
     /// [`permission::InteractivePromptingGate`] over real stdin /
     /// stderr; when `false` (default), it wires
@@ -242,6 +254,7 @@ impl Default for OrchestratorConfig {
             model: DEFAULT_MODEL.to_string(),
             fallback_model: None,
             system_prompt_override: None,
+            exclude_dynamic_system_prompt_sections: false,
             interactive_permissions: false,
             resume_session_id: None,
             escalate_max_output_tokens: false,
@@ -290,6 +303,7 @@ mod tests {
             model: "x".into(),
             fallback_model: Some("claude-sonnet-4-6".into()),
             system_prompt_override: Some("custom".into()),
+            exclude_dynamic_system_prompt_sections: false,
             interactive_permissions: true,
             resume_session_id: None,
             escalate_max_output_tokens: true,

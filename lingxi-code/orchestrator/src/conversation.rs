@@ -5245,11 +5245,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// tree / memory / tool-name context and calling
     /// [`crate::prompt::assemble_system_prompt`]. Bypassed when
     /// `OrchestratorConfig::system_prompt_override` is `Some(_)`.
-    async fn build_system_prompt(&self) -> String {
-        use crate::prompt::{
-            assemble_system_prompt_with_style, file_tree, git_status, ActiveOutputStyle,
-            SystemPromptContext,
-        };
+    /// Build the per-turn [`crate::prompt::SystemPromptContext`] (cwd / env /
+    /// git / tools / memory / …). Shared by [`Self::build_system_prompt`] and
+    /// [`Self::additional_context_message`] — the latter re-emits the env block
+    /// in the first user message when `--exclude-dynamic-system-prompt-sections`
+    /// is set, so the construction (and its env-field probes) lives in ONE place.
+    async fn build_prompt_context(&self) -> crate::prompt::SystemPromptContext {
+        use crate::prompt::{file_tree, git_status, SystemPromptContext};
 
         let cwd = self.cwd.clone();
         let memory_files = self.memory.load(&cwd).await;
@@ -5294,7 +5296,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // is moved into the context struct below.
         let in_worktree = cwd.join(".git").is_file();
 
-        let ctx = SystemPromptContext {
+        SystemPromptContext {
             cwd,
             // `Platform: ${je.platform}` — claude-code emits the node
             // `process.platform` value (`darwin`/`linux`/`win32`), NOT Rust's
@@ -5323,7 +5325,18 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             file_tree: tree,
             memory_files,
             tool_names,
-        };
+            // `--exclude-dynamic-system-prompt-sections`: when set, `assemble`
+            // OMITS the env block from the system prompt (it is re-emitted in the
+            // first-user-message context reminder via `env_reminder_section`).
+            exclude_dynamic_sections: self.config.exclude_dynamic_system_prompt_sections,
+        }
+    }
+
+    /// Assemble the full system-prompt STRING from [`Self::build_prompt_context`].
+    /// Bypassed when `OrchestratorConfig::system_prompt_override` is `Some(_)`.
+    async fn build_system_prompt(&self) -> String {
+        use crate::prompt::{assemble_system_prompt_with_style, git_status, ActiveOutputStyle};
+        let ctx = self.build_prompt_context().await;
         // OUTSTYLE.2/.3: when a non-default output style is active — a builtin
         // OR a custom disk style discovered under `output_style_dirs` — inject
         // its `# Output Style: <name>` section (TS getOutputStyleSection). A
@@ -5395,7 +5408,22 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let claude_md = crate::prompt::memory_block::format(&memory_files);
 
         // Build the entries in claude-code insertion order; each is `# key\nvalue`.
-        let mut entries: Vec<String> = Vec::with_capacity(3);
+        let mut entries: Vec<String> = Vec::with_capacity(4);
+        // `--exclude-dynamic-system-prompt-sections`: the per-machine env block
+        // (cwd / env / git / OS / shell) is OMITTED from the static system prompt
+        // (see `assemble_system_prompt_with_style`) and re-emitted HERE in the
+        // first-user-message context reminder, so the system prompt stays
+        // identical across machines (prompt-cache reuse) while the model still
+        // sees the env. Built from the SAME `build_prompt_context` the system
+        // prompt uses. (`false` ⟶ skipped, byte-identical to before this flag.)
+        if self.config.exclude_dynamic_system_prompt_sections {
+            let ctx = self.build_prompt_context().await;
+            let env = crate::prompt::env_block::format(&ctx);
+            let env = env.trim();
+            if !env.is_empty() {
+                entries.push(format!("# env\n{env}"));
+            }
+        }
         if !claude_md.is_empty() {
             entries.push(format!("# claudeMd\n{claude_md}"));
         }

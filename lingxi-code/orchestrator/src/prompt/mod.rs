@@ -134,8 +134,16 @@ pub fn assemble_system_prompt_with_style(
         /* fork_mode_enabled = */ fork_mode,
     ));
 
-    push_section_separator(&mut s);
-    s.push_str(&env_block::format(ctx));
+    // `--exclude-dynamic-system-prompt-sections`: OMIT the per-machine env
+    // block (cwd / env / git / OS / shell) from the system prompt so the static
+    // prompt is identical across machines (prompt-cache reuse). The conversation
+    // re-emits the same env block in the first-user-message context reminder
+    // (`additional_context_message`) so the model still sees it. `false` (the
+    // default) keeps the block here — byte-identical to before this flag.
+    if !ctx.exclude_dynamic_sections {
+        push_section_separator(&mut s);
+        s.push_str(&env_block::format(ctx));
+    }
 
     // R-P1c/R-P1d: the CLAUDE.md memory block is NO LONGER spliced into the
     // MAIN system prompt. claude-code v2.1.183 carries it as an additional-
@@ -247,6 +255,12 @@ pub struct SystemPromptContext {
     /// Available tool names — alphabetic order. Sorting happens here,
     /// NOT in `tools_block::format`.
     pub tool_names: Vec<String>,
+    /// CLI `--exclude-dynamic-system-prompt-sections`. When `true`, the
+    /// per-machine `env_block` is OMITTED from the assembled system prompt (it
+    /// is emitted in the first-user-message context reminder instead). `false`
+    /// (the default) keeps the env block in the prompt — byte-identical to
+    /// before this field existed.
+    pub exclude_dynamic_sections: bool,
 }
 
 /// Result of a git-status probe over the cwd.
@@ -341,6 +355,7 @@ mod tests {
             },
             memory_files: Vec::new(),
             tool_names: Vec::new(),
+            exclude_dynamic_sections: false,
         };
         assert_eq!(ctx.cwd, PathBuf::from("/tmp"));
         assert_eq!(ctx.model, "claude-opus-4-7");
@@ -390,7 +405,26 @@ mod tests {
             file_tree: FileTree::default(),
             memory_files: Vec::new(),
             tool_names: vec!["Read".into(), "Write".into()],
+            exclude_dynamic_sections: false,
         }
+    }
+
+    #[test]
+    fn exclude_dynamic_sections_omits_env_block() {
+        // `--exclude-dynamic-system-prompt-sections`: the per-machine env block
+        // (whose signature line is "Primary working directory:") is in the
+        // system prompt by default, and OMITTED when the flag is set (the
+        // conversation re-emits it in the first user message instead).
+        let mut ctx = ctx_minimal();
+        assert!(
+            assemble_system_prompt(&ctx).contains("Primary working directory"),
+            "env block must be present by default"
+        );
+        ctx.exclude_dynamic_sections = true;
+        assert!(
+            !assemble_system_prompt(&ctx).contains("Primary working directory"),
+            "env block must be OMITTED when exclude_dynamic_sections is set"
+        );
     }
 
     #[test]

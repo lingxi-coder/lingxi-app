@@ -96,6 +96,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         disable_slash_commands: false,
         add_dir: Vec::new(),
         cli_mcp_servers: Vec::new(),
+        exclude_dynamic_system_prompt_sections: false,
     };
     (tmp, cfg)
 }

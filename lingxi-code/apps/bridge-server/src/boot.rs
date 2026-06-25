@@ -250,6 +250,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         add_dir: Vec::new(),
         // The Electron bridge has no --mcp-config flag.
         cli_mcp_servers: Vec::new(),
+        // The Electron bridge has no --exclude-dynamic-system-prompt-sections flag.
+        exclude_dynamic_system_prompt_sections: false,
     }
 }
 
@@ -532,6 +534,7 @@ mod tests {
             disable_slash_commands: false,
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
+            exclude_dynamic_system_prompt_sections: false,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.

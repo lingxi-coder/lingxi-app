@@ -69,6 +69,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         disable_slash_commands: false,
         add_dir: Vec::new(),
         cli_mcp_servers: Vec::new(),
+        exclude_dynamic_system_prompt_sections: false,
     };
     (tmp, cfg)
 }

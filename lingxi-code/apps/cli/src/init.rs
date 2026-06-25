@@ -471,6 +471,9 @@ pub(crate) fn resolve_desktop_config(
         // CLI `--mcp-config <configs...>` servers (parsed above), merged over the
         // discovered servers in `build()`.
         cli_mcp_servers,
+        // CLI `--exclude-dynamic-system-prompt-sections`: move per-machine env
+        // sections out of the cacheable system prompt into the first user message.
+        exclude_dynamic_system_prompt_sections: argv.exclude_dynamic_system_prompt_sections,
     }
     // NOTE: claude-code's `--add-dir` is "Additional directories to allow TOOL
     // ACCESS to" (NOT CLAUDE.md search — an earlier comment here misread it). It

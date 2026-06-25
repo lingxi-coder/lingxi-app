@@ -57,6 +57,7 @@ fn env_block_marks_git_repo_true_but_emits_no_git_status_lines() {
         file_tree: FileTree::default(),
         memory_files: Vec::new(),
         tool_names: Vec::new(),
+        exclude_dynamic_sections: false,
     };
     let out = env_block::format(&ctx);
     // A repo present sets the `true` line; the env block carries NO branch /
@@ -82,6 +83,7 @@ fn env_block_marks_git_repo_false_when_no_git_status() {
         file_tree: FileTree::default(),
         memory_files: Vec::new(),
         tool_names: Vec::new(),
+        exclude_dynamic_sections: false,
     };
     let out = env_block::format(&ctx);
     assert!(out.contains("\n - Is a git repository: false\n"));

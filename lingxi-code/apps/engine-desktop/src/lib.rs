@@ -1042,6 +1042,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     disable_slash_commands: false,
 ///     add_dir: Vec::new(),
 ///     cli_mcp_servers: Vec::new(),
+///     exclude_dynamic_system_prompt_sections: false,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -1195,6 +1196,11 @@ pub struct DesktopConfig {
     /// `--strict-mcp-config` the host nulls the discovered paths, so these are
     /// the ONLY servers. Empty (the default) ⟶ none.
     pub cli_mcp_servers: Vec<mcp::McpServerConfig>,
+    /// CLI `--exclude-dynamic-system-prompt-sections`. Threaded into
+    /// `OrchestratorConfig::exclude_dynamic_system_prompt_sections`: moves the
+    /// per-machine env block out of the (cacheable) system prompt and into the
+    /// first user message. `false` (the default) ⟶ unchanged.
+    pub exclude_dynamic_system_prompt_sections: bool,
 }
 
 impl std::fmt::Debug for DesktopConfig {
@@ -1249,6 +1255,10 @@ impl std::fmt::Debug for DesktopConfig {
             .field("disable_slash_commands", &self.disable_slash_commands)
             .field("add_dir", &self.add_dir)
             .field("cli_mcp_servers", &self.cli_mcp_servers)
+            .field(
+                "exclude_dynamic_system_prompt_sections",
+                &self.exclude_dynamic_system_prompt_sections,
+            )
             .finish()
     }
 }
@@ -1281,6 +1291,7 @@ impl Default for DesktopConfig {
             disable_slash_commands: false,
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
+            exclude_dynamic_system_prompt_sections: false,
         }
     }
 }
@@ -2404,6 +2415,10 @@ pub async fn build(
     if let Some(override_prompt) = cfg.system_prompt_override.clone() {
         orch_cfg.system_prompt_override = Some(override_prompt);
     }
+    // CLI `--exclude-dynamic-system-prompt-sections`: move the per-machine env
+    // block out of the (cacheable) system prompt into the first user message.
+    orch_cfg.exclude_dynamic_system_prompt_sections =
+        cfg.exclude_dynamic_system_prompt_sections;
     // CLI `--append-system-prompt` / `--append-system-prompt-file`: text to
     // append after the assembled system prompt (or after `system_prompt_override`
     // when both are set). Appended with a newline separator.
@@ -4847,6 +4862,7 @@ mod tests {
             disable_slash_commands: false,
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
+            exclude_dynamic_system_prompt_sections: false,
         };
         (tmp, cfg)
     }

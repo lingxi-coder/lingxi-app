@@ -3,8 +3,10 @@
 //! Literal lock (claude-code `UserAgentNotificationMessage.tsx`):
 //! `{BLACK_CIRCLE} {summary}` where the circle's color is the status color
 //! (completed→success, failed→error, killed→warning, else→text). Empty
-//! summary renders nothing (claude-code returns null). We lock the non-darwin
-//! `BLACK_CIRCLE` = `●` (U+25CF), matching `system_text::MARKER`.
+//! summary renders nothing (claude-code returns null).
+//! (agent-notification-black-circle-darwin) `BLACK_CIRCLE` is
+//! platform-conditional: `⏺` (U+23FA) on macOS, `●` (U+25CF) elsewhere — see
+//! [`MARKER`].
 #![allow(clippy::needless_pass_by_value)]
 
 use iocraft::prelude::*;

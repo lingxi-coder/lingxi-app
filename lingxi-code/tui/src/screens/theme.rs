@@ -300,9 +300,25 @@ pub fn ThemePickerScreen(props: &ThemePickerScreenProps) -> impl Into<AnyElement
                     element! { Text(content: line, color: color) }
                 }))
             }
+            // (theme-preview-border-round-vs-dashed) claude-code's
+            // `borderTop+borderBottom only, borderStyle="dashed"` — Ink's
+            // CUSTOM_BORDER_STYLES.dashed (render-border.ts): `╌` (U+254C) on
+            // the rendered edges, blank corners/sides (suppressed here via
+            // `border_edges`).
             View(
                 flex_direction: FlexDirection::Column,
-                border_style: BorderStyle::Round,
+                border_style: BorderStyle::Custom(BorderCharacters {
+                    top: '\u{254C}',
+                    bottom: '\u{254C}',
+                    left: ' ',
+                    right: ' ',
+                    top_left: ' ',
+                    top_right: ' ',
+                    bottom_left: ' ',
+                    bottom_right: ' ',
+                }),
+                border_edges: Edges::Top | Edges::Bottom,
+                border_color: theme.dim,
                 padding: 1,
                 margin_top: 1,
             ) {
@@ -310,8 +326,12 @@ pub fn ThemePickerScreen(props: &ThemePickerScreenProps) -> impl Into<AnyElement
             }
             // (theme-syntax-status-line) dim syntax-status line below the preview.
             Text(content: syntax_status_line(state.syntax_disabled), color: theme.dim)
+            // (theme-footer-wording) claude-code's dim italic Byline:
+            // `KeyboardShortcutHint`s joined by " · " — "Enter to select" (not
+            // "apply"), no "Up/Down" hint (claude-code's ThemePicker footer
+            // never mentions the arrow keys).
             View(margin_top: 1) {
-                Text(content: "Up/Down select   Enter apply   Esc cancel".to_string(), color: theme.dim)
+                Text(content: "Enter to select \u{00B7} Esc to cancel".to_string(), color: theme.dim, italic: true)
             }
         }
     }

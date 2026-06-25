@@ -893,7 +893,7 @@ pub fn register_desktop_tools(
     skill_loader: Option<Arc<dyn tool_skill::skill::SkillLoader>>,
     cwd_changed_firer: hooks::OptionalCwdChangedFirer,
     web_side_query: Option<Arc<dyn sidequery::SideQueryClient>>,
-) {
+) -> tool_cron::WakeupSchedulerCell {
     // ----- cross-platform tool crates (also linked by engine-mobile, P11) ---
     tool_file::register_all(reg, ctx.clone());
     // BASH.4 `onCwdChangedForHooks` (Shell.ts:409): when a firer is supplied (real
@@ -909,8 +909,11 @@ pub fn register_desktop_tools(
     tool_meta::register_all(reg, ctx.clone());
     // `RemoteTrigger` gets the credential-store auth provider on desktop so it
     // can drive the claude.ai CCR API in-process. `register_all_with_auth`
-    // registers `ScheduleCron` + `RemoteTrigger` (the latter with `cron_auth`).
-    tool_cron::register_all_with_auth(reg, ctx.clone(), cron_auth);
+    // registers `ScheduleCron` + `RemoteTrigger` (the latter with `cron_auth`)
+    // and `ScheduleWakeup`; it returns the wakeup cell threaded out to `build`
+    // → `DesktopRuntime` so the bridge fills it once the per-connection queue +
+    // spawner exist (see `boot::assemble`).
+    let wakeup_cell = tool_cron::register_all_with_auth(reg, ctx.clone(), cron_auth);
     // In coordinator mode the richer `coordinator` `SendMessage` (registered
     // below, IN PLACE OF this builtin) carries the swarm routing surface, so we
     // skip the leaner `tool_ui` `SendMessage` here — otherwise, because the
@@ -964,6 +967,7 @@ pub fn register_desktop_tools(
     tool_worktree::register_all(reg, ctx.clone());
     tool_mcp::register_all(reg, ctx.clone());
     tool_lsp::register_all(reg, ctx);
+    wakeup_cell
 }
 
 /// Assemble the desktop builtin **skill** registry.
@@ -1471,6 +1475,19 @@ pub struct DesktopRuntime {
     /// the model's result here; the print path reads it after each turn to
     /// validate against the schema and retry. `None` for every normal run.
     pub structured_output_slot: Option<orchestrator::structured_output::StructuredOutputSlot>,
+    /// `/loop` dynamic-mode (Phase 2): the set-once cell for the registered
+    /// `ScheduleWakeup` tool. Empty at build time (the per-connection queue +
+    /// spawner don't exist yet); the bridge composition root fills it at
+    /// `boot::assemble` with a `MsgQueueWakeupScheduler`. Hosts without a
+    /// per-connection queue (CLI / offline) leave it empty → the tool is an
+    /// honest no-op.
+    pub wakeup_scheduler_cell: tool_cron::WakeupSchedulerCell,
+    /// A `RuntimeSpawner` for host-side background wiring that needs one after
+    /// `build` (today: the bridge's `MsgQueueWakeupScheduler`, which sleeps then
+    /// enqueues a `/loop` self-wakeup). A fresh stateless `PosixRuntime` — the
+    /// same seam every in-`build` spawner uses (D17: never a direct
+    /// `tokio::spawn`).
+    pub runtime_spawner: Arc<dyn traits::RuntimeSpawner>,
 }
 
 /// Errors surfaced while building a [`DesktopRuntime`].
@@ -3879,7 +3896,10 @@ pub async fn build(
             main_transcript_path.clone(),
         ),
     ));
-    register_desktop_tools(
+    // The wakeup cell for the registered `ScheduleWakeup` tool — surfaced on
+    // `DesktopRuntime` so the bridge composition root fills it once the
+    // per-connection queue + spawner exist (`boot::assemble`).
+    let wakeup_scheduler_cell = register_desktop_tools(
         &mut tools_inner,
         tool_ctx,
         coordinator_wiring,
@@ -4499,6 +4519,8 @@ pub async fn build(
         provider_adapter: provider_adapter_handle,
         credentials,
         structured_output_slot,
+        wakeup_scheduler_cell,
+        runtime_spawner: Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
     })
 }
 

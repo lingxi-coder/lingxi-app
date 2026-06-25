@@ -342,28 +342,23 @@ pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
             .await;
     }
 
-    // Phase-2 /loop dynamic mode (ScheduleWakeup) — KNOWN GAP, NOT auto-wired.
-    //
-    // The composition-root one-shot wakeup adapter
-    // [`crate::driver::MsgQueueWakeupScheduler`] is real and unit-tested (it does
-    // `RuntimeSpawner::sleep(delay)` → `tool_cron::resolve_wakeup_prompt` →
-    // `queue.enqueue(..)` at `Next`). It is NOT constructed/attached here because
-    // BOTH of its inputs are out of reach at this seam:
-    //   1. the registered `ScheduleWakeupTool` is built deep inside
-    //      `engine_desktop::build` (via `tool_cron::register_all_with_auth`) with
-    //      NO scheduler, BEFORE this per-connection `queue` exists, and
-    //      `ToolRegistry` exposes no replace-builtin API to swap in a
-    //      `ScheduleWakeupTool::with_scheduler(ctx, wakeup)` instance afterward; and
-    //   2. the session `RuntimeSpawner` is owned inside `build` and is not
-    //      surfaced on `DesktopRuntime`.
-    // Until a replace-builtin (or deferred-scheduler-cell) seam threads both into
-    // `build`, `ScheduleWakeup` runs as the honest no-op (it clamps + reports "no
-    // wakeup scheduler is wired"). See `MsgQueueWakeupScheduler` for the adapter
-    // that makes the eventual wiring a one-liner.
-    //
-    // TODO(loop-phase2): wire `MsgQueueWakeupScheduler::new(queue, spawner)` into
-    //   the registered `ScheduleWakeupTool` once the registry replace-builtin seam
-    //   + a surfaced session spawner exist.
+    // Phase-2 /loop dynamic mode (ScheduleWakeup): fill the registered tool's
+    // set-once wakeup cell now that the per-connection `queue` + a `RuntimeSpawner`
+    // both exist. `MsgQueueWakeupScheduler` sleeps for the (clamped) delay, resolves
+    // the `<<autonomous-loop-dynamic>>` sentinel, then enqueues the `/loop` input at
+    // `Next` so the between-turn drain folds it back into the session. The cell was
+    // threaded out of `engine_desktop::build` on `DesktopRuntime` precisely because
+    // the tool is constructed before this seam. Setting it more than once is a no-op
+    // (`OnceLock`); a fresh per-connection `assemble` builds a fresh runtime + cell.
+    let wakeup_scheduler: Arc<dyn tool_cron::WakeupScheduler> =
+        Arc::new(crate::driver::MsgQueueWakeupScheduler::new(
+            queue.clone(),
+            runtime.runtime_spawner.clone(),
+        ));
+    if runtime.wakeup_scheduler_cell.set(wakeup_scheduler).is_err() {
+        // Already filled — should not happen for a fresh runtime, but never panic
+        // at the composition root over a benign double-wire.
+    }
 
     // Production turn driver: errors surface as a terminal `ClientEvent::Error`
     // through the SAME connection-scoped event sink. Wired with the connection's
@@ -592,5 +587,11 @@ mod tests {
         // The gate handle is reachable only when bind() ran with a real gate.
         let gate = bound.connection.gate_handle();
         assert_eq!(gate.pending_count().await, 0, "fresh gate has no parked requests");
+        // Phase-2 /loop wiring: assemble fills the ScheduleWakeup cell with the
+        // msgqueue-backed scheduler (so the tool is no longer a no-op on the bridge).
+        assert!(
+            bound.runtime.wakeup_scheduler_cell.get().is_some(),
+            "assemble must wire the ScheduleWakeup self-wakeup scheduler"
+        );
     }
 }

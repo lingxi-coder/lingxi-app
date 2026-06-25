@@ -120,13 +120,13 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
 /// `Next` (not `Now`) is deliberate: a self-wakeup should resume work between
 /// turns, not abort an in-flight turn the user may be watching.
 ///
-/// WIRING STATUS (Phase-2 boundary): this adapter is real and unit-tested, but
-/// it is NOT yet auto-attached to the registered `ScheduleWakeupTool`. The tool
-/// is constructed deep inside `engine_desktop::build` (via
-/// `tool_cron::register_all_with_auth`) BEFORE the per-connection queue +
-/// spawner exist at `boot::assemble`, and the `ToolRegistry` exposes no
-/// replace-builtin seam to swap in a `with_scheduler(..)` instance afterward.
-/// See `boot::assemble` for the wiring TODO.
+/// WIRING: attached at `boot::assemble`. The `ScheduleWakeupTool` is built deep
+/// inside `engine_desktop::build` (via `tool_cron::register_all_with_auth`)
+/// BEFORE the per-connection queue + spawner exist, so it holds an empty
+/// set-once `WakeupSchedulerCell` surfaced on `DesktopRuntime`; `assemble` fills
+/// that cell with this adapter once the queue + `runtime_spawner` are available.
+/// Hosts without a per-connection queue (CLI / offline / mobile) leave the cell
+/// empty → the tool is an honest no-op.
 pub struct MsgQueueWakeupScheduler {
     queue: Arc<msgqueue::MessageQueueManager>,
     runtime: Arc<dyn traits::RuntimeSpawner>,

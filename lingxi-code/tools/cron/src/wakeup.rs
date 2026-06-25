@@ -69,6 +69,17 @@ pub trait WakeupScheduler: Send + Sync {
     async fn schedule(&self, delay: Duration, prompt: String, reason: String);
 }
 
+/// Shared, set-once handle to the live [`WakeupScheduler`].
+///
+/// The `ScheduleWakeupTool` is constructed deep inside `engine_desktop::build`
+/// (via `tool_cron::register_all_with_auth`), BEFORE the per-connection
+/// `MessageQueueManager` + `RuntimeSpawner` exist at `boot::assemble`. So the
+/// tool holds an empty cell whose clone is surfaced on `DesktopRuntime`; the
+/// bridge composition root fills it (`cell.set(scheduler)`) once those inputs
+/// are available. Hosts that own no per-connection queue (mobile / offline /
+/// CLI) simply leave it empty → the tool stays an honest no-op.
+pub type WakeupSchedulerCell = Arc<std::sync::OnceLock<Arc<dyn WakeupScheduler>>>;
+
 /// Clamp `delaySeconds` to `[MIN_DELAY_SECONDS, MAX_DELAY_SECONDS]` (spec
 /// `loop-impl-spec.md:146`). Non-finite / fractional inputs floor to a whole
 /// second after clamping.
@@ -136,30 +147,43 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
 /// `ScheduleWakeup` — `/loop` dynamic-mode one-shot self-wakeup.
 pub struct ScheduleWakeupTool {
     ctx: tool_api::BuiltinToolContext,
-    /// One-shot wakeup seam. `None` → no host wired the scheduler (e.g. the
-    /// engine-desktop CLI path or mobile, which own no per-connection queue):
-    /// the tool clamps + reports, but no wakeup fires (the documented gap).
-    wakeup: Option<Arc<dyn WakeupScheduler>>,
+    /// Set-once wakeup seam (see [`WakeupSchedulerCell`]). Empty until a host
+    /// fills it via the clone returned by [`Self::wakeup_cell`]; while empty the
+    /// tool clamps + reports but no wakeup fires (the legitimate unwired-host
+    /// case: mobile / offline / CLI).
+    wakeup: WakeupSchedulerCell,
 }
 
 impl ScheduleWakeupTool {
-    /// Construct WITHOUT a wakeup scheduler. The tool validates + clamps + emits
-    /// telemetry, but scheduling is a no-op (see [`Self::with_scheduler`]).
+    /// Construct with an empty set-once scheduler cell. The host fills it later
+    /// via the clone from [`Self::wakeup_cell`]; until then scheduling is a
+    /// no-op. The desktop bridge fills it at `boot::assemble`.
     #[must_use]
     pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
-        Self { ctx, wakeup: None }
+        Self {
+            ctx,
+            wakeup: Arc::new(std::sync::OnceLock::new()),
+        }
     }
 
-    /// Construct with a live [`WakeupScheduler`] (the bridge composition root).
+    /// A clone of the set-once cell, for the composition root to fill once the
+    /// per-connection queue + spawner exist (`cell.set(scheduler)`). Setting it
+    /// after the first set is a no-op (`OnceLock` semantics).
+    #[must_use]
+    pub fn wakeup_cell(&self) -> WakeupSchedulerCell {
+        self.wakeup.clone()
+    }
+
+    /// Construct with a live [`WakeupScheduler`] already wired (used by tests and
+    /// any host that owns the queue/spawner before building the tool).
     #[must_use]
     pub fn with_scheduler(
         ctx: tool_api::BuiltinToolContext,
         wakeup: Arc<dyn WakeupScheduler>,
     ) -> Self {
-        Self {
-            ctx,
-            wakeup: Some(wakeup),
-        }
+        let cell: WakeupSchedulerCell = Arc::new(std::sync::OnceLock::new());
+        let _ = cell.set(wakeup);
+        Self { ctx, wakeup: cell }
     }
 }
 
@@ -306,7 +330,7 @@ impl Tool for ScheduleWakeupTool {
 
         // Fire the one-shot wakeup if a scheduler is wired; otherwise the tool is
         // a strict no-op + reports the gap (documented Phase-2 boundary).
-        let scheduled = if let Some(wakeup) = self.wakeup.as_ref() {
+        let scheduled = if let Some(wakeup) = self.wakeup.get() {
             wakeup
                 .schedule(
                     Duration::from_secs(delay_secs as u64),
@@ -316,9 +340,9 @@ impl Tool for ScheduleWakeupTool {
                 .await;
             true
         } else {
-            // TODO(loop-phase2): wire WakeupScheduler at the bridge composition
-            // root (RuntimeSpawner::sleep + MessageQueueManager::enqueue). Until a
-            // host injects one via `with_scheduler`, no wakeup fires.
+            // No scheduler wired on this host (mobile / offline / CLI own no
+            // per-connection queue). The desktop bridge fills the cell at
+            // `boot::assemble`; here the tool is a strict, honest no-op.
             false
         };
 
@@ -484,6 +508,59 @@ mod tests {
         // applies `resolve_wakeup_prompt` just before enqueue.
         assert_eq!(calls[0].1, "5m /x");
         assert_eq!(calls[0].2, "idle tick");
+    }
+
+    #[tokio::test]
+    async fn cell_filled_after_construction_schedules() {
+        // The composition-root path: the tool is built with `new` (empty cell),
+        // then a host fills the SAME cell later via `wakeup_cell()` — exactly how
+        // `boot::assemble` attaches `MsgQueueWakeupScheduler` after `build`.
+        use std::sync::Mutex;
+
+        struct Recorder {
+            calls: Mutex<usize>,
+        }
+        #[async_trait]
+        impl WakeupScheduler for Recorder {
+            async fn schedule(&self, _: Duration, _: String, _: String) {
+                *self.calls.lock().unwrap() += 1;
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let cell = tool.wakeup_cell();
+
+        // Before the cell is filled, the tool is an honest no-op.
+        let before = tool
+            .call(
+                json!({"delaySeconds": 120, "reason": "r", "prompt": "p"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        assert_eq!(before.data["scheduled"], json!(false));
+
+        // Host fills the cell post-construction.
+        let rec = Arc::new(Recorder {
+            calls: Mutex::new(0),
+        });
+        assert!(cell.set(rec.clone() as Arc<dyn WakeupScheduler>).is_ok());
+        // A second set is a no-op (OnceLock).
+        assert!(cell.set(rec.clone() as Arc<dyn WakeupScheduler>).is_err());
+
+        // Now the SAME tool instance schedules through the filled cell.
+        let after = tool
+            .call(
+                json!({"delaySeconds": 120, "reason": "r", "prompt": "p"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        assert_eq!(after.data["scheduled"], json!(true));
+        assert_eq!(*rec.calls.lock().unwrap(), 1);
     }
 
     #[tokio::test]

@@ -462,6 +462,41 @@ pub struct Argv {
     pub background: bool,
 }
 
+/// Recursively graft a hidden trailing catch-all positional onto every LEAF
+/// subcommand (a node with no further subcommands) so surplus positional args
+/// are silently ignored like commander's `allowExcessArguments` default. Groups
+/// (incl. the top-level) are only recursed into — they must keep rejecting an
+/// unknown first token as an unknown subcommand. A leaf that already has a
+/// variadic positional (e.g. `mcp add <name> <commandOrUrl> [args...]`) is left
+/// alone, since it already absorbs the surplus and a second catch-all would
+/// conflict.
+fn with_excess_catchall(mut cmd: clap::Command) -> clap::Command {
+    let sub_names: Vec<String> = cmd.get_subcommands().map(|c| c.get_name().to_string()).collect();
+    if sub_names.is_empty() {
+        if !has_variadic_positional(&cmd) {
+            cmd = cmd.arg(
+                clap::Arg::new("__excess_ignored")
+                    .num_args(0..)
+                    .hide(true)
+                    .help("Excess positional arguments are ignored"),
+            );
+        }
+    } else {
+        for name in sub_names {
+            cmd = cmd.mut_subcommand(name, with_excess_catchall);
+        }
+    }
+    cmd
+}
+
+/// True iff `cmd` already has a positional that accepts more than one value (a
+/// `Vec`/trailing-var-arg positional), which would conflict with a second
+/// catch-all positional.
+fn has_variadic_positional(cmd: &clap::Command) -> bool {
+    cmd.get_positionals()
+        .any(|a| a.get_num_args().map(|r| r.max_values() > 1).unwrap_or(false))
+}
+
 impl Argv {
     /// Parse from any iterable of `OsString` (used by integration tests).
     ///
@@ -475,7 +510,17 @@ impl Argv {
         I: IntoIterator<Item = T>,
         T: Into<std::ffi::OsString> + Clone,
     {
-        Self::try_parse_from(iter)
+        use clap::{CommandFactory, FromArgMatches};
+        // Commander's `allowExcessArguments` defaults to true: surplus POSITIONAL
+        // args are silently ignored, not errored (e.g. `mcp get foo extra` runs
+        // `get foo`). clap rejects them, so we graft a hidden trailing catch-all
+        // positional onto every LEAF subcommand that lacks a variadic positional,
+        // then deserialize via `from_arg_matches` (which ignores the catch-all).
+        // Unknown FLAGS and unknown SUBCOMMANDS still error — only excess
+        // positionals are absorbed.
+        let cmd = with_excess_catchall(Self::command());
+        let matches = cmd.try_get_matches_from(iter)?;
+        Self::from_arg_matches(&matches)
     }
 
     /// True iff debug mode is on (`-d`/`--debug` in any form, the deprecated

@@ -1159,6 +1159,8 @@ pub fn render_screen(
             }),
             // (SS-06) reduced-motion → static spinner.
             reduced_motion: state.reduced_motion,
+            // (SS-08) Active todo → drives the spinner's leader verb.
+            current_todo: state.current_todo.clone(),
         )
     }
     .into_any()

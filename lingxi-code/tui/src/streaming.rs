@@ -6,8 +6,39 @@
 //! received from the bridge channel.
 
 use crate::events::orchestrator_bridge::TurnEvent;
-use crate::state::{AppState, RenderedMessage, StreamingState};
+use crate::state::{AppState, CurrentTodo, RenderedMessage, StreamingState};
 use tokio::sync::Notify;
+
+/// (SS-08) Resolve the spinner's "current todo" from a `TodoWrite` tool input.
+///
+/// A `TodoWrite` call replaces the entire session todo list; the spinner shows
+/// the first todo that is neither `pending` nor `completed` (claude-code
+/// `Spinner.tsx:162` — `tasksV2?.find(t => t.status !== 'pending' && t.status
+/// !== 'completed')`). Returns `None` when the input is malformed, the `todos`
+/// array is missing/empty, or every todo is pending/completed.
+///
+/// The TodoWrite wire shape is `{ todos: [{ content, status, activeForm }] }`
+/// (`tools/task/src/todo_write.rs`); `content` is the spinner's `subject`
+/// fallback and `activeForm` (camelCase) its preferred verb.
+fn current_todo_from_todowrite_input(input: &serde_json::Value) -> Option<CurrentTodo> {
+    let todos = input.get("todos")?.as_array()?;
+    let item = todos.iter().find(|t| {
+        let status = t.get("status").and_then(serde_json::Value::as_str);
+        // Anything not pending/completed is "active" (in_progress, or any
+        // other forward state). A missing status is treated as active too,
+        // matching the `!==` semantics of the TS predicate.
+        !matches!(status, Some("pending" | "completed"))
+    })?;
+    let subject = item.get("content").and_then(serde_json::Value::as_str)?.to_string();
+    let active_form = item
+        .get("activeForm")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    Some(CurrentTodo {
+        subject,
+        active_form,
+    })
+}
 
 /// Apply one `TurnEvent` to `state` and signal the renderer.
 ///
@@ -50,6 +81,15 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
             // It must reach the LATER `UserToolResult` render site. We stash it
             // by id here — chosen over a backward scan of `messages` so it stays
             // correct once M7-03 windows the visible message slice.
+            // (SS-08) A `TodoWrite` replaces the whole session todo list each
+            // call, so its input is the authoritative source for the spinner's
+            // "current todo" (claude-code derives `currentTodo` from the live
+            // `tasksV2` list — `Spinner.tsx:162`). Refresh on the START event so
+            // the verb tracks the new in-progress task as soon as it's written,
+            // not only after the (later) tool result returns.
+            if tool == "TodoWrite" {
+                state.current_todo = current_todo_from_todowrite_input(&input);
+            }
             state.tool_call_inputs.insert(id.clone(), input.clone());
             state
                 .messages
@@ -360,6 +400,89 @@ mod tests {
     /// whose TUI analog is "a turn just ended"). A terminal 429 emits
     /// `ClientEvent::Error`, not `TurnEnded`, so it deliberately does NOT
     /// re-arm the statusline (M8 — TS-faithful).
+    // ── SS-08: TodoWrite → AppState.current_todo ─────────────────────────
+
+    #[test]
+    fn todowrite_input_picks_first_active_todo() {
+        // The first non-pending/non-completed item wins (claude-code
+        // `tasksV2?.find(t => t.status !== 'pending' && t.status !== 'completed')`).
+        let input = serde_json::json!({
+            "todos": [
+                { "content": "Setup", "status": "completed", "activeForm": "Setting up" },
+                { "content": "Build project", "status": "in_progress", "activeForm": "Compiling" },
+                { "content": "Ship", "status": "pending", "activeForm": "Shipping" },
+            ]
+        });
+        let got = current_todo_from_todowrite_input(&input).expect("an active todo");
+        assert_eq!(got.subject, "Build project");
+        assert_eq!(got.active_form.as_deref(), Some("Compiling"));
+    }
+
+    #[test]
+    fn todowrite_input_all_pending_or_completed_is_none() {
+        let input = serde_json::json!({
+            "todos": [
+                { "content": "A", "status": "completed", "activeForm": "Doing A" },
+                { "content": "B", "status": "pending", "activeForm": "Doing B" },
+            ]
+        });
+        assert!(current_todo_from_todowrite_input(&input).is_none());
+    }
+
+    #[test]
+    fn todowrite_input_missing_or_empty_todos_is_none() {
+        assert!(current_todo_from_todowrite_input(&serde_json::json!({})).is_none());
+        assert!(
+            current_todo_from_todowrite_input(&serde_json::json!({ "todos": [] })).is_none()
+        );
+    }
+
+    #[test]
+    fn todowrite_tooluse_start_populates_current_todo() {
+        use crate::events::orchestrator_bridge::TurnEvent;
+        let mut s = new_state();
+        let n = Notify::new();
+        assert!(s.current_todo.is_none());
+        apply_event(
+            &mut s,
+            TurnEvent::ToolUseStart {
+                id: protocol::ToolUseId::new(),
+                tool: "TodoWrite".into(),
+                input: serde_json::json!({
+                    "todos": [
+                        { "content": "Run tests", "status": "in_progress", "activeForm": "Running tests" },
+                    ]
+                }),
+            },
+            &n,
+        );
+        let todo = s.current_todo.as_ref().expect("current todo set");
+        assert_eq!(todo.subject, "Run tests");
+        assert_eq!(todo.active_form.as_deref(), Some("Running tests"));
+    }
+
+    #[test]
+    fn non_todowrite_tool_leaves_current_todo_untouched() {
+        use crate::events::orchestrator_bridge::TurnEvent;
+        let mut s = new_state();
+        let n = Notify::new();
+        s.current_todo = Some(crate::state::CurrentTodo {
+            subject: "kept".into(),
+            active_form: None,
+        });
+        apply_event(
+            &mut s,
+            TurnEvent::ToolUseStart {
+                id: protocol::ToolUseId::new(),
+                tool: "Read".into(),
+                input: serde_json::json!({ "file_path": "/tmp/x" }),
+            },
+            &n,
+        );
+        // A non-TodoWrite tool must not clobber the active todo.
+        assert_eq!(s.current_todo.as_ref().map(|t| t.subject.as_str()), Some("kept"));
+    }
+
     #[test]
     fn turn_ended_sets_status_line_dirty() {
         let mut s = new_state();

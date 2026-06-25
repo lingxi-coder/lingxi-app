@@ -385,6 +385,23 @@ pub fn verb_at_index(rotation: usize) -> &'static str {
     VERBS_M6[rotation % VERBS_M6.len()]
 }
 
+/// (SS-08) Resolve the active todo's verb text per claude-code's `leaderVerb`
+/// order (`Spinner.tsx:169`): `currentTodo?.activeForm ?? currentTodo?.subject`.
+/// The text is used VERBATIM as the spinner verb — claude-code does NOT match
+/// it against the [`SPINNER_VERBS`] pool; whatever the model wrote in the
+/// todo's `activeForm`/`subject` is shown directly (e.g. "Running tests").
+///
+/// Returns `None` when there is no current todo (the caller then falls back to
+/// the random pool verb chosen on mount).
+#[must_use]
+pub fn todo_leader_verb(current_todo: Option<&crate::state::CurrentTodo>) -> Option<String> {
+    let todo = current_todo?;
+    todo.active_form
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| Some(todo.subject.clone()).filter(|s| !s.is_empty()))
+}
+
 /// Format a single spinner line: `"{frame} {verb}…"`.
 ///
 /// This is the function the iocraft component renders inside its `Text`.
@@ -416,6 +433,13 @@ pub struct SpinnerWithVerbProps {
     /// `useAnimationFrame(reducedMotion ? null : 50)`). Driven by the
     /// `prefersReducedMotion` setting threaded from the REPL.
     pub reduced_motion: bool,
+    /// (SS-08) The session's currently-active todo, threaded from
+    /// `AppState.current_todo`. When `Some`, the verb is driven by the todo's
+    /// `active_form ?? subject` (used verbatim — claude-code shows the todo
+    /// text directly, NOT a pool match), per `leaderVerb` resolution order
+    /// (`Spinner.tsx:169`: `overrideMessage ?? currentTodo?.activeForm ??
+    /// currentTodo?.subject ?? randomVerb`). `None` → the random pool verb.
+    pub current_todo: Option<crate::state::CurrentTodo>,
 }
 
 /// Renders one line: `"{frame} {verb}…"`. While mounted, advances frames
@@ -463,11 +487,14 @@ pub fn SpinnerWithVerb(
         verb.set(v);
     }
 
-    let line = format!(
-        "{} {}…",
-        frame_at_index(frame.get()),
-        pool_verb_at_index(verb.get())
-    );
+    // (SS-08) `leaderVerb` resolution (claude-code `Spinner.tsx:169`): the
+    // active todo's `activeForm ?? subject` wins over the random pool verb.
+    // When there is no current todo, fall back to the mount-time pool verb
+    // (`verb_override` for tests, else the random index).
+    let verb_text = todo_leader_verb(props.current_todo.as_ref())
+        .unwrap_or_else(|| pool_verb_at_index(verb.get()).to_string());
+
+    let line = format!("{} {}…", frame_at_index(frame.get()), verb_text);
     // Default fallback = dark-theme Claude accent rgb(215,119,87); the live
     // REPL passes the active `theme.claude` so the spinner recolors per theme.
     let color = props.color.unwrap_or(Color::Rgb { r: 215, g: 119, b: 87 });
@@ -669,6 +696,65 @@ mod tests {
         // Wraps modulo pool length.
         assert_eq!(pool_verb_at_index(len), "Accomplishing");
         assert_eq!(pool_verb_at_index(len + 6), "Beboppin'");
+    }
+
+    // ---- SS-08: leader verb from the active todo ----------------------------
+
+    #[test]
+    fn todo_leader_verb_prefers_active_form() {
+        // claude-code `leaderVerb = currentTodo?.activeForm ?? currentTodo?.subject`.
+        let todo = crate::state::CurrentTodo {
+            subject: "Build project".to_string(),
+            active_form: Some("Compiling".to_string()),
+        };
+        assert_eq!(todo_leader_verb(Some(&todo)).as_deref(), Some("Compiling"));
+    }
+
+    #[test]
+    fn todo_leader_verb_falls_back_to_subject() {
+        // When activeForm is absent, the subject is shown verbatim.
+        let todo = crate::state::CurrentTodo {
+            subject: "Running tests".to_string(),
+            active_form: None,
+        };
+        assert_eq!(todo_leader_verb(Some(&todo)).as_deref(), Some("Running tests"));
+    }
+
+    #[test]
+    fn todo_leader_verb_skips_empty_active_form() {
+        // An empty activeForm is treated as absent → subject fallback.
+        let todo = crate::state::CurrentTodo {
+            subject: "Running tests".to_string(),
+            active_form: Some(String::new()),
+        };
+        assert_eq!(todo_leader_verb(Some(&todo)).as_deref(), Some("Running tests"));
+    }
+
+    #[test]
+    fn todo_leader_verb_none_without_todo() {
+        // No current todo → caller falls back to the random pool verb.
+        assert_eq!(todo_leader_verb(None), None);
+        // Both fields empty → also None (defensive; the spinner keeps the pool verb).
+        let empty = crate::state::CurrentTodo {
+            subject: String::new(),
+            active_form: None,
+        };
+        assert_eq!(todo_leader_verb(Some(&empty)), None);
+    }
+
+    #[test]
+    fn todo_leader_verb_used_verbatim_not_pool_matched() {
+        // The todo text is NOT matched against SPINNER_VERBS — arbitrary,
+        // non-pool text is shown directly (claude-code `Spinner.tsx:169`).
+        let todo = crate::state::CurrentTodo {
+            subject: "Polishing the brass".to_string(),
+            active_form: Some("Squeaking the wheels".to_string()),
+        };
+        let verb = todo_leader_verb(Some(&todo)).unwrap();
+        assert_eq!(verb, "Squeaking the wheels");
+        assert!(!SPINNER_VERBS.contains(&verb.as_str()));
+        // Rendered line uses it verbatim with the horizontal ellipsis.
+        assert_eq!(format!("{} {}…", frame_at_index(0), verb), "· Squeaking the wheels…");
     }
 
     #[test]

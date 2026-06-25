@@ -158,6 +158,67 @@ impl Settings {
         })
     }
 
+    /// Like [`Settings::load`] but GATES the user / project file layers — the
+    /// substrate for claude-code's `--setting-sources <user,project,local>`
+    /// (scope which setting sources load). `include_user` / `include_project`
+    /// select whether the `~/.claude/settings.json` and
+    /// `<project>/.claude/settings.json` layers contribute; `defaults` and the
+    /// `env` layer ALWAYS apply (env vars are not a "setting source" claude
+    /// scopes off). Both `true` is identical to [`Settings::load`].
+    ///
+    /// NOTE: lingxi has no separate "local" (`settings.local.json`) layer, so
+    /// claude's `local` source is not modeled here — callers map it onto the
+    /// project layer or ignore it.
+    ///
+    /// # Errors
+    /// Same as [`Settings::load`].
+    pub fn load_scoped(
+        inputs: LoadInputs<'_>,
+        include_user: bool,
+        include_project: bool,
+    ) -> Result<EffectiveSettings, SettingsError> {
+        let LoadInputs {
+            env,
+            project_dir,
+            defaults,
+        } = inputs;
+
+        let mut trace = tracer::ProvenanceTrace::default();
+
+        // Layer 1 (lowest): defaults (always).
+        trace.record_layer(tracer::Source::Defaults, &defaults);
+        let mut acc = defaults;
+
+        // Layer 2: project (gated).
+        if include_project {
+            let project_path = loader::project_settings_path(project_dir);
+            if let Some(proj) = loader::read_settings_file(&project_path)? {
+                trace.record_layer(tracer::Source::Project, &proj);
+                acc = merger::merge(acc, proj);
+            }
+        }
+
+        // Layer 3: user (gated).
+        if include_user {
+            if let Some(user_path) = loader::user_settings_path() {
+                if let Some(usr) = loader::read_settings_file(&user_path)? {
+                    trace.record_layer(tracer::Source::User, &usr);
+                    acc = merger::merge(acc, usr);
+                }
+            }
+        }
+
+        // Layer 4 (highest): env (always — not a file "setting source").
+        let (env_layer, _invalid_env) = env_parser::parse_env(env)?;
+        trace.record_layer(tracer::Source::Env, &env_layer);
+        acc = merger::merge(acc, env_layer);
+
+        Ok(EffectiveSettings {
+            settings: acc,
+            trace,
+        })
+    }
+
     /// Same as [`Settings::load`] but emits telemetry through the supplied bus.
     ///
     /// Synchronous [`Settings::load`] stays available for callers that don't

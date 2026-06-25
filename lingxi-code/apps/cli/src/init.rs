@@ -177,14 +177,38 @@ pub fn resolve_api_base() -> String {
     std::env::var("LINGXI_API_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".to_string())
 }
 
-/// Load the merged settings `providers` object (project + user + env layers).
+/// Which file setting-sources to load, from claude-code `--setting-sources
+/// <user,project,local>`. `None` (flag absent) ⟶ ALL sources (the default:
+/// both layers). A comma-separated list gates the user / project layers; the
+/// `env` + `defaults` layers always apply.
+///
+/// NOTE: lingxi has no separate "local" (`settings.local.json`) layer; claude's
+/// `local` source is mapped onto the project layer here (so `--setting-sources
+/// local` still loads the project `.claude/settings.json`).
+#[must_use]
+pub(crate) fn setting_source_flags(setting_sources: Option<&str>) -> (bool, bool) {
+    match setting_sources {
+        None => (true, true),
+        Some(s) => {
+            let listed: Vec<String> =
+                s.split(',').map(|x| x.trim().to_ascii_lowercase()).collect();
+            let include_user = listed.iter().any(|x| x == "user");
+            // `local` has no distinct lingxi layer → fold onto `project`.
+            let include_project =
+                listed.iter().any(|x| x == "project" || x == "local");
+            (include_user, include_project)
+        }
+    }
+}
+
+/// Load the merged settings `providers` object, honoring `--setting-sources`.
 ///
 /// Resolves the project dir from the *current* working directory — the process
 /// has already `chdir`'d into any `--cwd` before `build_runtime` runs, so this
 /// reads the same dir as the hook loader. Returns `None` on any load failure or
 /// when no `providers` block is set; callers then fall back to built-in
 /// profiles only.
-fn load_provider_profiles() -> Option<std::collections::BTreeMap<String, serde_json::Value>> {
+fn load_provider_profiles(include_user: bool, include_project: bool) -> Option<std::collections::BTreeMap<String, serde_json::Value>> {
     let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
     let inputs = engine::settings::LoadInputs {
@@ -192,7 +216,7 @@ fn load_provider_profiles() -> Option<std::collections::BTreeMap<String, serde_j
         project_dir: &project_dir,
         defaults: engine::settings::schema::SettingsJson::default(),
     };
-    engine::settings::Settings::load(inputs)
+    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
         .ok()
         .and_then(|eff| eff.settings.providers)
 }
@@ -200,7 +224,7 @@ fn load_provider_profiles() -> Option<std::collections::BTreeMap<String, serde_j
 /// Load the merged `settings.claudeMdExcludes` (project + user + env layers) —
 /// glob patterns / absolute paths of `CLAUDE.md` files to exclude from the
 /// system prompt (claude-code `isClaudeMdExcluded`). Empty when unset.
-fn load_claude_md_excludes() -> Vec<String> {
+fn load_claude_md_excludes(include_user: bool, include_project: bool) -> Vec<String> {
     let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
     let inputs = engine::settings::LoadInputs {
@@ -208,7 +232,7 @@ fn load_claude_md_excludes() -> Vec<String> {
         project_dir: &project_dir,
         defaults: engine::settings::schema::SettingsJson::default(),
     };
-    engine::settings::Settings::load(inputs)
+    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
         .ok()
         .and_then(|eff| eff.settings.claude_md_excludes)
         .unwrap_or_default()
@@ -219,7 +243,7 @@ fn load_claude_md_excludes() -> Vec<String> {
 /// Mirrors [`load_provider_profiles`] but reads the `routing` field. Returns
 /// `None` on any load failure or when no `routing` block is set; callers then
 /// fall back to the default (empty) routing config.
-fn load_routing() -> Option<serde_json::Value> {
+fn load_routing(include_user: bool, include_project: bool) -> Option<serde_json::Value> {
     let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
     let inputs = engine::settings::LoadInputs {
@@ -227,7 +251,7 @@ fn load_routing() -> Option<serde_json::Value> {
         project_dir: &project_dir,
         defaults: engine::settings::schema::SettingsJson::default(),
     };
-    engine::settings::Settings::load(inputs)
+    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
         .ok()
         .and_then(|eff| eff.settings.routing)
 }
@@ -296,6 +320,11 @@ pub(crate) fn resolve_desktop_config(
         global_mcp_path = files.get(1).cloned().unwrap_or(nonexistent);
     }
 
+    // `--setting-sources <user,project,local>`: gate which file setting layers
+    // the provider/routing/claudeMdExcludes loaders read (env + defaults always
+    // apply). `None` ⟶ all sources (default behavior).
+    let (incl_user, incl_project) = setting_source_flags(argv.setting_sources.as_deref());
+
     let mut default_model = DesktopConfig::default().default_model;
     if let Some(m) = &argv.model {
         default_model.clone_from(m);
@@ -338,8 +367,8 @@ pub(crate) fn resolve_desktop_config(
         claude_home,
         default_model,
         fallback_model,
-        provider_profiles: load_provider_profiles(),
-        routing: load_routing(),
+        provider_profiles: load_provider_profiles(incl_user, incl_project),
+        routing: load_routing(incl_user, incl_project),
         mcp_paths: vec![project_mcp_path, global_mcp_path],
         use_noop_permission_gate: true,
         // HEADLESS deny-on-ask (claude-code `--print` parity): in `-p`/`--print`
@@ -372,7 +401,7 @@ pub(crate) fn resolve_desktop_config(
         // `fire_instructions_loaded()` fire over those files. Tests inject a
         // controlled provider (or `None`); only this real-host path reads the FS.
         memory_provider: Some(orchestrator::prompt::real_provider_with_excludes(
-            load_claude_md_excludes(),
+            load_claude_md_excludes(incl_user, incl_project),
         )),
         // CLI-resolved session permission mode (`initialPermissionModeFromCLI`),
         // threaded in by `run_cli`.
@@ -518,6 +547,23 @@ pub async fn build_runtime_for_tui(argv: &Argv) -> Result<TuiBuild, InitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setting_source_flags_default_and_scoped() {
+        // Flag absent ⟶ all sources (both layers).
+        assert_eq!(setting_source_flags(None), (true, true));
+        // Single source.
+        assert_eq!(setting_source_flags(Some("user")), (true, false));
+        assert_eq!(setting_source_flags(Some("project")), (false, true));
+        // `local` folds onto the project layer (no distinct lingxi layer).
+        assert_eq!(setting_source_flags(Some("local")), (false, true));
+        // Combined + whitespace + case-insensitive.
+        assert_eq!(setting_source_flags(Some(" User , Project ")), (true, true));
+        assert_eq!(setting_source_flags(Some("project,local")), (false, true));
+        // Unknown / empty ⟶ neither file layer (env + defaults still apply).
+        assert_eq!(setting_source_flags(Some("bogus")), (false, false));
+        assert_eq!(setting_source_flags(Some("")), (false, false));
+    }
 
     #[tokio::test]
     async fn build_runtime_for_tui_wires_permission_channel() {

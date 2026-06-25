@@ -437,16 +437,19 @@ pub(crate) fn resolve_permission_mode(
 /// `parsed` is currently unused (the CLI has no settings-path override flag);
 /// it is threaded for forward-compatibility with such a flag.
 pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettings {
-    let _ = parsed; // reserved (no settings-path override flag today)
+    // `--setting-sources <user,project,local>` gates which settings files this
+    // permission-mode reader consults too (claude scopes ALL settings loading,
+    // not just providers/routing). `None` ⟶ both layers (default).
+    let (incl_user, incl_project) = init::setting_source_flags(parsed.setting_sources.as_deref());
     let project_dir =
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut default_mode = None;
     let mut bypass_disabled = false;
-    let home = Some(crate::run::claude_home_dir().join("settings.json"));
-    let proj = project_dir.join(".claude").join("settings.json");
+    let home = incl_user.then(|| crate::run::claude_home_dir().join("settings.json"));
+    let proj = incl_project.then(|| project_dir.join(".claude").join("settings.json"));
     // User first, then project (ascending priority): project read last wins on
     // `defaultMode`; `bypass_disabled` is sticky across tiers.
-    for path in [home, Some(proj)].into_iter().flatten() {
+    for path in [home, proj].into_iter().flatten() {
         if let Ok(raw) = std::fs::read_to_string(&path) {
             if let Some(m) = permission::default_mode_from_settings_json(&raw) {
                 default_mode = Some(m);

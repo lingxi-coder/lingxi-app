@@ -3112,6 +3112,12 @@ fn tool_result_to_model_text(data: &serde_json::Value) -> String {
     data.get("model_content")
         .and_then(|v| v.as_str())
         .or_else(|| data.get("content").and_then(|v| v.as_str()))
+        // `result` is WebFetch's content field (claude-code's WebFetch result
+        // `data` names the model-facing markdown `result`, byte-faithful to the
+        // binary's `{bytes,code,codeText,result,durationMs,url}`). Without this
+        // arm a WebFetch result (no `content`/`model_content`) would fall through
+        // to the JSON dump below and show the model the whole object.
+        .or_else(|| data.get("result").and_then(|v| v.as_str()))
         .map_or_else(
             || serde_json::to_string(data).unwrap_or_else(|_| "<unserializable>".into()),
             std::string::ToString::to_string,
@@ -3258,6 +3264,22 @@ mod model_text_tests {
         // `content` string verbatim — NOT a JSON dump of the object.
         let data = json!({ "content": "build ok\n", "exit_code": 0 });
         assert_eq!(tool_result_to_model_text(&data), "build ok\n");
+    }
+
+    #[test]
+    fn webfetch_result_field_is_model_text() {
+        // WebFetch's claude-code result `data` names the model-facing markdown
+        // `result` (no `content`/`model_content`). The model must see that
+        // markdown verbatim — NOT a JSON dump of the whole {bytes,code,…} object.
+        let data = json!({
+            "bytes": 11,
+            "code": 200,
+            "codeText": "OK",
+            "result": "# Hello\n\nbody",
+            "durationMs": 3,
+            "url": "https://e.example/",
+        });
+        assert_eq!(tool_result_to_model_text(&data), "# Hello\n\nbody");
     }
 
     #[test]

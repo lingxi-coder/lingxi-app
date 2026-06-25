@@ -189,6 +189,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 description: a.when_to_use.clone(),
                 tools_allowed: a.allowed_tools.clone(),
                 wildcard_tools: matches!(a.tools, agent::AgentToolPolicy::All { .. }),
+                source_group: agent_source_group_label(a.source).to_string(),
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -500,6 +501,25 @@ fn hook_source_description(source: hooks::HookSource) -> String {
         S::Skill => "Skill bundle",
     }
     .to_string()
+}
+
+/// (agents-08) claude-code `AGENT_SOURCE_GROUPS` label for an
+/// [`agent::AgentSource`] (`tools/AgentTool/agentDisplay.ts:24-32` ×
+/// `getSettingSourceName`). `UserDefined`→User, `Project`→Project,
+/// `Local`→Local (LingXi has no `Local` variant yet — `localSettings` maps
+/// from `Project` in claude-code's gitignored tier, so it's absent here),
+/// `PolicySettings`→Managed, `Plugin`→Plugin, `Flag`→CLI arg, `BuiltIn`→
+/// Built-in.
+fn agent_source_group_label(source: agent::AgentSource) -> &'static str {
+    use agent::AgentSource as S;
+    match source {
+        S::UserDefined => "User agents",
+        S::Project => "Project agents",
+        S::PolicySettings => "Managed agents",
+        S::Plugin => "Plugin agents",
+        S::Flag => "CLI arg agents",
+        S::BuiltIn => "Built-in agents",
+    }
 }
 
 /// (settings-status-missing-mcp-and-setting-sources) claude-code

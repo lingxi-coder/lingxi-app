@@ -1188,7 +1188,11 @@ impl AppState {
     }
 
     /// (M9-08) Open the agents screen with the given catalog rows.
-    pub fn open_agents(&mut self, rows: Vec<crate::screens::agents::AgentRow>) {
+    pub fn open_agents(&mut self, mut rows: Vec<crate::screens::agents::AgentRow>) {
+        // (agents-08) Store rows in grouped display order so the section
+        // headers + selection index stay aligned (the render inserts a header
+        // at each source-group boundary).
+        crate::screens::agents::sort_into_group_order(&mut rows);
         self.active_screen = Some(crate::screens::Screen::Agents(
             crate::screens::agents::AgentsScreenState {
                 rows,

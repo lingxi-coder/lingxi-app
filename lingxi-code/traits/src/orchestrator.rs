@@ -188,7 +188,7 @@ pub struct HookInfo {
 }
 
 /// One subagent entry returned by [`OrchestratorHandle::list_agents`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AgentInfo {
     /// Agent name (matches the markdown filename without extension).
     pub name: String,
@@ -202,6 +202,12 @@ pub struct AgentInfo {
     /// tool" from an explicit empty allow-list, which `tools_allowed` alone
     /// cannot (both lower to an empty `Vec`).
     pub wildcard_tools: bool,
+    /// (agents-08) Source-group display label (claude-code
+    /// `AGENT_SOURCE_GROUPS`): `"User agents"`, `"Project agents"`, `"Local
+    /// agents"`, `"Managed agents"`, `"Plugin agents"`, `"CLI arg agents"`,
+    /// or `"Built-in agents"`. Drives the `/agents` list's section grouping.
+    /// Empty string defaults rows into the trailing built-in section.
+    pub source_group: String,
 }
 
 /// Aggregate diagnostic report returned by [`OrchestratorHandle::run_doctor_checks`].
@@ -1099,6 +1105,7 @@ mod tests {
             description: "review code".to_string(),
             tools_allowed: vec!["Read".to_string(), "Grep".to_string()],
             wildcard_tools: false,
+            ..AgentInfo::default()
         };
         assert_eq!(info.tools_allowed.len(), 2);
     }

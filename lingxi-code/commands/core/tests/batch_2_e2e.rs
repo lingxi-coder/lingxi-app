@@ -197,6 +197,7 @@ async fn agents_dispatch() {
         description: "x".into(),
         tools_allowed: vec![],
         wildcard_tools: false,
+        ..AgentInfo::default()
     }]);
     let r = d.dispatch("/agents").await;
     if let SlashDispatchResult::Handled { display } = r {

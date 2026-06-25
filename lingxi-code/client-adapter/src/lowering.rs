@@ -566,6 +566,7 @@ mod tests {
             description: "Reviews code".to_string(),
             tools_allowed: vec!["Read".to_string(), "Grep".to_string()],
             wildcard_tools: false,
+            ..AgentInfo::default()
         };
         let dto = lower_agent_info(&info);
         assert_eq!(dto.name, "reviewer");

@@ -148,6 +148,7 @@ fn agent_info_parity() {
         description: "find things".to_string(),
         tools_allowed: vec!["Read".to_string(), "Grep".to_string()],
         wildcard_tools: false,
+        ..AgentInfo::default()
     };
 
     let dto = lower_agent_info(&info);

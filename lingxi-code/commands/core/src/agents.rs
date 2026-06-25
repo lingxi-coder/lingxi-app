@@ -101,6 +101,7 @@ mod tests {
             description: "review code".into(),
             tools_allowed: vec![],
             wildcard_tools: false,
+            ..AgentInfo::default()
         }]);
         let h = AgentsHandler::new(mock);
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
@@ -119,6 +120,7 @@ mod tests {
             description: long,
             tools_allowed: vec![],
             wildcard_tools: false,
+            ..AgentInfo::default()
         }]);
         let h = AgentsHandler::new(mock);
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {

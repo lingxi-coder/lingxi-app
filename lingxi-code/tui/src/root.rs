@@ -1519,6 +1519,7 @@ pub async fn pump_open_agents(
             description: i.description,
             tools: i.tools_allowed,
             wildcard_tools: i.wildcard_tools,
+            source_group: i.source_group,
             ..Default::default()
         })
         .collect();

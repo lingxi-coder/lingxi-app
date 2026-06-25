@@ -15,6 +15,7 @@ fn rows() -> Vec<AgentRow> {
             permission_mode: Some("plan".into()),
             color: Some("cyan".into()),
             path: Some(".lingxi/agents/explorer.md".into()),
+            source_group: "Project agents".into(),
         },
         AgentRow {
             name: "writer".into(),

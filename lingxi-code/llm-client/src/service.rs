@@ -124,6 +124,18 @@ struct StreamState {
 
 // ── Adapter state ─────────────────────────────────────────────────────────────
 
+/// Origin of the request id recorded by [`ApiService::last_request_id`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestIdOrigin {
+    /// The provider returned its own id in a known response header
+    /// (authoritative — valid for provider-side log/support lookups).
+    Server,
+    /// No server id header was present, so the client-generated `x-request-id`
+    /// we sent is used as a fallback. Correlation-only: a provider will NOT find
+    /// this id in its logs.
+    Client,
+}
+
 /// Production service: drives `DefaultLlmClient` with full retry/rate-limit/betas.
 pub struct ApiService {
     client: Arc<DefaultLlmClient>,
@@ -220,12 +232,18 @@ pub struct ApiService {
     /// on the adapter directly. A future task can thread it into the handle if
     /// needed.
     last_rate_limit: Mutex<Option<RateLimitInfo>>,
-    /// The Anthropic `request-id` response header (`req_…`) of the most recently
-    /// recorded response, captured in [`Self::record_rate_limit_from_headers`]
-    /// (the stream connect-success + non-stream header pass). Read via the
+    /// The request id of the most recently recorded response, with its origin,
+    /// captured in [`Self::record_rate_limit_from_headers`] (the stream
+    /// connect-success + non-stream header pass). Read via the
     /// `last_request_id()` trait method to stamp the persisted assistant line's
-    /// top-level `requestId`. `None` until the first recorded response.
-    last_request_id: Mutex<Option<String>>,
+    /// top-level `requestId`. The value is the provider's server-side id when a
+    /// known id header is present ([`RequestIdOrigin::Server`]); otherwise it
+    /// falls back to the client-generated `x-request-id` we sent
+    /// ([`RequestIdOrigin::Client`]) so the field is never blank — but that
+    /// fallback is correlation-only and is NOT valid for provider-side log
+    /// lookups. `None` until the first recorded response (or when both are
+    /// absent).
+    last_request_id: Mutex<Option<(String, RequestIdOrigin)>>,
     /// Number of budget-consuming retry attempts the most recent drive
     /// performed before its terminal outcome (`RetryState::attempt`). Recorded
     /// on the non-stream success path and at stream connect-success; read via
@@ -1062,13 +1080,32 @@ impl ApiService {
         self.last_rate_limit.lock().unwrap().clone()
     }
 
-    /// The Anthropic `request-id` response header (`req_…`) of the most recently
-    /// recorded response. Backs the `OrchestratorApiClient::last_request_id`
-    /// trait override (used to stamp the persisted assistant line's top-level
-    /// `requestId`). `None` until the first recorded response.
+    /// The request id of the most recently recorded response. Backs the
+    /// `OrchestratorApiClient::last_request_id` trait override (used to stamp the
+    /// persisted assistant line's top-level `requestId`). Returns the server id
+    /// when present, else the client-generated fallback (see
+    /// [`Self::last_request_id_origin`]). `None` until the first recorded
+    /// response (or when both are absent).
     #[must_use]
     pub fn last_request_id(&self) -> Option<String> {
-        self.last_request_id.lock().unwrap().clone()
+        self.last_request_id
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(value, _origin)| value.clone())
+    }
+
+    /// Origin of the value returned by [`Self::last_request_id`] —
+    /// [`RequestIdOrigin::Server`] when it came from a provider response header,
+    /// [`RequestIdOrigin::Client`] when it is the client-generated fallback.
+    /// `None` when no request id has been recorded.
+    #[must_use]
+    pub fn last_request_id_origin(&self) -> Option<RequestIdOrigin> {
+        self.last_request_id
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(_value, origin)| *origin)
     }
 
     /// Number of budget-consuming retry attempts the most recent drive performed
@@ -1102,20 +1139,38 @@ impl ApiService {
     ///
     /// Emits a `tracing::warn!` when the overage status indicates the account is
     /// at or near exhaustion (`overage_status == "rejected"` or `"allowed_warning"`).
-    fn record_rate_limit_from_headers(&self, headers: &std::collections::BTreeMap<String, String>) {
+    fn record_rate_limit_from_headers(
+        &self,
+        headers: &std::collections::BTreeMap<String, String>,
+        client_request_id: &str,
+    ) {
         let hvec: Vec<(String, String)> = headers
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        // Capture the server-side request id on every recorded response — the
-        // SDK's `response._request_id`, which claude-code persists as the
-        // assistant line's top-level `requestId`. Provider-aware: tries each
-        // provider's canonical id header (Anthropic `request-id`, OpenAI
-        // `x-request-id`, Azure `apim-request-id`, Bedrock `x-amzn-requestid`,
-        // …) via the shared transport extractor. `None` clears it when none is
-        // present (so a stale id never leaks onto a later line).
+        // Capture the request id on every recorded response — the SDK's
+        // `response._request_id`, which claude-code persists as the assistant
+        // line's top-level `requestId`. Provider-aware: tries each provider's
+        // canonical id header (Anthropic `request-id`, OpenAI `x-request-id`,
+        // Azure `apim-request-id`, Bedrock `x-amzn-requestid`, …) via the shared
+        // transport extractor. When the provider returns none, fall back to the
+        // client-generated `x-request-id` we sent (origin = Client) so the field
+        // is never blank — this is correlation-only and NOT valid for
+        // provider-side lookups. `None` only when both are absent (so a stale id
+        // never leaks onto a later line).
         *self.last_request_id.lock().unwrap() =
-            crate::transport_bridge::extract_response_request_id(headers);
+            match crate::transport_bridge::extract_response_request_id(headers) {
+                Some(server_id) => Some((server_id, RequestIdOrigin::Server)),
+                None if !client_request_id.is_empty() => {
+                    tracing::debug!(
+                        client_request_id,
+                        "no provider request-id header on response; \
+                         falling back to client-generated id (correlation-only)"
+                    );
+                    Some((client_request_id.to_string(), RequestIdOrigin::Client))
+                }
+                None => None,
+            };
         // Task 2 (llm-client future-work batch 5): track the raw per-window
         // snapshot on EVERY recorded headers pass — `rawUtilization =
         // extractRawUtilization(headersToUse)` (claudeAiLimits.ts:476), NOT
@@ -1425,7 +1480,7 @@ impl ApiService {
                     match prepared.route.codec.decode_response(provider_resp.clone()) {
                         Ok(mut response) => {
                             // Feed rate-limit headers from every 2xx success response.
-                            self.record_rate_limit_from_headers(&provider_resp.headers);
+                            self.record_rate_limit_from_headers(&provider_resp.headers, &request_id);
                             // 3c-T3: populate response.cost when an estimator is wired.
                             // Unpriced or unknown models leave response.cost = None — never an error.
                             if let Some(est) = &self.estimator {
@@ -2004,7 +2059,7 @@ impl ApiService {
                     }
 
                     // Feed rate-limit headers from the connect-success response.
-                    self.record_rate_limit_from_headers(&streaming.headers);
+                    self.record_rate_limit_from_headers(&streaming.headers, &request_id);
                     // #5: surface the connect-phase retry count to the cost path
                     // via `last_retry_count()` (the value known at stream return).
                     *self.last_retry_count.lock().unwrap() = u32::from(state.attempt);
@@ -2750,37 +2805,42 @@ mod tests {
         }
     }
 
-    /// `last_request_id()` captures the Anthropic `request-id` response header
-    /// (falling back to `x-request-id`) on every recorded headers pass, and
-    /// clears when neither is present (no stale leak onto a later line). This is
-    /// the slot the persisted assistant line's top-level `requestId` reads from.
+    /// `last_request_id()` captures the provider's server-side request id on
+    /// every recorded headers pass (origin = Server), falls back to the
+    /// client-generated id when no server header is present (origin = Client),
+    /// and clears only when both are absent. This is the slot the persisted
+    /// assistant line's top-level `requestId` reads from.
     #[test]
     fn last_request_id_captures_request_id_header() {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
         assert_eq!(adapter.last_request_id(), None);
+        assert_eq!(adapter.last_request_id_origin(), None);
 
         let mut h = std::collections::BTreeMap::new();
         h.insert("request-id".to_string(), "req_011abc".to_string());
-        adapter.record_rate_limit_from_headers(&h);
-        assert_eq!(
-            adapter.last_request_id(),
-            Some("req_011abc".to_string())
-        );
+        adapter.record_rate_limit_from_headers(&h, "client_xyz");
+        assert_eq!(adapter.last_request_id(), Some("req_011abc".to_string()));
+        // Server header present → server origin (client id ignored).
+        assert_eq!(adapter.last_request_id_origin(), Some(RequestIdOrigin::Server));
 
-        // `x-request-id` fallback when the canonical header is absent.
+        // `x-request-id` (OpenAI/generic) is also a server header → server origin.
         let mut h2 = std::collections::BTreeMap::new();
         h2.insert("x-request-id".to_string(), "req_xfallback".to_string());
-        adapter.record_rate_limit_from_headers(&h2);
-        assert_eq!(
-            adapter.last_request_id(),
-            Some("req_xfallback".to_string())
-        );
+        adapter.record_rate_limit_from_headers(&h2, "client_xyz");
+        assert_eq!(adapter.last_request_id(), Some("req_xfallback".to_string()));
+        assert_eq!(adapter.last_request_id_origin(), Some(RequestIdOrigin::Server));
 
-        // Neither header → cleared (a later response without a request-id does
-        // not inherit the previous one).
-        adapter.record_rate_limit_from_headers(&std::collections::BTreeMap::new());
+        // No server id header → fall back to the client-generated id, marked
+        // client-origin (correlation-only, not provider-lookupable).
+        adapter.record_rate_limit_from_headers(&std::collections::BTreeMap::new(), "client_xyz");
+        assert_eq!(adapter.last_request_id(), Some("client_xyz".to_string()));
+        assert_eq!(adapter.last_request_id_origin(), Some(RequestIdOrigin::Client));
+
+        // Neither a server header nor a client id → cleared (no stale leak).
+        adapter.record_rate_limit_from_headers(&std::collections::BTreeMap::new(), "");
         assert_eq!(adapter.last_request_id(), None);
+        assert_eq!(adapter.last_request_id_origin(), None);
     }
 
     #[test]

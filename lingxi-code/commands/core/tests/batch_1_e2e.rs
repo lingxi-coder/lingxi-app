@@ -45,7 +45,7 @@ async fn compact_dispatch() {
     let r = d.dispatch("/compact").await;
     match r {
         SlashDispatchResult::Handled { display } => {
-            assert_eq!(display, "Compacted: 100 → 5 messages (4096 bytes saved).");
+            assert_eq!(display, "Compacted (ctrl+o to see full summary)");
         }
         other => panic!("{other:?}"),
     }

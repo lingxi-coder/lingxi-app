@@ -11,6 +11,12 @@ use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
 use traits::OrchestratorHandle;
 
+/// The user-visible `/compact` result, byte-faithful to claude-code's
+/// non-verbose `buildDisplayText` (`commands/compact/compact.ts:247`):
+/// `Compacted (ctrl+o to see full summary)`. `ctrl+o` is the
+/// `app:toggleTranscript` binding (LingXi wires the same toggle in `tui::root`).
+const COMPACT_DISPLAY: &str = "Compacted (ctrl+o to see full summary)";
+
 /// `/compact` handler — calls
 /// [`OrchestratorHandle::force_compact`](traits::OrchestratorHandle::force_compact)
 /// and renders the summary template.
@@ -38,11 +44,18 @@ impl BuiltinCommandHandler for CompactHandler {
                     summary.messages_before, summary.messages_after, summary.bytes_saved
                 );
                 telemetry::emit_command_completed(cmd_evt::COMPACT_COMPLETED, &details);
+                // Byte-faithful to claude-code's `buildDisplayText`
+                // (`commands/compact/compact.ts:230-247`): the user-visible result
+                // is `chalk.dim('Compacted ' + dimmed.join('\n'))` where, in the
+                // non-verbose case, `dimmed = ['(' + expandShortcut + ' to see full
+                // summary)']` and `expandShortcut` = the `app:toggleTranscript`
+                // binding (`ctrl+o`). claude-code shows NO message counts here — the
+                // delta is recorded in telemetry above and the full summary is
+                // reachable via the ctrl+o transcript toggle (already wired in
+                // `tui::root`). Dimming is applied by the TUI render layer (LingXi
+                // command displays are plain strings), not embedded here.
                 CommandResult::Done {
-                    display: Some(format!(
-                        "Compacted: {} → {} messages ({} bytes saved).",
-                        summary.messages_before, summary.messages_after, summary.bytes_saved
-                    )),
+                    display: Some(COMPACT_DISPLAY.to_string()),
                 }
             }
             Err(e) => {
@@ -79,7 +92,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn success_renders_summary_template() {
+    async fn success_renders_compacted_hint() {
+        // claude-code shows the brief `Compacted (ctrl+o to see full summary)`
+        // regardless of the delta — the counts ride on telemetry, not the display.
         let mock = Arc::new(MockOrchestratorHandle::new());
         mock.set_compact_summary(CompactionSummary {
             messages_before: 42,
@@ -89,7 +104,7 @@ mod tests {
         let h = CompactHandler::new(mock);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Compacted: 42 → 7 messages (18345 bytes saved).");
+                assert_eq!(s, "Compacted (ctrl+o to see full summary)");
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -110,6 +125,8 @@ mod tests {
 
     #[tokio::test]
     async fn zero_messages_renders_correctly() {
+        // Even a no-op compaction shows the same fixed hint (claude-code does not
+        // special-case the zero delta in the command result).
         let mock = Arc::new(MockOrchestratorHandle::new());
         mock.set_compact_summary(CompactionSummary {
             messages_before: 0,
@@ -119,7 +136,7 @@ mod tests {
         let h = CompactHandler::new(mock);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Compacted: 0 → 0 messages (0 bytes saved).");
+                assert_eq!(s, "Compacted (ctrl+o to see full summary)");
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -187,10 +204,16 @@ mod tests {
         let h = CompactHandler::new(handle);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert!(s.starts_with("Compacted: 40 → "), "got: {s}");
-                assert!(!s.contains("Compacted: 40 → 40 "), "no-op detected: {s}");
+                // The display is the fixed claude-code hint…
+                assert_eq!(s, "Compacted (ctrl+o to see full summary)", "got: {s}");
             }
             other => panic!("expected Done, got {other:?}"),
         }
+        // …and the REAL compactor mutated the live history (it replaces the
+        // summarized span with a boundary + summary, so the count changes from the
+        // seeded 40), proving the handler is wired to the live compactor — the
+        // delta itself now rides on telemetry / the session, not the display.
+        let remaining = orch.session().lock().await.history.len();
+        assert_ne!(remaining, 40, "expected the real compactor to mutate history");
     }
 }

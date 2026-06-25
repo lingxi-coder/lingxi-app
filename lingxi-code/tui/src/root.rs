@@ -1158,12 +1158,10 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
                 st.should_exit = true;
             }
             _ => {
+                // (RRS-08) Transient footer hint, not a scrollback line —
+                // see PromptInputFooter's sigint_armed_at-driven exit_hint.
                 st.sigint_armed_at = Some(std::time::Instant::now());
-                st.push_message(crate::state::RenderedMessage::SystemText {
-                    body: "Press Ctrl-D again to exit".into(),
-                    timestamp: chrono::Utc::now().timestamp(),
-                    is_error: false,
-                });
+                st.sigint_armed_key = "Ctrl-D";
             }
         }
         return;
@@ -3556,10 +3554,10 @@ mod tests {
         };
         handle_live_key(&mut st, &ctrl_d, 24);
         assert!(!st.should_exit, "first Ctrl+D only arms");
-        assert!(st.messages.iter().any(|m| matches!(
-            m,
-            crate::state::RenderedMessage::SystemText { body, .. } if body == "Press Ctrl-D again to exit"
-        )));
+        // (RRS-08) The confirmation is a transient footer hint
+        // (PromptInputFooter.exit_hint), not a pushed scrollback message.
+        assert!(st.sigint_armed_at.is_some());
+        assert_eq!(st.sigint_armed_key, "Ctrl-D");
         handle_live_key(&mut st, &ctrl_d, 24);
         assert!(st.should_exit, "second Ctrl+D within the window exits");
     }

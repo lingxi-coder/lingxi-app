@@ -516,12 +516,12 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                         st.should_exit = true;
                     }
                     _ => {
+                        // (RRS-08) claude-code renders this as a transient
+                        // footer hint ("Press {key} again to exit"), not a
+                        // scrollback line — see PromptInputFooter's
+                        // sigint_armed_at-driven exit_hint.
                         st.sigint_armed_at = Some(Instant::now());
-                        st.push_message(RenderedMessage::SystemText {
-                            body: "^C (press Ctrl-C again or type /exit to quit)".into(),
-                            timestamp: chrono::Utc::now().timestamp(),
-                            is_error: false,
-                        });
+                        st.sigint_armed_key = "Ctrl-C";
                     }
                 }
             }
@@ -1132,6 +1132,12 @@ pub fn render_screen(
                 .map_or(0, |c| c.padding),
             // (TokenWarning) live context-pressure banner above the prompt.
             context_pressure: state.context_pressure.clone(),
+            // (RRS-08) Footer-left override while the double-press exit
+            // window is armed and not yet expired.
+            exit_hint: state.sigint_armed_at.and_then(|t| {
+                (t.elapsed().as_millis() < u128::from(SIGINT_WINDOW_MS))
+                    .then_some(state.sigint_armed_key)
+            }),
         )
     }
     .into_any()
@@ -1501,6 +1507,21 @@ mod dispatch_tests {
             "Ctrl+C must push the INTERRUPT_MESSAGE marker, got: {:?}",
             st.messages
         );
+    }
+
+    #[test]
+    fn idle_ctrl_c_arms_without_pushing_a_scrollback_message() {
+        // (RRS-08) The "Press Ctrl-C again to exit" confirmation is a
+        // transient footer hint (PromptInputFooter.exit_hint), not a pushed
+        // scrollback line.
+        let mut st = s();
+        let before = st.messages.len();
+        dispatch(KeyAction::Cancel, &mut st);
+        assert!(st.sigint_armed_at.is_some(), "first idle Ctrl+C arms");
+        assert_eq!(st.sigint_armed_key, "Ctrl-C");
+        assert_eq!(st.messages.len(), before, "no scrollback message pushed");
+        dispatch(KeyAction::Cancel, &mut st);
+        assert!(st.should_exit, "second idle Ctrl+C within the window exits");
     }
 
     #[test]

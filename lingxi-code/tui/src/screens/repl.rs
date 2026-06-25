@@ -130,6 +130,11 @@ pub struct ReplScreenProps {
     /// warning threshold. Rendered directly above the prompt as claude-code's
     /// `<TokenWarning>` line (`PromptInput/Notifications.tsx:321`).
     pub context_pressure: Option<traits::ContextPressureBanner>,
+    /// (RRS-08) `Some(key)` while the idle Ctrl-C/Ctrl-D double-press exit
+    /// window is armed (clone of `AppState.sigint_armed_at`/`_key`, already
+    /// resolved against the window by the caller) — forwarded to
+    /// `PromptInputFooter.exit_hint`.
+    pub exit_hint: Option<&'static str>,
 }
 
 impl Default for ReplScreenProps {
@@ -162,6 +167,7 @@ impl Default for ReplScreenProps {
             status_line_text: None,
             status_line_padding: 0,
             context_pressure: None,
+            exit_hint: None,
         }
     }
 }
@@ -174,6 +180,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let cost = props.status.cost.clone();
     let context_pct = props.status.context_pct;
     let permission_mode = props.status.permission_mode;
+    let exit_hint = props.exit_hint;
     // (A6) Custom status-line text + padding + width-for-truncation.
     let status_line_text = props.status_line_text.clone();
     // (TokenWarning) The live context-pressure banner, rendered above the prompt.
@@ -326,6 +333,9 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 // (PIC-07) A turn in flight swaps the hint to "esc to
                 // interrupt" — same signal that gates the spinner row.
                 is_loading: show_spinner,
+                // (RRS-08) Replaces the whole footer-left with "Press {key}
+                // again to exit" while the double-press window is armed.
+                exit_hint: exit_hint,
             )
             // (M9-05) Background-task footer pill, drawn bottom-most when present
             // (claude-code `BackgroundTaskStatus`). Hidden (no row) when `None`.

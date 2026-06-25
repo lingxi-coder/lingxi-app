@@ -47,6 +47,26 @@ fn footer_hint_suppressed_when_buffer_nonempty_even_while_loading() {
 }
 
 #[test]
+fn footer_exit_hint_replaces_everything_else() {
+    // (RRS-08) exit_hint overrides the mode indicator/hint/placeholder
+    // entirely, matching claude-code's exitMessage.show early return.
+    let mut el = element! {
+        PromptInputFooter(
+            mode: FooterMode::Prompt,
+            placeholder: Some("Try \"edit <filepath> to...\"".to_string()),
+            is_empty: true,
+            is_loading: true,
+            exit_hint: Some("Ctrl-C"),
+        )
+    };
+    let frame = el.to_string();
+    assert!(frame.contains("Press Ctrl-C again to exit"), "{frame}");
+    assert!(!frame.contains("interrupt"), "{frame}");
+    assert!(!frame.contains("for shortcuts"), "{frame}");
+    assert!(!frame.contains("Try"), "{frame}");
+}
+
+#[test]
 fn input_three_lines() {
     let mut el = element! {
         PromptInput(text: "first\nsecond\nthird".to_string(), cursor: 0usize, width: 40usize)

@@ -621,8 +621,14 @@ pub struct AppState {
     pub syntax_highlighting_disabled: bool,
     /// `Some` while a turn is being driven by the orchestrator.
     pub in_flight_turn: Option<TurnInFlight>,
-    /// Timestamp of the first Ctrl-C while idle; cleared after 2s.
+    /// Timestamp of the first idle Ctrl-C/Ctrl-D press; cleared after
+    /// [`crate::app::SIGINT_WINDOW_MS`].
     pub sigint_armed_at: Option<Instant>,
+    /// (RRS-08) Which key armed [`Self::sigint_armed_at`] — `"Ctrl-C"` or
+    /// `"Ctrl-D"` — so the footer's "Press {key} again to exit" hint
+    /// (claude-code `exitMessage.key`) names the right key. Meaningless when
+    /// `sigint_armed_at` is `None`.
+    pub sigint_armed_key: &'static str,
     /// Set by `/exit` (or second Ctrl-C within the arming window).
     pub should_exit: bool,
     /// (M7-12) Set by the Resume screen on Enter: the session UUID the user
@@ -1012,6 +1018,7 @@ impl AppState {
             syntax_highlighting_disabled: false,
             in_flight_turn: None,
             sigint_armed_at: None,
+            sigint_armed_key: "Ctrl-C",
             should_exit: false,
             resume_request: None,
             pending_config_edit: false,

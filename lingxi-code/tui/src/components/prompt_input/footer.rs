@@ -118,6 +118,14 @@ pub struct PromptInputFooterProps {
     /// suppressed, shows `esc to interrupt` in place of `? for shortcuts`
     /// (claude-code `getSpinnerHintParts`'s `isLoading` branch).
     pub is_loading: bool,
+    /// (RRS-08) `Some(key)` while the idle Ctrl-C/Ctrl-D double-press exit
+    /// window is armed (`AppState.sigint_armed_at` within
+    /// [`crate::app::SIGINT_WINDOW_MS`]) — `key` is `"Ctrl-C"` or `"Ctrl-D"`.
+    /// claude-code's `exitMessage.show` check is the FIRST thing
+    /// `PromptInputFooterLeftSide` does, replacing the entire footer-left
+    /// (mode indicator, hint, search box) with `"Press {key} again to
+    /// exit"` — this overrides every other row here the same way.
+    pub exit_hint: Option<&'static str>,
 }
 
 impl Default for PromptInputFooterProps {
@@ -131,6 +139,7 @@ impl Default for PromptInputFooterProps {
             vim_visual_linewise: false,
             permission_mode: PermissionMode::Default,
             is_loading: false,
+            exit_hint: None,
         }
     }
 }
@@ -140,6 +149,19 @@ impl Default for PromptInputFooterProps {
 /// mode-indicator is shown — a dim `? for shortcuts` hint row.
 #[component]
 pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement<'static>> {
+    // (RRS-08) claude-code's `exitMessage.show` early-return — replaces the
+    // ENTIRE footer-left (mode indicator, hint, search box) with the
+    // double-press exit confirmation.
+    if let Some(key) = props.exit_hint {
+        return element! {
+            View(flex_direction: FlexDirection::Column) {
+                View(flex_direction: FlexDirection::Row) {
+                    Text(content: format!("Press {key} again to exit"), color: TuiTheme::DIM)
+                }
+            }
+        }
+        .into_any();
+    }
     let glyph = props.mode.glyph().to_string();
     let placeholder = if props.is_empty {
         props.placeholder.clone().unwrap_or_default()
@@ -190,6 +212,7 @@ pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement
             }))
         }
     }
+    .into_any()
 }
 
 #[cfg(test)]

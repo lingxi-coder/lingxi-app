@@ -101,6 +101,13 @@ pub struct SubagentContext {
     pub agent_memory: Option<AgentMemorySnapshot>,
     /// UI display configuration (color, icon).
     pub display: AgentDisplay,
+    /// Provider profile name used to route this subagent's model round-trips to
+    /// a specific provider (the dual-LLM candidate's resolved profile). Threaded
+    /// from [`traits::subagent_spawn::SubagentSpawnRequest::model_profile`] by the
+    /// spawner; the runner passes it as the `profile` arg of the api client's
+    /// `messages_create_*_in` methods. `None` ⇒ default/unscoped provider
+    /// resolution (the legacy single-provider behavior).
+    pub model_profile: Option<String>,
     /// Model API seam used by the multi-turn [`crate::runner::run_subagent`]
     /// loop. `None` keeps the legacy stub behavior (no real API calls) for
     /// back-compat with callers that haven't wired an API client yet.

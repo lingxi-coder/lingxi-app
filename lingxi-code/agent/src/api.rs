@@ -91,4 +91,120 @@ pub trait SubagentApiClient: Send + Sync {
         self.messages_create_stream(model, system, messages, tools, effort)
             .await
     }
+
+    /// Like [`Self::messages_create`], but threads a provider `profile` so the
+    /// per-spawn route (e.g. a dual-LLM candidate's resolved provider) reaches
+    /// the underlying multi-provider client. The DEFAULT body ignores `profile`
+    /// and delegates to [`Self::messages_create`] — so the ~5 existing impls and
+    /// test mocks that only implement the profile-less method keep their legacy
+    /// (default-provider) behavior unchanged (frozen-trait rule). The production
+    /// orchestrator adapter OVERRIDES this to forward `profile` to
+    /// `DefaultLlmClient::messages_create(model, profile, …)`.
+    async fn messages_create_in(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<protocol::ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Result<LlmResponse, LlmError> {
+        let _ = profile;
+        self.messages_create(model, system, messages, tools).await
+    }
+
+    /// Streaming analog of [`Self::messages_create_in`] — threads the provider
+    /// `profile` onto the SSE round-trip. The DEFAULT body ignores `profile` and
+    /// delegates to [`Self::messages_create_stream`] (which itself defaults to a
+    /// synthetic stream over [`Self::messages_create`]), so non-streaming /
+    /// profile-less impls and mocks are unaffected. The production orchestrator
+    /// adapter OVERRIDES this to forward `profile` to its real SSE transport.
+    async fn messages_create_stream_in(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<protocol::ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        effort: Option<serde_json::Value>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        let _ = profile;
+        self.messages_create_stream(model, system, messages, tools, effort)
+            .await
+    }
+
+    /// Like [`Self::messages_create_stream_in`], but FORCES the named tool
+    /// (`tool_choice`). The DEFAULT delegates to
+    /// [`Self::messages_create_stream_forced`] (ignoring `profile`); the
+    /// production adapter overrides it to thread BOTH `profile` and the forced
+    /// tool. Keeps the structured-output (schema) subagent path provider-routed.
+    async fn messages_create_stream_forced_in(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<protocol::ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        forced_tool: Option<&str>,
+        effort: Option<serde_json::Value>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        let _ = profile;
+        self.messages_create_stream_forced(model, system, messages, tools, forced_tool, effort)
+            .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// A mock that implements ONLY the required `messages_create`. It records
+    /// the call so we can prove the DEFAULTED `messages_create_in` routes back
+    /// through it (ignoring the profile) without the impl knowing about the new
+    /// method — the frozen-trait back-compat guarantee.
+    struct LegacyOnlyClient {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl SubagentApiClient for LegacyOnlyClient {
+        async fn messages_create(
+            &self,
+            _model: &str,
+            _system: Option<&str>,
+            _messages: Vec<protocol::ConversationMessage>,
+            _tools: Vec<serde_json::Value>,
+        ) -> Result<LlmResponse, LlmError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(LlmResponse {
+                id: "mock".into(),
+                model: "mock".into(),
+                content: Vec::new(),
+                stop_reason: Some("end_turn".into()),
+                stop_details: None,
+                usage: llm_client::Usage::default(),
+                cost: None,
+                provider_metadata: serde_json::Value::Null,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn messages_create_in_default_routes_through_legacy_method() {
+        let client = Arc::new(LegacyOnlyClient {
+            calls: AtomicUsize::new(0),
+        });
+        // Calling the NEW profile-aware method on a mock that only implements
+        // the legacy one must transparently fall through to `messages_create`.
+        let resp = client
+            .messages_create_in("some-model", Some("a-profile"), None, Vec::new(), Vec::new())
+            .await;
+        assert!(resp.is_ok(), "default messages_create_in delegates cleanly");
+        assert_eq!(
+            client.calls.load(Ordering::SeqCst),
+            1,
+            "the defaulted messages_create_in must route through the legacy messages_create"
+        );
+    }
 }

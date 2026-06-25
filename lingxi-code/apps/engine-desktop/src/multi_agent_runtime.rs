@@ -32,14 +32,21 @@
 //! `git diff` extraction against a real temp repo, the empty-diff path, and
 //! cancellation-before-spawn.
 //!
+//! Dual-PROVIDER routing IS now wired: each candidate / reviser spawn carries
+//! its `ResolvedCandidate`'s `request_model` + `profile_name` on the
+//! `SubagentSpawnRequest` (`model` + `model_profile`), which the spawner threads
+//! onto `SubagentContext.model_profile`; the runner then passes it as the
+//! `profile` arg of the subagent api client's `messages_create_*_in` methods,
+//! and the orchestrator's `ProviderApiAdapter` forwards that profile to the
+//! multi-provider `DefaultLlmClient`. So two candidates resolved on different
+//! providers genuinely round-trip against their own providers (proven
+//! deterministically by `candidate_spawn_carries_per_provider_model_and_profile`
+//! via the recording spawner).
+//!
 //! Runtime-only (NOT faked green here): that a REAL model actually edits files
 //! producing a meaningful diff; real token-usage numbers + streaming; the full
-//! dual-LLM pipeline against TWO live providers. Per the spike, the spawner
-//! seam routes both candidates through the ONE wired subagent api_client
-//! (`model` is only a family alias `sonnet|opus|haiku`), so this is
-//! dual-candidate, not dual-provider — matching design doc §最小可行版本.
-//! Full per-provider routing needs a spawn-time api_client override and is
-//! deferred.
+//! dual-LLM pipeline against TWO live providers end-to-end. The verification
+//! fixer is also still default-provider-routed (see its `TODO(multi-agent)`).
 
 use async_trait::async_trait;
 use llm_client::TokenUsage;
@@ -151,6 +158,7 @@ enum SpawnFlowError {
 /// worktree diff + the agent's text self-report + mapped usage. Shared by the
 /// candidate runner and the reviser (and adapted by the fixer). `prompt` is the
 /// fully-composed first user message; `phase` tags any failure.
+#[allow(clippy::too_many_arguments)]
 async fn run_editing_agent(
     spawner: &dyn SubagentSpawner,
     inherit: &SubagentInheritance,
@@ -159,11 +167,21 @@ async fn run_editing_agent(
     cancel: &CancellationToken,
     candidate_id: &str,
     phase: DualLlmPhase,
+    resolved: &multi_agent::ResolvedCandidate,
 ) -> Result<EditingOutcome, MultiAgentError> {
+    // Dual-LLM dual-PROVIDER routing: pin THIS candidate/author's spawn to its
+    // resolved provider route. `model` carries the concrete provider-local wire
+    // model (`route.request_model`) and `model_profile` the provider profile
+    // (`route.profile_name`), so the subagent's round-trips target the
+    // candidate's own provider rather than the shared default. The spawner uses
+    // the model verbatim (bypassing Claude family-alias resolution) when a
+    // profile is present.
     let request = SubagentSpawnRequest {
         subagent_type: FILE_EDITING_AGENT.to_string(),
         prompt,
         cwd: Some(cwd.to_string_lossy().into_owned()),
+        model: Some(resolved.request_model().to_string()),
+        model_profile: Some(resolved.route.profile_name.clone()),
         ..default_request()
     };
 
@@ -207,6 +225,7 @@ fn default_request() -> SubagentSpawnRequest {
         context_paths: Vec::new(),
         description: None,
         model: None,
+        model_profile: None,
         run_in_background: false,
         name: None,
         team_name: None,
@@ -266,6 +285,7 @@ impl CandidateRunner for SpawnerCandidateRunner {
             &ctx.cancel,
             &ctx.candidate_id,
             DualLlmPhase::ImplementCandidates,
+            &ctx.resolved,
         )
         .await?;
         Ok(CandidateOutcome {
@@ -306,6 +326,7 @@ impl Reviser for SpawnerReviser {
             &ctx.cancel,
             &ctx.candidate_id,
             DualLlmPhase::AuthorRevision,
+            &ctx.resolved,
         )
         .await?;
         Ok(RevisedOutcome { patch_diff: out.patch_diff, note: out.self_report })
@@ -338,6 +359,11 @@ impl VerificationFixer for SpawnerVerificationFixer {
         // verification phase. A spawn/agent failure becomes the `Err` that stops
         // the loop. We do not require a diff (the loop re-runs verification to
         // decide success), so an empty edit is not itself a failure here.
+        // TODO(multi-agent): the verification fixer is NOT per-provider-routed —
+        // it spawns on the default provider (no `model`/`model_profile`), unlike
+        // the candidate/reviser which pin their resolved route. The fixer has no
+        // `ResolvedCandidate` at this seam (it operates on the final workspace,
+        // not a candidate); threading the winner's route here is deferred.
         let request = SubagentSpawnRequest {
             subagent_type: FILE_EDITING_AGENT.to_string(),
             prompt,
@@ -700,6 +726,18 @@ mod tests {
     /// Build a `ResolvedCandidate` through the real `ModelResolver` (the adapter
     /// does not read it, but the context struct requires it).
     fn resolved_candidate() -> multi_agent::ResolvedCandidate {
+        resolved_candidate_on("p", "m", "candidate-a")
+    }
+
+    /// Build a `ResolvedCandidate` for a SPECIFIC provider profile + wire model
+    /// through the real `ModelResolver`. Used to construct two candidates on
+    /// DIFFERENT providers so the per-spawn routing (model + profile) can be
+    /// proven distinct on the recorded spawn requests (the dual-PROVIDER fix).
+    fn resolved_candidate_on(
+        profile: &str,
+        request_model: &str,
+        candidate_id: &str,
+    ) -> multi_agent::ResolvedCandidate {
         use llm_client::AuthStrategy;
         use llm_client::Capabilities;
         use llm_client::ClientConfig;
@@ -711,16 +749,16 @@ mod tests {
         use llm_client::ProviderProfile;
         let cfg = ClientConfig {
             providers: vec![ProviderProfile {
-                provider_id: ProviderId::OpenAICompatible { name: "p".into() },
-                profile_name: "p".into(),
+                provider_id: ProviderId::OpenAICompatible { name: profile.into() },
+                profile_name: profile.into(),
                 base_url: "https://example.test/v1".into(),
                 protocol: ProtocolFamily::OpenAiChat,
                 auth: AuthStrategy::ApiKey,
-                credential: CredentialConfig::Static { id: "p".into() },
+                credential: CredentialConfig::Static { id: profile.into() },
                 models: vec![ModelProfile {
-                    display_model: "m".into(),
-                    request_model: "m".into(),
-                    billing_model: "m".into(),
+                    display_model: request_model.into(),
+                    request_model: request_model.into(),
+                    billing_model: request_model.into(),
                     aliases: Vec::new(),
                     capabilities: Capabilities::default(),
                 }],
@@ -735,12 +773,72 @@ mod tests {
         let resolver = multi_agent::ModelResolver::from_client_config(cfg).unwrap();
         resolver
             .resolve_endpoint(&multi_agent::config::AgentEndpoint {
-                id: "candidate-a".into(),
+                id: candidate_id.into(),
                 label: None,
-                model: "p/m".into(),
+                model: format!("{profile}/{request_model}"),
                 role: None,
             })
             .unwrap()
+    }
+
+    /// CORE PROOF of the dual-PROVIDER fix: two candidates resolved on DIFFERENT
+    /// provider profiles each produce a spawn request carrying ITS OWN
+    /// `request_model` + `model_profile`. Before the fix the runner sent
+    /// `model: None` + no profile for every candidate, so both routed through
+    /// the single default provider (dual-candidate, not dual-provider).
+    #[tokio::test]
+    async fn candidate_spawn_carries_per_provider_model_and_profile() {
+        let repo_a = init_repo();
+        let repo_b = init_repo();
+        let (inherit, _ti, _bud) = inheritance();
+
+        // Candidate A → provider "openai", wire model "gpt-4o".
+        let spawner_a = Arc::new(RecordingSpawner::new(SpawnScript::WriteThenComplete {
+            file: "a.rs".into(),
+            contents: "// a\n".into(),
+            content: serde_json::Value::String("a".into()),
+            usage: SubagentUsage::default(),
+        }));
+        let runner_a = SpawnerCandidateRunner { spawner: spawner_a.clone(), inherit: inherit.clone() };
+        let ctx_a = CandidateRunContext {
+            candidate_id: "candidate-a".into(),
+            task_brief: "t".into(),
+            cwd: repo_a.path().to_path_buf(),
+            resolved: resolved_candidate_on("openai", "gpt-4o", "candidate-a"),
+            cancel: CancellationToken::new(),
+        };
+        runner_a.run(&ctx_a).await.expect("candidate a");
+
+        // Candidate B → a DIFFERENT provider "gemini", wire model "gemini-1.5-pro".
+        let spawner_b = Arc::new(RecordingSpawner::new(SpawnScript::WriteThenComplete {
+            file: "b.rs".into(),
+            contents: "// b\n".into(),
+            content: serde_json::Value::String("b".into()),
+            usage: SubagentUsage::default(),
+        }));
+        let runner_b = SpawnerCandidateRunner { spawner: spawner_b.clone(), inherit };
+        let ctx_b = CandidateRunContext {
+            candidate_id: "candidate-b".into(),
+            task_brief: "t".into(),
+            cwd: repo_b.path().to_path_buf(),
+            resolved: resolved_candidate_on("gemini", "gemini-1.5-pro", "candidate-b"),
+            cancel: CancellationToken::new(),
+        };
+        runner_b.run(&ctx_b).await.expect("candidate b");
+
+        // Each spawn request carries the candidate's OWN resolved wire model +
+        // provider profile — proving distinct per-provider routing.
+        let req_a = spawner_a.last_request.lock().unwrap().clone().unwrap();
+        assert_eq!(req_a.model.as_deref(), Some("gpt-4o"), "candidate-a wire model");
+        assert_eq!(req_a.model_profile.as_deref(), Some("openai"), "candidate-a profile");
+
+        let req_b = spawner_b.last_request.lock().unwrap().clone().unwrap();
+        assert_eq!(req_b.model.as_deref(), Some("gemini-1.5-pro"), "candidate-b wire model");
+        assert_eq!(req_b.model_profile.as_deref(), Some("gemini"), "candidate-b profile");
+
+        // The two candidates target DIFFERENT providers — the whole point.
+        assert_ne!(req_a.model_profile, req_b.model_profile);
+        assert_ne!(req_a.model, req_b.model);
     }
 
     #[test]
@@ -881,6 +979,7 @@ mod tests {
             review_feedback: "BLOCKING: handle empty input".into(),
             cwd: repo.path().to_path_buf(),
             pre_revision_patch: "diff --git a/x b/x\n+old\n".into(),
+            resolved: resolved_candidate(),
             cancel: CancellationToken::new(),
         };
         let out = reviser.revise(&ctx).await.expect("revise");
@@ -919,6 +1018,7 @@ mod tests {
             review_feedback: "fix".into(),
             cwd: repo_a.path().to_path_buf(),
             pre_revision_patch: "diff --git a/x b/x\n+old\n".into(),
+            resolved: resolved_candidate(),
             cancel: CancellationToken::new(),
         };
         let out = reviser.revise(&ctx).await.expect("revise");
@@ -953,6 +1053,7 @@ mod tests {
             review_feedback: "fix".into(),
             cwd: repo.path().to_path_buf(),
             pre_revision_patch: "diff\n".into(),
+            resolved: resolved_candidate(),
             cancel: CancellationToken::new(),
         };
         let err = reviser.revise(&ctx).await.unwrap_err();

@@ -720,6 +720,7 @@ Usage notes:\n\
             context_paths: parsed.context_paths.clone(),
             description: Some(parsed.description.clone()),
             model: if is_fork { None } else { parsed.model.clone() },
+            model_profile: None,
             run_in_background: true,
             name: if is_fork { None } else { parsed.name.clone() },
             team_name: if is_fork { None } else { parsed.team_name.clone() },
@@ -1394,6 +1395,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             // FORK_AGENT's `Inherit` resolves to the parent model unchanged; the
             // explicit-model override is honored only on the non-fork path.
             model: if is_fork { None } else { parsed.model.clone() },
+            model_profile: None,
             // claude collapses `run_in_background === true`; absent ⇒ false.
             run_in_background: parsed.run_in_background.unwrap_or(false),
             // Fork path carries no teammate/isolation/cwd overrides.

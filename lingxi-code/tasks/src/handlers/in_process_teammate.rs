@@ -470,6 +470,7 @@ impl InProcessTeammateHandler {
                 color: AgentColor::Cyan,
                 icon,
             },
+            model_profile: None,
             api_client: Some(self.api_client.clone()),
             tool_invoker: self.tool_invoker.clone(),
             // Advertised tool schemas (claude-code `assembleToolPool`) — resolved

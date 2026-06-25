@@ -109,6 +109,7 @@ impl AgentExecutor {
             // optional `model` (claude-code `schemas/hooks.ts` agent `model`).
             description: None,
             model: model.map(str::to_string),
+            model_profile: None,
             // Hook-driven agents run synchronously inside the hook timeout.
             run_in_background: false,
             name: None,

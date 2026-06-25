@@ -20,6 +20,7 @@
 //! feedback to act on; the caller (orchestrator) gates that.
 
 use crate::error::MultiAgentError;
+use crate::providers::ResolvedCandidate;
 use crate::state::DualLlmPhase;
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -43,6 +44,11 @@ pub struct RevisionContext {
     /// The author's pre-revision patch — retained verbatim if the revision
     /// fails so the run never loses the working implementation.
     pub pre_revision_patch: String,
+    /// The author's resolved provider route (dual-LLM dual-PROVIDER): the
+    /// reviser runs the revision pass against the SAME provider/model the
+    /// candidate implemented with, so a candidate authored on provider A is
+    /// revised on provider A. Mirrors [`crate::orchestrator::CandidateRunContext::resolved`].
+    pub resolved: ResolvedCandidate,
     /// Cooperative cancellation.
     pub cancel: CancellationToken,
 }
@@ -213,6 +219,46 @@ mod tests {
         }
     }
 
+    /// Build a `ResolvedCandidate` (a single-provider route) for a test ctx.
+    fn resolved_for(id: &str) -> ResolvedCandidate {
+        use llm_client::{
+            AuthStrategy, Capabilities, ClientConfig, CredentialConfig, ModelProfile,
+            PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
+        };
+        let cfg = ClientConfig {
+            providers: vec![ProviderProfile {
+                provider_id: ProviderId::OpenAICompatible { name: "p".into() },
+                profile_name: "p".into(),
+                base_url: "https://example.test/v1".into(),
+                protocol: ProtocolFamily::OpenAiChat,
+                auth: AuthStrategy::ApiKey,
+                credential: CredentialConfig::Static { id: "p".into() },
+                models: vec![ModelProfile {
+                    display_model: "m".into(),
+                    request_model: "m".into(),
+                    billing_model: "m".into(),
+                    aliases: Vec::new(),
+                    capabilities: Capabilities::default(),
+                }],
+                pricing: PricingConfig::default(),
+                signing: None,
+                azure: None,
+                supports_websockets: false,
+                supports_websocket_compression: false,
+                websocket_connect_timeout_ms: None,
+            }],
+        };
+        crate::ModelResolver::from_client_config(cfg)
+            .unwrap()
+            .resolve_endpoint(&crate::config::AgentEndpoint {
+                id: id.into(),
+                label: None,
+                model: "p/m".into(),
+                role: None,
+            })
+            .unwrap()
+    }
+
     fn ctx_in(dir: &std::path::Path, id: &str) -> RevisionContext {
         RevisionContext {
             candidate_id: id.to_string(),
@@ -220,6 +266,7 @@ mod tests {
             review_feedback: "blocking: fix it".into(),
             cwd: dir.to_path_buf(),
             pre_revision_patch: "diff --git a/old.rs b/old.rs\n+old\n".into(),
+            resolved: resolved_for(id),
             cancel: CancellationToken::new(),
         }
     }

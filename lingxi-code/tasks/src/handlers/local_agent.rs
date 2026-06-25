@@ -254,6 +254,7 @@ impl Task for LocalAgentHandler {
             // carries no model/name/etc. overrides, so those default to None.
             description: None,
             model: None,
+            model_profile: None,
             // The LocalAgent variant IS the background path; wire its real
             // `is_backgrounded` flag onto the spawn request's `run_in_background`.
             run_in_background: is_backgrounded,

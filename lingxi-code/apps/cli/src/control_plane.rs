@@ -61,6 +61,16 @@ pub struct StdioControlPlane {
     resolved_tool_use_ids: Mutex<VecDeque<String>>,
     /// The in-flight turn's cancellation token (for `deny+interrupt`).
     active_turn_cancel: Mutex<Option<CancellationToken>>,
+    /// Optional sink for ORPHANED permission recoveries. When a late
+    /// `control_response` cannot be matched to a pending request (process restart
+    /// with `--resume`, or a duplicate/late delivery), the genuine-orphan tail of
+    /// [`Self::resolve_response`] forwards an `OrphanedPermission` command here
+    /// instead of dropping it — the run loop dequeues it and re-runs the tool via
+    /// `ConversationOrchestrator::run_orphaned_permission`. `None` (the default)
+    /// keeps the legacy warn+drop, so every existing caller of [`Self::new`] is
+    /// unaffected. Twin of claude-code's `setUnexpectedResponseCallback` →
+    /// `enqueue({mode:'orphaned-permission'})` (print.ts:2767, 5291).
+    orphan_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<msgqueue::QueuedCommand>>>,
 }
 
 impl StdioControlPlane {
@@ -72,7 +82,20 @@ impl StdioControlPlane {
             pending: Mutex::new(HashMap::new()),
             resolved_tool_use_ids: Mutex::new(VecDeque::new()),
             active_turn_cancel: Mutex::new(None),
+            orphan_tx: Mutex::new(None),
         })
+    }
+
+    /// Wire the orphaned-permission recovery sink (the run loop's mpsc receiver
+    /// end lives in `run_stream_json_input_loop`). Called once after the session
+    /// id is known but before the resolver task spawns, so a genuine orphan
+    /// `control_response` is forwarded for recovery instead of dropped. Idempotent
+    /// (last writer wins); a `None` sink leaves the legacy warn+drop behaviour.
+    pub async fn set_orphan_sender(
+        &self,
+        tx: tokio::sync::mpsc::UnboundedSender<msgqueue::QueuedCommand>,
+    ) {
+        *self.orphan_tx.lock().await = Some(tx);
     }
 
     /// Register the current turn's cancellation token so a `deny+interrupt`
@@ -192,13 +215,47 @@ impl StdioControlPlane {
                 }
             }
             // GENUINE orphan: no pending request AND the toolUseID (if any) is not
-            // a known-resolved duplicate. The binary's `unexpectedResponseCallback`
-            // (handleOrphanedPermissionResponse) recovers by looking the unresolved
-            // tool_use up in the transcript and executing it — a transcript-recovery
-            // deep feature deferred for the stdio-only path. Surface the orphan
-            // (warn) rather than dropping it silently so it is observable.
+            // a known-resolved duplicate. claude-code's `unexpectedResponseCallback`
+            // (`handleOrphanedPermissionResponse`, print.ts:5241) recovers by
+            // re-running the unresolved tool_use from the transcript. When a
+            // recovery sink is wired (the stdio run loop), forward an
+            // `OrphanedPermission` command carrying the toolUseID + the raw inner
+            // permission payload; the loop looks the tool_use up in the (resumed)
+            // session history and re-runs it (`run_orphaned_permission`). This is
+            // the enqueue half of claude-code's `enqueue({mode:
+            // 'orphaned-permission', orphanedPermission:{permissionResult,…}})`
+            // (print.ts:5291). Without a sink, keep the legacy warn+drop.
+            let orphan_tx = self.orphan_tx.lock().await.clone();
+            if let (Some(tx), Some(tuid)) = (orphan_tx, tool_use_id) {
+                let permission_decision_json =
+                    response.get("response").cloned().unwrap_or_else(|| json!({}));
+                let cmd = msgqueue::QueuedCommand {
+                    uuid: Uuid::new_v4().to_string(),
+                    content: msgqueue::QueuedCommandContent::OrphanedPermission {
+                        tool_use_id: protocol::ToolUseId::from(tuid),
+                        permission_decision_json,
+                        reason: format!(
+                            "orphaned control_response (no pending request) request_id={request_id}"
+                        ),
+                    },
+                    priority: msgqueue::QueuePriority::Now,
+                    queued_at: std::time::SystemTime::now(),
+                    source: msgqueue::QueueSource::Orphan,
+                    agent_id: None,
+                    skip_slash_commands: false,
+                    is_meta: false,
+                };
+                if tx.send(cmd).is_err() {
+                    tracing::warn!(
+                        "Orphan recovery sink closed; dropping orphan control_response request_id={request_id} toolUseID={tuid}"
+                    );
+                }
+                return;
+            }
+            // No recovery sink wired (non-stdio paths / tests) — surface the orphan
+            // (warn) rather than dropping it silently so it stays observable.
             tracing::warn!(
-                "Dropping orphan control_response (no pending request; orphaned-tool recovery not wired) request_id={} toolUseID={:?}",
+                "Dropping orphan control_response (no pending request; no recovery sink) request_id={} toolUseID={:?}",
                 request_id,
                 tool_use_id
             );
@@ -863,7 +920,80 @@ mod tests {
         plane
             .resolve_response(&success_response("does-not-exist", json!({})))
             .await;
-        // No pending entry to resolve — silently ignored.
+        // No pending entry to resolve, and no recovery sink wired — warn+drop.
+    }
+
+    #[tokio::test]
+    async fn genuine_orphan_with_sink_forwards_orphaned_permission_command() {
+        let (plane, _rx) = plane_with_channel();
+        let (orphan_tx, mut orphan_rx) = mpsc::unbounded_channel::<msgqueue::QueuedCommand>();
+        plane.set_orphan_sender(orphan_tx).await;
+
+        // A genuine orphan: no pending request for this request_id, and the
+        // payload's toolUseID is not a known-resolved duplicate.
+        plane
+            .resolve_response(&success_response(
+                "no-such-request",
+                json!({
+                    "behavior": "allow",
+                    "updatedInput": { "command": "ls -la" },
+                    "toolUseID": "toolu_orphan_1",
+                }),
+            ))
+            .await;
+
+        let cmd = orphan_rx.try_recv().expect("orphan command forwarded");
+        match cmd.content {
+            msgqueue::QueuedCommandContent::OrphanedPermission {
+                tool_use_id,
+                permission_decision_json,
+                ..
+            } => {
+                assert_eq!(tool_use_id.as_str(), "toolu_orphan_1");
+                assert_eq!(permission_decision_json["behavior"], "allow");
+                assert_eq!(permission_decision_json["updatedInput"]["command"], "ls -la");
+            }
+            other => panic!("expected OrphanedPermission, got {other:?}"),
+        }
+        assert_eq!(cmd.source, msgqueue::QueueSource::Orphan);
+        assert_eq!(cmd.priority, msgqueue::QueuePriority::Now);
+    }
+
+    #[tokio::test]
+    async fn duplicate_resolved_orphan_is_not_forwarded() {
+        let (plane, mut rx) = plane_with_channel();
+        let (orphan_tx, mut orphan_rx) = mpsc::unbounded_channel::<msgqueue::QueuedCommand>();
+        plane.set_orphan_sender(orphan_tx).await;
+
+        // Drive a NORMAL allow round-trip so the toolUseID is tracked as resolved.
+        let gate = StdioControlPermissionGate::new(plane.clone());
+        let input = json!({"command": "ls"});
+        let check = tokio::spawn(async move { gate.check("Bash", &input).await });
+        let line = rx.recv().await.unwrap();
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        let req_id = frame["request_id"].as_str().unwrap().to_string();
+        let tuid = frame["request"]["tool_use_id"].as_str().unwrap().to_string();
+        plane
+            .resolve_response(&success_response(
+                &req_id,
+                json!({"behavior": "allow", "updatedInput": {}}),
+            ))
+            .await;
+        assert_eq!(check.await.unwrap(), PermissionDecision::Allow);
+
+        // A LATE duplicate `control_response` for the same (now-resolved) toolUseID
+        // with no pending request must be deduped (§1.5), NOT forwarded as an
+        // orphan (which would double-execute the tool).
+        plane
+            .resolve_response(&success_response(
+                "late-duplicate",
+                json!({"behavior": "allow", "updatedInput": {}, "toolUseID": tuid}),
+            ))
+            .await;
+        assert!(
+            orphan_rx.try_recv().is_err(),
+            "a resolved-duplicate must not be forwarded for recovery"
+        );
     }
 
     #[tokio::test]

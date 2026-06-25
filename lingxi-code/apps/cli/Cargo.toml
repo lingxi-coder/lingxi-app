@@ -38,6 +38,9 @@ traits = { path = "../../traits" }
 command-api = { path = "../../command-api" }
 orchestrator = { path = "../../orchestrator" }
 engine = { path = "../../engine" }
+# Orphaned-permission recovery: the stdio control-plane forwards an
+# `OrphanedPermission` command to the run loop, which re-runs the tool.
+msgqueue = { path = "../../msgqueue" }
 # stream-json P2b: contextWindow/maxOutputTokens per model from the llm-client catalog.
 llm-client = { path = "../../llm-client" }
 dirs = "5"

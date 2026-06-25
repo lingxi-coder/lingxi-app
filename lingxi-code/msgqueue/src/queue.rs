@@ -140,11 +140,27 @@ pub enum QueuedCommandContent {
         /// Body of the message.
         content: String,
     },
-    /// Permission decision orphaned because the requesting tool use vanished.
+    /// A late `control_response` permission decision whose originating
+    /// `can_use_tool` request was lost (process restart with resume, or a
+    /// duplicate/late delivery) — the stdio control-plane could not match it to a
+    /// pending request. Carries enough to RE-RUN the orphaned tool from the
+    /// recovered transcript, 1:1 with claude-code's `mode:'orphaned-permission'`
+    /// command (`print.ts` `handleOrphanedPermissionResponse` →
+    /// `queryHelpers.ts` `handleOrphanedPermission`).
     OrphanedPermission {
-        /// Tool use that was awaiting the decision.
+        /// Tool use that was awaiting the decision (the `toolUseID` carried on the
+        /// inner `control_response` payload).
         tool_use_id: ToolUseId,
-        /// Human-readable explanation.
+        /// The raw inner `control_response.response` permission payload
+        /// (`{behavior:"allow"|"deny", updatedInput?, message?, …}`). The consumer
+        /// maps it to a `PermissionOutcome` to force the tool's decision —
+        /// twin of `orphanedPermission.permissionResult`. Stored as raw JSON
+        /// because `msgqueue` sits below the `permission`/`traits` crates and
+        /// cannot name `PermissionOutcome`.
+        #[serde(default)]
+        permission_decision_json: serde_json::Value,
+        /// Human-readable explanation (diagnostic only).
+        #[serde(default)]
         reason: String,
     },
     /// Engine-injected content from a hook.
@@ -527,6 +543,73 @@ mod tests {
             agent_id: None,
             skip_slash_commands: false,
             is_meta: false,
+        }
+    }
+
+    #[test]
+    fn orphaned_permission_round_trips_through_serde() {
+        // Lock the NEW (widened) OrphanedPermission shape: tool_use_id +
+        // permission_decision_json + reason. Twin of claude-code's
+        // `orphanedPermission.{permissionResult, …}` riding on the
+        // `mode:'orphaned-permission'` command (print.ts:5291-5298).
+        let cmd = QueuedCommand {
+            uuid: "u1".into(),
+            content: QueuedCommandContent::OrphanedPermission {
+                tool_use_id: ToolUseId::from("toolu_abc"),
+                permission_decision_json: serde_json::json!({
+                    "behavior": "allow",
+                    "updatedInput": { "command": "ls -la" },
+                }),
+                reason: "orphaned control_response (no pending request)".into(),
+            },
+            priority: QueuePriority::Now,
+            queued_at: SystemTime::now(),
+            source: QueueSource::Orphan,
+            agent_id: None,
+            skip_slash_commands: false,
+            is_meta: false,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let back: QueuedCommand = serde_json::from_str(&json).unwrap();
+        match back.content {
+            QueuedCommandContent::OrphanedPermission {
+                tool_use_id,
+                permission_decision_json,
+                reason,
+            } => {
+                assert_eq!(tool_use_id.as_str(), "toolu_abc");
+                assert_eq!(permission_decision_json["behavior"], "allow");
+                assert_eq!(permission_decision_json["updatedInput"]["command"], "ls -la");
+                assert_eq!(reason, "orphaned control_response (no pending request)");
+            }
+            other => panic!("expected OrphanedPermission, got {other:?}"),
+        }
+        assert_eq!(back.source, QueueSource::Orphan);
+    }
+
+    #[test]
+    fn orphaned_permission_serde_default_tolerates_missing_fields() {
+        // The widened fields are `#[serde(default)]`, so a payload carrying only
+        // `tool_use_id` still deserializes (forward/backward tolerance).
+        let minimal = serde_json::json!({
+            "uuid": "u2",
+            "content": { "OrphanedPermission": { "tool_use_id": "toolu_min" } },
+            "priority": "Now",
+            "queued_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "source": "Orphan",
+        });
+        let back: QueuedCommand = serde_json::from_value(minimal).unwrap();
+        match back.content {
+            QueuedCommandContent::OrphanedPermission {
+                tool_use_id,
+                permission_decision_json,
+                reason,
+            } => {
+                assert_eq!(tool_use_id.as_str(), "toolu_min");
+                assert!(permission_decision_json.is_null());
+                assert_eq!(reason, "");
+            }
+            other => panic!("expected OrphanedPermission, got {other:?}"),
         }
     }
 

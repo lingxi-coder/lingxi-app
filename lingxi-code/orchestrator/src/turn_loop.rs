@@ -2316,7 +2316,22 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         let mut reject_content_blocks: Vec<ContentBlock> = Vec::new();
         let mut deny_hook_says_retry = false;
         let plan_mode = orch.session.lock().await.plan_mode;
-        let decision = if plan_mode {
+        // ORPHAN RECOVERY: a re-dispatched orphaned tool carries a forced
+        // permission decision (its recovered `control_response`) that REPLACES the
+        // interactive gate — twin of claude-code's forced `canUseTool` in
+        // `handleOrphanedPermission` (queryHelpers.ts:278-284). Consumed (removed)
+        // on read so it binds exactly this `tool_use` once. The map is empty on
+        // every normal turn, so this is a strict no-op there (byte-locked
+        // turn-loop fixtures unchanged). PreToolUse hooks above STILL ran (so do
+        // claude-code's, via `runTools`); only the permission decision is forced.
+        let forced_decision = orch
+            .orphan_forced_decisions
+            .lock()
+            .await
+            .remove(tool_use_id);
+        let decision = if let Some(forced) = forced_decision {
+            forced
+        } else if plan_mode {
             orch.perms.check_in_plan_mode(name, &effective_input).await
         } else if hook_allowed {
             orch.perms
@@ -3398,6 +3413,209 @@ mod read_file_state_tests {
     async fn dispatch_one(orch: &ConversationOrchestrator, name: &str, input: serde_json::Value) {
         let uses = vec![(ToolUseId::new(), name.to_string(), input, None)];
         dispatch_tool_uses(orch, &uses).await.expect("dispatch");
+    }
+
+    // ===== Orphaned-permission recovery (run_orphaned_permission) ===========
+    // 1:1 with claude-code's handleOrphanedPermission (queryHelpers.ts:224-343).
+
+    fn assistant_with_tool_use(
+        tuid: &ToolUseId,
+        name: &str,
+        input: serde_json::Value,
+    ) -> protocol::ConversationMessage {
+        protocol::ConversationMessage::Assistant {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolUse {
+                id: tuid.clone(),
+                name: name.to_string(),
+                input,
+                provider_id: None,
+            }],
+            stop_reason: None,
+        }
+    }
+
+    fn last_tool_result(history: &[protocol::ConversationMessage]) -> (String, bool) {
+        for m in history.iter().rev() {
+            if let protocol::ConversationMessage::User { content, .. } = m {
+                for b in content {
+                    if let protocol::ContentBlock::ToolResult {
+                        content, is_error, ..
+                    } = b
+                    {
+                        return (content.clone(), *is_error);
+                    }
+                }
+            }
+        }
+        panic!("no tool_result in history");
+    }
+
+    #[tokio::test]
+    async fn orphaned_permission_allow_applies_updated_input_and_executes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        tokio::fs::write(dir.path().join("real.txt"), "RECOVERED")
+            .await
+            .unwrap();
+        let tool = Arc::new(StubFileTool {
+            name: "Read",
+            cwd: dir.path().to_path_buf(),
+        });
+        let orch = orch_with_tools(dir.path().to_path_buf(), vec![tool]);
+
+        let tuid = ToolUseId::new();
+        {
+            let sess = orch.session();
+            let mut s = sess.lock().await;
+            // Original input points at a MISSING file; the orphaned ALLOW carries
+            // an `updatedInput` that rewrites it to the real one.
+            s.history.push(assistant_with_tool_use(
+                &tuid,
+                "Read",
+                json!({"file_path":"missing.txt"}),
+            ));
+        }
+
+        let recovered = orch
+            .run_orphaned_permission(
+                &tuid,
+                traits::permission_gate::PermissionOutcome::Allow {
+                    updated_input: Some(json!({"file_path":"real.txt"})),
+                    permission_updates: vec![],
+                },
+            )
+            .await
+            .expect("recovery");
+        assert!(recovered, "a found unresolved tool_use must recover");
+
+        let sess = orch.session();
+        let s = sess.lock().await;
+        let assistants = s
+            .history
+            .iter()
+            .filter(|m| matches!(m, protocol::ConversationMessage::Assistant { .. }))
+            .count();
+        assert_eq!(assistants, 1, "assistant must not be re-pushed (alreadyPresent)");
+        let (content, is_error) = last_tool_result(&s.history);
+        assert!(!is_error, "updatedInput should make the tool read the real file");
+        assert!(
+            content.contains("RECOVERED"),
+            "tool ran with the rewritten input: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn orphaned_permission_deny_pushes_error_result_without_executing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        tokio::fs::write(dir.path().join("real.txt"), "SHOULD_NOT_READ")
+            .await
+            .unwrap();
+        let tool = Arc::new(StubFileTool {
+            name: "Read",
+            cwd: dir.path().to_path_buf(),
+        });
+        let orch = orch_with_tools(dir.path().to_path_buf(), vec![tool]);
+
+        let tuid = ToolUseId::new();
+        {
+            let sess = orch.session();
+            let mut s = sess.lock().await;
+            s.history.push(assistant_with_tool_use(
+                &tuid,
+                "Read",
+                json!({"file_path":"real.txt"}),
+            ));
+        }
+
+        let recovered = orch
+            .run_orphaned_permission(
+                &tuid,
+                traits::permission_gate::PermissionOutcome::Deny {
+                    reason: "Permission to use Read has been denied.".into(),
+                },
+            )
+            .await
+            .expect("recovery");
+        assert!(recovered);
+
+        let sess = orch.session();
+        let s = sess.lock().await;
+        let (content, is_error) = last_tool_result(&s.history);
+        assert!(is_error, "deny must produce an error tool_result");
+        assert_eq!(content, "Permission to use Read has been denied.");
+        assert!(
+            !content.contains("SHOULD_NOT_READ"),
+            "deny must not execute the tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn orphaned_permission_noop_when_already_resolved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tool = Arc::new(StubFileTool {
+            name: "Read",
+            cwd: dir.path().to_path_buf(),
+        });
+        let orch = orch_with_tools(dir.path().to_path_buf(), vec![tool]);
+
+        let tuid = ToolUseId::new();
+        {
+            let sess = orch.session();
+            let mut s = sess.lock().await;
+            s.history
+                .push(assistant_with_tool_use(&tuid, "Read", json!({"file_path":"x.txt"})));
+            // A matching tool_result already exists ⇒ resolved.
+            s.history.push(protocol::ConversationMessage::User {
+                id: protocol::MessageId::new(),
+                content: vec![protocol::ContentBlock::ToolResult {
+                    tool_use_id: tuid.clone(),
+                    content: "prior".into(),
+                    is_error: false,
+                    provider_tool_use_id: None,
+                    content_blocks: None,
+                }],
+                is_meta: false,
+            });
+        }
+        let before = orch.session().lock().await.history.len();
+        let recovered = orch
+            .run_orphaned_permission(
+                &tuid,
+                traits::permission_gate::PermissionOutcome::Allow {
+                    updated_input: None,
+                    permission_updates: vec![],
+                },
+            )
+            .await
+            .expect("recovery");
+        assert!(!recovered, "already-resolved tool_use must not recover");
+        assert_eq!(
+            orch.session().lock().await.history.len(),
+            before,
+            "no mutation on a resolved tool_use"
+        );
+    }
+
+    #[tokio::test]
+    async fn orphaned_permission_noop_when_tool_use_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tool = Arc::new(StubFileTool {
+            name: "Read",
+            cwd: dir.path().to_path_buf(),
+        });
+        let orch = orch_with_tools(dir.path().to_path_buf(), vec![tool]);
+        let recovered = orch
+            .run_orphaned_permission(
+                &ToolUseId::new(),
+                traits::permission_gate::PermissionOutcome::Allow {
+                    updated_input: None,
+                    permission_updates: vec![],
+                },
+            )
+            .await
+            .expect("recovery");
+        assert!(!recovered);
+        assert!(orch.session().lock().await.history.is_empty());
     }
 
     // ----- JSON-schema input-validation gate -------------------------------

@@ -729,6 +729,18 @@ pub struct ConversationOrchestrator {
     /// `None` until the first successful turn / when the turn ran with no system
     /// prompt. Read by the fork dispatch path ONLY; no non-fork tool touches it.
     pub(crate) current_turn_system_prompt: Mutex<Option<String>>,
+    /// Forced permission decisions keyed by `tool_use_id`, consulted ONCE
+    /// (removed on read) by the permission gate in
+    /// [`crate::turn_loop::dispatch_tool_uses_tracked`]. Populated transiently by
+    /// [`Self::run_orphaned_permission`] right before it re-dispatches an
+    /// orphaned tool so the recovered `control_response` decision REPLACES the
+    /// interactive gate — twin of claude-code's forced `canUseTool` in
+    /// `handleOrphanedPermission` (`queryHelpers.ts:278-284`). Empty on every
+    /// normal turn → the gate's behaviour (and the byte-locked turn-loop
+    /// fixtures) are unchanged.
+    pub(crate) orphan_forced_decisions: Mutex<
+        std::collections::HashMap<protocol::ToolUseId, crate::test_support::PermissionDecision>,
+    >,
     /// Read-file-state cache backing `/files` (TS `context.readFileState`).
     /// The dispatch loop (`turn_loop::dispatch_tool_uses`) inserts the
     /// absolutized `file_path` of every successful
@@ -911,6 +923,48 @@ pub struct SessionMemoryHandle {
     pub runtime: Arc<dyn traits::RuntimeSpawner>,
 }
 
+/// Find the assistant `tool_use` with `tool_use_id` that has NO matching
+/// `tool_result` anywhere in `history`, returning its `(name, input,
+/// provider_id)`. 1:1 with claude-code's `findUnresolvedToolUse`
+/// (`sessionStorage.ts:4478-4519`): a `tool_result` for the same id (in any user
+/// message) means the call already resolved → `None`. Used by
+/// [`ConversationOrchestrator::run_orphaned_permission`].
+fn find_unresolved_tool_use_in_history(
+    history: &[protocol::ConversationMessage],
+    tool_use_id: &protocol::ToolUseId,
+) -> Option<(String, serde_json::Value, Option<String>)> {
+    use protocol::{ContentBlock, ConversationMessage};
+    // A matching `tool_result` anywhere ⇒ already resolved (bail, like the TS
+    // early `return null` when a tool_result block is found).
+    let resolved = history.iter().any(|m| match m {
+        ConversationMessage::User { content, .. } => content.iter().any(
+            |b| matches!(b, ContentBlock::ToolResult { tool_use_id: id, .. } if id == tool_use_id),
+        ),
+        _ => false,
+    });
+    if resolved {
+        return None;
+    }
+    for m in history {
+        if let ConversationMessage::Assistant { content, .. } = m {
+            for b in content {
+                if let ContentBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    provider_id,
+                } = b
+                {
+                    if id == tool_use_id {
+                        return Some((name.clone(), input.clone(), provider_id.clone()));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 impl ConversationOrchestrator {
     /// Construct a new orchestrator with a fresh in-memory session and
     /// BOTH batched + streaming API clients wired.
@@ -967,6 +1021,7 @@ impl ConversationOrchestrator {
             cache_safe_slot: None,
             new_diagnostics_source: None,
             current_turn_system_prompt: Mutex::new(None),
+            orphan_forced_decisions: Mutex::new(std::collections::HashMap::new()),
             read_file_state: Arc::new(Mutex::new(Vec::new())),
             read_state_map: tool_api::read_file_state::new_read_file_state_map(),
             last_emitted_rate_limit: Mutex::new(None),
@@ -2741,6 +2796,106 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             *slot = Some(uuid::Uuid::new_v4().to_string());
         }
         slot.clone()
+    }
+
+    /// Re-run a tool whose `can_use_tool` permission response was ORPHANED — the
+    /// stdio control-plane received a late `control_response` it could not match
+    /// to a pending request (a process restart with `--resume`, or a
+    /// duplicate/late delivery). 1:1 with claude-code's `handleOrphanedPermission`
+    /// (`queryHelpers.ts:224-343`), driven by the `mode:'orphaned-permission'`
+    /// command (`print.ts:5291`).
+    ///
+    /// Locates the unresolved `tool_use` in the LIVE session history — which the
+    /// CLI seeds from the transcript on `--resume`, so this mirrors claude-code's
+    /// `findUnresolvedToolUse` over the transcript file while staying robust to
+    /// compaction (a tool_use trimmed from the active context is not re-run) —
+    /// forces the recovered permission `decision` past the gate, runs the tool
+    /// through the SAME dispatch the normal turn loop uses, then appends +
+    /// persists the resulting `tool_result`, completing the `tool_use →
+    /// tool_result` chain.
+    ///
+    /// Returns `Ok(true)` when a tool was recovered + executed, `Ok(false)` when
+    /// no unresolved `tool_use` with this id exists (already resolved, or absent)
+    /// — the caller sets its once-per-session "handled" gate
+    /// (`QueryEngine.ts:190` `hasHandledOrphanedPermission`) only on a real
+    /// recovery, matching claude-code (which enqueues only when found).
+    pub async fn run_orphaned_permission(
+        &self,
+        tool_use_id: &protocol::ToolUseId,
+        decision: traits::permission_gate::PermissionOutcome,
+    ) -> Result<bool, OrchestratorError> {
+        use protocol::{ConversationMessage, MessageId};
+
+        // 1. Locate the orphaned assistant `tool_use` and confirm it is UNRESOLVED
+        //    (no matching `tool_result`) — `findUnresolvedToolUse`
+        //    (sessionStorage.ts:4478-4519). Snapshot its fields under the lock.
+        let found = {
+            let s = self.session.lock().await;
+            find_unresolved_tool_use_in_history(&s.history, tool_use_id)
+        };
+        let Some((name, input, provider_id)) = found else {
+            // Already resolved (a tool_result exists) or never present — no-op,
+            // exactly like claude-code's `findUnresolvedToolUse → null`.
+            return Ok(false);
+        };
+
+        // 2. Apply `updatedInput` on an allow (queryHelpers.ts:262-276): an allow
+        //    carries the host's possibly-rewritten input; a deny keeps the
+        //    original (it will not run anyway).
+        let (forced, final_input) = match decision {
+            traits::permission_gate::PermissionOutcome::Allow { updated_input, .. } => (
+                crate::test_support::PermissionDecision::Allow,
+                updated_input.unwrap_or(input),
+            ),
+            traits::permission_gate::PermissionOutcome::Deny { reason } => (
+                crate::test_support::PermissionDecision::Deny { reason },
+                input,
+            ),
+        };
+
+        // The orphaned assistant message is ALREADY in history (we found it
+        // there), so — like claude-code's `alreadyPresent` guard
+        // (queryHelpers.ts:299-312) — it is NOT re-pushed or re-persisted; only
+        // the new `tool_result` below is appended.
+
+        // 3. Force the recovered decision past the permission gate for this one
+        //    `tool_use`, then run it through the SAME dispatch the normal turn
+        //    loop uses (the `runTools` analog). The gate consumes (removes) the
+        //    forced entry; clear any residue defensively.
+        self.orphan_forced_decisions
+            .lock()
+            .await
+            .insert(tool_use_id.clone(), forced);
+        let tool_uses = vec![(tool_use_id.clone(), name, final_input, provider_id)];
+        let dispatch_result =
+            crate::turn_loop::dispatch_tool_uses_tracked(self, &tool_uses, None).await;
+        self.orphan_forced_decisions.lock().await.remove(tool_use_id);
+        let (tool_results, _prevent, injected_messages, context_modifiers) = dispatch_result?;
+
+        // 4. Append + persist the `tool_result` user message and any
+        //    tool-injected follow-ups — mirroring the batched turn loop's
+        //    post-dispatch block (`execute_one_turn`), the `recordTranscript`
+        //    per-result twin (queryHelpers.ts:328-332).
+        let tool_results_msg = ConversationMessage::User {
+            id: MessageId::new(),
+            content: tool_results,
+            is_meta: false,
+        };
+        {
+            let mut s = self.session.lock().await;
+            s.history.push(tool_results_msg.clone());
+            for (m, source_id) in &injected_messages {
+                s.history.push(m.clone());
+                s.injected_message_sources.insert(m.id(), source_id.clone());
+            }
+        }
+        self.persist_message_to_jsonl(&tool_results_msg).await;
+        for (m, _source_id) in &injected_messages {
+            self.persist_message_to_jsonl(m).await;
+        }
+        crate::turn_loop::apply_model_context_modifiers(self, context_modifiers).await;
+
+        Ok(true)
     }
 
     /// Persist a single message to the optional JSONL writer.

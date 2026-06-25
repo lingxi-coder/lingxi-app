@@ -708,6 +708,7 @@ dependencies = [
  "llm-client",
  "mcp",
  "migrations",
+ "msgqueue",
  "nix",
  "orchestrator",
  "permission",

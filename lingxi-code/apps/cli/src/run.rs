@@ -446,6 +446,103 @@ fn pure_control_response(subtype: &str, frame: &serde_json::Value) -> PureContro
     }
 }
 
+/// Map the raw inner `control_response.response` permission payload onto a
+/// [`permission::gate::PermissionOutcome`] for orphaned-tool recovery.
+///
+/// Mirrors the allow/deny shape of `StdioControlPermissionGate::map_payload`
+/// but is deliberately LENIENT where the live gate is strict: an `allow`
+/// WITHOUT `updatedInput` is honoured (falling back to the original tool input)
+/// rather than rejected — matching claude-code's `handleOrphanedPermission`,
+/// which logs a warning and uses the original input when `updatedInput` is
+/// `undefined` (queryHelpers.ts:262-272), instead of `map_payload`'s strict
+/// §3.3 "missing updatedInput" deny used for live responses.
+fn orphan_decision_from_payload(
+    payload: &serde_json::Value,
+) -> permission::gate::PermissionOutcome {
+    use permission::gate::PermissionOutcome;
+    match payload.get("behavior").and_then(serde_json::Value::as_str) {
+        Some("allow") => {
+            // Carry `updatedInput` only when it is a non-empty object (claude-code
+            // applies it "when it has keys"); otherwise fall back to the original.
+            let updated_input = match payload.get("updatedInput") {
+                Some(serde_json::Value::Object(m)) if !m.is_empty() => {
+                    Some(serde_json::Value::Object(m.clone()))
+                }
+                _ => None,
+            };
+            PermissionOutcome::Allow {
+                updated_input,
+                permission_updates: vec![],
+            }
+        }
+        Some("deny") => PermissionOutcome::Deny {
+            reason: payload
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Tool permission denied")
+                .to_string(),
+        },
+        // Any non-allow/deny behaviour is a schema-invalid result; deny safely
+        // rather than execute on a malformed recovered decision.
+        _ => PermissionOutcome::Deny {
+            reason: "Tool permission request failed: malformed orphaned control_response".to_string(),
+        },
+    }
+}
+
+/// Re-run a single ORPHANED tool: dequeued between turns, this looks the
+/// unresolved `tool_use` up in the (resumed) session history and executes it
+/// with the recovered permission decision. 1:1 with claude-code's
+/// `handleOrphanedPermission` (queryHelpers.ts:224-343), gated once per session
+/// by `handled_orphan` (`QueryEngine.ts:190` `hasHandledOrphanedPermission`):
+/// only the FIRST recoverable orphan runs; the gate is set ONLY on a real
+/// recovery, so a not-found orphan leaves a later one able to recover (matching
+/// claude-code, which enqueues — and consumes the gate — only when found).
+async fn recover_orphaned_permission(
+    runtime: &Runtime,
+    cmd: msgqueue::QueuedCommand,
+    handled_orphan: &mut bool,
+) {
+    if *handled_orphan {
+        tracing::debug!("ignoring orphaned permission; one already handled this session");
+        return;
+    }
+    let msgqueue::QueuedCommandContent::OrphanedPermission {
+        tool_use_id,
+        permission_decision_json,
+        ..
+    } = cmd.content
+    else {
+        return;
+    };
+    let decision = orphan_decision_from_payload(&permission_decision_json);
+    match runtime
+        .orchestrator
+        .run_orphaned_permission(&tool_use_id, decision)
+        .await
+    {
+        Ok(true) => {
+            *handled_orphan = true;
+            tracing::info!(
+                "recovered orphaned permission for toolUseID={}",
+                tool_use_id.as_str()
+            );
+        }
+        Ok(false) => {
+            tracing::debug!(
+                "orphaned permission toolUseID={} had no unresolved tool_use; skipped",
+                tool_use_id.as_str()
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                "orphaned permission recovery failed for toolUseID={}: {e}",
+                tool_use_id.as_str()
+            );
+        }
+    }
+}
+
 /// Drive a multi-turn `--input-format stream-json` conversation (P3).
 ///
 /// Reads user turns from stdin (one JSON line per turn), deduplicates by uuid,
@@ -560,6 +657,18 @@ pub async fn run_stream_json_input_loop(
         mut control_req_rx,
         mut control_resp_rx,
     } = spawn_stdin_router(argv.replay_user_messages, session_id_str.clone());
+
+    // ORPHANED PERMISSION recovery channel. A late `control_response` whose
+    // `can_use_tool` request was lost (process restart with `--resume`, or a
+    // duplicate/late delivery) cannot be matched to a pending request; the
+    // control-plane forwards it here as an `OrphanedPermission` command, and the
+    // turn loop's `select!` re-runs the tool BETWEEN turns
+    // (`run_orphaned_permission`). 1:1 with claude-code's
+    // `setUnexpectedResponseCallback` → `enqueue({mode:'orphaned-permission'})`
+    // → `handleOrphanedPermission` (print.ts:2767/5291, queryHelpers.ts:224).
+    let (orphan_tx, mut orphan_rx) =
+        tokio::sync::mpsc::unbounded_channel::<msgqueue::QueuedCommand>();
+    control_plane.set_orphan_sender(orphan_tx).await;
 
     // P5 Phase 2: a dedicated resolver task drains `control_response` frames and
     // resolves the matching pending `send_request` future (the `can_use_tool`
@@ -719,11 +828,31 @@ pub async fn run_stream_json_input_loop(
     let betas: Vec<String> = vec![];
     let mut last_turn_err: Option<String> = None;
     let mut had_any_turn = false;
+    // Once-per-session orphaned-permission gate (`QueryEngine.ts:190`
+    // `hasHandledOrphanedPermission`): only the FIRST recoverable orphan re-runs.
+    let mut handled_orphan = false;
+    // Disable the orphan `select!` branch once its channel closes (all senders
+    // dropped) so a perpetually-ready `recv() → None` can't busy-spin the loop.
+    let mut orphan_closed = false;
 
     loop {
         let turn = tokio::select! {
             // `end_session` (§2.2 #2): the host asked us to drain + exit.
             _ = end_notify.notified() => break,
+            // ORPHANED PERMISSION recovery, drained BETWEEN turns (the `select!`
+            // is not polled while `run_turn_streaming_with_cancel` runs, so an
+            // orphan that arrives mid-turn is buffered and recovered after — never
+            // concurrently with a turn, since both mutate `session.history`).
+            recv = orphan_rx.recv(), if !orphan_closed => match recv {
+                Some(cmd) => {
+                    recover_orphaned_permission(runtime, cmd, &mut handled_orphan).await;
+                    continue;
+                }
+                None => {
+                    orphan_closed = true;
+                    continue;
+                }
+            },
             recv = turn_rx.recv() => match recv {
                 Some(t) => t,
                 None => break, // stdin closed or fatal error — exit the loop.

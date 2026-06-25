@@ -907,12 +907,25 @@ pub fn render_screen(
                 // (highlight-only single-select, snapshot-tested) line-by-line in
                 // a column View. Mirrors the Mcp/Hooks arm.
                 use crate::screens::model::render_model_to_string;
+                use crate::theme::TuiTheme;
                 let body = render_model_to_string(m);
                 let lines: Vec<String> = body.lines().map(str::to_string).collect();
+                // (model-header-not-bold-no-subheader) claude-code's
+                // <Text color="remember" bold>Select model</Text> then a dim
+                // sub-header line — both are ALWAYS lines 0/1 of the oracle's
+                // fixed layout. LingXi's Theme has no "remember" (blue) token;
+                // `suggestion` is the closest existing accent color.
                 element! {
                     View(flex_direction: FlexDirection::Column, padding: 1) {
-                        #(lines.into_iter().map(|line| element! {
-                            Text(content: line)
+                        #(lines.into_iter().enumerate().map(|(i, line)| {
+                            let (color, weight) = match i {
+                                0 => (state.theme.suggestion, Weight::Bold),
+                                1 => (TuiTheme::DIM, Weight::Normal),
+                                _ => (Color::Reset, Weight::Normal),
+                            };
+                            element! {
+                                Text(content: line, color: color, weight: weight)
+                            }
                         }))
                     }
                 }

@@ -6,7 +6,7 @@
 //! distinct outcome so the caller can require an exact-match against the
 //! partial window rather than the whole file.
 
-use crate::cache::{FileState, FileStateCache};
+use super::cache::{FileState, FileStateCache};
 use sha2::{Digest, Sha256};
 use std::time::SystemTime;
 

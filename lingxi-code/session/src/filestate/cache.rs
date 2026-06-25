@@ -1,7 +1,7 @@
 //! In-memory cache of recently-read file contents (spec §23.1 / B8).
 //!
 //! Edits use this cache to detect external modifications between a Read and
-//! a subsequent Edit (Read↔Edit verification, see [`crate::verify`]).
+//! a subsequent Edit (Read↔Edit verification, see [`super::verify`]).
 //!
 //! The cache is bounded by both entry count and total byte count; both
 //! counters live under the same mutex so eviction stays consistent with the
@@ -135,7 +135,7 @@ impl FileStateCache {
     }
 
     /// Clone the cache by snapshotting and replaying entries — used by
-    /// [`crate::merge::merge_caches`] and by `ForkedAgent`'s copy-on-fork path.
+    /// [`super::merge::merge_caches`] and by `ForkedAgent`'s copy-on-fork path.
     #[must_use]
     pub fn clone_cache(&self) -> Self {
         let out = Self::new(self.max_entries, self.max_bytes);

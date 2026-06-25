@@ -2,7 +2,7 @@
 //! resolves and its cached Reads need to be folded back into the parent
 //! (spec §23.4).
 
-use crate::cache::FileStateCache;
+use super::cache::FileStateCache;
 
 /// Fold every entry from `from` into `into`, keeping whichever side has the
 /// newer `timestamp`.

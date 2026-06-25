@@ -1,8 +1,9 @@
 //! In-memory file-state cache and Read↔Edit verification.
 //!
 //! See spec §23 (`FileStateCache`, `verify_file_state`, `merge_caches`).
-
-#![forbid(unsafe_code)]
+//!
+//! Folded into the `session` crate (was the standalone `filestate` crate, whose
+//! sole consumer was `session::resumer`).
 
 pub mod cache;
 pub mod merge;

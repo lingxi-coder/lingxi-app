@@ -9,10 +9,10 @@ license.workspace = true
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 engine = { path = "../engine" }
-filestate = { path = "../filestate" }
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }
 thiserror.workspace = true
+sha2 = "0.10"
 async-trait.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "sync", "rt"] }
 tracing.workspace = true

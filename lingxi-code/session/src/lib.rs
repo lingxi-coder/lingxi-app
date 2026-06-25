@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_color;
+pub mod filestate;
 pub mod jsonl;
 pub mod metadata;
 pub mod resumer;

@@ -794,6 +794,15 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                 PermissionsOutcome::AddRule(row) => {
                     st.pending_permission_add = Some(row);
                 }
+                // (PERM-1 Workspace tab) Raise the pending workspace-dir add /
+                // remove; `pump_workspace_dir` persists to Local settings +
+                // reloads. The screen stays open.
+                PermissionsOutcome::AddWorkspaceDir(dir) => {
+                    st.pending_workspace_dir = Some((dir, true));
+                }
+                PermissionsOutcome::RemoveWorkspaceDir(dir) => {
+                    st.pending_workspace_dir = Some((dir, false));
+                }
             }
         }
         Some(Screen::Model(state)) => {
@@ -2382,6 +2391,52 @@ pub async fn pump_permission_add(state: &Arc<Mutex<AppState>>) -> bool {
     true
 }
 
+/// (PERM-1 Workspace tab) Persist a pending workspace-directory add/remove to
+/// Local settings' `permissions.additionalDirectories` (OUTSIDE the lock),
+/// reload, and refresh the open `/permissions` screen — the directory
+/// counterpart of [`pump_permission_add`]/[`pump_permission_delete`]. No-op
+/// (`false`) when nothing is pending or nothing changed on disk.
+pub async fn pump_workspace_dir(state: &Arc<Mutex<AppState>>) -> bool {
+    let ((dir, add), cwd) = {
+        let mut st = state.lock().await;
+        let Some(pending) = st.pending_workspace_dir.take() else {
+            return false;
+        };
+        (pending, st.status.cwd.clone())
+    };
+    let claude_home = claude_home_dir();
+    let paths = permission::PermissionPaths {
+        claude_home: claude_home.clone(),
+        cwd: cwd.clone(),
+    };
+    // Workspace dirs are added to Local settings (same destination the
+    // add-rule path defaults to).
+    if !permission::persist_workspace_directory(
+        &dir,
+        add,
+        permission::PermissionUpdateDestination::LocalSettings,
+        &paths,
+    )
+    .await
+    .unwrap_or(false)
+    {
+        return false; // already present / absent / broken file.
+    }
+    let reloaded = crate::screens::permissions::load_permission_sections(&cwd, &claude_home);
+    let mut st = state.lock().await;
+    if let Some(crate::screens::Screen::Permissions(scr)) = st.active_screen.as_mut() {
+        let tab = scr.tab;
+        scr.mode = reloaded.mode;
+        scr.rows = reloaded.rows;
+        scr.workspace_dirs = reloaded.workspace_dirs;
+        scr.tab = tab;
+        scr.dialog_mode = crate::screens::permissions::PermissionsDialogMode::List;
+        let n = scr.active_item_count();
+        scr.selected = scr.selected.min(n.saturating_sub(1));
+    }
+    true
+}
+
 /// (BGTASK-3) Drain a pending `/tasks` `x`-stop: call the multiagent feed's
 /// `kill` for the staged task id OUTSIDE the `AppState` lock. Best-effort —
 /// a failed kill (task already finished, unsupported feed) is silently
@@ -2855,6 +2910,10 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                     needs_redraw = true;
                 }
                 if pump_permission_add(&state).await {
+                    needs_redraw = true;
+                }
+                // (PERM-1 Workspace tab) workspace-directory add/remove pump.
+                if pump_workspace_dir(&state).await {
                     needs_redraw = true;
                 }
                 // (`/copy`) Clipboard write pump. Runs UNCONDITIONALLY (no
@@ -4050,6 +4109,50 @@ mod tests {
         let state = Arc::new(Mutex::new(AppState::new(crate::state::StatusSnapshot::default())));
         let stopped = pump_task_stop(&state, &PanicsIfCalled).await;
         assert!(!stopped);
+    }
+
+    /// (PERM-1 Workspace tab) `pump_workspace_dir` persists a pending add to
+    /// the cwd's local settings, reloads, and surfaces the directory in the
+    /// open Workspace tab.
+    #[tokio::test]
+    async fn pump_workspace_dir_persists_add_and_reloads_screen() {
+        use crate::screens::permissions::{PermTab, PermissionsScreenState};
+        use crate::screens::Screen;
+
+        let tmp = std::env::temp_dir().join(format!("lx-pump-ws-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("proj")).unwrap();
+
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.status.cwd = tmp.join("proj");
+        st.active_screen = Some(Screen::Permissions(PermissionsScreenState {
+            tab: PermTab::Workspace,
+            ..PermissionsScreenState::default()
+        }));
+        st.pending_workspace_dir = Some(("/work/added".to_string(), true));
+        let state = Arc::new(Mutex::new(st));
+
+        let wrote = pump_workspace_dir(&state).await;
+        assert!(wrote, "pump must report a successful write");
+
+        // settings.local.json now carries the directory.
+        let body =
+            std::fs::read_to_string(tmp.join("proj/.claude/settings.local.json")).unwrap();
+        assert!(body.contains("/work/added"), "persisted to disk: {body}");
+
+        let g = state.lock().await;
+        assert!(g.pending_workspace_dir.is_none(), "pending cleared");
+        if let Some(Screen::Permissions(scr)) = &g.active_screen {
+            assert!(
+                scr.workspace_dirs.iter().any(|d| d == "/work/added"),
+                "reloaded screen shows the directory: {:?}",
+                scr.workspace_dirs
+            );
+        } else {
+            panic!("permissions screen must still be open");
+        }
+        drop(g);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// (Plan 3c §6.3) `pump_open_connect` opens the masked API-key screen for an

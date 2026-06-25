@@ -62,16 +62,20 @@ pub enum PermTab {
     Ask,
     /// Denied rules.
     Deny,
+    /// (PERM-1) Workspace directories (`permissions.additionalDirectories`) —
+    /// not behavior rules; lists extra writable working directories.
+    Workspace,
 }
 
 impl PermTab {
-    /// Tab cycle order (Tab): Allow → Ask → Deny → Allow.
+    /// Tab cycle order (Tab): Allow → Ask → Deny → Workspace → Allow.
     #[must_use]
     pub fn next(self) -> Self {
         match self {
             PermTab::Allow => PermTab::Ask,
             PermTab::Ask => PermTab::Deny,
-            PermTab::Deny => PermTab::Allow,
+            PermTab::Deny => PermTab::Workspace,
+            PermTab::Workspace => PermTab::Allow,
         }
     }
 
@@ -79,9 +83,10 @@ impl PermTab {
     #[must_use]
     pub fn prev(self) -> Self {
         match self {
-            PermTab::Allow => PermTab::Deny,
+            PermTab::Allow => PermTab::Workspace,
             PermTab::Ask => PermTab::Allow,
             PermTab::Deny => PermTab::Ask,
+            PermTab::Workspace => PermTab::Deny,
         }
     }
 
@@ -92,17 +97,27 @@ impl PermTab {
             PermTab::Allow => "Allow",
             PermTab::Ask => "Ask",
             PermTab::Deny => "Deny",
+            PermTab::Workspace => "Workspace",
         }
     }
 
-    /// The `behavior` label rows in this tab carry.
+    /// The `behavior` label rows in this tab carry. `None` for the Workspace
+    /// tab, which lists directories rather than behavior rules.
     #[must_use]
     fn behavior(self) -> &'static str {
         match self {
             PermTab::Allow => "Allow",
             PermTab::Ask => "Ask",
             PermTab::Deny => "Deny",
+            // Workspace has no behavior; `tab_rows` never filters by it.
+            PermTab::Workspace => "Workspace",
         }
+    }
+
+    /// `true` for the directory-listing Workspace tab (vs. the rule tabs).
+    #[must_use]
+    pub fn is_workspace(self) -> bool {
+        matches!(self, PermTab::Workspace)
     }
 
     /// Per-tab subtitle (claude-code `PermissionRuleList`).
@@ -114,6 +129,9 @@ impl PermTab {
                 "Claude Code will always ask for confirmation before using these tools."
             }
             PermTab::Deny => "Claude Code will always reject requests to use denied tools.",
+            PermTab::Workspace => {
+                "Claude Code can read and write files in these directories without asking."
+            }
         }
     }
 }
@@ -133,16 +151,36 @@ pub struct PermissionsScreenState {
     pub tab: PermTab,
     /// (PERM-1) Buffer for the new-rule text in [`PermissionsDialogMode::AddInput`].
     pub add_input: String,
+    /// (PERM-1 Workspace tab) The configured `additionalDirectories`, shown in
+    /// the Workspace tab. Loaded alongside the rule rows.
+    pub workspace_dirs: Vec<String>,
 }
 
 impl PermissionsScreenState {
-    /// The rows belonging to the active tab (filtered by behavior).
+    /// The rows belonging to the active tab (filtered by behavior). Empty on
+    /// the Workspace tab (which lists directories, not rule rows — use
+    /// [`Self::workspace_dirs`]).
     #[must_use]
     pub fn tab_rows(&self) -> Vec<&PermRuleRow> {
+        if self.tab.is_workspace() {
+            return Vec::new();
+        }
         self.rows
             .iter()
             .filter(|r| r.behavior == self.tab.behavior())
             .collect()
+    }
+
+    /// (PERM-1) Number of selectable items in the active tab: directory count
+    /// on the Workspace tab, else the filtered rule-row count. Drives the
+    /// shared Up/Down clamp + selection logic.
+    #[must_use]
+    pub fn active_item_count(&self) -> usize {
+        if self.tab.is_workspace() {
+            self.workspace_dirs.len()
+        } else {
+            self.tab_rows().len()
+        }
     }
 }
 
@@ -160,6 +198,13 @@ pub enum PermissionsOutcome {
     /// (async) to Local settings + reloads. Carries the new rule (source
     /// `"Local"`, behavior = the active tab).
     AddRule(PermRuleRow),
+    /// (PERM-1 Workspace tab) The user submitted a new workspace directory —
+    /// the caller persists it to Local settings (`additionalDirectories`) +
+    /// reloads. Carries the directory path.
+    AddWorkspaceDir(String),
+    /// (PERM-1 Workspace tab) The user confirmed removing a workspace
+    /// directory — the caller persists the removal + reloads.
+    RemoveWorkspaceDir(String),
 }
 
 /// Behavior → display label.
@@ -212,6 +257,7 @@ pub fn load_permission_sections(
     claude_home: &std::path::Path,
 ) -> PermissionsScreenState {
     let mut rows = Vec::new();
+    let mut workspace_dirs: Vec<String> = Vec::new();
     // Default mode unless a tier overrides it; local read LAST wins (matching
     // the enforcement loader's ascending-priority order).
     let mut mode = "default".to_string();
@@ -242,6 +288,14 @@ pub fn load_permission_sections(
                 });
             }
         }
+        // (PERM-1 Workspace tab) accumulate `permissions.additionalDirectories`
+        // across tiers (claude-code merges them ConcatDedup); de-dup by path.
+        for dir in permission::additional_directories_from_settings_json(&raw) {
+            let s = dir.to_string_lossy().into_owned();
+            if !workspace_dirs.contains(&s) {
+                workspace_dirs.push(s);
+            }
+        }
         if let Some(m) = permission::default_mode_from_settings_json(&raw) {
             mode = mode_wire_name(m).to_string();
         }
@@ -254,6 +308,7 @@ pub fn load_permission_sections(
         dialog_mode: PermissionsDialogMode::List,
         tab: PermTab::Allow,
         add_input: String::new(),
+        workspace_dirs,
     }
 }
 
@@ -283,24 +338,26 @@ pub fn handle_permissions_key(
                 PermissionsOutcome::Stay
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                let n = state.tab_rows().len();
+                let n = state.active_item_count();
                 if n > 0 {
                     state.selected = (state.selected + 1).min(n - 1);
                 }
                 PermissionsOutcome::Stay
             }
+            // Enter views a rule's detail; the Workspace tab has no detail
+            // view (directories carry no extra fields), so Enter is inert there.
             KeyCode::Enter => {
-                if !state.tab_rows().is_empty() {
+                if !state.tab.is_workspace() && !state.tab_rows().is_empty() {
                     state.dialog_mode = PermissionsDialogMode::Detail;
                 }
                 PermissionsOutcome::Stay
             }
-            // (PERM-1) `d` asks to delete the selected rule.
-            KeyCode::Char('d') if !state.tab_rows().is_empty() => {
+            // (PERM-1) `d` asks to delete the selected rule / workspace dir.
+            KeyCode::Char('d') if state.active_item_count() > 0 => {
                 state.dialog_mode = PermissionsDialogMode::ConfirmDelete;
                 PermissionsOutcome::Stay
             }
-            // (PERM-1) `a` opens the new-rule input for the active tab.
+            // (PERM-1) `a` opens the new-rule / new-directory input.
             KeyCode::Char('a') => {
                 state.add_input.clear();
                 state.dialog_mode = PermissionsDialogMode::AddInput;
@@ -320,15 +377,18 @@ pub fn handle_permissions_key(
                 PermissionsOutcome::Stay
             }
             KeyCode::Enter => {
-                let rule = state.add_input.trim().to_string();
+                let entry = state.add_input.trim().to_string();
                 state.add_input.clear();
                 state.dialog_mode = PermissionsDialogMode::List;
-                if rule.is_empty() {
+                if entry.is_empty() {
                     PermissionsOutcome::Stay
+                } else if state.tab.is_workspace() {
+                    // (PERM-1 Workspace tab) the typed value is a directory path.
+                    PermissionsOutcome::AddWorkspaceDir(entry)
                 } else {
                     PermissionsOutcome::AddRule(PermRuleRow {
                         behavior: state.tab.behavior().to_string(),
-                        rule,
+                        rule: entry,
                         source: "Local".to_string(),
                     })
                 }
@@ -352,7 +412,16 @@ pub fn handle_permissions_key(
             _ => PermissionsOutcome::Stay,
         },
         PermissionsDialogMode::ConfirmDelete => match key {
-            // `y` confirms → emit the rule to delete (caller persists + reloads).
+            // `y` confirms → emit the rule / workspace-dir to delete (caller
+            // persists + reloads).
+            KeyCode::Char('y' | 'Y') if state.tab.is_workspace() => {
+                let dir = state.workspace_dirs.get(state.selected).cloned();
+                state.dialog_mode = PermissionsDialogMode::List;
+                match dir {
+                    Some(d) => PermissionsOutcome::RemoveWorkspaceDir(d),
+                    None => PermissionsOutcome::Stay,
+                }
+            }
             KeyCode::Char('y' | 'Y') => match state.tab_rows().get(state.selected).copied() {
                 Some(row) => {
                     let to_delete = row.clone();
@@ -388,13 +457,30 @@ pub fn render_permissions_to_string(state: &PermissionsScreenState) -> String {
                 }
             };
             let mut out = format!(
-                "Permissions\nMode: {}\n{} {} {}\n{}\n",
+                "Permissions\nMode: {}\n{} {} {} {}\n{}\n",
                 state.mode,
                 tab_mark(PermTab::Allow),
                 tab_mark(PermTab::Ask),
                 tab_mark(PermTab::Deny),
+                tab_mark(PermTab::Workspace),
                 state.tab.subtitle(),
             );
+            if state.tab.is_workspace() {
+                // (PERM-1 Workspace tab) list the configured directories.
+                if state.workspace_dirs.is_empty() {
+                    out.push_str("No workspace directories configured.\n");
+                } else {
+                    for (i, dir) in state.workspace_dirs.iter().enumerate() {
+                        let marker = if i == state.selected { "\u{276F} " } else { "  " };
+                        out.push_str(marker);
+                        out.push_str(dir);
+                        out.push('\n');
+                    }
+                }
+                // Workspace rows have no detail view → no `Enter view` hint.
+                out.push_str("\u{2191}\u{2193} navigate \u{00B7} \u{21c6} tabs \u{00B7} a add \u{00B7} d delete \u{00B7} Esc close");
+                return out;
+            }
             let rows = state.tab_rows();
             if rows.is_empty() {
                 out.push_str(&format!("No {} rules configured.", state.tab.title().to_lowercase()));
@@ -411,11 +497,24 @@ pub fn render_permissions_to_string(state: &PermissionsScreenState) -> String {
             out.push_str("\u{2191}\u{2193} navigate \u{00B7} \u{21c6} tabs \u{00B7} Enter view \u{00B7} a add \u{00B7} d delete \u{00B7} Esc close");
             out
         }
-        // (PERM-1) Delete confirmation for the selected rule.
+        // (PERM-1) Delete confirmation for the selected rule / workspace dir.
+        PermissionsDialogMode::ConfirmDelete if state.tab.is_workspace() => {
+            match state.workspace_dirs.get(state.selected) {
+                Some(dir) => {
+                    format!("Remove workspace directory {dir}?\ny to remove \u{00B7} n to cancel")
+                }
+                None => "Permissions\n(directory no longer available)".to_string(),
+            }
+        }
         PermissionsDialogMode::ConfirmDelete => match state.tab_rows().get(state.selected).copied() {
             Some(row) => format!("Delete rule {}?\ny to delete \u{00B7} n to cancel", row.rule),
             None => "Permissions\n(rule no longer available)".to_string(),
         },
+        // (PERM-1 Workspace tab) New-directory input.
+        PermissionsDialogMode::AddInput if state.tab.is_workspace() => format!(
+            "Add workspace directory:\n{}\u{2588}\nEnter add \u{00B7} Esc cancel",
+            state.add_input,
+        ),
         // (PERM-1) New-rule input for the active tab.
         PermissionsDialogMode::AddInput => format!(
             "Add {} rule:\n{}\u{2588}\nEnter add \u{00B7} Esc cancel",
@@ -569,14 +668,11 @@ mod tests {
                 row("Allow", "Bash", "User"),
                 row("Deny", "Read(./s/**)", "Local"),
             ],
-            selected: 0,
-            dialog_mode: PermissionsDialogMode::List,
-            tab: PermTab::Allow,
-            add_input: String::new(),
+            ..PermissionsScreenState::default()
         };
         let out = render_permissions_to_string(&s);
         assert!(out.starts_with(
-            "Permissions\nMode: acceptEdits\n[Allow]  Ask   Deny \nClaude Code won't ask before using allowed tools.\n\u{276F} Bash\n"
+            "Permissions\nMode: acceptEdits\n[Allow]  Ask   Deny   Workspace \nClaude Code won't ask before using allowed tools.\n\u{276F} Bash\n"
         ), "got: {out}");
         // The Deny rule is NOT in the Allow tab.
         assert!(!out.contains("Read(./s/**)"), "got: {out}");
@@ -663,8 +759,66 @@ mod tests {
         assert_eq!(s.tab, PermTab::Deny);
         // Deny tab shows the Edit rule.
         assert!(render_permissions_to_string(&s).contains("\u{276F} Edit"));
+        // (PERM-1) Deny → Workspace → Allow completes the 4-tab cycle.
+        let _ = handle_permissions_key(&mut s, KeyCode::Tab);
+        assert_eq!(s.tab, PermTab::Workspace);
+        let _ = handle_permissions_key(&mut s, KeyCode::Tab);
+        assert_eq!(s.tab, PermTab::Allow);
+        // BackTab from Allow wraps to Workspace.
         let _ = handle_permissions_key(&mut s, KeyCode::BackTab);
-        assert_eq!(s.tab, PermTab::Ask);
+        assert_eq!(s.tab, PermTab::Workspace);
+    }
+
+    #[test]
+    fn workspace_tab_lists_directories_and_add_remove() {
+        // (PERM-1 Workspace tab)
+        let mut s = PermissionsScreenState {
+            tab: PermTab::Workspace,
+            workspace_dirs: vec!["/work/a".into(), "/work/b".into()],
+            ..PermissionsScreenState::default()
+        };
+        let out = render_permissions_to_string(&s);
+        assert!(out.contains("[Workspace]"), "4th tab in header: {out}");
+        assert!(
+            out.contains("\u{276F} /work/a\n  /work/b\n"),
+            "directories listed with selection marker: {out}"
+        );
+        assert!(out.contains("Workspace"), "subtitle present");
+
+        // `a` opens the directory input; typing + Enter emits AddWorkspaceDir.
+        assert_eq!(handle_permissions_key(&mut s, KeyCode::Char('a')), PermissionsOutcome::Stay);
+        assert_eq!(s.dialog_mode, PermissionsDialogMode::AddInput);
+        assert!(render_permissions_to_string(&s).starts_with("Add workspace directory:\n"));
+        for c in "/work/c".chars() {
+            let _ = handle_permissions_key(&mut s, KeyCode::Char(c));
+        }
+        match handle_permissions_key(&mut s, KeyCode::Enter) {
+            PermissionsOutcome::AddWorkspaceDir(d) => assert_eq!(d, "/work/c"),
+            other => panic!("expected AddWorkspaceDir, got {other:?}"),
+        }
+
+        // `d` + `y` on the selected directory emits RemoveWorkspaceDir.
+        s.selected = 1;
+        assert_eq!(handle_permissions_key(&mut s, KeyCode::Char('d')), PermissionsOutcome::Stay);
+        assert_eq!(s.dialog_mode, PermissionsDialogMode::ConfirmDelete);
+        assert!(render_permissions_to_string(&s).contains("Remove workspace directory /work/b?"));
+        match handle_permissions_key(&mut s, KeyCode::Char('y')) {
+            PermissionsOutcome::RemoveWorkspaceDir(d) => assert_eq!(d, "/work/b"),
+            other => panic!("expected RemoveWorkspaceDir, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_tab_empty_state_and_enter_is_inert() {
+        // (PERM-1 Workspace tab) no dirs → locked empty state; Enter does not
+        // open a detail view (directories have no detail).
+        let mut s = PermissionsScreenState {
+            tab: PermTab::Workspace,
+            ..PermissionsScreenState::default()
+        };
+        assert!(render_permissions_to_string(&s).contains("No workspace directories configured."));
+        let _ = handle_permissions_key(&mut s, KeyCode::Enter);
+        assert_eq!(s.dialog_mode, PermissionsDialogMode::List, "Enter inert on Workspace");
     }
 
     #[test]

@@ -908,6 +908,11 @@ pub struct AppState {
     /// (PERM-1) Set by the `/permissions` add-rule input: a new rule the user
     /// submitted. `pump_permission_add` appends it to Local settings + reloads.
     pub pending_permission_add: Option<crate::screens::permissions::PermRuleRow>,
+    /// (PERM-1 Workspace tab) Set by the `/permissions` Workspace-tab add /
+    /// remove: `(directory, add)` — `add == true` appends the directory to
+    /// Local settings' `additionalDirectories`, `false` removes it.
+    /// `pump_workspace_dir` performs the write + reload, then clears it.
+    pub pending_workspace_dir: Option<(String, bool)>,
     /// (cp-05) Cached recursive project-file listing for `@`-completion,
     /// keyed by cwd. Computed once per cwd (lazily, on first non-empty `@`
     /// partial) rather than per keystroke — `git ls-files` is fast but not
@@ -1073,6 +1078,7 @@ impl AppState {
             pending_save_color: None,
             pending_permission_delete: None,
             pending_permission_add: None,
+            pending_workspace_dir: None,
             project_file_cache: None,
             pending_task_stop: None,
             pending_copy_clipboard: None,

@@ -75,7 +75,8 @@ pub use mode::{next_permission_mode, PermissionMode};
 pub use mode_policy::is_plan_safe_tool;
 pub use path_constraints::{check_path_constraints, PathConstraintAsk};
 pub use persist::{
-    persist_permission_update, remove_permission_update, PermissionPaths, PersistError,
+    persist_permission_update, persist_workspace_directory, remove_permission_update,
+    PermissionPaths, PersistError,
 };
 pub use policy::{tool_wide_name_matches, PermissionPolicy};
 pub use policy_gate::PolicyPermissionGate;

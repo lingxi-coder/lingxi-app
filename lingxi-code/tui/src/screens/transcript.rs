@@ -100,8 +100,9 @@ pub enum TranscriptOutcome {
 }
 
 /// Reduce one key. Scroll keys (Up/Down/PageUp/PageDown/Home/End) are handled by
-/// the embedded [`ScrollState`]; Ctrl+O (the toggle) and Esc close. Everything
-/// else is inert. Pure — the caller owns closing the screen + telemetry.
+/// the embedded [`ScrollState`]; Ctrl+O (the toggle), Esc, and bare `q` all
+/// close (`q` mirrors the sibling read-only viewers `help.rs`/`skills.rs`).
+/// Everything else is inert. Pure — the caller owns closing + telemetry.
 #[must_use]
 pub fn handle_transcript_key(state: &mut TranscriptScreenState, key: KeyEvent) -> TranscriptOutcome {
     // Ctrl+O toggles the transcript OFF (the same chord that opened it).
@@ -115,6 +116,9 @@ pub fn handle_transcript_key(state: &mut TranscriptScreenState, key: KeyEvent) -
     }
     match key.code {
         KeyCode::Esc => TranscriptOutcome::Close,
+        // (review) bare `q` also closes, matching help.rs/skills.rs. Only the
+        // unmodified key dismisses — a modified `q` falls through.
+        KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => TranscriptOutcome::Close,
         _ => TranscriptOutcome::Stay,
     }
 }
@@ -188,6 +192,21 @@ mod tests {
         let mut s = TranscriptScreenState::new(&[user("hi")]);
         assert_eq!(
             handle_transcript_key(&mut s, k(KeyCode::Char('o'))),
+            TranscriptOutcome::Stay
+        );
+    }
+
+    #[test]
+    fn close_on_bare_q() {
+        // (review) bare `q` closes, matching help.rs/skills.rs; a modified `q`
+        // (Ctrl+Q) is inert.
+        let mut s = TranscriptScreenState::new(&[user("hi")]);
+        assert_eq!(
+            handle_transcript_key(&mut s, k(KeyCode::Char('q'))),
+            TranscriptOutcome::Close
+        );
+        assert_eq!(
+            handle_transcript_key(&mut s, k_ctrl(KeyCode::Char('q'))),
             TranscriptOutcome::Stay
         );
     }

@@ -127,6 +127,11 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
         TurnEvent::TurnEnded(_outcome) => {
             state.streaming = None;
             state.cancel_token = None;
+            // (SS-08) Clear the active-todo verb source on turn end, so the
+            // next turn's spinner doesn't keep showing the previous turn's
+            // `activeForm` until a fresh TodoWrite arrives (claude-code's
+            // `currentTodo` is per-turn; documented on `AppState.current_todo`).
+            state.current_todo = None;
             // (A6 batch-6 Task 2) Arm one statusline-pump pass — the TUI analog
             // of claude-code's `StatusLine.tsx` re-run on `lastAssistantMessageId`
             // (a turn just produced its final assistant message). The 300ms
@@ -481,6 +486,21 @@ mod tests {
         );
         // A non-TodoWrite tool must not clobber the active todo.
         assert_eq!(s.current_todo.as_ref().map(|t| t.subject.as_str()), Some("kept"));
+    }
+
+    #[test]
+    fn turn_ended_clears_current_todo() {
+        // (SS-08) `current_todo` is per-turn — `TurnEnded` must clear it so the
+        // next turn's spinner doesn't inherit the stale `activeForm`.
+        use crate::events::orchestrator_bridge::TurnEvent;
+        let mut s = new_state();
+        let n = Notify::new();
+        s.current_todo = Some(crate::state::CurrentTodo {
+            subject: "Build project".into(),
+            active_form: Some("Compiling".into()),
+        });
+        apply_event(&mut s, TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn), &n);
+        assert!(s.current_todo.is_none(), "TurnEnded must clear current_todo");
     }
 
     #[test]

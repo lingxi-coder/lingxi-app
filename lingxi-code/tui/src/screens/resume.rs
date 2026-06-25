@@ -276,6 +276,10 @@ pub fn handle_resume_key(state: &mut ResumeState, key: KeyEvent) -> ResumeOutcom
 pub struct ResumeScreenProps {
     /// The screen state (rows + selection). Cloned from `active_screen`.
     pub state: ResumeState,
+    /// (review) Active theme — the "Resume Session" header uses
+    /// `theme.suggestion` (claude-code `LogSelector` `color="suggestion"`),
+    /// so it recolors with the picker instead of a hardcoded blue.
+    pub theme: crate::theme::Theme,
 }
 
 /// iocraft component: bold suggestion-colored "Resume Session" header (with an
@@ -285,6 +289,7 @@ pub struct ResumeScreenProps {
 #[component]
 pub fn ResumeScreen(props: &ResumeScreenProps) -> impl Into<AnyElement<'static>> {
     let state = props.state.clone();
+    let theme = props.theme;
 
     if state.is_empty() {
         return element! {
@@ -307,8 +312,9 @@ pub fn ResumeScreen(props: &ResumeScreenProps) -> impl Into<AnyElement<'static>>
     // (resume-old-form-vs-logselector) Bold suggestion-colored "Resume Session"
     // header. The "(idx of N)" position counter is appended (dim) ONLY in list
     // mode when the list overflows the viewport — claude-code renders it under
-    // `viewMode === "list" && displayedLogs.length > visibleCount`. The index
-    // is 1-based (claude-code `focusedIndex` starts at 1).
+    // `viewMode === "list" && displayedLogs.length > visibleCount`. `selected`
+    // is 0-based (range `0..n`); the counter shows the 1-based position via
+    // `selected + 1` to match claude-code's 1-based `focusedIndex` display.
     let show_counter = !state.in_search_mode && n > VISIBLE_ROWS;
     let counter = show_counter.then(|| format!(" ({} of {})", selected + 1, n));
     // (resume-old-form-vs-logselector) `/`-activated search box, rendered only
@@ -346,7 +352,7 @@ pub fn ResumeScreen(props: &ResumeScreenProps) -> impl Into<AnyElement<'static>>
     element! {
         View(flex_direction: FlexDirection::Column, padding: 1) {
             View(flex_direction: FlexDirection::Row) {
-                Text(content: "Resume Session".to_string(), weight: Weight::Bold, color: Color::Blue)
+                Text(content: "Resume Session".to_string(), weight: Weight::Bold, color: theme.suggestion)
                 #(counter.map(|c| element! {
                     Text(content: c, color: Color::DarkGrey)
                 }))

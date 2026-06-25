@@ -791,7 +791,7 @@ pub fn render_screen(
             }
             Screen::Resume(rs) => {
                 use crate::screens::resume::ResumeScreen;
-                element! { ResumeScreen(state: rs.clone()) }.into_any()
+                element! { ResumeScreen(state: rs.clone(), theme: state.theme) }.into_any()
             }
             Screen::Settings(ss) => {
                 use crate::screens::settings::SettingsScreen;

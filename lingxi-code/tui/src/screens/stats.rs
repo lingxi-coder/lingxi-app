@@ -1054,7 +1054,11 @@ fn format_y_axis_label(value: f64) -> String {
     let label = if value >= 1_000_000.0 {
         format!("{:.1}M", value / 1_000_000.0)
     } else if value >= 1_000.0 {
-        format!("{:.0}k", value / 1_000.0)
+        // (review) JS `.toFixed(0)` rounds half AWAY from zero; Rust's `{:.0}`
+        // rounds half to even. They diverge at `.5k` (e.g. 2500 → JS "3k" vs
+        // Rust "2k"). Match JS for these positive values via `(x + 0.5).floor()`.
+        let k = (value / 1_000.0 + 0.5).floor() as i64;
+        format!("{k}k")
     } else {
         format!("{value:.0}")
     };
@@ -2016,8 +2020,9 @@ mod tests {
         // <1k → integer, padStart(6).
         assert_eq!(format_y_axis_label(0.0), "     0");
         assert_eq!(format_y_axis_label(42.0), "    42");
-        // 1k..1M → {x/1k:.0}k (toFixed(0)).
-        assert_eq!(format_y_axis_label(1_500.0), "    2k"); // 1.5 -> round-half-even toFixed(0)=2
+        // 1k..1M → {x/1k:.0}k (JS toFixed(0) = round half AWAY from zero).
+        assert_eq!(format_y_axis_label(1_500.0), "    2k"); // 1.5 → 2
+        assert_eq!(format_y_axis_label(2_500.0), "    3k"); // (review) 2.5 → 3 (away), not 2 (banker's)
         assert_eq!(format_y_axis_label(12_000.0), "   12k");
         // >=1M → {x/1M:.1}M.
         assert_eq!(format_y_axis_label(2_000_000.0), "  2.0M");

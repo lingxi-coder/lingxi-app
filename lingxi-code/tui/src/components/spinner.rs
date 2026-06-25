@@ -440,6 +440,12 @@ pub struct SpinnerWithVerbProps {
     /// (`Spinner.tsx:169`: `overrideMessage ?? currentTodo?.activeForm ??
     /// currentTodo?.subject ?? randomVerb`). `None` → the random pool verb.
     pub current_todo: Option<crate::state::CurrentTodo>,
+    /// (SS-08) Highest-precedence verb override (claude-code `overrideMessage`,
+    /// `Spinner.tsx:169` — wins over the todo and the random verb). LingXi has
+    /// no backend source feeding this yet, so it is always `None` in practice;
+    /// the field exists so the `override ?? todo ?? random` resolution order is
+    /// byte-faithful and ready when a source is wired.
+    pub override_message: Option<String>,
 }
 
 /// Renders one line: `"{frame} {verb}…"`. While mounted, advances frames
@@ -487,11 +493,15 @@ pub fn SpinnerWithVerb(
         verb.set(v);
     }
 
-    // (SS-08) `leaderVerb` resolution (claude-code `Spinner.tsx:169`): the
-    // active todo's `activeForm ?? subject` wins over the random pool verb.
-    // When there is no current todo, fall back to the mount-time pool verb
-    // (`verb_override` for tests, else the random index).
-    let verb_text = todo_leader_verb(props.current_todo.as_ref())
+    // (SS-08) `leaderVerb` resolution (claude-code `Spinner.tsx:169`):
+    // `overrideMessage ?? currentTodo.activeForm ?? currentTodo.subject ??
+    // randomVerb`. The explicit override wins, then the active todo's
+    // `activeForm ?? subject`, then the mount-time pool verb (`verb_override`
+    // for tests, else the random index).
+    let verb_text = props
+        .override_message
+        .clone()
+        .or_else(|| todo_leader_verb(props.current_todo.as_ref()))
         .unwrap_or_else(|| pool_verb_at_index(verb.get()).to_string());
 
     let line = format!("{} {}…", frame_at_index(frame.get()), verb_text);

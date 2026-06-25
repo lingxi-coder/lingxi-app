@@ -404,7 +404,11 @@ pub fn render_model_to_string(state: &ModelScreenState) -> String {
                 // `<Box paddingLeft={2}><Text color="inactive">{description}</Text>`).
                 // The component layer dims it; this oracle carries the 2-space
                 // indent + text. Empty/absent descriptions emit no extra line.
+                // A catalog-sourced description could carry a newline; clamp to
+                // its first line so a multi-line value can't break the 2-space
+                // indent / column alignment of the following rows.
                 if let Some(desc) = row.description.as_deref() {
+                    let desc = desc.lines().next().unwrap_or("");
                     if !desc.is_empty() {
                         out.push_str("  ");
                         out.push_str(desc);
@@ -619,6 +623,27 @@ mod render_tests {
         // 2-space-indented description; it's the next row/header/blank line).
         assert!(out.contains("  Mystery  \u{00B7} DeepSeek\n"), "{out}");
         assert!(!out.contains("  Mystery  \u{00B7} DeepSeek\n  "), "{out}");
+    }
+
+    #[test]
+    fn multiline_catalog_description_clamps_to_first_line() {
+        // (review) A catalog description carrying a newline must not break the
+        // 2-space-indent contract — only its first line is rendered.
+        let rows = build_model_entries(
+            vec![],
+            vec![traits::orchestrator::ModelListing {
+                display_model: "Multi".to_string(),
+                request_model: "multi-1".to_string(),
+                provider_id: "deepseek".to_string(),
+                provider_label: "DeepSeek".to_string(),
+                description: Some("First line\nSecond line".to_string()),
+            }],
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+        );
+        let out = render_model_to_string(&ModelScreenState::new(rows, vec![], "x".to_string()));
+        assert!(out.contains("\n  First line\n"), "first line only, got: {out}");
+        assert!(!out.contains("Second line"), "second line dropped, got: {out}");
     }
 
     #[test]

@@ -248,6 +248,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         disable_slash_commands: false,
         // The Electron bridge has no --add-dir flag.
         add_dir: Vec::new(),
+        // The Electron bridge has no --mcp-config flag.
+        cli_mcp_servers: Vec::new(),
     }
 }
 
@@ -529,6 +531,7 @@ mod tests {
             session_id_override: None,
             disable_slash_commands: false,
             add_dir: Vec::new(),
+            cli_mcp_servers: Vec::new(),
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.

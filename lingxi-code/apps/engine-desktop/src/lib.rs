@@ -1041,6 +1041,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     session_id_override: None,
 ///     disable_slash_commands: false,
 ///     add_dir: Vec::new(),
+///     cli_mcp_servers: Vec::new(),
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -1187,6 +1188,13 @@ pub struct DesktopConfig {
     /// `permissions.additionalDirectories` entry, so file tools (Read/Edit/Bash)
     /// may operate outside `cwd`. Empty (the default) ⟶ no extra dirs.
     pub add_dir: Vec<std::path::PathBuf>,
+    /// CLI `--mcp-config <configs...>` servers (claude-code: "Load MCP servers
+    /// from JSON files or strings"). The host parses each file/inline-JSON entry
+    /// into server configs; `build()` merges them OVER the discovered
+    /// project/global servers (CLI wins on name collision). With
+    /// `--strict-mcp-config` the host nulls the discovered paths, so these are
+    /// the ONLY servers. Empty (the default) ⟶ none.
+    pub cli_mcp_servers: Vec<mcp::McpServerConfig>,
 }
 
 impl std::fmt::Debug for DesktopConfig {
@@ -1240,6 +1248,7 @@ impl std::fmt::Debug for DesktopConfig {
             .field("session_id_override", &self.session_id_override)
             .field("disable_slash_commands", &self.disable_slash_commands)
             .field("add_dir", &self.add_dir)
+            .field("cli_mcp_servers", &self.cli_mcp_servers)
             .finish()
     }
 }
@@ -1271,6 +1280,7 @@ impl Default for DesktopConfig {
             session_id_override: None,
             disable_slash_commands: false,
             add_dir: Vec::new(),
+            cli_mcp_servers: Vec::new(),
         }
     }
 }
@@ -2618,7 +2628,18 @@ pub async fn build(
     // project `.mcp.json` (mcp_paths[0]), user + local both inside the global
     // config `~/.claude.json` (mcp_paths[1]); local is keyed by the canonical
     // project key for `cwd`.
-    let mcp_configs = mcp::load_mcp_servers(&project_mcp_path, &global_mcp_path, &cwd);
+    let mut mcp_configs = mcp::load_mcp_servers(&project_mcp_path, &global_mcp_path, &cwd);
+    // CLI `--mcp-config` servers: highest precedence — override a discovered
+    // server of the same name, else append. (With `--strict-mcp-config` the host
+    // nulled the discovered paths above, so `mcp_configs` starts empty and these
+    // become the only servers.)
+    for c in &cfg.cli_mcp_servers {
+        if let Some(existing) = mcp_configs.iter_mut().find(|x| x.name == c.name) {
+            *existing = c.clone();
+        } else {
+            mcp_configs.push(c.clone());
+        }
+    }
     // Build one concrete `PosixMcpTransport` and hand it to the registry as
     // BOTH the `McpTransport` (discovery) and the `RawConnectionProvider`
     // (live-client bridge), so a connected server yields a working `McpClient`
@@ -4825,6 +4846,7 @@ mod tests {
             session_id_override: None,
             disable_slash_commands: false,
             add_dir: Vec::new(),
+            cli_mcp_servers: Vec::new(),
         };
         (tmp, cfg)
     }

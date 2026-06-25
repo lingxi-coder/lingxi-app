@@ -201,6 +201,42 @@ pub(crate) fn setting_source_flags(setting_sources: Option<&str>) -> (bool, bool
     }
 }
 
+/// Parse `--mcp-config <configs...>` entries into MCP server configs. Each
+/// entry is either an existing JSON file path (read from disk) or an inline
+/// JSON string; both accept the `{ "mcpServers": {...} }` envelope or a bare
+/// server map (claude-code's `parsed.mcpServers || parsed`). Malformed entries
+/// are reported to stderr and skipped (non-fatal). Returns `[]` when the flag
+/// is absent.
+#[must_use]
+pub(crate) fn parse_cli_mcp_servers(entries: Option<&Vec<String>>) -> Vec<mcp::McpServerConfig> {
+    let mut out = Vec::new();
+    let Some(entries) = entries else { return out };
+    for entry in entries {
+        let content = if std::path::Path::new(entry).is_file() {
+            match std::fs::read_to_string(entry) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("lingxi-cli: cannot read --mcp-config file {entry}: {e}");
+                    continue;
+                }
+            }
+        } else {
+            entry.clone()
+        };
+        if content.trim().is_empty() {
+            continue;
+        }
+        // CLI-provided servers carry Project scope (the approval policy's
+        // middle tier); precedence over discovered servers is enforced by the
+        // name-merge in `engine_desktop::build`, not the scope.
+        match mcp::json_config::parse_mcp_json_string(&content, mcp::ConfigScope::Project) {
+            Ok(cfgs) => out.extend(cfgs),
+            Err(e) => eprintln!("lingxi-cli: invalid --mcp-config entry: {e}"),
+        }
+    }
+    out
+}
+
 /// Load the merged settings `providers` object, honoring `--setting-sources`.
 ///
 /// Resolves the project dir from the *current* working directory — the process
@@ -300,25 +336,21 @@ pub(crate) fn resolve_desktop_config(
         .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
 
     // `--strict-mcp-config` (claude-code main.tsx:1586): "Only use MCP servers
-    // from --mcp-config, ignoring all other MCP configurations." `build()` reads
-    // exactly `mcp_paths[0]` (project) + `[1]` (global), so we REPLACE the
-    // discovered project/global `.mcp.json` paths with the `--mcp-config` FILE
-    // paths (the first two), or with a nonexistent path when none are given — so
-    // NO ambient servers load (full isolation). (Inline-JSON `--mcp-config`
-    // values are not yet wired — `build()` takes file paths, not JSON strings.)
+    // from --mcp-config, ignoring all other MCP configurations." Null the
+    // discovered project/global `.mcp.json` paths so `build()` loads NO ambient
+    // servers; the `--mcp-config` servers (parsed into `cli_mcp_servers` below
+    // and merged in `build()`) become the only source.
     if argv.strict_mcp_config {
         let nonexistent = std::path::PathBuf::from("/dev/null");
-        let files: Vec<std::path::PathBuf> = argv
-            .mcp_config
-            .as_deref()
-            .unwrap_or(&[])
-            .iter()
-            .map(std::path::PathBuf::from)
-            .filter(|p| p.is_file())
-            .collect();
-        project_mcp_path = files.first().cloned().unwrap_or_else(|| nonexistent.clone());
-        global_mcp_path = files.get(1).cloned().unwrap_or(nonexistent);
+        project_mcp_path = nonexistent.clone();
+        global_mcp_path = nonexistent;
     }
+
+    // `--mcp-config <configs...>` (claude-code: "Load MCP servers from JSON files
+    // or strings"): parse each entry — an existing file path is read; anything
+    // else is treated as an inline JSON string — into server configs that
+    // `build()` merges OVER the discovered servers (CLI wins on name collision).
+    let cli_mcp_servers = parse_cli_mcp_servers(argv.mcp_config.as_ref());
 
     // `--setting-sources <user,project,local>`: gate which file setting layers
     // the provider/routing/claudeMdExcludes loaders read (env + defaults always
@@ -436,6 +468,9 @@ pub(crate) fn resolve_desktop_config(
         // CLI `--add-dir <directories...>`: extra tool-access directories,
         // unioned into the permission working-dir set in `build()`.
         add_dir: argv.add_dir.clone().unwrap_or_default(),
+        // CLI `--mcp-config <configs...>` servers (parsed above), merged over the
+        // discovered servers in `build()`.
+        cli_mcp_servers,
     }
     // NOTE: claude-code's `--add-dir` is "Additional directories to allow TOOL
     // ACCESS to" (NOT CLAUDE.md search — an earlier comment here misread it). It

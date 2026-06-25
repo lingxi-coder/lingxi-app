@@ -68,6 +68,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         session_id_override: None,
         disable_slash_commands: false,
         add_dir: Vec::new(),
+        cli_mcp_servers: Vec::new(),
     };
     (tmp, cfg)
 }

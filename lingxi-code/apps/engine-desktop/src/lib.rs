@@ -1272,9 +1272,10 @@ pub async fn desktop_command_registry(
     // Plan 3c: wire `/connect` over the engine-supplied credential-writer +
     // Copilot device-flow + ChatGPT OAuth seams.
     command_core::register::register_core_connect(&mut reg, connect_writer, connect_copilot, connect_chatgpt);
-    // Desktop-only command handlers (no-op in M8 — the names remain
-    // command-core unimplemented stubs until future milestones fill them).
-    command_desktop::register(&mut reg);
+    // Desktop-only command handlers: currently none — the desktop command names
+    // (/commit, /diff, /review, /chrome, /ide, …) are served as command-core
+    // unimplemented stubs. Register real desktop handlers on `reg` directly here
+    // when a future milestone implements them.
     // SLASH.2: discover + register custom `.claude/commands/**.md` commands
     // (project up to git-root/home, plus user + managed layers), the same
     // layering claude-code's getCommands uses. Registered AFTER builtins so a

@@ -201,6 +201,9 @@ pub fn mobile_command_registry(
     register_core_batch_2(&mut reg, handle.clone(), auth);
     register_core_batch_4(&mut reg, handle.clone());
     register_core_batch_5(&mut reg, handle);
-    command_mobile::register(&mut reg);
+    // Mobile-only command handlers: currently none — the mobile command names
+    // (/mobile, /voice, /share, /camera) are served as command-core
+    // unimplemented stubs. Register real mobile handlers on `reg` directly here
+    // when implemented.
     reg
 }

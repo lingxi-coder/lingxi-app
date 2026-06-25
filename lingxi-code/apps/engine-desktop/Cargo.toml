@@ -15,7 +15,6 @@ tool-api = { path = "../../tool-api" }
 traits = { path = "../../traits" }
 command-api = { path = "../../command-api" }
 command-core = { path = "../../commands/core" }
-command-desktop = { path = "../../commands/desktop" }
 # Live cron scheduler (tick loop). `tool-cron` only persists descriptors; this
 # crate runs them (see SKILLLIST.1-adjacent cron wiring in lib.rs `build`).
 cron = { path = "../../cron" }

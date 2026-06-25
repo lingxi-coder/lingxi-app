@@ -6,10 +6,12 @@
 //! table, the `/help` + list renderers, and the per-name unimplemented stub
 //! handler).
 //!
-//! The command *handlers* live in the impl crates `command-core`
-//! (cross-platform core), `command-desktop`, and `command-mobile`, each
-//! exposing a `register()` entry point the composition roots call. This mirrors
-//! the `tool-api` / `tool-*` and `skill-api` / `skill-builtin` splits.
+//! The command *handlers* live in the impl crate `command-core`
+//! (cross-platform core), exposing a `register()` entry point the composition
+//! roots call. Platform-specific desktop/mobile command handlers, when added,
+//! are registered directly in the respective composition root (engine-desktop /
+//! engine-mobile). This mirrors the `tool-api` / `tool-*` and `skill-api` /
+//! `skill-builtin` splits.
 //!
 //! See spec §19 for the broader slash-command design.
 

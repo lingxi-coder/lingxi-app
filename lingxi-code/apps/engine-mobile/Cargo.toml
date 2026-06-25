@@ -182,7 +182,6 @@ tool-git-mobile = { path = "../../tools/git-mobile" }
 # Skill + command sets.
 skill-builtin = { path = "../../skills/builtin" }
 command-core = { path = "../../commands/core" }
-command-mobile = { path = "../../commands/mobile" }
 
 # Platform impls are target-gated: only linked when building for the device.
 [target.'cfg(target_os = "ios")'.dependencies]

@@ -12,7 +12,7 @@
 //!    panic.
 //!
 //! The auth header echoed by IDE plugins is exactly
-//! `X-Claude-Code-Ide-Authorization` — NOT `Authorization: Bearer …`.
+//! `X-LingXi-Ide-Authorization` — NOT `Authorization: Bearer …`.
 
 use crate::lockfile::{IdeLockfile, LockfileGuard};
 use crate::mcp_endpoint::McpEndpoint;
@@ -92,7 +92,7 @@ impl IdeBridge {
         &self.lockfile_path
     }
 
-    /// Auth token clients must echo in `X-Claude-Code-Ide-Authorization`.
+    /// Auth token clients must echo in `X-LingXi-Ide-Authorization`.
     #[must_use]
     pub fn auth_token(&self) -> &str {
         &self.auth_token

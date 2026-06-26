@@ -466,7 +466,7 @@ async fn connect(
         .header("sec-websocket-version", "13")
         .header("sec-websocket-key", generate_key())
         .header("sec-websocket-protocol", "mcp")
-        .header("x-claude-code-ide-authorization", E2E_TOKEN)
+        .header("x-lingxi-ide-authorization", E2E_TOKEN)
         .body(())
         .unwrap();
     let (ws, response) = tokio_tungstenite::connect_async(req)

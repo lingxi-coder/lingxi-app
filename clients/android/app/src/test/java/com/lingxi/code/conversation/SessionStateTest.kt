@@ -79,7 +79,7 @@ class SessionStateTest {
             EngineSessionState(),
             ClientEvent.SessionList(
                 sessions = listOf(
-                    dto("u1", "重装 Claude Code", "2024-06-15T11:30:00Z", 8),
+                    dto("u1", "重装 LingXi", "2024-06-15T11:30:00Z", 8),
                     dto("u2", "客户邮件模板", "2024-06-13T12:00:00Z", 4),
                 ),
             ),
@@ -87,7 +87,7 @@ class SessionStateTest {
         )
         assertTrue(next.hasSessions)
         assertEquals(listOf("u1", "u2"), next.rows.map { it.uuid })
-        assertEquals(listOf("重装 Claude Code", "客户邮件模板"), next.rows.map { it.title })
+        assertEquals(listOf("重装 LingXi", "客户邮件模板"), next.rows.map { it.title })
         assertEquals(listOf(8, 4), next.rows.map { it.messageCount })
         // 30 minutes ago → "30 分钟前"; ~2 days ago → "2 天前".
         assertEquals("30 分钟前", next.rows[0].relativeTime)

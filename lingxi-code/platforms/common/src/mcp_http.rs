@@ -9,7 +9,7 @@
 //! - `User-Agent: claude-code/<CARGO_PKG_VERSION>` (matches `getMCPUserAgent()`
 //!   shape from `utils/http.ts:37-50`).
 //! - When `auth_token` is `Some`, POST carries
-//!   `X-Claude-Code-Ide-Authorization: <token>` verbatim (no `Bearer ` prefix).
+//!   `X-LingXi-Ide-Authorization: <token>` verbatim (no `Bearer ` prefix).
 //! - Response body is EITHER a single `application/json` frame OR a
 //!   `text/event-stream` body of zero-or-more frames; content-type selects.
 
@@ -70,7 +70,7 @@ where
         let v = HeaderValue::try_from(token)
             .map_err(|e| HttpConnectError::InvalidAuth(e.to_string()))?;
         h.insert(
-            HeaderName::from_static("x-claude-code-ide-authorization"),
+            HeaderName::from_static("x-lingxi-ide-authorization"),
             v,
         );
     }

@@ -103,7 +103,7 @@ object MockData {
     )
 
     val chats: List<Chat> = listOf(
-        Chat("c1", "work", "重装 Claude Code", "今天", "nvm 残留清理完成", "2 小时前"),
+        Chat("c1", "work", "重装 LingXi", "今天", "nvm 残留清理完成", "2 小时前"),
         Chat("c2", "work", "客户邮件回复模板", "昨天", "已生成 4 套话术", "昨天"),
         Chat("c3", "work", "上海差旅规划", "本周", "机酒路线", "周二"),
     )

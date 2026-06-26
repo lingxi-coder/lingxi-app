@@ -6,7 +6,7 @@
 //!
 //! 1. [`lockfile::IdeLockfile`] writes the lockfile carrying the auth token
 //!    an IDE plugin must echo back in the
-//!    `X-Claude-Code-Ide-Authorization` header.
+//!    `X-LingXi-Ide-Authorization` header.
 //! 2. [`LockfileGuard`] removes that file on shutdown AND on panic.
 //! 3. [`mcp_endpoint::McpEndpoint`] is the TCP+WebSocket server with an
 //!    auth-gating handshake (401 on missing/wrong token).

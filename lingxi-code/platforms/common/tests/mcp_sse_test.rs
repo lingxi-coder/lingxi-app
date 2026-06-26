@@ -1,7 +1,7 @@
 //! Verifies `connect_sse` wire format against a real HTTP server:
 //! - GET request bears `Accept: text/event-stream`.
 //! - When `auth_token` is supplied, GET also bears
-//!   `X-Claude-Code-Ide-Authorization: <token>`.
+//!   `X-LingXi-Ide-Authorization: <token>`.
 //! - Outbound JSON-RPC requests POST to the same URL with
 //!   `Content-Type: application/json`.
 //! - SSE event line `data: {json}\n\n` is parsed into a JSON-RPC inbound
@@ -140,17 +140,17 @@ async fn connect_sse_passes_auth_header_when_token_supplied() {
 
     let get_headers = state.captured_get_headers.lock().await.clone();
     let auth = get_headers
-        .get("x-claude-code-ide-authorization")
+        .get("x-lingxi-ide-authorization")
         .and_then(|v| v.to_str().ok());
     assert_eq!(
         auth,
         Some("abc123def456abc123def456abc12345"),
-        "GET must carry X-Claude-Code-Ide-Authorization header verbatim"
+        "GET must carry X-LingXi-Ide-Authorization header verbatim"
     );
 
     let post_headers = state.captured_post_headers.lock().await.clone();
     let auth_post = post_headers
-        .get("x-claude-code-ide-authorization")
+        .get("x-lingxi-ide-authorization")
         .and_then(|v| v.to_str().ok());
     assert_eq!(
         auth_post,

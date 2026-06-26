@@ -94,7 +94,7 @@ async fn connect_http_includes_ide_auth_header_when_provided() {
 
     let headers = state.captured_headers.lock().await.clone();
     let auth = headers
-        .get("x-claude-code-ide-authorization")
+        .get("x-lingxi-ide-authorization")
         .and_then(|v| v.to_str().ok());
     assert_eq!(auth, Some("deadbeefdeadbeefdeadbeefdeadbeef"));
 }

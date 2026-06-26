@@ -41,8 +41,8 @@ class DrawerSearchTest {
 
     @Test
     fun chats_matchOnTitle_caseInsensitive() {
-        // "重装 Claude Code" — match the embedded "claude" (lowercased).
-        val out = filterChats(chats, "claude")
+        // "重装 LingXi" — match the embedded "lingxi" (lowercased).
+        val out = filterChats(chats, "lingxi")
         assertEquals(1, out.size)
         assertEquals("c1", out.first().id)
     }
@@ -111,7 +111,7 @@ class DrawerSearchTest {
     // --- engine sessions (the REAL drawer catalog) -------------------------
 
     private val sessions = listOf(
-        SessionRow(uuid = "u1", title = "重装 Claude Code", messageCount = 8, relativeTime = "2 小时前"),
+        SessionRow(uuid = "u1", title = "重装 LingXi", messageCount = 8, relativeTime = "2 小时前"),
         SessionRow(uuid = "u2", title = "客户邮件回复模板", messageCount = 4, relativeTime = "昨天"),
         SessionRow(uuid = "u3", title = "上海差旅规划", messageCount = 17, relativeTime = "5月3日"),
     )

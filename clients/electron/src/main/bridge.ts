@@ -12,7 +12,7 @@
  *      `ANTHROPIC_API_KEY` / `LINGXI_API_BASE_URL` pass through from the
  *      environment; `--cwd` / `--model` come from env overrides (the key is
  *      NEVER read into a string we log — it rides inherited `env` untouched).
- *   2. Wait for the F2-04 discovery lockfile to appear under `~/.claude/bridge`
+ *   2. Wait for the F2-04 discovery lockfile to appear under `~/.lingxi/bridge`
  *      (`<port>.lock`). We snapshot the pre-existing lockfiles first and accept
  *      the first NEW one the child writes, so a stale lockfile from a previous
  *      run never wins the race.
@@ -78,7 +78,7 @@ export interface BridgeManagerOptions {
   cwd?: string;
   /** Override the default model id (else `LINGXI_MODEL`, omitted if unset). */
   model?: string;
-  /** Directory to watch for the discovery lockfile (else `~/.claude/bridge`). */
+  /** Directory to watch for the discovery lockfile (else `~/.lingxi/bridge`). */
   bridgeDir?: string;
   /** How long to wait for the child to publish its lockfile (default 15_000ms). */
   lockfileTimeoutMs?: number;

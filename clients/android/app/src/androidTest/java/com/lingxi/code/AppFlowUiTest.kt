@@ -46,7 +46,7 @@ class AppFlowUiTest {
         openDrawer()
 
         // Default tab is 对话: the seeded "work" chat is visible.
-        rule.onNodeWithText("重装 Claude Code").assertIsDisplayed()
+        rule.onNodeWithText("重装 LingXi").assertIsDisplayed()
 
         // Switch to 项目 → a project name from the mock data appears.
         rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Projects.key)).performClick()
@@ -61,7 +61,7 @@ class AppFlowUiTest {
         // Back to 对话 → the chat is shown again.
         rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Chats.key)).performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("重装 Claude Code").assertIsDisplayed()
+        rule.onNodeWithText("重装 LingXi").assertIsDisplayed()
     }
 
     // --- 2. settings push-nav + system back -------------------------------

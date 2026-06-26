@@ -3,10 +3,10 @@
  * `bridge::lockfile` writer (`bridge/src/lockfile.rs`).
  *
  * The bridge-server writes a JSON discovery file at
- * `~/.claude/bridge/<port>.lock` (F2-04) whose body matches claude-code's
+ * `~/.lingxi/bridge/<port>.lock` (F2-04) whose body matches claude-code's
  * `LockfileJsonContent`: camelCase keys, the port encoded in the FILENAME (not
  * the body), and a 32-char hex `authToken` the client presents in the
- * `X-Claude-Code-Ide-Authorization` WS upgrade header.
+ * `X-LingXi-Ide-Authorization` WS upgrade header.
  */
 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -30,9 +30,9 @@ export interface Lockfile {
   body: LockfileBody;
 }
 
-/** The default `~/.claude/bridge` discovery directory the bridge-server writes to. */
+/** The default `~/.lingxi/bridge` discovery directory the bridge-server writes to. */
 export function defaultBridgeDir(): string {
-  return join(homedir(), '.claude', 'bridge');
+  return join(homedir(), '.lingxi', 'bridge');
 }
 
 /** Recover the port encoded in a `<port>.lock` filename, or `null` if malformed. */
@@ -67,7 +67,7 @@ export function readLockfile(path: string): Lockfile {
 
 /**
  * Discover the most-recently-modified `<port>.lock` in `dir` (defaults to
- * `~/.claude/bridge`). Mirrors the Rust `discover_latest`: skips `.tmp` shadows
+ * `~/.lingxi/bridge`). Mirrors the Rust `discover_latest`: skips `.tmp` shadows
  * and non-`.lock` files, and returns `null` when nothing parses.
  */
 export function discoverLatestLockfile(dir: string = defaultBridgeDir()): Lockfile | null {

@@ -8,7 +8,7 @@
  *
  *   1. {@link BridgeClient.connect} opens `ws://127.0.0.1:<port>/mcp` with the
  *      `mcp` subprotocol and the lockfile `authToken` in the
- *      `X-Claude-Code-Ide-Authorization` header. The endpoint rejects a
+ *      `X-LingXi-Ide-Authorization` header. The endpoint rejects a
  *      missing/mismatched token with HTTP 401 BEFORE the upgrade completes — so
  *      the token IS the auth (there is no separate post-handshake auth frame).
  *   2. It sends a `Frame::Request { method: "hello", params: ClientHello }` and
@@ -47,13 +47,13 @@ import { versionCompatible } from './version.js';
 /** Literal WS subprotocol the endpoint echoes back on a successful upgrade. */
 const WS_SUBPROTOCOL = 'mcp';
 /** Auth header the endpoint validates against the lockfile `authToken`. */
-const AUTH_HEADER_NAME = 'X-Claude-Code-Ide-Authorization';
+const AUTH_HEADER_NAME = 'X-LingXi-Ide-Authorization';
 
 /** Options for constructing a {@link BridgeClient}. */
 export interface BridgeClientOptions {
   /**
    * Path to a specific `<port>.lock` discovery file. If omitted, the newest
-   * lockfile in `lockfileDir` (or `~/.claude/bridge`) is auto-discovered.
+   * lockfile in `lockfileDir` (or `~/.lingxi/bridge`) is auto-discovered.
    */
   lockfilePath?: string;
   /** Directory to scan for lockfiles when `lockfilePath` is omitted. */
@@ -135,7 +135,7 @@ export class BridgeClient extends EventEmitter {
 
   /**
    * Resolve the lockfile this client will connect through — either the explicit
-   * `lockfilePath`, or the newest lockfile under `lockfileDir`/`~/.claude/bridge`.
+   * `lockfilePath`, or the newest lockfile under `lockfileDir`/`~/.lingxi/bridge`.
    * Throws if none is found.
    */
   resolveLockfile(): Lockfile {
@@ -144,7 +144,7 @@ export class BridgeClient extends EventEmitter {
     }
     const found = discoverLatestLockfile(this.opts.lockfileDir);
     if (!found) {
-      const where = this.opts.lockfileDir ?? '~/.claude/bridge';
+      const where = this.opts.lockfileDir ?? '~/.lingxi/bridge';
       throw new Error(`no bridge lockfile found under ${where}`);
     }
     return found;

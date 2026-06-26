@@ -5,7 +5,7 @@
 //! Wire contract (LITERAL):
 //! - GET `Accept: text/event-stream`
 //! - When `auth_token` is `Some`, both GET and POST carry
-//!   `X-Claude-Code-Ide-Authorization: <token>` verbatim (no `Bearer ` prefix).
+//!   `X-LingXi-Ide-Authorization: <token>` verbatim (no `Bearer ` prefix).
 //! - POST goes to the SAME URL as the GET. `Content-Type: application/json`.
 //! - Each SSE event is a single JSON-RPC `Message`: `data: {...}\n\n`.
 
@@ -22,7 +22,7 @@ use traits::mcp::McpError;
 /// Header name used by claude-code IDE plugins for the auth token.
 /// LITERAL — must match claude-code byte-for-byte.
 /// Source: `claude-code/src/services/mcp/client.ts:713`.
-pub const IDE_AUTH_HEADER: &str = "X-Claude-Code-Ide-Authorization";
+pub const IDE_AUTH_HEADER: &str = "X-LingXi-Ide-Authorization";
 
 /// `User-Agent` value emitted by this client.
 /// Matches claude-code's `getMCPUserAgent()` shape: `claude-code/<version>`.
@@ -67,7 +67,7 @@ where
         let v = HeaderValue::try_from(token)
             .map_err(|e| SseConnectError::InvalidAuth(e.to_string()))?;
         h.insert(
-            HeaderName::from_static("x-claude-code-ide-authorization"),
+            HeaderName::from_static("x-lingxi-ide-authorization"),
             v,
         );
     }
@@ -84,7 +84,7 @@ where
 /// Open an MCP SSE connection.
 ///
 /// `url` is the URL to GET (for events) AND to POST (for outbound requests).
-/// `auth_token`, if `Some`, becomes the `X-Claude-Code-Ide-Authorization`
+/// `auth_token`, if `Some`, becomes the `X-LingXi-Ide-Authorization`
 /// header on BOTH the GET and the POST. `extra_headers` are applied to both
 /// directions verbatim. It is generic over the map type so both an unordered
 /// `HashMap` and the insertion-ordered [`traits::McpHeaders`] (`IndexMap`)

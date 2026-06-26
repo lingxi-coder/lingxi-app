@@ -1,6 +1,6 @@
 //! Integration test: connect to an in-process axum WebSocket server via
 //! `connect_ws`, roundtrip a JSON-RPC `ping`, and assert the server saw the
-//! `X-Claude-Code-Ide-Authorization` header *and* the `mcp` subprotocol
+//! `X-LingXi-Ide-Authorization` header *and* the `mcp` subprotocol
 //! LITERALLY (no `Bearer ` prefix, exact subprotocol name).
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -112,8 +112,8 @@ async fn ws_roundtrips_and_sends_auth_header() {
         .clone()
         .expect("server captured no headers");
     let token = headers
-        .get("X-Claude-Code-Ide-Authorization")
-        .expect("X-Claude-Code-Ide-Authorization header not received by server");
+        .get("X-LingXi-Ide-Authorization")
+        .expect("X-LingXi-Ide-Authorization header not received by server");
     assert_eq!(token.to_str().unwrap(), "secret-token-xyz");
     assert!(
         !token.to_str().unwrap().starts_with("Bearer"),

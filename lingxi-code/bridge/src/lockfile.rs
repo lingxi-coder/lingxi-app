@@ -40,7 +40,7 @@ pub struct LockfileBody {
     #[serde(rename = "runningInWindows")]
     pub running_in_windows: bool,
     /// 32-char lowercase hex token a client MUST present in the
-    /// `X-Claude-Code-Ide-Authorization` header.
+    /// `X-LingXi-Ide-Authorization` header.
     #[serde(rename = "authToken")]
     pub auth_token: String,
 }

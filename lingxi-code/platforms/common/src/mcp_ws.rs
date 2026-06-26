@@ -1,6 +1,6 @@
 //! WebSocket MCP transport. Constructs a `jsonrpc::Connection` over a
 //! `tokio_tungstenite::WebSocketStream`, sending the
-//! `X-Claude-Code-Ide-Authorization: <token>` header and the
+//! `X-LingXi-Ide-Authorization: <token>` header and the
 //! `Sec-WebSocket-Protocol: mcp` subprotocol literally — both verified
 //! against `claude-code/src/services/mcp/client.ts:713,722,771,446`.
 
@@ -28,7 +28,7 @@ pub enum WsConnectError {
 
 /// LITERAL header name claude-code uses for IDE-lockfile-derived MCP auth.
 /// Source: `claude-code/src/services/mcp/client.ts:713`.
-pub const AUTH_HEADER_NAME: &str = "X-Claude-Code-Ide-Authorization";
+pub const AUTH_HEADER_NAME: &str = "X-LingXi-Ide-Authorization";
 
 /// LITERAL WebSocket subprotocol — single value `mcp`.
 /// Source: `claude-code/src/services/mcp/client.ts:722,771,446` (`protocols: ['mcp']`).
@@ -72,7 +72,7 @@ pub fn build_handshake_request(url: &Url, auth_token: &str) -> Result<Request<()
 
 /// Connect to an MCP server over WebSocket and return a wired `Connection`.
 ///
-/// - Sends `X-Claude-Code-Ide-Authorization: <auth_token>` in the handshake.
+/// - Sends `X-LingXi-Ide-Authorization: <auth_token>` in the handshake.
 /// - Negotiates the `mcp` subprotocol.
 /// - Adapts WS text frames to and from `jsonrpc::Message` (one JSON
 ///   object per text frame). Binary frames are rejected; ping/pong are
@@ -155,8 +155,8 @@ mod tests {
 
         let header = req
             .headers()
-            .get("X-Claude-Code-Ide-Authorization")
-            .expect("X-Claude-Code-Ide-Authorization header missing");
+            .get("X-LingXi-Ide-Authorization")
+            .expect("X-LingXi-Ide-Authorization header missing");
         assert_eq!(header.to_str().unwrap(), "test-token-abc");
         // No `Bearer ` prefix.
         assert!(!header.to_str().unwrap().starts_with("Bearer"));

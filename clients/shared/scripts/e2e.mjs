@@ -255,12 +255,12 @@ async function main() {
   };
 
   try {
-    // The binary writes ~/.claude/bridge/<port>.lock just after announcing the
+    // The binary writes ~/.lingxi/bridge/<port>.lock just after announcing the
     // port. Connect by the EXACT discovered port via an explicit lockfile path so
     // we never race a stale lockfile from another server instance.
     const lockfilePath = join(
       process.env.HOME ?? '',
-      '.claude',
+      '.lingxi',
       'bridge',
       `${port}.lock`,
     );

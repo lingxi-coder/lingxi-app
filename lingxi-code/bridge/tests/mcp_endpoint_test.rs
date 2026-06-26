@@ -1,5 +1,5 @@
 //! Integration tests for `McpEndpoint` and `IdeBridge`:
-//! - rejects WebSocket upgrades that lack `X-Claude-Code-Ide-Authorization`,
+//! - rejects WebSocket upgrades that lack `X-LingXi-Ide-Authorization`,
 //! - rejects upgrades whose token does NOT match the lockfile authToken,
 //! - happy path: `IdeBridge::start` writes the lockfile, the bound port
 //!   accepts the WS upgrade with the matching token, and `shutdown` removes
@@ -53,7 +53,7 @@ async fn rejects_upgrade_with_wrong_token() {
         .header("upgrade", "websocket")
         .header("sec-websocket-version", "13")
         .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
-        .header("x-claude-code-ide-authorization", "WRONG-TOKEN")
+        .header("x-lingxi-ide-authorization", "WRONG-TOKEN")
         .send()
         .await
         .expect("HTTP send");
@@ -96,7 +96,7 @@ async fn bridge_writes_lockfile_then_round_trips_ws_upgrade() {
         .header("sec-websocket-version", "13")
         .header("sec-websocket-key", generate_key())
         .header("sec-websocket-protocol", "mcp")
-        .header("x-claude-code-ide-authorization", expected_token.as_str())
+        .header("x-lingxi-ide-authorization", expected_token.as_str())
         .body(())
         .unwrap();
     let (ws, response) = tokio_tungstenite::connect_async(req)
@@ -157,7 +157,7 @@ async fn frame_pump_invoked_on_inbound_frame() {
         .header("sec-websocket-key", generate_key())
         .header("sec-websocket-protocol", "mcp")
         .header(
-            "x-claude-code-ide-authorization",
+            "x-lingxi-ide-authorization",
             "pump-token-32chars000000000000000",
         )
         .body(())

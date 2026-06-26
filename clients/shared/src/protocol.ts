@@ -234,7 +234,7 @@ export type MemoryTierDto =
   | { type: 'team' }
   | { type: 'user' };
 
-/** One CLAUDE.md memory entry (listings.rs `MemoryEntryDto`). */
+/** One LINGXI.md memory entry (listings.rs `MemoryEntryDto`). */
 export interface MemoryEntryDto {
   path: string;
   tier: MemoryTierDto;

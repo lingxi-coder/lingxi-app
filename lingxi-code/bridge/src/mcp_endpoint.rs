@@ -1,7 +1,7 @@
 //! MCP-over-WebSocket endpoint exposed by the bridge.
 //!
 //! Clients connect at `ws://<host>:<port>/mcp` and must present the matching
-//! `X-Claude-Code-Ide-Authorization` header (value = lockfile `authToken`).
+//! `X-LingXi-Ide-Authorization` header (value = lockfile `authToken`).
 //! Mismatched or missing tokens are rejected with HTTP 401 BEFORE the upgrade
 //! completes (the response body is literally `"unauthorized\n"`).
 //!
@@ -19,10 +19,10 @@ use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue, StatusCode};
 use tokio_tungstenite::tungstenite::Message;
 
 /// Header name (canonical case) for the IDE auth token — matches the literal
-/// `X-Claude-Code-Ide-Authorization` claude-code clients send.
+/// `X-LingXi-Ide-Authorization` claude-code clients send.
 /// `http::HeaderMap::get` is case-insensitive so the lookup works for any
 /// case the client uses (claude-code's TS client lower-cases it).
-pub const AUTH_HEADER_NAME: &str = "X-Claude-Code-Ide-Authorization";
+pub const AUTH_HEADER_NAME: &str = "X-LingXi-Ide-Authorization";
 
 /// LITERAL WebSocket subprotocol — single value `mcp` — echoed back on
 /// successful upgrade when the client requested it.

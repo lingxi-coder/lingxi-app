@@ -19,6 +19,7 @@
     clippy::manual_let_else
 )]
 
+pub mod monitor;
 pub mod reminder;
 pub mod task;
 pub mod todo_store;
@@ -27,6 +28,7 @@ pub mod todo_write;
 pub use task::{
     TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
 };
+pub use monitor::MonitorTool;
 pub use todo_write::TodoWriteTool;
 
 /// Register the 6 task tools + TodoWrite against `reg`.
@@ -38,5 +40,9 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
     reg.register_builtin(Arc::new(TaskUpdateTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(TaskStopTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(TaskOutputTool::new(ctx.clone())));
+    // PARITY: the `Monitor` tool (binary `EVp`). Registered always; isEnabled
+    // (flag `tengu_amber_sentinel`, default off) gates exposure — invisible to the
+    // model by default, like the shipped binary.
+    reg.register_builtin(Arc::new(MonitorTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(TodoWriteTool::new(ctx)));
 }

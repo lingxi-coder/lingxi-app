@@ -545,11 +545,12 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     }
 
     // `agent_listing_delta`: per-turn, transient agent catalog reminder, emitted
-    // ONLY when the `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES` gate is ON (default OFF
-    // ⇒ `None`, keeping the locked turn-loop fixtures byte-identical and the
-    // inline `AgentTool` catalog in place). Appended to THIS call's OUTGOING
-    // snapshot only (never `session.history` / JSONL), after the conditional-
-    // rules reminder. See [`ConversationOrchestrator::agent_listing_reminder_message`].
+    // when the `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES` gate is ON (the v2.1.193
+    // DEFAULT — the catalog is externalized here, the `AgentTool` description
+    // carries only the pointer line; an explicit `=false` opts into the legacy
+    // inline catalog ⇒ `None` here). Appended to THIS call's OUTGOING snapshot
+    // only (never `session.history` / JSONL), after the conditional-rules
+    // reminder. See [`ConversationOrchestrator::agent_listing_reminder_message`].
     if let Some(reminder) = orch.agent_listing_reminder_message().await {
         history_snapshot.push(reminder);
     }

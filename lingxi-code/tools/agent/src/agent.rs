@@ -315,49 +315,44 @@ impl AgentTool {
         traits::subagent_spawn::format_agent_line(agent)
     }
 
-    /// Build the dynamic Agent tool prompt, porting claude-code's `getPrompt`
-    /// (AgentTool/prompt.ts:66-287) for the non-fork path. The catalog is
-    /// embedded INLINE by default; when
-    /// `traits::subagent_spawn::should_inject_agent_list_in_messages()` is ON
-    /// (the `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES` override, default OFF), the
-    /// catalog instead moves to a per-turn `agent_listing_delta`
-    /// `<system-reminder>` attachment built by the orchestrator and this prompt
-    /// carries only the static pointer line (AgentTool/prompt.ts:194-199).
+    /// Build the dynamic Agent tool prompt, porting claude-code v2.1.193's
+    /// `getPrompt` (binary `bin/claude.exe` offset ~208233723). 2.1.193 ALWAYS
+    /// externalizes the agent catalog to a per-turn `agent_listing_delta`
+    /// `<system-reminder>` attachment (built by the orchestrator,
+    /// [`crate::PoolSubagentSpawner`]-fed); the tool DESCRIPTION carries only the
+    /// static pointer line "Available agent types are listed in <system-reminder>
+    /// messages in the conversation." — there is NO inline-catalog variant in the
+    /// description. The `should_inject_agent_list_in_messages()` gate (now default
+    /// ON, see [`traits::subagent_spawn`]) reflects that: ON ⇒ pointer (the
+    /// 2.1.193 default); an explicit `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES=false`
+    /// opt-out keeps a LEGACY inline-catalog body (not a 2.1.193 form).
     ///
-    /// `is_coordinator` selects the slim coordinator prompt (the coordinator
-    /// system prompt already covers usage notes / examples). Not yet wired from
-    /// host state — see [`Tool::prompt`].
+    /// The body is the 2.1.193 SHORT form (`if(c)` branch — the live default):
+    /// intro + `## When to use` + four terse bullets. (The FULL `if(c)`-false
+    /// form — `## When not to use` + `## Usage notes` + `<example>`s — is the
+    /// alternate; we render the SHORT form, which is what a live 2.1.193 session
+    /// emits.)
     ///
-    /// Deferred vs TS (no behavioral surface in this port): the fork-subagent
-    /// branch (item 1g), the embedded-search-tools (`bfs`/`ugrep`) hint swap,
-    /// the subscription / teammate gating on the concurrency + name/team/mode
-    /// notes, and the `USER_TYPE === 'ant'` remote-isolation note.
-    fn format_mcp_servers_note(mcp_server_names: &[String]) -> String {
-        if mcp_server_names.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "\n\n# MCP Servers\n\nThe following MCP servers are available; spawned agents may have access to their tools:\n{}",
-                mcp_server_names
-                    .iter()
-                    .map(|n| format!("- {n}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            )
-        }
-    }
-
+    /// `is_coordinator` selects the slim coordinator prompt (intro only; the
+    /// coordinator system prompt already covers usage / examples).
+    ///
+    /// Deferred vs binary (no behavioral surface here): the `o` fork-subagent
+    /// branch (the fork subagent_type sentence + `(except subagent_type: "fork")`
+    /// qualifiers), the `d` pro-plan "Do not spawn agents unless the user asks"
+    /// block (`vi()==="pro"`; needs subscription threading), the `m` embedded-grep
+    /// hint swap, teammate (`yB`/`_m`) notes, and the remote-isolation (`V8t`)
+    /// note. The fabricated "# MCP Servers" note (NOT present in the 2.1.193
+    /// binary) is removed; `_mcp_server_names` is retained for signature stability.
     fn build_prompt(
         agents: &[traits::subagent_spawn::SubagentListingEntry],
-        mcp_server_names: &[String],
+        _mcp_server_names: &[String],
         is_coordinator: bool,
     ) -> String {
-        // `agent_listing_delta` gate (AgentTool/prompt.ts:194-199): when ON, the
-        // catalog moves to a per-turn `<system-reminder>` attachment (built by
-        // the orchestrator) and this description carries only a STATIC pointer
-        // line — so the tool-schema prompt cache no longer busts every time an
-        // agent loads. OFF by default (no GrowthBook in Rust), so the inline
-        // catalog below is byte-identical to the pre-gate behavior.
+        // Catalog placement (binary intro `p`): the 2.1.193 default externalizes
+        // the catalog to the orchestrator's `<system-reminder>` attachment, so the
+        // description carries only the static pointer line. A LEGACY inline body is
+        // retained behind an explicit `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES=false`
+        // opt-out (gate OFF) — not a 2.1.193 form, but a usable escape hatch.
         let agent_list_section = if traits::subagent_spawn::should_inject_agent_list_in_messages() {
             "Available agent types are listed in <system-reminder> messages in the conversation."
                 .to_string()
@@ -369,80 +364,35 @@ impl AgentTool {
                 .join("\n");
             format!("Available agent types and the tools they have access to:\n{agent_lines}")
         };
-        let mcp_note = Self::format_mcp_servers_note(mcp_server_names);
 
-        // Shared core (TS `shared`): intro + agent list + when-to-use note.
-        let shared = format!(
-            "Launch a new agent to handle complex, multi-step tasks autonomously.\n\n\
-The {AGENT_TOOL_NAME} tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.\n\n\
-{agent_list_section}{mcp_note}\n\n\
+        // Intro `p` (binary ~208233723): the catalog line sits between the two
+        // intro sentences; the subagent_type sentence closes it.
+        let intro = format!(
+            "Launch a new agent to handle complex, multi-step tasks. Each agent type has specific capabilities and tools available to it.\n\n\
+{agent_list_section}\n\n\
 When using the {AGENT_TOOL_NAME} tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used."
         );
 
-        // Coordinator mode gets the slim prompt (TS: `if (isCoordinator) return shared`).
+        // Coordinator mode gets the slim intro only (binary `if(t)return p`).
         if is_coordinator {
-            return shared;
+            return intro;
         }
 
-        // Non-coordinator: full prompt with when-not-to-use + usage notes +
-        // examples (TS non-coordinator return, AgentTool/prompt.ts:252-286,
-        // non-embedded-search-tools branch).
-        let when_not_to_use = format!(
-            "\nWhen NOT to use the {AGENT_TOOL_NAME} tool:\n\
-- If you want to read a specific file path, use the Read tool or the Glob tool instead of the {AGENT_TOOL_NAME} tool, to find the match more quickly\n\
-- If you are searching for a specific class definition like \"class Foo\", use the Glob tool instead, to find the match more quickly\n\
-- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the {AGENT_TOOL_NAME} tool, to find the match more quickly\n\
-- Other tasks that are not related to the agent descriptions above\n"
-        );
-
-        let examples = format!(
-            "Example usage:\n\n\
-<example_agent_descriptions>\n\
-\"test-runner\": use this agent after you are done writing code to run tests\n\
-\"greeting-responder\": use this agent to respond to user greetings with a friendly joke\n\
-</example_agent_descriptions>\n\n\
-<example>\n\
-user: \"Please write a function that checks if a number is prime\"\n\
-assistant: I'm going to use the Write tool to write the following code:\n\
-<code>\n\
-function isPrime(n) {{\n\
-  if (n <= 1) return false\n\
-  for (let i = 2; i * i <= n; i++) {{\n\
-    if (n % i === 0) return false\n\
-  }}\n\
-  return true\n\
-}}\n\
-</code>\n\
-<commentary>\n\
-Since a significant piece of code was written and the task was completed, now use the test-runner agent to run the tests\n\
-</commentary>\n\
-assistant: Uses the {AGENT_TOOL_NAME} tool to launch the test-runner agent\n\
-</example>\n\n\
-<example>\n\
-user: \"Hello\"\n\
-<commentary>\n\
-Since the user is greeting, use the greeting-responder agent to respond with a friendly joke\n\
-</commentary>\n\
-assistant: \"I'm going to use the {AGENT_TOOL_NAME} tool to launch the greeting-responder agent\"\n\
-</example>\n"
-        );
-
+        // Non-coordinator SHORT form (binary `if(c)` branch — the live 2.1.193
+        // default): `## When to use` + four terse bullets. NO `## When not to
+        // use`, NO `## Usage notes`, NO `<example>`s (those are the FULL form).
+        // Em-dashes are U+2014. The `run_in_background` bullet is the
+        // background-enabled default (the binary's `h`; the
+        // `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` / teammate suppressions are not
+        // modeled here).
         format!(
-            "{shared}\n\
-{when_not_to_use}\n\n\
-Usage notes:\n\
-- Always include a short description (3-5 words) summarizing what the agent will do\n\
-- Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses\n\
-- When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.\n\
-- You can optionally run agents in the background using the run_in_background parameter. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.\n\
-- **Foreground vs background**: Use foreground (default) when you need the agent's results before you can proceed — e.g., research agents whose findings inform your next steps. Use background when you have genuinely independent work to do in parallel.\n\
-- To continue a previously spawned agent, use SendMessage with the agent's ID or name as the `to` field. The agent resumes with its full context preserved. Each Agent invocation starts fresh — provide a complete task description.\n\
-- The agent's outputs should generally be trusted\n\
-- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent\n\
-- If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.\n\
-- If the user specifies that they want you to run agents \"in parallel\", you MUST send a single message with multiple {AGENT_TOOL_NAME} tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.\n\
-- You can optionally set `isolation: \"worktree\"` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result.\n\n\
-{examples}"
+            "{intro}\n\n\
+## When to use\n\n\
+Reach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps. For a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result.\n\n\
+- The agent's final message is returned to you as the tool result; it is not shown to the user — relay what matters.\n\
+- Use SendMessage with the agent's ID or name to continue a previously spawned agent with its context intact; a new {AGENT_TOOL_NAME} call starts fresh.\n\
+- `isolation: \"worktree\"` gives the agent its own git worktree (auto-cleaned if unchanged).\n\
+- `run_in_background: true` runs the agent asynchronously; you'll be notified when it completes."
         )
     }
 
@@ -2448,7 +2398,10 @@ mod tests {
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        // The inline catalog lines live only on the LEGACY gate-OFF path (the
+        // 2.1.193 default externalizes them to the orchestrator reminder), so
+        // force the inline path to exercise `formatAgentLine` rendering here.
+        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "false");
         let spawner = arc_mock_spawner();
         let bctx = wired_ctx(
             spawner.clone(),
@@ -2463,6 +2416,7 @@ mod tests {
                 model: None,
             })
             .await;
+        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
         assert!(prompt.contains("Available agent types and the tools they have access to:"));
         // formatAgentLine: `- {type}: {whenToUse} (Tools: {tools})`.
         assert!(
@@ -2504,7 +2458,9 @@ mod tests {
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        // Inline catalog lines (and thus the deny filter's visible effect) live
+        // on the LEGACY gate-OFF path; force it.
+        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "false");
         let spawner = arc_mock_spawner();
         let mut bctx = wired_ctx(
             spawner.clone(),
@@ -2520,6 +2476,7 @@ mod tests {
                 model: None,
             })
             .await;
+        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
         assert!(
             prompt.contains("- general-purpose:"),
             "general-purpose should remain; prompt was:\n{prompt}"
@@ -2561,14 +2518,16 @@ mod tests {
         assert!(spawner.invocations().is_empty());
     }
 
-    // build_prompt's coordinator branch returns the slim shared prompt only
-    // (no "Usage notes:" / examples), matching TS `if (isCoordinator) return shared`.
+    // build_prompt's coordinator branch returns the slim intro only (no
+    // `## When to use` / bullets), matching binary `if(t)return p`. The
+    // non-coordinator SHORT form carries `## When to use`.
     #[test]
     fn build_prompt_coordinator_branch_is_slim() {
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        // Force the legacy inline path so the catalog line is in the description.
+        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "false");
         let agents = vec![traits::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
@@ -2576,15 +2535,17 @@ mod tests {
         }];
         let full = AgentTool::build_prompt(&agents, &[], false);
         let slim = AgentTool::build_prompt(&agents, &[], true);
-        assert!(full.contains("Usage notes:"));
-        assert!(!slim.contains("Usage notes:"));
-        // Both carry the agent catalog.
+        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        assert!(full.contains("## When to use"));
+        assert!(!slim.contains("## When to use"));
+        // Both carry the agent catalog (legacy inline path).
         assert!(slim.contains("- general-purpose: anything (Tools: All tools)"));
     }
 
-    // MCP server names surface in the prompt when the registry exposes them.
+    // The fabricated "# MCP Servers" note is NOT present in v2.1.193 — the agent
+    // prompt carries no per-tool MCP-servers section regardless of registry.
     #[test]
-    fn build_prompt_lists_mcp_servers_when_present() {
+    fn build_prompt_omits_fabricated_mcp_servers_note() {
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -2595,9 +2556,10 @@ mod tests {
             tools_description: "All tools".into(),
         }];
         let p = AgentTool::build_prompt(&agents, &["github".into(), "linear".into()], false);
-        assert!(p.contains("# MCP Servers"));
-        assert!(p.contains("- github"));
-        assert!(p.contains("- linear"));
+        assert!(
+            !p.contains("# MCP Servers"),
+            "v2.1.193 has no per-tool MCP-servers note; was:\n{p}"
+        );
     }
 
     // `agent_listing_delta` gate ON (AgentTool/prompt.ts:194-199): the inline
@@ -2635,9 +2597,11 @@ mod tests {
             !p.contains("- general-purpose: anything (Tools: All tools)"),
             "gate-ON prompt must NOT carry inline formatAgentLine lines"
         );
-        // The rest of the prompt scaffold is unchanged.
+        // The rest of the SHORT-form scaffold is present.
         assert!(p.contains("Launch a new agent to handle complex, multi-step tasks"));
-        assert!(p.contains("Usage notes:"));
+        assert!(p.contains("## When to use"));
+        assert!(p.contains("relay what matters"));
+        assert!(p.contains("`run_in_background: true` runs the agent asynchronously"));
     }
 
     // ── #4 meta props (AgentTool.tsx:229, 1264-1266, 1273-1275) + G8 ──

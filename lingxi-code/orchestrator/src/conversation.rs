@@ -9583,13 +9583,15 @@ mod agent_listing_reminder_tests {
     }
 
     #[tokio::test]
-    async fn gate_off_default_is_none() {
+    async fn gate_explicit_off_is_none() {
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        // v2.1.193 default is ON (catalog externalized); the LEGACY inline path
+        // (explicit `=false`) keeps the catalog in the description, so the
+        // orchestrator emits no reminder.
+        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "false");
 
-        // Even with the Agent tool + a catalog wired, the default gate is OFF.
         let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
             "general-purpose",
             "anything",
@@ -9598,10 +9600,9 @@ mod agent_listing_reminder_tests {
             },
         )]));
         let orch = orch_with(reg_with_agent_tool(), Some(catalog));
-        assert!(
-            orch.agent_listing_reminder_message().await.is_none(),
-            "gate OFF (default) must yield no reminder"
-        );
+        let got = orch.agent_listing_reminder_message().await;
+        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        assert!(got.is_none(), "explicit gate OFF ⇒ no reminder (inline path)");
     }
 
     #[tokio::test]

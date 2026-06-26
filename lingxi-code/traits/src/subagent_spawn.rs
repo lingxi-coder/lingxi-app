@@ -366,12 +366,14 @@ pub fn format_agent_line(entry: &SubagentListingEntry) -> String {
 /// embedded inline in the `AgentTool` description.
 ///
 /// Port of claude-code `shouldInjectAgentListInMessages`
-/// (`AgentTool/prompt.ts:59-64`): honor the `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES`
-/// override (`isEnvTruthy` ⇒ true, `isEnvDefinedFalsy` ⇒ false), else fall back
-/// to the `tengu_agent_list_attach` GrowthBook flag — which has no Rust analog,
-/// so the fallback is `false`. Net: **OFF by default**, so the default build
-/// keeps the inline catalog byte-for-byte; flipping the env var moves the
-/// listing into the per-turn reminder.
+/// (`AgentTool/prompt.ts`): honor the `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES`
+/// override (`isEnvTruthy` ⇒ true, `isEnvDefinedFalsy` ⇒ false), else the
+/// default. **Default is now ON**: in claude-code v2.1.193 the agent catalog is
+/// ALWAYS externalized to the per-turn `<system-reminder>` attachment (the
+/// `AgentTool` description carries only the static pointer line — there is no
+/// inline-catalog variant left). An explicit
+/// `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES=false` opts back into a LEGACY inline
+/// catalog (not a 2.1.193 form), retained only as an escape hatch.
 #[must_use]
 pub fn should_inject_agent_list_in_messages() -> bool {
     let v = std::env::var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES").ok();
@@ -381,8 +383,8 @@ pub fn should_inject_agent_list_in_messages() -> bool {
     if crate::env::is_env_defined_falsy(v.as_deref()) {
         return false;
     }
-    // No GrowthBook in Rust → `getFeatureValue(..., false)` ⇒ false.
-    false
+    // v2.1.193: catalog is always externalized ⇒ default ON.
+    true
 }
 
 /// Spawn-a-subagent seam used by `AgentTool`.
@@ -507,16 +509,19 @@ mod tests {
         );
     }
 
-    /// The gate defaults OFF (no GrowthBook in Rust). Guarded by a process-wide
-    /// lock because it mutates a shared env var.
+    /// The gate defaults ON in v2.1.193 (catalog always externalized). Guarded by
+    /// a process-wide lock because it mutates a shared env var.
     #[test]
-    fn agent_list_gate_default_off_and_env_override() {
+    fn agent_list_gate_default_on_and_env_override() {
         use std::sync::Mutex;
         static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
-        assert!(!should_inject_agent_list_in_messages(), "default must be OFF");
+        assert!(
+            should_inject_agent_list_in_messages(),
+            "v2.1.193 default must be ON (catalog externalized)"
+        );
 
         std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "1");
         assert!(should_inject_agent_list_in_messages(), "truthy ⇒ ON");
@@ -524,7 +529,7 @@ mod tests {
         std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "false");
         assert!(
             !should_inject_agent_list_in_messages(),
-            "defined-falsy ⇒ OFF"
+            "explicit defined-falsy ⇒ OFF (legacy inline escape hatch)"
         );
 
         std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");

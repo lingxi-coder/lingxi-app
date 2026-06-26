@@ -24,6 +24,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.lifecycleScope
+import com.lingxi.code.cron.CronAlarmScheduler
 import com.lingxi.code.onboarding.SetupWizardOverlay
 import com.lingxi.code.settings.SettingsHost
 import com.lingxi.code.theme.AppearancePrefs
@@ -89,6 +91,14 @@ class MainActivity : ComponentActivity() {
         // Offline voice-model downloader — process-global so a language-pack
         // download started in the setup wizard survives leaving that step.
         com.lingxi.code.voice.offline.VoiceModelDownloader.attach(applicationContext)
+
+        // Cron: re-arm the next scheduled-task alarm on every launch. Exact alarms
+        // do not survive process death / app updates, so arming here self-heals the
+        // schedule and picks up jobs created via chat. Off the main thread (it
+        // builds a transient engine to query the next fire) and best-effort.
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.Default) {
+            runCatching { CronAlarmScheduler.armNext(applicationContext) }
+        }
 
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)

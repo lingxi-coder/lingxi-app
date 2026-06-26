@@ -32,6 +32,7 @@ object SettingsRoutes {
     const val MCP_LIST = "settings/mcp"
     const val MCP_EDIT = "settings/mcp/{id}"
     const val DREAM = "settings/dream"
+    const val CRON = "settings/cron"
 
     // 应用 (A6)
     const val APPEARANCE = "settings/appearance"
@@ -65,4 +66,5 @@ object SettingsTitles {
     const val SKILLS = "Skills"
     const val MCP = "MCP 服务器"
     const val DREAM = "Dream 模式"
+    const val CRON = "定时任务"
 }

@@ -205,6 +205,7 @@ fun SettingsHost(
                     )
                 }
                 page(SettingsRoutes.DREAM) { DreamPage(state = state, store = store) }
+                page(SettingsRoutes.CRON) { com.lingxi.code.cron.CronScreen() }
             }
         }
     }
@@ -248,6 +249,7 @@ private fun titleFor(entry: androidx.navigation.NavBackStackEntry?, state: Setti
         SettingsRoutes.SKILLS -> SettingsTitles.SKILLS
         SettingsRoutes.MCP_LIST -> SettingsTitles.MCP
         SettingsRoutes.DREAM -> SettingsTitles.DREAM
+        SettingsRoutes.CRON -> SettingsTitles.CRON
         SettingsRoutes.PROVIDER_LIST -> providerKindArg(entry).title
         SettingsRoutes.PROVIDER_PICKER -> "添加${providerKindArg(entry).title}"
         SettingsRoutes.PROVIDER_EDIT -> {

@@ -1,8 +1,9 @@
 //!
 //! Exercises the core Stop continuation contract (TS `query.ts:1262-1308`):
-//! - a Stop hook `Block` (keep working) continues ONE extra turn with the
-//!   blocking message appended + `stop_hook_active=true`; a SECOND block does
-//!   NOT loop forever (re-entry guard);
+//! - a Stop hook `Block` (keep working) continues with the blocking message
+//!   appended + `stop_hook_active=true`; consecutive blocks loop up to
+//!   `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` (default 8), then the cap surfaces an
+//!   override warning and ends the turn (no infinite loop);
 //! - `preventContinuation` (`continue:false`) terminates as `StopHookPrevented`;
 //! - a `UserPromptSubmit` `Block` aborts the turn BEFORE any API call.
 use llm_client::ContentBlock as LlmContentBlock;
@@ -179,27 +180,58 @@ fn end_turn(text: &str) -> llm_client::LlmResponse {
 }
 
 #[tokio::test]
-async fn stop_block_continues_once_then_guard_stops() {
-    // Two end_turn responses. The Stop hook blocks every time. First end_turn:
-    // Block + !stop_hook_active → continue (one extra turn). Second end_turn:
-    // Block + stop_hook_active → guard → pass → end. Exactly 2 API calls.
-    let api = Arc::new(MockApiClient::new(vec![end_turn("one"), end_turn("two")]));
+async fn stop_block_continues_until_cap_then_overrides() {
+    // A perpetually-blocking Stop hook drives consecutive continuations up to
+    // the default CLAUDE_CODE_STOP_HOOK_BLOCK_CAP of 8 (binary v2.1.191:
+    // `bo=Number.isNaN(jr)?8:jr; if(bo>0&&ar>bo) …yield warning…{reason:"completed"}`),
+    // NOT the old boolean guard that stopped after ONE continuation. Blocks 1..8
+    // loop (counts 1..8 ≤ 8); the 9th block has next-count 9 > 8 ⇒ the cap fires,
+    // surfaces the override warning, and ends the turn. So 9 API calls.
+    let api = Arc::new(MockApiClient::new(vec![
+        end_turn("1"),
+        end_turn("2"),
+        end_turn("3"),
+        end_turn("4"),
+        end_turn("5"),
+        end_turn("6"),
+        end_turn("7"),
+        end_turn("8"),
+        end_turn("9"),
+    ]));
     let hooks = exec_with(
         Arc::new(StopBlockHandler),
         builtin_hook("stop-block", HookEventType::Stop),
     )
     .await;
-    let o = orch(api.clone(), hooks);
+    // Build with a CAPTURED output stream so we can assert the override warning.
+    let output = Arc::new(MockOutputStream::new());
+    let o = Arc::new(ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api.clone(),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        hooks,
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    ));
 
     let outcome = o.run_turn("hi").await.expect("turn ok");
     assert!(
         matches!(outcome, ConversationOutcome::EndTurn { .. }),
-        "guard must end the turn, not loop forever: {outcome:?}"
+        "the cap must end the turn, not loop forever: {outcome:?}"
     );
     assert_eq!(
         api.captured_msgs().await.len(),
-        2,
-        "Stop-block must drive exactly ONE continuation (2 API calls)"
+        9,
+        "a perpetually-blocking Stop hook drives 8 continuations (cap=8), ending on the 9th call"
+    );
+    // The byte-exact override warning is surfaced once the cap is exceeded
+    // (em-dash U+2014; count 9 == the would-be next consecutive block).
+    let texts = output.text_events().await;
+    assert!(
+        texts.iter().any(|t| t == "A hook blocked the turn from ending 9 consecutive times — overriding and ending turn. For Stop/SubagentStop hooks, check stop_hook_active in the input and return success while it's true. Set CLAUDE_CODE_STOP_HOOK_BLOCK_CAP to raise this limit."),
+        "the byte-exact override warning must be surfaced when the cap is exceeded: {texts:?}"
     );
     // The blocking REASON (blockingError) is appended as a meta user message,
     // wrapped exactly as claude-code's `getStopHookMessage`

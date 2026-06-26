@@ -156,7 +156,22 @@ pub(crate) fn render_transcript(messages: &[RenderedMessage]) -> String {
             }
             RenderedMessage::AssistantText { body, .. } => out.push_str(body),
             RenderedMessage::AssistantToolUse { tool, input, .. } => {
-                out.push_str(&format!("● {tool}({input})"));
+                // #3 (call line): show the same human preview the inline header
+                // uses (`Bash(echo …)`, `Read(file.txt)`, …) instead of dumping
+                // the raw JSON input. No cwd in this oracle's scope, so paths
+                // render absolute (a minor cosmetic delta vs the inline view's
+                // cwd-relative form — far better than raw JSON).
+                use crate::components::messages::assistant_tool_use::{
+                    render_tool_use_message, single_line_json_preview, user_facing_name,
+                };
+                let name = user_facing_name(tool);
+                let preview = render_tool_use_message(tool, input, std::path::Path::new(""))
+                    .unwrap_or_else(|| single_line_json_preview(input));
+                if preview.is_empty() {
+                    out.push_str(&format!("● {name}"));
+                } else {
+                    out.push_str(&format!("● {name}({preview})"));
+                }
             }
             RenderedMessage::UserToolResult { tool, result, .. } => {
                 // #3: the transcript/export formatter dumped the raw structured

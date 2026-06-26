@@ -101,12 +101,12 @@ impl TodoTask {
 /// → cwd-relative), else `$HOME/.claude` (falling back to `USERPROFILE` and
 /// finally a bare `.claude` so the path is always well-formed).
 fn claude_config_home_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+    if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
         return PathBuf::from(dir);
     }
     match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        Some(home) => PathBuf::from(home).join(".claude"),
-        None => PathBuf::from(".claude"),
+        Some(home) => PathBuf::from(home).join(branding::DOT_DIR),
+        None => PathBuf::from(branding::DOT_DIR),
     }
 }
 

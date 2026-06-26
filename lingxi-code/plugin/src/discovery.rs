@@ -341,7 +341,9 @@ pub async fn discover_installed_plugins(
 pub(crate) async fn load_plugin_from_path(
     plugin_dir: &Path,
 ) -> Option<(PluginId, PluginManifest)> {
-    let manifest_path = plugin_dir.join(".claude-plugin").join("plugin.json");
+    let manifest_path = plugin_dir
+        .join(branding::PLUGIN_MANIFEST_DIR)
+        .join("plugin.json");
     let raw = tokio::fs::read_to_string(&manifest_path).await.ok()?;
     let parsed: RawManifest = match serde_json::from_str(&raw) {
         Ok(m) => m,

@@ -667,7 +667,7 @@ async fn resolve_manifest(path: &std::path::Path) -> Option<(std::path::PathBuf,
 
     // Directory: probe `<dir>/.claude-plugin/{plugin,marketplace}.json` and
     // also the case where `dir` already IS the `.claude-plugin` directory.
-    for base in [path.join(".claude-plugin"), path.to_path_buf()] {
+    for base in [path.join(branding::PLUGIN_MANIFEST_DIR), path.to_path_buf()] {
         let plugin = base.join("plugin.json");
         if tokio::fs::try_exists(&plugin).await.unwrap_or(false) {
             return Some((plugin, ManifestKind::Plugin));

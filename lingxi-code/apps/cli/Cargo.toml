@@ -14,6 +14,10 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
+# Single source of truth for the product namespace (config dir/file names, env
+# var names, memory filenames, plugin manifest dir). The CLI routes its runtime
+# `.claude*` / `CLAUDE_CONFIG_DIR` literals through these constants.
+branding.workspace = true
 # M8-P6 / F2-01: the desktop composition root owns the orchestrator assembly.
 # `engine_desktop::build(DesktopConfig)` now constructs the full runtime; this
 # binary only resolves a `DesktopConfig` from `Argv`/env and delegates. The

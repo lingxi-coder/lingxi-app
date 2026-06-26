@@ -49,6 +49,7 @@ engine-mobile = { path = "../engine-mobile" }
 skill-api = { path = "../../skill-api" }
 traits = { path = "../../traits" }
 protocol = { path = "../../protocol" }
+branding.workspace = true
 thiserror.workspace = true
 
 # F3-04: optional UniFFI dep — pulled under the (default) `uniffi` feature so the

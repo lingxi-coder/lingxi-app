@@ -348,7 +348,10 @@ pub struct LoopFile {
 // `dc()==Zn()` for a single-project session).
 #[must_use]
 pub fn read_loop_file(cwd: &Path) -> Option<LoopFile> {
-    let candidates = [cwd.join(".claude").join("loop.md"), cwd.join("loop.md")];
+    let candidates = [
+        cwd.join(branding::DOT_DIR).join("loop.md"),
+        cwd.join("loop.md"),
+    ];
     for path in candidates {
         let raw = match std::fs::read_to_string(&path) {
             Ok(s) => s,

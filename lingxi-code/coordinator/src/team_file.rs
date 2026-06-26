@@ -82,10 +82,10 @@ pub fn sanitize_name(name: &str) -> String {
 /// neither resolves.
 #[must_use]
 pub fn claude_home() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+    if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
         return Some(PathBuf::from(dir));
     }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude"))
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(branding::DOT_DIR))
 }
 
 /// `getTeamDir` (`teamHelpers.ts:115-117`): `<claude_home>/teams/{sanitize}`.

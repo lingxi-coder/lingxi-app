@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+branding.workspace = true
 tool-api = { path = "../../tool-api" }
 traits = { path = "../../traits" }
 protocol = { path = "../../protocol" }

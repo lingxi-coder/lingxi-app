@@ -10,6 +10,7 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
+branding = { workspace = true }
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 orchestrator = { path = "../orchestrator" }

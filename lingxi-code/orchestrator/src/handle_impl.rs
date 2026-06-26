@@ -131,7 +131,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let home = dirs::home_dir().ok_or_else(|| {
             HandleError::ActionFailed("home dir unavailable on this platform".into())
         })?;
-        let target = memory::claude_md::user_config_dir(&home).join("CLAUDE.md");
+        let target = memory::claude_md::user_config_dir(&home).join(branding::MEMORY_FILE);
         spawn_editor_on(target, "").await
     }
 

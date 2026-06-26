@@ -54,7 +54,7 @@ pub const CONFIG_TOOL_NAME: &str = "Config";
 /// Backing-store filename.
 pub const CONFIG_FILE_NAME: &str = "settings.json";
 /// `~/.claude/` subdirectory.
-pub const CONFIG_SUBDIR: &str = ".claude";
+pub const CONFIG_SUBDIR: &str = branding::DOT_DIR;
 
 // ─── legacy wire-identifier surface (pre-registry M4-08 parity fixture) ───
 //
@@ -409,7 +409,7 @@ pub(crate) fn config_path(home: &Path) -> PathBuf {
 /// empty value is honored verbatim → cwd-relative), else `<home>/<CONFIG_SUBDIR>`.
 #[must_use]
 fn config_home_dir(home: &Path) -> PathBuf {
-    match std::env::var_os("CLAUDE_CONFIG_DIR") {
+    match std::env::var_os(branding::CONFIG_DIR_ENV) {
         Some(dir) => PathBuf::from(dir),
         None => home.join(CONFIG_SUBDIR),
     }

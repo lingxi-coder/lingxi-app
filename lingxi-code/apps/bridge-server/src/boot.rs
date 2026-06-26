@@ -175,10 +175,10 @@ fn load_settings_blocks() -> (Option<BTreeMap<String, serde_json::Value>>, Optio
 /// the bridge's desktop-config + lockfile resolution.
 #[must_use]
 pub fn claude_config_home() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+    if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
         return Some(PathBuf::from(dir));
     }
-    dirs::home_dir().map(|h| h.join(".claude"))
+    dirs::home_dir().map(|h| h.join(branding::DOT_DIR))
 }
 
 #[must_use]

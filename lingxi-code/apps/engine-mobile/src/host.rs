@@ -710,13 +710,13 @@ pub async fn build_mobile_inner(
         // tiers, so an AcceptEdits write under a settings-declared extra dir
         // auto-allows (mirrors desktop's `.with_working_dirs`); empty ⇒ unchanged.
         let mut additional_working_dirs: Vec<std::path::PathBuf> = Vec::new();
-        let proj = cwd.join(".claude").join("settings.json");
+        let proj = cwd.join(branding::DOT_DIR).join("settings.json");
         let user = cfg.claude_home.join("settings.json");
         // Audit fix (#6): also read the LocalSettings tier (`settings.local.json`),
         // LAST so its rules/defaultMode win — mirrors desktop. Mobile does not
         // PERSIST to it (no `.with_persist`), but a synced/checked-in
         // settings.local.json's deny/allow rules + defaultMode are now honored.
-        let local = cwd.join(".claude").join("settings.local.json");
+        let local = cwd.join(branding::DOT_DIR).join("settings.local.json");
         let mut sources: Vec<(std::path::PathBuf, permission::PermissionRuleSource)> = Vec::new();
         if user != proj {
             sources.push((user, permission::PermissionRuleSource::UserSettings));
@@ -786,7 +786,7 @@ pub async fn build_mobile_inner(
     //      as desktop reads them. A missing or malformed file is skipped, never an
     //      error — the common (no-hooks) case registers nothing and stays a no-op.
     let mut hook_registry = hooks::HookRegistry::new();
-    let project_settings_path = cwd.join(".claude").join("settings.json");
+    let project_settings_path = cwd.join(branding::DOT_DIR).join("settings.json");
     let user_settings_path = cfg.claude_home.join("settings.json");
     // On mobile `claude_home` is commonly `<cwd>/.claude`, so the user- and
     // project-settings paths can resolve to the SAME file. Desktop never

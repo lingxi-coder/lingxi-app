@@ -73,7 +73,12 @@ fn parse_prune_v_stdout(stdout: &str, repo_root: &std::path::Path) -> Vec<PathBu
             if name.is_empty() {
                 return None;
             }
-            Some(repo_root.join(".claude").join("worktrees").join(name))
+            Some(
+                repo_root
+                    .join(branding::DOT_DIR)
+                    .join("worktrees")
+                    .join(name),
+            )
         })
         .collect()
 }
@@ -120,7 +125,11 @@ impl WorktreeManager for WindowsWorktreeManager {
         validate_worktree_slug(slug)?;
         let flat = flatten_slug(slug);
         let branch_name = format!("worktree-{flat}");
-        let worktree_path = self.repo_root.join(".claude").join("worktrees").join(&flat);
+        let worktree_path = self
+            .repo_root
+            .join(branding::DOT_DIR)
+            .join("worktrees")
+            .join(&flat);
 
         // git worktree add creates the leaf; the `.claude/worktrees/` parent
         // may not exist yet.

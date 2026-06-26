@@ -27,7 +27,9 @@ pub enum SettingsSource {
 pub fn settings_path(source: SettingsSource, claude_home: &Path, project_dir: &Path) -> PathBuf {
     match source {
         SettingsSource::User => claude_home.join("settings.json"),
-        SettingsSource::Local => project_dir.join(".claude").join("settings.local.json"),
+        SettingsSource::Local => project_dir
+            .join(branding::DOT_DIR)
+            .join("settings.local.json"),
     }
 }
 

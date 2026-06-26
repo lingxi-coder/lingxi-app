@@ -82,6 +82,11 @@ uniffi = [
 ]
 
 [dependencies]
+# Single source of truth for the product namespace (config-dir / memory-file /
+# config-dir env-var names). The host + test-support modules route their
+# `.claude` / `CLAUDE.md` literals through these constants (still the Claude
+# values — pure indirection, byte-identical behavior).
+branding.workspace = true
 tool-api = { path = "../../tool-api" }
 traits = { path = "../../traits" }
 skill-api = { path = "../../skill-api" }

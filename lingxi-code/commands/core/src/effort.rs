@@ -215,10 +215,10 @@ fn to_persistable(level: EffortLevel) -> Option<EffortLevel> {
 /// `/config` read. `None` if neither the env override nor `HOME` resolves (TS
 /// `getSettingsFilePathForSource` → `null` → `{ error: null }`).
 fn user_settings_path() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+    if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
         return Some(PathBuf::from(dir).join("settings.json"));
     }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude").join("settings.json"))
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(branding::DOT_DIR).join("settings.json"))
 }
 
 /// Persist `effortLevel` into the user `settings.json`, mirroring

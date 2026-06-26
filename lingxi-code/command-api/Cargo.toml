@@ -12,6 +12,7 @@ license.workspace = true
 # registered directly in the engine-desktop / engine-mobile composition roots).
 
 [dependencies]
+branding.workspace = true
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 # #39 UserPromptExpansion: the dispatcher fires the `UserPromptExpansion` hook

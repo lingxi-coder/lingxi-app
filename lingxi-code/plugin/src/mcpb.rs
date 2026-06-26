@@ -111,7 +111,7 @@ fn unpack_mcpb_limited(
 /// # Errors
 /// Returns a byte-faithful detail when neither manifest is present/valid.
 pub fn ensure_plugin_manifest(dir: &Path) -> Result<(), String> {
-    let plugin_json = dir.join(".claude-plugin").join("plugin.json");
+    let plugin_json = dir.join(branding::PLUGIN_MANIFEST_DIR).join("plugin.json");
     if plugin_json.exists() {
         return Ok(());
     }
@@ -129,7 +129,7 @@ pub fn ensure_plugin_manifest(dir: &Path) -> Result<(), String> {
         .get("version")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("0.0.0");
-    std::fs::create_dir_all(dir.join(".claude-plugin")).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(dir.join(branding::PLUGIN_MANIFEST_DIR)).map_err(|e| e.to_string())?;
     std::fs::write(
         &plugin_json,
         serde_json::json!({ "name": name, "version": version }).to_string(),

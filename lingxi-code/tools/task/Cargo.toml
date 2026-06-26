@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 tool-api = { path = "../../tool-api" }
+branding.workspace = true
 traits = { path = "../../traits" }
 protocol = { path = "../../protocol" }
 permission = { path = "../../permission" }

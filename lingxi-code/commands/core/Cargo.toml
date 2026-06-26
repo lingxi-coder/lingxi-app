@@ -10,6 +10,7 @@ license.workspace = true
 # on the command-api runtime. build.rs captures LINGXI_GIT_SHA_SHORT for /version.
 
 [dependencies]
+branding.workspace = true
 command-api = { path = "../../command-api" }
 protocol = { path = "../../protocol" }
 skill-api = { path = "../../skill-api" }

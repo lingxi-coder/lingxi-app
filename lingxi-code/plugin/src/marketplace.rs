@@ -86,7 +86,9 @@ impl MarketplaceManager {
             .map_err(|e| format!("Failed to clone marketplace repository: {e}"))?
             .map_err(|e| format!("Failed to clone marketplace repository: {e}"))?;
 
-        let index_path = clone_dir.join(".claude-plugin").join("marketplace.json");
+        let index_path = clone_dir
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("marketplace.json");
         let raw = tokio::fs::read_to_string(&index_path)
             .await
             .map_err(|_| format!("Marketplace file not found at {}", index_path.display()))?;

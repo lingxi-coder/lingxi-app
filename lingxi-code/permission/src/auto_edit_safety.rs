@@ -70,13 +70,13 @@ pub const DANGEROUS_FILES: &[&str] = &[
     ".profile",
     ".ripgreprc",
     ".mcp.json",
-    ".claude.json",
+    branding::GLOBAL_CONFIG_FILE,
 ];
 
 /// Dangerous directories that should be protected from auto-editing. These
 /// directories contain sensitive configuration or executable files. Verbatim
 /// from `filesystem.ts:74-79` (`DANGEROUS_DIRECTORIES`).
-pub const DANGEROUS_DIRECTORIES: &[&str] = &[".git", ".vscode", ".idea", ".claude"];
+pub const DANGEROUS_DIRECTORIES: &[&str] = &[".git", ".vscode", ".idea", branding::DOT_DIR];
 
 /// Result of [`check_path_safety_for_auto_edit`]. `Safe` ⇒ the path may be
 /// auto-allowed by the (future) `acceptEdits` working-dir branch; `Unsafe` ⇒
@@ -154,7 +154,7 @@ pub fn is_dangerous_file_path_to_auto_edit(path: &Path, raw: &str) -> bool {
             // directory. Skip THIS `.claude` segment when it is immediately
             // followed by `worktrees`; keep scanning later segments so a
             // nested `.claude` inside the worktree is still blocked.
-            if *dir == ".claude" {
+            if *dir == branding::DOT_DIR {
                 if let Some(next) = segments.get(i + 1) {
                     if normalize_case_for_comparison(next) == "worktrees" {
                         break; // skip this `.claude`, continue outer scan
@@ -343,7 +343,7 @@ fn is_claude_config_file_path(expanded: &Path, roots: &FsRoots) -> bool {
     // the expanded path must be at-or-under the directory.
     let cwd = &roots.cwd;
     for sub in ["commands", "agents", "skills"] {
-        let dir = cwd.join(".claude").join(sub);
+        let dir = cwd.join(branding::DOT_DIR).join(sub);
         if path_at_or_under(&normalized, &normalize_case_for_comparison(&dir.to_string_lossy())) {
             return true;
         }

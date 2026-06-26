@@ -106,9 +106,9 @@ pub fn resolve_team_dir(home: &Path, team_name: &str) -> PathBuf {
 /// empty value is honored verbatim → cwd-relative), else `<home>/.claude`.
 #[must_use]
 fn config_home_dir(home: &Path) -> PathBuf {
-    match std::env::var_os("CLAUDE_CONFIG_DIR") {
+    match std::env::var_os(branding::CONFIG_DIR_ENV) {
         Some(dir) => PathBuf::from(dir),
-        None => home.join(".claude"),
+        None => home.join(branding::DOT_DIR),
     }
 }
 

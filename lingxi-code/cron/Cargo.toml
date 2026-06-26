@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+branding = { path = "../branding" }
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 tasks = { path = "../tasks" }

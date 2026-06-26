@@ -57,7 +57,7 @@ pub fn load_file_skill_sections_with_roots(
     additional_skill_dirs: &[PathBuf],
 ) -> Vec<FileSkillSection> {
     let mut seen: HashSet<PathBuf> = HashSet::new();
-    let managed_skills_dir = managed_dir.map(|dir| dir.join(".claude").join("skills"));
+    let managed_skills_dir = managed_dir.map(|dir| dir.join(branding::DOT_DIR).join("skills"));
     let managed_rows = managed_skills_dir.as_ref().map_or_else(Vec::new, |dir| {
         load_skills_from_dirs(std::slice::from_ref(dir), SkillSource::Managed, &mut seen)
     });
@@ -114,7 +114,7 @@ fn project_skills_dirs(cwd: &Path, claude_home: &Path) -> Vec<PathBuf> {
         if Some(dir) == home {
             break;
         }
-        let candidate = dir.join(".claude").join("skills");
+        let candidate = dir.join(branding::DOT_DIR).join("skills");
         if candidate.is_dir() {
             dirs.push(candidate);
         }

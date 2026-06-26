@@ -573,7 +573,7 @@ impl WebFetchTool {
             ns ^ (body.len() as u64).rotate_left(17) ^ (body.as_ptr() as u64)
         };
         let stem = crate::persist::persisted_filename(unix_ms, seed);
-        let output_dir = self.ctx.workspace.join(".claude").join("tool-results");
+        let output_dir = self.ctx.workspace.join(branding::DOT_DIR).join("tool-results");
         match crate::persist::persist_binary_content(body, content_type, &stem, &output_dir) {
             crate::persist::PersistResult::Ok { filepath, size } => (Some(filepath), Some(size)),
             crate::persist::PersistResult::Err { .. } => (None, None),

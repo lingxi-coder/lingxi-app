@@ -162,7 +162,7 @@ impl PermissionRequestSink for CollectingPermissionSink {
 pub fn test_config(cwd: &std::path::Path) -> MobileConfig {
     MobileConfig {
         cwd: cwd.to_path_buf(),
-        claude_home: cwd.join(".claude"),
+        claude_home: cwd.join(branding::DOT_DIR),
         ..MobileConfig::default()
     }
 }

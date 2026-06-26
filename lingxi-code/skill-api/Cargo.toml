@@ -12,6 +12,7 @@ license.workspace = true
 # compiled-in builtin skill templates live in this crate's `builtin` module.
 
 [dependencies]
+branding = { path = "../branding" }
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 serde.workspace = true

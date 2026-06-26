@@ -57,8 +57,8 @@ pub fn get_dangerous_directories() -> Vec<String> {
         .filter(|d| **d != ".git")
         .map(|d| (*d).to_string())
         .collect();
-    out.push(".claude/commands".to_string());
-    out.push(".claude/agents".to_string());
+    out.push(format!("{}/commands", branding::DOT_DIR));
+    out.push(format!("{}/agents", branding::DOT_DIR));
     out
 }
 

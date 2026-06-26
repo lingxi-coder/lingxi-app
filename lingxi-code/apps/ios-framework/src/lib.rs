@@ -109,7 +109,7 @@ pub fn build_mobile_engine(
         use platform_ios::{IosPlatform, IosPlatformInputs};
         let cfg = MobileConfig {
             cwd: std::path::PathBuf::from(&impls.app_sandbox_root),
-            claude_home: std::path::PathBuf::from(&impls.app_sandbox_root).join(".claude"),
+            claude_home: std::path::PathBuf::from(&impls.app_sandbox_root).join(branding::DOT_DIR),
             // P0.2: production injects the real CLAUDE.md hierarchy provider so the
             // orchestrator loads `<cwd>/CLAUDE.md` + `<claude_home>/CLAUDE.md` into
             // its system prompt and `fire_instructions_loaded()` fires over them.
@@ -1090,7 +1090,7 @@ pub fn build_ios_engine(
         use platform_ios::{IosPlatform, IosPlatformInputs};
         let mut cfg = MobileConfig {
             cwd: std::path::PathBuf::from(&app_sandbox_root),
-            claude_home: std::path::PathBuf::from(&app_sandbox_root).join(".claude"),
+            claude_home: std::path::PathBuf::from(&app_sandbox_root).join(branding::DOT_DIR),
             // P0.2: production injects the real CLAUDE.md hierarchy provider so the
             // orchestrator loads `<cwd>/CLAUDE.md` + `<claude_home>/CLAUDE.md` into
             // its system prompt and `fire_instructions_loaded()` fires over them.

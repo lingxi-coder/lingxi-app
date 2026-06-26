@@ -100,7 +100,7 @@ pub type EditorSpawner = Arc<dyn Fn(&Path) -> Result<(), String> + Send + Sync>;
 #[must_use]
 pub fn keybindings_path() -> PathBuf {
     resolve_keybindings_path(
-        std::env::var_os("CLAUDE_CONFIG_DIR"),
+        std::env::var_os(branding::CONFIG_DIR_ENV),
         std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")),
     )
 }
@@ -119,7 +119,7 @@ fn resolve_keybindings_path(
         Some(dir) => PathBuf::from(dir),
         None => {
             let home = home_env.map_or_else(|| PathBuf::from("."), PathBuf::from);
-            home.join(".claude")
+            home.join(branding::DOT_DIR)
         }
     };
     base.join("keybindings.json")

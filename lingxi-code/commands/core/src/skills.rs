@@ -128,14 +128,14 @@ fn claude_home_dir() -> PathBuf {
     // claude-code `tr()`: `$CLAUDE_CONFIG_DIR` when set wins (`??`: an empty value
     // is honored verbatim → cwd-relative), else `$HOME/.claude` (with a
     // `$USERPROFILE` fallback for Windows, matching tools/file + tools/task).
-    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+    if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
         return PathBuf::from(dir);
     }
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map_or_else(
-            || PathBuf::from(".").join(".claude"),
-            |h| PathBuf::from(h).join(".claude"),
+            || PathBuf::from(".").join(branding::DOT_DIR),
+            |h| PathBuf::from(h).join(branding::DOT_DIR),
         )
 }
 

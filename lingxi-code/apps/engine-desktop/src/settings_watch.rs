@@ -164,8 +164,8 @@ impl SettingsPaths {
         let managed = managed_settings_dir();
         Self {
             user_settings: claude_home.join("settings.json"),
-            project_settings: cwd.join(".claude").join("settings.json"),
-            local_settings: cwd.join(".claude").join("settings.local.json"),
+            project_settings: cwd.join(branding::DOT_DIR).join("settings.json"),
+            local_settings: cwd.join(branding::DOT_DIR).join("settings.local.json"),
             policy_settings: managed.join("managed-settings.json"),
             policy_drop_in_dir: managed.join("managed-settings.d"),
         }

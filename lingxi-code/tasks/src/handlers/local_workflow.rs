@@ -1089,7 +1089,11 @@ async fn resolve_nested_script(
     {
         for ext in [".js", ".mjs", ".ts"] {
             if let Ok(fc) = fs
-                .read_file(&format!(".claude/workflows/{name}{ext}"), None, None)
+                .read_file(
+                    &format!("{}/workflows/{name}{ext}", branding::DOT_DIR),
+                    None,
+                    None,
+                )
                 .await
             {
                 if !fc.content.is_empty() {

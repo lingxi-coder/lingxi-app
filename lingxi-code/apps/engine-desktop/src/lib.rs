@@ -1725,7 +1725,7 @@ async fn load_enabled_plugins(
 ) -> std::collections::BTreeMap<String, bool> {
     let mut merged: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
     let user = claude_home.join("settings.json");
-    let project = cwd.join(".claude").join("settings.json");
+    let project = cwd.join(branding::DOT_DIR).join("settings.json");
     // User first, project second → project overrides on identical keys.
     for path in [user, project] {
         let Ok(raw) = tokio::fs::read_to_string(&path).await else {
@@ -2461,7 +2461,7 @@ pub async fn build(
     // (`outputstyles::resolve_output_style`); absent dirs ⇒ builtin-only.
     orch_cfg.output_style_dirs = vec![
         cfg.claude_home.join("output-styles"),
-        cfg.cwd.join(".claude").join("output-styles"),
+        cfg.cwd.join(branding::DOT_DIR).join("output-styles"),
     ];
     // CLI `--system-prompt` / `--system-prompt-file`: override the assembled
     // system prompt for the session. `None` keeps the memory-hierarchy prompt
@@ -2730,7 +2730,7 @@ pub async fn build(
     //       project last so it wins on identical command registration. The user
     //       root is `cfg.claude_home` (was `dirs::config_dir()/claude`).
     let mut hook_registry = hooks::HookRegistry::new();
-    let project_settings_path = cwd.join(".claude").join("settings.json");
+    let project_settings_path = cwd.join(branding::DOT_DIR).join("settings.json");
     let user_settings_path = cfg.claude_home.join("settings.json");
     // `--setting-sources` scope (default `(true, true)` = all tiers): skip the
     // user tier when `!include_user` and the project tier when `!include_project`
@@ -2857,12 +2857,12 @@ pub async fn build(
                     incl_user_settings,
                 ),
                 (
-                    cwd.join(".claude").join("settings.json"),
+                    cwd.join(branding::DOT_DIR).join("settings.json"),
                     permission::PermissionRuleSource::ProjectSettings,
                     incl_project_settings,
                 ),
                 (
-                    cwd.join(".claude").join("settings.local.json"),
+                    cwd.join(branding::DOT_DIR).join("settings.local.json"),
                     permission::PermissionRuleSource::LocalSettings,
                     incl_project_settings,
                 ),
@@ -3117,8 +3117,8 @@ pub async fn build(
         let mut tiers: Vec<String> = Vec::new();
         for p in [
             cfg.claude_home.join("settings.json"),
-            cwd.join(".claude").join("settings.json"),
-            cwd.join(".claude").join("settings.local.json"),
+            cwd.join(branding::DOT_DIR).join("settings.json"),
+            cwd.join(branding::DOT_DIR).join("settings.local.json"),
         ] {
             if let Ok(raw) = tokio::fs::read_to_string(&p).await {
                 tiers.push(raw);
@@ -3162,7 +3162,7 @@ pub async fn build(
     // (5.3) Agent catalog — load from project + user agents/. Project wins on
     //       collision (passed SECOND; later paths win). The user agents dir is
     //       `cfg.claude_home/agents` (was `dirs::home_dir()/.claude/agents`).
-    let project_agents_dir = cwd.join(".claude").join("agents");
+    let project_agents_dir = cwd.join(branding::DOT_DIR).join("agents");
     let user_agents_dir = cfg.claude_home.join("agents");
     let agents = agent::load_agents_from_dirs(&[
         (user_agents_dir, agent::definition::AgentSource::UserDefined),
@@ -3581,8 +3581,8 @@ pub async fn build(
         let mut tiers: Vec<String> = Vec::new();
         for p in [
             cfg.claude_home.join("settings.json"),
-            cwd.join(".claude").join("settings.json"),
-            cwd.join(".claude").join("settings.local.json"),
+            cwd.join(branding::DOT_DIR).join("settings.json"),
+            cwd.join(branding::DOT_DIR).join("settings.local.json"),
         ] {
             if let Ok(raw) = tokio::fs::read_to_string(&p).await {
                 tiers.push(raw);
@@ -3614,12 +3614,12 @@ pub async fn build(
             claude_temp_dir: Some(claude_temp_dir()),
             settings_file_paths: vec![
                 to_s(cfg.claude_home.join("settings.json")),
-                to_s(cwd.join(".claude").join("settings.json")),
-                to_s(cwd.join(".claude").join("settings.local.json")),
+                to_s(cwd.join(branding::DOT_DIR).join("settings.json")),
+                to_s(cwd.join(branding::DOT_DIR).join("settings.local.json")),
                 to_s(managed.join("managed-settings.json")),
             ],
             managed_drop_in_dir: Some(to_s(managed.join("managed-settings.d"))),
-            skills_dirs: vec![to_s(cwd.join(".claude").join("skills"))],
+            skills_dirs: vec![to_s(cwd.join(branding::DOT_DIR).join("skills"))],
             managed_allowed_domains,
             managed_read_paths,
             ..Default::default()

@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Project-relative `.claude` subdir holding the single tasks file.
-pub const CLAUDE_DIR: &str = ".claude";
+pub const CLAUDE_DIR: &str = branding::DOT_DIR;
 /// Single-file name (claude-code `SCHEDULED_TASKS_FILE`).
 pub const SCHEDULED_TASKS_FILE: &str = "scheduled_tasks.json";
 /// Lock-file name beside the tasks file (claude-code `scheduled_tasks.lock`).

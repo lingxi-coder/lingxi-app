@@ -355,7 +355,9 @@ impl PluginManager {
         repo_subpath: &str,
     ) -> Result<PathBuf, PluginManagerError> {
         // Read name + version from the fetched manifest to compute the path.
-        let manifest_path = src_dir.join(".claude-plugin").join("plugin.json");
+        let manifest_path = src_dir
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json");
         let raw = tokio::fs::read_to_string(&manifest_path).await.map_err(|_| {
             PluginManagerError::Io(format!(
                 "no plugin manifest found at {}",

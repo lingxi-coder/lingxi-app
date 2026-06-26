@@ -132,12 +132,13 @@ where
     }
     if let Some(name) = nonempty(&spec.name) {
         for ext in [".js", ".mjs", ".ts", ""] {
-            if let Ok(src) = read(&format!(".claude/workflows/{name}{ext}")) {
+            if let Ok(src) = read(&format!("{}/workflows/{name}{ext}", branding::DOT_DIR)) {
                 return Ok(src);
             }
         }
         return Err(WorkflowLaunchError(format!(
-            "no saved workflow named '{name}' under .claude/workflows/"
+            "no saved workflow named '{name}' under {}/workflows/",
+            branding::DOT_DIR
         )));
     }
     Err(WorkflowLaunchError(
@@ -185,7 +186,7 @@ impl WorkflowTool {
     /// List saved workflow names from `.claude/workflows/`. Returns a
     /// comma-joined string for the errorCode-1b message, or `None` on I/O error.
     fn list_available_workflow_names() -> Option<String> {
-        let dir = std::fs::read_dir(".claude/workflows").ok()?;
+        let dir = std::fs::read_dir(format!("{}/workflows", branding::DOT_DIR)).ok()?;
         let mut names: Vec<String> = dir
             .filter_map(|e| e.ok())
             .filter_map(|e| {
@@ -348,7 +349,7 @@ impl Tool for WorkflowTool {
             // Try to resolve from saved workflows (.claude/workflows/<name>{.js,.mjs,.ts,""}).
             let mut found: Option<String> = None;
             for ext in [".js", ".mjs", ".ts", ""] {
-                let candidate = format!(".claude/workflows/{wf_name}{ext}");
+                let candidate = format!("{}/workflows/{wf_name}{ext}", branding::DOT_DIR);
                 match std::fs::read_to_string(&candidate) {
                     Ok(src) => { found = Some(src); break; }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,

@@ -13,6 +13,9 @@ license.workspace = true
 [dependencies]
 tool-api = { path = "../../tool-api" }
 traits = { path = "../../traits" }
+# Namespace branding constants (`.claude` dir name, `CLAUDE.md`, etc.) routed
+# through one place so the dir/file literals are not scattered across the source.
+branding = { path = "../../branding" }
 command-api = { path = "../../command-api" }
 command-core = { path = "../../commands/core" }
 # Live cron scheduler (tick loop). `tool-cron` only persists descriptors; this

@@ -20,6 +20,9 @@ name = "bridge_server"
 path = "src/lib.rs"
 
 [dependencies]
+# Namespace/branding literals (config-dir name, env var names) route through this
+# crate so the Claude namespace lives in one place.
+branding.workspace = true
 bridge = { path = "../../bridge" }
 client-protocol = { path = "../../client-protocol" }
 client-adapter = { path = "../../client-adapter" }

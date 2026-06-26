@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
+branding.workspace = true
 mcp = { path = "../mcp" }
 engine = { path = "../engine" }
 agent = { path = "../agent" }

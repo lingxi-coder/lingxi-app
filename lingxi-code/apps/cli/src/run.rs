@@ -1444,10 +1444,13 @@ async fn load_resume_session_from(
 /// Shared across the CLI's settings/MCP/desktop-config resolution (`lib`, `mode`,
 /// `init`) so every user-tier path honors `$CLAUDE_CONFIG_DIR`.
 pub(crate) fn claude_home_dir() -> PathBuf {
-    if let Ok(explicit) = std::env::var("CLAUDE_CONFIG_DIR") {
+    if let Ok(explicit) = std::env::var(branding::CONFIG_DIR_ENV) {
         return PathBuf::from(explicit);
     }
-    dirs::home_dir().map_or_else(|| PathBuf::from(".claude"), |h| h.join(".claude"))
+    dirs::home_dir().map_or_else(
+        || PathBuf::from(branding::DOT_DIR),
+        |h| h.join(branding::DOT_DIR),
+    )
 }
 
 /// Resolve the `--resume <ID>` argument into a concrete UUID.

@@ -2157,10 +2157,10 @@ pub async fn pump_open_permissions(state: &Arc<Mutex<AppState>>) -> bool {
 fn claude_home_dir() -> std::path::PathBuf {
     // claude-code `tr()` `??`: a SET `$CLAUDE_CONFIG_DIR` wins verbatim (incl.
     // empty → cwd-relative); only UNSET falls back to `<home>/.claude`.
-    if let Ok(explicit) = std::env::var("CLAUDE_CONFIG_DIR") {
+    if let Ok(explicit) = std::env::var(branding::CONFIG_DIR_ENV) {
         return std::path::PathBuf::from(explicit);
     }
-    dirs::home_dir().map_or_else(|| std::path::PathBuf::from("."), |h| h.join(".claude"))
+    dirs::home_dir().map_or_else(|| std::path::PathBuf::from("."), |h| h.join(branding::DOT_DIR))
 }
 
 /// (M9-10) Walk every `*.jsonl` transcript under `<claude_home>/projects/`

@@ -254,7 +254,7 @@ pub fn project_dirs_up_to_home(subdir: &str, cwd: &Path, home: &Path) -> Vec<Pat
             break;
         }
 
-        let claude_subdir = current.join(".claude").join(subdir);
+        let claude_subdir = current.join(branding::DOT_DIR).join(subdir);
         // Perf filter: only existing dirs (the worktree fallback relies on this).
         if std::fs::metadata(&claude_subdir).is_ok() {
             dirs.push(claude_subdir);
@@ -342,7 +342,7 @@ pub async fn load_command_markdown_files(
     const SUBDIR: &str = "commands";
 
     let user_dir = claude_home.join(SUBDIR);
-    let managed_commands_dir = managed_dir.join(".claude").join(SUBDIR);
+    let managed_commands_dir = managed_dir.join(branding::DOT_DIR).join(SUBDIR);
     let mut project_dirs = project_dirs_up_to_home(SUBDIR, cwd, home);
 
     // Worktree fallback: when cwd's nearest .git is a worktree marker whose main
@@ -352,12 +352,12 @@ pub async fn load_command_markdown_files(
         if let Some(canonical_root) = canonical_git_root(&git_root) {
             if normalize_for_comparison(&canonical_root) != normalize_for_comparison(&git_root) {
                 let worktree_subdir =
-                    normalize_for_comparison(&git_root.join(".claude").join(SUBDIR));
+                    normalize_for_comparison(&git_root.join(branding::DOT_DIR).join(SUBDIR));
                 let worktree_has_subdir = project_dirs
                     .iter()
                     .any(|d| normalize_for_comparison(d) == worktree_subdir);
                 if !worktree_has_subdir {
-                    let main_claude_subdir = canonical_root.join(".claude").join(SUBDIR);
+                    let main_claude_subdir = canonical_root.join(branding::DOT_DIR).join(SUBDIR);
                     if !project_dirs.iter().any(|d| *d == main_claude_subdir) {
                         project_dirs.push(main_claude_subdir);
                     }
@@ -408,7 +408,7 @@ pub async fn load_skill_markdown_files_with_roots(
     let mut all_files = Vec::new();
     if let Some(managed_dir) = managed_dir {
         all_files.extend(load_skill_dir(
-            &managed_dir.join(".claude").join("skills"),
+            &managed_dir.join(branding::DOT_DIR).join("skills"),
             CommandSource::Managed,
         ));
     }

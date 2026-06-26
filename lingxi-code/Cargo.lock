@@ -63,6 +63,7 @@ name = "android-aar"
 version = "0.9.0"
 dependencies = [
  "async-trait",
+ "branding",
  "client-protocol",
  "engine-mobile",
  "hex",
@@ -520,6 +521,7 @@ version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "branding",
  "bridge",
  "client-adapter",
  "client-protocol",
@@ -701,6 +703,7 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "async-trait",
+ "branding",
  "chrono",
  "clap",
  "client-adapter",
@@ -789,6 +792,7 @@ name = "command-api"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "branding",
  "hooks",
  "protocol",
  "serde",
@@ -805,6 +809,7 @@ name = "command-core"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "branding",
  "command-api",
  "compaction",
  "cost",
@@ -893,6 +898,7 @@ version = "0.12.0"
 dependencies = [
  "agent",
  "async-trait",
+ "branding",
  "engine",
  "memory",
  "permission",
@@ -964,6 +970,7 @@ name = "cron"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "branding",
  "futures",
  "libc",
  "protocol",
@@ -1276,6 +1283,7 @@ version = "0.9.0"
 dependencies = [
  "agent",
  "async-trait",
+ "branding",
  "client-adapter",
  "client-protocol",
  "command-api",
@@ -1342,6 +1350,7 @@ name = "engine-mobile"
 version = "0.9.0"
 dependencies = [
  "async-trait",
+ "branding",
  "client-adapter",
  "client-protocol",
  "command-api",
@@ -2180,6 +2189,7 @@ version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "branding",
  "camino",
  "client-protocol",
  "engine-mobile",
@@ -2867,6 +2877,7 @@ dependencies = [
  "agent",
  "async-trait",
  "boon",
+ "branding",
  "chrono",
  "compaction",
  "cost",
@@ -2999,6 +3010,7 @@ name = "permission"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "branding",
  "ignore",
  "protocol",
  "regex",
@@ -3238,6 +3250,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "axum",
+ "branding",
  "fs2",
  "futures",
  "futures-core",
@@ -3279,6 +3292,7 @@ version = "0.12.0"
 dependencies = [
  "agent",
  "async-trait",
+ "branding",
  "command-api",
  "git2",
  "hooks",
@@ -4011,6 +4025,7 @@ name = "sandbox-runtime"
 version = "0.12.0"
 dependencies = [
  "base64",
+ "branding",
  "bytes",
  "clap",
  "dirs",
@@ -4442,6 +4457,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 name = "skill-api"
 version = "0.12.0"
 dependencies = [
+ "branding",
  "protocol",
  "serde",
  "serde_json",
@@ -4623,6 +4639,7 @@ version = "0.12.0"
 dependencies = [
  "agent",
  "async-trait",
+ "branding",
  "engine",
  "futures",
  "hooks",
@@ -5102,6 +5119,7 @@ name = "tool-cron"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "branding",
  "cron",
  "engine",
  "once_cell",
@@ -5125,6 +5143,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "base64",
+ "branding",
  "filetime",
  "globset",
  "grep-matcher",
@@ -5204,6 +5223,7 @@ name = "tool-mcp"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "branding",
  "engine",
  "mcp",
  "once_cell",
@@ -5224,6 +5244,7 @@ name = "tool-meta"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "branding",
  "engine",
  "once_cell",
  "permission",
@@ -5333,6 +5354,7 @@ name = "tool-task"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "branding",
  "engine",
  "once_cell",
  "permission",
@@ -5354,6 +5376,7 @@ name = "tool-team"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "branding",
  "engine",
  "once_cell",
  "permission",
@@ -5393,6 +5416,7 @@ name = "tool-web"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "branding",
  "chrono",
  "futures-util",
  "htmd",
@@ -5417,6 +5441,7 @@ name = "tool-workflow"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "branding",
  "once_cell",
  "permission",
  "serde",
@@ -5636,6 +5661,7 @@ version = "0.12.0"
 dependencies = [
  "assert_cmd",
  "async-trait",
+ "branding",
  "chrono",
  "command-api",
  "command-core",

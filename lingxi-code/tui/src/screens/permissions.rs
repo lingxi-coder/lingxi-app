@@ -268,11 +268,11 @@ pub fn load_permission_sections(
             PermissionRuleSource::UserSettings,
         ),
         (
-            cwd.join(".claude").join("settings.json"),
+            cwd.join(branding::DOT_DIR).join("settings.json"),
             PermissionRuleSource::ProjectSettings,
         ),
         (
-            cwd.join(".claude").join("settings.local.json"),
+            cwd.join(branding::DOT_DIR).join("settings.local.json"),
             PermissionRuleSource::LocalSettings,
         ),
     ] {

@@ -90,11 +90,11 @@ fn rust_toolchain_version() -> String {
 fn claude_home_dir() -> String {
     // claude-code `tr()` `??`: a SET `$CLAUDE_CONFIG_DIR` wins verbatim (incl.
     // empty); only UNSET falls back to `<home>/.claude`.
-    if let Ok(explicit) = std::env::var("CLAUDE_CONFIG_DIR") {
+    if let Ok(explicit) = std::env::var(branding::CONFIG_DIR_ENV) {
         return explicit;
     }
     match dirs::home_dir() {
-        Some(h) => h.join(".claude").display().to_string(),
+        Some(h) => h.join(branding::DOT_DIR).display().to_string(),
         None => "~/.claude".to_string(),
     }
 }

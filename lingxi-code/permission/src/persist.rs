@@ -66,10 +66,10 @@ impl PermissionPaths {
         match dest {
             PermissionUpdateDestination::UserSettings => Some(self.claude_home.join("settings.json")),
             PermissionUpdateDestination::ProjectSettings => {
-                Some(self.cwd.join(".claude").join("settings.json"))
+                Some(self.cwd.join(branding::DOT_DIR).join("settings.json"))
             }
             PermissionUpdateDestination::LocalSettings => {
-                Some(self.cwd.join(".claude").join("settings.local.json"))
+                Some(self.cwd.join(branding::DOT_DIR).join("settings.local.json"))
             }
             PermissionUpdateDestination::Session | PermissionUpdateDestination::CliArg => None,
         }

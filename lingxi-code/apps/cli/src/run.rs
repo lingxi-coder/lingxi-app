@@ -1156,11 +1156,49 @@ async fn run_resume_by_id(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink)
             return exit_codes::RUNTIME_ERROR;
         }
     };
+    resume_resolved_session(argv, runtime, sink, session_id).await
+}
 
-    // SESSION.4 parity: a `--resume <uuid>` for a session that does NOT exist
-    // on disk must NOT report success. TS (claude-code/src/main.tsx:3675-3681)
-    // calls `loadConversationForResume(sessionId)` and, when it yields nothing,
-    // exits via `exitWithError(root, "No conversation found with session ID:
+/// `-c/--continue` — resume the MOST-RECENT conversation in the current cwd's
+/// project dir (claude-code `main.tsx`: `options.continue` →
+/// `loadConversationForResume(undefined)` → newest log). When the project has no
+/// resumable conversation, error with the byte-exact `No conversation found to
+/// continue` and exit non-zero (TS `exitWithError`). Once a session is picked the
+/// dispatch is identical to `--resume <uuid>` (prompt one-shot / TUI / stdio).
+pub async fn run_continue(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -> i32 {
+    // Newest-first rows over the cwd's project dir (same loader the picker uses);
+    // `EmptyDirectory` (or an empty list) ⇒ nothing to continue.
+    let rows = match load_resume_rows().await {
+        Ok(rows) => rows,
+        Err(LoaderError::EmptyDirectory) => {
+            sink.error("runtime", "No conversation found to continue").await;
+            return exit_codes::RUNTIME_ERROR;
+        }
+        Err(e) => {
+            sink.error("runtime", &e.to_string()).await;
+            return exit_codes::RUNTIME_ERROR;
+        }
+    };
+    let Some(first) = rows.first() else {
+        sink.error("runtime", "No conversation found to continue").await;
+        return exit_codes::RUNTIME_ERROR;
+    };
+    resume_resolved_session(argv, runtime, sink, first.uuid).await
+}
+
+/// Shared post-resolution resume dispatch for both `--resume <uuid>` and
+/// `--continue`: confirm the session exists on disk, then mirror the fresh launch
+/// (prompt one-shot → TUI mount → stdio fallback).
+async fn resume_resolved_session(
+    argv: &Argv,
+    runtime: &Runtime,
+    sink: &dyn OutputSink,
+    session_id: uuid::Uuid,
+) -> i32 {
+    // SESSION.4 parity: a resume for a session that does NOT exist on disk must
+    // NOT report success. TS (claude-code/src/main.tsx:3675-3681) calls
+    // `loadConversationForResume(sessionId)` and, when it yields nothing, exits
+    // via `exitWithError(root, "No conversation found with session ID:
     // {sessionId}")` (exit code 1). We mirror that by loading the session up
     // front and only proceeding once it is confirmed to exist and parse.
     let loaded = load_resume_session(session_id).await;

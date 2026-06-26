@@ -597,6 +597,16 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         });
     }
 
+    // `-c/--continue` resumes the MOST-RECENT conversation in the current cwd's
+    // project dir (claude-code `main.tsx`: `options.continue` →
+    // `loadConversationForResume(undefined)`; errors `No conversation found to
+    // continue` when none). Dispatched BEFORE `--resume` so the no-id continue
+    // path is honored. `--continue --resume <id>` is rejected upstream
+    // (lib.rs:315 cross-flag rule), so the two never collide here.
+    if parsed.continue_session {
+        return run::run_continue(&parsed, &runtime, sink.as_ref()).await;
+    }
+
     // --resume routes through run::run_resume, which itself splits (M7-12):
     //   <uuid>            → load by id
     //   (none) + TTY      → iocraft Resume screen

@@ -86,6 +86,17 @@ pub const REPL_SESSION_STARTED: &str = "tengu_repl_session_started";
 /// (M5-13)
 pub const REPL_SESSION_ENDED: &str = "tengu_repl_session_ended";
 
+/// `tengu_post_autocompact_turn` — emitted once per turn AFTER an auto-compact
+/// (binary main loop `if(le?.compacted)le.turnCounter++,G("tengu_post_autocompact_turn",
+/// {turnId,turnCounter,queryChainId,queryDepth})`, offset ~209133741). Payload:
+/// `turnId`, `turnCounter`, `queryChainId`, `queryDepth`.
+///
+/// Kept OUT of the count-locked [`NAMES`] / `ALL_EVENT_NAMES` (a post-fixture
+/// addition), mirroring how `kairos`/`queue`/`workflow` event names sit apart
+/// from the frozen registry — so adding it does not perturb the 347-entry
+/// completeness lock.
+pub const POST_AUTOCOMPACT_TURN: &str = "tengu_post_autocompact_turn";
+
 /// Order-locked array of all orchestrator-lifecycle names; consumed by
 /// `tengu::ALL_EVENT_NAMES`. Append-only: never reorder or remove entries.
 pub(crate) const NAMES: &[&str] = &[
@@ -129,5 +140,12 @@ mod tests {
     fn names_has_17_entries_after_m5_13() {
         // 15 (M5-02..M5-06) + 2 (M5-13 REPL) = 17.
         assert_eq!(NAMES.len(), 17);
+    }
+
+    #[test]
+    fn post_autocompact_turn_name_locked_and_out_of_frozen_names() {
+        assert_eq!(POST_AUTOCOMPACT_TURN, "tengu_post_autocompact_turn");
+        // Kept apart from the count-locked registry (like kairos/queue/workflow).
+        assert!(!NAMES.contains(&POST_AUTOCOMPACT_TURN));
     }
 }

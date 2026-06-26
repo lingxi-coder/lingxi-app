@@ -2160,23 +2160,58 @@ impl ConversationOrchestrator {
         .await;
     }
 
+    /// `tengu_post_autocompact_turn` (binary main loop, offset ~209133741):
+    /// fired once per turn that follows an auto-compact, alongside the
+    /// `turnCounter++` increment. Payload `{turnId, turnCounter, queryChainId,
+    /// queryDepth}`; `queryDepth` is always 0 (subagents never run through
+    /// `ConversationOrchestrator`). Strict no-op when no analytics bus is wired.
+    async fn fire_post_autocompact_turn(&self, turn_id: &str, turn_counter: u32) {
+        let Some(bus) = self.analytics_bus.as_ref() else {
+            return;
+        };
+        let mut metadata = telemetry::LogEventMetadata::new();
+        metadata.insert(
+            "turnId".into(),
+            telemetry::AnalyticsValue::String(turn_id.to_string()),
+        );
+        metadata.insert(
+            "turnCounter".into(),
+            telemetry::AnalyticsValue::Int(i64::from(turn_counter)),
+        );
+        metadata.insert(
+            "queryChainId".into(),
+            telemetry::AnalyticsValue::String(self.query_chain_id.clone()),
+        );
+        metadata.insert("queryDepth".into(), telemetry::AnalyticsValue::Int(0));
+        bus.log_event(telemetry::tengu::orchestrator::POST_AUTOCOMPACT_TURN, metadata)
+            .await;
+    }
+
     pub(crate) async fn maybe_compact_before_call(&self) {
         let Some(compactor) = self.compaction.clone() else {
             // No compactor wired — strict no-op (history untouched).
             return;
         };
 
-        // #54 per-turn turn-counter increment (`if(oe?.compacted)
-        // oe.turnCounter++`, `bin/claude.exe` offset 202951666). Runs on EVERY
-        // turn after a compact (regardless of the threshold below) so the
-        // rapid-refill window (`turn_counter < RAPID_REFILL_TURN_WINDOW`) measures
-        // turns-since-previous-compact correctly. Fires
-        // `tengu_post_autocompact_turn`-equivalent bookkeeping; held only briefly.
-        {
+        // #54 per-turn turn-counter increment + `tengu_post_autocompact_turn`
+        // emit (binary `if(le?.compacted)le.turnCounter++,G(
+        // "tengu_post_autocompact_turn",{turnId,turnCounter,queryChainId,queryDepth})`,
+        // offsets 202951666 / ~209133741). Runs on EVERY turn after a compact
+        // (regardless of the threshold below) so the rapid-refill window
+        // (`turn_counter < RAPID_REFILL_TURN_WINDOW`) measures
+        // turns-since-previous-compact correctly. Capture under the lock, then
+        // emit after releasing it (the analytics emit is async).
+        let post_autocompact = {
             let mut tracking = self.compaction_tracking.lock().await;
             if tracking.compacted {
                 tracking.turn_counter = tracking.turn_counter.saturating_add(1);
+                Some((tracking.turn_id.clone(), tracking.turn_counter))
+            } else {
+                None
             }
+        };
+        if let Some((turn_id, turn_counter)) = post_autocompact {
+            self.fire_post_autocompact_turn(&turn_id, turn_counter).await;
         }
 
         // Snapshot history + estimate tokens WITHOUT holding the lock across

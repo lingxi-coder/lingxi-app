@@ -880,6 +880,17 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         tool_uses.iter().map(|(_, name, _, _)| name.clone()).collect();
     orch.note_todo_reminder_tool_call(&invoked_tool_names).await;
 
+    // #78 nudge guard `!Pt(ce)`: suppress the thinking-only nudge during a
+    // StructuredOutput exchange. Computed here (a match guard cannot `.await`
+    // the session lock); the scan is cheap — it stops at the first real user
+    // message. The current assistant response is already in `history` (pushed at
+    // the top of this fn), mirroring the binary's `se` including `se.at(-1)`.
+    let prior_structured_output = {
+        let session = orch.session();
+        let s = session.lock().await;
+        prior_assistant_used_structured_output(&s.history)
+    };
+
     // 6. Decide loop disposition.
     let outcome = if hook_prevent_continuation {
         // HOOK.2: honor the PreToolUse `continue:false` request — end the turn
@@ -930,7 +941,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                 if recovery
                     .as_deref()
                     .is_some_and(|s| !s.thinking_only_nudged)
-                    && !has_visible_text(&assistant_blocks) =>
+                    && !has_visible_text(&assistant_blocks)
+                    && !prior_structured_output =>
             {
                 let state = recovery.as_deref_mut().expect("recovery is Some");
                 handle_thinking_only(orch, state).await?
@@ -1733,6 +1745,58 @@ fn has_visible_text(blocks: &[ContentBlock]) -> bool {
     blocks
         .iter()
         .any(|b| matches!(b, ContentBlock::Text { text } if !text.trim().is_empty()))
+}
+
+/// `StructuredOutput` tool name (claude-code `bp`). It is the only tool that
+/// sets the `endsTurn`/`toolEndsTurn` flag, so detecting its `tool_use` by name
+/// is equivalent to the binary's `name===bp` check.
+pub(crate) const STRUCTURED_OUTPUT_TOOL_NAME: &str = "StructuredOutput";
+
+/// Port of claude-code's `Pt(ce)` (query module, `bin/claude.exe` offset
+/// ~209123866): scanning the message history backward, return `true` when the
+/// most recent assistant carried a `StructuredOutput` `tool_use` BEFORE any real
+/// user turn. Meta user messages and tool-result-carrier user messages
+/// (`Jde(e)` = a `user` message whose content array holds a `tool_result`) are
+/// skipped; a real user message short-circuits to `false`.
+///
+/// Used as the `!Pt(ce)` guard on the #78 thinking-only nudge: in a
+/// structured-output exchange the model's post-`StructuredOutput` `end_turn`
+/// legitimately carries no visible text, so the "[Your previous response had no
+/// visible output…]" nudge must NOT fire.
+pub(crate) fn prior_assistant_used_structured_output(history: &[ConversationMessage]) -> bool {
+    for msg in history.iter().rev() {
+        match msg.role() {
+            protocol::MessageRole::User => {
+                // `if(Sn.isMeta||Jde(Sn))continue; return!1`
+                if msg.is_meta() || is_tool_result_carrier(msg) {
+                    continue;
+                }
+                return false;
+            }
+            protocol::MessageRole::Assistant => {
+                // `Sn.message.content.some(b=>b.type==="tool_use"&&b.name===bp)`
+                if msg.tool_calls().iter().any(|b| {
+                    matches!(b, ContentBlock::ToolUse { name, .. } if name == STRUCTURED_OUTPUT_TOOL_NAME)
+                }) {
+                    return true;
+                }
+            }
+            // `if(Sn.type!=="assistant")continue` — system / other lines skipped.
+            protocol::MessageRole::System => continue,
+        }
+    }
+    false
+}
+
+/// claude-code `Jde(e)`: a `user` message whose content array contains any
+/// `tool_result` block (a synthetic tool-result-carrier turn, not a real human
+/// turn).
+fn is_tool_result_carrier(msg: &ConversationMessage) -> bool {
+    matches!(
+        msg,
+        ConversationMessage::User { content, .. }
+            if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+    )
 }
 
 /// #77 (batched twin, claude-code `bin/claude.exe` offset ~202945837): handle a
@@ -5016,8 +5080,9 @@ mod max_output_tokens_recovery_tests {
 #[cfg(test)]
 mod malformed_and_thinking_only_tests {
     use super::{
-        execute_one_turn, execute_one_turn_with_recovery, RecoveryState, TurnStepOutcome,
-        MALFORMED_TOOL_USE_RETRY_FAILED, MALFORMED_TOOL_USE_RETRY_NUDGE, THINKING_ONLY_NUDGE,
+        execute_one_turn, execute_one_turn_with_recovery, prior_assistant_used_structured_output,
+        RecoveryState, TurnStepOutcome, MALFORMED_TOOL_USE_RETRY_FAILED,
+        MALFORMED_TOOL_USE_RETRY_NUDGE, STRUCTURED_OUTPUT_TOOL_NAME, THINKING_ONLY_NUDGE,
     };
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
@@ -5026,7 +5091,7 @@ mod malformed_and_thinking_only_tests {
     };
     use crate::OrchestratorConfig;
     use llm_client::LlmResponse;
-    use protocol::{ContentBlock, ConversationMessage};
+    use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
     use std::path::PathBuf;
     use std::sync::Arc;
     use tool_api::registry::ToolRegistry;
@@ -5206,6 +5271,108 @@ mod malformed_and_thinking_only_tests {
                 if matches!(content.first(), Some(ContentBlock::Text { text })
                     if text == MALFORMED_TOOL_USE_RETRY_NUDGE)
         )));
+    }
+
+    // ---- #78 nudge guard `!Pt(ce)` (StructuredOutput exchange) -------------
+
+    fn so_tool_use_assistant() -> ConversationMessage {
+        ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolUse {
+                id: ToolUseId::new(),
+                name: STRUCTURED_OUTPUT_TOOL_NAME.to_string(),
+                input: serde_json::json!({}),
+                provider_id: None,
+            }],
+            stop_reason: None,
+        }
+    }
+
+    fn tool_result_user() -> ConversationMessage {
+        ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: ToolUseId::new(),
+                content: "Structured output provided successfully".into(),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+        }
+    }
+
+    fn real_user(text: &str) -> ConversationMessage {
+        ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text { text: text.into() }],
+            is_meta: false,
+        }
+    }
+
+    fn empty_assistant() -> ConversationMessage {
+        ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![],
+            stop_reason: None,
+        }
+    }
+
+    #[test]
+    fn pt_true_skips_tool_result_carrier_to_reach_structured_output() {
+        // [real user] [assistant StructuredOutput tool_use] [user tool_result]
+        // [current empty assistant]: scanning back, the carrier is skipped (Jde)
+        // and the StructuredOutput assistant is reached BEFORE any real user ⇒ true.
+        let h = vec![
+            real_user("emit JSON"),
+            so_tool_use_assistant(),
+            tool_result_user(),
+            empty_assistant(),
+        ];
+        assert!(prior_assistant_used_structured_output(&h));
+    }
+
+    #[test]
+    fn pt_false_when_real_user_precedes_any_structured_output() {
+        // No StructuredOutput before the most recent real user turn ⇒ false (the
+        // `Sn.type==="user" && !isMeta && !Jde ⇒ return!1` short-circuit).
+        let h = vec![so_tool_use_assistant(), real_user("new question"), empty_assistant()];
+        assert!(!prior_assistant_used_structured_output(&h));
+    }
+
+    #[test]
+    fn pt_false_for_non_structured_output_tool_use() {
+        // An assistant that used a DIFFERENT tool is not a match; scanning hits
+        // the real user and returns false.
+        let other = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolUse {
+                id: ToolUseId::new(),
+                name: "Read".into(),
+                input: serde_json::json!({}),
+                provider_id: None,
+            }],
+            stop_reason: None,
+        };
+        let h = vec![real_user("read it"), other, tool_result_user(), empty_assistant()];
+        assert!(!prior_assistant_used_structured_output(&h));
+    }
+
+    #[test]
+    fn pt_skips_meta_user_messages() {
+        // A meta user message (isMeta) between the StructuredOutput assistant and
+        // the current response is skipped, not treated as a real user turn.
+        let mut meta = real_user("[meta nudge]");
+        if let ConversationMessage::User { is_meta, .. } = &mut meta {
+            *is_meta = true;
+        }
+        let h = vec![so_tool_use_assistant(), meta, empty_assistant()];
+        assert!(prior_assistant_used_structured_output(&h));
+    }
+
+    #[test]
+    fn pt_false_on_empty_history() {
+        assert!(!prior_assistant_used_structured_output(&[]));
     }
 
     // ---- #78 thinking-only -------------------------------------------------

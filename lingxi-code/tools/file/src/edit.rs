@@ -745,13 +745,26 @@ impl Tool for FileEditTool {
         // `patch_preview` remain for the TUI diff render only.
         let content = edit_result_message(file_path, replace_all);
 
+        // claude-code FileEditTool result data (2.1.191): {filePath, oldString,
+        // newString, originalFile, structuredPatch, userModified, replaceAll}
+        // (preserve_order). The model-facing message rides on `model_content`.
+        // `structuredPatch` is the +/-/space preview string — LingXi's existing
+        // structure, SAME as the already-merged Write tool; the binary's npm-`diff`
+        // hunk array {oldStart,oldLines,newStart,newLines,lines} is a shared
+        // residual (Write + Edit both emit the string preview). `userModified` is
+        // false (no interactive human-accept step); `gitDiff`/`staleRecovered` are
+        // OMITTED (LingXi has no git-diff capture / stale-recovery signal here).
         Ok(ToolCallResult {
             data: json!({
-                "content": content,
-                "replacements": replacements,
-                "patch_preview": patch_preview
+                "filePath": file_path,
+                "oldString": old_string,
+                "newString": new_string,
+                "originalFile": before,
+                "structuredPatch": patch_preview,
+                "userModified": false,
+                "replaceAll": replace_all,
             }),
-            model_content: None,
+            model_content: Some(content),
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -909,15 +922,24 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result.data["replacements"], 1);
         // Model-facing `content` is the byte-faithful single-edit message and
         // echoes the ORIGINAL input path verbatim (not canonicalized).
         let input_path = target.to_str().unwrap();
         assert_eq!(
-            result.data["content"].as_str().unwrap(),
+            result.model_content.as_deref().unwrap(),
             edit_result_message(input_path, false)
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello Rust");
+        // Result data is the binary FileEditTool record (1:1 field set); the
+        // model render rides on model_content, NOT inside data.
+        assert_eq!(result.data["filePath"], input_path);
+        assert_eq!(result.data["oldString"], "world");
+        assert_eq!(result.data["newString"], "Rust");
+        assert!(result.data["originalFile"].as_str().unwrap().starts_with("hello world"));
+        assert_eq!(result.data["userModified"], false);
+        assert_eq!(result.data["replaceAll"], false);
+        assert!(result.data.get("content").is_none());
+        assert!(result.data.get("replacements").is_none());
     }
 
     // ── Finding #16: deletion (new_string == "") consumes the trailing newline,
@@ -1335,7 +1357,6 @@ that bypasses Perforce tracking."
             )
             .await
             .unwrap();
-        assert_eq!(result.data["replacements"], 1);
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
             "brand new contents\n"
@@ -1510,12 +1531,11 @@ that bypasses Perforce tracking."
             )
             .await
             .unwrap();
-        assert_eq!(result.data["replacements"], 3);
         // replace_all path emits the "All occurrences were successfully
         // replaced." message verbatim to the model.
         let input_path = target.to_str().unwrap();
         assert_eq!(
-            result.data["content"].as_str().unwrap(),
+            result.model_content.as_deref().unwrap(),
             edit_result_message(input_path, true)
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "bar bar bar");
@@ -1691,7 +1711,7 @@ that bypasses Perforce tracking."
             )
             .await
             .unwrap();
-        let preview = result.data["patch_preview"].as_str().unwrap();
+        let preview = result.data["structuredPatch"].as_str().unwrap();
         assert!(
             preview.contains("lines truncated] ..."),
             "preview missing truncation suffix: {preview}"
@@ -2046,7 +2066,6 @@ that bypasses Perforce tracking."
             )
             .await
             .unwrap();
-        assert_eq!(result.data["replacements"], 1);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "edited\n");
     }
 
@@ -2085,7 +2104,6 @@ that bypasses Perforce tracking."
             )
             .await
             .unwrap();
-        assert_eq!(result.data["replacements"], 1);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "ALPHA BETA\n");
     }
 

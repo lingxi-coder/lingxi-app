@@ -292,7 +292,6 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result.data["replacements"], 1);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello Rust");
     }
 
@@ -320,7 +319,6 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result.data["replacements"], 1);
         // Only "alpha" → "ALPHA" applied; "beta" unchanged.
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),

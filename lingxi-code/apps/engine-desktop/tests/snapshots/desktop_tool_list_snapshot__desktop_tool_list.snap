@@ -24,6 +24,7 @@ expression: names
 - MultiEdit
 - NotebookEdit
 - PowerShell
+- PushNotification
 - REPL
 - Read
 - ReadMcpResourceTool

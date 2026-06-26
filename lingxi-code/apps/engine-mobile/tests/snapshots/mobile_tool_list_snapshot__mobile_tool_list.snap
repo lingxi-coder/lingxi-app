@@ -15,6 +15,7 @@ expression: names
 - Grep
 - MultiEdit
 - NotebookEdit
+- PushNotification
 - Read
 - RemoteTrigger
 - ScheduleWakeup

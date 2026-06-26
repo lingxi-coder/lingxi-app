@@ -3158,7 +3158,17 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                     || st.active_screen.is_some()
                     || st.history_search.is_some()
                     || st.palette.open
-                    || st.completion.open;
+                    || st.completion.open
+                    // Vim NORMAL/VISUAL: printable keys are COMMANDS (motions,
+                    // operators, `i`/`a`/`x`/…), not text — they must reach
+                    // `handle_live_key`'s vim branch (priority 4), NOT the
+                    // composer-bound paste coalescer. Only INSERT mode (and
+                    // vim-disabled) types text. Same class of fix as the
+                    // `active_screen` guard above; without it every normal-mode
+                    // command was siphoned into the composer as literal text.
+                    || (st.vim_enabled
+                        && st.vim.mode
+                            != crate::components::prompt_input::VimMode::Insert);
                 let printable = matches!(k.code, KeyCode::Char(_))
                     && !k.modifiers.contains(KeyModifiers::CONTROL)
                     && !k.modifiers.contains(KeyModifiers::ALT);

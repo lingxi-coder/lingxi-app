@@ -355,6 +355,9 @@ pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
             queue.clone(),
             runtime.runtime_spawner.clone(),
         ));
+    // The driver re-uses the SAME scheduler at its turn-completion edge to arm the
+    // `/loop` keepalive fallback (binary `lKi`); clone before the cell consumes it.
+    let driver_wakeup_scheduler = wakeup_scheduler.clone();
     if runtime.wakeup_scheduler_cell.set(wakeup_scheduler).is_err() {
         // Already filled — should not happen for a fresh runtime, but never panic
         // at the composition root over a benign double-wire.
@@ -362,10 +365,12 @@ pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
 
     // Production turn driver: errors surface as a terminal `ClientEvent::Error`
     // through the SAME connection-scoped event sink. Wired with the connection's
-    // queue + the shared reason flag so each turn registers its cancel token.
+    // queue + the shared reason flag so each turn registers its cancel token, and
+    // the wakeup scheduler so the turn-end edge can arm the keepalive fallback.
     let driver = Arc::new(
         OrchestratorTurnDriver::with_error_sink(runtime.orchestrator.clone(), event_sink)
-            .with_queue(queue, cancel_reason),
+            .with_queue(queue, cancel_reason)
+            .with_wakeup_scheduler(driver_wakeup_scheduler),
     );
 
     // The full command-routing seam over the real engine handles.

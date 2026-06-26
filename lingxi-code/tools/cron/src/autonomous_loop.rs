@@ -409,25 +409,97 @@ static DELIVERY: Mutex<DeliveryState> = Mutex::new(DeliveryState {
 });
 
 /// `X4d` / `resetAutonomousLoopDelivered` (cc_all.txt:504966): clears the
-/// first-delivery state so the next fire re-emits the full preamble. Called on a
-/// fresh loop / user-abort.
-///
-// PARITY-TODO: in the binary, `X4d` is invoked by the user-abort path (`XIn`)
-// and on fresh-loop start so the first-vs-subsequent delivery state is correct
-// across distinct `/loop` sessions in one process. In the port this fn is NOT
-// yet wired to a production loop-lifecycle event (only a test calls it). With
-// the resolver gate OFF (`tengu_kairos_loop_prompt` default false, i.e.
-// `CLAUDE_CODE_LOOP_PROMPT` unset) the `DELIVERY` state is never mutated, so
-// this is inert and byte-matches the shipped binary. But under the documented
-// `CLAUDE_CODE_LOOP_PROMPT=1` override a second `/loop` session in the same
-// process would skip the full preamble (the first session left
-// `preamble_delivered=true`). Wire this to the loop-end / user-abort and
-// fresh-loop-start events once those seams exist; until then a process restart
-// is the only reset.
+/// first-delivery state so the next fire re-emits the full preamble.
+// PARITY: in the binary `X4d` is invoked from the post-compact cleanup `Zne`
+// (`if(o)resetAutonomousLoopDelivered()`, main-thread compact). The port wires it
+// at the same site — `compaction::run_post_compact_cleanup` inside its
+// main-thread-compact gate. Inert by default (the resolver gate
+// `tengu_kairos_loop_prompt` is off → `DELIVERY` is never mutated), so it
+// byte-matches the shipped binary until the flag flips.
 pub fn reset_autonomous_loop_delivered() {
     let mut st = DELIVERY.lock().unwrap();
     st.preamble_delivered = false;
     st.last_content = None;
+}
+
+// ── Loop runtime state (binary `Nt.loopTickInFlightPrompt` / `…Keepalives`) ───
+//
+// The keepalive fallback tracks, across a /loop tick turn: the prompt of the tick
+// currently in flight (`tAt`/`I7e`) and how many consecutive keepalives have been
+// armed without the model rescheduling (`PZt`/`nAt`, budget `tqd`=1). In the
+// binary these live on the session state object `Nt`; the port mirrors them with
+// a process-global [`Mutex`] (single live /loop per process, like `DELIVERY`).
+
+#[derive(Default)]
+struct LoopRuntimeState {
+    /// `Nt.loopTickInFlightPrompt` — prompt of the loop tick being processed.
+    tick_in_flight_prompt: Option<String>,
+    /// `Nt.loopConsecutiveKeepalives` — consecutive keepalive count.
+    consecutive_keepalives: u32,
+    /// The port's stand-in for `Xke()` (is-a-loop-cron-armed): set when the model
+    /// calls `ScheduleWakeup` successfully this turn. The port has no loop-cron
+    /// registry to query, and the wakeup enqueues in the FUTURE, so this
+    /// synchronous per-turn flag is the only reliable "model rescheduled" signal.
+    rescheduled_this_turn: bool,
+}
+
+static LOOP_RUNTIME: Mutex<LoopRuntimeState> = Mutex::new(LoopRuntimeState {
+    tick_in_flight_prompt: None,
+    consecutive_keepalives: 0,
+    rescheduled_this_turn: false,
+});
+
+/// Mark the START of a loop-tick turn (binary `onFireTask` `I7e(d.prompt)`):
+/// record the in-flight tick prompt and clear the per-turn reschedule flag. Called
+/// by the bridge drain when it pops a `QueueSource::Cron` command.
+pub fn begin_loop_tick(prompt: String) {
+    let mut st = LOOP_RUNTIME.lock().unwrap();
+    st.tick_in_flight_prompt = Some(prompt);
+    st.rescheduled_this_turn = false;
+}
+
+/// `tAt` (cc_all.txt) — peek the in-flight loop-tick prompt (or None).
+#[must_use]
+pub fn loop_tick_in_flight_prompt() -> Option<String> {
+    LOOP_RUNTIME.lock().unwrap().tick_in_flight_prompt.clone()
+}
+
+/// `I7e(null)` (cc_all.txt) at turn end — take (read+clear) the in-flight prompt.
+/// `Some` iff the just-completed turn was a loop tick.
+pub fn take_loop_tick_in_flight_prompt() -> Option<String> {
+    LOOP_RUNTIME.lock().unwrap().tick_in_flight_prompt.take()
+}
+
+/// The port's `Xke()=true` side: record that the model rescheduled this turn
+/// (`ScheduleWakeup` success). Called from `ScheduleWakeupTool::call`.
+pub fn mark_loop_rescheduled() {
+    LOOP_RUNTIME.lock().unwrap().rescheduled_this_turn = true;
+}
+
+/// Take (read+clear) the per-turn reschedule flag — the port's `!Xke()` check.
+pub fn take_loop_rescheduled() -> bool {
+    let mut st = LOOP_RUNTIME.lock().unwrap();
+    std::mem::take(&mut st.rescheduled_this_turn)
+}
+
+/// `PZt` (cc_all.txt) — consecutive-keepalive count.
+#[must_use]
+pub fn loop_consecutive_keepalives() -> u32 {
+    LOOP_RUNTIME.lock().unwrap().consecutive_keepalives
+}
+
+/// `nAt` (cc_all.txt) — set the consecutive-keepalive count. Reset to 0 on any
+/// non-keepalive schedule (binary `cKi`: `if(!r)nAt(0)`).
+pub fn set_loop_consecutive_keepalives(n: u32) {
+    LOOP_RUNTIME.lock().unwrap().consecutive_keepalives = n;
+}
+
+/// Clear all loop runtime state. Used by tests and a fresh-loop start.
+pub fn reset_loop_runtime_state() {
+    let mut st = LOOP_RUNTIME.lock().unwrap();
+    st.tick_in_flight_prompt = None;
+    st.consecutive_keepalives = 0;
+    st.rescheduled_this_turn = false;
 }
 
 /// Process-wide serialization lock for tests that mutate the shared `DELIVERY`

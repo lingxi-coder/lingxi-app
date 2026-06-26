@@ -250,6 +250,7 @@ async fn drain_main_thread(driver: &Arc<dyn TurnDriver>, queue: &Arc<MessageQueu
                 Some(cmd) => {
                     if let Some(t) = cmd.text() {
                         if !t.is_empty() {
+                            tag_loop_tick_in_flight(cmd.source == QueueSource::Cron, t);
                             driver.run_turn(t.to_string()).await;
                         }
                     }
@@ -258,8 +259,33 @@ async fn drain_main_thread(driver: &Arc<dyn TurnDriver>, queue: &Arc<MessageQueu
                 None => break,
             }
         };
+        // KEEPALIVE (binary `onFireTask` `if(d.kind==="loop")I7e(d.prompt)`): tag on
+        // the command SOURCE, not the slash-vs-non-slash branch — a dynamic loop
+        // tick whose sentinel resolved to non-slash instruction text lands in THIS
+        // batched branch, so the in-flight tag must be set here too. Use the first
+        // consumed `QueueSource::Cron` command's text as the in-flight prompt.
+        let cron_tick = batch
+            .iter()
+            .find(|c| c.source == QueueSource::Cron && consumed.contains(&c.uuid))
+            .and_then(|c| c.text().map(str::to_string));
+        match cron_tick {
+            Some(ref t) => tag_loop_tick_in_flight(true, t),
+            None => tag_loop_tick_in_flight(false, &joined),
+        }
         queue.remove(&consumed, "drained into follow-up turn").await;
         driver.run_turn(joined).await;
+    }
+}
+
+/// Record (or clear) the in-flight `/loop` tick so the driver's turn-completion
+/// edge can arm the keepalive fallback. A `QueueSource::Cron` command IS a loop
+/// tick (binary `d.kind==="loop"`); any other turn clears a stale tag so a user
+/// turn never inherits one.
+fn tag_loop_tick_in_flight(is_cron: bool, text: &str) {
+    if is_cron {
+        tool_cron::begin_loop_tick(text.to_string());
+    } else {
+        tool_cron::take_loop_tick_in_flight_prompt();
     }
 }
 
@@ -975,5 +1001,71 @@ mod tests {
         assert!(!connection.turn_running.load(Ordering::SeqCst));
         assert!(connection.queue.is_empty().await);
         assert_eq!(*prompts.lock().await, vec!["first", "second"]);
+    }
+
+    // ── Keepalive: drain tags the in-flight loop tick on SOURCE, not text shape ──
+
+    fn drain_test_command(text: &str, source: super::QueueSource) -> super::QueuedCommand {
+        super::QueuedCommand {
+            uuid: format!("drain-ka-{text}"),
+            content: super::QueuedCommandContent::UserInput {
+                text: text.to_string(),
+            },
+            priority: super::QueuePriority::Next,
+            queued_at: std::time::SystemTime::now(),
+            source,
+            agent_id: None,
+            skip_slash_commands: false,
+            is_meta: false,
+        }
+    }
+
+    /// REGRESSION (verify-wf HIGH): a dynamic loop tick whose sentinel resolved to
+    /// NON-slash instruction text takes the BATCHED drain branch. The drain must
+    /// still tag it as the in-flight loop tick (binary `if(d.kind==="loop")
+    /// I7e(d.prompt)`) so the driver's turn-end edge can arm the keepalive. The
+    /// `RecordingDriver` does not consume the in-flight tag, so it remains set after
+    /// the drain — proving the tag was written on the batched path.
+    #[tokio::test]
+    async fn drain_tags_non_slash_cron_tick_in_flight() {
+        let _g = crate::driver::LOOP_KA_TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        tool_cron::reset_loop_runtime_state();
+        let queue = Arc::new(super::MessageQueueManager::new());
+        queue
+            .enqueue(drain_test_command("# Autonomous loop tick", super::QueueSource::Cron))
+            .await;
+        let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
+            captured: Arc::new(Mutex::new(None)),
+            notify: Arc::new(Notify::new()),
+        });
+        super::drain_main_thread(&driver, &queue).await;
+        assert_eq!(
+            tool_cron::loop_tick_in_flight_prompt().as_deref(),
+            Some("# Autonomous loop tick"),
+            "the batched drain branch must tag a Cron tick as in-flight"
+        );
+        tool_cron::reset_loop_runtime_state();
+    }
+
+    /// A normal user prompt (non-Cron) through the same batched drain branch must
+    /// NOT leave an in-flight loop-tick tag.
+    #[tokio::test]
+    async fn drain_does_not_tag_user_prompt_in_flight() {
+        let _g = crate::driver::LOOP_KA_TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        tool_cron::reset_loop_runtime_state();
+        let queue = Arc::new(super::MessageQueueManager::new());
+        queue
+            .enqueue(drain_test_command("just a user prompt", super::QueueSource::PromptInput))
+            .await;
+        let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
+            captured: Arc::new(Mutex::new(None)),
+            notify: Arc::new(Notify::new()),
+        });
+        super::drain_main_thread(&driver, &queue).await;
+        assert_eq!(
+            tool_cron::loop_tick_in_flight_prompt(),
+            None,
+            "a user prompt must not be tagged as a loop tick"
+        );
     }
 }

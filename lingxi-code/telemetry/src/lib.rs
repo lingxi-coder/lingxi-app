@@ -100,13 +100,36 @@ pub fn emit_loop_persistent_activated(variant: bool) {
     );
 }
 
-/// Emit `tengu_loop_ended` with the raw `reason` literal.
+/// Emit `tengu_loop_ended` with the raw `reason` literal and the optional
+/// `via_keepalive` extra.
 ///
 /// PARITY: binary `Vst(e,t){W("tengu_loop_ended",{reason:Le(e),...t})}` where
 /// `Le()` is identity — so `reason` is the verbatim literal (`gate_off` |
-/// `model_stopped` | `aged_out` | `user_abort`). See [`crate::tengu::kairos`].
-pub fn emit_loop_ended(reason: &str) {
-    tracing::info!(event = crate::tengu::kairos::LOOP_ENDED, reason = %reason);
+/// `model_stopped` | `aged_out` | `user_abort`). The `...t` spread carries
+/// per-reason extras: `gate_off` has none (`via_keepalive = None`), while
+/// `model_stopped`/`aged_out` from the keepalive path carry `via_keepalive`.
+pub fn emit_loop_ended(reason: &str, via_keepalive: Option<bool>) {
+    match via_keepalive {
+        Some(v) => tracing::info!(
+            event = crate::tengu::kairos::LOOP_ENDED,
+            reason = %reason,
+            via_keepalive = v,
+        ),
+        None => tracing::info!(event = crate::tengu::kairos::LOOP_ENDED, reason = %reason),
+    }
+}
+
+/// Emit `tengu_loop_keepalive_fired`.
+///
+/// PARITY: binary `cKi` keepalive branch —
+/// `W("tengu_loop_keepalive_fired",{clamped_delay_seconds:d,
+/// prompt_is_sentinel:Z4d.isLoopDefaultSentinel(t)})`.
+pub fn emit_loop_keepalive_fired(clamped_delay_seconds: u64, prompt_is_sentinel: bool) {
+    tracing::info!(
+        event = crate::tengu::kairos::LOOP_KEEPALIVE_FIRED,
+        clamped_delay_seconds = clamped_delay_seconds,
+        prompt_is_sentinel = prompt_is_sentinel,
+    );
 }
 
 /// Emit `tengu_loop_dynamic_wakeup_scheduled`.

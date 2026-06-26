@@ -95,6 +95,108 @@ pub fn clamp_delay_seconds(raw: f64) -> i64 {
     secs.clamp(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
 }
 
+// ── Keepalive fallback (binary `lKi` + budget `tqd` / delay `eqd`) ────────────
+
+/// `eqd` (cc_all.txt) — the keepalive fallback delay (seconds): one quiet
+/// heartbeat at 1200s if the model did not reschedule.
+const KEEPALIVE_DELAY_SECONDS: i64 = 1200;
+/// `tqd` (cc_all.txt) — the consecutive-keepalive budget: after this many
+/// back-to-back keepalives with no model reschedule, the loop ends.
+const KEEPALIVE_BUDGET: u32 = 1;
+
+/// Outcome of an [`arm_keepalive`] attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeepaliveOutcome {
+    /// A fallback wakeup was scheduled (binary `cKi` keepalive branch).
+    Armed,
+    /// The consecutive-keepalive budget was exhausted → loop ended
+    /// (`tengu_loop_ended{model_stopped, via_keepalive}`).
+    BudgetExhausted,
+    /// The dynamic gate (`q_e`) is off → loop ended (`gate_off`).
+    GateOff,
+}
+
+/// `lKi` (cc_all.txt) — arm the keepalive fallback when a dynamic /loop tick
+/// completes without the model rescheduling.
+///
+/// PARITY: binary
+/// `lKi(e){if(!q_e())return Vst("gate_off"),null;
+///        if(PZt()>=tqd)return C("[loop] keepalive budget exhausted …"),
+///          Vst("model_stopped",{via_keepalive:!0}),null;
+///        return cKi(eqd,e,{viaKeepalive:!0})}`.
+///
+/// SIMPLIFIED vs the binary `cKi`: the port's [`WakeupScheduler`] is a one-shot
+/// seam with NO loop-cron registry, so the port omits `cKi`'s superseded-cancel
+/// (`sqd`) and aged-out (`recurringMaxAgeMs`/`Ydr`/`IZt`) machinery — there is no
+/// per-loop cron state to age out. The keepalive itself (gate → budget → schedule
+/// 1200s + increment counter + `tengu_loop_keepalive_fired`) is faithful.
+pub async fn arm_keepalive(scheduler: &Arc<dyn WakeupScheduler>, prompt: &str) -> KeepaliveOutcome {
+    use crate::autonomous_loop as al;
+    // `if(!q_e())return Vst("gate_off"),null`
+    if !al::is_loop_dynamic_enabled() {
+        telemetry::emit_loop_ended("gate_off", None);
+        return KeepaliveOutcome::GateOff;
+    }
+    // `if(PZt()>=tqd)return …,Vst("model_stopped",{via_keepalive:!0}),null`
+    if al::loop_consecutive_keepalives() >= KEEPALIVE_BUDGET {
+        tracing::info!(
+            "[loop] keepalive budget exhausted (model declined to reschedule twice) — ending loop"
+        );
+        telemetry::emit_loop_ended("model_stopped", Some(true));
+        return KeepaliveOutcome::BudgetExhausted;
+    }
+    // `return cKi(eqd,e,{viaKeepalive:!0})` — schedule the 1200s fallback,
+    // increment the counter, emit keepalive_fired.
+    let delay = clamp_delay_seconds(KEEPALIVE_DELAY_SECONDS as f64);
+    scheduler
+        .schedule(
+            Duration::from_secs(delay as u64),
+            prompt.to_string(),
+            "loop keepalive fallback".to_string(),
+        )
+        .await;
+    al::set_loop_consecutive_keepalives(al::loop_consecutive_keepalives() + 1);
+    telemetry::emit_loop_keepalive_fired(delay as u64, al::is_loop_default_sentinel(prompt));
+    KeepaliveOutcome::Armed
+}
+
+/// The turn-completion keepalive trigger (binary loading→idle `useEffect`:
+/// `let l=tAt();if(l!==null){I7e(null);if(iKi()&&!Xke())lKi(l)}`).
+///
+/// Call once at every turn's completion edge. Returns `None` when the just-ended
+/// turn was NOT a loop tick (no in-flight prompt), or when the keepalive gate is
+/// off, or when the model rescheduled this turn (the `!Xke()` short-circuit);
+/// otherwise it runs [`arm_keepalive`] (`lKi`) and returns its outcome.
+///
+/// PARITY-NOTE: the in-flight prompt is the RESOLVED tick text (the port resolves
+/// the `<<…dynamic>>` sentinel at enqueue, so the drain only ever sees resolved
+/// text), whereas the binary re-arms with the original sentinel (which re-resolves
+/// to a short reminder on the next fire). The keepalive's gate/budget/telemetry
+/// are faithful; the re-armed prompt content is the resolved tick. Carrying the
+/// original sentinel through the queue for a byte-identical re-arm is a deferred
+/// refinement.
+pub async fn maybe_arm_keepalive(scheduler: &Arc<dyn WakeupScheduler>) -> Option<KeepaliveOutcome> {
+    use crate::autonomous_loop as al;
+    // `let l=tAt(); if(l===null) return` — only loop-tick turns proceed. `take`
+    // doubles as the binary `I7e(null)` clear.
+    let prompt = al::take_loop_tick_in_flight_prompt()?;
+    // Always consume the per-turn reschedule flag (fresh state next turn).
+    let rescheduled = al::take_loop_rescheduled();
+    // `iKi()` — keepalive feature gate.
+    if !al::is_loop_keepalive_enabled() {
+        return None;
+    }
+    // `!Xke()` — the model already rescheduled, so a loop wakeup is armed; the
+    // keepalive must not fire. The counter was already reset by the model's
+    // `ScheduleWakeup` success (binary `cKi`'s `if(!r)nAt(0)`), so this branch only
+    // short-circuits — it does NOT reset again (matching the binary `useEffect`,
+    // which owns no counter reset).
+    if rescheduled {
+        return None;
+    }
+    Some(arm_keepalive(scheduler, &prompt).await)
+}
+
 /// Format an epoch-ms timestamp as local `HH:MM:SS`.
 // PARITY: binary `new Date(e).toTimeString().slice(0,8)` (cc_all.txt:507964) —
 // the LOCAL wall-clock time of the wakeup. Uses the same local-offset source as
@@ -466,7 +568,7 @@ impl Tool for ScheduleWakeupTool {
         // path (inside `aKi`/`cKi`), so the gate-off return is a literal zero
         // triple.
         if !crate::autonomous_loop::is_loop_dynamic_enabled() {
-            telemetry::emit_loop_ended("gate_off");
+            telemetry::emit_loop_ended("gate_off", None);
             emit_completed(&bus, started.elapsed().as_millis() as u64, false).await;
             return Ok(zero_triple_result(&reason));
         }
@@ -491,6 +593,14 @@ impl Tool for ScheduleWakeupTool {
                 reason.clone(),
             )
             .await;
+
+        // PARITY: binary `cKi` resets the consecutive-keepalive counter on any
+        // NON-keepalive schedule (`if(!r)nAt(0)`) — i.e. when the model itself
+        // calls ScheduleWakeup, the keepalive budget is refreshed. Also record the
+        // reschedule (the port's `Xke()=true` signal) so the turn-end keepalive
+        // check sees the model rescheduled and does NOT arm a fallback.
+        crate::autonomous_loop::set_loop_consecutive_keepalives(0);
+        crate::autonomous_loop::mark_loop_rescheduled();
 
         // PARITY: binary `cKi` success emit — `chosen_delay_seconds` is the RAW
         // requested delay (`Number.isFinite(e)?e:0`, NOT rounded); `reason_length`
@@ -984,5 +1094,140 @@ mod tests {
             )
             .await
             .is_ok());
+    }
+
+    // ── Keepalive (binary `lKi` / `useEffect`) ───────────────────────────────
+
+    use std::sync::Mutex as StdMutex;
+    struct KaRecorder {
+        calls: StdMutex<Vec<(Duration, String)>>,
+    }
+    #[async_trait]
+    impl WakeupScheduler for KaRecorder {
+        async fn schedule(&self, delay: Duration, prompt: String, _reason: String) {
+            self.calls.lock().unwrap().push((delay, prompt));
+        }
+    }
+
+    /// Serialize + reset the loop runtime globals + flags for keepalive tests.
+    fn ka_guard() -> std::sync::MutexGuard<'static, ()> {
+        let g = crate::autonomous_loop::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::autonomous_loop::reset_loop_runtime_state();
+        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
+        telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
+        g
+    }
+
+    #[tokio::test]
+    async fn arm_keepalive_gate_off_ends_loop() {
+        let _g = ka_guard();
+        // q_e off → lKi returns gate_off, no schedule.
+        let rec = Arc::new(KaRecorder {
+            calls: StdMutex::new(Vec::new()),
+        });
+        let sched: Arc<dyn WakeupScheduler> = rec.clone();
+        assert_eq!(
+            arm_keepalive(&sched, "<<autonomous-loop-dynamic>>").await,
+            KeepaliveOutcome::GateOff
+        );
+        assert!(rec.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn arm_keepalive_arms_then_exhausts_budget() {
+        let _g = ka_guard();
+        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
+        let rec = Arc::new(KaRecorder {
+            calls: StdMutex::new(Vec::new()),
+        });
+        let sched: Arc<dyn WakeupScheduler> = rec.clone();
+        // First arm: schedules a 1200s fallback, counter → 1.
+        assert_eq!(
+            arm_keepalive(&sched, "<<autonomous-loop-dynamic>>").await,
+            KeepaliveOutcome::Armed
+        );
+        assert_eq!(crate::autonomous_loop::loop_consecutive_keepalives(), 1);
+        {
+            let calls = rec.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].0, Duration::from_secs(1200));
+            assert_eq!(calls[0].1, "<<autonomous-loop-dynamic>>");
+        }
+        // Budget = 1: a second consecutive arm ends the loop (model_stopped).
+        assert_eq!(
+            arm_keepalive(&sched, "<<autonomous-loop-dynamic>>").await,
+            KeepaliveOutcome::BudgetExhausted
+        );
+        // No second schedule.
+        assert_eq!(rec.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn maybe_arm_keepalive_no_in_flight_is_noop() {
+        let _g = ka_guard();
+        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
+        telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
+        let rec = Arc::new(KaRecorder {
+            calls: StdMutex::new(Vec::new()),
+        });
+        let sched: Arc<dyn WakeupScheduler> = rec.clone();
+        // No loop tick was in flight → not a loop-tick turn → nothing.
+        assert_eq!(maybe_arm_keepalive(&sched).await, None);
+        assert!(rec.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn maybe_arm_keepalive_rescheduled_does_not_arm() {
+        let _g = ka_guard();
+        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
+        telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
+        crate::autonomous_loop::begin_loop_tick("<<autonomous-loop-dynamic>>".to_string());
+        // The model rescheduled this turn (the !Xke() short-circuit).
+        crate::autonomous_loop::mark_loop_rescheduled();
+        let rec = Arc::new(KaRecorder {
+            calls: StdMutex::new(Vec::new()),
+        });
+        let sched: Arc<dyn WakeupScheduler> = rec.clone();
+        assert_eq!(maybe_arm_keepalive(&sched).await, None);
+        assert!(rec.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn maybe_arm_keepalive_keepalive_off_does_not_arm() {
+        let _g = ka_guard();
+        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
+        // keepalive flag OFF (iKi) → no arm even though a tick was in flight.
+        crate::autonomous_loop::begin_loop_tick("<<autonomous-loop-dynamic>>".to_string());
+        let rec = Arc::new(KaRecorder {
+            calls: StdMutex::new(Vec::new()),
+        });
+        let sched: Arc<dyn WakeupScheduler> = rec.clone();
+        assert_eq!(maybe_arm_keepalive(&sched).await, None);
+        assert!(rec.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn maybe_arm_keepalive_arms_when_model_silent() {
+        let _g = ka_guard();
+        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
+        telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
+        // A loop tick ran and the model did NOT reschedule → arm the fallback.
+        crate::autonomous_loop::begin_loop_tick("<<autonomous-loop-dynamic>>".to_string());
+        let rec = Arc::new(KaRecorder {
+            calls: StdMutex::new(Vec::new()),
+        });
+        let sched: Arc<dyn WakeupScheduler> = rec.clone();
+        assert_eq!(maybe_arm_keepalive(&sched).await, Some(KeepaliveOutcome::Armed));
+        let calls = rec.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, Duration::from_secs(1200));
+        // In-flight was cleared (take), so a second completion is a no-op.
+        drop(calls);
+        assert_eq!(maybe_arm_keepalive(&sched).await, None);
+        assert_eq!(rec.calls.lock().unwrap().len(), 1);
+        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
+        telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
     }
 }

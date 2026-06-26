@@ -219,6 +219,12 @@ pub struct OrchestratorTurnDriver {
     /// when no queue is wired. The queue's now-abort hook sets it to
     /// `QueueNowCommand` right before firing the token.
     cancel_reason: Option<orchestrator::prompt::mid_turn_input::CancelReasonFlag>,
+    /// The self-wakeup scheduler, used at each turn's completion edge to arm the
+    /// `/loop` keepalive fallback (binary `lKi`) when a dynamic loop tick ended
+    /// without the model rescheduling. `None` ⇒ no keepalive (CLI / tests / hosts
+    /// with no per-connection queue). Wired at `boot::assemble` with the SAME
+    /// [`MsgQueueWakeupScheduler`] filling the tool's `WakeupSchedulerCell`.
+    wakeup_scheduler: Option<Arc<dyn tool_cron::WakeupScheduler>>,
 }
 
 impl OrchestratorTurnDriver {
@@ -235,6 +241,7 @@ impl OrchestratorTurnDriver {
             error_sink: None,
             queue: None,
             cancel_reason: None,
+            wakeup_scheduler: None,
         }
     }
 
@@ -274,7 +281,22 @@ impl OrchestratorTurnDriver {
             error_sink: Some(error_sink),
             queue: None,
             cancel_reason: None,
+            wakeup_scheduler: None,
         }
+    }
+
+    /// Wire the self-wakeup scheduler so each turn's completion edge can arm the
+    /// `/loop` keepalive fallback (binary `lKi`). Additive over [`Self::new`] /
+    /// [`Self::with_error_sink`] / [`Self::with_queue`]; a driver built without it
+    /// never arms a keepalive. `boot::assemble` passes the SAME
+    /// [`MsgQueueWakeupScheduler`] it uses to fill the tool's `WakeupSchedulerCell`.
+    #[must_use]
+    pub fn with_wakeup_scheduler(
+        mut self,
+        scheduler: Arc<dyn tool_cron::WakeupScheduler>,
+    ) -> Self {
+        self.wakeup_scheduler = Some(scheduler);
+        self
     }
 
     /// Map an [`OrchestratorError`] to a wire [`ClientEvent::Error`].
@@ -347,6 +369,14 @@ impl OrchestratorTurnDriver {
         if let Some(queue) = self.queue.as_ref() {
             queue.clear_active_turn().await;
         }
+        // KEEPALIVE (binary loading→idle `useEffect`): this is the turn-end edge.
+        // If the just-completed turn was a dynamic `/loop` tick that did NOT
+        // reschedule, arm one fallback heartbeat (`lKi`). `maybe_arm_keepalive`
+        // is a no-op for non-loop-tick turns (no in-flight prompt) and when the
+        // keepalive gate is off, so it is safe to call after EVERY turn.
+        if let Some(scheduler) = self.wakeup_scheduler.as_ref() {
+            tool_cron::maybe_arm_keepalive(scheduler).await;
+        }
         match result {
             // Success / cancellation / max-turns all already produced their
             // terminal events through the orchestrator's output stream
@@ -383,6 +413,13 @@ impl TurnDriver for OrchestratorTurnDriver {
         self.drive_turn(prompt, sources).await;
     }
 }
+
+/// Crate-shared serialization lock for ALL tests that touch the process-global
+/// `tool_cron` loop runtime state (in-flight tick / keepalive counter / reschedule
+/// flag) or the telemetry flag-override map — across both `driver` and `server`
+/// test modules, since they run in the same test binary and share those globals.
+#[cfg(test)]
+pub(crate) static LOOP_KA_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -798,5 +835,71 @@ mod tests {
         }
         let cmd = queue.dequeue().await.expect("enqueued");
         assert_eq!(cmd.text(), Some("5m /babysit-prs"));
+    }
+
+    use super::LOOP_KA_TEST_SERIAL;
+
+    /// A keepalive recorder scheduler for the turn-completion trigger tests.
+    struct KaRec {
+        calls: std::sync::Mutex<Vec<std::time::Duration>>,
+    }
+    #[async_trait::async_trait]
+    impl tool_cron::WakeupScheduler for KaRec {
+        async fn schedule(&self, delay: std::time::Duration, _p: String, _r: String) {
+            self.calls.lock().unwrap().push(delay);
+        }
+    }
+
+    /// A dynamic /loop tick that completes WITHOUT the model rescheduling arms one
+    /// 1200s keepalive fallback at the turn-completion edge (binary `lKi` via the
+    /// loading→idle `useEffect`).
+    #[tokio::test]
+    async fn keepalive_arms_after_silent_loop_tick() {
+        let _serial = LOOP_KA_TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
+        telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
+        tool_cron::reset_loop_runtime_state();
+        // The drain tags a Cron-sourced command as the in-flight loop tick.
+        tool_cron::begin_loop_tick("<<autonomous-loop-dynamic>>".to_string());
+
+        let rec = Arc::new(KaRec {
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let sched: Arc<dyn tool_cron::WakeupScheduler> = rec.clone();
+        let driver = build_driver(streaming_one_turn()).with_wakeup_scheduler(sched);
+        // The scripted turn emits text + end_turn — NO ScheduleWakeup call.
+        driver.run_turn("loop tick".to_string()).await;
+
+        let calls = rec.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "a silent loop tick must arm one keepalive");
+        assert_eq!(calls[0], std::time::Duration::from_secs(1200));
+        drop(calls);
+        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
+        telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
+        tool_cron::reset_loop_runtime_state();
+    }
+
+    /// A NON-loop turn (no in-flight tick) never arms a keepalive, even with a
+    /// scheduler wired and the flags on.
+    #[tokio::test]
+    async fn keepalive_not_armed_for_user_turn() {
+        let _serial = LOOP_KA_TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
+        telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
+        tool_cron::reset_loop_runtime_state(); // no begin_loop_tick → user turn
+
+        let rec = Arc::new(KaRec {
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let sched: Arc<dyn tool_cron::WakeupScheduler> = rec.clone();
+        let driver = build_driver(streaming_one_turn()).with_wakeup_scheduler(sched);
+        driver.run_turn("just a normal user turn".to_string()).await;
+
+        assert!(
+            rec.calls.lock().unwrap().is_empty(),
+            "a non-loop turn must NOT arm a keepalive"
+        );
+        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
+        telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
     }
 }

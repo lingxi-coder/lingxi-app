@@ -65,7 +65,7 @@ async fn default_config_uses_assembler() {
         .flatten()
         .expect("system prompt");
     // Assembler always opens with HEADER.
-    assert!(s.starts_with("You are Claude Code"));
+    assert!(s.starts_with("You are LingXi"));
     // Override sentinel must NOT appear.
     assert!(!s.contains("CUSTOM PROMPT"));
 }

@@ -2,11 +2,12 @@
 //! system.ts. See M5-03 plan "Reverse-engineered byte-locks".
 #![forbid(unsafe_code)]
 
-/// Opening literal of every assembled system prompt.
+/// Opening literal of every assembled system prompt — LingXi's identity.
 ///
-/// Source: `claude-code/src/constants/system.ts:10` (`DEFAULT_PREFIX`).
-/// Length: 57 bytes (no leading/trailing whitespace; no LF).
-pub const HEADER: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+/// Diverged from claude-code's `DEFAULT_PREFIX` (`system.ts:10`) by the rebrand:
+/// LingXi is not Anthropic's official CLI, so the descriptor is debranded.
+/// (no leading/trailing whitespace; no LF.)
+pub const HEADER: &str = "You are LingXi, an agentic command-line coding assistant.";
 
 /// Section separator between header / `<env>` / `<memory>` /
 /// `<tools>` / footer. Two LFs (one blank line).

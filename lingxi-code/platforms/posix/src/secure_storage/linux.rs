@@ -103,7 +103,7 @@ impl LinuxSecretStorage {
             self.default_config_dir.as_path(),
         );
         full_service_name(
-            "Claude Code",
+            "LingXi",
             self.oauth_suffix.as_str(),
             service_suffix,
             &dir_hash,
@@ -190,7 +190,7 @@ async fn run_store(
     let mut child = Command::new("secret-tool")
         .args([
             "store",
-            "--label=Claude Code",
+            "--label=LingXi",
             "service",
             full_service,
             "account",
@@ -347,16 +347,16 @@ mod tests {
     #[test]
     fn service_name_default_dir_has_no_dir_hash() {
         let s = mk_test_storage("/home/x/.lingxi", "/home/x/.lingxi");
-        assert_eq!(s.service_name("-credentials"), "Claude Code-credentials");
-        assert_eq!(s.service_name(""), "Claude Code");
+        assert_eq!(s.service_name("-credentials"), "LingXi-credentials");
+        assert_eq!(s.service_name(""), "LingXi");
     }
 
     #[test]
     fn service_name_non_default_dir_has_dir_hash() {
         let s = mk_test_storage("/home/x/work/.claude-2", "/home/x/.lingxi");
         let svc = s.service_name("-credentials");
-        assert!(svc.starts_with("Claude Code-credentials-"));
-        assert_eq!(svc.len(), "Claude Code-credentials-".len() + 8);
+        assert!(svc.starts_with("LingXi-credentials-"));
+        assert_eq!(svc.len(), "LingXi-credentials-".len() + 8);
     }
 
     #[test]

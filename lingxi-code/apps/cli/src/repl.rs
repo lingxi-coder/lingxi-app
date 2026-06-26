@@ -59,7 +59,7 @@ enum TrustOutcome {
 ///   - options       `:228,231` "Yes, I trust this folder" / "No, exit"
 fn format_trust_prompt(cwd: &Path) -> String {
     format!(
-        "Accessing workspace:\n\n{cwd}\n\nQuick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.\nClaude Code'll be able to read, edit, and execute files here.\n\nSecurity guide: https://code.claude.com/docs/en/security\n\n  Yes, I trust this folder\n  No, exit\n[y/N] ",
+        "Accessing workspace:\n\n{cwd}\n\nQuick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.\nLingXi'll be able to read, edit, and execute files here.\n\nSecurity guide: https://code.claude.com/docs/en/security\n\n  Yes, I trust this folder\n  No, exit\n[y/N] ",
         cwd = cwd.display()
     )
 }
@@ -560,7 +560,7 @@ mod tests {
         let s = format_trust_prompt(Path::new("/home/dev/project"));
         assert_eq!(
             s.as_bytes(),
-            b"Accessing workspace:\n\n/home/dev/project\n\nQuick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.\nClaude Code'll be able to read, edit, and execute files here.\n\nSecurity guide: https://code.claude.com/docs/en/security\n\n  Yes, I trust this folder\n  No, exit\n[y/N] " as &[u8]
+            b"Accessing workspace:\n\n/home/dev/project\n\nQuick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.\nLingXi'll be able to read, edit, and execute files here.\n\nSecurity guide: https://code.claude.com/docs/en/security\n\n  Yes, I trust this folder\n  No, exit\n[y/N] " as &[u8]
         );
     }
 

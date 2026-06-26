@@ -2092,7 +2092,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .expect_err("blocked domain must be Err");
         match err {
             ToolError::Transport(msg) => {
-                assert_eq!(msg, "Claude Code is unable to fetch from blocked-host.example");
+                assert_eq!(msg, "LingXi is unable to fetch from blocked-host.example");
             }
             other => panic!("expected Transport, got {other:?}"),
         }

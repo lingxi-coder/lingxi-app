@@ -1,12 +1,13 @@
 ---
-source: crates/tui/tests/snapshot_permission_dialogs.rs
+source: tui/tests/snapshot_permission_dialogs.rs
+assertion_line: 125
 expression: "&frame"
 ---
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                                                                                                      │
-│ WARNING: Claude Code running in Bypass Permissions mode                                                                              │
+│ WARNING: LingXi running in Bypass Permissions mode                                                                                   │
 │                                                                                                                                      │
-│ In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous commands.                │
+│ In Bypass Permissions mode, LingXi will not ask for your approval before running potentially dangerous commands.                     │
 │ This mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged. │
 │ By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.                             │
 │                                                                                                                                      │

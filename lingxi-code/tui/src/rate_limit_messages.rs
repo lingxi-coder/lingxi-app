@@ -364,7 +364,7 @@ fn format_limit_reached_text(limit: &str, reset_message: &str, is_ant: bool) -> 
 
 /// Warning-upsell copy (rateLimitMessages.ts:274, :282 — straight ASCII).
 const EXTRA_USAGE_REQUEST: &str = "/extra-usage to request more";
-const UPGRADE_KEEP_USING: &str = "/upgrade to keep using Claude Code";
+const UPGRADE_KEEP_USING: &str = "/upgrade to keep using LingXi";
 
 /// Port of `getWarningUpsellText` (rateLimitMessages.ts:261-297).
 fn warning_upsell(
@@ -920,11 +920,11 @@ mod tests {
         assert_eq!(
             got.text,
             format!(
-                "You've used 80% of your session limit \u{b7} resets {} \u{b7} /upgrade to keep using Claude Code",
+                "You've used 80% of your session limit \u{b7} resets {} \u{b7} /upgrade to keep using LingXi",
                 reset(ts)
             )
         );
-        assert!(got.text.ends_with(" \u{b7} /upgrade to keep using Claude Code"));
+        assert!(got.text.ends_with(" \u{b7} /upgrade to keep using LingXi"));
         // TS :281 matches subscription_type directly ('pro' || 'max') — pin
         // the max arm too (max here is NOT the 20x tier; tier is separate).
         let max = SubscriptionSnapshot {
@@ -932,7 +932,7 @@ mod tests {
             ..pro()
         };
         let got = compose_with(&info, false, &max, false).unwrap();
-        assert!(got.text.ends_with(" \u{b7} /upgrade to keep using Claude Code"));
+        assert!(got.text.ends_with(" \u{b7} /upgrade to keep using LingXi"));
     }
 
     #[test]
@@ -1096,7 +1096,7 @@ mod tests {
         // rateLimitMessages.ts:274 + :282 use plain ASCII (no curly
         // apostrophes, unlike the TSX getUpsellMessage strings).
         assert_eq!(EXTRA_USAGE_REQUEST, "/extra-usage to request more");
-        assert_eq!(UPGRADE_KEEP_USING, "/upgrade to keep using Claude Code");
+        assert_eq!(UPGRADE_KEEP_USING, "/upgrade to keep using LingXi");
         for s in [EXTRA_USAGE_REQUEST, UPGRADE_KEEP_USING] {
             assert!(s.is_ascii(), "warning upsell copy must be straight ASCII");
             assert!(!s.contains('\u{2019}'));

@@ -433,7 +433,7 @@ fn deny_reason_string(reason: &PermissionDecisionReason, tool_name: &str) -> Str
         PermissionDecisionReason::PermissionMode {
             mode: PermissionMode::DontAsk,
         } => format!(
-            "Permission to use {tool_name} has been denied because Claude Code is running in don't ask mode. {DENIAL_WORKAROUND_GUIDANCE}"
+            "Permission to use {tool_name} has been denied because LingXi is running in don't ask mode. {DENIAL_WORKAROUND_GUIDANCE}"
         ),
         _ => format!("Permission to use {tool_name} has been denied."),
     }
@@ -525,7 +525,7 @@ mod tests {
         };
         assert_eq!(
             deny_reason_string(&dont_ask, "Edit"),
-            format!("Permission to use Edit has been denied because Claude Code is running in don't ask mode. {DENIAL_WORKAROUND_GUIDANCE}")
+            format!("Permission to use Edit has been denied because LingXi is running in don't ask mode. {DENIAL_WORKAROUND_GUIDANCE}")
         );
         // The guidance text itself is byte-locked.
         assert!(DENIAL_WORKAROUND_GUIDANCE.starts_with("IMPORTANT: You *may* attempt to accomplish this action using other tools"));

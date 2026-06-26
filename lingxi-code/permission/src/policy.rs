@@ -3093,7 +3093,7 @@ mod tests {
                 );
                 assert_eq!(
                     prompt.message,
-                    "sed in '/etc/passwd' was blocked. For security, Claude Code \
+                    "sed in '/etc/passwd' was blocked. For security, LingXi \
                      may only edit files in the allowed working directories for \
                      this session: '/proj'."
                 );

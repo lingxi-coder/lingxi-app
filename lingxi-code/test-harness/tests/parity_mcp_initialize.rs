@@ -4,7 +4,7 @@
 //! `mcp::InitializeParams::default()` against claude-code's
 //! reference (`src/services/mcp/client.ts:985-1002`):
 //!
-//! - `clientInfo.name = "claude-code"` (literal),
+//! - `clientInfo.name = "lingxi"` (literal),
 //! - `clientInfo.title = "Claude Code"` (literal),
 //! - `clientInfo.websiteUrl = "https://claude.com/claude-code"` (literal),
 //! - `clientInfo.version = env!("CARGO_PKG_VERSION")` of `lingxi-mcp`,
@@ -93,7 +93,7 @@ fn mcp_initialize_wire_bytes_contain_claude_code_marker() {
     let bytes = serde_json::to_vec(&params).expect("serialize");
     let s = std::str::from_utf8(&bytes).expect("utf8");
     assert!(
-        s.contains(r#""name":"claude-code""#),
+        s.contains(r#""name":"lingxi""#),
         "wire bytes must contain literal \"name\":\"claude-code\", got: {s}",
     );
     assert!(

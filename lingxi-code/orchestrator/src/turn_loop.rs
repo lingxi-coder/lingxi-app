@@ -1498,12 +1498,12 @@ pub(crate) fn terminal_api_error_text(
                             "{label} has safety measures that flagged something in this session (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations."
                         )
                     };
-                    format!("API Error: {a} Claude Code can't respond to this request with {label}.\n\n{m}\n\n{f}")
+                    format!("API Error: {a} LingXi can't respond to this request with {label}.\n\n{m}\n\n{f}")
                 }
                 None => {
                     // NO-LABEL branch.
                     let m = if interactive {
-                        "Please double press esc to edit your last message or start a new session for Claude Code to assist with a different task."
+                        "Please double press esc to edit your last message or start a new session for LingXi to assist with a different task."
                     } else {
                         "Try rephrasing the request in a new session or change your model."
                     };
@@ -1522,7 +1522,7 @@ pub(crate) fn terminal_api_error_text(
                         )
                     } else {
                         format!(
-                            "API Error: Claude Code is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup). {m}"
+                            "API Error: LingXi is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup). {m}"
                         )
                     }
                 }
@@ -3445,7 +3445,7 @@ mod terminal_api_error_tests {
                 t.contains("They may flag safe, normal content as well."),
                 "{cat}: {t}"
             );
-            assert!(t.contains("Claude Code can't respond to this request with"), "{cat}: {t}");
+            assert!(t.contains("LingXi can't respond to this request with"), "{cat}: {t}");
         }
     }
 

@@ -111,7 +111,7 @@ fn snapshot_bypass_permissions_empty_typed() {
     };
     let frame = element.to_string();
     insta::assert_snapshot!("bypass_permissions_empty_typed", &frame);
-    assert!(frame.contains("WARNING: Claude Code running in Bypass Permissions mode"));
+    assert!(frame.contains("WARNING: LingXi running in Bypass Permissions mode"));
     assert!(frame.contains("In Bypass Permissions mode"));
     assert!(frame.contains("By proceeding"));
 }
@@ -123,6 +123,6 @@ fn snapshot_bypass_permissions_partial_typed() {
     };
     let frame = element.to_string();
     insta::assert_snapshot!("bypass_permissions_partial_typed", &frame);
-    assert!(frame.contains("WARNING: Claude Code running in Bypass Permissions mode"));
+    assert!(frame.contains("WARNING: LingXi running in Bypass Permissions mode"));
     assert!(frame.contains("Esc to cancel: ye"));
 }

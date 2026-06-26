@@ -71,7 +71,7 @@ const DOING_TASKS_SECTION: &str = concat!(
     "\n - For UI or frontend changes, start the dev server and use the feature in a browser before reporting the task as complete. Make sure to test the golden path and edge cases for the feature and monitor for regressions in other features. Type checking and test suites verify code correctness, not feature correctness - if you can't test the UI, say so explicitly rather than claiming success.",
     "\n - Avoid backwards-compatibility hacks like renaming unused _vars, re-exporting types, adding // removed comments for removed code, etc. If you are certain that something is unused, you can delete it completely.",
     "\n - If the user asks for help or wants to give feedback inform them of the following:",
-    "\n  - /help: Get help with using Claude Code",
+    "\n  - /help: Get help with using LingXi",
     "\n  - To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
 );
 
@@ -384,7 +384,7 @@ mod tests {
         // Flag-gated verified-vs-assumed bullet is omitted (default false).
         assert!(!DOING_TASKS_SECTION.contains("be accurate about what you verified vs. what you assumed"));
         // Nested /help + feedback items use the two-space prefix.
-        assert!(DOING_TASKS_SECTION.contains("\n  - /help: Get help with using Claude Code"));
+        assert!(DOING_TASKS_SECTION.contains("\n  - /help: Get help with using LingXi"));
         assert!(DOING_TASKS_SECTION.ends_with("report the issue at https://github.com/anthropics/claude-code/issues"));
     }
 

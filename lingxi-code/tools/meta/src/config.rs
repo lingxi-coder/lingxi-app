@@ -571,7 +571,7 @@ impl Tool for ConfigTool {
         CONFIG_TOOL_NAME
     }
     fn search_hint(&self) -> Option<&str> {
-        Some("get or set Claude Code settings (theme, model)")
+        Some("get or set LingXi settings (theme, model)")
     }
     fn input_schema(&self) -> &Value {
         &SCHEMA
@@ -634,11 +634,11 @@ impl Tool for ConfigTool {
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
-        "Get or set Claude Code configuration settings.".into()
+        "Get or set LingXi configuration settings.".into()
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "Get or set Claude Code configuration settings.".into()
+        "Get or set LingXi configuration settings.".into()
     }
 
     async fn validate_input(
@@ -1320,7 +1320,7 @@ mod tests {
         assert_eq!(t.name(), "Config");
         assert_eq!(
             t.search_hint(),
-            Some("get or set Claude Code settings (theme, model)")
+            Some("get or set LingXi settings (theme, model)")
         );
         assert!(t.should_defer());
         assert_eq!(t.max_result_size_chars(), 100_000);

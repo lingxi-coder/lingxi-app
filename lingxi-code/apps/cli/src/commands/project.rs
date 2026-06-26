@@ -76,14 +76,14 @@ pub async fn run(cli: &Cli) -> i32 {
 fn print_family_help() {
     println!("Usage: lingxi-cli project [options] [command]");
     println!();
-    println!("Manage Claude Code project state");
+    println!("Manage LingXi project state");
     println!();
     println!("Options:");
     println!("  -h, --help              Display help for command");
     println!();
     println!("Commands:");
     println!("  help [command]          display help for command");
-    println!("  purge [options] [path]  Delete all Claude Code state for a project");
+    println!("  purge [options] [path]  Delete all LingXi state for a project");
     println!("                          (transcripts, tasks, file history, config entry)");
 }
 
@@ -171,7 +171,7 @@ fn run_purge(args: &PurgeArgs) -> i32 {
         } else {
             format!("project '{}'", targets[0].config_key)
         };
-        if !confirm(&format!("Delete all Claude Code state for {scope}?")) {
+        if !confirm(&format!("Delete all LingXi state for {scope}?")) {
             println!("Aborted. Nothing was deleted.");
             return SUCCESS;
         }

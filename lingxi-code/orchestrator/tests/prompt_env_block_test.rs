@@ -43,9 +43,9 @@ fn env_block_full_byte_lock() {
 Model IDs \u{2014} Fable 5: 'claude-fable-5', Opus 4.8: 'claude-opus-4-8', \
 Sonnet 4.6: 'claude-sonnet-4-6', Haiku 4.5: 'claude-haiku-4-5-20251001'. \
 When building AI applications, default to the latest and most capable Claude models.",
-        " - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), \
+        " - LingXi is available as a CLI in the terminal, desktop app (Mac/Windows), \
 web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).",
-        " - Fast mode for Claude Code uses Claude Opus with faster output \
+        " - Fast mode for LingXi uses Claude Opus with faster output \
 (it does not downgrade to a smaller model). It can be toggled with /fast and is \
 available on Opus 4.8/4.7/4.6.",
     ]

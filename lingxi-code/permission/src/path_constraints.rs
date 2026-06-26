@@ -510,7 +510,7 @@ pub fn check_path_constraints(
     //    cwd.
     if has_cd && !all_redirs.is_empty() {
         return Some(PathConstraintAsk {
-            message: "Commands that change directories and write via output redirection require explicit approval to ensure paths are evaluated correctly. For security, Claude Code cannot automatically determine the final working directory when 'cd' is used in compound commands.".to_string(),
+            message: "Commands that change directories and write via output redirection require explicit approval to ensure paths are evaluated correctly. For security, LingXi cannot automatically determine the final working directory when 'cd' is used in compound commands.".to_string(),
             reason: "Compound command contains cd with output redirection - manual approval required to prevent path resolution bypass".to_string(),
         });
     }
@@ -528,12 +528,12 @@ pub fn check_path_constraints(
             let resolved_disp = resolved.to_string_lossy();
             return Some(PathConstraintAsk {
                 message: format!(
-                    "Output redirection to '{resolved_disp}' was blocked. For security, Claude Code may only write to files in the allowed working directories for this session: {dir_list}."
+                    "Output redirection to '{resolved_disp}' was blocked. For security, LingXi may only write to files in the allowed working directories for this session: {dir_list}."
                 ),
                 // TS attaches no custom reason for the containment ask; the
                 // message doubles as the reason in the Rust `Other` slot.
                 reason: format!(
-                    "Output redirection to '{resolved_disp}' was blocked. For security, Claude Code may only write to files in the allowed working directories for this session: {dir_list}."
+                    "Output redirection to '{resolved_disp}' was blocked. For security, LingXi may only write to files in the allowed working directories for this session: {dir_list}."
                 ),
             });
         }
@@ -575,10 +575,10 @@ pub fn check_path_constraints(
             let resolved_disp = resolved.to_string_lossy();
             return Some(PathConstraintAsk {
                 message: format!(
-                    "cd in '{resolved_disp}' was blocked. For security, Claude Code may only change directories to the allowed working directories for this session: {dir_list}."
+                    "cd in '{resolved_disp}' was blocked. For security, LingXi may only change directories to the allowed working directories for this session: {dir_list}."
                 ),
                 reason: format!(
-                    "cd in '{resolved_disp}' was blocked. For security, Claude Code may only change directories to the allowed working directories for this session: {dir_list}."
+                    "cd in '{resolved_disp}' was blocked. For security, LingXi may only change directories to the allowed working directories for this session: {dir_list}."
                 ),
             });
         }
@@ -640,7 +640,7 @@ mod tests {
         assert_eq!(
             a.message,
             "Output redirection to '/etc/foo' was blocked. For security, \
-             Claude Code may only write to files in the allowed working \
+             LingXi may only write to files in the allowed working \
              directories for this session: '/proj/work'."
         );
         assert_eq!(a.reason, a.message);
@@ -741,7 +741,7 @@ mod tests {
         let a = check("cd /tmp").expect("should ask");
         assert_eq!(
             a.message,
-            "cd in '/tmp' was blocked. For security, Claude Code may only \
+            "cd in '/tmp' was blocked. For security, LingXi may only \
              change directories to the allowed working directories for this \
              session: '/proj/work'."
         );

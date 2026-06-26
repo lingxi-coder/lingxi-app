@@ -41,11 +41,11 @@ use traits::{
 /// as there would be for Streamable HTTP).
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 
-/// `clientInfo.description` literal — claude-code sends
-/// `"Anthropic's agentic coding tool"` (TS `services/mcp/client.ts:990`).
-/// The canonical `mcp::identity::ClientInfo` model does not (yet) carry a
-/// `description` field, so the literal lives here at the posix wire boundary.
-const CLIENT_DESCRIPTION: &str = "Anthropic's agentic coding tool";
+/// `clientInfo.description` literal (debranded from claude-code's
+/// `"Anthropic's agentic coding tool"`). The canonical
+/// `mcp::identity::ClientInfo` model does not (yet) carry a `description`
+/// field, so the literal lives here at the posix wire boundary.
+const CLIENT_DESCRIPTION: &str = "An agentic coding tool";
 
 /// Build the `params` object for the MCP `initialize` request.
 ///
@@ -958,9 +958,9 @@ mod initialize_params_tests {
     fn client_info_carries_claude_code_identity_literals() {
         let params = initialize_params();
         let info = &params["clientInfo"];
-        assert_eq!(info["name"], "claude-code");
-        assert_eq!(info["title"], "Claude Code");
-        assert_eq!(info["description"], "Anthropic's agentic coding tool");
+        assert_eq!(info["name"], "lingxi");
+        assert_eq!(info["title"], "LingXi");
+        assert_eq!(info["description"], "An agentic coding tool");
         assert_eq!(info["websiteUrl"], "https://claude.com/claude-code");
         // The literals are sourced from the canonical `mcp::identity` constants
         // (so a rename there propagates here) — cross-check the reused values.
@@ -984,15 +984,15 @@ mod initialize_params_tests {
         let s = std::str::from_utf8(&bytes).expect("utf8");
         assert_eq!(initialize_params()["protocolVersion"], MCP_PROTOCOL_VERSION);
         assert!(
-            s.contains(r#""name":"claude-code""#),
-            "wire bytes must carry literal claude-code name, got: {s}",
+            s.contains(r#""name":"lingxi""#),
+            "wire bytes must carry literal lingxi name, got: {s}",
         );
         assert!(
             s.contains(r#""websiteUrl":"https://claude.com/claude-code""#),
             "websiteUrl must be camelCase, got: {s}",
         );
-        // No stale `lingxi` client name and no snake_case `website_url` leak.
-        assert!(!s.contains(r#""name":"lingxi""#), "stale lingxi name leaked");
+        // No stale `claude-code` client name and no snake_case `website_url` leak.
+        assert!(!s.contains(r#""name":"claude-code""#), "stale claude-code name leaked");
         assert!(!s.contains("website_url"), "snake_case website_url leaked");
     }
 }

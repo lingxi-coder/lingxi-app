@@ -223,7 +223,7 @@ impl Tool for RemoteTriggerTool {
 
     /// TS `DESCRIPTION`.
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
-        "Manage scheduled remote Claude Code agents (triggers) via the claude.ai CCR API. Auth is handled in-process — the token never reaches the shell.".into()
+        "Manage scheduled remote LingXi agents (triggers) via the claude.ai CCR API. Auth is handled in-process — the token never reaches the shell.".into()
     }
 
     /// TS `PROMPT`.

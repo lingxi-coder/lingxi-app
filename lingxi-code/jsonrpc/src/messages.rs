@@ -208,14 +208,14 @@ mod tests {
         let req = Request {
             jsonrpc: JSONRPC_VERSION.into(),
             method: "initialize".into(),
-            params: Some(json!({"clientInfo": {"name": "claude-code"}})),
+            params: Some(json!({"clientInfo": {"name": "lingxi"}})),
             id: Id::Number(1),
         };
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["jsonrpc"], "2.0");
         assert_eq!(v["method"], "initialize");
         assert_eq!(v["id"], 1);
-        assert_eq!(v["params"]["clientInfo"]["name"], "claude-code");
+        assert_eq!(v["params"]["clientInfo"]["name"], "lingxi");
     }
 
     #[test]

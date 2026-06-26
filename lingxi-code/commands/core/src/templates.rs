@@ -14,7 +14,7 @@
 /// Backtick-fence handling: the original TS literal uses backslash-escaped
 /// backticks for the embedded fenced code block. In Rust string literals
 /// backticks are not special, so they appear unescaped here.
-pub const OLD_INIT_PROMPT: &str = "Please analyze this codebase and create a LINGXI.md file, which will be given to future instances of Claude Code to operate in this repository.
+pub const OLD_INIT_PROMPT: &str = "Please analyze this codebase and create a LINGXI.md file, which will be given to future instances of LingXi to operate in this repository.
 
 What to add:
 1. Commands that will be commonly used, such as how to build, lint, and run tests. Include the necessary commands to develop in this codebase, such as how to run a single test.
@@ -33,7 +33,7 @@ Usage notes:
 ```
 # LINGXI.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to LingXi (claude.ai/code) when working with code in this repository.
 ```";
 
 #[cfg(test)]
@@ -44,12 +44,12 @@ mod tests {
     fn old_init_prompt_starts_with_locked_first_line() {
         assert!(OLD_INIT_PROMPT.starts_with(
             "Please analyze this codebase and create a LINGXI.md file, \
-             which will be given to future instances of Claude Code \
+             which will be given to future instances of LingXi \
              to operate in this repository."
                 .replace("             ", "")
                 .as_str()
         ) || OLD_INIT_PROMPT.starts_with(
-            "Please analyze this codebase and create a LINGXI.md file, which will be given to future instances of Claude Code to operate in this repository."
+            "Please analyze this codebase and create a LINGXI.md file, which will be given to future instances of LingXi to operate in this repository."
         ));
     }
 
@@ -57,12 +57,12 @@ mod tests {
     fn old_init_prompt_contains_claude_md_prefix_block() {
         assert!(OLD_INIT_PROMPT.contains("# LINGXI.md"));
         assert!(OLD_INIT_PROMPT.contains(
-            "This file provides guidance to Claude Code (claude.ai/code) \
+            "This file provides guidance to LingXi (claude.ai/code) \
              when working with code in this repository."
                 .replace("             ", "")
                 .as_str()
         ) || OLD_INIT_PROMPT.contains(
-            "This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository."
+            "This file provides guidance to LingXi (claude.ai/code) when working with code in this repository."
         ));
     }
 
@@ -95,7 +95,7 @@ mod tests {
         // Byte-locked length. If this drifts, refresh `parity_init_template.json`
         // alongside this constant. Locked 2026-05-28 (M5-10 T8 first-green).
         let n = OLD_INIT_PROMPT.len();
-        assert_eq!(n, 1592, "/init template byte length drifted: {n}");
+        assert_eq!(n, 1582, "/init template byte length drifted: {n}");
     }
 
     #[test]
@@ -110,7 +110,7 @@ mod tests {
         // 2. Run this test once; copy the actual digest from the failure.
         // 3. Paste below + into parity_init_template.json.
         assert_eq!(
-            digest, "7836b540b43aca31123274901f24984e89bcee0c87ab3bb5c10e131a40aa36c9",
+            digest, "f379e92cdef57db5223a0af64d7bf3014b0c7ca4a5afa9f1deaf873635f2eb5a",
             "OLD_INIT_PROMPT byte-changed; expected hash drifted"
         );
     }

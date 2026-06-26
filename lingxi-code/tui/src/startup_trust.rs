@@ -103,7 +103,7 @@ pub fn render_lines(cwd: &Path) -> Vec<String> {
         "Accessing workspace:".to_string(),
         cwd.to_string_lossy().into_owned(),
         "Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.".to_string(),
-        "Claude Code'll be able to read, edit, and execute files here.".to_string(),
+        "LingXi'll be able to read, edit, and execute files here.".to_string(),
         // TrustDialog.tsx:220 `<Link url=".../security">Security guide</Link>`.
         // Terminals can't render Ink's clickable link, so surface the label +
         // href (matching the REPL gate's `Security guide: {url}` rendering).
@@ -290,7 +290,7 @@ mod tests {
         assert_eq!(lines[2], "Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.");
         assert_eq!(
             lines[3],
-            "Claude Code'll be able to read, edit, and execute files here."
+            "LingXi'll be able to read, edit, and execute files here."
         );
         assert_eq!(lines[4], "Security guide: https://code.claude.com/docs/en/security");
         assert_eq!(lines[5], "Yes, I trust this folder");

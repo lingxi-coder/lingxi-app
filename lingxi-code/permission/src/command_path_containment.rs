@@ -787,7 +787,7 @@ pub fn check_command_path_containment(
         // bypass path extraction, so ALL flags on mv/cp force manual approval.
         if matches!(base.as_str(), "mv" | "cp") && args.iter().any(|a| a.starts_with('-')) {
             let msg = format!(
-                "{base} with flags requires manual approval to ensure path safety. For security, Claude Code cannot automatically validate {base} commands that use flags, as some flags like --target-directory=PATH can bypass path validation."
+                "{base} with flags requires manual approval to ensure path safety. For security, LingXi cannot automatically validate {base} commands that use flags, as some flags like --target-directory=PATH can bypass path validation."
             );
             return Some(PathConstraintAsk {
                 message: msg,
@@ -800,7 +800,7 @@ pub fn check_command_path_containment(
         // unresolvable against the final cwd.
         if compound_has_cd && operation_type != OperationType::Read {
             return Some(PathConstraintAsk {
-                message: "Commands that change directories and perform write operations require explicit approval to ensure paths are evaluated correctly. For security, Claude Code cannot automatically determine the final working directory when 'cd' is used in compound commands.".to_string(),
+                message: "Commands that change directories and perform write operations require explicit approval to ensure paths are evaluated correctly. For security, LingXi cannot automatically determine the final working directory when 'cd' is used in compound commands.".to_string(),
                 reason: "Compound command contains cd with write operation - manual approval required to prevent path resolution bypass".to_string(),
             });
         }
@@ -837,7 +837,7 @@ pub fn check_command_path_containment(
                         // No custom `decisionReason.reason` is attached in TS for
                         // the containment case, so the message doubles as reason.
                         let message = format!(
-                            "{base} in '{resolved_disp}' was blocked. For security, Claude Code may only {action_verb} the allowed working directories for this session: {dir_list}."
+                            "{base} in '{resolved_disp}' was blocked. For security, LingXi may only {action_verb} the allowed working directories for this session: {dir_list}."
                         );
                         return Some(PathConstraintAsk {
                             reason: message.clone(),
@@ -883,7 +883,7 @@ mod tests {
         let a = check("cat /etc/passwd").expect("should ask");
         assert_eq!(
             a.message,
-            "cat in '/etc/passwd' was blocked. For security, Claude Code may \
+            "cat in '/etc/passwd' was blocked. For security, LingXi may \
              only concatenate files from the allowed working directories for \
              this session: '/proj/work'."
         );
@@ -1024,7 +1024,7 @@ mod tests {
         assert_eq!(
             a.message,
             "mv with flags requires manual approval to ensure path safety. For \
-             security, Claude Code cannot automatically validate mv commands \
+             security, LingXi cannot automatically validate mv commands \
              that use flags, as some flags like --target-directory=PATH can \
              bypass path validation."
         );
@@ -1218,7 +1218,7 @@ mod tests {
         let a = check("cd ./.claude && mv test.txt settings.json").expect("ask");
         assert_eq!(
             a.message,
-            "Commands that change directories and perform write operations require explicit approval to ensure paths are evaluated correctly. For security, Claude Code cannot automatically determine the final working directory when 'cd' is used in compound commands."
+            "Commands that change directories and perform write operations require explicit approval to ensure paths are evaluated correctly. For security, LingXi cannot automatically determine the final working directory when 'cd' is used in compound commands."
         );
         assert_eq!(
             a.reason,

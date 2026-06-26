@@ -114,7 +114,7 @@ impl MacOsKeychainStorage {
             self.default_config_dir.as_path(),
         );
         full_service_name(
-            "Claude Code",
+            "LingXi",
             self.oauth_suffix.as_str(),
             service_suffix,
             &dir_hash,
@@ -443,17 +443,17 @@ mod tests {
         let s = mk_test_storage("/Users/x/.lingxi", "/Users/x/.lingxi");
         assert_eq!(
             s.keychain_service_name("-credentials"),
-            "Claude Code-credentials"
+            "LingXi-credentials"
         );
-        assert_eq!(s.keychain_service_name(""), "Claude Code");
+        assert_eq!(s.keychain_service_name(""), "LingXi");
     }
 
     #[test]
     fn service_name_non_default_dir_has_dir_hash() {
         let s = mk_test_storage("/Users/x/work/.claude-2", "/Users/x/.lingxi");
         let svc = s.keychain_service_name("-credentials");
-        assert!(svc.starts_with("Claude Code-credentials-"));
-        assert_eq!(svc.len(), "Claude Code-credentials-".len() + 8);
+        assert!(svc.starts_with("LingXi-credentials-"));
+        assert_eq!(svc.len(), "LingXi-credentials-".len() + 8);
     }
 
     #[test]

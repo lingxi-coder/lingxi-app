@@ -72,8 +72,8 @@ pub fn handle_key(state: &mut BypassDialogState, key: KeyEvent) -> Option<Bypass
 #[must_use]
 pub fn render_lines() -> Vec<String> {
     vec![
-        "WARNING: Claude Code running in Bypass Permissions mode".to_string(),
-        "In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous commands.".to_string(),
+        "WARNING: LingXi running in Bypass Permissions mode".to_string(),
+        "In Bypass Permissions mode, LingXi will not ask for your approval before running potentially dangerous commands.".to_string(),
         "This mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged.".to_string(),
         "By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.".to_string(),
         "https://code.claude.com/docs/en/security".to_string(),
@@ -251,10 +251,10 @@ mod tests {
         let lines = render_lines();
         assert_eq!(
             lines[0],
-            "WARNING: Claude Code running in Bypass Permissions mode"
+            "WARNING: LingXi running in Bypass Permissions mode"
         );
         assert!(lines.iter().any(|l| l
-            == "In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous commands."));
+            == "In Bypass Permissions mode, LingXi will not ask for your approval before running potentially dangerous commands."));
         assert!(lines.iter().any(|l| l
             == "This mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged."));
         assert!(lines.iter().any(|l| l

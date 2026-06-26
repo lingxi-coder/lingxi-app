@@ -124,13 +124,13 @@ impl PermTab {
     #[must_use]
     pub fn subtitle(self) -> &'static str {
         match self {
-            PermTab::Allow => "Claude Code won't ask before using allowed tools.",
+            PermTab::Allow => "LingXi won't ask before using allowed tools.",
             PermTab::Ask => {
-                "Claude Code will always ask for confirmation before using these tools."
+                "LingXi will always ask for confirmation before using these tools."
             }
-            PermTab::Deny => "Claude Code will always reject requests to use denied tools.",
+            PermTab::Deny => "LingXi will always reject requests to use denied tools.",
             PermTab::Workspace => {
-                "Claude Code can read and write files in these directories without asking."
+                "LingXi can read and write files in these directories without asking."
             }
         }
     }
@@ -672,7 +672,7 @@ mod tests {
         };
         let out = render_permissions_to_string(&s);
         assert!(out.starts_with(
-            "Permissions\nMode: acceptEdits\n[Allow]  Ask   Deny   Workspace \nClaude Code won't ask before using allowed tools.\n\u{276F} Bash\n"
+            "Permissions\nMode: acceptEdits\n[Allow]  Ask   Deny   Workspace \nLingXi won't ask before using allowed tools.\n\u{276F} Bash\n"
         ), "got: {out}");
         // The Deny rule is NOT in the Allow tab.
         assert!(!out.contains("Read(./s/**)"), "got: {out}");

@@ -15,20 +15,20 @@ Commands:
   /copy                 Copy Claude's last response to clipboard (or /copy N for the Nth-latest)
   /desktop              Continue the current session in Claude Desktop
   /diff                 View uncommitted changes and per-turn diffs
-  /doctor               Diagnose and verify your Claude Code installation and settings
+  /doctor               Diagnose and verify your LingXi installation and settings
   /effort               Set effort level for model usage
   /exit                 Exit the CLI
   /export               Export the current conversation to a file or clipboard
   /fast                 Toggle fast mode
-  /feedback             Submit feedback about Claude Code
+  /feedback             Submit feedback about LingXi
   /files                List all files currently in context
   /help                 Show help and available commands
   /hooks                Manage hooks
   /ide                  Manage IDE integrations and show status
   /init                 Initialize a new LINGXI.md file with codebase documentation
   /init-verifiers       Create verifier skill(s) for automated verification of code changes
-  /insights             Generate a report analyzing your Claude Code sessions
-  /install              Install Claude Code native build
+  /insights             Generate a report analyzing your LingXi sessions
+  /install              Install LingXi native build
   /install-github-app   Set up Claude GitHub Actions for a repository
   /install-slack-app    Install the Claude Slack app
   /keybindings          Open or create your keybindings configuration file
@@ -37,16 +37,16 @@ Commands:
   /mcp                  Manage MCP servers
   /memory               Open a memory file in your editor
   /mobile               Show QR code to download the Claude mobile app
-  /model                Set the AI model for Claude Code
-  /passes               Share a free week of Claude Code with friends and earn extra usage
+  /model                Set the AI model for LingXi
+  /passes               Share a free week of LingXi with friends and earn extra usage
   /permissions          Manage allow and deny tool permission rules
   /plan                 Enable plan mode or view the current session plan
-  /plugin               Manage Claude Code plugins
+  /plugin               Manage LingXi plugins
   /privacy-settings     View and update your privacy settings
   /release-notes        View release notes
   /reload-plugins       Activate pending plugin changes in the current session
   /remote-env           Configure the default remote environment for teleport sessions
-  /remote-setup         Setup Claude Code on the web (requires connecting your GitHub account)
+  /remote-setup         Setup LingXi on the web (requires connecting your GitHub account)
   /rename               Rename the current conversation
   /resume               Resume a previous conversation
   /review               Review a pull request
@@ -55,13 +55,13 @@ Commands:
   /security-review      Complete a security review of the pending changes on the current branch
   /session              Show remote session URL and QR code
   /skills               List available skills
-  /status               Show Claude Code status including version, model, account, API connectivity, and tool statuses
-  /statusline           Set up Claude Code's status line UI
-  /stickers             Order Claude Code stickers
+  /status               Show LingXi status including version, model, account, API connectivity, and tool statuses
+  /statusline           Set up LingXi's status line UI
+  /stickers             Order LingXi stickers
   /tasks                List and manage background tasks
   /terminal-setup       Install Shift+Enter key binding for newlines
   /theme                Change the theme
-  /ultraplan            Claude Code on the web drafts an advanced plan you can edit and approve
+  /ultraplan            LingXi on the web drafts an advanced plan you can edit and approve
   /upgrade              Upgrade to Max for higher rate limits and more Opus
   /usage                Show session cost, plan usage, and what's contributing to your limits
   /version              Print version information

@@ -354,7 +354,7 @@ pub fn handle_model_key(
 
 /// (model-header-not-bold-no-subheader) claude-code `ModelPicker`'s dim
 /// sub-header line, verbatim.
-pub const SUB_HEADER: &str = "Switch between Claude models. Applies to this session and future Claude Code sessions. For other/previous model names, specify with --model.";
+pub const SUB_HEADER: &str = "Switch between Claude models. Applies to this session and future LingXi sessions. For other/previous model names, specify with --model.";
 
 /// Render the grouped picker body (plain text; the iocraft layer wraps it).
 ///

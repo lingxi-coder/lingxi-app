@@ -42,7 +42,7 @@ async fn run_turn_passes_assembled_system_prompt_to_api_client() {
     // Assembler always opens with HEADER and carries the `# Environment` block.
     // There is NO `Notes:` FOOTER on the MAIN prompt (R-P1b).
     // GAP-2: `# Context management` is now the last section (after env block).
-    assert!(s.starts_with("You are Claude Code"));
+    assert!(s.starts_with("You are LingXi"));
     assert!(s.contains("# Environment"));
     assert!(!s.contains("<env>"));
     assert!(!s.contains("Notes:"));

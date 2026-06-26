@@ -19,7 +19,7 @@ use crate::{CacheControl, CacheScope, SystemBlock};
 /// Private to this module: it is the formatting boundary the splitter
 /// uses to detect the prefix bucket, not a content constant exposed to
 /// callers.
-const HEADER: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+const HEADER: &str = "You are LingXi, an agentic command-line coding assistant.";
 
 /// Section separator — two LFs (one blank line). Value copied from
 /// `locked_templates::SECTION_SEP` in the orchestrator; it is pure

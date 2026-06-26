@@ -98,7 +98,7 @@ mod tests {
             "must be camelCase clientInfo"
         );
         assert!(json.get("client_info").is_none(), "no snake_case leak");
-        assert_eq!(json["clientInfo"]["name"], "claude-code");
+        assert_eq!(json["clientInfo"]["name"], "lingxi");
     }
 
     #[test]
@@ -108,7 +108,7 @@ mod tests {
         let bytes = serde_json::to_vec(&params).expect("serialize");
         let s = std::str::from_utf8(&bytes).expect("utf8");
         assert!(
-            s.contains(r#""name":"claude-code""#),
+            s.contains(r#""name":"lingxi""#),
             "wire bytes must contain literal \"name\":\"claude-code\", got: {s}",
         );
     }

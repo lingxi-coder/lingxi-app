@@ -1,13 +1,13 @@
 use orchestrator::prompt::locked_templates::{HEADER, SECTION_SEP, TRAILING_NL};
 
 #[test]
-fn header_starts_with_you_are_claude_code() {
-    assert!(HEADER.starts_with("You are Claude Code"));
+fn header_starts_with_you_are_lingxi() {
+    assert!(HEADER.starts_with("You are LingXi"));
 }
 
 #[test]
-fn header_mentions_anthropic_official_cli() {
-    assert!(HEADER.contains("Anthropic's official CLI"));
+fn header_describes_lingxi_identity() {
+    assert!(HEADER.contains("agentic command-line coding assistant"));
 }
 
 #[test]

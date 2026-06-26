@@ -77,7 +77,7 @@ pub enum DomainCheckResult {
 /// Byte-locked `DomainBlockedError` message (`utils.ts:23`).
 #[must_use]
 pub fn domain_blocked_msg(domain: &str) -> String {
-    format!("Claude Code is unable to fetch from {domain}")
+    format!("LingXi is unable to fetch from {domain}")
 }
 
 /// Byte-locked `DomainCheckFailedError` message (`utils.ts:30-32`).
@@ -322,7 +322,7 @@ mod tests {
     fn blocked_message_byte_locked() {
         assert_eq!(
             domain_blocked_msg("example.com"),
-            "Claude Code is unable to fetch from example.com"
+            "LingXi is unable to fetch from example.com"
         );
     }
 

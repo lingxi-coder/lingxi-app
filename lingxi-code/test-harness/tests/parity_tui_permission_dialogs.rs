@@ -40,11 +40,11 @@ fn parity_tui_permission_dialogs_labels_locked() {
     );
     assert_eq!(
         fixture["labels"]["exit_plan_mode"]["header"],
-        "Claude Code needs your approval for the plan"
+        "LingXi needs your approval for the plan"
     );
     assert_eq!(
         fixture["labels"]["bypass_permissions"]["title"],
-        "WARNING: Claude Code running in Bypass Permissions mode"
+        "WARNING: LingXi running in Bypass Permissions mode"
     );
 
     // Button labels (LingXi-locked).

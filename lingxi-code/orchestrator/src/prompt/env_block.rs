@@ -133,7 +133,7 @@ When building AI applications, default to the latest and most capable Claude mod
     .unwrap();
 
     s.push_str(
-        "\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), \
+        "\n - LingXi is available as a CLI in the terminal, desktop app (Mac/Windows), \
 web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).",
     );
 
@@ -141,7 +141,7 @@ web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).",
     // the subagent flag, false here). LingXi's subagent path is assembled
     // separately, so the main assembler always emits this line.
     s.push_str(
-        "\n - Fast mode for Claude Code uses Claude Opus with faster output \
+        "\n - Fast mode for LingXi uses Claude Opus with faster output \
 (it does not downgrade to a smaller model). It can be toggled with /fast and is \
 available on Opus 4.8/4.7/4.6.",
     );

@@ -401,7 +401,7 @@ pub async fn run(cli: &Cli) -> i32 {
 fn print_marketplace_help() {
     let mut cmd = <MarketplaceArgs as clap::Args>::augment_args(clap::Command::new("marketplace"))
         .bin_name("lingxi-cli plugin marketplace")
-        .about("Manage Claude Code marketplaces");
+        .about("Manage LingXi marketplaces");
     let _ = cmd.print_help();
     println!();
 }
@@ -416,7 +416,7 @@ fn print_help() {
     // without reaching across modules into the top-level `Commands`.
     let mut cmd = <Cli as clap::Args>::augment_args(clap::Command::new("plugin"))
         .bin_name("lingxi-cli plugin")
-        .about("Manage Claude Code plugins");
+        .about("Manage LingXi plugins");
     let _ = cmd.print_help();
     println!();
 }

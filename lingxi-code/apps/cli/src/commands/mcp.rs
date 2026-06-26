@@ -1208,7 +1208,7 @@ fn run_reset_project_choices() -> i32 {
             // ⇒ first line only; ≥1 project server ⇒ both lines. (The approval
             // keys cleared above in ~/.lingxi.json do NOT affect this.)
             if project_mcp_json_has_servers() {
-                println!("You will be prompted for approval next time you start Claude Code.");
+                println!("You will be prompted for approval next time you start LingXi.");
             }
             SUCCESS
         }

@@ -28,24 +28,24 @@ fn non_default_dir_yields_8_char_hex() {
 
 #[test]
 fn service_name_default_oauth_layout() {
-    let name = full_service_name("Claude Code", "", "-credentials", "");
-    assert_eq!(name, "Claude Code-credentials");
+    let name = full_service_name("LingXi", "", "-credentials", "");
+    assert_eq!(name, "LingXi-credentials");
 }
 
 #[test]
 fn service_name_legacy_api_key_default() {
-    let name = full_service_name("Claude Code", "", "", "");
-    assert_eq!(name, "Claude Code");
+    let name = full_service_name("LingXi", "", "", "");
+    assert_eq!(name, "LingXi");
 }
 
 #[test]
 fn service_name_oauth_with_dir_hash() {
-    let name = full_service_name("Claude Code", "", "-credentials", "-abc12345");
-    assert_eq!(name, "Claude Code-credentials-abc12345");
+    let name = full_service_name("LingXi", "", "-credentials", "-abc12345");
+    assert_eq!(name, "LingXi-credentials-abc12345");
 }
 
 #[test]
 fn service_name_with_oauth_suffix_and_dir_hash() {
-    let name = full_service_name("Claude Code", "-staging", "-credentials", "-deadbeef");
-    assert_eq!(name, "Claude Code-staging-credentials-deadbeef");
+    let name = full_service_name("LingXi", "-staging", "-credentials", "-deadbeef");
+    assert_eq!(name, "LingXi-staging-credentials-deadbeef");
 }

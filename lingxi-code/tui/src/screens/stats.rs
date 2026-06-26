@@ -58,7 +58,7 @@ pub const TAB_OVERVIEW: &str = "Overview";
 /// Locked second tab title.
 pub const TAB_MODELS: &str = "Models";
 /// Locked empty-state line (claude-code `allTimeResult.type === "empty"`).
-pub const EMPTY_LINE: &str = "No stats available yet. Start using Claude Code!";
+pub const EMPTY_LINE: &str = "No stats available yet. Start using LingXi!";
 /// Loading line shown while the background transcript walk runs (the history can
 /// be many GB, so the aggregation is done off the UI thread).
 pub const LOADING_LINE: &str = "Computing usage stats… (scanning transcript history)";
@@ -1826,7 +1826,7 @@ mod tests {
         let out = render_stats_to_string(&s);
         assert_eq!(
             out,
-            "No stats available yet. Start using Claude Code!\nEsc to cancel \u{00B7} r to cycle dates"
+            "No stats available yet. Start using LingXi!\nEsc to cancel \u{00B7} r to cycle dates"
         );
     }
 

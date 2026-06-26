@@ -318,7 +318,7 @@ impl McpClient {
     ///
     /// Emits a JSON-RPC payload whose bytes contain:
     ///   * `"method":"initialize"`
-    ///   * `"clientInfo":{"name":"claude-code", ...}`
+    ///   * `"clientInfo":{"name":"lingxi", ...}`
     ///   * `"protocolVersion":"2025-11-25"`
     ///   * `"capabilities":{"roots":{},"elicitation":{}}`
     ///

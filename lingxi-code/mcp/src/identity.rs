@@ -1,18 +1,17 @@
-//! claude-code identity constants — DO NOT change without updating
-//! `2026-05-23-m2-02b-mcp-client.md` §"Critical 1:1 fidelity items".
+//! LingXi MCP `clientInfo` identity constants. Rebranded from claude-code
+//! (whose `clientInfo.name` was `claude-code`); LingXi presents its own
+//! identity to MCP servers.
 
 use serde::Serialize;
 
-/// Wire-literal `clientInfo.name` value sent by claude-code in the MCP
-/// `initialize` request (TS `services/mcp/client.ts:987`).
-pub const CLIENT_NAME: &str = "claude-code";
-/// Wire-literal `clientInfo.title` value sent by claude-code (TS line 988).
-pub const CLIENT_TITLE: &str = "Claude Code";
-/// Wire-literal `clientInfo.version` — sourced from this crate's `Cargo.toml`.
+/// Wire `clientInfo.name` value LingXi sends in the MCP `initialize` request.
+pub const CLIENT_NAME: &str = "lingxi";
+/// Wire `clientInfo.title` value.
+pub const CLIENT_TITLE: &str = "LingXi";
+/// Wire `clientInfo.version` — sourced from this crate's `Cargo.toml`.
 pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// Wire-literal `clientInfo.description` value. Binary-confirmed at offset 84000384:
-/// `description:"Anthropic's agentic coding tool"` in the `new Client(...)` call.
-pub const CLIENT_DESCRIPTION: &str = "Anthropic's agentic coding tool";
+/// Wire `clientInfo.description` value (debranded from claude-code's).
+pub const CLIENT_DESCRIPTION: &str = "An agentic coding tool";
 /// Public-facing website URL emitted in `clientInfo.websiteUrl` (matches
 /// claude-code). Confirmed against binary at offset 200376067.
 pub const MCP_WEBSITE_URL: &str = "https://claude.com/claude-code";
@@ -73,9 +72,9 @@ mod tests {
         let json = serde_json::to_string(&info).expect("serialize");
         // Field order is not guaranteed by serde_json — assert by parsing back.
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["name"], "claude-code");
-        assert_eq!(parsed["title"], "Claude Code");
-        assert_eq!(parsed["description"], "Anthropic's agentic coding tool");
+        assert_eq!(parsed["name"], "lingxi");
+        assert_eq!(parsed["title"], "LingXi");
+        assert_eq!(parsed["description"], "An agentic coding tool");
         assert_eq!(parsed["websiteUrl"], "https://claude.com/claude-code");
         // CARGO_PKG_VERSION must be present and look like a semver triple.
         let version = parsed["version"].as_str().expect("version");
@@ -104,9 +103,9 @@ mod tests {
     #[test]
     fn client_name_constant_is_literal_claude_code() {
         // Lock the wire constant against accidental renames.
-        assert_eq!(CLIENT_NAME, "claude-code");
-        assert_eq!(CLIENT_TITLE, "Claude Code");
-        assert_eq!(CLIENT_DESCRIPTION, "Anthropic's agentic coding tool");
+        assert_eq!(CLIENT_NAME, "lingxi");
+        assert_eq!(CLIENT_TITLE, "LingXi");
+        assert_eq!(CLIENT_DESCRIPTION, "An agentic coding tool");
         assert_eq!(MCP_WEBSITE_URL, "https://claude.com/claude-code");
     }
 }

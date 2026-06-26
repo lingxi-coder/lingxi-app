@@ -32,7 +32,7 @@ const DEFAULT_BRANCH: &str = "main";
 const COMMIT_ATTRIBUTION: &str = "Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>";
 
 /// TS default PR attribution line.
-const PR_ATTRIBUTION: &str = "🤖 Generated with [Claude Code](https://claude.com/claude-code)";
+const PR_ATTRIBUTION: &str = "🤖 Generated with [LingXi](https://claude.com/claude-code)";
 
 /// `/commit-push-pr` handler — injects the commit/push/PR prompt template.
 ///

@@ -166,8 +166,8 @@ async fn initialize_emits_literal_claude_code_clientinfo() {
         "method must be literal \"initialize\", got: {frame}",
     );
     assert!(
-        frame.contains(r#""clientInfo":{"name":"claude-code""#),
-        "literal claude-code clientInfo must appear, got: {frame}",
+        frame.contains(r#""clientInfo":{"name":"lingxi""#),
+        "literal lingxi clientInfo must appear, got: {frame}",
     );
     assert!(
         frame.contains(r#""protocolVersion":"2025-11-25""#),

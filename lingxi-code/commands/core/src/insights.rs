@@ -59,7 +59,7 @@ fn build_prompt(args: &str) -> String {
         format!("Additional user input: {args}\n")
     };
     format!(
-        r#"The user just ran /insights to generate a usage report analyzing their Claude Code sessions.
+        r#"The user just ran /insights to generate a usage report analyzing their LingXi sessions.
 
 Here is the full insights data:
 {{insights_json}}
@@ -101,7 +101,7 @@ mod tests {
         match h.handle(&args("")).await {
             CommandResult::InjectMessage { content } => {
                 assert!(content.contains(
-                    "The user just ran /insights to generate a usage report analyzing their Claude Code sessions."
+                    "The user just ran /insights to generate a usage report analyzing their LingXi sessions."
                 ));
                 assert!(content.contains("Now output the following message exactly:"));
                 assert!(content.contains("Your shareable insights report is ready:"));

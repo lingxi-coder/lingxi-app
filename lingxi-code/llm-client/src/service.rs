@@ -2511,7 +2511,7 @@ mod tests {
     // Local opaque stand-ins for the orchestrator's locked-template constants
     // (the build_request tests assert the system prefix self-referentially and
     // use SECTION_SEP only as the "\n\n" separator, so any non-empty HEADER works).
-    const HEADER: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+    const HEADER: &str = "You are LingXi, an agentic command-line coding assistant.";
     const SECTION_SEP: &str = "\n\n";
 
     // ── FakeTransport ─────────────────────────────────────────────────────────

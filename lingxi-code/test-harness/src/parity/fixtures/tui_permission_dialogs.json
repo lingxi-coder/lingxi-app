@@ -9,14 +9,14 @@
       "button_deny": "[N] Deny"
     },
     "exit_plan_mode": {
-      "header": "Claude Code needs your approval for the plan",
+      "header": "LingXi needs your approval for the plan",
       "button_allow_once": "[1] Allow Once",
       "button_allow_always": "[2] Allow Always",
       "button_deny": "[N] Deny"
     },
     "bypass_permissions": {
-      "title": "WARNING: Claude Code running in Bypass Permissions mode",
-      "body_1": "In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous commands.\nThis mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged.",
+      "title": "WARNING: LingXi running in Bypass Permissions mode",
+      "body_1": "In Bypass Permissions mode, LingXi will not ask for your approval before running potentially dangerous commands.\nThis mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged.",
       "body_2": "By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.",
       "confirm_word": "yes"
     }

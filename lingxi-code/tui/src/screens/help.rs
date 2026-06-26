@@ -57,7 +57,7 @@ const KEY_WIDTH: usize = 16;
 // (help-4) `Claude Code v<version>` (HelpV2.tsx:141), per the user's strict-1:1
 // branding call. The version is LingXi's `CARGO_PKG_VERSION` (the doctor.rs
 // `cli_version` pattern) — composed at compile time.
-pub const TITLE: &str = concat!("Claude Code v", env!("CARGO_PKG_VERSION"));
+pub const TITLE: &str = concat!("LingXi v", env!("CARGO_PKG_VERSION"));
 /// Locked intro line (claude-code `HelpV2/General.tsx`).
 pub const INTRO: &str = "Claude understands your codebase, makes edits with your permission, and executes commands \u{2014} right from your terminal.";
 /// Locked `Shortcuts` section header.
@@ -147,7 +147,7 @@ fn spaced_chord(chord: &str) -> String {
 pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/help", "Show keyboard shortcuts and commands"),
     ("/clear", "Clear the conversation history"),
-    ("/exit", "Exit Claude Code"),
+    ("/exit", "Exit LingXi"),
     ("/agents", "Manage agent configurations"),
     ("/mcp", "Show configured MCP servers"),
     ("/hooks", "Show configured hooks"),
@@ -365,7 +365,7 @@ mod tests {
         let out = render_help_to_string(&s);
         // (help-4) `Claude Code v<version>` title (version-agnostic assert).
         assert!(out.starts_with(&format!("{TITLE}\n")), "got: {out}");
-        assert!(out.starts_with("Claude Code v"), "got: {out}");
+        assert!(out.starts_with("LingXi v"), "got: {out}");
         assert!(out.contains(INTRO), "intro line present");
         assert!(out.contains(SHORTCUTS_HEADER), "Shortcuts header present");
         assert!(out.ends_with(FOOTER), "footer present, got: {out}");

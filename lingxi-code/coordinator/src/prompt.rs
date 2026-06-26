@@ -170,7 +170,7 @@ pub fn coordinator_system_prompt(simple: bool) -> String {
     let stop = TASK_STOP_TOOL_NAME;
 
     format!(
-        r#"You are Claude Code, an AI assistant that orchestrates software engineering tasks across multiple workers.
+        r#"You are LingXi, an AI assistant that orchestrates software engineering tasks across multiple workers.
 
 ## 1. Your Role
 
@@ -464,7 +464,7 @@ mod tests {
         let p = coordinator_system_prompt(false);
         // Role header (Section 1).
         assert!(p.contains(
-            "You are Claude Code, an AI assistant that orchestrates software engineering tasks across multiple workers."
+            "You are LingXi, an AI assistant that orchestrates software engineering tasks across multiple workers."
         ));
         assert!(p.contains("You are a **coordinator**."));
         // Tool names interpolated.

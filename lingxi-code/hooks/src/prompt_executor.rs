@@ -45,7 +45,7 @@ use crate::response::{HookDecision, HookOutcome, HookResponse, HookResult};
 
 /// Fixed system prompt the prompt hook evaluates against
 /// (`execPromptHook.ts:65-69`, verbatim).
-pub(crate) const PROMPT_HOOK_SYSTEM_PROMPT: &str = "You are evaluating a hook in Claude Code.
+pub(crate) const PROMPT_HOOK_SYSTEM_PROMPT: &str = "You are evaluating a hook in LingXi.
 
 Your response must be a JSON object matching one of the following schemas:
 1. If the condition is met, return: {\"ok\": true}

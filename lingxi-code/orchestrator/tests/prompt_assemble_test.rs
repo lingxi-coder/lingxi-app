@@ -27,7 +27,7 @@ const MEMORY_PREAMBLE: &str = "Codebase and user instructions are shown below.";
 fn minimal_assembly_no_memory_no_tools_no_footer() {
     let out = assemble_system_prompt(&ctx_minimal());
     // Must start with HEADER.
-    assert!(out.starts_with("You are Claude Code, Anthropic's official CLI for Claude."));
+    assert!(out.starts_with("You are LingXi, an agentic command-line coding assistant."));
     // Must contain the `# Environment` block (R-P1a: replaces the old `<env>`).
     assert!(out.contains("\n\n# Environment\nYou have been invoked in the following environment: "));
     assert!(!out.contains("<env>"));
@@ -66,7 +66,7 @@ fn memory_files_are_not_spliced_into_the_prompt() {
 #[test]
 fn section_order_locked_header_body_env() {
     let out = assemble_system_prompt(&ctx_minimal());
-    let i_header = out.find("You are Claude Code").expect("header present");
+    let i_header = out.find("You are LingXi").expect("header present");
     let i_body = out
         .find("You are an interactive agent that helps users with software engineering tasks.")
         .expect("static body present");
@@ -80,7 +80,7 @@ fn double_lf_between_each_section() {
     let out = assemble_system_prompt(&ctx_minimal());
     // After HEADER, before the static BODY — exactly `\n\n`, then the `Pym`
     // opening paragraph.
-    let header_end = "You are Claude Code, Anthropic's official CLI for Claude.";
+    let header_end = "You are LingXi, an agentic command-line coding assistant.";
     let after_header = &out[out.find(header_end).unwrap() + header_end.len()..];
     assert!(after_header.starts_with(
         "\n\nYou are an interactive agent that helps users with software engineering tasks."
@@ -123,7 +123,7 @@ fn static_body_sections_present_and_ordered_between_header_and_env() {
     ];
     let out = assemble_system_prompt(&ctx);
 
-    let i_header = out.find("You are Claude Code, Anthropic's official CLI for Claude.").unwrap();
+    let i_header = out.find("You are LingXi, an agentic command-line coding assistant.").unwrap();
     let i_open = out
         .find("You are an interactive agent that helps users with software engineering tasks.")
         .expect("Pym opening present");
@@ -167,7 +167,7 @@ fn static_body_sections_present_and_ordered_between_header_and_env() {
     assert!(i_env < i_ctx_mgmt, "# Context management must follow the env block (binary cx() order)");
 
     assert!(out.contains(" - Users may configure 'hooks', shell commands that execute"));
-    assert!(out.contains("\n  - /help: Get help with using Claude Code"));
+    assert!(out.contains("\n  - /help: Get help with using LingXi"));
     // Agent tool bullet in session guidance.
     assert!(out.contains("Use the Agent tool with specialized agents"));
     assert!(out.contains("suggest they type `! <command>`"));

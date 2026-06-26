@@ -439,7 +439,7 @@ mod tests {
         assert!(!default.contains("# Output Style:"));
         // Spot-check the locked envelope: opens with HEADER; ends with the
         // `# Context management` section's last line (no `Notes:` FOOTER — R-P1b).
-        assert!(default.starts_with("You are Claude Code, Anthropic's official CLI for Claude."));
+        assert!(default.starts_with("You are LingXi, an agentic command-line coding assistant."));
         assert!(!default.contains("Notes:"));
         assert!(default.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
     }

@@ -5795,7 +5795,7 @@ mod tests {
         // Coordinator role header + interpolated tool names.
         assert!(
             sys.contains(
-                "You are Claude Code, an AI assistant that orchestrates software engineering tasks across multiple workers."
+                "You are LingXi, an AI assistant that orchestrates software engineering tasks across multiple workers."
             ),
             "coordinator session must assemble the coordinator system prompt: {sys}"
         );

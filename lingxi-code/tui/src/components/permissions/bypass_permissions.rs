@@ -72,8 +72,8 @@ pub fn handle_key(state: &mut BypassPermissionsState, key: KeyEvent) -> Option<D
 #[component]
 pub fn BypassPermissionsMode(props: &BypassPermissionsProps) -> impl Into<AnyElement<'static>> {
     // Byte-locked literals from BypassPermissionsModeDialog.tsx (lines 53, 73).
-    let title = "WARNING: Claude Code running in Bypass Permissions mode".to_string();
-    let body1 = "In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous commands.\nThis mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged.".to_string();
+    let title = "WARNING: LingXi running in Bypass Permissions mode".to_string();
+    let body1 = "In Bypass Permissions mode, LingXi will not ask for your approval before running potentially dangerous commands.\nThis mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged.".to_string();
     let body2 = "By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.".to_string();
     let prompt_line = format!(
         "Type \"yes\" + Enter to enable, Esc to cancel: {}",

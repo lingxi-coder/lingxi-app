@@ -8389,6 +8389,7 @@ mod skill_model_override_tests {
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: Some(modifier),
+                is_error: false,
                 mcp_meta: None,
             })
         }
@@ -8462,6 +8463,7 @@ mod skill_model_override_tests {
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
+                is_error: false,
                 mcp_meta: None,
             })
         }
@@ -9114,6 +9116,7 @@ mod skill_listing_reminder_tests {
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
+                is_error: false,
                 mcp_meta: None,
             })
         }
@@ -9474,6 +9477,7 @@ mod agent_listing_reminder_tests {
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
+                is_error: false,
                 mcp_meta: None,
             })
         }
@@ -10997,6 +11001,7 @@ mod todo_reminder_tests {
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
+                is_error: false,
                 mcp_meta: None,
             })
         }

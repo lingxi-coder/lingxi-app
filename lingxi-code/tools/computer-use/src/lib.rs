@@ -432,6 +432,7 @@ fn finish(mut data: Value, action: &str) -> ToolCallResult {
         model_content: None,
         new_messages: vec![],
         context_modifier: None,
+        is_error: false,
         mcp_meta: None,
     }
 }

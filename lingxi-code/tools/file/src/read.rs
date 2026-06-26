@@ -1136,6 +1136,7 @@ impl FileReadTool {
             model_content: Some("[Image content provided in the following message.]".to_string()),
             new_messages: vec![msg],
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         })
     }
@@ -1178,6 +1179,7 @@ impl FileReadTool {
             model_content: Some(model_content),
             new_messages: vec![msg],
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         })
     }
@@ -1338,6 +1340,7 @@ impl FileReadTool {
             model_content: Some(model_content),
             new_messages: vec![msg],
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         })
     }
@@ -1581,6 +1584,7 @@ impl Tool for FileReadTool {
                     model_content: Some(FILE_UNCHANGED_STUB.to_string()),
                     new_messages: vec![],
                     context_modifier: None,
+                    is_error: false,
                     mcp_meta: None,
                 });
             }
@@ -1769,6 +1773,7 @@ impl Tool for FileReadTool {
                 model_content: Some(model_content),
                 new_messages: vec![],
                 context_modifier: None,
+                is_error: false,
                 mcp_meta: None,
             });
         }
@@ -1945,6 +1950,7 @@ impl Tool for FileReadTool {
             model_content: Some(model_content),
             new_messages: vec![],
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         })
     }

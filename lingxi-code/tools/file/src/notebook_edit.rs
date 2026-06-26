@@ -332,6 +332,7 @@ Usage:\n\
                     model_content: Some("Notebook is not valid JSON.".to_string()),
                     new_messages: vec![],
                     context_modifier: None,
+                    is_error: false,
                     mcp_meta: None,
                 });
             }
@@ -578,6 +579,7 @@ Usage:\n\
             model_content: Some(content),
             new_messages: vec![],
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         })
     }

@@ -796,6 +796,10 @@ impl Tool for MCPTool {
                     model_content,
                     new_messages: vec![],
                     context_modifier: None,
+                    // claude-code flags the tool_result block with the MCP server's
+                    // `isError` (a logical-error RESULT, not a transport failure).
+                    // The dispatch reads this onto the block's is_error.
+                    is_error: dto.is_error,
                     mcp_meta: build_mcp_meta(dto.meta, dto.structured_content),
                 })
             }
@@ -997,6 +1001,7 @@ impl Tool for McpAuthTool {
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         })
     }
@@ -1175,6 +1180,7 @@ impl Tool for ListMcpResourcesTool {
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         })
     }
@@ -1360,6 +1366,7 @@ impl Tool for ReadMcpResourceTool {
                     model_content: None,
                     new_messages: vec![],
                     context_modifier: None,
+                    is_error: false,
                     mcp_meta: None,
                 })
             }

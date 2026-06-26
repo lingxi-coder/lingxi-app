@@ -2760,7 +2760,11 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 if let Some(modifier) = result.context_modifier {
                     context_modifiers.push(modifier);
                 }
-                (text, false, result.data)
+                // `is_error` rides on the result (set by MCP tools from the
+                // server's `isError`; `false` for every native success). A native
+                // FAILURE is an `Err` handled below — this Ok arm only flags an
+                // MCP logical-error RESULT.
+                (text, result.is_error, result.data)
             }
             Err(err) => {
                 // Bare error string — no <tool_use_error> wrapper.
@@ -3575,6 +3579,7 @@ mod read_file_state_tests {
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
+                is_error: false,
                 mcp_meta: None,
             })
         }
@@ -4020,6 +4025,7 @@ mod read_file_state_tests {
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
+                is_error: false,
                 mcp_meta: None,
             })
         }
@@ -5907,6 +5913,7 @@ mod pre_tool_hook_tests {
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
+                is_error: false,
                 mcp_meta: None,
             })
         }
@@ -5984,6 +5991,7 @@ mod pre_tool_hook_tests {
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
+                is_error: false,
                 mcp_meta: None,
             })
         }
@@ -6128,6 +6136,7 @@ mod pre_tool_hook_tests {
                     "EXPANDED-SKILL-PROMPT".into(),
                 )],
                 context_modifier: None,
+                is_error: false,
                 mcp_meta: None,
             })
         }

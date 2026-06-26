@@ -950,6 +950,7 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
             model_content,
             new_messages: vec![],
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         })
     }

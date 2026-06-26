@@ -958,6 +958,7 @@ ALREADY been loaded - follow the instructions directly instead of calling this t
             model_content: None,
             new_messages,
             context_modifier,
+            is_error: false,
             mcp_meta: None,
         })
     }

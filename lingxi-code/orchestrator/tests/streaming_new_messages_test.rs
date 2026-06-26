@@ -190,6 +190,7 @@ impl Tool for InjectingTool {
                 "EXPANDED-SKILL-PROMPT".into(),
             )],
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         })
     }
@@ -260,6 +261,7 @@ impl Tool for PlainTool {
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         })
     }

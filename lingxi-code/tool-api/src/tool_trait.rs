@@ -292,6 +292,12 @@ pub struct ToolCallResult {
     pub context_modifier: Option<ContextModifier>,
     /// Opaque per-call metadata (used by MCP tools).
     pub mcp_meta: Option<serde_json::Value>,
+    /// Whether this result is an ERROR — drives the `tool_result` block's
+    /// `is_error` flag. `false` for every native tool's success path (a native
+    /// failure surfaces as an `Err`, which the dispatch flags separately); MCP
+    /// tools set it from the server's `isError` so an MCP error RESULT (a logical
+    /// failure, not a transport error) is flagged to the model 1:1 with claude-code.
+    pub is_error: bool,
 }
 
 impl ToolCallResult {
@@ -303,6 +309,7 @@ impl ToolCallResult {
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         }
     }
@@ -316,6 +323,7 @@ impl std::fmt::Debug for ToolCallResult {
             .field("model_content", &self.model_content)
             .field("new_messages", &self.new_messages)
             .field("mcp_meta", &self.mcp_meta)
+            .field("is_error", &self.is_error)
             .finish_non_exhaustive()
     }
 }

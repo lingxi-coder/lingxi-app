@@ -796,6 +796,7 @@ Usage notes:\n\
                     model_content: None,
                     new_messages: vec![],
                     context_modifier: None,
+                    is_error: false,
                     mcp_meta: None,
                 })
             }
@@ -1588,6 +1589,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                     model_content: None,
                     new_messages: vec![],
                     context_modifier: None,
+                    is_error: false,
                     mcp_meta: None,
                 })
             }

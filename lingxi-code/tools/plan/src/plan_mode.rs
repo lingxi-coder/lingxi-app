@@ -334,6 +334,7 @@ impl Tool for EnterPlanModeTool {
             model_content: Some(ENTER_PLAN_MODE_INSTRUCTIONS.to_string()),
             new_messages: Vec::new(),
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         })
     }
@@ -501,6 +502,7 @@ impl Tool for ExitPlanModeTool {
             model_content: None,
             new_messages: Vec::new(),
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         })
     }

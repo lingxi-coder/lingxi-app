@@ -294,6 +294,7 @@ impl Tool for TeamDeleteTool {
                 model_content: None,
                 new_messages: Vec::new(),
                 context_modifier: None,
+                is_error: false,
                 mcp_meta: None,
             });
         }
@@ -354,6 +355,7 @@ impl Tool for TeamDeleteTool {
             model_content: None,
             new_messages: Vec::new(),
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         })
     }

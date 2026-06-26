@@ -999,6 +999,7 @@ impl Tool for TaskCreateTool {
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         })
     }
@@ -1135,6 +1136,7 @@ impl Tool for TaskGetTool {
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         })
     }
@@ -1298,6 +1300,7 @@ impl Tool for TaskListTool {
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         })
     }
@@ -1446,6 +1449,7 @@ impl Tool for TaskUpdateTool {
                     model_content: None,
                     new_messages: vec![],
                     context_modifier: None,
+                    is_error: false,
                     mcp_meta: None,
                 });
             }
@@ -1493,6 +1497,7 @@ impl Tool for TaskUpdateTool {
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
+                is_error: false,
                 mcp_meta: None,
             });
         }
@@ -1614,6 +1619,7 @@ impl Tool for TaskUpdateTool {
                                 model_content: None,
                                 new_messages: vec![],
                                 context_modifier: None,
+                                is_error: false,
                                 mcp_meta: None,
                             });
                         }
@@ -1790,6 +1796,7 @@ impl Tool for TaskUpdateTool {
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         })
     }
@@ -2061,6 +2068,7 @@ impl Tool for TaskStopTool {
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         })
     }
@@ -2620,6 +2628,7 @@ impl Tool for TaskOutputTool {
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         })
     }

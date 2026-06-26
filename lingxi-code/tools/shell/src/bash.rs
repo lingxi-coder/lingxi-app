@@ -568,6 +568,7 @@ fn build_interrupted_result(stdout_partial: &str, stderr_partial: &str, cmd_str:
         model_content: Some(model_content),
         new_messages: vec![],
         context_modifier: None,
+        is_error: false,
         mcp_meta: None,
     }
 }
@@ -1201,6 +1202,7 @@ impl Tool for BashTool {
                         model_content: Some(model_content),
                         new_messages: vec![],
                         context_modifier: None,
+                        is_error: false,
                         mcp_meta: None,
                     })
                 }
@@ -1539,6 +1541,7 @@ impl Tool for BashTool {
                             ),
                             new_messages: vec![msg],
                             context_modifier: None,
+                            is_error: false,
                             mcp_meta: None,
                         });
                     }
@@ -1599,6 +1602,7 @@ impl Tool for BashTool {
                     model_content: Some(model_content),
                     new_messages: vec![],
                     context_modifier: None,
+                    is_error: false,
                     mcp_meta: None,
                 })
             }

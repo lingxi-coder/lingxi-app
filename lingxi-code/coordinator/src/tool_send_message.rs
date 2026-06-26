@@ -491,6 +491,7 @@ impl SendMessageTool {
             model_content: None,
             new_messages: Vec::new(),
             context_modifier: None,
+            is_error: false,
             mcp_meta: None,
         }
     }

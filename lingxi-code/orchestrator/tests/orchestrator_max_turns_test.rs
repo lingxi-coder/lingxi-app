@@ -100,14 +100,16 @@ async fn max_turns_zero_means_unbounded() {
         std::env::temp_dir(),
     );
 
-    let err = orch.run_turn("forever").await.expect_err("queue exhausts");
+    let outcome = orch.run_turn("forever").await;
     assert!(
-        !matches!(err, OrchestratorError::MaxTurnsReached { .. }),
-        "max_turns = 0 must be UNBOUNDED (never MaxTurnsReached), got: {err}"
+        !matches!(outcome, Err(OrchestratorError::MaxTurnsReached { .. })),
+        "max_turns = 0 must be UNBOUNDED (never MaxTurnsReached), got: {outcome:?}"
     );
     // No turn cap stopped the loop early — it consumed every queued response
-    // (the queue is fully drained) before failing on exhaustion. (With the old
-    // hard cap, `0 >= 0` would have hit MaxTurnsReached on turn 0.)
+    // (the queue is fully drained). Post-#10, the queue-exhaustion error (a
+    // model/runtime error) ends the turn GRACEFULLY as `model_error` rather than
+    // bubbling, but the queue is still fully drained first. (With the old hard
+    // cap, `0 >= 0` would have hit MaxTurnsReached on turn 0.)
     assert_eq!(
         api.remaining().await,
         0,
@@ -150,8 +152,13 @@ async fn default_config_single_end_turn_completes_cleanly() {
 }
 
 #[tokio::test]
-async fn api_error_propagates_as_orchestrator_error_api_call() {
-    // Empty mock → first call returns ApiError::Server (mock-exhaustion shape).
+async fn api_error_ends_turn_gracefully_as_model_error() {
+    // #10 (batched twin, faithful port of `query.ts:955-997` catch): a generic
+    // model/runtime API error (here the empty-mock exhaustion shape, a
+    // `Transport` error — NOT a RateLimited/Overloaded carve-out) is no longer
+    // bubbled as a hard `OrchestratorError`. The turn ends GRACEFULLY with
+    // `reason:"model_error"` and the raw error text surfaced as an api-error
+    // assistant message.
     let api = Arc::new(MockApiClient::new(vec![]));
     let output = Arc::new(MockOutputStream::new());
     let hooks = orchestrator::test_support::noop_hook_executor();
@@ -164,12 +171,34 @@ async fn api_error_propagates_as_orchestrator_error_api_call() {
         tools,
         hooks,
         perms,
-        output,
+        output.clone(),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
     );
 
-    let err = orch.run_turn("anything").await.expect_err("must fail");
-    let msg = err.to_string();
-    assert!(msg.starts_with("api call failed: "), "got: {msg}");
+    let outcome = orch
+        .run_turn("anything")
+        .await
+        .expect("a generic API error must end the turn gracefully, not bubble");
+    assert!(
+        matches!(outcome, ConversationOutcome::EndTurn { .. }),
+        "{outcome:?}"
+    );
+    let events = output.snapshot().await;
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            traits::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "model_error"
+        )),
+        "turn must end with stop_reason model_error; events={events:#?}"
+    );
+    // The raw error text (the mock exhaustion message) is surfaced verbatim.
+    assert!(
+        output
+            .text_events()
+            .await
+            .iter()
+            .any(|t| t.contains("mock script exhausted")),
+        "the raw error text must be surfaced as the model_error message"
+    );
 }

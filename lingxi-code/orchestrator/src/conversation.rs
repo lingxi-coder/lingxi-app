@@ -4783,7 +4783,23 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         }
                     }
                 }
-                Err(other) => return Err(OrchestratorError::Streaming(other)),
+                // #10: a connect-phase RateLimited/Overloaded keeps its dedicated
+                // downstream handling — propagate as a hard error.
+                Err(e @ (LlmError::RateLimited { .. } | LlmError::Overloaded { .. })) => {
+                    return Err(OrchestratorError::Streaming(e))
+                }
+                // #10: any other connect-phase model/runtime error ends the turn
+                // GRACEFULLY as `model_error` (faithful port of the `query.ts`
+                // catch) — surface the raw error text as an api-error assistant
+                // message instead of bubbling a hard error. No assistant message
+                // was persisted this turn, so no orphaned tool_use to repair.
+                Err(other) => {
+                    let id = crate::turn_loop::surface_model_error(self, &other.to_string()).await;
+                    let cost = self.snapshot_cost_real().await;
+                    self.output.emit_end_turn("model_error", &cost).await;
+                    final_message_id = id;
+                    break;
+                }
             };
 
             // 3. Pump the stream (with mid-stream 529 → non-streaming fallback).
@@ -4914,7 +4930,22 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 
                     pumped_from_fallback
                 }
-                Err(other) => return Err(other),
+                // #10: RateLimited/Overloaded/RepeatedOverloaded keep dedicated
+                // downstream handling — propagate.
+                Err(e) if crate::turn_loop::is_carveout_propagated(&e) => return Err(e),
+                // #10: any other mid-stream model/runtime error (e.g. Transport)
+                // ends the turn GRACEFULLY as `model_error` (faithful port of the
+                // `query.ts` catch) rather than bubbling a hard error / phantom
+                // interrupt. The assistant message for this turn is persisted only
+                // AFTER a successful pump, so the errored pump left no orphaned
+                // tool_use to repair (TS `yieldMissingToolResultBlocks` no-op here).
+                Err(other) => {
+                    let id = crate::turn_loop::surface_model_error(self, &other.to_string()).await;
+                    let cost = self.snapshot_cost_real().await;
+                    self.output.emit_end_turn("model_error", &cost).await;
+                    final_message_id = id;
+                    break;
+                }
                 },
             };
             // A3: accumulate this turn's output tokens (TS `getTurnOutputTokens()`).

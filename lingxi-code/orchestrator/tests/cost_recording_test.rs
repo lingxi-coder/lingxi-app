@@ -191,7 +191,10 @@ async fn run_turn_stops_at_max_budget() {
 #[tokio::test]
 async fn no_budget_cap_never_stops_on_budget() {
     // max_budget_nano_usd = None (default) → the cap is inert; the loop runs to
-    // queue exhaustion, never MaxBudgetReached.
+    // queue exhaustion, never MaxBudgetReached. Post-#10, queue exhaustion is a
+    // model/runtime error, so the loop now ends GRACEFULLY (Ok(EndTurn) with
+    // reason model_error) rather than bubbling a hard error — either way the
+    // result must NOT be MaxBudgetReached.
     let api = Arc::new(MockApiClient::new(vec![
         looping_response_with_usage(1_000, 500),
         looping_response_with_usage(1_000, 500),
@@ -203,9 +206,12 @@ async fn no_budget_cap_never_stops_on_budget() {
         tx,
     ));
     let orch = budget_orch(api, tracker, None);
-    let err = orch.run_turn("hi").await.expect_err("queue exhausts");
+    let outcome = orch.run_turn("hi").await;
     assert!(
-        !matches!(err, orchestrator::OrchestratorError::MaxBudgetReached { .. }),
-        "no cap must not stop on budget, got {err:?}"
+        !matches!(
+            outcome,
+            Err(orchestrator::OrchestratorError::MaxBudgetReached { .. })
+        ),
+        "no cap must not stop on budget, got {outcome:?}"
     );
 }

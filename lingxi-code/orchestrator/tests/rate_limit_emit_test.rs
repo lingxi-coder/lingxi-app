@@ -518,10 +518,10 @@ async fn non_rate_limited_terminal_emits_no_rate_limit_event() {
     let output = Arc::new(MockOutputStream::new());
     let orch = build_orch(api.clone(), output.clone());
 
-    let _ = orch
-        .run_turn("hello")
-        .await
-        .expect_err("turn must die on the transport error");
+    // Post-#10 the Transport error ends the turn GRACEFULLY as `model_error`
+    // (no longer a hard bubble); the point of THIS test is unchanged — a
+    // non-rate-limited terminal must emit NO RateLimit event.
+    let _ = orch.run_turn("hello").await;
 
     let rl = rate_limit_events(&output.snapshot().await);
     assert!(

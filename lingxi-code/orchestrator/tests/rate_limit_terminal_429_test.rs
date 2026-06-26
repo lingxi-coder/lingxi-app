@@ -93,14 +93,16 @@ async fn terminal_429_without_limits_context_keeps_generic_copy() {
     assert_eq!(err.to_string(), "api call failed: rate limited");
 }
 
-/// A non-429 terminal error must NOT consult the composed-copy cache: even
-/// with a stale message cached, a Transport failure keeps its own surface.
+/// A non-429 terminal error that still BUBBLES must NOT consult the
+/// composed-copy cache: even with a stale rate-limit message cached, it keeps its
+/// own surface. Uses `Overloaded` — a non-RateLimited carve-out that still
+/// propagates post-#10 (generic errors like Transport now end gracefully as
+/// `model_error` and never reach `enrich_api_error`, so they can't exercise the
+/// cache-selectivity this test guards).
 #[tokio::test]
 async fn non_429_terminal_error_ignores_cached_limits_copy() {
     let api = Arc::new(MockApiClient::new(vec![]));
-    api.set_fail_with(Some(LlmError::Transport {
-        message: "boom".to_string(),
-    }));
+    api.set_fail_with(Some(LlmError::Overloaded { repeated: false }));
     api.set_rate_limit_error_message(Some(
         "You've hit your weekly limit · resets 3pm".to_string(),
     ));
@@ -109,8 +111,8 @@ async fn non_429_terminal_error_ignores_cached_limits_copy() {
 
     let err = orch.run_turn("hello").await.expect_err("turn must die");
     assert!(
-        matches!(err, OrchestratorError::ApiCall(LlmError::Transport { .. })),
+        matches!(err, OrchestratorError::ApiCall(LlmError::Overloaded { .. })),
         "non-429 error must pass through untouched, got {err:?}"
     );
-    assert_eq!(err.to_string(), "api call failed: transport error: boom");
+    assert_eq!(err.to_string(), "api call failed: provider overloaded");
 }

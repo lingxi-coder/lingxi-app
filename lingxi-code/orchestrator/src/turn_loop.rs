@@ -632,9 +632,10 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         tools,
         max_tokens_override,
     )
-    .await?
+    .await
     {
-        PtlCallOutcome::Response(resp) => resp,
+        Ok(outcome) => match outcome {
+            PtlCallOutcome::Response(resp) => resp,
         PtlCallOutcome::PromptTooLong => {
             let assistant_id = surface_prompt_too_long(orch).await;
             return Ok((
@@ -675,6 +676,26 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                 TurnStepOutcome::Ended {
                     final_message_id: assistant_id,
                     stop_reason: "rapid_refill_breaker".to_string(),
+                },
+                0,
+            ));
+            }
+        },
+        // #10: a model/runtime error that escaped the API layer is NOT a hard
+        // failure (faithful port of `query.ts:955-997` catch → `model_error`).
+        // PROPAGATE the carve-outs that have dedicated downstream handling
+        // (RateLimited → wrapper rate-limit enrichment; Overloaded /
+        // RepeatedOverloaded → the "Repeated 529" surface); surface EVERYTHING
+        // else gracefully as an `isApiErrorMessage` assistant message + end the
+        // turn with `reason:"model_error"` (no Stop/StopFailure hooks — the catch
+        // path runs neither). 0 output tokens.
+        Err(e) if is_carveout_propagated(&e) => return Err(e),
+        Err(e) => {
+            let assistant_id = surface_model_error(orch, &e.to_string()).await;
+            return Ok((
+                TurnStepOutcome::Ended {
+                    final_message_id: assistant_id,
+                    stop_reason: "model_error".to_string(),
                 },
                 0,
             ));
@@ -1569,6 +1590,76 @@ pub(crate) async fn surface_terminal_api_error(
     orch.persist_message_to_jsonl(&assistant_msg).await;
     orch.output.emit_text(&text).await;
     Some(assistant_id)
+}
+
+/// Whether a turn error has DEDICATED downstream handling and must propagate as
+/// a hard `Err` instead of being caught as a graceful `model_error` (#10):
+/// - `RateLimited` — the `run_turn*` wrapper re-maps it onto the limits-specific
+///   copy + emits the terminal rate-limit snapshot (`enrich_api_error` /
+///   `emit_terminal_rate_limit_if_changed`).
+/// - `Overloaded` / `RepeatedOverloaded` — the byte-locked "Repeated 529
+///   Overloaded errors" surface (`errors.ts:166`).
+/// Mirrors claude-code, whose top-level `catch` is reached only AFTER the retry
+/// layer has handled 429/529; everything else falls through to `model_error`.
+pub(crate) fn is_carveout_propagated(e: &OrchestratorError) -> bool {
+    matches!(
+        e,
+        OrchestratorError::RepeatedOverloaded
+            | OrchestratorError::ApiCall(
+                LlmError::RateLimited { .. } | LlmError::Overloaded { .. }
+            )
+            | OrchestratorError::Streaming(
+                LlmError::RateLimited { .. } | LlmError::Overloaded { .. }
+            )
+    )
+}
+
+/// Surface a `model_error` turn-end (faithful port of the `query.ts:955-997`
+/// top-level `catch`). A model/runtime error that escaped the API layer (not a
+/// PTL/overflow/rate-limit/overload case — those are handled / propagated
+/// upstream) is NOT a hard failure: claude-code logs `tengu_query_error`, yields
+/// the raw error text as an `isApiErrorMessage` assistant message
+/// (`createAssistantAPIErrorMessage({ content: errorMessage })` — the text is the
+/// error message VERBATIM, *not* an `API Error:`-prefixed template), and returns
+/// `{ reason: 'model_error' }`. The driver then ends the turn gracefully (the
+/// session survives, the error is visible to the model/UI) instead of bubbling a
+/// hard error and showing a phantom interrupt.
+///
+/// NOTE vs the TS catch: `yield* yieldMissingToolResultBlocks(...)` is a NO-OP in
+/// this port — both twins persist the assistant message only AFTER a successful
+/// response/pump, so an error here leaves NO orphaned `tool_use` in history to
+/// repair. The `tengu_query_error` payload's `assistantMessages`/`toolUses`
+/// counts and `queryChainId`/`queryDepth` are omitted (we do not model the
+/// per-query-chain recursion-tracking subsystem — same deferral as the rapid-
+/// refill querytracking fields); the event itself fires for parity.
+pub(crate) async fn surface_model_error(
+    orch: &ConversationOrchestrator,
+    error_text: &str,
+) -> MessageId {
+    if let Some(bus) = orch.analytics_bus.as_ref() {
+        bus.log_event("tengu_query_error", telemetry::LogEventMetadata::new())
+            .await;
+    }
+    // `createAssistantAPIErrorMessage({ content })` renders `content` verbatim,
+    // falling back to the `NO_CONTENT_MESSAGE` placeholder when empty.
+    let text = if error_text.is_empty() {
+        "(no content)".to_string()
+    } else {
+        error_text.to_string()
+    };
+    let assistant_id = MessageId::new();
+    let assistant_msg = ConversationMessage::Assistant {
+        id: assistant_id,
+        content: vec![ContentBlock::Text { text: text.clone() }],
+        stop_reason: Some("model_error".to_string()),
+    };
+    {
+        let mut s = orch.session.lock().await;
+        s.history.push(assistant_msg.clone());
+    }
+    orch.persist_message_to_jsonl(&assistant_msg).await;
+    orch.output.emit_text(&text).await;
+    assistant_id
 }
 
 /// A1 `max_tokens` recovery decision (TS `query.ts:1223-1255`).

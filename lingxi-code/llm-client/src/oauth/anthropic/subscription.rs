@@ -22,7 +22,11 @@
 //! non-enterprise and non-subscriber.
 
 use crate::oauth::anthropic::limits::{ClaudeAiLimitsState, SubscriptionType};
-use crate::oauth::anthropic::profile::OAuthProfileResponse;
+use crate::oauth::anthropic::profile::{
+    fetch_profile_from_oauth_token, fetch_user_roles, OAuthProfileResponse,
+};
+use std::sync::Arc;
+use traits::HttpTransport;
 
 /// `CLAUDE_AI_INFERENCE_SCOPE` — `constants/oauth.ts:33`. Locked byte-for-byte.
 /// Presence of this scope is what distinguishes a real Claude.ai login token
@@ -90,6 +94,68 @@ pub fn is_subscriber_tier(state: &ClaudeAiLimitsState) -> bool {
 pub fn apply_profile(state: &mut ClaudeAiLimitsState, profile: &OAuthProfileResponse) {
     if let Some(tier) = profile.subscription_type() {
         state.subscription_type = Some(tier);
+    }
+}
+
+/// Map the resolved [`SubscriptionType`] to the claude-code `getSubscriptionType()`
+/// string union (`"pro" | "max" | "team" | "enterprise"`). `Free`/`Unknown` →
+/// `None` (no recognized paid tier — the predicates on
+/// [`traits::subscription::SubscriptionSnapshot`] all treat an absent tier as a
+/// conservative "not pro / not team / not enterprise").
+#[must_use]
+fn subscription_type_str(tier: SubscriptionType) -> Option<String> {
+    match tier {
+        SubscriptionType::Pro => Some("pro".into()),
+        SubscriptionType::Max => Some("max".into()),
+        SubscriptionType::Team => Some("team".into()),
+        SubscriptionType::Enterprise => Some("enterprise".into()),
+        SubscriptionType::Free | SubscriptionType::Unknown => None,
+    }
+}
+
+/// Resolve the signed-in user's full subscription snapshot from the OAuth
+/// profile + roles endpoints — the port's analog of claude-code's
+/// `getOauthAccountInfo()` (`auth.ts`, written at login from the profile + roles
+/// responses). Gated on the `user:profile` scope (`hasProfileScope`,
+/// `auth.ts:1580-1584`): a token without it can't hit `/api/oauth/profile`, so
+/// we skip and return `None`. Any profile-fetch failure → `None`; roles are
+/// best-effort (missing roles ⇒ `organization_role: None`).
+pub async fn resolve_subscription_snapshot(
+    access_token: &str,
+    scopes: &[String],
+    transport: &Arc<dyn HttpTransport>,
+) -> Option<traits::subscription::SubscriptionSnapshot> {
+    if !has_profile_scope(scopes) {
+        return None;
+    }
+    let profile = fetch_profile_from_oauth_token(access_token, transport).await?;
+    // Roles are a second, best-effort call (claude-code fetches them alongside
+    // the profile for `organizationRole`); failure leaves the role unknown.
+    let roles = fetch_user_roles(access_token, transport).await;
+    let org = profile.organization.as_ref();
+    Some(traits::subscription::SubscriptionSnapshot {
+        // `isClaudeAISubscriber` ← the `user:inference` scope.
+        is_subscriber: subscription_from_scopes(scopes),
+        subscription_type: profile.subscription_type().and_then(subscription_type_str),
+        rate_limit_tier: org.and_then(|o| o.rate_limit_tier.clone()),
+        has_extra_usage_enabled: org.and_then(|o| o.has_extra_usage_enabled).unwrap_or(false),
+        billing_type: org.and_then(|o| o.billing_type.clone()),
+        organization_role: roles.and_then(|r| r.organization_role),
+    })
+}
+
+/// Resolve [`resolve_subscription_snapshot`] and publish it to the process-global
+/// [`traits::subscription`] cache, so subscription-gated logic (e.g. the
+/// `AgentTool` pro-plan prompt gate) reflects the signed-in user's plan.
+/// Best-effort: a missing `user:profile` scope or a failed fetch leaves the
+/// cache unchanged (subscription stays "unknown", matching the binary default).
+pub async fn publish_subscription(
+    access_token: &str,
+    scopes: &[String],
+    transport: &Arc<dyn HttpTransport>,
+) {
+    if let Some(snapshot) = resolve_subscription_snapshot(access_token, scopes, transport).await {
+        traits::subscription::set_current_subscription(Some(snapshot));
     }
 }
 
@@ -216,5 +282,51 @@ mod tests {
         apply_profile(&mut state, &unknown);
         // Known Max tier survives an unknown-org-type profile.
         assert_eq!(state.subscription_type, Some(SubscriptionType::Max));
+    }
+
+    #[tokio::test]
+    async fn resolve_and_publish_pro_plan_to_global() {
+        use crate::oauth::anthropic::testsupport::{Canned, MockHttp};
+        // Serialize: `publish_subscription` mutates the process-global cache.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let body = r#"{"organization":{"organization_type":"claude_pro","uuid":"o1",
+            "rate_limit_tier":"default_claude_pro","billing_type":"stripe_subscription",
+            "has_extra_usage_enabled":true}}"#;
+        let transport: Arc<dyn HttpTransport> =
+            MockHttp::new(vec![("anthropic.com", Canned { status: 200, body: body.into() })]);
+        let scopes = vec!["user:inference".to_string(), "user:profile".to_string()];
+
+        let snap = resolve_subscription_snapshot("tok", &scopes, &transport)
+            .await
+            .expect("profile scope + 200 ⇒ Some");
+        assert_eq!(snap.subscription_type.as_deref(), Some("pro"));
+        assert!(snap.is_subscriber, "user:inference ⇒ subscriber");
+        assert_eq!(snap.rate_limit_tier.as_deref(), Some("default_claude_pro"));
+        assert_eq!(snap.billing_type.as_deref(), Some("stripe_subscription"));
+        assert!(snap.has_extra_usage_enabled);
+
+        // publish → the process-global cache reflects the pro plan.
+        traits::subscription::set_current_subscription(None);
+        publish_subscription("tok", &scopes, &transport).await;
+        assert!(
+            traits::subscription::is_pro_plan(),
+            "global must report pro after publish (this is what activates the F3 gate)"
+        );
+        traits::subscription::set_current_subscription(None);
+    }
+
+    #[tokio::test]
+    async fn resolve_skips_without_profile_scope() {
+        use crate::oauth::anthropic::testsupport::{Canned, MockHttp};
+        let body = r#"{"organization":{"organization_type":"claude_pro"}}"#;
+        let transport: Arc<dyn HttpTransport> =
+            MockHttp::new(vec![("anthropic.com", Canned { status: 200, body: body.into() })]);
+        // No `user:profile` scope ⇒ `hasProfileScope` gate skips the fetch ⇒ None.
+        let scopes = vec!["user:inference".to_string()];
+        assert!(resolve_subscription_snapshot("tok", &scopes, &transport)
+            .await
+            .is_none());
     }
 }

@@ -136,6 +136,21 @@ impl OAuthHandle {
             .await
             .map_err(|e| AuthError::ServerError(format!("persist: {e}")))?;
 
+        // (6b) Resolve + publish the subscription tier (claude-code
+        // `getOauthAccountInfo`, written at login from the profile + roles
+        // endpoints) into the process-global `traits::subscription` cache, so
+        // subscription-gated prompt logic (e.g. the `AgentTool` pro-plan gate)
+        // reflects the signed-in plan. Best-effort + scope-gated
+        // (`hasProfileScope`): a token without `user:profile`, or any fetch
+        // failure, leaves the cache unchanged.
+        let transport = self.client.http();
+        crate::oauth::anthropic::subscription::publish_subscription(
+            tokens.access_token.expose_secret(),
+            &tokens.scopes,
+            &transport,
+        )
+        .await;
+
         // (7) Return the resolved identity.
         Ok(LoginInfo { email, org_id })
     }

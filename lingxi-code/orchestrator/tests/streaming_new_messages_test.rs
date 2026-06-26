@@ -184,6 +184,7 @@ impl Tool for InjectingTool {
                 "content": "TOOL-RESULT",
                 "model_content": "Launching skill: demo",
             }),
+            model_content: None,
             new_messages: vec![ConversationMessage::user(
                 MessageId::new(),
                 "EXPANDED-SKILL-PROMPT".into(),
@@ -256,6 +257,7 @@ impl Tool for PlainTool {
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
             data: json!({ "content": "TOOL-RESULT", "model_content": "ok" }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

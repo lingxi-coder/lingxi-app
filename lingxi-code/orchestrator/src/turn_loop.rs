@@ -1891,10 +1891,17 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 name,
                 provider_id.clone(),
             );
+            // Pass the SAME wrapped string the result_block carries as the
+            // model text, so the SDK frame's `content` matches the model wire.
+            let model_text = match &result_block {
+                ContentBlock::ToolResult { content, .. } => content.clone(),
+                _ => format!("<tool_use_error>Error: No such tool available: {name}</tool_use_error>"),
+            };
             orch.output
                 .emit_tool_result(
                     tool_use_id,
                     name,
+                    &model_text,
                     &serde_json::json!({ "error": format!("tool not found: {name}") }),
                 )
                 .await;
@@ -1914,9 +1921,11 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         if let Err(detail) =
             crate::schema_validation::validate_tool_input_schema(tool_handle.input_schema(), input)
         {
+            let model_text =
+                format!("<tool_use_error>InputValidationError: {detail}</tool_use_error>");
             let result_block = ContentBlock::ToolResult {
                 tool_use_id: tool_use_id.clone(),
-                content: format!("<tool_use_error>InputValidationError: {detail}</tool_use_error>"),
+                content: model_text.clone(),
                 is_error: true,
                 provider_tool_use_id: provider_id.clone(),
                 content_blocks: None,
@@ -1925,6 +1934,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 .emit_tool_result(
                     tool_use_id,
                     name,
+                    &model_text,
                     &serde_json::json!({ "error": detail }),
                 )
                 .await;
@@ -1993,9 +2003,10 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         if let Err(tool_api::ValidationError(msg)) =
             tool_handle.validate_input(input, &ctx).await
         {
+            let model_text = format!("<tool_use_error>{msg}</tool_use_error>");
             let result_block = ContentBlock::ToolResult {
                 tool_use_id: tool_use_id.clone(),
-                content: format!("<tool_use_error>{msg}</tool_use_error>"),
+                content: model_text.clone(),
                 is_error: true,
                 provider_tool_use_id: provider_id.clone(),
                 content_blocks: None,
@@ -2004,6 +2015,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 .emit_tool_result(
                     tool_use_id,
                     name,
+                    &model_text,
                     &serde_json::json!({ "error": msg }),
                 )
                 .await;
@@ -2030,6 +2042,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 .emit_tool_result(
                     tool_use_id,
                     name,
+                    CANCEL_MESSAGE,
                     &serde_json::json!({ "error": CANCEL_MESSAGE }),
                 )
                 .await;
@@ -2264,9 +2277,10 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 decision = "block",
                 duration_ms = pre_dur_ms,
             );
+            let model_text = format!("Hook blocked: {reason}");
             let result_block = ContentBlock::ToolResult {
                 tool_use_id: tool_use_id.clone(),
-                content: format!("Hook blocked: {reason}"),
+                content: model_text.clone(),
                 is_error: true,
                 provider_tool_use_id: provider_id.clone(),
                 content_blocks: None,
@@ -2275,7 +2289,8 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 .emit_tool_result(
                     tool_use_id,
                     name,
-                    &serde_json::json!({ "error": format!("Hook blocked: {reason}") }),
+                    &model_text,
+                    &serde_json::json!({ "error": model_text.clone() }),
                 )
                 .await;
             results.push(result_block);
@@ -2393,13 +2408,19 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // delegating to the prompt transport) so the source-gated permission
             // hooks fire the way claude-code does.
             let resolution = orch.perms.resolve_detailed(name, &effective_input).await;
-            // R-D3: a PreToolUse hook `permissionDecision:"ask"` (HookDecision::Ask)
-            // forces the interactive prompt even over a configured ALLOW rule
-            // (claude-code `permissionBehavior="ask"`, `azn` off ~205721920). The
-            // behavior precedence is deny > ask > allow, so a deny rule still binds
-            // (resolved as Deny below) and plan mode already bound above; only an
-            // Allow is upgraded to Ask so the prompt fires instead of silently
-            // auto-allowing. No-op unless a hook returned `ask`.
+            // R-D3: a PreToolUse hook `permissionBehavior:"ask"` (HookDecision::Ask)
+            // forces the interactive prompt even over a configured ALLOW rule, but a
+            // DENY rule still overrides the hook. This is 1:1 with claude-code's
+            // `applyHookPermissionResult` (`JWn`): on a hook `ask`/`allow` it RE-RUNS
+            // the rule resolution (`EPe`) and `if (p?.behavior === "deny") return …
+            // "deny rule overrides"`, so the deny rule wins; only when no deny rule
+            // matches does the hook `ask` fall through to the full permission pipeline
+            // (the interactive prompt). Here `resolve_detailed` has already applied
+            // that rule precedence, so upgrading ONLY the resolved `Allow` to `Ask`
+            // reproduces it exactly: a resolved `Deny` keeps binding (the deny rule
+            // overrides), plan mode already bound above, and a resolved `Ask` already
+            // prompts. Precedence is therefore deny > ask > allow — matching the
+            // binary, NOT a divergence. No-op unless a hook returned `ask`.
             let resolution = if hook_ask
                 && matches!(resolution, PermissionResolution::Allow)
             {
@@ -2545,6 +2566,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     .emit_tool_result(
                         tool_use_id,
                         name,
+                        &reason,
                         &serde_json::json!({ "error": reason }),
                     )
                     .await;
@@ -2622,7 +2644,10 @@ pub(crate) async fn dispatch_tool_uses_tracked(
 
         let (content, is_error, emit_payload) = match tool_outcome {
             Ok(result) => {
-                let text = tool_result_to_model_text(&result.data);
+                let text = result
+                    .model_content
+                    .clone()
+                    .unwrap_or_else(|| tool_result_to_model_text(&result.data));
                 // SKILLEXEC.3 (Part A): stash any tool-injected conversation
                 // messages so the caller can append them after this batch's
                 // tool_result user message. Non-empty only for the Skill tool
@@ -2664,7 +2689,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         };
 
         orch.output
-            .emit_tool_result(tool_use_id, name, &emit_payload)
+            .emit_tool_result(tool_use_id, name, &content, &emit_payload)
             .await;
 
         // Record the file into the read-file-state cache backing `/files`
@@ -3021,16 +3046,21 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             );
         }
 
-        // MCP results carry a content-block array (`model_content_blocks`) so the
-        // egress can send it VERBATIM as `tool_result.content` (claude-code passes
-        // the MCP content array directly — images/resources stay structured). A
-        // hook-mutated result (output replaced or additionalContext appended)
+        // MCP results carry a content-block array directly in `data.content` (1:1
+        // with the binary's MCPTool result `data` — no `model_content_blocks`
+        // sidecar) so the egress can send it VERBATIM as `tool_result.content`
+        // (claude-code passes the MCP content array directly — images/resources
+        // stay structured). When `data.content` is an ARRAY it IS that wire form;
+        // a bare-string `content` (or large-output file replacement) is not. Gated
+        // to MCP tools so non-MCP tools that happen to put an array under
+        // `data.content` (e.g. the Agent tool's transcript blocks) are unaffected.
+        // A hook-mutated result (output replaced or additionalContext appended)
         // drops to the text-only `final_content`.
-        let content_blocks = if mutated {
+        let content_blocks = if mutated || !tool_handle.is_mcp() {
             None
         } else {
             emit_payload
-                .get("model_content_blocks")
+                .get("content")
                 .and_then(serde_json::Value::as_array)
                 .cloned()
         };
@@ -3455,6 +3485,7 @@ mod read_file_state_tests {
                 .map_err(|e| ToolError::Io(format!("read {}: {e}", resolved.display())))?;
             Ok(ToolCallResult {
                 data: json!({ "content": content }),
+                model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 mcp_meta: None,
@@ -3899,6 +3930,7 @@ mod read_file_state_tests {
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(ToolCallResult {
                 data: json!({ "ok": true }),
+                model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 mcp_meta: None,
@@ -5785,6 +5817,7 @@ mod pre_tool_hook_tests {
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
                 data: json!({ "content": "ECHOED-OUTPUT" }),
+                model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 mcp_meta: None,
@@ -5861,6 +5894,7 @@ mod pre_tool_hook_tests {
             *self.captured.lock().unwrap() = Some(ctx.fork_parent_system_prompt.clone());
             Ok(ToolCallResult {
                 data: json!({ "content": "ok" }),
+                model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 mcp_meta: None,
@@ -6001,6 +6035,7 @@ mod pre_tool_hook_tests {
                     "content": "TOOL-RESULT",
                     "model_content": "Launching skill: demo",
                 }),
+                model_content: None,
                 new_messages: vec![ConversationMessage::user(
                     MessageId::new(),
                     "EXPANDED-SKILL-PROMPT".into(),

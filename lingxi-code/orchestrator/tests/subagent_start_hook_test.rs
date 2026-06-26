@@ -153,6 +153,7 @@ impl Tool for FakeAgentTool {
                 "result": "done",
                 "agentId": FAKE_AGENT_CHILD_ID.to_string(),
             }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -225,6 +226,7 @@ impl Tool for AlwaysOkTool {
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
             data: json!({ "content": "all good" }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

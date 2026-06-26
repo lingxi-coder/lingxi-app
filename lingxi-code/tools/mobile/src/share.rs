@@ -126,6 +126,7 @@ impl Tool for ShareTool {
 
         Ok(ToolCallResult {
             data: json!({ "shared": matches!(outcome, ShareResult::Success) }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

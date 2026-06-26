@@ -123,9 +123,13 @@ pub fn transform_result_content(content: &Value, server_name: &str, ctx: Persist
 fn transform_block(block: &Value, server_name: &str, ctx: PersistContext) -> Vec<Value> {
     let kind = block.get("type").and_then(Value::as_str);
     match kind {
-        // case 'text': return [{ type:'text', text }] — and, on the tool-result
-        // path (binary `Rzr(_,_,_,r=true)` via `Rzr(i,n,r,!0)`), preserve the
-        // source block's per-block `_meta` when present (`if(r){if(e._meta)…}`).
+        // case 'text': `let o={type:"text",text}; if(r){if(e._meta)o._meta=e._meta}`
+        // — on the tool-result path the binary `Voo`/`Rzr` runs with the 4th arg
+        // `r=true` (both real call sites are `Voo(c,n,r,!0)` / `Voo(i,n,r,!0)`),
+        // so a source block's per-block `_meta` IS carried onto the emitted text
+        // block when present. A block WITHOUT `_meta` stays bare `{type,text}`
+        // (no null key). The model-facing STRING reads only `text`, so the
+        // preserved `_meta` does not perturb the model-text path.
         Some("text") => {
             let text = block.get("text").and_then(Value::as_str).unwrap_or("");
             let mut out = text_block(text);
@@ -453,6 +457,8 @@ mod tests {
 
     #[test]
     fn text_block_preserves_per_block_meta() {
+        // On the tool-result path (binary `Voo`/`Rzr` with `r=true`) a source
+        // text block's per-block `_meta` IS carried onto the emitted text block.
         let dir = tempfile::tempdir().unwrap();
         let content = json!([{ "type": "text", "text": "hi", "_meta": { "k": "v" } }]);
         let got = transform_result_content(&content, "srv", ctx(dir.path()));
@@ -462,6 +468,7 @@ mod tests {
         // A text block WITHOUT _meta stays bare (no null _meta key).
         let bare = transform_result_content(&json!([{ "type": "text", "text": "x" }]), "srv", ctx(dir.path()));
         assert!(bare[0].get("_meta").is_none());
+        assert_eq!(bare, json!([{ "type": "text", "text": "x" }]));
     }
 
     #[test]

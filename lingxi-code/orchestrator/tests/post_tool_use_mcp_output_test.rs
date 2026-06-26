@@ -134,6 +134,7 @@ impl Tool for ConfigurableTool {
         Ok(ToolCallResult {
             // The tool's own output the model would see absent any mutation.
             data: json!({ "content": "ORIGINAL_OUTPUT" }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

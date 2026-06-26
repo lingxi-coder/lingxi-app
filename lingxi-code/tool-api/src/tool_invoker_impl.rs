@@ -259,6 +259,7 @@ mod tests {
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
                 data: json!({ "echo": input }),
+                model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 mcp_meta: None,
@@ -327,6 +328,7 @@ mod tests {
             *self.captured.lock().unwrap() = Some(ctx.subagent_registry.clone());
             Ok(ToolCallResult {
                 data: json!({}),
+                model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 mcp_meta: None,
@@ -470,6 +472,7 @@ mod tests {
             *self.captured.lock().unwrap() = Some((ctx.agent_name.clone(), ctx.team_name.clone()));
             Ok(ToolCallResult {
                 data: json!({}),
+                model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 mcp_meta: None,

@@ -793,6 +793,7 @@ Usage notes:\n\
                         "canReadOutputFile": can_read_output_file,
                         "model_content": model_content,
                     }),
+                    model_content: None,
                     new_messages: vec![],
                     context_modifier: None,
                     mcp_meta: None,
@@ -1584,6 +1585,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 }
                 Ok(ToolCallResult {
                     data,
+                    model_content: None,
                     new_messages: vec![],
                     context_modifier: None,
                     mcp_meta: None,

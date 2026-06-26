@@ -817,10 +817,15 @@ pub trait OutputStream: Send + Sync {
     async fn emit_tool_call(&self, id: &protocol::ToolUseId, tool: &str, input: &serde_json::Value);
 
     /// Emit a tool-result notification immediately after dispatch.
+    ///
+    /// `model_text` is the exact string the model saw for this tool result
+    /// (the SDK frame's `tool_result.content`); `result` is the pure-metadata
+    /// `data` payload (carried in `toolUseResult`).
     async fn emit_tool_result(
         &self,
         id: &protocol::ToolUseId,
         tool: &str,
+        model_text: &str,
         result: &serde_json::Value,
     );
 
@@ -1102,6 +1107,7 @@ mod tests {
                 &self,
                 _id: &protocol::ToolUseId,
                 _tool: &str,
+                _model_text: &str,
                 _result: &serde_json::Value,
             ) {
             }
@@ -1382,6 +1388,7 @@ mod tests {
                 &self,
                 _id: &protocol::ToolUseId,
                 _tool: &str,
+                _model_text: &str,
                 _result: &serde_json::Value,
             ) {
             }
@@ -1458,6 +1465,7 @@ mod tests {
                 &self,
                 _id: &protocol::ToolUseId,
                 _tool: &str,
+                _model_text: &str,
                 _result: &serde_json::Value,
             ) {
             }

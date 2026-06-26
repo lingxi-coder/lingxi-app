@@ -182,6 +182,7 @@ impl OutputStream for BridgeOutputStream {
         &self,
         id: &protocol::ToolUseId,
         tool: &str,
+        _model_text: &str,
         result: &serde_json::Value,
     ) {
         let _ = self.tx.send(TurnEvent::ToolUseResult {

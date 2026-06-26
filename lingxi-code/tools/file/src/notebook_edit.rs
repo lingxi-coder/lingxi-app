@@ -327,6 +327,7 @@ Usage:\n\
                         "original_file": "",
                         "updated_file": "",
                     }),
+                    model_content: None,
                     new_messages: vec![],
                     context_modifier: None,
                     mcp_meta: None,
@@ -539,6 +540,7 @@ Usage:\n\
 
         Ok(ToolCallResult {
             data: json!({ "content": content, "cells_edited": 1 }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

@@ -488,6 +488,7 @@ impl SendMessageTool {
     fn ok(data: Value) -> ToolCallResult {
         ToolCallResult {
             data,
+            model_content: None,
             new_messages: Vec::new(),
             context_modifier: None,
             mcp_meta: None,

@@ -463,26 +463,25 @@ impl StreamJsonStream {
     /// `…,toolUseResult:<data>,…` on the SDK user message). LingXi previously put
     /// the whole `data` object where the string belongs and omitted
     /// `toolUseResult`, so an SDK consumer saw a JSON blob instead of the tool's
-    /// output. The string is derived from the data exactly as
-    /// `orchestrator::tool_result_to_model_text` does (`model_content ?? content
-    /// ?? result`), plus `error` for the dispatch's `{error: …}` wrapper;
-    /// structured-only results (no string field) keep the object as a last
-    /// resort.
+    /// output. `model_text` is the EXACT string the model saw (passed by the
+    /// orchestrator's dispatch — `result.model_content`, the derived model text,
+    /// or the pre-exec error/cancel/deny string), so the frame's `content` is
+    /// byte-faithful to the model wire; `toolUseResult` keeps the pure metadata
+    /// `data`.
     ///
     /// Pure builder (modulo the fresh `uuid`/`timestamp`) — does not write to
     /// stdout. Call `emit_tool_result` to build + emit.
-    async fn build_tool_result_frame(&self, tool_use_id: &str, result: &Value) -> Value {
+    async fn build_tool_result_frame(
+        &self,
+        tool_use_id: &str,
+        model_text: &str,
+        result: &Value,
+    ) -> Value {
         let is_error = result.get("error").is_some();
         let uuid = uuid::Uuid::new_v4().to_string();
         let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let session_id = self.session_id.lock().await.clone();
-        let content_value = result
-            .get("model_content")
-            .and_then(Value::as_str)
-            .or_else(|| result.get("content").and_then(Value::as_str))
-            .or_else(|| result.get("result").and_then(Value::as_str))
-            .or_else(|| result.get("error").and_then(Value::as_str))
-            .map_or_else(|| result.clone(), |s| json!(s));
+        let content_value = json!(model_text);
         let content_block = json!({
             "type": "tool_result",
             "tool_use_id": tool_use_id,
@@ -783,12 +782,15 @@ impl OutputStream for StreamJsonStream {
         &self,
         _id: &protocol::ToolUseId,
         _tool: &str,
+        model_text: &str,
         result: &serde_json::Value,
     ) {
         if self.suppress_frames {
             return;
         }
-        let frame = self.build_tool_result_frame(_id.as_str(), result).await;
+        let frame = self
+            .build_tool_result_frame(_id.as_str(), model_text, result)
+            .await;
         self.enqueue(&frame);
     }
 
@@ -1234,12 +1236,13 @@ mod tests {
         let stream = StreamJsonStream::new(make_params("sess"));
         let tuid = "toolu_x";
 
-        // WebFetch-shaped: the model-facing string lives in `result`.
+        // WebFetch-shaped: the orchestrator passes the model text explicitly;
+        // the full structured `data` lands on `toolUseResult`.
         let data = json!({
             "bytes": 5, "code": 200, "codeText": "OK",
             "result": "# Page\n\nbody", "durationMs": 3, "url": "https://e/"
         });
-        let frame = stream.build_tool_result_frame(tuid, &data).await;
+        let frame = stream.build_tool_result_frame(tuid, "# Page\n\nbody", &data).await;
         let tr = &frame["message"]["content"][0];
         assert_eq!(tr["type"], "tool_result");
         assert_eq!(tr["tool_use_id"], tuid);
@@ -1247,15 +1250,19 @@ mod tests {
         assert_eq!(tr["is_error"], false);
         assert_eq!(frame["toolUseResult"], data, "full structured result on the top-level field");
 
-        // Bash-shaped: `model_content` wins over the raw stdout/exit_code.
+        // Bash-shaped: the model text is whatever the dispatch computed; `data`
+        // stays pure metadata on `toolUseResult`.
         let bash = json!({ "model_content": "out\n", "stdout": "out\n", "exit_code": 0 });
-        let f2 = stream.build_tool_result_frame(tuid, &bash).await;
+        let f2 = stream.build_tool_result_frame(tuid, "out\n", &bash).await;
         assert_eq!(f2["message"]["content"][0]["content"], "out\n");
         assert_eq!(f2["toolUseResult"], bash);
 
-        // Error wrapper `{error}`: content is the error string + is_error true.
+        // Error wrapper `{error}`: content is the model text + is_error derives
+        // from the `error` key on `data`.
         let err = json!({ "error": "Permission to use Bash has been denied." });
-        let f3 = stream.build_tool_result_frame(tuid, &err).await;
+        let f3 = stream
+            .build_tool_result_frame(tuid, "Permission to use Bash has been denied.", &err)
+            .await;
         assert_eq!(
             f3["message"]["content"][0]["content"],
             "Permission to use Bash has been denied."

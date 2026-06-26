@@ -46,6 +46,7 @@ impl OutputStream for SinkAdapter {
         &self,
         _id: &protocol::ToolUseId,
         tool: &str,
+        _model_text: &str,
         result: &serde_json::Value,
     ) {
         self.sink.tool_result(tool, result).await;

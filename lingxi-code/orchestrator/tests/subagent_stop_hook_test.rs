@@ -156,6 +156,7 @@ impl Tool for FakeAgentTool {
             .unwrap_or_default();
         Ok(ToolCallResult {
             data: json!({ "subagent_type": subagent_type, "result": "done" }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -222,6 +223,7 @@ impl Tool for AlwaysOkTool {
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
             data: json!({ "content": "all good" }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

@@ -100,6 +100,7 @@ impl Tool for SimpleReadTool {
             .map_err(|e| ToolError::Io(format!("read {path}: {e}")))?;
         Ok(ToolCallResult {
             data: json!({ "content": content }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

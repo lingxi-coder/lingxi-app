@@ -96,6 +96,7 @@ macro_rules! impl_test_tool {
                 }
                 Ok(ToolCallResult {
                     data: json!({"tool": $name}),
+                    model_content: None,
                     new_messages: vec![],
                     context_modifier: None,
                     mcp_meta: None,

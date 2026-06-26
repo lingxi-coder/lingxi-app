@@ -136,6 +136,7 @@ mod tests {
             &self,
             _id: &protocol::ToolUseId,
             _tool: &str,
+            _model_text: &str,
             _result: &serde_json::Value,
         ) {
         }

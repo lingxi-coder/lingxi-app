@@ -155,6 +155,7 @@ impl Tool for NotificationTool {
 
         Ok(ToolCallResult {
             data: json!({ "posted": true }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

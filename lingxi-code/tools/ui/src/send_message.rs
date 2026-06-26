@@ -936,8 +936,18 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
         };
 
         Self::emit_completed(&bus, &invocation_id, started.elapsed().as_millis() as u64).await;
+        // Model-facing content is the brief status string (`data["message"]`),
+        // not the full routing/recipients JSON dump. claude-code surfaces the
+        // `Message sent…`/shutdown/plan status line to the model; the routing
+        // metadata stays in `data` for the UI only. Without this the dispatch
+        // falls back to serialising `data` (the JSON dump) for the model.
+        let model_content = data
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         Ok(ToolCallResult {
             data,
+            model_content,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -1182,6 +1192,11 @@ mod tests {
         assert_eq!(res.data["message"], "Message sent to researcher's inbox");
         assert_eq!(res.data["routing"]["target"], "@researcher");
         assert_eq!(res.data["routing"]["content"], "start on task #1");
+        // The model sees only the brief status string, never the routing JSON dump.
+        assert_eq!(
+            res.model_content.as_deref(),
+            Some("Message sent to researcher's inbox")
+        );
 
         let routed = router.routed.lock().unwrap();
         assert_eq!(routed.len(), 1);
@@ -1204,6 +1219,11 @@ mod tests {
             .expect("broadcast must succeed");
         assert_eq!(res.data["success"], true);
         assert!(res.data["recipients"].is_array());
+        // Model-facing text is the brief broadcast status string, not the data dump.
+        assert_eq!(
+            res.model_content.as_deref(),
+            Some("No teammates to broadcast to (you are the only team member)")
+        );
     }
 
     #[tokio::test]
@@ -1226,6 +1246,8 @@ mod tests {
         assert!(res.data["request_id"].as_str().unwrap().starts_with("shutdown-"));
         let msg = res.data["message"].as_str().unwrap();
         assert!(msg.starts_with("Shutdown request sent to researcher. Request ID: shutdown-"));
+        // Model-facing text mirrors the brief status string, not the data dump.
+        assert_eq!(res.model_content.as_deref(), Some(msg));
         // The structured payload was delivered to the named recipient.
         assert_eq!(router.routed.lock().unwrap()[0].1, "researcher");
     }

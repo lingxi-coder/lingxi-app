@@ -291,6 +291,7 @@ impl Tool for TeamDeleteTool {
                     ),
                     "agent_id": agent_id_str,
                 }),
+                model_content: None,
                 new_messages: Vec::new(),
                 context_modifier: None,
                 mcp_meta: None,
@@ -350,6 +351,7 @@ impl Tool for TeamDeleteTool {
 
         Ok(ToolCallResult {
             data,
+            model_content: None,
             new_messages: Vec::new(),
             context_modifier: None,
             mcp_meta: None,

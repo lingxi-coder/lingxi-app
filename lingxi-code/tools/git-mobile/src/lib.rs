@@ -258,6 +258,7 @@ impl Tool for GitTool {
         match dispatch_result {
             Ok(data) => Ok(ToolCallResult {
                 data,
+                model_content: None,
                 new_messages: Vec::new(),
                 context_modifier: None,
                 mcp_meta: None,

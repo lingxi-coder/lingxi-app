@@ -1124,6 +1124,7 @@ impl FileReadTool {
                 "original_size": original_size,
                 "model_content": "[Image content provided in the following message.]",
             }),
+            model_content: None,
             new_messages: vec![msg],
             context_modifier: None,
             mcp_meta: None,
@@ -1165,6 +1166,7 @@ impl FileReadTool {
             .await;
         Ok(ToolCallResult {
             data,
+            model_content: None,
             new_messages: vec![msg],
             context_modifier: None,
             mcp_meta: None,
@@ -1317,6 +1319,7 @@ impl FileReadTool {
                 "original_size": original_size,
                 "model_content": format!("PDF file read: {} ({})", canon.display(), format_file_size(original_size)),
             }),
+            model_content: None,
             new_messages: vec![msg],
             context_modifier: None,
             mcp_meta: None,
@@ -1558,6 +1561,7 @@ impl Tool for FileReadTool {
                         "content": FILE_UNCHANGED_STUB,
                         "model_content": FILE_UNCHANGED_STUB,
                     }),
+                    model_content: None,
                     new_messages: vec![],
                     context_modifier: None,
                     mcp_meta: None,
@@ -1745,6 +1749,7 @@ impl Tool for FileReadTool {
                     "cells": cells,
                     "model_content": model_content,
                 }),
+                model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 mcp_meta: None,
@@ -1912,6 +1917,7 @@ impl Tool for FileReadTool {
                 "line_range": [line_range_start, line_range_end],
                 "total_lines": total_lines
             }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

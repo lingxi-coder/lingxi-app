@@ -118,6 +118,7 @@ impl Tool for StructuredOutputTool {
         }
         Ok(ToolCallResult {
             data: json!({ "ok": true }),
+            model_content: None,
             new_messages: Vec::new(),
             context_modifier: None,
             mcp_meta: None,

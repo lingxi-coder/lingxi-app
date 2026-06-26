@@ -332,6 +332,7 @@ impl Tool for EnterPlanModeTool {
                 // the model (TS embeds it as the `tool_result` content).
                 "instructions": ENTER_PLAN_MODE_INSTRUCTIONS,
             }),
+            model_content: None,
             new_messages: Vec::new(),
             context_modifier: None,
             mcp_meta: None,
@@ -498,6 +499,7 @@ impl Tool for ExitPlanModeTool {
                 // dump of `data` (TS prose parity, EXITPLAN.1).
                 "model_content": model_content,
             }),
+            model_content: None,
             new_messages: Vec::new(),
             context_modifier: None,
             mcp_meta: None,

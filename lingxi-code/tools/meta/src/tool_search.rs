@@ -604,6 +604,7 @@ impl Tool for ToolSearchTool {
                 "total_deferred_tools": entries.len(),
                 "max_results": max_results,
             }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

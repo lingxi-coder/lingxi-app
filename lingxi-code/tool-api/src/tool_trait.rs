@@ -281,6 +281,11 @@ pub type ContextModifier = Box<dyn FnOnce(ToolUseContext) -> ToolUseContext + Se
 pub struct ToolCallResult {
     /// JSON payload returned to the model.
     pub data: Value,
+    /// Optional faithful model-facing string. When `Some`, the dispatch uses
+    /// this verbatim as the tool's model text (and the SDK frame's
+    /// `tool_result.content`), keeping `data` as pure metadata. When `None`,
+    /// the dispatch falls back to deriving the model text out of `data`.
+    pub model_content: Option<String>,
     /// Extra conversation messages to inject after this call.
     pub new_messages: Vec<protocol::ConversationMessage>,
     /// Optional one-shot mutator for the [`ToolUseContext`].
@@ -289,11 +294,26 @@ pub struct ToolCallResult {
     pub mcp_meta: Option<serde_json::Value>,
 }
 
+impl ToolCallResult {
+    /// Build a result from a `data` payload only — the model text is derived
+    /// from `data` by the dispatch (`model_content` stays `None`).
+    pub fn from_data(data: Value) -> Self {
+        Self {
+            data,
+            model_content: None,
+            new_messages: vec![],
+            context_modifier: None,
+            mcp_meta: None,
+        }
+    }
+}
+
 impl std::fmt::Debug for ToolCallResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // `context_modifier` is a boxed `FnOnce` and cannot be `Debug`-printed.
         f.debug_struct("ToolCallResult")
             .field("data", &self.data)
+            .field("model_content", &self.model_content)
             .field("new_messages", &self.new_messages)
             .field("mcp_meta", &self.mcp_meta)
             .finish_non_exhaustive()

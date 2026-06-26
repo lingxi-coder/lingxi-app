@@ -115,6 +115,7 @@ impl Tool for ProbeTool {
         self.log.lock().unwrap().push("tool-started".to_string());
         Ok(ToolCallResult {
             data: json!({"ok": true}),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

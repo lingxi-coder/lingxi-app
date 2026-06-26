@@ -231,6 +231,7 @@ impl Tool for EchoTool {
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
             data: json!({ "content": format!("ran with {input}") }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

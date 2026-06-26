@@ -787,6 +787,7 @@ mod tests {
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
                 data: json!({ "content": "ok" }),
+                model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 mcp_meta: None,
@@ -934,6 +935,7 @@ mod tests {
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
                 data: json!({ "content": "ok" }),
+                model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 mcp_meta: None,
@@ -1592,6 +1594,7 @@ mod tests {
                 () = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
                     Ok(ToolCallResult {
                         data: json!({ "content": "cancel-tool-ran-to-end" }),
+                        model_content: None,
                         new_messages: vec![],
                         context_modifier: None,
                         mcp_meta: None,

@@ -815,6 +815,7 @@ impl Tool for ConfigTool {
 fn done(data: Value) -> ToolCallResult {
     ToolCallResult {
         data,
+        model_content: None,
         new_messages: vec![],
         context_modifier: None,
         mcp_meta: None,

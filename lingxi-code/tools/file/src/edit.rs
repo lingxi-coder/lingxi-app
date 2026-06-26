@@ -751,6 +751,7 @@ impl Tool for FileEditTool {
                 "replacements": replacements,
                 "patch_preview": patch_preview
             }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

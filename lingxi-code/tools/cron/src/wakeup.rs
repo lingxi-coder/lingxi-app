@@ -515,6 +515,7 @@ impl Tool for ScheduleWakeupTool {
                 // for the surface that records it.
                 "reason": reason,
             }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

@@ -106,6 +106,7 @@ impl Tool for CancelBlockingTool {
             }
             None => Ok(ToolCallResult {
                 data: json!({ "content": "ran-to-end" }),
+                model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 mcp_meta: None,

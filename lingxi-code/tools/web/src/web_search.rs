@@ -346,6 +346,27 @@ pub fn parse_response_content(content: &[Value]) -> Vec<SearchResultEntry> {
     out
 }
 
+/// Count the number of web searches performed in a response `content` array —
+/// 1:1 with claude-code `V7p` (binary @~148664): `searchCount = Math.max(i, a)`
+/// where `i` is the number of `server_tool_use` blocks (each a hosted search
+/// invocation) and `a` is the number of `web_search_tool_result` blocks (each a
+/// search result, including error payloads). Emitted into the result `data` as
+/// the `searchCount` field (`outputSchema` `searchCount: A.number().optional()`,
+/// "Number of web searches performed").
+#[must_use]
+pub fn count_searches(content: &[Value]) -> u64 {
+    let mut server_tool_use = 0u64;
+    let mut tool_result = 0u64;
+    for block in content {
+        match block.get("type").and_then(Value::as_str).unwrap_or("") {
+            "server_tool_use" => server_tool_use += 1,
+            "web_search_tool_result" => tool_result += 1,
+            _ => {}
+        }
+    }
+    server_tool_use.max(tool_result)
+}
+
 /// Streaming-SSE block reassembler — rebuilds the raw `Vec<serde_json::Value>`
 /// content-block array from an Anthropic message-stream event sequence so it can
 /// be fed to the EXISTING [`parse_response_content`] verbatim.
@@ -932,12 +953,14 @@ impl Tool for WebSearchTool {
                     }
                 };
                 let elapsed_ms = started.elapsed().as_millis() as u64;
+                let search_count = count_searches(&blocks);
                 let results = parse_response_content(&blocks);
                 Ok(self
                     .build_success_result(
                         &invocation_id,
                         &parsed_input.query,
                         results,
+                        search_count,
                         usage.input_tokens,
                         usage.output_tokens,
                         elapsed_ms,
@@ -1042,6 +1065,7 @@ impl WebSearchTool {
         invocation_id: &str,
         query: &str,
         results: Vec<SearchResultEntry>,
+        search_count: u64,
         input_tokens: u64,
         output_tokens: u64,
         elapsed_ms: u64,
@@ -1049,14 +1073,23 @@ impl WebSearchTool {
         let hits = results.len() as u64;
         self.emit_completed(invocation_id, hits, input_tokens, output_tokens, elapsed_ms)
             .await;
+        // Model-facing text — the `Web search results for query: "<q>"` header +
+        // per-entry segments + cite-sources footer. Lives on
+        // `ToolCallResult.model_content` (the dispatch uses it verbatim as the
+        // tool's model text); `data` is pure metadata, 1:1 with claude-code's
+        // `V7p` return `{query, results, durationSeconds, searchCount}`.
         let model_content = build_model_content(query, &results);
+        // `durationSeconds = (performance.now()-s)/1000` (binary @148664): the
+        // f64-seconds elapsed, not the integer millisecond `duration_ms`.
+        let duration_seconds = elapsed_ms as f64 / 1000.0;
         ToolCallResult {
             data: json!({
                 "query": query,
                 "results": results,
-                "duration_ms": elapsed_ms,
-                "model_content": model_content,
+                "durationSeconds": duration_seconds,
+                "searchCount": search_count,
             }),
+            model_content: Some(model_content),
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -1114,12 +1147,14 @@ impl WebSearchTool {
                         )));
                     }
                 };
+                let search_count = count_searches(&parsed.content);
                 let results = parse_response_content(&parsed.content);
                 Ok(self
                     .build_success_result(
                         invocation_id,
                         query,
                         results,
+                        search_count,
                         parsed.usage.input_tokens,
                         parsed.usage.output_tokens,
                         elapsed_ms,
@@ -1570,6 +1605,36 @@ mod tests {
     }
 
     #[test]
+    fn count_searches_is_max_of_server_tool_use_and_result_blocks() {
+        // 1:1 with `V7p`: searchCount = Math.max(i, a) where i = #server_tool_use,
+        // a = #web_search_tool_result.
+        // Balanced single search → max(1,1) = 1.
+        let one = vec![
+            json!({ "type": "server_tool_use", "id": "s", "name": "web_search", "input": {} }),
+            json!({ "type": "web_search_tool_result", "tool_use_id": "s", "content": [] }),
+        ];
+        assert_eq!(count_searches(&one), 1);
+        // Two searches → max(2,2) = 2; interleaved text blocks are ignored.
+        let two = vec![
+            json!({ "type": "text", "text": "x" }),
+            json!({ "type": "server_tool_use", "id": "s1", "name": "web_search", "input": {} }),
+            json!({ "type": "web_search_tool_result", "tool_use_id": "s1", "content": [] }),
+            json!({ "type": "server_tool_use", "id": "s2", "name": "web_search", "input": {} }),
+            json!({ "type": "web_search_tool_result", "tool_use_id": "s2", "content": [] }),
+        ];
+        assert_eq!(count_searches(&two), 2);
+        // Unbalanced (a result block with no matching server_tool_use) → max(1,2).
+        let unbalanced = vec![
+            json!({ "type": "server_tool_use", "id": "s1", "name": "web_search", "input": {} }),
+            json!({ "type": "web_search_tool_result", "tool_use_id": "s1", "content": [] }),
+            json!({ "type": "web_search_tool_result", "tool_use_id": "s2", "content": [] }),
+        ];
+        assert_eq!(count_searches(&unbalanced), 2);
+        // No search blocks at all → 0.
+        assert_eq!(count_searches(&[json!({ "type": "text", "text": "x" })]), 0);
+    }
+
+    #[test]
     fn ignores_thinking_blocks() {
         let blocks = vec![json!({ "type": "thinking", "thinking": "let me think" })];
         let parsed = parse_response_content(&blocks);
@@ -1778,9 +1843,19 @@ mod tests {
         assert_eq!(hits[1], json!({ "title": "crates.io", "url": "https://crates.io" }));
         assert_eq!(arr[2], "Done.");
 
+        // `data` is pure metadata (1:1 with `V7p`): the camelCase
+        // `durationSeconds` (f64 seconds) + `searchCount` (= max(server_tool_use,
+        // web_search_tool_result) = max(1,1) = 1 here). No `model_content` /
+        // `duration_ms` keys remain in `data`.
+        assert!(res.data.get("model_content").is_none());
+        assert!(res.data.get("duration_ms").is_none());
+        assert!(res.data.get("durationSeconds").is_some());
+        assert_eq!(res.data["searchCount"], 1);
+
         // Final formatted output matches the blocking path for the equivalent
-        // full response (same header / Links: / footer bytes).
-        let mc = res.data["model_content"].as_str().expect("model_content");
+        // full response (same header / Links: / footer bytes). The model-facing
+        // text now lives on `ToolCallResult.model_content`, NOT in `data`.
+        let mc = res.model_content.as_deref().expect("model_content");
         let equivalent_blocks = vec![
             json!({ "type": "text", "text": "Here are results:" }),
             json!({ "type": "server_tool_use", "id": "stu_1", "name": "web_search", "input": { "query": "rust async" } }),
@@ -2074,14 +2149,18 @@ mod tests {
             .call(json!({ "query": "rust async" }), fresh_ctx(), tx)
             .await
             .expect("ok");
-        let mc = res.data["model_content"].as_str().expect("model_content str");
+        // Model-facing text lives on `ToolCallResult.model_content` (the dispatch
+        // uses it verbatim), NOT in `data`.
+        let mc = res.model_content.as_deref().expect("model_content str");
         assert!(mc.starts_with("Web search results for query: \"rust async\"\n\n"));
         assert!(mc.contains("Here are results:"));
         assert!(mc.ends_with(
             "REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks."
         ));
-        // Structured results array is still present for the TUI.
+        // Structured results array is still present for the TUI, and `data` is
+        // pure metadata (no `model_content` key).
         assert!(res.data["results"].as_array().is_some());
+        assert!(res.data.get("model_content").is_none());
     }
 
     #[tokio::test]

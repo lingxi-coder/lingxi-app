@@ -996,6 +996,7 @@ impl Tool for TaskCreateTool {
                 "content": format!("Task #{task_id} created successfully: {subject}"),
                 "task": { "id": task_id, "subject": subject },
             }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -1131,6 +1132,7 @@ impl Tool for TaskGetTool {
         };
         Ok(ToolCallResult {
             data: json!({ "content": content, "task": task_json }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -1293,6 +1295,7 @@ impl Tool for TaskListTool {
             .collect();
         Ok(ToolCallResult {
             data: json!({ "content": content, "tasks": tasks }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -1440,6 +1443,7 @@ impl Tool for TaskUpdateTool {
                         "updatedFields": Vec::<String>::new(),
                         "error": "Task not found",
                     }),
+                    model_content: None,
                     new_messages: vec![],
                     context_modifier: None,
                     mcp_meta: None,
@@ -1486,6 +1490,7 @@ impl Tool for TaskUpdateTool {
             };
             return Ok(ToolCallResult {
                 data,
+                model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 mcp_meta: None,
@@ -1606,6 +1611,7 @@ impl Tool for TaskUpdateTool {
                                     "updatedFields": Vec::<String>::new(),
                                     "error": reason,
                                 }),
+                                model_content: None,
                                 new_messages: vec![],
                                 context_modifier: None,
                                 mcp_meta: None,
@@ -1781,6 +1787,7 @@ impl Tool for TaskUpdateTool {
         }
         Ok(ToolCallResult {
             data,
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -2051,6 +2058,7 @@ impl Tool for TaskStopTool {
                 "task_type": task_type,
                 "command": command,
             }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -2609,6 +2617,7 @@ impl Tool for TaskOutputTool {
                 "task": Value::Object(task_obj),
                 "content": content,
             }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

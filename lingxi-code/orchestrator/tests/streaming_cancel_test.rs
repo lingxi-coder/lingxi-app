@@ -195,6 +195,7 @@ impl Tool for CancelBlockingTool {
             // if the token is not threaded through.
             None => Ok(ToolCallResult {
                 data: json!({ "content": "cancel-tool-ran-to-end" }),
+                model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 mcp_meta: None,

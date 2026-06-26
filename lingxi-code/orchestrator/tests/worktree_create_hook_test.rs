@@ -144,6 +144,7 @@ impl Tool for FakeEnterWorktreeTool {
         }
         Ok(ToolCallResult {
             data: json!({ "path": self.path, "branch_name": self.branch_name }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -210,6 +211,7 @@ impl Tool for AlwaysOkTool {
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
             data: json!({ "content": "all good" }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

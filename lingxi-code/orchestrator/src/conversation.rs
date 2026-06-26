@@ -2557,7 +2557,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// Convert an in-memory `ConversationMessage` into a `JsonlMessage`.
     ///
     /// `parent_uuid` is the UUID of the prior persisted entry (None for the
-    /// first turn). `cwd` is taken from `self.cwd`. The `message` payload
+    /// first turn). `cwd` is read from the LIVE `current_cwd()` cell (the
+    /// post-`cd` shell cwd; falls back to `self.cwd` when no firer is wired).
+    /// The `message` payload
     /// is the Anthropic-shaped inner object: for user/assistant we splat
     /// the content blocks via `serde_json::to_value` of the
     /// `ConversationMessage` and pull out the `content` array.
@@ -2767,7 +2769,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             timestamp: chrono::Utc::now()
                 .format("%Y-%m-%dT%H:%M:%S%.3fZ")
                 .to_string(),
-            cwd: self.cwd.to_string_lossy().into_owned(),
+            // Per-line cwd readback — the LIVE session cwd (advanced by a Bash
+            // `cd` via the shared `current_cwd` cell), NOT the static init cwd.
+            // 1:1 with claude-code, which stamps `getCwd()` on every persisted
+            // line and where `cd` mutates that single global cwd. Falls back to
+            // the static `cwd` when no firer is wired (the cell never moves).
+            cwd: self.current_cwd().to_string_lossy().into_owned(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             message: inner_message,
             is_sidechain: false,
@@ -8305,6 +8312,7 @@ mod skill_model_override_tests {
                     "content": "TOOL-RESULT",
                     "model_content": "Launching skill: switcher",
                 }),
+                model_content: None,
                 new_messages: vec![],
                 context_modifier: Some(modifier),
                 mcp_meta: None,
@@ -8377,6 +8385,7 @@ mod skill_model_override_tests {
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
                 data: serde_json::json!({ "content": "PLAIN-RESULT" }),
+                model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 mcp_meta: None,
@@ -9028,6 +9037,7 @@ mod skill_listing_reminder_tests {
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
                 data: serde_json::json!({}),
+                model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 mcp_meta: None,
@@ -9387,6 +9397,7 @@ mod agent_listing_reminder_tests {
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
                 data: serde_json::json!({}),
+                model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 mcp_meta: None,
@@ -10495,6 +10506,47 @@ mod persist_with_parent_tests {
         assert_eq!(pinner["content"][0]["text"], serde_json::json!("hi"));
     }
 
+    // ── transcript per-line cwd reflects the LIVE (post-`cd`) session cwd ──────
+
+    #[tokio::test]
+    async fn transcript_line_cwd_tracks_live_cwd_after_cd() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Share a `current_cwd` cell with the orchestrator — the same `Arc` the
+        // desktop composition root hands to `OrchestratorCwdChangedFirer`, which
+        // a Bash `cd` mutates. Start it at the init cwd.
+        let init_cwd = dir.path().to_path_buf();
+        let cell = Arc::new(std::sync::Mutex::new(init_cwd.clone()));
+        let orch = orch_with_writer(dir.path(), dir.path().join("s.jsonl"))
+            .with_current_cwd(cell.clone());
+
+        // First persisted line is stamped with the init cwd.
+        let m1 = ConversationMessage::user(protocol::MessageId::new(), "before cd".into());
+        let line1 = orch.to_jsonl_message(&m1, "sess", None, None, None, None);
+        assert_eq!(
+            line1.cwd,
+            init_cwd.to_string_lossy(),
+            "pre-`cd` line carries the init cwd"
+        );
+
+        // Simulate a Bash `cd` advancing the shared cell (what the CwdChanged
+        // firer does on every `cd`).
+        let new_cwd = dir.path().join("subdir");
+        *cell.lock().unwrap() = new_cwd.clone();
+
+        // The NEXT persisted line must reflect the advanced cwd, not the init.
+        let m2 = ConversationMessage::user(protocol::MessageId::new(), "after cd".into());
+        let line2 = orch.to_jsonl_message(&m2, "sess", None, None, None, None);
+        assert_eq!(
+            line2.cwd,
+            new_cwd.to_string_lossy(),
+            "post-`cd` line must carry the advanced live cwd, not the init cwd"
+        );
+        assert_ne!(
+            line2.cwd, line1.cwd,
+            "the cwd readback must move with the live session cwd"
+        );
+    }
+
     // ── test 5: per-content_block_stop single-block assistant lines ───────────
     //
     // claude.ts:2171-2211: a streaming assistant turn emits ONE JSONL line per
@@ -10868,6 +10920,7 @@ mod todo_reminder_tests {
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
                 data: serde_json::json!({}),
+                model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 mcp_meta: None,

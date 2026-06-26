@@ -342,9 +342,11 @@ impl Tool for FileWriteTool {
 
         // Model-facing result string is byte-faithful to claude-code
         // (`FileWriteTool.ts:418-433`); it echoes the ORIGINAL `file_path` arg,
-        // not the canonicalized path. Batch A's serialization rule emits
-        // `data["content"]` verbatim to the model; `bytes_written` / `type` /
-        // `patch_preview` remain for the TUI.
+        // not the canonicalized path. claude derives the model text from the
+        // tool's structured result via `mapToolResultToToolResultBlockParam`;
+        // LingXi surfaces the message verbatim via `ToolCallResult.model_content`
+        // (the dispatch prefers that field over deriving text from `data`), so
+        // `data` is PURE METADATA — the file payload, NOT the message.
         let content_message = write_result_message(file_path, is_create);
         let type_str = if is_create { "create" } else { "update" };
 
@@ -354,9 +356,11 @@ impl Tool for FileWriteTool {
         // (`getPatchForDisplay({ fileContents: oldContent, … })`). A `create`
         // emits the empty patch (TS `structuredPatch: []`). The prior content
         // was captured before the write as `prior_decoded`; we reuse it here so
-        // the TUI can render the diff. Like Edit's `patch_preview`, this is a
-        // TUI-only field (the model sees only `content`); we use the same flat
-        // `+`/`-`/` ` preview builder for a uniform Rust patch representation.
+        // the TUI can render the diff. Like Edit's `structuredPatch`, this is a
+        // TUI-only field (the model sees only the message via `model_content`);
+        // we use the same flat `+`/`-`/` ` preview builder for a uniform Rust
+        // patch representation (the structured hunk array is a larger lift —
+        // PARTIAL carryover, same caveat as Edit).
         let patch_preview = if is_create {
             String::new()
         } else {
@@ -364,13 +368,48 @@ impl Tool for FileWriteTool {
             crate::edit::FileEditTool::build_patch_preview(prior, content)
         };
 
+        // `data` is byte-faithful to claude-code's Write result `data` object —
+        // the object `mapToolResultToToolResultBlockParam` receives (binary
+        // field names, casing, and order):
+        //   `{type, filePath, content, structuredPatch, originalFile,
+        //     userModified, gitDiff?}`
+        // from `S={type:…,filePath:e,content:t,structuredPatch:y,originalFile:h,
+        //          userModified:s??!1,..._&&{gitDiff:_}}`.
+        //   - `type`            = `create`|`update` (keyed on prior truthiness).
+        //   - `filePath`        = the ORIGINAL `file_path` input (echoed
+        //                          verbatim, NOT canonicalized).
+        //   - `content`         = the FILE BYTES WRITTEN (the model-sent
+        //                          `content`), NOT the result message. claude's
+        //                          schema: "content that was written to the file".
+        //   - `structuredPatch` = the +/-/space diff preview (LingXi's existing
+        //                          preview structure, renamed to the binary's
+        //                          camelCase key). `create` → empty.
+        //   - `originalFile`    = the pre-write file content (`null` for a
+        //                          create, the prior bytes for an update). claude
+        //                          schema: nullable, "null for new files".
+        //   - `userModified`    = `false` — the human-in-the-loop "modified your
+        //                          proposed changes" accept step does not exist
+        //                          in this non-interactive orchestrator.
+        //   - `gitDiff`         = OMITTED (absent) — claude only attaches it when
+        //                          git diff capture is enabled; LingXi has none.
+        let original_file = if is_create {
+            Value::Null
+        } else {
+            Value::String(prior_decoded.clone().unwrap_or_default())
+        };
+
         Ok(ToolCallResult {
             data: json!({
-                "content": content_message,
-                "bytes_written": bytes_written,
                 "type": type_str,
-                "patch_preview": patch_preview,
+                "filePath": file_path,
+                "content": content,
+                "structuredPatch": patch_preview,
+                "originalFile": original_file,
+                "userModified": false,
             }),
+            // Model-facing text is the byte-faithful Write message, surfaced
+            // verbatim (NOT a JSON dump of `data`).
+            model_content: Some(content_message),
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -502,13 +541,19 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result.data["bytes_written"], 5);
-        // New file → `create`: model-facing `content` is byte-faithful and
-        // echoes the ORIGINAL input path verbatim.
+        // New file → `create`. `data.content` is the FILE BYTES written (NOT
+        // the message); the model message is surfaced verbatim via
+        // `model_content` and echoes the ORIGINAL input path.
         let input_path = target.to_str().unwrap();
         assert_eq!(result.data["type"], "create");
+        assert_eq!(result.data["filePath"], input_path);
+        assert_eq!(result.data["content"], "hello");
+        assert_eq!(result.data["originalFile"], Value::Null);
+        assert_eq!(result.data["userModified"], false);
+        assert!(result.data.get("bytes_written").is_none());
+        assert!(result.data.get("gitDiff").is_none());
         assert_eq!(
-            result.data["content"].as_str().unwrap(),
+            result.model_content.as_deref().unwrap(),
             write_result_message(input_path, true)
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
@@ -533,7 +578,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data["type"], "create");
-        assert_eq!(result.data["patch_preview"], "");
+        assert_eq!(result.data["structuredPatch"], "");
+        // `create` → originalFile is null (TS "null for new files").
+        assert_eq!(result.data["originalFile"], Value::Null);
+        // `data.content` is the FILE BYTES written, not the message.
+        assert_eq!(result.data["content"], "hello\nworld\n");
     }
 
     #[tokio::test]
@@ -554,9 +603,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data["type"], "update");
+        // `originalFile` is the pre-write content; `content` is the new bytes.
+        assert_eq!(result.data["originalFile"], "alpha\nbeta\ngamma\n");
+        assert_eq!(result.data["content"], "alpha\nBETA\ngamma\n");
         // The diff preview captures the changed middle line (prior content was
         // tracked before the write).
-        let preview = result.data["patch_preview"].as_str().unwrap();
+        let preview = result.data["structuredPatch"].as_str().unwrap();
         assert!(preview.contains(" alpha"), "preview: {preview}");
         assert!(preview.contains("-beta"), "preview: {preview}");
         assert!(preview.contains("+BETA"), "preview: {preview}");
@@ -580,7 +632,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data["type"], "create");
-        assert_eq!(result.data["bytes_written"], 2);
+        assert_eq!(result.data["content"], "hi");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hi");
     }
 
@@ -602,7 +654,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result.data["bytes_written"], 12);
+        assert_eq!(result.data["content"], "deep content");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "deep content");
     }
 
@@ -644,11 +696,16 @@ mod tests {
             )
             .await
             .unwrap();
-        // Pre-existing non-empty file → `update`: byte-faithful message.
+        // Pre-existing non-empty file → `update`: byte-faithful message lives on
+        // `model_content`; `data.content` is the new FILE BYTES.
         let input_path = target.to_str().unwrap();
         assert_eq!(result.data["type"], "update");
+        assert_eq!(result.data["filePath"], input_path);
+        assert_eq!(result.data["content"], "new");
+        assert_eq!(result.data["originalFile"], "old");
+        assert_eq!(result.data["userModified"], false);
         assert_eq!(
-            result.data["content"].as_str().unwrap(),
+            result.model_content.as_deref().unwrap(),
             write_result_message(input_path, false)
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
@@ -676,8 +733,12 @@ mod tests {
             .unwrap();
         let input_path = target.to_str().unwrap();
         assert_eq!(result.data["type"], "create");
+        // create → originalFile is null even for an existing-but-empty file
+        // (TS `if (oldContent)` is falsy → create branch, `originalFile:null`).
+        assert_eq!(result.data["originalFile"], Value::Null);
+        assert_eq!(result.data["content"], "filled");
         assert_eq!(
-            result.data["content"].as_str().unwrap(),
+            result.model_content.as_deref().unwrap(),
             write_result_message(input_path, true)
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "filled");
@@ -702,8 +763,9 @@ mod tests {
             .unwrap();
         let input_path = target.to_str().unwrap();
         assert_eq!(result.data["type"], "create");
+        assert_eq!(result.data["content"], "deep content");
         assert_eq!(
-            result.data["content"].as_str().unwrap(),
+            result.model_content.as_deref().unwrap(),
             write_result_message(input_path, true)
         );
     }

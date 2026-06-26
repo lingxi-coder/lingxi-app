@@ -774,31 +774,33 @@ impl Tool for MCPTool {
                     &output_dir,
                     now_millis,
                 );
-                let mut data = json!({
+                // 1:1 with the binary's MCPTool result `data`
+                // (`{server_name, tool_name, content, is_error}`): `content` holds
+                // the model-faithful structured block ARRAY (or a bare string /
+                // large-output file replacement) DIRECTLY. The binary surfaces NO
+                // `model_content` / `model_content_blocks` sidecar — the egress
+                // sources the block array from `data.content`
+                // (turn_loop reads `data.content` when it is an array) and the
+                // model-facing TEXT is carried out-of-band on
+                // `ToolCallResult.model_content` below.
+                let data = json!({
                     "server_name": server,
                     "tool_name": tool,
                     "content": content,
                     "is_error": dto.is_error,
                 });
                 // Model-facing render: claude-code passes the MCP result content
-                // DIRECTLY as the `tool_result` content (`MCPTool.ts:70-76`).
-                // - `model_content_blocks`: when `content` is a block ARRAY, carry
-                //   it so the egress sends the array VERBATIM (the model-faithful
-                //   wire form — text blocks stay separate, images/resources stay
-                //   structured; threaded via `ContentBlock::ToolResult.content_blocks`
-                //   → the codec `normalize_tool_result_content`).
-                // - `model_content`: the joined text — the TUI/display + fallback
-                //   form (used by the status surfaces and when there are no blocks).
-                // A bare-string `content` (or a large-output file replacement) has
-                // neither — it is already model-faithful as the plain `content`.
-                if data["content"].is_array() {
-                    data["model_content_blocks"] = data["content"].clone();
-                }
-                if let Some(text) = mcp_all_text_content_to_string(&data["content"]) {
-                    data["model_content"] = Value::String(text);
-                }
+                // DIRECTLY as the `tool_result` content (`MCPTool.ts:70-76`). The
+                // dispatch's `tool_result_to_model_text` would JSON-dump an ARRAY
+                // `content`, so when the result is all-text we hand it the joined
+                // string here via `ToolCallResult.model_content` (the model sees
+                // the tool's STRING, never the JSON object). A bare-string
+                // `content` is already model-faithful through the dispatch's
+                // `content` fallback, so it leaves `model_content` as `None`.
+                let model_content = mcp_all_text_content_to_string(&data["content"]);
                 Ok(ToolCallResult {
                     data,
+                    model_content,
                     new_messages: vec![],
                     context_modifier: None,
                     mcp_meta: build_mcp_meta(dto.meta, dto.structured_content),
@@ -999,6 +1001,7 @@ impl Tool for McpAuthTool {
                 "has_static_headers": has_headers,
                 "has_headers_helper": has_helper,
             }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -1176,6 +1179,7 @@ impl Tool for ListMcpResourcesTool {
             // objects (matches `ListMcpResourcesTool.ts:26-34` output rows). The
             // optional `server_name` echo is retained for the single-server path.
             data: json!({ "server_name": target_server, "resources": resources }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -1360,6 +1364,7 @@ impl Tool for ReadMcpResourceTool {
                         "uri": uri,
                         "contents": contents,
                     }),
+                    model_content: None,
                     new_messages: vec![],
                     context_modifier: None,
                     mcp_meta: None,

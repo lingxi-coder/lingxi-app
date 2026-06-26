@@ -193,6 +193,7 @@ impl tool_api::tool_trait::Tool for BashStubTool {
     ) -> Result<tool_api::tool_trait::ToolCallResult, tool_api::tool_trait::ToolError> {
         Ok(tool_api::tool_trait::ToolCallResult {
             data: json!({ "content": "ok" }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

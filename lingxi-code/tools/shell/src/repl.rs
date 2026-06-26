@@ -200,6 +200,7 @@ impl Tool for REPLTool {
                         "is_error":  is_error,
                         "truncated": truncated,
                     }),
+                    model_content: None,
                     new_messages: vec![],
                     context_modifier: None,
                     mcp_meta: None,

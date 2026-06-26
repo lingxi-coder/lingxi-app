@@ -367,11 +367,29 @@ impl Tool for GlobTool {
             matches.join("\n")
         };
 
+        // `data` is the structured metadata block, byte-1:1 with claude-code's
+        // Glob `call()` return (`GlobTool.ts`): `{filenames, durationMs, numFiles,
+        // truncated, totalMatches, countIsComplete}`, in this field order/casing.
+        // - `filenames` (was `matches`): the cwd-relative paths.
+        // - `durationMs`: wall-clock since `started` (TS `Date.now()-o`).
+        // - `numFiles`: `filenames.len()` (after truncation), TS `u.length`.
+        // - `totalMatches`: total hits BEFORE the 100-cap (TS `h.length`).
+        // - `countIsComplete`: `true` — the in-process walk never truncates its
+        //   own output upstream (TS `!f`, where `f` is always `false` here).
+        // The model-facing string moves OUT of `data` onto `model_content` so the
+        // model text is the tool's STRING, not a JSON dump of `data`.
+        let duration_ms = started.elapsed().as_millis() as u64;
+        let num_files = matches.len();
         Ok(ToolCallResult {
-            // `content` is what the model sees (turn_loop `tool_result_to_model_text`
-            // surfaces `data.content` verbatim); `matches`/`truncated` stay for the
-            // TUI + existing tests.
-            data: json!({ "content": content, "matches": matches, "truncated": truncated }),
+            data: json!({
+                "filenames": matches,
+                "durationMs": duration_ms,
+                "numFiles": num_files,
+                "truncated": truncated,
+                "totalMatches": total,
+                "countIsComplete": true,
+            }),
+            model_content: Some(content),
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -479,9 +497,14 @@ mod tests {
             .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
             .await
             .unwrap();
-        let matches = result.data["matches"].as_array().unwrap();
+        let matches = result.data["filenames"].as_array().unwrap();
         assert_eq!(matches.len(), 2);
+        assert_eq!(result.data["numFiles"], 2);
         assert_eq!(result.data["truncated"], false);
+        assert_eq!(result.data["totalMatches"], 2);
+        assert_eq!(result.data["countIsComplete"], true);
+        // `durationMs` is always present (a non-negative integer).
+        assert!(result.data["durationMs"].is_u64());
     }
 
     /// Read(deny) exclude globs (`glob.ts` `lLa()`): a populated
@@ -505,7 +528,7 @@ mod tests {
                 .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
                 .await
                 .unwrap()
-                .data["matches"]
+                .data["filenames"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -525,7 +548,7 @@ mod tests {
                 .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
                 .await
                 .unwrap()
-                .data["matches"]
+                .data["filenames"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -563,7 +586,7 @@ mod tests {
             .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
             .await
             .unwrap();
-        let matches: Vec<String> = result.data["matches"]
+        let matches: Vec<String> = result.data["filenames"]
             .as_array()
             .unwrap()
             .iter()
@@ -593,7 +616,7 @@ mod tests {
             .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
             .await
             .unwrap();
-        let matches = result.data["matches"].as_array().unwrap();
+        let matches = result.data["filenames"].as_array().unwrap();
         assert_eq!(matches.len(), 2, "**/*.rs should match both: {matches:?}");
     }
 
@@ -610,9 +633,12 @@ mod tests {
             .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
             .await
             .unwrap();
-        let matches = result.data["matches"].as_array().unwrap();
+        let matches = result.data["filenames"].as_array().unwrap();
         assert_eq!(matches.len(), MAX_GLOB_MATCHES);
+        assert_eq!(result.data["numFiles"], MAX_GLOB_MATCHES);
         assert_eq!(result.data["truncated"], true);
+        assert_eq!(result.data["totalMatches"], 150);
+        assert_eq!(result.data["countIsComplete"], true);
     }
 
     #[tokio::test]
@@ -635,7 +661,7 @@ mod tests {
             .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
             .await
             .unwrap();
-        let matches: Vec<&str> = result.data["matches"]
+        let matches: Vec<&str> = result.data["filenames"]
             .as_array()
             .unwrap()
             .iter()
@@ -689,7 +715,7 @@ mod tests {
                 .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
                 .await
                 .unwrap();
-            let matches: Vec<String> = result.data["matches"]
+            let matches: Vec<String> = result.data["filenames"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -710,7 +736,7 @@ mod tests {
                 .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
                 .await
                 .unwrap();
-            let matches: Vec<String> = result.data["matches"]
+            let matches: Vec<String> = result.data["filenames"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -748,7 +774,7 @@ mod tests {
                 .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
                 .await
                 .unwrap();
-            let matches: Vec<String> = result.data["matches"]
+            let matches: Vec<String> = result.data["filenames"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -769,7 +795,7 @@ mod tests {
                 .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
                 .await
                 .unwrap();
-            let matches: Vec<String> = result.data["matches"]
+            let matches: Vec<String> = result.data["filenames"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -798,15 +824,23 @@ mod tests {
             .await
             .unwrap();
         // `matches` is relativized (not the canonical absolute path).
-        let matches: Vec<&str> = result.data["matches"]
+        let matches: Vec<&str> = result.data["filenames"]
             .as_array()
             .unwrap()
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
         assert_eq!(matches, vec!["a.rs"]);
-        // `content` is the model-facing string: joined relative paths.
-        assert_eq!(result.data["content"].as_str().unwrap(), "a.rs");
+        // The model-facing string now lives on `ToolCallResult.model_content`
+        // (NOT a `data` field) — joined relative paths.
+        assert_eq!(
+            result.model_content.as_deref(),
+            Some("a.rs"),
+            "model_content is the joined relative paths"
+        );
+        // `data` is pure metadata: no `content`/`matches` keys remain.
+        assert!(result.data.get("content").is_none());
+        assert!(result.data.get("matches").is_none());
     }
 
     #[tokio::test]
@@ -820,9 +854,12 @@ mod tests {
             .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
             .await
             .unwrap();
-        assert_eq!(result.data["content"].as_str().unwrap(), "No files found");
-        assert_eq!(result.data["matches"].as_array().unwrap().len(), 0);
+        assert_eq!(result.model_content.as_deref(), Some("No files found"));
+        assert_eq!(result.data["filenames"].as_array().unwrap().len(), 0);
+        assert_eq!(result.data["numFiles"], 0);
         assert_eq!(result.data["truncated"], false);
+        assert_eq!(result.data["totalMatches"], 0);
+        assert_eq!(result.data["countIsComplete"], true);
     }
 
     #[tokio::test]
@@ -838,14 +875,18 @@ mod tests {
             .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
             .await
             .unwrap();
-        let content = result.data["content"].as_str().unwrap();
+        let content = result.model_content.as_deref().unwrap();
         assert!(
             content.ends_with(
                 "\n(Results are truncated. Consider using a more specific path or pattern.)"
             ),
-            "content should end with the truncation advisory: {content}"
+            "model_content should end with the truncation advisory: {content}"
         );
         assert_eq!(result.data["truncated"], true);
+        // `totalMatches` is the pre-cap count (150); `numFiles` is the capped 100.
+        assert_eq!(result.data["numFiles"], MAX_GLOB_MATCHES);
+        assert_eq!(result.data["totalMatches"], 150);
+        assert_eq!(result.data["countIsComplete"], true);
     }
 
     // --- absolute patterns re-rooted via extractGlobBaseDirectory ---
@@ -893,7 +934,7 @@ mod tests {
             .call(json!({ "pattern": pattern }), fresh_ctx(), fresh_tx())
             .await
             .unwrap();
-        let matches = result.data["matches"].as_array().unwrap();
+        let matches = result.data["filenames"].as_array().unwrap();
         assert_eq!(matches.len(), 2, "absolute pattern should match: {matches:?}");
         assert_eq!(result.data["truncated"], false);
     }

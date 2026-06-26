@@ -346,6 +346,7 @@ impl Tool for BriefTool {
 
         Ok(ToolCallResult {
             data,
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

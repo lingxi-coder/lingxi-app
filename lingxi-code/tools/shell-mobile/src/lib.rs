@@ -330,6 +330,7 @@ impl Tool for ShellMobileTool {
                 "timed_out": false,
                 "truncated": truncated_out || truncated_err,
             }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

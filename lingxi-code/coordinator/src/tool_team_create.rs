@@ -578,6 +578,7 @@ impl Tool for TeamCreateTool {
         }
         Ok(ToolCallResult {
             data,
+            model_content: None,
             new_messages: Vec::new(),
             context_modifier: None,
             mcp_meta: None,
@@ -749,6 +750,7 @@ mod tests {
             &self,
             _id: &protocol::ToolUseId,
             _tool: &str,
+            _model_text: &str,
             _result: &serde_json::Value,
         ) {
         }

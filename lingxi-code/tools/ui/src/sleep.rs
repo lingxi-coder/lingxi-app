@@ -150,6 +150,7 @@ impl Tool for SleepTool {
 
         Ok(ToolCallResult {
             data: json!({ "duration_ms": d, "slept": true }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

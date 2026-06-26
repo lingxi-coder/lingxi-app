@@ -599,6 +599,7 @@ impl Tool for AskUserQuestionTool {
 
         Ok(ToolCallResult {
             data: Value::Object(data),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

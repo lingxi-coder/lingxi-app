@@ -241,6 +241,7 @@ impl Tool for SyntheticOutputTool {
                 "data": STRUCTURED_OUTPUT_SUCCESS_DATA,
                 "structured_output": payload,
             }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

@@ -233,6 +233,7 @@ impl Tool for CronDeleteTool {
                 "id": id,
                 "content": format!("Cancelled job {id}."),
             }),
+            model_content: None,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,

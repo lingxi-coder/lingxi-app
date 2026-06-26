@@ -342,6 +342,7 @@ impl Tool for PowerShellTool {
                         "timed_out": out.timed_out,
                         "truncated": truncated,
                     }),
+                    model_content: None,
                     new_messages: vec![],
                     context_modifier: None,
                     mcp_meta: None,

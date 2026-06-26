@@ -27,8 +27,11 @@
 //!
 //! ## `is_error` derivation
 //!
-//! [`traits::OutputStream::emit_tool_result`] carries ONLY `(id, tool, &Value)`
-//! — it has NO separate `is_error` flag (verified `traits/src/orchestrator.rs:436`).
+//! [`traits::OutputStream::emit_tool_result`] carries `(id, tool, model_text,
+//! &Value)` — it has NO separate `is_error` flag (verified
+//! `traits/src/orchestrator.rs:436`). The `model_text` (the model-facing string)
+//! is ignored by this adapter because the `client-protocol` DTO is wire-frozen;
+//! `result_json` carries the full metadata `data`.
 //! The orchestrator signals a failed tool by shaping the emitted payload as
 //! `{ "error": "<message>" }` (verified `orchestrator/src/turn_loop.rs:319-333`).
 //! The adapter therefore derives `is_error` structurally: a JSON object carrying
@@ -124,8 +127,15 @@ impl OutputStream for AdapterOutputStream {
         &self,
         id: &protocol::ToolUseId,
         tool: &str,
+        _model_text: &str,
         result: &serde_json::Value,
     ) {
+        // The `client-protocol` `ToolUseResult` DTO is wire-frozen, so we do NOT
+        // add a `model_text` field yet — the adapter ignores it and keeps
+        // lowering the full metadata `data` into `result_json`. `is_error` still
+        // derives structurally from the `{ "error": … }` payload shape. KNOWN
+        // RESIDUAL: a migrated tool's model text is not carried on this DTO; if a
+        // consumer needs it, a follow-up DTO field is required (out of scope).
         self.sink
             .emit(ClientEvent::ToolUseResult {
                 id: id.to_string(),
@@ -292,7 +302,7 @@ mod tests {
 
         let id = protocol::ToolUseId::new();
         let result = serde_json::json!({"content": "ok", "lines": 3});
-        stream.emit_tool_result(&id, "Read", &result).await;
+        stream.emit_tool_result(&id, "Read", "ok", &result).await;
 
         let events = sink.events().await;
         assert_eq!(events.len(), 1);
@@ -322,7 +332,7 @@ mod tests {
 
         let id = protocol::ToolUseId::new();
         let result = serde_json::json!({"error": "file not found"});
-        stream.emit_tool_result(&id, "Read", &result).await;
+        stream.emit_tool_result(&id, "Read", "file not found", &result).await;
 
         let events = sink.events().await;
         assert_eq!(events.len(), 1);

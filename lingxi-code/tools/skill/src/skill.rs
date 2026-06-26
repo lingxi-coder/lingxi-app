@@ -955,6 +955,7 @@ ALREADY been loaded - follow the instructions directly instead of calling this t
 
         Ok(ToolCallResult {
             data,
+            model_content: None,
             new_messages,
             context_modifier,
             mcp_meta: None,

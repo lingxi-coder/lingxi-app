@@ -521,20 +521,24 @@ impl Tool for TodoWriteTool {
                 "TodoWrite: session not wired into ToolUseContext (M4-04 contract)".into(),
             )
         })?;
-        {
+        // claude-code `call`: `o=n.todos[r]??[]` — snapshot the PRIOR stored
+        // todos (`oldTodos`) BEFORE the overwrite, then `i=allDone?[]:e` is
+        // written. The result reports `{oldTodos:o, newTodos:e}` where `e` is
+        // the full list the model sent (not the cleared `i`).
+        let old_todos: Vec<TodoItem> = {
             let mut guard = session.lock().await;
+            let old = guard.todos.clone();
             if all_done {
                 guard.todos.clear();
             } else {
                 guard.todos.clone_from(&todos);
             }
-        }
+            old
+        };
 
         let duration_ms = started_at.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, &todos, duration_ms)
             .await;
-
-        let (pending, in_progress, completed) = summary(&todos);
 
         // Model-facing result text (`TodoWriteTool.ts`
         // `mapToolResultToToolResultBlockParam`): in claude-code v2.1.183 the
@@ -545,20 +549,19 @@ impl Tool for TodoWriteTool {
         // out`, `tengu_hive_evidence`, `VERIFICATION_AGENT`, and
         // `verificationNudge` all return 0. The whole nudge feature is absent,
         // so neither the suffix nor a `verificationNudgeNeeded` field is emitted.
+        // This string is carried as `ToolCallResult.model_content` (the dispatch
+        // emits it verbatim as the tool's model text); `data` is pure metadata
+        // `{oldTodos, newTodos}` — the binary's `outputSchema` (`sfp`).
         let content = String::from(
             "Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable",
         );
 
         Ok(ToolCallResult {
             data: json!({
-                "content": content,
-                "todos": todos,
-                "summary": {
-                    "pending": pending,
-                    "in_progress": in_progress,
-                    "completed": completed,
-                },
+                "oldTodos": old_todos,
+                "newTodos": todos,
             }),
+            model_content: Some(content),
             new_messages: Vec::new(),
             context_modifier: None,
             mcp_meta: None,
@@ -820,9 +823,18 @@ mod tests {
         assert_eq!(s.todos.len(), 3);
         assert_eq!(s.todos[0].id, "t1");
         assert_eq!(s.todos[1].status, TodoState::InProgress);
-        assert_eq!(res.data["summary"]["pending"], 1);
-        assert_eq!(res.data["summary"]["in_progress"], 1);
-        assert_eq!(res.data["summary"]["completed"], 1);
+        // `data` is the binary `{oldTodos, newTodos}` schema: oldTodos is the
+        // pre-write snapshot (empty here — a fresh session), newTodos is the
+        // full 3-item list the model sent.
+        assert_eq!(res.data["oldTodos"].as_array().unwrap().len(), 0);
+        assert_eq!(res.data["newTodos"].as_array().unwrap().len(), 3);
+        assert!(res.data.get("content").is_none(), "content moved to model_content");
+        assert!(res.data.get("summary").is_none(), "summary dropped (not in binary)");
+        // Model text is the fixed base string carried as model_content.
+        assert_eq!(
+            res.model_content.as_deref(),
+            Some("Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable")
+        );
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&TODO_WRITE_STARTED.to_string()));
         assert!(names.contains(&TODO_WRITE_COMPLETED.to_string()));
@@ -868,7 +880,7 @@ mod tests {
             .call(input, use_ctx, fresh_tx())
             .await
             .expect("two in_progress is accepted");
-        assert_eq!(res.data["summary"]["in_progress"], 2);
+        assert_eq!(res.data["newTodos"].as_array().unwrap().len(), 2);
         {
             let s = session.lock().await;
             assert_eq!(s.todos.len(), 2);
@@ -900,8 +912,8 @@ mod tests {
             assert_eq!(s.todos.len(), 2);
             assert_eq!(s.todos[0].id, "", "id defaults to empty when absent");
         }
-        let out = &res.data["todos"];
-        for item in out.as_array().expect("todos array") {
+        let out = &res.data["newTodos"];
+        for item in out.as_array().expect("newTodos array") {
             assert!(
                 item.get("id").is_none(),
                 "OUTPUT must not leak an id: {item}"
@@ -959,10 +971,9 @@ mod tests {
             let s = session.lock().await;
             assert!(s.todos.is_empty(), "all-completed write clears the stored todos");
         }
-        // The result still reports the full 2-item list + all-completed summary.
-        assert_eq!(res.data["todos"].as_array().unwrap().len(), 2);
-        assert_eq!(res.data["summary"]["completed"], 2);
-        assert_eq!(res.data["summary"]["pending"], 0);
+        // The result still reports the full 2-item list as `newTodos` (the
+        // model-sent `e`, not the cleared `i`).
+        assert_eq!(res.data["newTodos"].as_array().unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -979,6 +990,49 @@ mod tests {
         tool.call(input, use_ctx, fresh_tx()).await.expect("ok");
         let s = session.lock().await;
         assert_eq!(s.todos.len(), 2, "a not-all-completed write is stored verbatim");
+    }
+
+    // ── oldTodos captures the PRE-WRITE snapshot (binary `o=n.todos[r]??[]`) ──
+
+    #[tokio::test]
+    async fn old_todos_is_pre_write_snapshot_across_two_writes() {
+        // Binary `call`: `o=n.todos[r]??[]` reads the stored list BEFORE the
+        // overwrite. A first write seeds the session; the second write's result
+        // must report that seeded list as `oldTodos`, and its own list as
+        // `newTodos`.
+        let (tool, sink, _session, _use_ctx) = make_tool_and_session();
+        tool.ctx.bus.attach_sink(sink.clone()).await;
+
+        // First write — fresh session ⇒ oldTodos empty.
+        let first = json!({
+            "todos": [
+                { "id": "a", "content": "first",  "status": "in_progress", "activeForm": "Doing first" }
+            ]
+        });
+        let res1 = {
+            let mut c = fresh_ctx();
+            c.session = Some(_session.clone());
+            tool.call(first, c, fresh_tx()).await.expect("first write")
+        };
+        assert_eq!(res1.data["oldTodos"].as_array().unwrap().len(), 0);
+        assert_eq!(res1.data["newTodos"].as_array().unwrap().len(), 1);
+
+        // Second write — oldTodos must be the 1-item list the first write stored.
+        let second = json!({
+            "todos": [
+                { "id": "b", "content": "second", "status": "pending", "activeForm": "Doing second" },
+                { "id": "c", "content": "third",  "status": "pending", "activeForm": "Doing third"  }
+            ]
+        });
+        let res2 = {
+            let mut c = fresh_ctx();
+            c.session = Some(_session.clone());
+            tool.call(second, c, fresh_tx()).await.expect("second write")
+        };
+        let old = res2.data["oldTodos"].as_array().expect("oldTodos array");
+        assert_eq!(old.len(), 1, "oldTodos is the pre-write stored list");
+        assert_eq!(old[0]["content"], "first");
+        assert_eq!(res2.data["newTodos"].as_array().unwrap().len(), 2);
     }
 
     // ── result text is the BARE base string (finding #74) ────────────────
@@ -1014,11 +1068,15 @@ mod tests {
             ]
         });
         let res = tool.call(input, use_ctx, fresh_tx()).await.expect("ok");
-        assert_eq!(res.data["content"], json!(TODO_BASE), "bare base string only");
+        // The base string is now the model text (`ToolCallResult.model_content`,
+        // the binary's `mapToolResultToToolResultBlockParam` content), NOT a
+        // `data` field. `data` is the pure `{oldTodos, newTodos}` metadata.
+        assert_eq!(res.model_content.as_deref(), Some(TODO_BASE), "bare base string only");
         assert!(
-            !res.data["content"].as_str().unwrap().contains(NUDGE_MARKER),
+            !res.model_content.as_deref().unwrap().contains(NUDGE_MARKER),
             "no verification-nudge suffix"
         );
+        assert!(res.data.get("content").is_none(), "content not in data");
         assert!(
             res.data.get("verificationNudgeNeeded").is_none(),
             "no verificationNudgeNeeded field in result data"
@@ -1033,7 +1091,8 @@ mod tests {
             "todos": [completed("1", "Implement"), completed("2", "Document")]
         });
         let res = tool.call(input, use_ctx, fresh_tx()).await.expect("ok");
-        assert_eq!(res.data["content"], json!(TODO_BASE));
+        assert_eq!(res.model_content.as_deref(), Some(TODO_BASE));
+        assert!(res.data.get("content").is_none());
         assert!(res.data.get("verificationNudgeNeeded").is_none());
     }
 
@@ -1050,7 +1109,8 @@ mod tests {
             ]
         });
         let res = tool.call(input, use_ctx, fresh_tx()).await.expect("ok");
-        assert_eq!(res.data["content"], json!(TODO_BASE));
+        assert_eq!(res.model_content.as_deref(), Some(TODO_BASE));
+        assert!(res.data.get("content").is_none());
         assert!(res.data.get("verificationNudgeNeeded").is_none());
     }
 
@@ -1066,7 +1126,8 @@ mod tests {
             ]
         });
         let res = tool.call(input, use_ctx, fresh_tx()).await.expect("ok");
-        assert_eq!(res.data["content"], json!(TODO_BASE));
+        assert_eq!(res.model_content.as_deref(), Some(TODO_BASE));
+        assert!(res.data.get("content").is_none());
         assert!(res.data.get("verificationNudgeNeeded").is_none());
     }
 

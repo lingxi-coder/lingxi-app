@@ -800,7 +800,7 @@ mod tests {
         assert!(out.contains(&p(&dir, ".mcp.json")));
         // Seed: dangerous directories.
         assert!(out.contains(&p(&dir, ".vscode")));
-        assert!(out.contains(&p(&dir, ".claude/commands")));
+        assert!(out.contains(&p(&dir, ".lingxi/commands")));
         // .git is a dir -> hooks + config denied.
         assert!(out.contains(&p(&dir, ".git/hooks")));
         assert!(out.contains(&p(&dir, ".git/config")));

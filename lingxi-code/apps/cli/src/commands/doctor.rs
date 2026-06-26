@@ -10,9 +10,9 @@
 //! to diagnose: that portion is NOT-APPLICABLE and we say so plainly. Instead
 //! we emit a useful, fully READ-ONLY + LOCAL health summary:
 //!   * lingxi-cli version,
-//!   * config-dir (`~/.claude`) + global-config (`~/.claude.json`) presence,
+//!   * config-dir (`~/.claude`) + global-config (`~/.lingxi.json`) presence,
 //!   * the MCP servers configured across the user/project/local scopes
-//!     (parsed from `.mcp.json` / `~/.claude.json` — we do NOT spawn them, do
+//!     (parsed from `.mcp.json` / `~/.lingxi.json` — we do NOT spawn them, do
 //!     NOT touch the network, and start NO LLM turn).
 //!
 //! The command exits `SUCCESS`. It has no children: a bare `doctor` runs the
@@ -69,8 +69,8 @@ pub async fn run(_cli: &Cli) -> i32 {
 
     // ── MCP servers (READ-ONLY — parsed, never spawned) ───────────────────
     // Mirror the workspace's standard three-scope resolution
-    // (user `~/.claude.json` `mcpServers`, project `<cwd>/.mcp.json`, and local
-    // `~/.claude.json` `projects.<cwd>.mcpServers`) WITHOUT connecting to any
+    // (user `~/.lingxi.json` `mcpServers`, project `<cwd>/.mcp.json`, and local
+    // `~/.lingxi.json` `projects.<cwd>.mcpServers`) WITHOUT connecting to any
     // server. claude's doctor *spawns* stdio servers; we deliberately do not —
     // we only report what is configured, which is the safe, local health view.
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));

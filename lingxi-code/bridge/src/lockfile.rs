@@ -1,4 +1,4 @@
-//! `~/.claude/ide/<port>.lock` writer and Drop-guard.
+//! `~/.lingxi/ide/<port>.lock` writer and Drop-guard.
 //!
 //! Wire format matches claude-code's `LockfileJsonContent` in
 //! `src/utils/ide.ts`. The file is JSON with keys:
@@ -11,12 +11,12 @@ use rand::TryRngCore;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// The literal `ideName` value we publish in the `~/.claude/ide/` lockfile,
+/// The literal `ideName` value we publish in the `~/.lingxi/ide/` lockfile,
 /// scanned by the real IDE peer (claude-code, VS Code Claude, …).
 pub const IDE_NAME: &str = "LingXi";
-/// The literal `ideName` value we publish in the dedicated `~/.claude/bridge/`
+/// The literal `ideName` value we publish in the dedicated `~/.lingxi/bridge/`
 /// discovery lockfile. Deliberately DISTINCT from [`IDE_NAME`] so the real IDE
-/// peer's `~/.claude/ide/` scan never picks up the bridge's lockfile.
+/// peer's `~/.lingxi/ide/` scan never picks up the bridge's lockfile.
 pub const BRIDGE_IDE_NAME: &str = "LingXi-Bridge";
 /// The literal `transport` value we publish — always `"ws"` for this bridge.
 pub const TRANSPORT: &str = "ws";
@@ -95,14 +95,14 @@ impl IdeLockfile {
         }
     }
 
-    /// Construct an `IdeLockfile` rooted at the user's `~/.claude/ide` dir.
+    /// Construct an `IdeLockfile` rooted at the user's `~/.lingxi/ide` dir.
     /// Creates the dir on first call (mode 0o755 on Unix).
     ///
     /// # Errors
     /// Returns I/O errors if the home directory cannot be resolved or the
-    /// `~/.claude/ide` directory cannot be created.
+    /// `~/.lingxi/ide` directory cannot be created.
     pub fn for_user(port: u16, workspace_folders: Vec<PathBuf>) -> std::io::Result<Self> {
-        // Honor `$CLAUDE_CONFIG_DIR` (set+non-empty) else `~/.claude`, like the
+        // Honor `$LINGXI_CONFIG_DIR` (set+non-empty) else `~/.claude`, like the
         // rest of the config-home tree, so the IDE discovery lockfile lands where
         // the engine/peers look for it.
         let config_home = std::env::var_os(branding::CONFIG_DIR_ENV)
@@ -128,18 +128,18 @@ impl IdeLockfile {
     }
 
     /// Construct a DEDICATED bridge discovery lockfile rooted at the user's
-    /// `~/.claude/bridge` dir, carrying the distinct [`BRIDGE_IDE_NAME`].
+    /// `~/.lingxi/bridge` dir, carrying the distinct [`BRIDGE_IDE_NAME`].
     /// Creates the dir on first call (mode 0o755 on Unix).
     ///
     /// This is the F2-04 discovery file the Electron app reads: it lives in its
     /// own directory with its own `ideName` so it never collides with the real
-    /// IDE peer scanning `~/.claude/ide/`.
+    /// IDE peer scanning `~/.lingxi/ide/`.
     ///
     /// # Errors
     /// Returns I/O errors if the home directory cannot be resolved or the
-    /// `~/.claude/bridge` directory cannot be created.
+    /// `~/.lingxi/bridge` directory cannot be created.
     pub fn for_bridge(port: u16, workspace_folders: Vec<PathBuf>) -> std::io::Result<Self> {
-        // Honor `$CLAUDE_CONFIG_DIR` (set+non-empty) else `~/.claude`, matching
+        // Honor `$LINGXI_CONFIG_DIR` (set+non-empty) else `~/.claude`, matching
         // the config-home tree (the Electron app reads this discovery file).
         let config_home = std::env::var_os(branding::CONFIG_DIR_ENV)
             .map(PathBuf::from)

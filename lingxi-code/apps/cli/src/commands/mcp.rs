@@ -6,7 +6,7 @@
 //!
 //! REAL-IMPLEMENTED, local-config only (no network, no LLM turn):
 //!   * `add` / `add-json` — write a server into the chosen scope's config file
-//!     (`~/.claude.json` for local/user, `<cwd>/.mcp.json` for project) via the
+//!     (`~/.lingxi.json` for local/user, `<cwd>/.mcp.json` for project) via the
 //!     `migrations::global_config` read-modify-write substrate + serde_json.
 //!   * `remove` — delete a server from a scope (or from whichever scope holds it
 //!     when `--scope` is omitted).
@@ -40,9 +40,9 @@ pub struct Cli {
 /// `local | user | project` choice (default `local`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Scope {
-    /// Private to you in this project (`~/.claude.json` `projects.<key>`).
+    /// Private to you in this project (`~/.lingxi.json` `projects.<key>`).
     Local,
-    /// Available across all your projects (`~/.claude.json` top-level).
+    /// Available across all your projects (`~/.lingxi.json` top-level).
     User,
     /// Shared with everyone via `<cwd>/.mcp.json`.
     Project,
@@ -330,7 +330,7 @@ fn print_family_help() {
 // Config-file location helpers (mirror `migrations::global_config`).
 // ──────────────────────────────────────────────────────────────────────────
 
-/// Path to `~/.claude.json` (the global config). `None` when `$HOME` is unset.
+/// Path to `~/.lingxi.json` (the global config). `None` when `$HOME` is unset.
 fn global_config_path() -> Option<PathBuf> {
     migrations::global_config::global_config_path()
 }
@@ -639,7 +639,7 @@ fn write_server(name: &str, entry: &serde_json::Value, scope: Scope) -> Result<W
     }
 }
 
-/// User scope: `~/.claude.json` top-level `mcpServers.<name>`.
+/// User scope: `~/.lingxi.json` top-level `mcpServers.<name>`.
 fn write_user_server(name: &str, entry: &serde_json::Value) -> Result<WriteOutcome, String> {
     let path = global_config_path().ok_or_else(|| "Could not resolve home directory".to_string())?;
     let map = migrations::global_config::read_map(&path).map_err(|e| e.to_string())?;
@@ -665,7 +665,7 @@ fn write_user_server(name: &str, entry: &serde_json::Value) -> Result<WriteOutco
     Ok(WriteOutcome::Added(path))
 }
 
-/// Local scope: `~/.claude.json` `projects.<key>.mcpServers.<name>`.
+/// Local scope: `~/.lingxi.json` `projects.<key>.mcpServers.<name>`.
 fn write_local_server(name: &str, entry: &serde_json::Value) -> Result<WriteOutcome, String> {
     let path = global_config_path().ok_or_else(|| "Could not resolve home directory".to_string())?;
     let key = project_key().ok_or_else(|| "Could not resolve project directory".to_string())?;
@@ -988,7 +988,7 @@ fn not_found_message(name: &str) -> String {
     format!("No MCP server named \"{name}\". Configured servers: {shown}{suffix}")
 }
 
-/// User-scope (`~/.claude.json` top-level `mcpServers`) server names.
+/// User-scope (`~/.lingxi.json` top-level `mcpServers`) server names.
 fn user_server_names() -> Vec<String> {
     global_config_path()
         .and_then(|p| migrations::global_config::read_map(&p).ok())
@@ -997,7 +997,7 @@ fn user_server_names() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Local-scope (`~/.claude.json` `projects.<key>.mcpServers`) server names.
+/// Local-scope (`~/.lingxi.json` `projects.<key>.mcpServers`) server names.
 fn local_server_names() -> Vec<String> {
     global_config_path()
         .zip(project_key())
@@ -1008,7 +1008,7 @@ fn local_server_names() -> Vec<String> {
 }
 
 /// Partition the project `.mcp.json` servers into `(approved, pending)` using the
-/// per-project approval state in `~/.claude.json` `projects.<key>`: a server is
+/// per-project approval state in `~/.lingxi.json` `projects.<key>`: a server is
 /// approved iff it is NOT in `disabledMcpjsonServers` AND
 /// (`enableAllProjectMcpServers` is true OR it is in `enabledMcpjsonServers`).
 /// `pending` (unapproved) project servers are the ones claude's `mcp get`
@@ -1206,7 +1206,7 @@ fn run_reset_project_choices() -> i32 {
             // project `.mcp.json` actually has servers to re-approve. Verified vs
             // live 2.1.191: a missing / empty / `{}` / empty-`mcpServers` .mcp.json
             // ⇒ first line only; ≥1 project server ⇒ both lines. (The approval
-            // keys cleared above in ~/.claude.json do NOT affect this.)
+            // keys cleared above in ~/.lingxi.json do NOT affect this.)
             if project_mcp_json_has_servers() {
                 println!("You will be prompted for approval next time you start Claude Code.");
             }
@@ -1364,8 +1364,8 @@ fn write_json_object(
 
 /// Print the trailing `File modified: <path>[ [project: <cwd>]]` line, matching
 /// claude's per-scope format:
-///   * local   → `File modified: ~/.claude.json [project: <cwd>]`
-///   * user    → `File modified: ~/.claude.json`
+///   * local   → `File modified: ~/.lingxi.json [project: <cwd>]`
+///   * user    → `File modified: ~/.lingxi.json`
 ///   * project → `File modified: <cwd>/.mcp.json`
 fn print_file_modified(scope: Scope, path: &std::path::Path) {
     match scope {

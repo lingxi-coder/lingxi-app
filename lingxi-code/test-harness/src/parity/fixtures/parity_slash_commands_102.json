@@ -388,7 +388,7 @@
       "name": "init",
       "is_core": true,
       "implemented": true,
-      "description": "Initialize a new CLAUDE.md file with codebase documentation",
+      "description": "Initialize a new LINGXI.md file with codebase documentation",
       "claude_type": "local",
       "rust_status": "implemented",
       "target_status": "implemented",

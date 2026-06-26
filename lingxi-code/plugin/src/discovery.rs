@@ -4,7 +4,7 @@
 //! `loadAllPluginsCacheOnly()` (`main.tsx:282`), whose shared body is
 //! `loadPluginsFromMarketplaces({cacheOnly})` (`pluginLoader.ts:1887`). For
 //! each installed plugin it runs `createPluginFromPath()`
-//! (`pluginLoader.ts:1348`): read `<pluginPath>/.claude-plugin/plugin.json`
+//! (`pluginLoader.ts:1348`): read `<pluginPath>/.lingxi-plugin/plugin.json`
 //! (`loadPluginManifest`) and **auto-detect** the optional `commands/`,
 //! `agents/`, `skills/`, `output-styles/` directories (Step 3,
 //! `pluginLoader.ts:1373-1385`), plus the standard `hooks/hooks.json`
@@ -16,13 +16,13 @@
 //!   `settings.enabledPlugins` allowlist and resolves each enabled
 //!   `name@marketplace` entry to its versioned cache path
 //!   `cache/{marketplace}/{plugin}/{version}/` — the real layout
-//!   `loadAllPluginsCacheOnly` consumes. Against a real `~/.claude/plugins`
+//!   `loadAllPluginsCacheOnly` consumes. Against a real `~/.lingxi/plugins`
 //!   (which holds `cache/`, `npm-cache/`, `installed_plugins.json` — none with
-//!   a direct `.claude-plugin/plugin.json`) this is what discovers the
+//!   a direct `.lingxi-plugin/plugin.json`) this is what discovers the
 //!   actually-installed plugins.
 //!
 //! * [`discover_installed_plugins`] is a flat directory-walk that loads any
-//!   directory holding a direct `.claude-plugin/plugin.json` child. It is the
+//!   directory holding a direct `.lingxi-plugin/plugin.json` child. It is the
 //!   primitive used by the local-path install arm (a pre-fetched plugin dir
 //!   passed by path, as with `--add-dir`) — NOT the real cache layout. Against
 //!   a real claude-code plugins dir it finds nothing, by design.
@@ -50,7 +50,7 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-/// Raw shape of `.claude-plugin/plugin.json`.
+/// Raw shape of `.lingxi-plugin/plugin.json`.
 ///
 /// Mirrors claude-code's `PluginManifestSchema` (the full union of
 /// `PluginManifestMetadataSchema` + component declaration fields):
@@ -197,7 +197,7 @@ pub(crate) fn sanitize_segment(s: &str, allow_dot: bool) -> String {
 /// entry resolves through `getVersionedCachePath` (`pluginLoader.ts:139`) to
 /// the versioned cache directory
 /// `<plugins>/cache/{marketplace}/{plugin}/{version}/`
-/// whose `.claude-plugin/plugin.json` is then read by `createPluginFromPath`
+/// whose `.lingxi-plugin/plugin.json` is then read by `createPluginFromPath`
 /// (`pluginLoader.ts:1348`).
 ///
 /// This port reads the `enabled` allowlist, skips disabled entries, resolves
@@ -306,7 +306,7 @@ pub async fn discover_recorded_plugins(
 /// Each returned tuple is `(freshly-minted id, manifest, install dir)`. A
 /// missing `plugins_dir` yields an empty vec (zero-cost on a fresh install,
 /// matching claude-code's resilient boot). Directories without a readable
-/// `.claude-plugin/plugin.json` are skipped.
+/// `.lingxi-plugin/plugin.json` are skipped.
 ///
 /// `PluginId` is a UUID newtype with no string-stable derivation, so a fresh
 /// id is minted per plugin and stamped onto the returned manifest; callers

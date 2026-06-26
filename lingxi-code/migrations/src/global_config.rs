@@ -1,4 +1,4 @@
-//! `~/.claude.json` `GlobalConfig` substrate — the first in the Rust port
+//! `~/.lingxi.json` `GlobalConfig` substrate — the first in the Rust port
 //! (`tools/meta/src/config.rs:17` records "no substrate" prior to this).
 //!
 //! Ports the path/read/save mechanics of `utils/config.ts` +
@@ -19,7 +19,7 @@
 //! - TS `writeFileSyncAndFlush_DEPRECATED` (`file.ts:439-477`) falls back to
 //!   a NON-atomic in-place write when the atomic tmp+rename path fails; this
 //!   port skips the fallback and surfaces the error — migrations treat any
-//!   write failure as "skip", and a torn half-write of `~/.claude.json` is
+//!   write failure as "skip", and a torn half-write of `~/.lingxi.json` is
 //!   worse than a skipped migration.
 
 use std::path::{Component, Path, PathBuf};
@@ -58,14 +58,14 @@ pub fn trust_homedir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// A raw JSON object — the in-memory shape of `~/.claude.json`.
+/// A raw JSON object — the in-memory shape of `~/.lingxi.json`.
 pub type JsonMap = Map<String, Value>;
 
-/// `$CLAUDE_CONFIG_DIR`, treating set-but-EMPTY as unset. DELIBERATE
+/// `$LINGXI_CONFIG_DIR`, treating set-but-EMPTY as unset. DELIBERATE
 /// divergence: in TS only `getGlobalClaudeFile`'s base (`env.ts:25`) is
-/// `process.env.CLAUDE_CONFIG_DIR || homedir()`-shaped (`""` falsy ⇒ home);
+/// `process.env.LINGXI_CONFIG_DIR || homedir()`-shaped (`""` falsy ⇒ home);
 /// `getClaudeConfigHomeDir` (`envUtils.ts:8-14`) is `??`-shaped, so under
-/// `CLAUDE_CONFIG_DIR=""` TS resolves config-home to `""` — a cwd-RELATIVE
+/// `LINGXI_CONFIG_DIR=""` TS resolves config-home to `""` — a cwd-RELATIVE
 /// path, not `~/.claude`. That is pathological, not a behavior worth porting;
 /// this port treats `""` as unset everywhere.
 fn claude_config_dir_env() -> Option<PathBuf> {
@@ -74,7 +74,7 @@ fn claude_config_dir_env() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// `getClaudeConfigHomeDir` (`envUtils.ts:7-14`): `$CLAUDE_CONFIG_DIR` if
+/// `getClaudeConfigHomeDir` (`envUtils.ts:7-14`): `$LINGXI_CONFIG_DIR` if
 /// set (non-empty — see [`claude_config_dir_env`] for the empty-string
 /// divergence), else `$HOME/.claude`. `None` when neither env var exists.
 #[must_use]
@@ -86,13 +86,13 @@ pub fn claude_config_home() -> Option<PathBuf> {
 }
 
 /// `getGlobalClaudeFile` (`env.ts:14-26`): legacy `<config-home>/.config.json`
-/// when it exists, else `($CLAUDE_CONFIG_DIR || $HOME)/.claude.json`.
+/// when it exists, else `($LINGXI_CONFIG_DIR || $HOME)/.lingxi.json`.
 ///
 /// The TS oauth filename suffix (`fileSuffixForOauthConfig()` →
 /// `-custom-oauth`/`-local-oauth`/`-staging-oauth`) only applies under custom
 /// OAuth env vars this port does not model (`anthropic-oauth` has no
 /// `getOauthConfigType` substrate) — the default build resolves it to `""`,
-/// so `.claude.json` is hardcoded here.
+/// so `.lingxi.json` is hardcoded here.
 #[must_use]
 pub fn global_config_path() -> Option<PathBuf> {
     let home = claude_config_home()?;
@@ -129,7 +129,7 @@ impl std::fmt::Display for GlobalConfigError {
 
 impl std::error::Error for GlobalConfigError {}
 
-/// Read `~/.claude.json` into a raw map. Missing file ⇒ empty map (TS
+/// Read `~/.lingxi.json` into a raw map. Missing file ⇒ empty map (TS
 /// `getConfig` falls back to defaults; the typed getters below default per
 /// key). Broken JSON ⇒ [`GlobalConfigError::Broken`].
 pub fn read_map(path: &Path) -> Result<JsonMap, GlobalConfigError> {
@@ -501,7 +501,7 @@ fn project_has_trust(config_path: &Path, key: &str) -> bool {
 }
 
 /// `config.projects?.[getProjectPathForConfig(cwd)]?.hasClaudeMdExternalIncludesApproved`
-/// truthiness — whether the user has approved Managed/Project/Local CLAUDE.md
+/// truthiness — whether the user has approved Managed/Project/Local LINGXI.md
 /// files to `@import` paths OUTSIDE the working dir (claude-code
 /// `hasClaudeMdExternalIncludesApproved`, claudemd.ts:826-846). Fail-safe to
 /// `false` on any read/parse error; the writer only ever stores boolean `true`.
@@ -559,7 +559,7 @@ mod tests {
     #[test]
     fn user_id_is_64_hex_persisted_and_reused() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join(".claude.json");
+        let path = tmp.path().join(".lingxi.json");
         let first = get_or_create_user_id_at(&path);
         // `randomBytes(32).toString('hex')` → 64 lowercase hex chars.
         assert_eq!(first.len(), 64, "device id is 64 hex chars");
@@ -578,7 +578,7 @@ mod tests {
     #[test]
     fn user_id_honors_existing_nonempty_value() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join(".claude.json");
+        let path = tmp.path().join(".lingxi.json");
         std::fs::write(&path, r#"{"userID":"preexisting-id","other":1}"#).unwrap();
         assert_eq!(get_or_create_user_id_at(&path), "preexisting-id");
         // An empty stored value is treated as absent → regenerated (64 hex).
@@ -589,22 +589,22 @@ mod tests {
     #[test]
     fn config_home_prefers_claude_config_dir() {
         let _g = env_lock();
-        std::env::set_var("CLAUDE_CONFIG_DIR", "/tmp/cc-test-home");
+        std::env::set_var("LINGXI_CONFIG_DIR", "/tmp/cc-test-home");
         assert_eq!(
             claude_config_home(),
             Some(std::path::PathBuf::from("/tmp/cc-test-home"))
         );
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        std::env::remove_var("LINGXI_CONFIG_DIR");
     }
 
     #[test]
     fn config_home_falls_back_to_home_dot_claude() {
         let _g = env_lock();
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        std::env::remove_var("LINGXI_CONFIG_DIR");
         std::env::set_var("HOME", "/tmp/cc-test-h2");
         assert_eq!(
             claude_config_home(),
-            Some(std::path::PathBuf::from("/tmp/cc-test-h2/.claude"))
+            Some(std::path::PathBuf::from("/tmp/cc-test-h2/.lingxi"))
         );
     }
 
@@ -614,40 +614,40 @@ mod tests {
         // Deliberate divergence (see `claude_config_dir_env`): TS's
         // `??`-shaped getClaudeConfigHomeDir would use "" (cwd-relative);
         // this port treats "" as unset and falls back to ~/.claude.
-        std::env::set_var("CLAUDE_CONFIG_DIR", "");
+        std::env::set_var("LINGXI_CONFIG_DIR", "");
         std::env::set_var("HOME", "/tmp/cc-test-h4");
         assert_eq!(
             claude_config_home(),
-            Some(std::path::PathBuf::from("/tmp/cc-test-h4/.claude"))
+            Some(std::path::PathBuf::from("/tmp/cc-test-h4/.lingxi"))
         );
         assert_eq!(
             global_config_path(),
-            Some(std::path::PathBuf::from("/tmp/cc-test-h4/.claude.json"))
+            Some(std::path::PathBuf::from("/tmp/cc-test-h4/.lingxi.json"))
         );
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        std::env::remove_var("LINGXI_CONFIG_DIR");
     }
 
     #[test]
     fn global_path_prefers_legacy_config_json_when_present() {
         let _g = env_lock();
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
+        std::env::set_var("LINGXI_CONFIG_DIR", tmp.path());
         std::fs::write(tmp.path().join(".config.json"), "{}").unwrap();
         assert_eq!(global_config_path(), Some(tmp.path().join(".config.json")));
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        std::env::remove_var("LINGXI_CONFIG_DIR");
     }
 
     #[test]
     fn global_path_is_claude_json_under_config_dir_else_home() {
         let _g = env_lock();
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
-        assert_eq!(global_config_path(), Some(tmp.path().join(".claude.json")));
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        std::env::set_var("LINGXI_CONFIG_DIR", tmp.path());
+        assert_eq!(global_config_path(), Some(tmp.path().join(".lingxi.json")));
+        std::env::remove_var("LINGXI_CONFIG_DIR");
         std::env::set_var("HOME", "/tmp/cc-test-h3");
         assert_eq!(
             global_config_path(),
-            Some(std::path::PathBuf::from("/tmp/cc-test-h3/.claude.json"))
+            Some(std::path::PathBuf::from("/tmp/cc-test-h3/.lingxi.json"))
         );
     }
 

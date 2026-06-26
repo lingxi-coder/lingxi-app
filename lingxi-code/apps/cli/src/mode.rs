@@ -288,7 +288,7 @@ fn settings_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
 }
 
 /// (A6 batch-6 Task 2) Read + merge the `statusLine` setting from the USER
-/// (`~/.claude/settings.json`) and LOCAL (`<proj>/.claude/settings.local.json`)
+/// (`~/.lingxi/settings.json`) and LOCAL (`<proj>/.lingxi/settings.local.json`)
 /// tiers, Local-over-User, and parse it into a [`StatusLineConfig`]. `None` when
 /// neither tier carries a `command`-shaped `statusLine` (then the built-in row
 /// renders). Pure over the two settings roots so it is unit-testable; the live
@@ -302,10 +302,10 @@ fn settings_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
 ///
 /// DIVERGENCES from claude-code (documented, intentional): (1) TS resolves
 /// `statusLine` from the fully-merged settings across User → Project
-/// (`.claude/settings.json`) → Local → flag → policy (`constants.ts`
+/// (`.lingxi/settings.json`) → Local → flag → policy (`constants.ts`
 /// `SETTING_SOURCES`); the Rust `migrations::settings_update::SettingsSource`
 /// has only `User`/`Local` substrate (same limit as [`read_skip_dangerous_prompt`]),
-/// so a `statusLine` committed in project `.claude/settings.json` is silently
+/// so a `statusLine` committed in project `.lingxi/settings.json` is silently
 /// dropped — recorded in spec rev2.11's remaining list. (2) TS deep-merges the
 /// `statusLine` OBJECT across tiers (lodash default merge); this does a whole-
 /// object replace (Local's `statusLine` wholly replaces User's), so a config
@@ -340,7 +340,7 @@ fn read_status_line_config() -> Option<tui::components::status_line_command::Sta
 }
 
 /// True iff `skipDangerousModePermissionPrompt` is truthy in EITHER the user
-/// (`~/.claude/settings.json`) OR local (`<cwd>/.claude/settings.local.json`)
+/// (`~/.lingxi/settings.json`) OR local (`<cwd>/.lingxi/settings.local.json`)
 /// settings — the `hasSkipDangerousModePermissionPrompt` user+local check
 /// (claude-code `settings.ts:882-889`; the flag/policy tiers have no Rust
 /// substrate). On any read failure the tier degrades to `false`.
@@ -522,7 +522,7 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
-    /// Local settings (`<proj>/.claude/settings.local.json`) WIN over User for
+    /// Local settings (`<proj>/.lingxi/settings.local.json`) WIN over User for
     /// the `statusLine` key (Local-over-User precedence).
     #[test]
     fn status_line_config_local_overrides_user() {
@@ -534,7 +534,7 @@ mod tests {
             r#"{"statusLine":{"type":"command","command":"user-cmd"}}"#,
         );
         write_settings(
-            &project_dir.join(".claude").join("settings.local.json"),
+            &project_dir.join(".lingxi").join("settings.local.json"),
             r#"{"statusLine":{"type":"command","command":"local-cmd"}}"#,
         );
         let cfg = read_status_line_config_from(&claude_home, &project_dir)
@@ -575,7 +575,7 @@ mod tests {
     #[test]
     fn untrusted_cwd_prompts_then_accept_marks_and_continues() {
         let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join(".claude.json");
+        let config_path = tmp.path().join(".lingxi.json");
         let cwd = tmp.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
 
@@ -602,7 +602,7 @@ mod tests {
     #[test]
     fn trusted_cwd_shows_no_dialog() {
         let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join(".claude.json");
+        let config_path = tmp.path().join(".lingxi.json");
         let cwd = tmp.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         // Pre-trust the cwd.
@@ -618,7 +618,7 @@ mod tests {
     #[test]
     fn ancestor_trusted_cwd_shows_no_dialog() {
         let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join(".claude.json");
+        let config_path = tmp.path().join(".lingxi.json");
         let parent = tmp.path().join("workspace");
         let child = parent.join("sub").join("project");
         std::fs::create_dir_all(&child).unwrap();

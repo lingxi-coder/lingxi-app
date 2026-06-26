@@ -376,7 +376,7 @@ pub async fn run_tui_session(
     // key via `CredentialManager::set_provider_key`. `None` (smoke gates / resume
     // picker) leaves the pump a no-op — byte-identical to the pre-seam behavior.
     initial_state.set_provider_key_store(runtime.provider_key_store.take());
-    // (M7-15) Apply the stored theme preference from ~/.claude/settings.json
+    // (M7-15) Apply the stored theme preference from ~/.lingxi/settings.json
     // (best-effort; absent/unreadable → session-default `auto`). Read once at
     // startup, before the first render, so the very first frame uses the saved
     // theme.
@@ -395,7 +395,7 @@ pub async fn run_tui_session(
         initial_state.reduced_motion = reduced;
     }
     // (GAP D) Install the runtime keybindings keymap (merged default + user
-    // `~/.claude/keybindings.json`), which the live PRIMARY dispatch consults
+    // `~/.lingxi/keybindings.json`), which the live PRIMARY dispatch consults
     // before the hardcoded `map_iocraft_key` table. The customization gate is
     // OFF by default — same as the `/keybindings` command's
     // `isKeybindingCustomizationEnabled` (the `tengu_keybinding_customization_release`

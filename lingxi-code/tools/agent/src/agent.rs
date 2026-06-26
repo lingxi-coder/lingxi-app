@@ -1380,7 +1380,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // Worktree / cwd isolation (claude `z = a ?? L.isolation`; `me = cwd ??
         // worktreePath`). When the caller requests `isolation:"worktree"` (non-fork)
         // create a git worktree (slug `agent-<id>` → branch `worktree-agent-<id>`
-        // under `.claude/worktrees/`, matching claude's scheme) and run the agent
+        // under `.lingxi/worktrees/`, matching claude's scheme) and run the agent
         // in it; an explicit `cwd` is honoured directly. `remote` is deferred (run
         // local). The handle is held for the post-completion keep/cleanup below.
         // (`def.isolation` frontmatter as a secondary source is not threaded to the
@@ -1657,10 +1657,10 @@ mod tests {
             10,
             2,
             500,
-            Some(("/repo/.claude/worktrees/agent-1", "worktree-agent-1")),
+            Some(("/repo/.lingxi/worktrees/agent-1", "worktree-agent-1")),
         );
         assert!(with_wt.contains(
-            "to continue this agent)\nworktreePath: /repo/.claude/worktrees/agent-1\nworktreeBranch: worktree-agent-1\n<usage>"
+            "to continue this agent)\nworktreePath: /repo/.lingxi/worktrees/agent-1\nworktreeBranch: worktree-agent-1\n<usage>"
         ));
         let without = render_completed_model_content(
             &["did stuff".to_string()],

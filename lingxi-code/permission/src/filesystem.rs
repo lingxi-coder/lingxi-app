@@ -469,7 +469,7 @@ mod tests {
         FsRoots {
             cwd: PathBuf::from("/proj"),
             home: Some(PathBuf::from("/home/u")),
-            claude_home: PathBuf::from("/home/u/.claude"),
+            claude_home: PathBuf::from("/home/u/.lingxi"),
         }
     }
 
@@ -554,7 +554,7 @@ mod tests {
     fn user_settings_root_is_claude_home() {
         // `/sub/**` in USER settings resolves against ~/.claude, not cwd.
         assert!(matches(
-            "/home/u/.claude/sub/x",
+            "/home/u/.lingxi/sub/x",
             "/sub/**",
             PermissionRuleSource::UserSettings
         ));
@@ -690,7 +690,7 @@ mod tests {
 
     #[test]
     fn normalize_case_lowercases_in_filesystem() {
-        assert_eq!(normalize_case_for_comparison(".CLAUDE"), ".claude");
+        assert_eq!(normalize_case_for_comparison(".LINGXI"), ".lingxi");
         assert_eq!(normalize_case_for_comparison("Foo/Bar.RS"), "foo/bar.rs");
     }
 
@@ -740,10 +740,10 @@ mod tests {
 
     #[test]
     fn comparison_is_case_insensitive() {
-        // A mixed-case `.CLAUDE` segment in the target still resolves under a
+        // A mixed-case `.LINGXI` segment in the target still resolves under a
         // lowercase working dir (case-folded comparison).
         assert!(in_working("/Proj/SRC/Main.RS", "/proj/src"));
-        assert!(in_working("/proj/.ClAuDe/x", "/proj/.claude"));
+        assert!(in_working("/proj/.LiNgXi/x", "/proj/.lingxi"));
     }
 
     #[test]

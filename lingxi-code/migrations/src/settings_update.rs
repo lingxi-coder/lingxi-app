@@ -18,7 +18,7 @@ use serde_json::{Map, Value};
 pub enum SettingsSource {
     /// `userSettings` → `<claude-config-home>/settings.json`.
     User,
-    /// `localSettings` → `<project>/.claude/settings.local.json`.
+    /// `localSettings` → `<project>/.lingxi/settings.local.json`.
     Local,
 }
 
@@ -117,7 +117,7 @@ mod tests {
         );
         assert_eq!(
             settings_path(SettingsSource::Local, &t.home, &t.project),
-            t.project.join(".claude").join("settings.local.json")
+            t.project.join(".lingxi").join("settings.local.json")
         );
     }
 

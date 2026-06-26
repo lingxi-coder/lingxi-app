@@ -10,7 +10,7 @@
 //! * `is_supported()` answers a `bool` without panicking.
 //! * On supported platforms, `create_worktree(slug, None, &[])` succeeds and
 //!   the resulting handle uses the claude-code-mandated `worktree-` branch
-//!   prefix and `.claude/worktrees/` layout.
+//!   prefix and `.lingxi/worktrees/` layout.
 //! * Invalid slugs (e.g. with whitespace) are rejected with
 //!   [`WorktreeError::InvalidSlug`] before any git command runs.
 //! * `cleanup_stale(Duration::ZERO)` returns without panicking (its
@@ -65,10 +65,10 @@ async fn test_create_worktree_yields_prefixed_branch<W: WorktreeManager>(w: &W, 
         "branch must use `worktree-` prefix (claude-code parity), got {}",
         handle.branch_name
     );
-    let expected_parent = repo_root.join(".claude").join("worktrees");
+    let expected_parent = repo_root.join(".lingxi").join("worktrees");
     assert!(
         handle.path.starts_with(&expected_parent),
-        "worktree path must be under <root>/.claude/worktrees/, got {:?}",
+        "worktree path must be under <root>/.lingxi/worktrees/, got {:?}",
         handle.path
     );
 }

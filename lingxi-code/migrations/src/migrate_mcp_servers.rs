@@ -1,6 +1,6 @@
 //! `migrateEnableAllProjectMcpServersToSettings.ts` — move the three MCP
-//! approval fields from the project config (inside `~/.claude.json`
-//! `projects[<key>]`) into `<project>/.claude/settings.local.json`.
+//! approval fields from the project config (inside `~/.lingxi.json`
+//! `projects[<key>]`) into `<project>/.lingxi/settings.local.json`.
 //! No Rust reader consumes these settings keys yet; the file-level move is
 //! the faithful contract.
 

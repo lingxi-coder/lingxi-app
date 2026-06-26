@@ -44,7 +44,7 @@ fn mk_storage(tag: &str) -> Option<MacOsKeychainStorage> {
         std::process::id(),
         tag
     ));
-    let default_dir = PathBuf::from("/Users/_lingxi_test_default/.claude");
+    let default_dir = PathBuf::from("/Users/_lingxi_test_default/.lingxi");
     MacOsKeychainStorage::new(user, config_dir, default_dir, String::new()).ok()
 }
 

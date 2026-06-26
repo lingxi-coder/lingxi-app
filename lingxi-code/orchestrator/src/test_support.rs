@@ -919,7 +919,7 @@ impl OrchestratorHandle for MockOrchestratorHandle {
                 .lock()
                 .unwrap()
                 .clone()
-                .unwrap_or_else(|| PathBuf::from("/dev/null/CLAUDE.md")),
+                .unwrap_or_else(|| PathBuf::from("/dev/null/LINGXI.md")),
             exit_code: self.editor_exit_code.load(Ordering::SeqCst),
         })
     }

@@ -184,7 +184,7 @@ pub fn resolve_api_base() -> String {
 ///
 /// NOTE: lingxi has no separate "local" (`settings.local.json`) layer; claude's
 /// `local` source is mapped onto the project layer here (so `--setting-sources
-/// local` still loads the project `.claude/settings.json`).
+/// local` still loads the project `.lingxi/settings.json`).
 #[must_use]
 pub(crate) fn setting_source_flags(setting_sources: Option<&str>) -> (bool, bool) {
     match setting_sources {
@@ -258,7 +258,7 @@ fn load_provider_profiles(include_user: bool, include_project: bool) -> Option<s
 }
 
 /// Load the merged `settings.claudeMdExcludes` (project + user + env layers) —
-/// glob patterns / absolute paths of `CLAUDE.md` files to exclude from the
+/// glob patterns / absolute paths of `LINGXI.md` files to exclude from the
 /// system prompt (claude-code `isClaudeMdExcluded`). Empty when unset.
 fn load_claude_md_excludes(include_user: bool, include_project: bool) -> Vec<String> {
     let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -304,7 +304,7 @@ fn load_routing(include_user: bool, include_project: bool) -> Option<serde_json:
 /// - `api_key` ← env `ANTHROPIC_API_KEY` (empty string is valid).
 /// - `cwd` ← `std::env::current_dir()` (the process has already `chdir`'d into
 ///   any `--cwd`).
-/// - `claude_home` ← config-home (`$CLAUDE_CONFIG_DIR` else `~/.claude`, via
+/// - `claude_home` ← config-home (`$LINGXI_CONFIG_DIR` else `~/.claude`, via
 ///   `run::claude_home_dir`) — the hook / agents / settings loader root.
 /// - `default_model` ← `Argv::model`, else the desktop default.
 /// - `fallback_model` ← `Argv::fallback_model`, but ONLY in `--print` mode
@@ -312,8 +312,8 @@ fn load_routing(include_user: bool, include_project: bool) -> Option<serde_json:
 ///   interactive TUI path resolves it to `None`.
 /// - `provider_profiles` ← settings `providers` block (`load_provider_profiles`).
 /// - `routing` ← settings `routing` block (`load_routing`).
-/// - `mcp_paths` ← `[<cwd>/.mcp.json, ~/.claude.json]` (project `.mcp.json`
-///   preferred over the user/global `mcpServers` inside `~/.claude.json`, matching
+/// - `mcp_paths` ← `[<cwd>/.mcp.json, ~/.lingxi.json]` (project `.mcp.json`
+///   preferred over the user/global `mcpServers` inside `~/.lingxi.json`, matching
 ///   claude-code's user/project MCP scopes).
 /// - `use_noop_permission_gate` ← `true` (the CLI always binds the always-allow
 ///   `NoOpPermissionGate`; a transport binds `AdapterPermissionGate`).
@@ -328,7 +328,7 @@ pub(crate) fn resolve_desktop_config(
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let claude_home = crate::run::claude_home_dir();
     let mut project_mcp_path = cwd.join(".mcp.json");
-    // User/global-scope MCP servers live INSIDE `~/.claude.json` (top-level
+    // User/global-scope MCP servers live INSIDE `~/.lingxi.json` (top-level
     // `mcpServers`), exactly like claude-code — NOT a standalone file under the
     // OS config dir. The loader reads only that key
     // (`mcp::parse_global_config_mcp_servers`).
@@ -427,8 +427,8 @@ pub(crate) fn resolve_desktop_config(
         // from session metadata is a follow-up; the default is byte-identical
         // to the pre-M10 build).
         session_started_as_coordinator: false,
-        // Production memory: load the real `<cwd>/CLAUDE.md` +
-        // `~/.claude/CLAUDE.md` hierarchy into the system prompt (claude-code
+        // Production memory: load the real `<cwd>/LINGXI.md` +
+        // `~/.lingxi/LINGXI.md` hierarchy into the system prompt (claude-code
         // parity), which also makes the session-start
         // `fire_instructions_loaded()` fire over those files. Tests inject a
         // controlled provider (or `None`); only this real-host path reads the FS.
@@ -444,7 +444,7 @@ pub(crate) fn resolve_desktop_config(
         connect_prompt: None,
         // CLI `--system-prompt` / `--system-prompt-file` (print-mode only):
         // override the assembled system prompt for the session. `None` in
-        // interactive mode so the CLAUDE.md hierarchy prompt is used unchanged.
+        // interactive mode so the LINGXI.md hierarchy prompt is used unchanged.
         system_prompt_override: if argv.print {
             argv.resolve_system_prompt()
         } else {
@@ -481,7 +481,7 @@ pub(crate) fn resolve_desktop_config(
         setting_source_scope: (incl_user, incl_project),
     }
     // NOTE: claude-code's `--add-dir` is "Additional directories to allow TOOL
-    // ACCESS to" (NOT CLAUDE.md search — an earlier comment here misread it). It
+    // ACCESS to" (NOT LINGXI.md search — an earlier comment here misread it). It
     // is now wired above into `DesktopConfig.add_dir`, which `engine_desktop::
     // build` unions into the permission policy's working-dir set (parity with a
     // settings `permissions.additionalDirectories` entry).
@@ -567,7 +567,7 @@ pub async fn build_runtime_for_tui(argv: &Argv) -> Result<TuiBuild, InitError> {
 
     // Interactive permission gate: an unresolved mutating `Ask` surfaces the
     // TUI dialog over this channel instead of auto-allowing. AllowAlways
-    // persists to <cwd>/.claude/settings.local.json (via `.with_persist`).
+    // persists to <cwd>/.lingxi/settings.local.json (via `.with_persist`).
     let (perm_tx, perm_rx) =
         tokio::sync::mpsc::channel::<tui::permission_bridge::PermissionExchange>(16);
     let session_allow_rules = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));

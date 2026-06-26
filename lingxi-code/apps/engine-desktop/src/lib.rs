@@ -349,7 +349,7 @@ fn cron_scheduler_enabled(disable_cron_env: Option<&str>) -> bool {
 /// write wins) into a full [`sandbox::runtime_config::SandboxRuntimeConfig`].
 ///
 /// `ctx` carries the session/host seeds (`getClaudeTempDir()`, the settings-file
-/// `deny_write` paths, the managed drop-in dir, `.claude/skills`, …). It is built
+/// `deny_write` paths, the managed drop-in dir, `.lingxi/skills`, …). It is built
 /// by the caller (the composition root has `claude_home`/`cwd`/`managed` in scope,
 /// so the helper stays pure and unit-testable; tests pass a minimal seed). See
 /// the `build()` call site and spec §5 for which seeds have a boot-time analog.
@@ -1022,7 +1022,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     api_base: "https://api.anthropic.com".to_string(),
 ///     api_key: "sk-test".to_string(),
 ///     cwd: PathBuf::from("/tmp/project"),
-///     claude_home: PathBuf::from("/tmp/home/.claude"),
+///     claude_home: PathBuf::from("/tmp/home/.lingxi"),
 ///     default_model: "claude-sonnet-4-20250514".to_string(),
 ///     fallback_model: None,
 ///     provider_profiles: Some(BTreeMap::new()),
@@ -1036,7 +1036,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     injected_permission_gate: None,
 ///     session_started_as_coordinator: false,
 ///     // `None` ⟶ empty memory (deterministic). A production host injects
-///     // `Some(orchestrator::prompt::real_provider())` to load real CLAUDE.md.
+///     // `Some(orchestrator::prompt::real_provider())` to load real LINGXI.md.
 ///     memory_provider: None,
 ///     permission_mode: permission::PermissionMode::Default,
 ///     connect_prompt: None,
@@ -1136,12 +1136,12 @@ pub struct DesktopConfig {
     /// (mode off, `tool_team` unchanged, no teammate spawned). Additive to the
     /// frozen field set.
     pub session_started_as_coordinator: bool,
-    /// The CLAUDE.md hierarchy provider the orchestrator loads project/user
+    /// The LINGXI.md hierarchy provider the orchestrator loads project/user
     /// memory from. `None` (the default) ⟶ the empty
     /// [`StaticMemoryProvider::empty`], so a default build loads NO memory and
     /// is fully deterministic (the boot tests rely on this). A production host
     /// injects `Some(orchestrator::prompt::real_provider())` to load the real
-    /// `<cwd>/CLAUDE.md`, `<cwd>/CLAUDE.local.md`, and `~/.claude/CLAUDE.md`
+    /// `<cwd>/LINGXI.md`, `<cwd>/LINGXI.local.md`, and `~/.lingxi/LINGXI.md`
     /// into the system prompt (claude-code parity), which also makes the
     /// session-start `fire_instructions_loaded()` fire over those files. The
     /// field is injectable (not a `bool` flag) so tests can supply a CONTROLLED
@@ -1167,7 +1167,7 @@ pub struct DesktopConfig {
     /// CLI `--system-prompt <prompt>` / `--system-prompt-file <file>`: override
     /// the assembled system prompt for the session. When `Some`, replaces the
     /// default memory-hierarchy prompt entirely (`OrchestratorConfig.system_prompt_override`).
-    /// `None` (the default) keeps the assembled CLAUDE.md hierarchy prompt
+    /// `None` (the default) keeps the assembled LINGXI.md hierarchy prompt
     /// (byte-identical to before this field was added).
     pub system_prompt_override: Option<String>,
     /// CLI `--append-system-prompt <prompt>` / `--append-system-prompt-file <file>`:
@@ -1351,7 +1351,7 @@ pub async fn desktop_command_registry(
     // (/commit, /diff, /review, /chrome, /ide, …) are served as command-core
     // unimplemented stubs. Register real desktop handlers on `reg` directly here
     // when a future milestone implements them.
-    // SLASH.2: discover + register custom `.claude/commands/**.md` commands
+    // SLASH.2: discover + register custom `.lingxi/commands/**.md` commands
     // (project up to git-root/home, plus user + managed layers), the same
     // layering claude-code's getCommands uses. Registered AFTER builtins so a
     // same-named custom command shadows a builtin (TS findCommand order).
@@ -1905,7 +1905,7 @@ fn sanitize_path_component(name: &str) -> String {
 /// `projectTempDir = <claudeTempDir>/<sanitized-cwd>` (`getProjectTempDir`,
 /// `permissions/filesystem.ts:376-378`).
 ///
-/// Session-scoping (vs the old in-repo `<cwd>/.claude/tasks-output`) keeps
+/// Session-scoping (vs the old in-repo `<cwd>/.lingxi/tasks-output`) keeps
 /// concurrent sessions in one project from clobbering each other's spools and
 /// stops task output from polluting the working tree / git status. Rooting under
 /// the project temp dir also makes reads auto-allowed by claude's
@@ -2454,8 +2454,8 @@ pub async fn build(
     // `# Output Style: <name>` section (Explanatory / Learning builtins). `None`
     // / "default" / unknown ⇒ no section (prompt byte-identical to before).
     orch_cfg.output_style = load_merged_output_style(&cfg.cwd);
-    // OUTSTYLE.3: custom output-style search dirs — user (`~/.claude/output-styles`)
-    // then project (`<cwd>/.claude/output-styles`), in increasing priority so a
+    // OUTSTYLE.3: custom output-style search dirs — user (`~/.lingxi/output-styles`)
+    // then project (`<cwd>/.lingxi/output-styles`), in increasing priority so a
     // project style overrides a user one and both override the builtins. A
     // `settings.outputStyle` naming a disk style now activates it
     // (`outputstyles::resolve_output_style`); absent dirs ⇒ builtin-only.
@@ -2465,7 +2465,7 @@ pub async fn build(
     ];
     // CLI `--system-prompt` / `--system-prompt-file`: override the assembled
     // system prompt for the session. `None` keeps the memory-hierarchy prompt
-    // assembled from CLAUDE.md files (byte-identical to the pre-field state).
+    // assembled from LINGXI.md files (byte-identical to the pre-field state).
     if let Some(override_prompt) = cfg.system_prompt_override.clone() {
         orch_cfg.system_prompt_override = Some(override_prompt);
     }
@@ -2634,8 +2634,8 @@ pub async fn build(
     //     HTTP / Command hook arms run for real.
     //     Memory provider: the production host injects
     //     `cfg.memory_provider = Some(orchestrator::prompt::real_provider())`
-    //     so the orchestrator loads the real `<cwd>/CLAUDE.md` +
-    //     `~/.claude/CLAUDE.md` hierarchy into the system prompt (claude-code
+    //     so the orchestrator loads the real `<cwd>/LINGXI.md` +
+    //     `~/.lingxi/LINGXI.md` hierarchy into the system prompt (claude-code
     //     parity) and `fire_instructions_loaded()` fires over those files.
     //     `None` (the default + every test caller) falls back to the empty
     //     `StaticMemoryProvider`, so a default build loads NO memory and the
@@ -2665,7 +2665,7 @@ pub async fn build(
                 (Arc::new(NoOpPermissionGate), None)
             }
         } else {
-            // (3c) Persist an `AllowAlways` choice to `<cwd>/.claude/settings.local.json`.
+            // (3c) Persist an `AllowAlways` choice to `<cwd>/.lingxi/settings.local.json`.
             let gate = Arc::new(AdapterPermissionGate::new(permission_sink).with_persist(
                 permission::PermissionPaths {
                     claude_home: cfg.claude_home.clone(),
@@ -2695,7 +2695,7 @@ pub async fn build(
         .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
     // All three claude-code MCP scopes (precedence local > project > user):
     // project `.mcp.json` (mcp_paths[0]), user + local both inside the global
-    // config `~/.claude.json` (mcp_paths[1]); local is keyed by the canonical
+    // config `~/.lingxi.json` (mcp_paths[1]); local is keyed by the canonical
     // project key for `cwd`.
     let mut mcp_configs = mcp::load_mcp_servers(&project_mcp_path, &global_mcp_path, &cwd);
     // CLI `--mcp-config` servers: highest precedence — override a discovered
@@ -2726,7 +2726,7 @@ pub async fn build(
     // dispatcher wiring.
 
     // (5.2) HookRegistry — read settings.json hooks from project
-    //       (cwd/.claude/settings.json) then user (claude_home/settings.json),
+    //       (cwd/.lingxi/settings.json) then user (claude_home/settings.json),
     //       project last so it wins on identical command registration. The user
     //       root is `cfg.claude_home` (was `dirs::config_dir()/claude`).
     let mut hook_registry = hooks::HookRegistry::new();
@@ -3161,7 +3161,7 @@ pub async fn build(
 
     // (5.3) Agent catalog — load from project + user agents/. Project wins on
     //       collision (passed SECOND; later paths win). The user agents dir is
-    //       `cfg.claude_home/agents` (was `dirs::home_dir()/.claude/agents`).
+    //       `cfg.claude_home/agents` (was `dirs::home_dir()/.lingxi/agents`).
     let project_agents_dir = cwd.join(branding::DOT_DIR).join("agents");
     let user_agents_dir = cfg.claude_home.join("agents");
     let agents = agent::load_agents_from_dirs(&[
@@ -3200,7 +3200,7 @@ pub async fn build(
     // (5.45) The real desktop `TaskRegistry`, wired into the tool context. Tasks
     //        materialize stdout/stderr under a SESSION-SCOPED project temp dir
     //        `<projectTempDir>/<sessionId>/tasks` (claude-code `getTaskOutputDir`,
-    //        `diskOutput.ts:50-55`) instead of an in-repo `<cwd>/.claude/...`
+    //        `diskOutput.ts:50-55`) instead of an in-repo `<cwd>/.lingxi/...`
     //        path: the session id keeps concurrent sessions in one project from
     //        clobbering each other's spools, and the temp root keeps task output
     //        out of the working tree / git status (T16). The spawner is the
@@ -3513,7 +3513,7 @@ pub async fn build(
     //        closing parity gap §0.3 / §B (the scheduler was never constructed, so
     //        persisted jobs never ran). 1:1 with claude-code `cronTasks.ts`: all
     //        durable jobs live in ONE project-relative file
-    //        `<cwd>/.claude/scheduled_tasks.json` (the same project root the
+    //        `<cwd>/.lingxi/scheduled_tasks.json` (the same project root the
     //        CronCreate/List/Delete tools key off via `BuiltinToolContext.workspace`,
     //        which is `cwd`). `load_persisted` reads `createdAt`/`lastFiredAt` in
     //        epoch ms; next-fire is COMPUTED at runtime from the cron string +
@@ -4128,7 +4128,7 @@ pub async fn build(
 
     // P0.1 ACTIVATION (gated, default OFF). When `CLAUDE_CODE_MEMDIR_PREFETCH`
     // is truthy, wire the memdir-backed memory selector so relevant
-    // `~/.claude/memdir` entries surface each turn (a Haiku-class side query per
+    // `~/.lingxi/memdir` entries surface each turn (a Haiku-class side query per
     // turn over `side_query_client`). The composition-root presence of the
     // prefetch IS the gate — claude-code keeps this behind `tengu_moth_copse`
     // (default false), so unset/false leaves the surfacing channel inert and the
@@ -4231,7 +4231,7 @@ pub async fn build(
     //       `loadAllPluginsCacheOnly()` → `pluginLoader.ts:1887`
     //       `loadPluginsFromMarketplaces({cacheOnly})`; `setup.ts:318`
     //       `loadPluginHooks`). Plugins live under `getPluginsDirectory()` =
-    //       `~/.claude/plugins` (`pluginDirectories.ts:53`), honoring the
+    //       `~/.lingxi/plugins` (`pluginDirectories.ts:53`), honoring the
     //       `CLAUDE_CODE_PLUGIN_CACHE_DIR` override. Discovery is allowlist-
     //       driven (faithful): the `settings.enabledPlugins`
     //       (`plugin@marketplace` → enabled) entries resolve to versioned cache
@@ -4262,13 +4262,13 @@ pub async fn build(
         // allowlist (`plugin@marketplace` → enabled) to versioned cache dirs
         // `cache/{marketplace}/{plugin}/{version}/`, exactly as
         // `loadAllPluginsCacheOnly` (`pluginLoader.ts:1888`) consumes a real
-        // `~/.claude/plugins`. Read `enabledPlugins` from the user then project
+        // `~/.lingxi/plugins`. Read `enabledPlugins` from the user then project
         // settings (project wins), mirroring `getSettings_DEPRECATED()`.
         let enabled = load_enabled_plugins(&cfg.claude_home, &cwd_for_plugins).await;
         let mut discovered = plugin::discover_enabled_plugins(&plugins_dir, &enabled).await;
         // Fallback: when no allowlist resolves anything (e.g. a flat directory
         // of pre-fetched plugin dirs supplied directly, as with `--add-dir`),
-        // flat-walk for direct `.claude-plugin/plugin.json` children. This is
+        // flat-walk for direct `.lingxi-plugin/plugin.json` children. This is
         // NOT the real cache layout but keeps local/dev plugin dirs loadable.
         if discovered.is_empty() {
             discovered = plugin::discover_installed_plugins(&plugins_dir).await;
@@ -4391,7 +4391,7 @@ pub async fn build(
 
     // (7.1) Instruction-load lifecycle: fire the `InstructionsLoaded` hooks now
     //       that memory + the hook registry are wired. claude-code fires this
-    //       fire-and-forget hook once per CLAUDE.md / `CLAUDE.local.md` spliced
+    //       fire-and-forget hook once per LINGXI.md / `LINGXI.local.md` spliced
     //       into context by the eager session-start `getMemoryFiles` pass
     //       (`utils/claudemd.ts:1054-1071`, `utils/hooks.ts:4335-4369`), each
     //       carrying the file's `file_path` / `memory_type` / `load_reason`
@@ -4928,7 +4928,7 @@ mod tests {
     fn test_config(use_noop: bool) -> (tempfile::TempDir, DesktopConfig) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
-        let claude_home = cwd.join(".claude");
+        let claude_home = cwd.join(".lingxi");
         let cfg = DesktopConfig {
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
@@ -5049,9 +5049,9 @@ mod tests {
         let (_tmp, cfg) = test_config(true);
         // Lay down a fixture plugin under `<claude_home>/plugins/myplugin`.
         let plugin_dir = cfg.claude_home.join("plugins").join("myplugin");
-        std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+        std::fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
         std::fs::write(
-            plugin_dir.join(".claude-plugin").join("plugin.json"),
+            plugin_dir.join(".lingxi-plugin").join("plugin.json"),
             r#"{"name":"myplugin","version":"1.0.0"}"#,
         )
         .unwrap();
@@ -5106,9 +5106,9 @@ mod tests {
             .join("acme")
             .join("weather")
             .join("1.0.0");
-        std::fs::create_dir_all(versioned.join(".claude-plugin")).unwrap();
+        std::fs::create_dir_all(versioned.join(".lingxi-plugin")).unwrap();
         std::fs::write(
-            versioned.join(".claude-plugin").join("plugin.json"),
+            versioned.join(".lingxi-plugin").join("plugin.json"),
             r#"{"name":"weather","version":"1.0.0"}"#,
         )
         .unwrap();
@@ -5522,7 +5522,7 @@ mod tests {
     /// once the orchestrator + hook registry are wired, and does so best-effort.
     ///
     /// We register a `SessionStart` command hook in the project
-    /// `cwd/.claude/settings.json` that `build()` reads at boot. `build()` must
+    /// `cwd/.lingxi/settings.json` that `build()` reads at boot. `build()` must
     /// (a) complete successfully — proving the wired `fire_session_start`
     /// (which uses the minimal stub process runner, so the hook command itself
     /// errors `Unsupported`) is best-effort and never breaks boot — and (b)
@@ -5535,9 +5535,9 @@ mod tests {
 
         let (_tmp, cfg) = test_config(true);
         // Project settings the hooks loader reads at boot
-        // (cwd/.claude/settings.json) — a single `SessionStart` command hook.
-        let claude_dir = cfg.cwd.join(".claude");
-        std::fs::create_dir_all(&claude_dir).expect("mk .claude");
+        // (cwd/.lingxi/settings.json) — a single `SessionStart` command hook.
+        let claude_dir = cfg.cwd.join(".lingxi");
+        std::fs::create_dir_all(&claude_dir).expect("mk .lingxi");
         std::fs::write(
             claude_dir.join("settings.json"),
             r#"{ "hooks": { "SessionStart": [ { "hooks": [
@@ -5567,11 +5567,11 @@ mod tests {
     }
 
     /// Instruction-load lifecycle: the boot path fires `InstructionsLoaded`
-    /// (once per loaded CLAUDE.md, load_reason=session_start) right after
+    /// (once per loaded LINGXI.md, load_reason=session_start) right after
     /// `SessionStart`, best-effort.
     ///
     /// We register an `InstructionsLoaded` command hook in the project
-    /// `cwd/.claude/settings.json` that `build()` reads at boot. `build()` must
+    /// `cwd/.lingxi/settings.json` that `build()` reads at boot. `build()` must
     /// (a) complete successfully — proving the wired `fire_instructions_loaded`
     /// (using the minimal stub process runner, so the hook command itself errors
     /// `Unsupported`) is best-effort and never breaks boot — and (b) surface the
@@ -5595,9 +5595,9 @@ mod tests {
 
         let (_tmp, cfg) = test_config(true);
         // Project settings the hooks loader reads at boot
-        // (cwd/.claude/settings.json) — a single `InstructionsLoaded` command hook.
-        let claude_dir = cfg.cwd.join(".claude");
-        std::fs::create_dir_all(&claude_dir).expect("mk .claude");
+        // (cwd/.lingxi/settings.json) — a single `InstructionsLoaded` command hook.
+        let claude_dir = cfg.cwd.join(".lingxi");
+        std::fs::create_dir_all(&claude_dir).expect("mk .lingxi");
         std::fs::write(
             claude_dir.join("settings.json"),
             r#"{ "hooks": { "InstructionsLoaded": [ { "hooks": [
@@ -5631,9 +5631,9 @@ mod tests {
     /// path) using a CONTROLLED in-memory provider — NEVER the real filesystem.
     ///
     /// Production wires `cfg.memory_provider = Some(real_provider())`, which
-    /// reads the developer's real `~/.claude/CLAUDE.md` and would make the boot
+    /// reads the developer's real `~/.lingxi/LINGXI.md` and would make the boot
     /// tests non-deterministic. So this test instead injects
-    /// `Some(StaticMemoryProvider::with_files([..one CLAUDE.md..]))` — the SAME
+    /// `Some(StaticMemoryProvider::with_files([..one LINGXI.md..]))` — the SAME
     /// `cfg.memory_provider` seam the real provider flows through — and proves
     /// that the injected memory flows through `build()` into the orchestrator
     /// and lands in the assembled SYSTEM PROMPT (the GAP-3 memory section —
@@ -5662,8 +5662,8 @@ mod tests {
         // Register an InstructionsLoaded hook so the in-build
         // `fire_instructions_loaded()` actually dispatches over the injected
         // file (best-effort; the stub runner makes it a no-op side-effect-wise).
-        let claude_dir = cfg.cwd.join(".claude");
-        std::fs::create_dir_all(&claude_dir).expect("mk .claude");
+        let claude_dir = cfg.cwd.join(".lingxi");
+        std::fs::create_dir_all(&claude_dir).expect("mk .lingxi");
         std::fs::write(
             claude_dir.join("settings.json"),
             r#"{ "hooks": { "InstructionsLoaded": [ { "hooks": [
@@ -5673,9 +5673,9 @@ mod tests {
         .expect("write settings.json");
 
         // INJECT a CONTROLLED in-memory provider (NOT the real FS): one
-        // top-level project CLAUDE.md. This is the exact `cfg.memory_provider`
+        // top-level project LINGXI.md. This is the exact `cfg.memory_provider`
         // seam production fills with `orchestrator::prompt::real_provider()`.
-        let memory_path = cfg.cwd.join("CLAUDE.md");
+        let memory_path = cfg.cwd.join("LINGXI.md");
         let memory_body = "PROJECT MEMORY: always be terse.";
         let memory_file = orchestrator::prompt::MemoryFile {
             path: memory_path.clone(),
@@ -5700,7 +5700,7 @@ mod tests {
             .await
             .expect("build() with an injected memory provider must succeed");
 
-        // The injected CLAUDE.md must reach the assembled system prompt: the
+        // The injected LINGXI.md must reach the assembled system prompt: the
         // memory section (GAP 3 — preamble + `Contents of …:` per file, 1:1 with
         // claude-code getClaudeMds) carries the file's path + tier description +
         // body. This proves the controlled provider flowed through build() into
@@ -5708,7 +5708,7 @@ mod tests {
         // is closed.
         // R-P1: claudeMd lives in the leading additional-context `<system-reminder>`
         // meta now (built from the SAME `memory_block::format`), NOT the system
-        // prompt. The injected CLAUDE.md must reach THAT.
+        // prompt. The injected LINGXI.md must reach THAT.
         let ctx = rt
             .orchestrator
             .additional_context_preview()
@@ -5725,11 +5725,11 @@ mod tests {
                 "Contents of {} (project instructions, checked into the codebase):",
                 memory_path.display()
             )),
-            "the injected CLAUDE.md must emit a tier-tagged `Contents of …:` marker: {ctx}"
+            "the injected LINGXI.md must emit a tier-tagged `Contents of …:` marker: {ctx}"
         );
         assert!(
             ctx.contains(memory_body),
-            "the injected CLAUDE.md body must appear in the additional-context meta: {ctx}"
+            "the injected LINGXI.md body must appear in the additional-context meta: {ctx}"
         );
 
         // Sanity: the InstructionsLoaded hook the in-build fire dispatched
@@ -5745,7 +5745,7 @@ mod tests {
     /// (`cfg.memory_provider == None` ⟶ `StaticMemoryProvider::empty()`) loads
     /// NO memory, so the system prompt emits NO memory section (no preamble, no
     /// `Contents of …:` markers). This pins that the existing boot tests stay
-    /// deterministic (they never read the real `~/.claude/CLAUDE.md`).
+    /// deterministic (they never read the real `~/.lingxi/LINGXI.md`).
     #[tokio::test]
     async fn build_default_loads_no_memory() {
         let (_tmp, cfg) = test_config(true);
@@ -6869,7 +6869,7 @@ mod tests {
     #[test]
     fn session_task_output_dir_is_session_scoped_under_project_temp() {
         // T16: the task-output dir must be `<projectTempDir>/<sessionId>/tasks`
-        // (claude-code `getTaskOutputDir`), NOT an in-repo `.claude/...` path.
+        // (claude-code `getTaskOutputDir`), NOT an in-repo `.lingxi/...` path.
         // Pin CLAUDE_CODE_TMPDIR so the base is deterministic for the assert.
         // (Single-threaded test sets + clears the env var around the call.)
         let prev = std::env::var_os("CLAUDE_CODE_TMPDIR");
@@ -6898,8 +6898,8 @@ mod tests {
         // child of cwd) — the whole point of T16.
         assert!(!dir.starts_with(cwd), "dir must not be under the repo cwd");
         assert!(
-            !dir.to_string_lossy().contains("/.claude/"),
-            "dir must not be the old in-repo .claude/tasks-output path"
+            !dir.to_string_lossy().contains("/.lingxi/"),
+            "dir must not be the old in-repo .lingxi/tasks-output path"
         );
         assert!(dir.ends_with("tasks"));
     }

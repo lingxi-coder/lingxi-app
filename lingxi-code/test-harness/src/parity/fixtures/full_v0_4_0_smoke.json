@@ -2,8 +2,8 @@
   "_source": "docs/superpowers/specs/2026-05-23-m3-engine-completion-design.md §7 Wire identifiers (lines 620-810); claude-code upstream commit 6a25909 (2026-05-23)",
   "_note": "High-level smoke fixture for v0.4.0. Cross-checks that every M3 sub-plan's locked literal is reachable through its crate's public API. NOT a substitute for the per-subsystem parity drivers (parity_settings_merge.rs etc.); this driver only verifies presence + byte-equality, not behavioral roundtrip. Per v3 §32.6 parity protocol.",
   "settings": {
-    "user_settings_file_suffix": "/.claude/settings.json",
-    "project_settings_file_suffix": ".claude/settings.json",
+    "user_settings_file_suffix": "/.lingxi/settings.json",
+    "project_settings_file_suffix": ".lingxi/settings.json",
     "env_prefix_priority": ["LINGXI_", "CLAUDE_CODE_", "CLAUDE_"],
     "tengu_settings_events": [
       "tengu_settings_loaded",
@@ -12,10 +12,10 @@
     ]
   },
   "memory": {
-    "project_memory_filename": "CLAUDE.md",
-    "local_override_filename": "CLAUDE.local.md",
-    "memdir_suffix": "/.claude/memdir/",
-    "team_memory_suffix": "/.claude/team-mem/",
+    "project_memory_filename": "LINGXI.md",
+    "local_override_filename": "LINGXI.local.md",
+    "memdir_suffix": "/.lingxi/memdir/",
+    "team_memory_suffix": "/.lingxi/team-mem/",
     "max_memory_file_size_bytes": 10485760,
     "memory_age_penalty_days": 30,
     "memory_age_hard_drop_days": 365,

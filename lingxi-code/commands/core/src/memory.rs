@@ -1,4 +1,4 @@
-//! `/memory` — spawns `$EDITOR` on `<config>/claude/CLAUDE.md`.
+//! `/memory` — spawns `$EDITOR` on `<config>/claude/LINGXI.md`.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-10-commands-batch-1.md`
 //! Task 7.
@@ -86,12 +86,12 @@ mod tests {
     #[tokio::test]
     async fn success_renders_template_with_path_and_exit_code() {
         let mock = Arc::new(MockOrchestratorHandle::new());
-        mock.set_memory_path(PathBuf::from("/home/u/.config/claude/CLAUDE.md"));
+        mock.set_memory_path(PathBuf::from("/home/u/.config/claude/LINGXI.md"));
         mock.set_editor_exit_code(0);
         let h = MemoryHandler::new(mock);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Edited /home/u/.config/claude/CLAUDE.md (exit 0).");
+                assert_eq!(s, "Edited /home/u/.config/claude/LINGXI.md (exit 0).");
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -100,12 +100,12 @@ mod tests {
     #[tokio::test]
     async fn nonzero_exit_still_reports_as_edited() {
         let mock = Arc::new(MockOrchestratorHandle::new());
-        mock.set_memory_path(PathBuf::from("/tmp/CLAUDE.md"));
+        mock.set_memory_path(PathBuf::from("/tmp/LINGXI.md"));
         mock.set_editor_exit_code(2);
         let h = MemoryHandler::new(mock);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Edited /tmp/CLAUDE.md (exit 2).");
+                assert_eq!(s, "Edited /tmp/LINGXI.md (exit 2).");
             }
             other => panic!("expected Done, got {other:?}"),
         }

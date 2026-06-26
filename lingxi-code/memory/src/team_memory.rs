@@ -18,7 +18,7 @@ pub struct TeamMemoryWatcher {
 }
 
 impl TeamMemoryWatcher {
-    /// Construct a watcher rooted at `<home>/.claude/team-mem/` when
+    /// Construct a watcher rooted at `<home>/.lingxi/team-mem/` when
     /// `enabled == true`, otherwise no-op.
     #[must_use]
     pub fn new(home: &Path, enabled: bool) -> Self {
@@ -57,7 +57,7 @@ mod tests {
         let w = TeamMemoryWatcher::new(&PathBuf::from("/home/u"), true);
         assert_eq!(
             w.dir(),
-            Some(std::path::Path::new("/home/u/.claude/team-mem"))
+            Some(std::path::Path::new("/home/u/.lingxi/team-mem"))
         );
     }
 }

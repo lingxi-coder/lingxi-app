@@ -110,8 +110,8 @@ pub fn build_mobile_engine(
         let cfg = MobileConfig {
             cwd: std::path::PathBuf::from(&impls.app_sandbox_root),
             claude_home: std::path::PathBuf::from(&impls.app_sandbox_root).join(branding::DOT_DIR),
-            // P0.2: production injects the real CLAUDE.md hierarchy provider so the
-            // orchestrator loads `<cwd>/CLAUDE.md` + `<claude_home>/CLAUDE.md` into
+            // P0.2: production injects the real LINGXI.md hierarchy provider so the
+            // orchestrator loads `<cwd>/LINGXI.md` + `<claude_home>/LINGXI.md` into
             // its system prompt and `fire_instructions_loaded()` fires over them.
             memory_provider: Some(orchestrator::prompt::real_provider()),
             ..MobileConfig::default()
@@ -1091,8 +1091,8 @@ pub fn build_ios_engine(
         let mut cfg = MobileConfig {
             cwd: std::path::PathBuf::from(&app_sandbox_root),
             claude_home: std::path::PathBuf::from(&app_sandbox_root).join(branding::DOT_DIR),
-            // P0.2: production injects the real CLAUDE.md hierarchy provider so the
-            // orchestrator loads `<cwd>/CLAUDE.md` + `<claude_home>/CLAUDE.md` into
+            // P0.2: production injects the real LINGXI.md hierarchy provider so the
+            // orchestrator loads `<cwd>/LINGXI.md` + `<claude_home>/LINGXI.md` into
             // its system prompt and `fire_instructions_loaded()` fires over them.
             memory_provider: Some(orchestrator::prompt::real_provider()),
             ..MobileConfig::default()
@@ -1259,7 +1259,7 @@ mod tests {
             Arc::new(RecordingPermissionSink::default());
         let cfg = MobileConfig {
             cwd: root.to_path_buf(),
-            claude_home: root.join(".claude"),
+            claude_home: root.join(".lingxi"),
             ..MobileConfig::default()
         };
         engine_mobile::build_mobile_engine(cfg, platform, listener, perm_sink)

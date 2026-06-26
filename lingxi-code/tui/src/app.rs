@@ -316,7 +316,7 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
             }
             // (M9-09) `/skills` opens the read-only skill-registry viewer. Like
             // `/agents`/`/stats`, the open needs async work the sync `dispatch`
-            // seam can't `.await`: an on-disk `.claude/skills/` dir walk (the
+            // seam can't `.await`: an on-disk `.lingxi/skills/` dir walk (the
             // project ancestors up to the git root + the user home), reading +
             // parsing each `SKILL.md`. The frozen `OrchestratorHandle` exposes
             // no `list_skills`, so the TUI reads the dirs itself. We RAISE

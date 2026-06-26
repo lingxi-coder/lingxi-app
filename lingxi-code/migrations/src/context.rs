@@ -73,7 +73,7 @@ impl MigrationContext {
 /// Everything one migration run needs: explicit paths (so tests never touch
 /// process env), gates, and an optional telemetry bus.
 pub struct MigrationEnv {
-    /// `~/.claude.json` (resolved by `global_config::global_config_path`).
+    /// `~/.lingxi.json` (resolved by `global_config::global_config_path`).
     pub global_config_path: PathBuf,
     /// `~/.claude` (config home — settings.json + cache/ live here).
     pub claude_config_home: PathBuf,

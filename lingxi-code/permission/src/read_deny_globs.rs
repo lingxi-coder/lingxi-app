@@ -275,7 +275,7 @@ mod tests {
         FsRoots {
             cwd: PathBuf::from(cwd),
             home: Some(PathBuf::from("/home/u")),
-            claude_home: PathBuf::from("/home/u/.claude"),
+            claude_home: PathBuf::from("/home/u/.lingxi"),
         }
     }
 
@@ -335,9 +335,9 @@ mod tests {
         // If cwd is /home/u/.claude, `/x` rebases to `/x`.
         let p = policy_with(
             vec![read_deny("/x/**", PermissionRuleSource::UserSettings)],
-            "/home/u/.claude",
+            "/home/u/.lingxi",
         );
-        let globs = read_deny_exclude_globs(&p, Path::new("/home/u/.claude"));
+        let globs = read_deny_exclude_globs(&p, Path::new("/home/u/.lingxi"));
         assert_eq!(globs, vec!["/x/**".to_string()]);
     }
 
@@ -356,13 +356,13 @@ mod tests {
     #[test]
     fn rooted_rule_in_subdir_of_cwd_keeps_prefix() {
         // UserSettings rule root = /home/u/.claude; cwd = /home/u. The root is a
-        // subdir of cwd, so a `/c/**` pattern rebases to `/.claude/c/**`.
+        // subdir of cwd, so a `/c/**` pattern rebases to `/.lingxi/c/**`.
         let p = policy_with(
             vec![read_deny("/c/**", PermissionRuleSource::UserSettings)],
             "/home/u",
         );
         let globs = read_deny_exclude_globs(&p, Path::new("/home/u"));
-        assert_eq!(globs, vec!["/.claude/c/**".to_string()]);
+        assert_eq!(globs, vec!["/.lingxi/c/**".to_string()]);
     }
 
     #[test]

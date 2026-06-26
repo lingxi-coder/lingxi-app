@@ -339,11 +339,11 @@ pub struct LoopFile {
     pub content: String,
 }
 
-/// `oKi` / `readLoopFile` (cc_all.txt:504966): reads `<cwd>/.claude/loop.md` then
+/// `oKi` / `readLoopFile` (cc_all.txt:504966): reads `<cwd>/.lingxi/loop.md` then
 /// `<cwd>/loop.md`, trims, skips empty, truncates to `zIn` bytes. Returns the
 /// first non-empty match (path + content) or `None`.
 // PARITY: binary oKi (cc_all.txt:504966). The binary uses `dc()` (project root)
-// for `.claude/loop.md` and `Zn()` (cwd) for `loop.md`; the port reads both
+// for `.lingxi/loop.md` and `Zn()` (cwd) for `loop.md`; the port reads both
 // relative to the supplied `cwd` (the bridge passes the session cwd; in practice
 // `dc()==Zn()` for a single-project session).
 #[must_use]

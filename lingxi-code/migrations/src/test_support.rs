@@ -8,7 +8,7 @@ use telemetry::sink::{AnalyticsSink, LogEventMetadata};
 use telemetry::AnalyticsBus;
 
 /// Process-wide lock for tests that mutate env vars (`HOME`,
-/// `CLAUDE_CONFIG_DIR`, `DISABLE_AUTOUPDATER`, provider gates). Cargo runs
+/// `LINGXI_CONFIG_DIR`, `DISABLE_AUTOUPDATER`, provider gates). Cargo runs
 /// tests in parallel threads sharing the process env; hold this for the
 /// test's whole body.
 pub fn env_lock() -> MutexGuard<'static, ()> {
@@ -19,13 +19,13 @@ pub fn env_lock() -> MutexGuard<'static, ()> {
 }
 
 /// A throwaway config universe: `dir` is a tempdir acting as the Claude
-/// config home; `global` is the `~/.claude.json`-equivalent path inside it.
+/// config home; `global` is the `~/.lingxi.json`-equivalent path inside it.
 pub struct TempConfig {
     /// Owns the tempdir (deleted on drop).
     pub _tmp: tempfile::TempDir,
     /// Stand-in for `~/.claude` (claude config home).
     pub home: PathBuf,
-    /// Stand-in for `~/.claude.json` (global config file).
+    /// Stand-in for `~/.lingxi.json` (global config file).
     pub global: PathBuf,
     /// Stand-in project directory (for settings.local.json).
     pub project: PathBuf,

@@ -1,5 +1,5 @@
 //! `/doctor` check runners. Ships 7 checks (T2 step 6 + T12; plus the global
-//! `~/.claude.json` config probe — claude-code's doctor diagnoses both the
+//! `~/.lingxi.json` config probe — claude-code's doctor diagnoses both the
 //! `tr()`-rooted config-home tree AND the global config file).
 //!
 //! Each check returns a [`DoctorCheck`] with a `Pass`/`Warn`/`Fail` status.
@@ -10,7 +10,7 @@ use std::path::Path;
 use traits::{CheckStatus, DoctorCheck, DoctorReport, DoctorSummary};
 
 /// Run all doctor checks against the supplied config-dir root (the `tr()`-rooted
-/// config-home tree) plus the global config file (`~/.claude.json`, passed
+/// config-home tree) plus the global config file (`~/.lingxi.json`, passed
 /// separately because it is the one path NOT under `tr()`), and aggregate the
 /// results.
 pub async fn run_all(config_dir: &Path, global_config_path: Option<&Path>) -> DoctorReport {
@@ -68,7 +68,7 @@ async fn check_config_dir(p: &Path) -> DoctorCheck {
     }
 }
 
-/// Probe the global config file `~/.claude.json` — claude-code's doctor names
+/// Probe the global config file `~/.lingxi.json` — claude-code's doctor names
 /// this file literally in its writability error and diagnoses it alongside the
 /// config-home tree. A corrupt (unparseable) global config breaks every config
 /// read, so it Fails; a present-but-read-only file Fails; an absent file is fine
@@ -79,7 +79,7 @@ async fn check_global_config(path: Option<&Path>) -> DoctorCheck {
         return DoctorCheck {
             name,
             status: CheckStatus::Warn,
-            detail: Some("could not resolve the global config (~/.claude.json) path".to_string()),
+            detail: Some("could not resolve the global config (~/.lingxi.json) path".to_string()),
         };
     };
     match tokio::fs::read(path).await {
@@ -299,7 +299,7 @@ mod tests {
     #[tokio::test]
     async fn run_all_returns_7_checks() {
         let tmp = std::env::temp_dir().join("lingxi_diag_test");
-        let global = tmp.join(".claude.json");
+        let global = tmp.join(".lingxi.json");
         let report = run_all(&tmp, Some(&global)).await;
         assert_eq!(report.checks.len(), 7, "doctor must run 7 checks");
         // Summary tallies match check count.
@@ -310,7 +310,7 @@ mod tests {
     #[tokio::test]
     async fn global_config_check_corrupt_is_fail() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".claude.json");
+        let path = dir.path().join(".lingxi.json");
         tokio::fs::write(&path, b"{ not json").await.unwrap();
         let c = check_global_config(Some(&path)).await;
         assert_eq!(c.name, "global-config");
@@ -320,7 +320,7 @@ mod tests {
     #[tokio::test]
     async fn global_config_check_valid_is_pass() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".claude.json");
+        let path = dir.path().join(".lingxi.json");
         tokio::fs::write(&path, br#"{"numStartups":1}"#).await.unwrap();
         let c = check_global_config(Some(&path)).await;
         assert!(matches!(c.status, CheckStatus::Pass));
@@ -328,10 +328,10 @@ mod tests {
 
     #[tokio::test]
     async fn global_config_check_absent_is_pass() {
-        // Fresh install: `~/.claude.json` not yet created — must Pass (it is
+        // Fresh install: `~/.lingxi.json` not yet created — must Pass (it is
         // written on the first config change), not Fail.
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".claude.json"); // never created
+        let path = dir.path().join(".lingxi.json"); // never created
         let c = check_global_config(Some(&path)).await;
         assert!(matches!(c.status, CheckStatus::Pass));
     }

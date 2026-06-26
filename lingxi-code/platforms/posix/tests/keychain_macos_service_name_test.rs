@@ -7,7 +7,7 @@ use std::path::PathBuf;
 #[test]
 fn default_dir_yields_empty_hash_suffix() {
     let default_dir = PathBuf::from(format!(
-        "{}/.claude",
+        "{}/.lingxi",
         std::env::var("HOME").unwrap_or_else(|_| "/Users/test".into())
     ));
     let hash = compute_dir_hash(&default_dir, &default_dir);
@@ -16,7 +16,7 @@ fn default_dir_yields_empty_hash_suffix() {
 
 #[test]
 fn non_default_dir_yields_8_char_hex() {
-    let default = PathBuf::from("/Users/test/.claude");
+    let default = PathBuf::from("/Users/test/.lingxi");
     let custom = PathBuf::from("/Users/test/work/.claude-2");
     let hash = compute_dir_hash(&custom, &default);
     assert_eq!(hash.len(), 9, "expected `-` + 8 hex chars, got {hash:?}");

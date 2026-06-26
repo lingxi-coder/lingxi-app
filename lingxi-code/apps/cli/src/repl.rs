@@ -432,12 +432,12 @@ mod tests {
         Arc::new(Mutex::new(out_end))
     }
 
-    /// A temp `~/.claude.json` config path + an un-trusted cwd, isolated from
+    /// A temp `~/.lingxi.json` config path + an un-trusted cwd, isolated from
     /// the real home via a unique tempdir (no `env_lock` needed: we pass the
     /// path explicitly to the gate, never reading `HOME`).
     fn temp_cfg_and_cwd() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let cfg = dir.path().join(".claude.json");
+        let cfg = dir.path().join(".lingxi.json");
         // A real, canonicalizable cwd inside the tempdir.
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).expect("mkdir cwd");

@@ -1174,7 +1174,7 @@ mod tests {
                 "superpowers@marketplace".to_string(),
             )],
             "default",
-            Some("/home/user/.claude/projects/test/memory/"),
+            Some("/home/user/.lingxi/projects/test/memory/"),
             "off",
         );
         let stream = Arc::new(StreamJsonStream::new(params));
@@ -1667,7 +1667,7 @@ mod tests {
             vec!["graphify".to_string()],
             vec![],
             "default",
-            Some("/home/user/.claude/projects/test/memory/"),
+            Some("/home/user/.lingxi/projects/test/memory/"),
             "off",
         );
         let stream = Arc::new(StreamJsonStream::new(params));

@@ -508,7 +508,7 @@ mod tests {
             modified: UNIX_EPOCH + Duration::from_secs(1_609_459_200),
             created: UNIX_EPOCH + Duration::from_secs(1_609_459_200),
             message_count: 7,
-            path: PathBuf::from("/home/u/.claude/sessions/abc.jsonl"),
+            path: PathBuf::from("/home/u/.lingxi/sessions/abc.jsonl"),
         };
         let row = lower_session_metadata(&meta);
         assert_eq!(row.uuid, uuid.to_string());
@@ -516,7 +516,7 @@ mod tests {
         assert_eq!(row.modified_rfc3339, "2021-01-01T00:00:00Z");
         assert_eq!(row.message_count, 7);
         // `.path` is mapped DIRECTLY (plan line 152), not synthesized.
-        assert_eq!(row.path, "/home/u/.claude/sessions/abc.jsonl");
+        assert_eq!(row.path, "/home/u/.lingxi/sessions/abc.jsonl");
     }
 
     #[test]

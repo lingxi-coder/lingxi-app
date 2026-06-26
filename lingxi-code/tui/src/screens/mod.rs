@@ -56,7 +56,7 @@ pub enum Screen {
     /// settings + status/cost, writes ONLY via the `edit_config_file` handoff
     /// (§4 R7 — no inline mutation).
     Settings(settings::SettingsState),
-    /// (M7-14) The Memory file editor — pick a CLAUDE.md tier, edit it
+    /// (M7-14) The Memory file editor — pick a LINGXI.md tier, edit it
     /// inline, save through the M3 store. Carries its own selector/edit
     /// state. Interactive like Resume/Settings: `root::handle_screen_key`
     /// runs the pure `memory::handle_memory_key` (↑/↓ select, Enter edit,
@@ -71,7 +71,7 @@ pub enum Screen {
     /// Esc/`q` cancel-restore). Up/Down LIVE-PREVIEW the highlighted theme by
     /// writing `AppState.theme` directly (the whole UI re-renders); Enter
     /// commits via `set_theme` + best-effort persist; Esc restores the prior
-    /// setting. Persists through the existing `~/.claude/settings.json` `theme`
+    /// setting. Persists through the existing `~/.lingxi/settings.json` `theme`
     /// field (§4 R7 — best-effort, session-only on failure).
     Theme(theme::ThemePickerState),
     /// The `/help` keyboard-shortcuts + slash-command viewer — claude-code

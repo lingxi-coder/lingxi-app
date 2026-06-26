@@ -31,7 +31,7 @@ pub const SUBAGENT_DISPATCHED: &str = "tengu_agent_subagent_dispatched";
 pub const SUBAGENT_COMPLETED: &str = "tengu_agent_subagent_completed";
 /// `tengu_agent_subagent_failed` — dispatched subagent errored.
 pub const SUBAGENT_FAILED: &str = "tengu_agent_subagent_failed";
-/// `tengu_agent_memory_loaded` — CLAUDE.md / memory files merged into prompt.
+/// `tengu_agent_memory_loaded` — LINGXI.md / memory files merged into prompt.
 pub const MEMORY_LOADED: &str = "tengu_agent_memory_loaded";
 /// `tengu_agent_system_prompt_built` — final system prompt was assembled.
 pub const SYSTEM_PROMPT_BUILT: &str = "tengu_agent_system_prompt_built";

@@ -545,7 +545,7 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
         Some(Screen::Settings(_)) => &["Tabs"],
         // Memory has two modes in one reducer: a tier SELECTOR (a `<Select>` list
         // in claude-code's MemoryFileSelector — Up/Down/`j`/`k`/Enter/Esc) and an
-        // inline CLAUDE.md EDITOR (free text). Consult `Select` (the faithful
+        // inline LINGXI.md EDITOR (free text). Consult `Select` (the faithful
         // claude-code context) only in the selector; while editing, `Select`'s
         // `j`/`k`/Enter/Esc would hijack typed chars, so editing falls through
         // (text-entry residual). The OLD `Settings` mapping was wrong here too —
@@ -656,7 +656,7 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
             }
         }
         Some(Screen::Memory(state)) => {
-            // (M7-14) Pick a CLAUDE.md tier, edit it inline, save through the
+            // (M7-14) Pick a LINGXI.md tier, edit it inline, save through the
             // M3 store. Tiers are re-resolved synchronously each key from
             // `hierarchy::walk` (no async open pump). The pure
             // `handle_memory_key` reducer drives selection / editing; we act on
@@ -1298,7 +1298,7 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
     // chords. With the default keymap (gate off / no `keybindings.json`) this
     // resolves the same chords to the same `KeyAction`s the legacy
     // `map_iocraft_key` table below produces — so default behavior is identical.
-    // A user override in `~/.claude/keybindings.json` is honored here.
+    // A user override in `~/.lingxi/keybindings.json` is honored here.
     //
     // Fall-through discipline (so nothing existing regresses):
     //   - `Action` with a mapped `KeyAction`  → dispatch it, done.
@@ -2061,7 +2061,7 @@ pub async fn pump_open_stats(state: &Arc<Mutex<AppState>>) -> bool {
 ///
 /// Mirrors [`pump_open_stats`] (no `OrchestratorHandle` needed): the frozen
 /// `OrchestratorHandle` exposes no `list_skills`, so the data is an on-disk
-/// `.claude/skills/` dir walk (project ancestors up to the git root + the user
+/// `.lingxi/skills/` dir walk (project ancestors up to the git root + the user
 /// home), read + parsed by the pure `skills::load_skill_sections`. The sync
 /// `/skills` submit path raises `AppState.pending_open_skills = true` (it can't
 /// `.await` the walk); this pump — driven by the same 100ms ticker `use_future`
@@ -2151,11 +2151,11 @@ pub async fn pump_open_permissions(state: &Arc<Mutex<AppState>>) -> bool {
 }
 
 /// (M9-10) Resolve the claude config home — the same resolution the rest of the
-/// workspace uses (`$CLAUDE_CONFIG_DIR` → `~/.claude`). Mirrors
+/// workspace uses (`$LINGXI_CONFIG_DIR` → `~/.claude`). Mirrors
 /// `screens::doctor::claude_home_dir`. Falls back to `.` when the home dir is
 /// unknown so the walk simply finds nothing.
 fn claude_home_dir() -> std::path::PathBuf {
-    // claude-code `tr()` `??`: a SET `$CLAUDE_CONFIG_DIR` wins verbatim (incl.
+    // claude-code `tr()` `??`: a SET `$LINGXI_CONFIG_DIR` wins verbatim (incl.
     // empty → cwd-relative); only UNSET falls back to `<home>/.claude`.
     if let Ok(explicit) = std::env::var(branding::CONFIG_DIR_ENV) {
         return std::path::PathBuf::from(explicit);
@@ -2280,7 +2280,7 @@ fn fingerprint_paths(paths: &[(std::path::PathBuf, bool)]) -> crate::screens::st
 /// empty `StatsData::default()` on any I/O failure (the screen then shows the
 /// locked empty state).
 ///
-/// (`/stats` result cache, claude-code `aggregateClaudeCodeStats`) Resolves the
+/// (`/stats` result cache, claude-code `aggregateLingXiStats`) Resolves the
 /// `<claude_home>/projects/` walk root + the [`stats_cache_path`], checks the
 /// in-process [`STATS_MEM_CACHE`] first (a 2nd open within one process returns
 /// instantly), then delegates to the path-parameterized [`aggregate_stats_at`]
@@ -2346,7 +2346,7 @@ fn aggregate_stats_at(
     }
     let data = aggregate(&contribs);
 
-    // Persist the cache, best-effort: a read-only `CLAUDE_CONFIG_DIR` must never
+    // Persist the cache, best-effort: a read-only `LINGXI_CONFIG_DIR` must never
     // break `/stats`, so write failures are swallowed. The tmp-sibling + rename
     // keeps a concurrent reader from seeing a half-written file (mirrors
     // `memory::save_tier_body`). The tmp name carries the PID so two concurrent
@@ -3014,7 +3014,7 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 }
                 // (M9-09 real data) `/skills` open pump. Runs UNCONDITIONALLY
                 // (not gated on a wired `OrchestratorHandle`): the skill data is
-                // an on-disk `.claude/skills/` dir walk that needs no handle.
+                // an on-disk `.lingxi/skills/` dir walk that needs no handle.
                 // No-op (returns false) when no `/skills` request is pending.
                 if pump_open_skills(&state).await {
                     needs_redraw = true;
@@ -4453,7 +4453,7 @@ mod tests {
 
         // settings.local.json now carries the directory.
         let body =
-            std::fs::read_to_string(tmp.join("proj/.claude/settings.local.json")).unwrap();
+            std::fs::read_to_string(tmp.join("proj/.lingxi/settings.local.json")).unwrap();
         assert!(body.contains("/work/added"), "persisted to disk: {body}");
 
         let g = state.lock().await;

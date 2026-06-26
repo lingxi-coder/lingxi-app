@@ -352,7 +352,7 @@ struct MockWtInner {
 #[allow(dead_code)] // M4-04 Tasks 10/11/13 use these helpers
 impl MockWorktreeManager {
     /// Build a fresh `MockWorktreeManager`. Defaults to creating worktrees
-    /// under `/tmp/mock-repo/.claude/worktrees/<flatten(slug)>`.
+    /// under `/tmp/mock-repo/.lingxi/worktrees/<flatten(slug)>`.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -422,7 +422,7 @@ impl WorktreeManager for MockWorktreeManager {
             .next_path_root
             .clone()
             .unwrap_or_else(|| PathBuf::from("/tmp/mock-repo"));
-        let path = root.join(".claude").join("worktrees").join(&flat);
+        let path = root.join(".lingxi").join("worktrees").join(&flat);
         let handle = WorktreeHandle {
             path,
             branch_name: format!("worktree-{flat}"),
@@ -642,7 +642,7 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
 
 /// Like [`shell_test_ctx`] but with the project `workspace` pinned to
 /// `workspace`. Used by the cron tools' tests, which key their single
-/// `<workspace>/.claude/scheduled_tasks.json` persistence off the project root,
+/// `<workspace>/.lingxi/scheduled_tasks.json` persistence off the project root,
 /// so each test can isolate it in its own tempdir.
 #[must_use]
 #[allow(dead_code)]

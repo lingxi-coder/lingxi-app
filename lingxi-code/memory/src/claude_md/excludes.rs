@@ -1,4 +1,4 @@
-//! `claudeMdExcludes` — exclude `CLAUDE.md` files matching glob patterns or
+//! `claudeMdExcludes` — exclude `LINGXI.md` files matching glob patterns or
 //! absolute paths from loading. 1:1 with claude-code `isClaudeMdExcluded`
 //! (`claudemd.ts:547-573`) + `resolveExcludePatterns`. Only `User` / `Project` /
 //! `Local` tier files are excludable; `Managed` (and AutoMem/TeamMem) are never
@@ -48,7 +48,7 @@ impl ClaudeMdExcluder {
         self.patterns.is_empty()
     }
 
-    /// Whether the `CLAUDE.md` at `path` (tier `tier`) is excluded. Only
+    /// Whether the `LINGXI.md` at `path` (tier `tier`) is excluded. Only
     /// `User` / `Project` / `Local` are excludable; `Managed` is never excluded
     /// (`isClaudeMdExcluded`, `claudemd.ts:548-550`).
     #[must_use]
@@ -128,15 +128,15 @@ mod tests {
     fn empty_excluder_excludes_nothing() {
         let ex = ClaudeMdExcluder::new(&[]);
         assert!(ex.is_empty());
-        assert!(!ex.is_excluded(Path::new("/p/CLAUDE.md"), ClaudeMdTier::Project));
+        assert!(!ex.is_excluded(Path::new("/p/LINGXI.md"), ClaudeMdTier::Project));
     }
 
     #[test]
     fn managed_tier_is_never_excluded() {
-        let ex = ClaudeMdExcluder::new(&["**/CLAUDE.md".to_string()]);
+        let ex = ClaudeMdExcluder::new(&["**/LINGXI.md".to_string()]);
         // A glob that DOES match the path, but Managed tier is exempt.
-        assert!(!ex.is_excluded(Path::new("/mgr/CLAUDE.md"), ClaudeMdTier::Managed));
-        assert!(ex.is_excluded(Path::new("/proj/CLAUDE.md"), ClaudeMdTier::Project));
+        assert!(!ex.is_excluded(Path::new("/mgr/LINGXI.md"), ClaudeMdTier::Managed));
+        assert!(ex.is_excluded(Path::new("/proj/LINGXI.md"), ClaudeMdTier::Project));
     }
 
     #[test]
@@ -156,15 +156,15 @@ mod tests {
     #[test]
     fn glob_and_absolute_patterns_match() {
         let ex = ClaudeMdExcluder::new(&[
-            "**/secret/CLAUDE.md".to_string(),
-            "/etc/proj/CLAUDE.md".to_string(),
+            "**/secret/LINGXI.md".to_string(),
+            "/etc/proj/LINGXI.md".to_string(),
         ]);
-        assert!(ex.is_excluded(Path::new("/a/secret/CLAUDE.md"), ClaudeMdTier::User));
-        assert!(ex.is_excluded(Path::new("/etc/proj/CLAUDE.md"), ClaudeMdTier::Local));
-        assert!(!ex.is_excluded(Path::new("/a/public/CLAUDE.md"), ClaudeMdTier::User));
+        assert!(ex.is_excluded(Path::new("/a/secret/LINGXI.md"), ClaudeMdTier::User));
+        assert!(ex.is_excluded(Path::new("/etc/proj/LINGXI.md"), ClaudeMdTier::Local));
+        assert!(!ex.is_excluded(Path::new("/a/public/LINGXI.md"), ClaudeMdTier::User));
         // `*` does not cross `/`.
-        assert!(!ex.is_excluded(Path::new("/a/b/CLAUDE.md"), ClaudeMdTier::Project)
-            && ClaudeMdExcluder::new(&["/a/*/CLAUDE.md".to_string()])
-                .is_excluded(Path::new("/a/b/CLAUDE.md"), ClaudeMdTier::Project));
+        assert!(!ex.is_excluded(Path::new("/a/b/LINGXI.md"), ClaudeMdTier::Project)
+            && ClaudeMdExcluder::new(&["/a/*/LINGXI.md".to_string()])
+                .is_excluded(Path::new("/a/b/LINGXI.md"), ClaudeMdTier::Project));
     }
 }

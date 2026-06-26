@@ -3,7 +3,7 @@
 //! after `fire_session_start`.
 //!
 //! Byte-faithful to claude-code: the eager session-start `getMemoryFiles` pass
-//! fires `executeInstructionsLoadedHooks` once per CLAUDE.md / `CLAUDE.local.md`
+//! fires `executeInstructionsLoadedHooks` once per LINGXI.md / `LINGXI.local.md`
 //! spliced into context (`utils/claudemd.ts:1054-1071`, `utils/hooks.ts:4335-4369`),
 //! each carrying that file's `file_path` / `memory_type` / `load_reason`. Every
 //! top-level (parent-less) file reports `load_reason: 'session_start'`. The
@@ -14,7 +14,7 @@
 //! Scenarios:
 //! 1. One fire per loaded instruction file, carrying the correct
 //!    `(file_path, memory_type, load_reason)` triple — `Project` for a repo
-//!    CLAUDE.md, `Local` for a `CLAUDE.local.md`.
+//!    LINGXI.md, `Local` for a `LINGXI.local.md`.
 //! 2. A hook that itself returns an error outcome does NOT panic / break the
 //!    (best-effort) fire helper.
 //! 3. No `InstructionsLoaded` hook registered ⇒ firing is a strict no-op.
@@ -181,18 +181,18 @@ async fn fire_instructions_loaded_dispatches_one_event_per_file() {
         Arc::new(RecordingHandler { log: log.clone() }),
     );
 
-    // A repo CLAUDE.md (Project) and a repo CLAUDE.local.md (Local). The
+    // A repo LINGXI.md (Project) and a repo LINGXI.local.md (Local). The
     // `memory_type` is now taken straight from each file's tier.
     let cwd = PathBuf::from("/work/repo");
     let project = MemoryFile {
-        path: cwd.join("CLAUDE.md"),
+        path: cwd.join("LINGXI.md"),
         body: "project rules".into(),
         is_local_override: false,
         tier: memory::claude_md::ClaudeMdTier::Project,
         globs: None,
     };
     let local = MemoryFile {
-        path: cwd.join("CLAUDE.local.md"),
+        path: cwd.join("LINGXI.local.md"),
         body: "local override".into(),
         is_local_override: true,
         tier: memory::claude_md::ClaudeMdTier::Local,
@@ -239,7 +239,7 @@ async fn managed_tier_file_reports_memory_type_managed() {
 
     let cwd = PathBuf::from("/work/repo");
     let managed = MemoryFile {
-        path: PathBuf::from("/Library/Application Support/ClaudeCode/CLAUDE.md"),
+        path: PathBuf::from("/Library/Application Support/LingXi/LINGXI.md"),
         body: "enterprise policy".into(),
         is_local_override: false,
         tier: memory::claude_md::ClaudeMdTier::Managed,
@@ -275,7 +275,7 @@ async fn failing_instructions_loaded_hook_does_not_break_fire() {
     exec.register_builtin(Arc::new(FailingHandler));
     let cwd = PathBuf::from("/work/repo");
     let file = MemoryFile {
-        path: cwd.join("CLAUDE.md"),
+        path: cwd.join("LINGXI.md"),
         body: "x".into(),
         is_local_override: false,
         tier: memory::claude_md::ClaudeMdTier::Project,
@@ -300,7 +300,7 @@ async fn fire_instructions_loaded_is_noop_without_a_registered_hook() {
     );
     let cwd = PathBuf::from("/work/repo");
     let file = MemoryFile {
-        path: cwd.join("CLAUDE.md"),
+        path: cwd.join("LINGXI.md"),
         body: "x".into(),
         is_local_override: false,
         tier: memory::claude_md::ClaudeMdTier::Project,

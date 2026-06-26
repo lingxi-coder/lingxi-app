@@ -3,13 +3,13 @@
 //! `TeamCreate` / `TeamDelete` tools.
 //!
 //! Layout (claude-code):
-//! - team dir:  `~/.claude/teams/{sanitize(name)}/`
-//! - team file: `~/.claude/teams/{sanitize(name)}/config.json`
-//! - task dir:  `~/.claude/tasks/{sanitize(name)}/`
+//! - team dir:  `~/.lingxi/teams/{sanitize(name)}/`
+//! - team file: `~/.lingxi/teams/{sanitize(name)}/config.json`
+//! - task dir:  `~/.lingxi/tasks/{sanitize(name)}/`
 //!
 //! NOTE: this is the claude-code *coordinator* team-file subsystem
-//! (`~/.claude/teams/`), DISTINCT from the LingXi-internal `team-mem`
-//! subsystem in `tools/team` (`~/.claude/team-mem/`). They do not share a
+//! (`~/.lingxi/teams/`), DISTINCT from the LingXi-internal `team-mem`
+//! subsystem in `tools/team` (`~/.lingxi/team-mem/`). They do not share a
 //! directory or a schema.
 
 use std::path::{Path, PathBuf};
@@ -76,7 +76,7 @@ pub fn sanitize_name(name: &str) -> String {
         .collect()
 }
 
-/// Resolve the config-home root: `$CLAUDE_CONFIG_DIR` when set wins (claude-code
+/// Resolve the config-home root: `$LINGXI_CONFIG_DIR` when set wins (claude-code
 /// `tr()` `??`: an empty value is honored verbatim → cwd-relative), else
 /// `$HOME/.claude` (tests redirect `$HOME` to a tempdir). Returns `None` when
 /// neither resolves.
@@ -130,7 +130,7 @@ pub fn write_team_file(home: &Path, name: &str, file: &TeamFile) -> std::io::Res
 
 /// `cleanupTeamDirectories` (`TeamDeleteTool.ts:101` → `teamHelpers.ts:641-683`),
 /// reduced to the directory removal the coordinator needs: remove the team dir
-/// (`~/.claude/teams/{name}/`) and the tasks dir (`~/.claude/tasks/{name}/`).
+/// (`~/.lingxi/teams/{name}/`) and the tasks dir (`~/.lingxi/tasks/{name}/`).
 /// Worktree teardown is out of scope (in-process teammates have no worktrees).
 /// Best-effort: a missing dir is not an error.
 pub fn cleanup_team_directories(home: &Path, name: &str) {
@@ -167,21 +167,21 @@ mod tests {
 
     #[test]
     fn paths_compose() {
-        let home = PathBuf::from("/home/u/.claude");
+        let home = PathBuf::from("/home/u/.lingxi");
         assert_eq!(
             team_file_path(&home, "Alpha Team"),
-            PathBuf::from("/home/u/.claude/teams/alpha-team/config.json")
+            PathBuf::from("/home/u/.lingxi/teams/alpha-team/config.json")
         );
         assert_eq!(
             task_dir(&home, "Alpha Team"),
-            PathBuf::from("/home/u/.claude/tasks/alpha-team")
+            PathBuf::from("/home/u/.lingxi/tasks/alpha-team")
         );
     }
 
     #[test]
     fn write_then_exists_then_cleanup() {
         let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join(".claude");
+        let home = tmp.path().join(".lingxi");
         assert!(!team_file_exists(&home, "alpha"));
 
         let file = TeamFile {

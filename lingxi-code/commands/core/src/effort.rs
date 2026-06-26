@@ -16,7 +16,7 @@
 //! settings crate is a read-only loader, but a write is not load-bearing on
 //! it: we persist with the same direct-fs seam `export.rs` uses, mirroring
 //! `updateSettingsForSource` byte-for-byte (merge into the existing
-//! `~/.claude/settings.json`, treat a missing value as a delete, never
+//! `~/.lingxi/settings.json`, treat a missing value as a delete, never
 //! overwrite a JSON-syntax-broken file). [`persist_effort_level`] is the port.
 //!
 //! Per [`to_persistable`] (TS `Tve` / `toPersistableEffort`) only
@@ -207,7 +207,7 @@ fn to_persistable(level: EffortLevel) -> Option<EffortLevel> {
     }
 }
 
-/// `<config-home>/settings.json` — `$CLAUDE_CONFIG_DIR` when set (claude-code
+/// `<config-home>/settings.json` — `$LINGXI_CONFIG_DIR` when set (claude-code
 /// `tr()` `??`: an empty value is honored verbatim), else `~/.claude`.
 /// Byte-identical to the engine settings loader
 /// (`engine/src/settings/loader.rs` `config_home_dir` + `user_settings_path`)
@@ -563,7 +563,7 @@ mod tests {
 
     /// Env-mutating tests must run serialized: they share the one process-wide
     /// `CLAUDE_CODE_EFFORT_LEVEL` *and* `HOME` (now that the set/clear paths
-    /// write `~/.claude/settings.json`). A module-level mutex serializes them.
+    /// write `~/.lingxi/settings.json`). A module-level mutex serializes them.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// RAII test fixture: holds [`ENV_LOCK`], redirects `HOME` to a fresh
@@ -601,9 +601,9 @@ mod tests {
             }
         }
 
-        /// The redirected `~/.claude/settings.json` path.
+        /// The redirected `~/.lingxi/settings.json` path.
         fn settings_path(&self) -> PathBuf {
-            self.home.join(".claude").join("settings.json")
+            self.home.join(".lingxi").join("settings.json")
         }
 
         /// Pre-seed `settings.json` with the given raw bytes (for the

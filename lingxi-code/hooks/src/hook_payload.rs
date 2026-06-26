@@ -2549,7 +2549,7 @@ mod tests {
             agent_id: None,
             agent_type: None,
             effort: None,
-            file_path: "/work/CLAUDE.md".into(),
+            file_path: "/work/LINGXI.md".into(),
             memory_type: crate::events::InstructionsMemoryType::Project,
             load_reason: crate::events::InstructionsLoadReason::SessionStart,
             globs: None,
@@ -2559,7 +2559,7 @@ mod tests {
         let s = serde_json::to_string(&p).unwrap();
         assert_eq!(
             s,
-            r#"{"hook_event_name":"InstructionsLoaded","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","file_path":"/work/CLAUDE.md","memory_type":"Project","load_reason":"session_start"}"#
+            r#"{"hook_event_name":"InstructionsLoaded","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","file_path":"/work/LINGXI.md","memory_type":"Project","load_reason":"session_start"}"#
         );
     }
 
@@ -2579,12 +2579,12 @@ mod tests {
             load_reason: crate::events::InstructionsLoadReason::Compact,
             globs: Some(vec!["src/**/*.rs".into()]),
             trigger_file_path: Some("/w/src/main.rs".into()),
-            parent_file_path: Some("/w/CLAUDE.md".into()),
+            parent_file_path: Some("/w/LINGXI.md".into()),
         };
         let s = serde_json::to_string(&p).unwrap();
         assert_eq!(
             s,
-            r#"{"hook_event_name":"InstructionsLoaded","session_id":"s","transcript_path":"/t","cwd":"/w","file_path":"/w/rules/api.md","memory_type":"Managed","load_reason":"compact","globs":["src/**/*.rs"],"trigger_file_path":"/w/src/main.rs","parent_file_path":"/w/CLAUDE.md"}"#
+            r#"{"hook_event_name":"InstructionsLoaded","session_id":"s","transcript_path":"/t","cwd":"/w","file_path":"/w/rules/api.md","memory_type":"Managed","load_reason":"compact","globs":["src/**/*.rs"],"trigger_file_path":"/w/src/main.rs","parent_file_path":"/w/LINGXI.md"}"#
         );
     }
 

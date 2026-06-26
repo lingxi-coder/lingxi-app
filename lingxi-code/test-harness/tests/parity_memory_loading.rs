@@ -1,4 +1,4 @@
-//! Parity fixture: CLAUDE.md hierarchy walk (no size drop).
+//! Parity fixture: LINGXI.md hierarchy walk (no size drop).
 //!
 //! Locks the shape of `claude_md::hierarchy::walk` + `claude_md::loader::load_file`
 //! against claude-code's reference (`src/memory/hierarchy.ts:22-71`,

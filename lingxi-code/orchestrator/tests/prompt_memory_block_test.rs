@@ -27,13 +27,13 @@ fn single_entry_shape() {
     // GAP 3: 1:1 with claude-code getClaudeMds — preamble + `Contents of …`,
     // tier description, trimmed body. NO enclosing tag, NO trailing newline.
     let out = memory_block::format(&[mf(
-        "/home/u/.claude/CLAUDE.md",
+        "/home/u/.lingxi/LINGXI.md",
         "global notes",
         ClaudeMdTier::User,
     )]);
     let expected = format!(
         "{PREAMBLE}\n\n\
-Contents of /home/u/.claude/CLAUDE.md (user's private global instructions for all projects):\n\n\
+Contents of /home/u/.lingxi/LINGXI.md (user's private global instructions for all projects):\n\n\
 global notes"
     );
     assert_eq!(out, expected);
@@ -45,17 +45,17 @@ fn multi_entry_splice_order_locked() {
     // Order verified here: User, then Project, then Local. Each tier gets its
     // own description; blocks are joined by a blank line; no trailing newline.
     let out = memory_block::format(&[
-        mf("/home/u/.claude/CLAUDE.md", "home", ClaudeMdTier::User),
-        mf("/proj/CLAUDE.md", "repo", ClaudeMdTier::Project),
-        mf("/proj/CLAUDE.local.md", "local", ClaudeMdTier::Local),
+        mf("/home/u/.lingxi/LINGXI.md", "home", ClaudeMdTier::User),
+        mf("/proj/LINGXI.md", "repo", ClaudeMdTier::Project),
+        mf("/proj/LINGXI.local.md", "local", ClaudeMdTier::Local),
     ]);
     let expected = format!(
         "{PREAMBLE}\n\n\
-Contents of /home/u/.claude/CLAUDE.md (user's private global instructions for all projects):\n\n\
+Contents of /home/u/.lingxi/LINGXI.md (user's private global instructions for all projects):\n\n\
 home\n\n\
-Contents of /proj/CLAUDE.md (project instructions, checked into the codebase):\n\n\
+Contents of /proj/LINGXI.md (project instructions, checked into the codebase):\n\n\
 repo\n\n\
-Contents of /proj/CLAUDE.local.md (user's private project instructions, not checked in):\n\n\
+Contents of /proj/LINGXI.local.md (user's private project instructions, not checked in):\n\n\
 local"
     );
     assert_eq!(out, expected);
@@ -68,13 +68,13 @@ fn managed_tier_uses_organization_managed_description() {
     // "global instructions" wording (the prior claudemd.ts:1177 citation was
     // stale src; verified against the v2.1.193 binary switch).
     let out = memory_block::format(&[mf(
-        "/Library/Application Support/ClaudeCode/CLAUDE.md",
+        "/Library/Application Support/LingXi/LINGXI.md",
         "policy",
         ClaudeMdTier::Managed,
     )]);
     let expected = format!(
         "{PREAMBLE}\n\n\
-Contents of /Library/Application Support/ClaudeCode/CLAUDE.md (organization-managed policy instructions):\n\n\
+Contents of /Library/Application Support/LingXi/LINGXI.md (organization-managed policy instructions):\n\n\
 policy"
     );
     assert_eq!(out, expected);
@@ -88,7 +88,7 @@ fn conditional_rule_with_paths_is_excluded_from_eager_block() {
     // exercised below by constructing files as the provider would after its
     // `globs.is_some()` drop.)
     let included = MemoryFile {
-        path: PathBuf::from("/proj/.claude/rules/always.md"),
+        path: PathBuf::from("/proj/.lingxi/rules/always.md"),
         body: "always".into(),
         is_local_override: false,
         tier: ClaudeMdTier::Project,
@@ -97,7 +97,7 @@ fn conditional_rule_with_paths_is_excluded_from_eager_block() {
     // The provider would have dropped this one (globs.is_some()); assert that a
     // hand-rolled eager set excludes it and keeps only the unconditional rule.
     let conditional = MemoryFile {
-        path: PathBuf::from("/proj/.claude/rules/scoped.md"),
+        path: PathBuf::from("/proj/.lingxi/rules/scoped.md"),
         body: "scoped".into(),
         is_local_override: false,
         tier: ClaudeMdTier::Project,
@@ -122,14 +122,14 @@ async fn real_provider_loads_in_spec_splice_order_via_temp_repo() {
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path().join("home");
-    std::fs::create_dir_all(home.join(".claude")).unwrap();
-    std::fs::write(home.join(".claude").join("CLAUDE.md"), "HOME").unwrap();
+    std::fs::create_dir_all(home.join(".lingxi")).unwrap();
+    std::fs::write(home.join(".lingxi").join("LINGXI.md"), "HOME").unwrap();
 
     let proj = tmp.path().join("proj");
-    let rules = proj.join(".claude").join("rules");
+    let rules = proj.join(".lingxi").join("rules");
     std::fs::create_dir_all(&rules).unwrap();
-    std::fs::write(proj.join("CLAUDE.md"), "REPO").unwrap();
-    std::fs::write(proj.join("CLAUDE.local.md"), "LOCAL").unwrap();
+    std::fs::write(proj.join("LINGXI.md"), "REPO").unwrap();
+    std::fs::write(proj.join("LINGXI.local.md"), "LOCAL").unwrap();
     // §F: an unconditional rule (no `paths:`) is eagerly injected; a conditional
     // rule (with `paths:`) is now RETAINED by the provider (globs intact) so the
     // orchestrator can lazily activate it — it is only EXCLUDED from the eager
@@ -161,7 +161,7 @@ async fn real_provider_loads_in_spec_splice_order_via_temp_repo() {
     let bodies: Vec<String> = files.iter().map(|f| f.body.clone()).collect();
     // §F: `load()` now RETAINS the conditional rule (with globs). Splice order:
     // HOME → REPO → unconditional rule → conditional rule → LOCAL. (Within the
-    // `.claude/rules/` dir the walk emits `a-always.md` before `b-scoped.md`.)
+    // `.lingxi/rules/` dir the walk emits `a-always.md` before `b-scoped.md`.)
     assert_eq!(bodies, vec!["HOME", "REPO", "ALWAYS", "SCOPED", "LOCAL"]);
     // The included unconditional rule carries no globs; tiers are tagged.
     let always = files.iter().find(|f| f.body == "ALWAYS").unwrap();

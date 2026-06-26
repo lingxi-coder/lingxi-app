@@ -125,7 +125,7 @@ struct Frontmatter {
 /// Parse a single agent markdown buffer.
 ///
 /// `source` and `base_dir` are supplied by the caller (so the loader can
-/// tag files coming from `~/.claude/agents/` differently from project
+/// tag files coming from `~/.lingxi/agents/` differently from project
 /// files). `path_for_error` is used purely for error messages.
 ///
 /// Frontmatter format: leading `---\n…\n---\n` (followed by the markdown

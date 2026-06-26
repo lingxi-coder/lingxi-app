@@ -83,12 +83,12 @@ async fn exit_dispatch() {
 #[tokio::test]
 async fn memory_dispatch() {
     let (d, mock) = fresh();
-    mock.set_memory_path(std::path::PathBuf::from("/tmp/CLAUDE.md"));
+    mock.set_memory_path(std::path::PathBuf::from("/tmp/LINGXI.md"));
     mock.set_editor_exit_code(0);
     let r = d.dispatch("/memory").await;
     match r {
         SlashDispatchResult::Handled { display } => {
-            assert_eq!(display, "Edited /tmp/CLAUDE.md (exit 0).");
+            assert_eq!(display, "Edited /tmp/LINGXI.md (exit 0).");
         }
         other => panic!("{other:?}"),
     }

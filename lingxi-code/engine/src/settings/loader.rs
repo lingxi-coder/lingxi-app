@@ -41,7 +41,7 @@ pub fn read_settings_file(path: &Path) -> Result<Option<SettingsJson>, SettingsE
     Ok(Some(parsed))
 }
 
-/// Path to the user settings file: `~/.claude/settings.json`.
+/// Path to the user settings file: `~/.lingxi/settings.json`.
 ///
 /// Uses `HOME` env var with a `dirs::home_dir`-equivalent fallback. Returns
 /// `None` if neither resolves (e.g. on a misconfigured CI runner).

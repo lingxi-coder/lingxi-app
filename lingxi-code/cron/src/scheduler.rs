@@ -170,7 +170,7 @@ pub struct CronScheduler {
     clock: Arc<dyn Clock>,
     runtime: Arc<dyn RuntimeSpawner>,
     /// The single project tasks file
-    /// (`<project_root>/.claude/scheduled_tasks.json`) the scheduler loads from
+    /// (`<project_root>/.lingxi/scheduled_tasks.json`) the scheduler loads from
     /// and writes `lastFiredAt` back to. 1:1 with claude-code `cronTasks.ts`.
     tasks_file: PathBuf,
     /// Directory holding per-job lock files (the tasks file's parent, i.e.
@@ -187,7 +187,7 @@ pub struct CronScheduler {
 
 impl CronScheduler {
     /// Construct a new scheduler over the single project tasks file
-    /// `<project_root>/.claude/scheduled_tasks.json` (1:1 with claude-code
+    /// `<project_root>/.lingxi/scheduled_tasks.json` (1:1 with claude-code
     /// `cronTasks.ts`). The per-job A9 lock files live in that file's parent
     /// directory (`<project_root>/.claude`). The tick loop is not started until
     /// [`Self::start`] is invoked.

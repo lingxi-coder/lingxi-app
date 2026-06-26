@@ -1,6 +1,6 @@
 //! `tengu_memory_*` event schemas — 12 events (M3-02 emits).
 //!
-//! Spec §7 line 757-768. Covers CLAUDE.md hierarchy load, case-mismatch
+//! Spec §7 line 757-768. Covers LINGXI.md hierarchy load, case-mismatch
 //! detection, oversize gating, secret-scanner redactions, age-based ranking,
 //! and team-memory scans. Paths route through [`PiiTagged`] (privileged
 //! `BigQuery` proto column); rule identifiers and filenames route through
@@ -9,11 +9,11 @@
 use crate::pii::{PiiTagged, Verified};
 use serde::{Deserialize, Serialize};
 
-/// `tengu_memory_loaded` — CLAUDE.md hierarchy successfully loaded.
+/// `tengu_memory_loaded` — LINGXI.md hierarchy successfully loaded.
 pub const LOADED: &str = "tengu_memory_loaded";
 /// `tengu_memory_load_failed` — load aborted before any file resident.
 pub const LOAD_FAILED: &str = "tengu_memory_load_failed";
-/// `tengu_memory_case_mismatch` — a CLAUDE.md sibling exists under a different case.
+/// `tengu_memory_case_mismatch` — a LINGXI.md sibling exists under a different case.
 pub const CASE_MISMATCH: &str = "tengu_memory_case_mismatch";
 /// `tengu_memory_file_too_large` — file exceeded the 10 MB cap.
 pub const FILE_TOO_LARGE: &str = "tengu_memory_file_too_large";
@@ -31,7 +31,7 @@ pub const TEAM_SCAN_STARTED: &str = "tengu_memory_team_scan_started";
 pub const TEAM_SCAN_COMPLETED: &str = "tengu_memory_team_scan_completed";
 /// `tengu_memory_team_scan_failed` — team-memory directory scan errored.
 pub const TEAM_SCAN_FAILED: &str = "tengu_memory_team_scan_failed";
-/// `tengu_memory_claude_md_hierarchy_walked` — full CLAUDE.md walk completed.
+/// `tengu_memory_claude_md_hierarchy_walked` — full LINGXI.md walk completed.
 pub const CLAUDE_MD_HIERARCHY_WALKED: &str = "tengu_memory_claude_md_hierarchy_walked";
 
 pub(crate) const NAMES: &[&str] = &[
@@ -53,7 +53,7 @@ pub(crate) const NAMES: &[&str] = &[
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoadedPayload {
-    /// Number of CLAUDE.md (or local override) files resident after load.
+    /// Number of LINGXI.md (or local override) files resident after load.
     pub files_loaded: u32,
     /// Total bytes resident after load.
     pub total_bytes: u64,
@@ -167,6 +167,6 @@ pub struct TeamScanFailedPayload {
 pub struct ClaudeMdHierarchyWalkedPayload {
     /// Maximum walk depth reached.
     pub depth: u32,
-    /// Total CLAUDE.md (or local override) files visited.
+    /// Total LINGXI.md (or local override) files visited.
     pub files_visited: u32,
 }

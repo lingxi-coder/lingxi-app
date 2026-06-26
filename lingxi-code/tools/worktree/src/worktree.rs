@@ -1,7 +1,7 @@
 //! `EnterWorktreeTool` + `ExitWorktreeTool` — manage disposable git worktrees
 //! via the M2-01 [`WorktreeManager`] trait. Locks (spec §7 lines 488-489):
 //! - Branch prefix: `worktree-<flatten(slug)>`
-//! - Path layout:   `<repo>/.claude/worktrees/<flatten(slug)>`
+//! - Path layout:   `<repo>/.lingxi/worktrees/<flatten(slug)>`
 //! - Slug flatten:  `'/' -> '+'` (injective; `'+'` outside allowed charset)
 //!
 //! The slug-validation and flatten helpers are reimplemented locally in this
@@ -40,7 +40,7 @@ use tool_api::BuiltinToolContext;
 /// M2-01 lock). The full branch is `worktree-<flatten(slug)>`.
 pub const WORKTREE_BRANCH_PREFIX: &str = "worktree-";
 /// Byte-locked path segment under the repo root (spec §7 line 489, M2-01 lock).
-pub const WORKTREE_PATH_SEGMENT: &str = ".claude/worktrees";
+pub const WORKTREE_PATH_SEGMENT: &str = ".lingxi/worktrees";
 /// Byte-locked flatten character: every `/` in the slug becomes `+` (M2-01 lock).
 pub const WORKTREE_FLATTEN_CHAR: char = '+';
 /// Maximum allowed total length of a worktree slug (M2-01 lock).
@@ -236,7 +236,7 @@ impl Tool for EnterWorktreeTool {
         "Create a disposable git worktree".into()
     }
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "EnterWorktree creates `<repo>/.claude/worktrees/<flatten(slug)>` on branch \
+        "EnterWorktree creates `<repo>/.lingxi/worktrees/<flatten(slug)>` on branch \
          `worktree-<flatten(slug)>` via the configured worktree manager."
             .into()
     }
@@ -562,7 +562,7 @@ mod tests {
 
     #[test]
     fn path_segment_matches_lock() {
-        assert_eq!(WORKTREE_PATH_SEGMENT, ".claude/worktrees");
+        assert_eq!(WORKTREE_PATH_SEGMENT, ".lingxi/worktrees");
     }
 
     #[test]
@@ -629,7 +629,7 @@ mod tests {
         assert_eq!(res.data["branch_name"], "worktree-user+feature");
         let path = res.data["path"].as_str().unwrap();
         assert!(
-            path.ends_with("/tmp/repo-A/.claude/worktrees/user+feature"),
+            path.ends_with("/tmp/repo-A/.lingxi/worktrees/user+feature"),
             "path layout off: {path}"
         );
         assert_eq!(mock.created().len(), 1);
@@ -719,7 +719,7 @@ mod tests {
         let res = tool
             .call(
                 json!({
-                    "path": "/tmp/repo-B/.claude/worktrees/user+feature",
+                    "path": "/tmp/repo-B/.lingxi/worktrees/user+feature",
                     "branch_name": "worktree-user+feature"
                 }),
                 fresh_ctx(),
@@ -755,7 +755,7 @@ mod tests {
         let res = tool
             .call(
                 json!({
-                    "path": "/tmp/repo-C/.claude/worktrees/user+feature",
+                    "path": "/tmp/repo-C/.lingxi/worktrees/user+feature",
                     "branch_name": "worktree-user+feature"
                 }),
                 fresh_ctx(),
@@ -771,7 +771,7 @@ mod tests {
         let msg = res.data["message"].as_str().unwrap();
         assert_eq!(
             msg,
-            "Exited and removed worktree at /tmp/repo-C/.claude/worktrees/user+feature. \
+            "Exited and removed worktree at /tmp/repo-C/.lingxi/worktrees/user+feature. \
              Discarded 2 commits and 3 uncommitted files."
         );
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
@@ -796,7 +796,7 @@ mod tests {
         let res = tool
             .call(
                 json!({
-                    "path": "/tmp/repo-D/.claude/worktrees/feat",
+                    "path": "/tmp/repo-D/.lingxi/worktrees/feat",
                     "branch_name": "worktree-feat"
                 }),
                 fresh_ctx(),
@@ -808,7 +808,7 @@ mod tests {
         let msg = res.data["message"].as_str().unwrap();
         assert_eq!(
             msg,
-            "Exited and removed worktree at /tmp/repo-D/.claude/worktrees/feat."
+            "Exited and removed worktree at /tmp/repo-D/.lingxi/worktrees/feat."
         );
         assert!(!msg.contains("Discarded"), "clean exit has no discard note");
     }
@@ -827,7 +827,7 @@ mod tests {
         let res = tool
             .call(
                 json!({
-                    "path": "/tmp/repo-E/.claude/worktrees/feat",
+                    "path": "/tmp/repo-E/.lingxi/worktrees/feat",
                     "branch_name": "worktree-feat"
                 }),
                 fresh_ctx(),

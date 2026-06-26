@@ -8,7 +8,7 @@
 //! ## Data source
 //! Reads the SAME three settings files the enforcement loader reads
 //! (`engine-desktop`): `<claude_home>/settings.json` (user),
-//! `<cwd>/.claude/settings.json` (project), `<cwd>/.claude/settings.local.json`
+//! `<cwd>/.lingxi/settings.json` (project), `<cwd>/.lingxi/settings.local.json`
 //! (local). These are the PERSISTED rules — the ones `LINGXI_ENFORCE_PERMISSIONS`
 //! enforces and that an Ask→"always allow" (3c) writes to. The frozen
 //! `PermissionGate` trait exposes no live-policy accessor, so a session-only
@@ -870,17 +870,17 @@ mod tests {
     fn load_reads_tiers_and_mode() {
         let tmp = std::env::temp_dir().join(format!("lx-perm-view-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        let claude_home = tmp.join("home/.claude");
+        let claude_home = tmp.join("home/.lingxi");
         let cwd = tmp.join("proj");
         std::fs::create_dir_all(&claude_home).unwrap();
-        std::fs::create_dir_all(cwd.join(".claude")).unwrap();
+        std::fs::create_dir_all(cwd.join(".lingxi")).unwrap();
         std::fs::write(
             claude_home.join("settings.json"),
             r#"{ "permissions": { "allow": ["Bash"] } }"#,
         )
         .unwrap();
         std::fs::write(
-            cwd.join(".claude").join("settings.local.json"),
+            cwd.join(".lingxi").join("settings.local.json"),
             r#"{ "permissions": { "deny": ["Read(./secrets/**)"], "defaultMode": "acceptEdits" } }"#,
         )
         .unwrap();
@@ -903,7 +903,7 @@ mod tests {
     fn load_missing_files_is_empty_default() {
         let tmp = std::env::temp_dir().join(format!("lx-perm-view-empty-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        let st = load_permission_sections(&tmp.join("proj"), &tmp.join("home/.claude"));
+        let st = load_permission_sections(&tmp.join("proj"), &tmp.join("home/.lingxi"));
         assert_eq!(st.mode, "default");
         assert!(st.rows.is_empty());
     }

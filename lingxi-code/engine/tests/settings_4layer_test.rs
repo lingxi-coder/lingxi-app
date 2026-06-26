@@ -35,14 +35,14 @@ fn user_settings_path_is_dot_claude_settings_json() {
     std::env::set_var("HOME", tmp.path());
     let p = engine::settings::loader::user_settings_path().unwrap();
     // Byte-for-byte literal from spec §7.
-    assert_eq!(p, tmp.path().join(".claude").join("settings.json"));
+    assert_eq!(p, tmp.path().join(".lingxi").join("settings.json"));
 }
 
 #[test]
 fn project_settings_path_is_dot_claude_settings_json() {
     let tmp = tempfile::tempdir().unwrap();
     let p = engine::settings::loader::project_settings_path(tmp.path());
-    assert_eq!(p, tmp.path().join(".claude").join("settings.json"));
+    assert_eq!(p, tmp.path().join(".lingxi").join("settings.json"));
 }
 
 #[test]
@@ -55,13 +55,13 @@ fn four_layer_priority_env_user_project_defaults() {
     std::env::set_var("HOME", &home);
 
     write_file(
-        &home.join(".claude").join("settings.json"),
+        &home.join(".lingxi").join("settings.json"),
         r#"{"model": "user-model"}"#,
     );
     write_file(
         &tmp.path()
             .join("project")
-            .join(".claude")
+            .join(".lingxi")
             .join("settings.json"),
         r#"{"model": "project-model"}"#,
     );
@@ -125,11 +125,11 @@ fn array_concat_dedup_across_all_four_layers() {
     std::env::set_var("HOME", &home);
 
     write_file(
-        &home.join(".claude").join("settings.json"),
+        &home.join(".lingxi").join("settings.json"),
         r#"{"enabledTools": ["Read", "Edit"]}"#,
     );
     write_file(
-        &tmp.path().join("p").join(".claude").join("settings.json"),
+        &tmp.path().join("p").join(".lingxi").join("settings.json"),
         r#"{"enabledTools": ["Bash", "Read"]}"#,
     );
 
@@ -174,7 +174,7 @@ fn dollar_schema_field_is_tolerated_but_not_required() {
 
     // Older / IDE-injected file with $schema.
     write_file(
-        &home.join(".claude").join("settings.json"),
+        &home.join(".lingxi").join("settings.json"),
         r#"{"$schema": "https://example/x.json", "model": "m"}"#,
     );
 
@@ -197,7 +197,7 @@ fn effective_for_returns_provenance_for_each_field() {
     std::env::set_var("HOME", &home);
 
     write_file(
-        &home.join(".claude").join("settings.json"),
+        &home.join(".lingxi").join("settings.json"),
         r#"{"model": "user-m"}"#,
     );
 

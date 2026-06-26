@@ -154,7 +154,7 @@ impl AdapterPermissionGate {
     }
 
     /// (3c) Enable persisting an `AllowAlways` choice to `settings.local.json`
-    /// (under `paths.cwd/.claude/`). Without this, `AllowAlways` is session-only.
+    /// (under `paths.cwd/.lingxi/`). Without this, `AllowAlways` is session-only.
     #[must_use]
     pub fn with_persist(mut self, paths: PermissionPaths) -> Self {
         self.persist_paths = Some(paths);
@@ -500,7 +500,7 @@ mod tests {
 
     /// (3c) `gate_persists_allow_always_writes_local_settings` — with a persist
     /// target wired, `AllowAlways` ALSO writes a durable rule to
-    /// `<cwd>/.claude/settings.local.json` (in addition to the session rule).
+    /// `<cwd>/.lingxi/settings.local.json` (in addition to the session rule).
     #[tokio::test]
     async fn gate_persists_allow_always_writes_local_settings() {
         let tmp = std::env::temp_dir().join(format!("lx-3c-adapter-{}", std::process::id()));
@@ -508,7 +508,7 @@ mod tests {
         let sink = MockRequestSink::arc();
         let gate = Arc::new(AdapterPermissionGate::new(sink.clone()).with_persist(
             permission::PermissionPaths {
-                claude_home: tmp.join("home/.claude"),
+                claude_home: tmp.join("home/.lingxi"),
                 cwd: tmp.join("proj"),
             },
         ));
@@ -521,7 +521,7 @@ mod tests {
         assert_eq!(task.await.unwrap(), PermissionDecision::Allow);
 
         // The choice was persisted to settings.local.json.
-        let path = tmp.join("proj/.claude/settings.local.json");
+        let path = tmp.join("proj/.lingxi/settings.local.json");
         let written = std::fs::read_to_string(&path).expect("settings.local.json written");
         let v: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert_eq!(v["permissions"]["allow"], json!(["Bash"]));

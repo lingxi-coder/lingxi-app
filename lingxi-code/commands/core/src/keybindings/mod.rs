@@ -6,7 +6,7 @@
 //!
 //! 1. If keybinding customization is **not** enabled, return the locked preview
 //!    string and do nothing else.
-//! 2. Resolve the keybindings path (`$CLAUDE_CONFIG_DIR ?? ~/.claude` joined
+//! 2. Resolve the keybindings path (`$LINGXI_CONFIG_DIR ?? ~/.claude` joined
 //!    with `keybindings.json`, mirroring `getKeybindingsPath()` →
 //!    `getClaudeConfigHomeDir()`).
 //! 3. `mkdir -p` the parent, then write the template with the `wx` flag
@@ -57,7 +57,7 @@ use std::sync::Arc;
 //
 // `keybindings.rs` historically held ONLY the `/keybindings` command (write the
 // template, open `$EDITOR`). GAP D adds the loader/parser/resolver/runtime-keymap
-// that actually consults `~/.claude/keybindings.json`, a 1:1 port of
+// that actually consults `~/.lingxi/keybindings.json`, a 1:1 port of
 // `claude-code/src/keybindings/{schema,parser,match,resolver,reservedShortcuts,
 // validate,defaultBindings,loadUserBindings}.ts`. The `/keybindings` handler
 // below is unchanged.
@@ -95,7 +95,7 @@ pub type EditorSpawner = Arc<dyn Fn(&Path) -> Result<(), String> + Send + Sync>;
 
 /// Resolve the keybindings file path, mirroring the TS `getKeybindingsPath()` →
 /// `join(getClaudeConfigHomeDir(), 'keybindings.json')` where
-/// `getClaudeConfigHomeDir()` is `$CLAUDE_CONFIG_DIR ?? join(homedir(),
+/// `getClaudeConfigHomeDir()` is `$LINGXI_CONFIG_DIR ?? join(homedir(),
 /// '.claude')`.
 #[must_use]
 pub fn keybindings_path() -> PathBuf {
@@ -106,8 +106,8 @@ pub fn keybindings_path() -> PathBuf {
 }
 
 /// Pure path resolver (extracted for testing without mutating process env):
-/// `$CLAUDE_CONFIG_DIR ?? join(home, '.claude')` then join `keybindings.json`.
-/// Matches claude-code `tr()` `??`: a SET `$CLAUDE_CONFIG_DIR` is honored
+/// `$LINGXI_CONFIG_DIR ?? join(home, '.claude')` then join `keybindings.json`.
+/// Matches claude-code `tr()` `??`: a SET `$LINGXI_CONFIG_DIR` is honored
 /// verbatim — including an empty value (which then resolves cwd-relative) —
 /// and only an UNSET var falls back to `<home>/.claude`. A missing home falls
 /// back to the current directory so the path is always well-formed.
@@ -497,7 +497,7 @@ mod tests {
 
     #[test]
     fn path_honors_config_dir_env() {
-        // CLAUDE_CONFIG_DIR set → used verbatim as the base.
+        // LINGXI_CONFIG_DIR set → used verbatim as the base.
         let p = resolve_keybindings_path(
             Some(std::ffi::OsString::from("/custom/cfg")),
             Some(std::ffi::OsString::from("/home/u")),
@@ -507,14 +507,14 @@ mod tests {
 
     #[test]
     fn path_falls_back_to_home_dot_claude() {
-        // No CLAUDE_CONFIG_DIR → join(home, '.claude', 'keybindings.json').
+        // No LINGXI_CONFIG_DIR → join(home, '.claude', 'keybindings.json').
         let p = resolve_keybindings_path(None, Some(std::ffi::OsString::from("/home/u")));
-        assert_eq!(p, PathBuf::from("/home/u/.claude/keybindings.json"));
+        assert_eq!(p, PathBuf::from("/home/u/.lingxi/keybindings.json"));
     }
 
     #[test]
     fn path_empty_config_dir_is_honored_verbatim() {
-        // A set-but-EMPTY CLAUDE_CONFIG_DIR is honored verbatim (claude-code
+        // A set-but-EMPTY LINGXI_CONFIG_DIR is honored verbatim (claude-code
         // `??`), resolving cwd-relative — NOT treated as unset.
         let p = resolve_keybindings_path(
             Some(std::ffi::OsString::new()),

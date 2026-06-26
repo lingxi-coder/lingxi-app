@@ -6,12 +6,12 @@
   },
   "byte_length": 1592,
   "line_count": 21,
-  "sha256": "cfdedaa2c59770dce2afbc73047805cda7078d961cc650463e39125197b55a39",
-  "first_sentence": "Please analyze this codebase and create a CLAUDE.md file, which will be given to future instances of Claude Code to operate in this repository.",
+  "sha256": "7836b540b43aca31123274901f24984e89bcee0c87ab3bb5c10e131a40aa36c9",
+  "first_sentence": "Please analyze this codebase and create a LINGXI.md file, which will be given to future instances of Claude Code to operate in this repository.",
   "must_contain_substrings": [
-    "# CLAUDE.md",
+    "# LINGXI.md",
     "This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.",
-    "If there's already a CLAUDE.md, suggest improvements to it.",
+    "If there's already a LINGXI.md, suggest improvements to it.",
     "Be sure to prefix the file with the following text:"
   ]
 }

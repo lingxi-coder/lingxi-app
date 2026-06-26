@@ -430,7 +430,7 @@ impl StatsData {
     /// `today`. `All` returns the data unchanged; `Last7`/`Last30` keep only the
     /// dated rows on/after the cutoff and RE-derive every displayed field
     /// (sessions, longest session, daily messages, per-model usage, chart,
-    /// factoid) from that window — claude-code `aggregateClaudeCodeStatsForRange`.
+    /// factoid) from that window — claude-code `aggregateLingXiStatsForRange`.
     #[must_use]
     pub fn for_range(&self, range: StatsRange, today: chrono::NaiveDate) -> StatsData {
         let Some(days) = range.window_days() else {

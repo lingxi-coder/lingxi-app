@@ -2,7 +2,7 @@
 //!
 //! Mirrors claude-code's cache-only loader (`pluginLoader.ts:1348`
 //! `createPluginFromPath` + `1618` standard `hooks/hooks.json`): walk the
-//! plugins directory, read each `<plugin>/.claude-plugin/plugin.json`, and
+//! plugins directory, read each `<plugin>/.lingxi-plugin/plugin.json`, and
 //! auto-detect the `commands/`, `agents/`, `skills/<name>/SKILL.md`,
 //! `output-styles/` component directories, the standard `hooks/hooks.json`,
 //! and the `.mcp.json` / `.lsp.json` server configs.
@@ -13,9 +13,9 @@ use std::path::Path;
 /// Write a self-contained fixture plugin under `root/<name>`.
 fn write_fixture_plugin(root: &Path, name: &str) {
     let plugin_dir = root.join(name);
-    fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
     fs::write(
-        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        plugin_dir.join(".lingxi-plugin").join("plugin.json"),
         r#"{"name":"myplugin","version":"1.2.3","description":"a fixture plugin","author":{"name":"Ada"},"homepage":"https://example.com"}"#,
     )
     .unwrap();
@@ -92,9 +92,9 @@ async fn detects_skill_subdirs_mcp_and_lsp_configs() {
     // from `.lsp.json` (`mcpPluginIntegration.ts` / `lspPluginIntegration.ts`).
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("p");
-    fs::create_dir_all(dir.join(".claude-plugin")).unwrap();
+    fs::create_dir_all(dir.join(".lingxi-plugin")).unwrap();
     fs::write(
-        dir.join(".claude-plugin").join("plugin.json"),
+        dir.join(".lingxi-plugin").join("plugin.json"),
         r#"{"name":"p","version":"1.0.0"}"#,
     )
     .unwrap();
@@ -146,7 +146,7 @@ async fn missing_plugins_dir_yields_no_plugins() {
 #[tokio::test]
 async fn a_dir_without_a_manifest_is_skipped() {
     let tmp = tempfile::tempdir().unwrap();
-    // A stray directory with no `.claude-plugin/plugin.json`.
+    // A stray directory with no `.lingxi-plugin/plugin.json`.
     fs::create_dir_all(tmp.path().join("not-a-plugin").join("commands")).unwrap();
     let discovered = plugin::discover_installed_plugins(tmp.path()).await;
     assert!(

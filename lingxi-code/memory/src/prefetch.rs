@@ -332,7 +332,7 @@ mod tests {
     #[tokio::test]
     async fn real_path_scans_selects_and_surfaces() {
         let home = tempfile::tempdir().expect("tmp home");
-        let memdir = home.path().join(".claude").join("memdir");
+        let memdir = home.path().join(".lingxi").join("memdir");
         std::fs::create_dir_all(&memdir).expect("mk memdir");
         std::fs::write(memdir.join("fd.md"), "USE FD NOT FIND").expect("write fd");
         std::fs::write(memdir.join("rg.md"), "USE RG NOT GREP").expect("write rg");

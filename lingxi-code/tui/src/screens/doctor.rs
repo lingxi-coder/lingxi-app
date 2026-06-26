@@ -25,7 +25,7 @@ pub struct DoctorDiagnostics {
     pub cli_version: String,
     /// e.g. "1.82.0".
     pub rust_toolchain: String,
-    /// Absolute claude config home (e.g. "~/.claude" expanded).
+    /// Absolute claude config home (e.g. "~/.lingxi" expanded).
     pub claude_home: String,
     /// Working directory.
     pub cwd: String,
@@ -85,17 +85,17 @@ fn rust_toolchain_version() -> String {
 }
 
 /// Claude config home dir as a display string. Reuses the standard
-/// config-dir resolution the rest of the workspace uses (`$CLAUDE_CONFIG_DIR`
-/// → `~/.claude`). Falls back to "~/.claude" when the home dir is unknown.
+/// config-dir resolution the rest of the workspace uses (`$LINGXI_CONFIG_DIR`
+/// → `~/.claude`). Falls back to "~/.lingxi" when the home dir is unknown.
 fn claude_home_dir() -> String {
-    // claude-code `tr()` `??`: a SET `$CLAUDE_CONFIG_DIR` wins verbatim (incl.
+    // claude-code `tr()` `??`: a SET `$LINGXI_CONFIG_DIR` wins verbatim (incl.
     // empty); only UNSET falls back to `<home>/.claude`.
     if let Ok(explicit) = std::env::var(branding::CONFIG_DIR_ENV) {
         return explicit;
     }
     match dirs::home_dir() {
         Some(h) => h.join(branding::DOT_DIR).display().to_string(),
-        None => "~/.claude".to_string(),
+        None => "~/.lingxi".to_string(),
     }
 }
 
@@ -171,7 +171,7 @@ mod tests {
         let diag = DoctorDiagnostics {
             cli_version: "lingxi-cli v0.8.0".into(),
             rust_toolchain: "1.82.0".into(),
-            claude_home: "/home/u/.claude".into(),
+            claude_home: "/home/u/.lingxi".into(),
             cwd: "/work/proj".into(),
             mcp_configured: 2,
             mcp_connected: 0,

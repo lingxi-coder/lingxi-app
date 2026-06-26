@@ -1,48 +1,48 @@
 {
   "_source": "claude-code/src/memory/hierarchy.ts: walkClaudeMdHierarchy (lines 22-71); claude-code/src/memory/loader.ts: loadOneFile (lines 14-38)",
-  "_note": "Hierarchy walk is cwd → each parent → ~/.claude/. Within a directory, CLAUDE.local.md (when present) precedes CLAUDE.md so local overrides shadow canonical entries. GAP 4: there is NO per-file size drop — claude-code reads every memory file whole (safelyReadMemoryFileAsync), so an oversized file LOADS rather than being skipped (the 40k-char limit is a non-blocking warning only). Case-insensitive matching is OS-layer best-effort; mismatches emit tengu_memory_case_mismatch but do not block load. (Managed tier is exercised separately in hierarchy unit tests.)",
+  "_note": "Hierarchy walk is cwd → each parent → ~/.lingxi/. Within a directory, LINGXI.local.md (when present) precedes LINGXI.md so local overrides shadow canonical entries. GAP 4: there is NO per-file size drop — claude-code reads every memory file whole (safelyReadMemoryFileAsync), so an oversized file LOADS rather than being skipped (the 40k-char limit is a non-blocking warning only). Case-insensitive matching is OS-layer best-effort; mismatches emit tengu_memory_case_mismatch but do not block load. (Managed tier is exercised separately in hierarchy unit tests.)",
   "scenarios": [
     {
       "name": "cwd_then_parent_then_home",
       "layout": {
-        "home/.claude/CLAUDE.md": "# user notes\n",
-        "repo/CLAUDE.md": "# repo notes\n",
-        "repo/pkg/CLAUDE.md": "# pkg notes\n"
+        "home/.lingxi/LINGXI.md": "# user notes\n",
+        "repo/LINGXI.md": "# repo notes\n",
+        "repo/pkg/LINGXI.md": "# pkg notes\n"
       },
       "cwd": "repo/pkg",
       "home": "home",
       "expected_order": [
-        "repo/pkg/CLAUDE.md",
-        "repo/CLAUDE.md",
-        "home/.claude/CLAUDE.md"
+        "repo/pkg/LINGXI.md",
+        "repo/LINGXI.md",
+        "home/.lingxi/LINGXI.md"
       ]
     },
     {
       "name": "local_override_precedes_canonical",
       "layout": {
-        "home/.claude/CLAUDE.md": "# user\n",
-        "repo/CLAUDE.md": "# repo\n",
-        "repo/CLAUDE.local.md": "# repo override\n"
+        "home/.lingxi/LINGXI.md": "# user\n",
+        "repo/LINGXI.md": "# repo\n",
+        "repo/LINGXI.local.md": "# repo override\n"
       },
       "cwd": "repo",
       "home": "home",
       "expected_order": [
-        "repo/CLAUDE.local.md",
-        "repo/CLAUDE.md",
-        "home/.claude/CLAUDE.md"
+        "repo/LINGXI.local.md",
+        "repo/LINGXI.md",
+        "home/.lingxi/LINGXI.md"
       ]
     },
     {
       "name": "oversized_file_loads_whole_no_size_drop",
       "layout": {
-        "home/.claude/CLAUDE.md": "# small home\n",
-        "repo/CLAUDE.md": "OVERSIZED:11mb"
+        "home/.lingxi/LINGXI.md": "# small home\n",
+        "repo/LINGXI.md": "OVERSIZED:11mb"
       },
       "cwd": "repo",
       "home": "home",
       "expected_order": [
-        "repo/CLAUDE.md",
-        "home/.claude/CLAUDE.md"
+        "repo/LINGXI.md",
+        "home/.lingxi/LINGXI.md"
       ],
       "expected_skipped": []
     },

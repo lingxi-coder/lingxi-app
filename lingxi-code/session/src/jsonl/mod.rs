@@ -1,5 +1,5 @@
 //! On-disk JSONL transcript format — byte-equivalent to claude-code's
-//! `~/.claude/projects/<sanitized-cwd>[-<djb2>]/<session-uuid>.jsonl`.
+//! `~/.lingxi/projects/<sanitized-cwd>[-<djb2>]/<session-uuid>.jsonl`.
 //!
 //! Submodules:
 //! - `djb2` — modified-djb2 hash (1:1 port of `claude-code/src/utils/hash.ts`).

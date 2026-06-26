@@ -25,7 +25,7 @@
 //!   (`command_core::keybindings::get_binding_display_text`, the analogue of
 //!   claude-code's `useShortcutDisplay`): each rebindable row carries an
 //!   `(action, context)` plus a fallback chord, and the rendered chord is the
-//!   resolved binding text (a user's `~/.claude/keybindings.json` override is
+//!   resolved binding text (a user's `~/.lingxi/keybindings.json` override is
 //!   reflected here) or the fallback when the action has no binding. The
 //!   non-rebindable rows (`!`, `/`, `@`, `&`, `/btw`, `/keybindings`,
 //!   `double tap esc`) stay literal. Under the DEFAULT keymap the rendered
@@ -155,7 +155,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/skills", "List available skills"),
     ("/stats", "Show usage statistics"),
     ("/doctor", "Diagnose the installation"),
-    ("/memory", "Edit CLAUDE.md memory files"),
+    ("/memory", "Edit LINGXI.md memory files"),
     ("/theme", "Change the color theme"),
     ("/config", "Open settings"),
     ("/status", "Show the session status"),
@@ -295,7 +295,7 @@ pub fn render_help_to_string(state: &HelpState) -> String {
 
 /// Pure render oracle parameterized on the live keymap `bindings`: the shortcut
 /// chords are resolved via `get_binding_display_text` (the `useShortcutDisplay`
-/// analogue), so a user's `~/.claude/keybindings.json` override shows here.
+/// analogue), so a user's `~/.lingxi/keybindings.json` override shows here.
 ///
 /// `Help` title, the `INTRO` line, then the visible window of the flattened
 /// section/row lines, then (when scrolled) a scroll indicator, then the

@@ -1,6 +1,6 @@
 //! Memory file editor screen (M7-14).
 //!
-//! A `MemoryFileSelector` lists the project/user CLAUDE.md tiers (resolved
+//! A `MemoryFileSelector` lists the project/user LINGXI.md tiers (resolved
 //! via [`memory::claude_md::hierarchy::walk`]); selecting a tier
 //! opens an inline edit view. Reads go through the M3 loader
 //! ([`memory::claude_md::loader::load_file`]); writes go back to the
@@ -17,7 +17,7 @@ use memory::claude_md::loader::{load_file, LoaderError};
 
 /// One resolved memory tier the selector lists. The project/user tiers are
 /// always offered (even when the file does not exist yet — marked `(new)`);
-/// additional discovered project-parent CLAUDE.md files are appended.
+/// additional discovered project-parent LINGXI.md files are appended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryTierEntry {
     /// Selector label, literal-locked to claude-code (`"Project memory"`,
@@ -25,15 +25,15 @@ pub struct MemoryTierEntry {
     pub label: String,
     /// One-line description shown under the label (literal-locked).
     pub description: String,
-    /// On-disk path of the CLAUDE.md file (the M3 store target).
+    /// On-disk path of the LINGXI.md file (the M3 store target).
     pub path: PathBuf,
     /// Whether the file currently exists. `false` → the row shows `" (new)"`.
     pub exists: bool,
 }
 
 /// Resolve the memory tiers to list, innermost-first. The project tier is
-/// `<cwd>/CLAUDE.md` and the user tier is `<home>/.claude/CLAUDE.md`; both
-/// are always present (creatable). Any other CLAUDE.md the walker finds
+/// `<cwd>/LINGXI.md` and the user tier is `<home>/.lingxi/LINGXI.md`; both
+/// are always present (creatable). Any other LINGXI.md the walker finds
 /// (project parents) is appended after, by display path.
 ///
 /// Mirrors `claude-code/src/components/memory/MemoryFileSelector.tsx`
@@ -49,34 +49,34 @@ fn cwd_is_in_git_repo(cwd: &Path) -> bool {
 #[must_use]
 pub fn memory_tiers(cwd: &Path, home: &Path) -> Vec<MemoryTierEntry> {
     let project_path = cwd.join(FILE_NAME);
-    // User-tier CLAUDE.md must resolve via `$CLAUDE_CONFIG_DIR` (else `~/.claude`)
+    // User-tier LINGXI.md must resolve via `$LINGXI_CONFIG_DIR` (else `~/.claude`)
     // — the SAME env-aware resolver the prompt loader (`hierarchy::walk`) uses, so
     // the /memory editor writes exactly the file the system prompt loads (no
-    // split-brain when `$CLAUDE_CONFIG_DIR` is set).
+    // split-brain when `$LINGXI_CONFIG_DIR` is set).
     let user_path = memory::claude_md::user_config_dir(home).join(FILE_NAME);
 
     let mut tiers = vec![
         MemoryTierEntry {
             label: "Project memory".to_string(),
             // (MEM-1) git-conditional, matching MemoryFileSelector.tsx:88,93:
-            // "Checked in at ./CLAUDE.md" inside a git repo, else "Saved in …".
+            // "Checked in at ./LINGXI.md" inside a git repo, else "Saved in …".
             description: if cwd_is_in_git_repo(cwd) {
-                "Checked in at ./CLAUDE.md".to_string()
+                "Checked in at ./LINGXI.md".to_string()
             } else {
-                "Saved in ./CLAUDE.md".to_string()
+                "Saved in ./LINGXI.md".to_string()
             },
             exists: project_path.is_file(),
             path: project_path.clone(),
         },
         MemoryTierEntry {
             label: "User memory".to_string(),
-            description: "Saved in ~/.claude/CLAUDE.md".to_string(),
+            description: "Saved in ~/.lingxi/LINGXI.md".to_string(),
             exists: user_path.is_file(),
             path: user_path.clone(),
         },
     ];
 
-    // Append any other discovered CLAUDE.md (project parents) not already
+    // Append any other discovered LINGXI.md (project parents) not already
     // covered by the project/user rows, in walk order. The Managed tier is not
     // surfaced in this editor (read-only enterprise policy, not user-editable),
     // so pass `None`.
@@ -339,40 +339,40 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path().join("home");
         let cwd = tmp.path().join("repo");
-        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::create_dir_all(home.join(".lingxi")).unwrap();
         fs::create_dir_all(&cwd).unwrap();
-        fs::write(cwd.join("CLAUDE.md"), b"# project notes\n").unwrap();
-        // user CLAUDE.md does NOT exist → still listed, marked (new).
+        fs::write(cwd.join("LINGXI.md"), b"# project notes\n").unwrap();
+        // user LINGXI.md does NOT exist → still listed, marked (new).
 
         let tiers = memory_tiers(&cwd, &home);
         // Project (exists) + User (new) — innermost first.
         let proj = tiers.iter().find(|t| t.label == "Project memory").unwrap();
         assert!(proj.exists);
-        assert_eq!(proj.path, cwd.join("CLAUDE.md"));
+        assert_eq!(proj.path, cwd.join("LINGXI.md"));
         let user = tiers.iter().find(|t| t.label == "User memory").unwrap();
         assert!(!user.exists);
-        assert_eq!(user.path, home.join(".claude").join("CLAUDE.md"));
+        assert_eq!(user.path, home.join(".lingxi").join("LINGXI.md"));
     }
 
     #[test]
     fn discovered_parent_claude_md_says_dynamically_loaded_not_imported() {
-        // (MEM-2) An ancestor-directory CLAUDE.md (not cwd's own, not an
+        // (MEM-2) An ancestor-directory LINGXI.md (not cwd's own, not an
         // `@import`) gets claude-code's "dynamically loaded" description —
         // "@-imported" is reserved for `@import`-following (file.parent set).
         let tmp = TempDir::new().unwrap();
         let home = tmp.path().join("home");
         let cwd = tmp.path().join("repo").join("sub");
         fs::create_dir_all(&cwd).unwrap();
-        fs::create_dir_all(home.join(".claude")).unwrap();
-        let ancestor_md = tmp.path().join("repo").join("CLAUDE.md");
+        fs::create_dir_all(home.join(".lingxi")).unwrap();
+        let ancestor_md = tmp.path().join("repo").join("LINGXI.md");
         fs::write(&ancestor_md, b"# ancestor notes\n").unwrap();
-        fs::write(cwd.join("CLAUDE.md"), b"# project notes\n").unwrap();
+        fs::write(cwd.join("LINGXI.md"), b"# project notes\n").unwrap();
 
         let tiers = memory_tiers(&cwd, &home);
         let discovered = tiers
             .iter()
             .find(|t| t.path == ancestor_md)
-            .expect("ancestor CLAUDE.md discovered as its own tier row");
+            .expect("ancestor LINGXI.md discovered as its own tier row");
         assert_eq!(discovered.description, "dynamically loaded");
     }
 
@@ -392,12 +392,12 @@ mod tests {
                 .clone()
         };
         // No `.git` anywhere under the fresh tempdir → "Saved in".
-        assert_eq!(proj_desc(&memory_tiers(&cwd, &home)), "Saved in ./CLAUDE.md");
+        assert_eq!(proj_desc(&memory_tiers(&cwd, &home)), "Saved in ./LINGXI.md");
         // Add a `.git` dir at cwd → "Checked in at".
         fs::create_dir_all(cwd.join(".git")).unwrap();
         assert_eq!(
             proj_desc(&memory_tiers(&cwd, &home)),
-            "Checked in at ./CLAUDE.md"
+            "Checked in at ./LINGXI.md"
         );
     }
 
@@ -418,7 +418,7 @@ mod tests {
     #[test]
     fn load_returns_empty_for_missing_then_save_creates_file() {
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("CLAUDE.md");
+        let path = tmp.path().join("LINGXI.md");
         // Missing file → empty editable buffer (a "new" tier).
         assert_eq!(load_tier_body(&path).unwrap(), "");
         save_tier_body(&path, "# hello\n").unwrap();
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn save_creates_parent_dirs_when_absent() {
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("nested").join("deeper").join("CLAUDE.md");
+        let path = tmp.path().join("nested").join("deeper").join("LINGXI.md");
         save_tier_body(&path, "x\n").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "x\n");
     }
@@ -438,7 +438,7 @@ mod tests {
     #[test]
     fn save_is_atomic_no_leftover_tmp() {
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("CLAUDE.md");
+        let path = tmp.path().join("LINGXI.md");
         save_tier_body(&path, "body\n").unwrap();
         // The temp sibling must be gone after a successful rename.
         let tmp_sibling = path.with_extension("md.lingxi-tmp");
@@ -451,13 +451,13 @@ mod tests {
             MemoryTierEntry {
                 label: "Project memory".into(),
                 description: String::new(),
-                path: "/p/CLAUDE.md".into(),
+                path: "/p/LINGXI.md".into(),
                 exists: true,
             },
             MemoryTierEntry {
                 label: "User memory".into(),
                 description: String::new(),
-                path: "/u/CLAUDE.md".into(),
+                path: "/u/LINGXI.md".into(),
                 exists: false,
             },
         ];
@@ -473,7 +473,7 @@ mod tests {
         assert!(st.editing);
         assert_eq!(
             st.editing_path.as_deref(),
-            Some(std::path::Path::new("/u/CLAUDE.md"))
+            Some(std::path::Path::new("/u/LINGXI.md"))
         );
     }
 
@@ -482,7 +482,7 @@ mod tests {
         let tiers = vec![MemoryTierEntry {
             label: "Project memory".into(),
             description: String::new(),
-            path: "/p/CLAUDE.md".into(),
+            path: "/p/LINGXI.md".into(),
             exists: true,
         }];
         let mut st = MemoryScreenState::default();
@@ -502,7 +502,7 @@ mod tests {
         let tiers = vec![MemoryTierEntry {
             label: "Project memory".into(),
             description: String::new(),
-            path: "/p/CLAUDE.md".into(),
+            path: "/p/LINGXI.md".into(),
             exists: true,
         }];
         let mut st = MemoryScreenState::default();
@@ -515,7 +515,7 @@ mod tests {
         let tiers = vec![MemoryTierEntry {
             label: "Project memory".into(),
             description: String::new(),
-            path: "/p/CLAUDE.md".into(),
+            path: "/p/LINGXI.md".into(),
             exists: true,
         }];
         let mut st = MemoryScreenState::default();
@@ -527,7 +527,7 @@ mod tests {
         assert_eq!(
             action,
             MemoryAction::Save {
-                path: "/p/CLAUDE.md".into(),
+                path: "/p/LINGXI.md".into(),
                 body: "new body".into()
             }
         );

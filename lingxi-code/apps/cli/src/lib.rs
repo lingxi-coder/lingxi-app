@@ -349,7 +349,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
 
     // (Item B) Resolve the session permission mode from CLI flags + settings,
     // run the bypass safety guards, and capture the startup notice. This must
-    // happen AFTER `cwd::apply_cwd` (so the project `.claude/settings.json` is
+    // happen AFTER `cwd::apply_cwd` (so the project `.lingxi/settings.json` is
     // read from the effective project dir) and BEFORE `build_runtime` — a
     // refused bypass exits before the runtime is constructed, and the resolved
     // mode threads into `DesktopConfig.permission_mode`.
@@ -645,8 +645,8 @@ pub(crate) fn resolve_permission_mode(
 /// `settings.json` files (the bypass-killswitch + settings `defaultMode`
 /// inputs the mode resolver reads).
 ///
-/// Reads the user `~/.claude/settings.json` then the project
-/// `<cwd>/.claude/settings.json` raw, deriving the two fields via the existing
+/// Reads the user `~/.lingxi/settings.json` then the project
+/// `<cwd>/.lingxi/settings.json` raw, deriving the two fields via the existing
 /// `permission` helpers: `defaultMode` takes project-wins precedence (project
 /// read last), and the bypass-disable killswitch is sticky (set by any tier).
 /// On any load failure (missing/unreadable/malformed file) it degrades to the
@@ -797,7 +797,7 @@ mod cli_mode_settings_tests {
         Argv::default()
     }
 
-    /// With no `~/.claude/settings.json` and no `<cwd>/.claude/settings.json`,
+    /// With no `~/.lingxi/settings.json` and no `<cwd>/.lingxi/settings.json`,
     /// the helper degrades to the no-op default (the faithful TS
     /// `getSettings_DEPRECATED() || {}` fallback).
     #[test]
@@ -806,7 +806,7 @@ mod cli_mode_settings_tests {
         let prior_home = std::env::var_os("HOME");
         let prior_cwd = std::env::current_dir().ok();
 
-        // Point HOME + cwd at fresh empty dirs (no `.claude/settings.json`).
+        // Point HOME + cwd at fresh empty dirs (no `.lingxi/settings.json`).
         let home = tempfile::tempdir().expect("home tempdir");
         let proj = tempfile::tempdir().expect("proj tempdir");
         std::env::set_var("HOME", home.path());
@@ -826,7 +826,7 @@ mod cli_mode_settings_tests {
         }
     }
 
-    /// The project `<cwd>/.claude/settings.json` `defaultMode` is read and wins
+    /// The project `<cwd>/.lingxi/settings.json` `defaultMode` is read and wins
     /// over the user tier, and `disableBypassPermissionsMode: "disable"` sets the
     /// killswitch — exercising the parse path, not just the empty degrade.
     #[test]
@@ -837,8 +837,8 @@ mod cli_mode_settings_tests {
 
         let home = tempfile::tempdir().expect("home tempdir");
         let proj = tempfile::tempdir().expect("proj tempdir");
-        let proj_claude = proj.path().join(".claude");
-        std::fs::create_dir_all(&proj_claude).expect("mkdir .claude");
+        let proj_claude = proj.path().join(".lingxi");
+        std::fs::create_dir_all(&proj_claude).expect("mkdir .lingxi");
         std::fs::write(
             proj_claude.join("settings.json"),
             r#"{"permissions":{"defaultMode":"acceptEdits","disableBypassPermissionsMode":"disable"}}"#,

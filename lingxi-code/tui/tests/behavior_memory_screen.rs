@@ -23,7 +23,7 @@ fn select_edit_save_round_trip_through_store() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tempfile::TempDir;
     let tmp = TempDir::new().unwrap();
-    let path = tmp.path().join("CLAUDE.md");
+    let path = tmp.path().join("LINGXI.md");
     let tiers = vec![MemoryTierEntry {
         label: "Project memory".into(),
         description: String::new(),
@@ -65,7 +65,7 @@ fn esc_in_editor_does_not_write_to_disk() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tempfile::TempDir;
     let tmp = TempDir::new().unwrap();
-    let path = tmp.path().join("CLAUDE.md");
+    let path = tmp.path().join("LINGXI.md");
     let tiers = vec![MemoryTierEntry {
         label: "Project memory".into(),
         description: String::new(),

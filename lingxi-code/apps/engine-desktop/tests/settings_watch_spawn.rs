@@ -110,12 +110,12 @@ async fn spawn_fires_config_change_for_observed_settings_paths() {
     let claude_home = home.path().to_path_buf();
     let cwd = proj.path().to_path_buf();
     // The watcher only watches dirs that exist; create the project `.claude`.
-    std::fs::create_dir_all(cwd.join(".claude")).unwrap();
+    std::fs::create_dir_all(cwd.join(".lingxi")).unwrap();
 
     let user_settings = claude_home.join("settings.json");
-    let project_settings = cwd.join(".claude").join("settings.json");
-    let local_settings = cwd.join(".claude").join("settings.local.json");
-    let ignored = cwd.join(".claude").join("agents.json");
+    let project_settings = cwd.join(".lingxi").join("settings.json");
+    let local_settings = cwd.join(".lingxi").join("settings.local.json");
+    let ignored = cwd.join(".lingxi").join("agents.json");
 
     // The seeded burst is delivered to whichever directory is watched first
     // (`watch_dirs()` orders user dir first, then project `.claude`). Put events
@@ -165,11 +165,11 @@ async fn spawn_with_no_existing_dirs_watches_nothing() {
     // gate), so no task is spawned and nothing fires.
     let firer: Arc<RecordingFirer> = Arc::new(RecordingFirer::default());
     let fs = Arc::new(FakeFs::new(vec![ev(PathBuf::from(
-        "/no/such/.claude/settings.json",
+        "/no/such/.lingxi/settings.json",
     ))])) as Arc<dyn FileSystem>;
 
     let watcher = SettingsWatcher::new(
-        std::path::Path::new("/no/such/home/.claude"),
+        std::path::Path::new("/no/such/home/.lingxi"),
         std::path::Path::new("/no/such/project"),
         firer.clone(),
     );

@@ -54,7 +54,7 @@ fn over_max_length_gets_djb2_suffix() {
 
 #[test]
 fn session_path_layout_matches_claude_code() {
-    let home = Path::new("/home/user/.claude");
+    let home = Path::new("/home/user/.lingxi");
     let p = session_path(
         home,
         "/Users/foo/proj",
@@ -63,7 +63,7 @@ fn session_path_layout_matches_claude_code() {
     assert_eq!(
         p,
         Path::new(
-            "/home/user/.claude/projects/-Users-foo-proj/0a1b2c3d-4e5f-6789-abcd-ef0123456789.jsonl"
+            "/home/user/.lingxi/projects/-Users-foo-proj/0a1b2c3d-4e5f-6789-abcd-ef0123456789.jsonl"
         )
     );
 }

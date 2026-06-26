@@ -1,5 +1,5 @@
 //! `CronDeleteTool` — cancel a scheduled cron job by id, removing it from the
-//! single project-relative `<root>/.claude/scheduled_tasks.json` file.
+//! single project-relative `<root>/.lingxi/scheduled_tasks.json` file.
 //!
 //! 1:1 parity port of claude-code `CronDeleteTool.ts`. The model supplies the
 //! job `id` returned by `CronCreate`; the tool read-modify-writes the tasks
@@ -130,7 +130,7 @@ impl Tool for CronDeleteTool {
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: "CronDelete removes a cron job from .claude/scheduled_tasks.json".into(),
+                reason: "CronDelete removes a cron job from .lingxi/scheduled_tasks.json".into(),
             },
             updated_input: None,
             update_destination: None,
@@ -257,7 +257,7 @@ mod tests {
         }
     }
 
-    /// Seed `<root>/.claude/scheduled_tasks.json` with the given task ids.
+    /// Seed `<root>/.lingxi/scheduled_tasks.json` with the given task ids.
     async fn seed_ids(root: &Path, ids: &[&str]) {
         let path = cron_file_path(root);
         tokio::fs::create_dir_all(path.parent().unwrap())

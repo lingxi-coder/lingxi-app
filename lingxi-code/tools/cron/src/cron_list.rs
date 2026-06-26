@@ -1,5 +1,5 @@
 //! `CronListTool` — list every scheduled cron job by reading the single
-//! project-relative `<root>/.claude/scheduled_tasks.json` file.
+//! project-relative `<root>/.lingxi/scheduled_tasks.json` file.
 //!
 //! 1:1 parity port of claude-code `CronListTool.ts`. Returns a `jobs` array of
 //! `{id, cron, humanSchedule, prompt, recurring?, durable?}` plus a flattened
@@ -81,7 +81,7 @@ fn truncate_single_line(s: &str, max_width: usize) -> String {
     truncate_to_width(s, max_width)
 }
 
-/// Read the single `<root>/.claude/scheduled_tasks.json` file into the `jobs`
+/// Read the single `<root>/.lingxi/scheduled_tasks.json` file into the `jobs`
 /// shape, sorted by id for determinism. A missing / unparseable file yields no
 /// jobs. Every persisted task is durable by definition, so the `durable:false`
 /// key (CronListTool.ts' `durable === false` spread, which only applies to the
@@ -196,7 +196,7 @@ impl Tool for CronListTool {
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: "CronList reads .claude/scheduled_tasks.json".into(),
+                reason: "CronList reads .lingxi/scheduled_tasks.json".into(),
             },
             updated_input: None,
             update_destination: None,
@@ -275,7 +275,7 @@ mod tests {
         }
     }
 
-    /// Seed the single `<root>/.claude/scheduled_tasks.json` file with the given
+    /// Seed the single `<root>/.lingxi/scheduled_tasks.json` file with the given
     /// tasks (everything on disk is durable by definition — there is no on-disk
     /// `durable` field).
     async fn seed_tasks(root: &Path, tasks: Vec<cron::tasks_file::CronTask>) {

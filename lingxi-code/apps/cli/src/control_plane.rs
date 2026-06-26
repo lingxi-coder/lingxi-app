@@ -1430,7 +1430,7 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("lx-p5-2b-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let paths = PermissionPaths {
-            claude_home: tmp.join("home/.claude"),
+            claude_home: tmp.join("home/.lingxi"),
             cwd: tmp.join("proj"),
         };
         let (plane, mut rx) = plane_with_channel();
@@ -1462,8 +1462,8 @@ mod tests {
             .await;
         let outcome = check.await.unwrap();
         assert!(matches!(outcome, PermissionOutcome::Allow { .. }));
-        // The rule landed in <cwd>/.claude/settings.local.json.
-        let path = tmp.join("proj/.claude/settings.local.json");
+        // The rule landed in <cwd>/.lingxi/settings.local.json.
+        let path = tmp.join("proj/.lingxi/settings.local.json");
         let written = std::fs::read_to_string(&path).expect("settings.local.json written");
         let v: Value = serde_json::from_str(&written).unwrap();
         assert_eq!(v["permissions"]["allow"], json!(["Bash(npm install)"]));

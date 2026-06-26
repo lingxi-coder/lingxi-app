@@ -25,7 +25,7 @@ Commands:
   /help                 Show help and available commands
   /hooks                Manage hooks
   /ide                  Manage IDE integrations and show status
-  /init                 Initialize a new CLAUDE.md file with codebase documentation
+  /init                 Initialize a new LINGXI.md file with codebase documentation
   /init-verifiers       Create verifier skill(s) for automated verification of code changes
   /insights             Generate a report analyzing your Claude Code sessions
   /install              Install Claude Code native build

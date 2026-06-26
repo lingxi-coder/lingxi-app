@@ -3,20 +3,20 @@ use std::path::PathBuf;
 
 #[test]
 fn double_slash_strips_one_slash() {
-    let out = resolve_path_pattern_for_sandbox("//etc/passwd", &PathBuf::from("/home/u/.claude"));
+    let out = resolve_path_pattern_for_sandbox("//etc/passwd", &PathBuf::from("/home/u/.lingxi"));
     assert_eq!(out, "/etc/passwd");
 }
 
 #[test]
 fn double_slash_works_with_glob() {
-    let out = resolve_path_pattern_for_sandbox("//.aws/**", &PathBuf::from("/home/u/.claude"));
+    let out = resolve_path_pattern_for_sandbox("//.aws/**", &PathBuf::from("/home/u/.lingxi"));
     assert_eq!(out, "/.aws/**");
 }
 
 #[test]
 fn single_slash_resolves_against_settings_dir() {
-    let out = resolve_path_pattern_for_sandbox("/foo/**", &PathBuf::from("/home/u/.claude"));
-    assert_eq!(out, "/home/u/.claude/foo/**");
+    let out = resolve_path_pattern_for_sandbox("/foo/**", &PathBuf::from("/home/u/.lingxi"));
+    assert_eq!(out, "/home/u/.lingxi/foo/**");
 }
 
 #[test]

@@ -170,7 +170,7 @@ fn load_settings_blocks() -> (Option<BTreeMap<String, serde_json::Value>>, Optio
 /// The `ANTHROPIC_API_KEY` env value is read here but is NEVER logged; an empty
 /// key is a valid config (the server boots for transport testing and only a live
 /// turn fails with a 401 — surfaced to the client as a terminal `Error` event).
-/// User config-home: `$CLAUDE_CONFIG_DIR` when set (claude-code `tr()` `??`: an
+/// User config-home: `$LINGXI_CONFIG_DIR` when set (claude-code `tr()` `??`: an
 /// empty value is honored verbatim → cwd-relative), else `~/.claude`. Shared by
 /// the bridge's desktop-config + lockfile resolution.
 #[must_use]
@@ -186,7 +186,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let claude_home = claude_config_home().unwrap_or_else(|| PathBuf::from("/dev/null"));
     let project_mcp_path = cwd.join(".mcp.json");
-    // User/global-scope MCP servers live INSIDE `~/.claude.json` (top-level
+    // User/global-scope MCP servers live INSIDE `~/.lingxi.json` (top-level
     // `mcpServers`), exactly like claude-code — NOT a standalone file under the
     // OS config dir. The loader reads only that key
     // (`mcp::parse_global_config_mcp_servers`).
@@ -222,8 +222,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // M10: the bridge-server does not start a coordinator session by
         // default (threading this from session metadata is a follow-up).
         session_started_as_coordinator: false,
-        // Production memory: load the real `<cwd>/CLAUDE.md` +
-        // `~/.claude/CLAUDE.md` hierarchy into the system prompt (claude-code
+        // Production memory: load the real `<cwd>/LINGXI.md` +
+        // `~/.lingxi/LINGXI.md` hierarchy into the system prompt (claude-code
         // parity), which also makes the session-start
         // `fire_instructions_loaded()` fire over those files. Tests inject a
         // controlled provider (or `None`); only this real-host path reads the FS.
@@ -420,7 +420,7 @@ impl SlashCommandDispatcher for RegistrySlashDispatcherClone {
 /// lockfile.
 ///
 /// Returned by [`publish_lockfile`]: holding the [`LockfileGuard`] keeps the
-/// `~/.claude/bridge/<port>.lock` file on disk for the server's lifetime; it is
+/// `~/.lingxi/bridge/<port>.lock` file on disk for the server's lifetime; it is
 /// removed when this struct is dropped (clean shutdown OR panic unwind).
 pub struct ServedEndpoint {
     /// The bound loopback endpoint serving the connection.
@@ -439,7 +439,7 @@ pub struct ServedEndpoint {
 /// code (keeping `main.rs` thin).
 ///
 /// `lockfile_dir` is the directory the `<port>.lock` file is written into: the
-/// binary passes its `~/.claude/bridge` dir (via [`IdeLockfile::for_bridge`]);
+/// binary passes its `~/.lingxi/bridge` dir (via [`IdeLockfile::for_bridge`]);
 /// the test passes a `tempfile::TempDir` so no real `$HOME` is touched. The
 /// `workspace_folders` are recorded verbatim in the lockfile body.
 ///
@@ -562,7 +562,7 @@ mod tests {
             api_base: DEFAULT_API_BASE.to_string(),
             api_key: String::new(),
             cwd: cwd.clone(),
-            claude_home: cwd.join(".claude"),
+            claude_home: cwd.join(".lingxi"),
             default_model: "claude-sonnet-4-20250514".to_string(),
             fallback_model: None,
             provider_profiles: None,

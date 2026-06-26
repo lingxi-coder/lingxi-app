@@ -1,5 +1,5 @@
 //! Filesystem discovery + registration of custom markdown slash commands
-//! (`.claude/commands/**.md`).
+//! (`.lingxi/commands/**.md`).
 //!
 //! The discovery half of this feature already lives — fully ported and tested —
 //! in [`command_api::markdown_loader`]
@@ -54,7 +54,7 @@ use command_api::CommandRegistry;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// Discover every `.claude/commands/**.md` custom command reachable from `cwd`
+/// Discover every `.lingxi/commands/**.md` custom command reachable from `cwd`
 /// (project dirs up to the git root / `home`, plus the user and managed layers)
 /// and register each one into `reg` so it becomes resolvable and listable
 /// exactly like a builtin.
@@ -74,7 +74,7 @@ use std::path::{Path, PathBuf};
 /// * `cwd` — session working directory (drives the project upward walk).
 /// * `claude_home` — user config dir; the user layer is `claude_home/commands`.
 /// * `managed_dir` — managed-policy root; the managed layer is
-///   `managed_dir/.claude/commands`.
+///   `managed_dir/.lingxi/commands`.
 /// * `home` — the user's home directory, the upward-walk stop boundary.
 ///
 /// # Async
@@ -112,7 +112,7 @@ pub async fn load_and_register_custom_commands(
     registered
 }
 
-/// Discover every directory-format `.claude/skills/<name>/SKILL.md` command and
+/// Discover every directory-format `.lingxi/skills/<name>/SKILL.md` command and
 /// register it into `reg`.
 pub async fn load_and_register_skill_commands(
     reg: &mut CommandRegistry,
@@ -123,7 +123,7 @@ pub async fn load_and_register_skill_commands(
     load_and_register_skill_commands_with_roots(reg, cwd, claude_home, None, home, &[]).await
 }
 
-/// Discover every directory-format `.claude/skills/<name>/SKILL.md` command
+/// Discover every directory-format `.lingxi/skills/<name>/SKILL.md` command
 /// from managed, user, project, and additional skill directories and register it
 /// into `reg`.
 pub async fn load_and_register_skill_commands_with_roots(
@@ -183,18 +183,18 @@ mod tests {
         fs::write(path, contents).unwrap();
     }
 
-    /// A tempdir `.claude/commands/foo.md` becomes resolvable as `/foo` after
+    /// A tempdir `.lingxi/commands/foo.md` becomes resolvable as `/foo` after
     /// registration, as a `Markdown`-kind command carrying the file body.
     #[tokio::test]
     async fn registers_project_command_so_it_resolves() {
         let root = temp_dir("resolve");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = home.join(".claude");
+        let claude_home = home.join(".lingxi");
         let managed = root.join("managed-none");
 
         let project = root.join("proj");
-        let cmds = project.join(".claude").join("commands");
+        let cmds = project.join(".lingxi").join("commands");
         write(&cmds.join("foo.md"), "# Foo\n\nDo the foo with $1");
         // A namespaced one too: `sub/bar.md` -> `/sub:bar`.
         write(&cmds.join("sub").join("bar.md"), "Bar body");
@@ -229,10 +229,10 @@ mod tests {
         let root = temp_dir("skill-resolve");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = home.join(".claude");
+        let claude_home = home.join(".lingxi");
         let project = root.join("proj");
         fs::create_dir_all(project.join(".git")).unwrap();
-        let skill_dir = project.join(".claude").join("skills").join("demo");
+        let skill_dir = project.join(".lingxi").join("skills").join("demo");
         write(
             &skill_dir.join("SKILL.md"),
             "---\ndescription: Demo skill\n---\nUse this skill\n",
@@ -256,11 +256,11 @@ mod tests {
         let root = temp_dir("skill-collide");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = home.join(".claude");
+        let claude_home = home.join(".lingxi");
         let project = root.join("proj");
         fs::create_dir_all(project.join(".git")).unwrap();
         let user_skill_dir = claude_home.join("skills").join("dup");
-        let project_skill_dir = project.join(".claude").join("skills").join("dup");
+        let project_skill_dir = project.join(".lingxi").join("skills").join("dup");
         write(
             &user_skill_dir.join("SKILL.md"),
             "---\ndescription: User skill\n---\nUSER body\n",
@@ -292,13 +292,13 @@ mod tests {
         let root = temp_dir("skill-managed-collide");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = home.join(".claude");
+        let claude_home = home.join(".lingxi");
         let managed = root.join("managed");
         let additional = root.join("additional-skills");
         let project = root.join("proj");
         fs::create_dir_all(project.join(".git")).unwrap();
 
-        let managed_skill_dir = managed.join(".claude").join("skills").join("dup");
+        let managed_skill_dir = managed.join(".lingxi").join("skills").join("dup");
         write(
             &managed_skill_dir.join("SKILL.md"),
             "---\ndescription: Managed skill\n---\nMANAGED body\n",
@@ -309,7 +309,7 @@ mod tests {
         );
         write(
             &project
-                .join(".claude")
+                .join(".lingxi")
                 .join("skills")
                 .join("dup")
                 .join("SKILL.md"),
@@ -355,15 +355,15 @@ mod tests {
         let root = temp_dir("collide");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = home.join(".claude");
+        let claude_home = home.join(".lingxi");
         let managed = root.join("managed-none");
 
         // User layer: claude_home/commands/dup.md
         write(&claude_home.join("commands").join("dup.md"), "USER body");
-        // Project layer: <proj>/.claude/commands/dup.md
+        // Project layer: <proj>/.lingxi/commands/dup.md
         let project = root.join("proj");
         write(
-            &project.join(".claude").join("commands").join("dup.md"),
+            &project.join(".lingxi").join("commands").join("dup.md"),
             "PROJECT body",
         );
 
@@ -391,13 +391,13 @@ mod tests {
         let root = temp_dir("override");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = home.join(".claude");
+        let claude_home = home.join(".lingxi");
         let managed = root.join("managed-none");
 
         let project = root.join("proj");
         // `commit` is a real builtin name; a custom `commit.md` must shadow it.
         write(
-            &project.join(".claude").join("commands").join("commit.md"),
+            &project.join(".lingxi").join("commands").join("commit.md"),
             "# Custom commit\n\ncustom commit body",
         );
 
@@ -428,7 +428,7 @@ mod tests {
         let root = temp_dir("empty");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = home.join(".claude");
+        let claude_home = home.join(".lingxi");
         let managed = root.join("managed-none");
         let project = root.join("noproj");
 

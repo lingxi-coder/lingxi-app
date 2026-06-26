@@ -252,7 +252,7 @@ mod tests {
         let firer = OrchestratorCwdChangedFirer::new(
             Arc::new(exec),
             PathBuf::from("/work"),
-            PathBuf::from("/home/.claude/projects/-work/abc.jsonl"),
+            PathBuf::from("/home/.lingxi/projects/-work/abc.jsonl"),
             current_cwd.clone(),
         );
         firer
@@ -281,7 +281,7 @@ mod tests {
         let got_transcript = seen_transcript.lock().unwrap().clone();
         assert_eq!(
             got_transcript,
-            Some(PathBuf::from("/home/.claude/projects/-work/abc.jsonl")),
+            Some(PathBuf::from("/home/.lingxi/projects/-work/abc.jsonl")),
             "OrchestratorCwdChangedFirer must carry the constructor's transcript_path \
              into the HookContext (non-empty)"
         );

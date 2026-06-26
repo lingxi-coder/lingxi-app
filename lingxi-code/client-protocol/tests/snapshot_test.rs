@@ -230,7 +230,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     title: "Implement the parser".to_string(),
                     modified_rfc3339: "2026-06-02T12:00:00Z".to_string(),
                     message_count: 17,
-                    path: "/home/dev/.claude/sessions/33333333.jsonl".to_string(),
+                    path: "/home/dev/.lingxi/sessions/33333333.jsonl".to_string(),
                 }],
             },
         ),
@@ -301,7 +301,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             "event/memory_entries.json",
             ClientEvent::MemoryEntries {
                 entries: vec![MemoryEntryDto {
-                    path: "/home/dev/project/CLAUDE.md".to_string(),
+                    path: "/home/dev/project/LINGXI.md".to_string(),
                     tier: MemoryTierDto::Project,
                     body: "# Project notes".to_string(),
                     age_days: 3,

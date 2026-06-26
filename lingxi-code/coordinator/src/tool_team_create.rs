@@ -102,7 +102,7 @@ pub struct TeamCreateTool {
     /// Optional `~/.claude` root override. `None` (production) ⇒ resolve from
     /// `$HOME` via [`team_file::claude_home`]. Tests inject a tempdir so the
     /// on-disk team file is written under a scratch path (hermetic, no real
-    /// `~/.claude/teams/` pollution, no cross-test interference).
+    /// `~/.lingxi/teams/` pollution, no cross-test interference).
     home_override: Option<std::path::PathBuf>,
     /// Optional background-task spawner (D17 — no direct `tokio::spawn`) used to
     /// start the per-teammate mailbox→runner PUMP right after a spawn is
@@ -479,7 +479,7 @@ impl Tool for TeamCreateTool {
         //        of under the session id.
         traits::team_registry::set_leader_team_name(&team_name);
 
-        // 5b. Write the on-disk team file `~/.claude/teams/{name}/config.json`
+        // 5b. Write the on-disk team file `~/.lingxi/teams/{name}/config.json`
         //     mirroring the TS `TeamFile` shape (TeamCreateTool.ts:157-177 →
         //     teamHelpers.ts:175-182). Best-effort: a write failure is surfaced
         //     as a `warning` on the result but does NOT abort the spawn (the
@@ -770,7 +770,7 @@ mod tests {
     ///
     /// The tool's `~/.claude` root is overridden to a fresh tempdir so the
     /// on-disk team file is written under a scratch path (hermetic; no real
-    /// `~/.claude/teams/` pollution, no cross-test interference). The returned
+    /// `~/.lingxi/teams/` pollution, no cross-test interference). The returned
     /// `TempDir` MUST be held alive for the duration of the test.
     fn make_tool_with_seam_and_spy(
         seam: Arc<RecordingSeam>,
@@ -792,7 +792,7 @@ mod tests {
             seam as Arc<dyn TeamSpawnSeam>,
             spy.clone() as Arc<dyn OutputStream>,
         )
-        .with_home(tmp.path().join(".claude"));
+        .with_home(tmp.path().join(".lingxi"));
         (tool, registry, mode, spy, tmp)
     }
 
@@ -1122,8 +1122,8 @@ mod tests {
     async fn name_collision_auto_renames() {
         let seam = Arc::new(RecordingSeam::new("task-x"));
         let (tool, registry, _mode, _spy, tmp) = make_tool_with_seam_and_spy(seam);
-        let home = tmp.path().join(".claude");
-        // Pre-seed a colliding team file at `~/.claude/teams/alpha/config.json`.
+        let home = tmp.path().join(".lingxi");
+        // Pre-seed a colliding team file at `~/.lingxi/teams/alpha/config.json`.
         std::fs::create_dir_all(team_file::team_dir(&home, "alpha")).unwrap();
         std::fs::write(team_file::team_file_path(&home, "alpha"), "{}").unwrap();
 
@@ -1145,13 +1145,13 @@ mod tests {
         assert_eq!(registry.team_name().await.as_deref(), Some(final_name));
     }
 
-    /// The on-disk team file is written at `~/.claude/teams/{name}/config.json`
+    /// The on-disk team file is written at `~/.lingxi/teams/{name}/config.json`
     /// with the TS `TeamFile` shape (TeamCreateTool.ts:157-177).
     #[tokio::test]
     async fn writes_team_file_to_disk() {
         let seam = Arc::new(RecordingSeam::new("task-y"));
         let (tool, _registry, _mode, _spy, tmp) = make_tool_with_seam_and_spy(seam);
-        let home = tmp.path().join(".claude");
+        let home = tmp.path().join(".lingxi");
 
         let res = tool
             .call(

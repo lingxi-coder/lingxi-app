@@ -1,6 +1,6 @@
 //! Marketplace catalog resolution + plugin materialization (Stage 2 install).
 //!
-//! A marketplace is a git repo whose `.claude-plugin/marketplace.json` lists
+//! A marketplace is a git repo whose `.lingxi-plugin/marketplace.json` lists
 //! installable plugins. Installing `plugin@marketplace` clones the catalog into
 //! `<plugins>/marketplaces/<name>/`, finds the entry, and materializes that
 //! plugin's tree into the versioned cache the discovery loader resolves.
@@ -14,7 +14,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// The `.claude-plugin/marketplace.json` catalog.
+/// The `.lingxi-plugin/marketplace.json` catalog.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MarketplaceIndex {
     /// Marketplace name.
@@ -49,7 +49,7 @@ pub type MarketplaceError = String;
 
 /// Resolves marketplace catalogs and materializes plugins from them.
 pub struct MarketplaceManager {
-    /// The plugins root (`~/.claude/plugins`).
+    /// The plugins root (`~/.lingxi/plugins`).
     install_dir: PathBuf,
 }
 
@@ -61,7 +61,7 @@ impl MarketplaceManager {
     }
 
     /// Clone (or refresh) the marketplace git repo at `url` into
-    /// `marketplaces/<name>/` and parse its `.claude-plugin/marketplace.json`.
+    /// `marketplaces/<name>/` and parse its `.lingxi-plugin/marketplace.json`.
     /// Returns the parsed index + the clone directory.
     pub async fn resolve_index_via_git(
         &self,

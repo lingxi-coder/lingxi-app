@@ -580,7 +580,7 @@ pub struct ConversationOrchestrator {
     /// The byte value is a host-minted uuid (shape-parity only — never matches
     /// the binary's per-run uuid).
     pub(crate) query_chain_id: String,
-    /// CLAUDE.md hierarchy provider (M5-03). The orchestrator calls
+    /// LINGXI.md hierarchy provider (M5-03). The orchestrator calls
     /// `memory.load(&cwd).await` once per `run_turn` to gather the
     /// memory files spliced into the system prompt.
     pub(crate) memory: Arc<dyn crate::prompt::MemoryHierarchyProvider>,
@@ -600,7 +600,7 @@ pub struct ConversationOrchestrator {
     /// Defaults to a private `Arc` over `cwd` (no firer wired ⇒ never moves ⇒
     /// hooks read the static cwd exactly as before).
     pub(crate) current_cwd: Arc<std::sync::Mutex<std::path::PathBuf>>,
-    /// Resolved `$CLAUDE_CONFIG_DIR ?? ~/.claude` dir (the claude-home root).
+    /// Resolved `$LINGXI_CONFIG_DIR ?? ~/.claude` dir (the claude-home root).
     /// Used by [`Self::computed_transcript_path`] to deterministically derive the
     /// session's transcript path (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`,
     /// = claude-code `getTranscriptPathForSession`) for hook payloads when no
@@ -611,7 +611,7 @@ pub struct ConversationOrchestrator {
     /// Wired at the composition root via [`Self::with_config_home`].
     pub(crate) config_home: Option<std::path::PathBuf>,
     /// Optional on-disk JSONL persistence (M5-07). `None` for in-memory
-    /// tests; `Some` when the CLI binary wires `~/.claude/projects/.../<uuid>.jsonl`.
+    /// tests; `Some` when the CLI binary wires `~/.lingxi/projects/.../<uuid>.jsonl`.
     pub(crate) jsonl_writer: Option<Arc<JsonlWriter>>,
     /// Cached UUID of the last persisted JSONL entry — used to populate
     /// `parentUuid` on the next append. Reset to `None` for fresh sessions.
@@ -688,7 +688,7 @@ pub struct ConversationOrchestrator {
     pub(crate) hook_registry: Option<Arc<tokio::sync::RwLock<hooks::HookRegistry>>>,
     /// Subagent catalog (M6-07). `None` when not wired — `list_agents`
     /// then returns `vec![]`. The CLI binary populates from
-    /// `~/.claude/agents/` + project `.claude/agents/`.
+    /// `~/.lingxi/agents/` + project `.lingxi/agents/`.
     pub(crate) agent_catalog: Option<Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>>>,
     /// Compaction engine (M3-05) wired by `with_compaction`. `None` when
     /// not configured — `force_compact` then falls back to the legacy
@@ -945,7 +945,7 @@ pub struct SessionMemoryHandle {
     pub extractor: Mutex<memory::session_memory::SessionMemoryExtractor>,
     /// Forked-agent runner that issues the distillation off the cache prefix.
     pub runner: Arc<sidequery::ForkedAgentRunner>,
-    /// Resolved `$CLAUDE_CONFIG_DIR ?? ~/.claude` dir (the write base).
+    /// Resolved `$LINGXI_CONFIG_DIR ?? ~/.claude` dir (the write base).
     pub config_home: std::path::PathBuf,
     /// Runtime used to background-spawn the extraction fork.
     pub runtime: Arc<dyn traits::RuntimeSpawner>,
@@ -1078,7 +1078,7 @@ impl ConversationOrchestrator {
         self
     }
 
-    /// Attach the resolved claude-home (`$CLAUDE_CONFIG_DIR ?? ~/.claude`) so
+    /// Attach the resolved claude-home (`$LINGXI_CONFIG_DIR ?? ~/.claude`) so
     /// hook payloads carry a deterministically-computed `transcript_path` even
     /// when no [`JsonlWriter`] is wired (the production case). Builder-style —
     /// wired at the composition root (`engine-desktop` / `engine-mobile`).
@@ -3904,8 +3904,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// dispatched from the eager `getMemoryFiles` pass — `utils/claudemd.ts:1054-1071`,
     /// `utils/hooks.ts:4335-4369`).
     ///
-    /// claude-code fires this fire-and-forget hook for **each** CLAUDE.md /
-    /// `CLAUDE.local.md` it splices into context, carrying that file's `file_path`,
+    /// claude-code fires this fire-and-forget hook for **each** LINGXI.md /
+    /// `LINGXI.local.md` it splices into context, carrying that file's `file_path`,
     /// `memory_type` (`User` / `Project` / `Local` / `Managed`), and `load_reason`.
     /// The eager session-start pass reports `load_reason: 'session_start'` for every
     /// top-level (parent-less) file (`eagerLoadReason`). The orchestrator's
@@ -4504,7 +4504,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // with claude-code `A6n(re, userContext)`, which prepends the meta
             // message at every `callModel`. Recomputed each turn, never accumulates.
             // `currentDate` is always present, so this is `Some(_)` whenever a
-            // CLAUDE.md / email / date is sourceable (i.e. always for the date).
+            // LINGXI.md / email / date is sourceable (i.e. always for the date).
             if let Some(ctx_msg) = self.additional_context_message().await {
                 snapshot.insert(0, ctx_msg);
             }
@@ -4534,7 +4534,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             }
 
             // §F (streaming twin): per-turn, transient `conditional_rules`
-            // reminder — path-gated CLAUDE.md rules that newly activate because a
+            // reminder — path-gated LINGXI.md rules that newly activate because a
             // touched file matches their globs. Appended to THIS turn's OUTGOING
             // snapshot only (never `session.history` / JSONL), after the
             // skill-listing reminder and BEFORE the blocking-limit estimate below
@@ -6152,7 +6152,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// (the IMPORTANT line is indented by exactly six spaces).
     ///
     /// The `userContext` keys, in claude-code insertion order (`pS`,
-    /// binary offset ~197202100): `claudeMd` (the assembled CLAUDE.md memory
+    /// binary offset ~197202100): `claudeMd` (the assembled LINGXI.md memory
     /// block — [`memory_block::format`]), `userEmail`
     /// (`The user's email address is {email}.`, only when configured), and
     /// `currentDate` (`Today's date is {YYYY-MM-DD}.`, always present). The
@@ -6167,7 +6167,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// it is never persisted to `session.history` / JSONL.
     pub(crate) async fn additional_context_message(&self) -> Option<ConversationMessage> {
         // `claudeMd` value = the assembled memory block (preamble + `Contents
-        // of …:` blocks). Empty when no CLAUDE.md files are loaded.
+        // of …:` blocks). Empty when no LINGXI.md files are loaded.
         let memory_files = self.memory.load(&self.cwd).await;
         let claude_md = crate::prompt::memory_block::format(&memory_files);
 
@@ -6616,7 +6616,7 @@ As you answer the user's questions, you can use the following context:\n\
     }
 
     /// §F: the per-turn, transient `conditional_rules` reminder — path-gated
-    /// CLAUDE.md rules (`paths:`-globbed) that newly ACTIVATE because a file the
+    /// LINGXI.md rules (`paths:`-globbed) that newly ACTIVATE because a file the
     /// session has touched this run matches their globs. Returns `None` when no
     /// memory provider is wired, the hierarchy has no conditional rules, or no
     /// newly-activated rule exists this turn.
@@ -8286,7 +8286,7 @@ mod additional_context_tests {
         // claudeMd + userEmail present; currentDate always present. Insertion
         // order (claude-code `pS`): claudeMd, userEmail, currentDate.
         let mem = Arc::new(StaticMemoryProvider::with_files(vec![MemoryFile {
-            path: std::path::PathBuf::from("/proj/CLAUDE.md"),
+            path: std::path::PathBuf::from("/proj/LINGXI.md"),
             body: "MD BODY".into(),
             is_local_override: false,
             tier: memory::claude_md::ClaudeMdTier::Project,
@@ -8319,7 +8319,7 @@ You should not respond to this context unless it is highly relevant to your task
 
         // claudeMd value = the assembled memory block (preamble + Contents).
         assert!(body.contains("# claudeMd\nCodebase and user instructions are shown below."));
-        assert!(body.contains("Contents of /proj/CLAUDE.md"));
+        assert!(body.contains("Contents of /proj/LINGXI.md"));
         assert!(body.contains("MD BODY"));
         // userEmail value.
         assert!(body.contains("# userEmail\nThe user's email address is u@example.com."));
@@ -9896,11 +9896,11 @@ mod conditional_rules_reminder_tests {
     use std::sync::Arc;
     use tool_api::registry::ToolRegistry;
 
-    /// A Project-tier conditional rule living at `<cwd>/.claude/rules/{name}.md`
+    /// A Project-tier conditional rule living at `<cwd>/.lingxi/rules/{name}.md`
     /// (so its derived base dir is `<cwd>`) carrying the given `paths:` globs.
     fn project_rule(cwd: &std::path::Path, name: &str, globs: &[&str]) -> MemoryFile {
         MemoryFile {
-            path: cwd.join(".claude").join("rules").join(format!("{name}.md")),
+            path: cwd.join(".lingxi").join("rules").join(format!("{name}.md")),
             body: format!("BODY OF {name}"),
             is_local_override: false,
             tier: ClaudeMdTier::Project,
@@ -9941,7 +9941,7 @@ mod conditional_rules_reminder_tests {
         let text = msg.text_content();
         assert!(text.starts_with("<system-reminder>"), "got: {text}");
         assert!(
-            text.contains("Contents of /work/repo/.claude/rules/scoped.md:"),
+            text.contains("Contents of /work/repo/.lingxi/rules/scoped.md:"),
             "got: {text}"
         );
         assert!(text.contains("BODY OF scoped"), "got: {text}");
@@ -9995,7 +9995,7 @@ mod conditional_rules_reminder_tests {
         // a touched file present.
         let cwd = PathBuf::from("/work/repo");
         let unconditional = MemoryFile {
-            path: cwd.join("CLAUDE.md"),
+            path: cwd.join("LINGXI.md"),
             body: "always".into(),
             is_local_override: false,
             tier: ClaudeMdTier::Project,

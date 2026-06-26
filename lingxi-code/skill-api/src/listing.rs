@@ -2,8 +2,8 @@
 //!
 //! This is the non-UI half of Claude Code's `loadSkillsFromSkillsDir` +
 //! `getProjectDirsUpToHome('skills', cwd)` behavior: read directory-format
-//! skills from project `.claude/skills/` directories and user
-//! `~/.claude/skills/`, parse each `SKILL.md`, deduplicate by canonical path,
+//! skills from project `.lingxi/skills/` directories and user
+//! `~/.lingxi/skills/`, parse each `SKILL.md`, deduplicate by canonical path,
 //! and return rows sorted by directory name.
 
 use crate::{parse_skill_markdown, LoadedFrom, SkillSource};
@@ -37,7 +37,7 @@ pub struct FileSkillSection {
 
 /// Load project and user file-based skills for display.
 ///
-/// Project skills come from every existing `<ancestor>/.claude/skills` from
+/// Project skills come from every existing `<ancestor>/.lingxi/skills` from
 /// `cwd` up to the nearest git root, most-specific first. User skills come from
 /// `<claude_home>/skills`. Empty sections are omitted.
 #[must_use]
@@ -212,13 +212,13 @@ mod tests {
         let root = tmp_root("sections");
         let repo = root.join("repo");
         let cwd = repo.join("nested");
-        let home = root.join("home").join(".claude");
+        let home = root.join("home").join(".lingxi");
         fs::create_dir_all(repo.join(".git")).expect("create git marker");
         fs::create_dir_all(&cwd).expect("create cwd");
         fs::create_dir_all(&home).expect("create home");
 
         write_skill(
-            &cwd.join(".claude").join("skills"),
+            &cwd.join(".lingxi").join("skills"),
             "alpha",
             "does alpha things",
             None,
@@ -244,7 +244,7 @@ mod tests {
         let root = tmp_root("roots");
         let repo = root.join("repo");
         let cwd = repo.join("nested");
-        let home = root.join("home").join(".claude");
+        let home = root.join("home").join(".lingxi");
         let managed = root.join("managed");
         let additional = root.join("additional-skills");
         fs::create_dir_all(repo.join(".git")).expect("create git marker");
@@ -252,13 +252,13 @@ mod tests {
         fs::create_dir_all(&home).expect("create home");
 
         write_skill(
-            &managed.join(".claude").join("skills"),
+            &managed.join(".lingxi").join("skills"),
             "managed",
             "managed skill",
             None,
         );
         write_skill(
-            &cwd.join(".claude").join("skills"),
+            &cwd.join(".lingxi").join("skills"),
             "project",
             "project skill",
             None,
@@ -291,8 +291,8 @@ mod tests {
     fn ignores_loose_markdown_files() {
         let root = tmp_root("loose");
         let cwd = root.join("repo");
-        let home = root.join("home").join(".claude");
-        let skills = cwd.join(".claude").join("skills");
+        let home = root.join("home").join(".lingxi");
+        let skills = cwd.join(".lingxi").join("skills");
         fs::create_dir_all(&skills).expect("create skills dir");
         fs::create_dir_all(&home).expect("create home");
         fs::write(skills.join("loose.md"), "---\ndescription: x\n---\n").expect("write loose");

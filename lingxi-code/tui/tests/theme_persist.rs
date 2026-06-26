@@ -1,4 +1,4 @@
-//! M7-15 Task 9 — best-effort theme persistence via `~/.claude/settings.json`
+//! M7-15 Task 9 — best-effort theme persistence via `~/.lingxi/settings.json`
 //! `theme` field. Round-trips through the explicit-path test seams.
 
 use tui::theme::{ThemeName, ThemeSetting};

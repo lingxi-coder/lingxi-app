@@ -160,12 +160,12 @@ mod tests {
         // (settings-status-missing-mcp-and-setting-sources)
         let mut data = fixture();
         data.status.setting_sources = vec![
-            "Project settings (.claude/settings.json)".to_string(),
-            "User settings (~/.claude/settings.json)".to_string(),
+            "Project settings (.lingxi/settings.json)".to_string(),
+            "User settings (~/.lingxi/settings.json)".to_string(),
         ];
         let out = render_status_to_string(&data);
         assert!(out.contains(
-            "Setting sources: Project settings (.claude/settings.json), User settings (~/.claude/settings.json)"
+            "Setting sources: Project settings (.lingxi/settings.json), User settings (~/.lingxi/settings.json)"
         ), "got: {out}");
     }
 

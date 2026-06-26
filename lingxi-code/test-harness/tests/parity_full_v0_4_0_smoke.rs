@@ -111,11 +111,11 @@ fn full_v0_4_0_smoke_fixture_loads_and_self_consistent() {
     // --- Settings literals ---
     assert_eq!(
         fx.settings.user_settings_file_suffix,
-        "/.claude/settings.json"
+        "/.lingxi/settings.json"
     );
     assert_eq!(
         fx.settings.project_settings_file_suffix,
-        ".claude/settings.json"
+        ".lingxi/settings.json"
     );
     assert_eq!(
         fx.settings.env_prefix_priority,
@@ -140,10 +140,10 @@ fn full_v0_4_0_smoke_fixture_loads_and_self_consistent() {
         .contains(&"tengu_settings_parse_error".to_string()));
 
     // --- Memory literals ---
-    assert_eq!(fx.memory.project_memory_filename, "CLAUDE.md");
-    assert_eq!(fx.memory.local_override_filename, "CLAUDE.local.md");
-    assert_eq!(fx.memory.memdir_suffix, "/.claude/memdir/");
-    assert_eq!(fx.memory.team_memory_suffix, "/.claude/team-mem/");
+    assert_eq!(fx.memory.project_memory_filename, "LINGXI.md");
+    assert_eq!(fx.memory.local_override_filename, "LINGXI.local.md");
+    assert_eq!(fx.memory.memdir_suffix, "/.lingxi/memdir/");
+    assert_eq!(fx.memory.team_memory_suffix, "/.lingxi/team-mem/");
     assert_eq!(fx.memory.max_memory_file_size_bytes, 10 * 1024 * 1024);
     assert_eq!(fx.memory.memory_age_penalty_days, 30);
     assert_eq!(fx.memory.memory_age_hard_drop_days, 365);

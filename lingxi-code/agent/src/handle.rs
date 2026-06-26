@@ -2196,16 +2196,16 @@ mod tests {
         // A worktree-isolated spawn (request.cwd Some) threads the cwd into the
         // env renderer so the agent's env block reflects the worktree.
         let mut wt_req = req.clone();
-        wt_req.cwd = Some("/repo/.claude/worktrees/agent-x".to_string());
+        wt_req.cwd = Some("/repo/.lingxi/worktrees/agent-x".to_string());
         let wt_ctx = spawner.build_subagent_context(&wt_req, mk_inherit(), false).await;
         let wt_sys = wt_ctx.rendered_system_prompt.as_deref().unwrap();
         assert!(
-            wt_sys.contains("CWD: /repo/.claude/worktrees/agent-x"),
+            wt_sys.contains("CWD: /repo/.lingxi/worktrees/agent-x"),
             "worktree cwd must reach the env renderer; got:\n{wt_sys}"
         );
         assert_eq!(
             wt_ctx.cwd.as_deref(),
-            Some(std::path::Path::new("/repo/.claude/worktrees/agent-x")),
+            Some(std::path::Path::new("/repo/.lingxi/worktrees/agent-x")),
             "SubagentContext.cwd is set from request.cwd"
         );
 

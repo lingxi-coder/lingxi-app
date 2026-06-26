@@ -7,7 +7,7 @@
 //! 2. Build an [`IdeLockfile`] which generates a fresh 32-hex-char auth token.
 //! 3. Hand the token to the running endpoint with
 //!    [`McpEndpoint::set_auth_token`].
-//! 4. Write `~/.claude/ide/<port>.lock` carrying that token.
+//! 4. Write `~/.lingxi/ide/<port>.lock` carrying that token.
 //! 5. Install a [`LockfileGuard`] that removes the lockfile on shutdown or
 //!    panic.
 //!
@@ -52,7 +52,7 @@ pub struct IdeBridge {
 impl IdeBridge {
     /// Start the bridge. `workspace_folders` becomes the `workspaceFolders`
     /// array in the lockfile body and identifies the IDE session to clients
-    /// scanning `~/.claude/ide/`.
+    /// scanning `~/.lingxi/ide/`.
     ///
     /// # Errors
     /// - [`BridgeError::Config`] if `workspace_folders` is empty.
@@ -138,7 +138,7 @@ mod tests {
     #[tokio::test]
     async fn state_is_disconnected_after_start() {
         // We can't easily run `IdeBridge::start` in tests without touching
-        // `~/.claude/ide/`, so this test only verifies the empty-input guard
+        // `~/.lingxi/ide/`, so this test only verifies the empty-input guard
         // above. Full start/shutdown is covered by the integration test in
         // tests/mcp_endpoint_test.rs.
         let bridge = IdeBridge {

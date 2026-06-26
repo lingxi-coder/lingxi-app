@@ -868,7 +868,7 @@ mod tests {
         FsRoots {
             cwd: PathBuf::from("/proj/work"),
             home: Some(PathBuf::from("/home/u")),
-            claude_home: PathBuf::from("/home/u/.claude"),
+            claude_home: PathBuf::from("/home/u/.lingxi"),
         }
     }
 
@@ -1214,7 +1214,7 @@ mod tests {
 
     #[test]
     fn compound_cd_with_write_asks() {
-        // `cd .claude/ && mv test.txt settings.json` — cd + a write op.
+        // `cd .lingxi/ && mv test.txt settings.json` — cd + a write op.
         let a = check("cd ./.claude && mv test.txt settings.json").expect("ask");
         assert_eq!(
             a.message,

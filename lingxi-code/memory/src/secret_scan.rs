@@ -133,7 +133,7 @@ mod tests {
                 label: "Stripe".into(),
             },
         ];
-        emit_redactions(Some(&bus), Path::new("/x/CLAUDE.md"), &dets).await;
+        emit_redactions(Some(&bus), Path::new("/x/LINGXI.md"), &dets).await;
         let ev = sink.events.lock().unwrap();
         assert_eq!(ev.len(), 2);
         for (name, md) in ev.iter() {

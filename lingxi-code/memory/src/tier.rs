@@ -13,14 +13,14 @@ use std::path::PathBuf;
 /// before invoking the LLM selector.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MemoryTier {
-    /// Repository-local memory (e.g. `.claude/CLAUDE.md`).
+    /// Repository-local memory (e.g. `.lingxi/LINGXI.md`).
     Project {
         /// Repository root containing the memory tree.
         repo_root: PathBuf,
     },
     /// Per-user memory checked into the user's home directory.
     User {
-        /// Root of the user's memory directory (e.g. `~/.claude/`).
+        /// Root of the user's memory directory (e.g. `~/.lingxi/`).
         user_memory_dir: PathBuf,
     },
     /// Ephemeral notes that live only for the current session.

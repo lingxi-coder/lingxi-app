@@ -120,6 +120,6 @@ async fn list_hooks_maps_executor_type_content_and_source() {
     let v = orch.list_hooks().await;
     assert_eq!(v[0].hook_type, "command");
     assert_eq!(v[0].content, "prettier --write");
-    assert_eq!(v[0].source, "Project settings (.claude/settings.json)");
+    assert_eq!(v[0].source, "Project settings (.lingxi/settings.json)");
     assert_eq!(v[0].status_message.as_deref(), Some("Formatting…"));
 }

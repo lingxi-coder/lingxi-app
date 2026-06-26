@@ -1,6 +1,6 @@
 //! Startup config migrations — port of claude-code `runMigrations()`
 //! (`main.tsx:323-353`, `CURRENT_MIGRATION_VERSION = 11`) plus the
-//! `~/.claude.json` `GlobalConfig` substrate it requires (`utils/config.ts`).
+//! `~/.lingxi.json` `GlobalConfig` substrate it requires (`utils/config.ts`).
 //!
 //! Desktop-only: wired in `apps/cli` pre-REPL; NEVER part of the
 //! engine-mobile dependency tree.

@@ -56,14 +56,14 @@ fn resume_with_invalid_uuid_exits_1() {
 /// the M5-08 stdio picker (deterministic regardless of CI TTY state); with no
 /// sessions in the cwd's project dir the picker prints the locked
 /// "No conversations found to resume." line and exits 0. The test runs in a
-/// fresh temp `$CLAUDE_CONFIG_DIR` so the loader sees an empty project dir.
+/// fresh temp `$LINGXI_CONFIG_DIR` so the loader sees an empty project dir.
 #[test]
 fn resume_without_value_no_tui_empty_dir_exits_0() {
     let tmp = tempfile::tempdir().unwrap();
     Command::cargo_bin("lingxi-cli")
         .unwrap()
         .env("ANTHROPIC_API_KEY", "sk-test-fake")
-        .env("CLAUDE_CONFIG_DIR", tmp.path())
+        .env("LINGXI_CONFIG_DIR", tmp.path())
         .args(["--resume", "--no-tui"])
         .assert()
         .code(0)

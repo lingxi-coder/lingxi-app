@@ -213,7 +213,7 @@ impl Tool for TeamDeleteTool {
 
     async fn prompt(&self, _: &PromptOptions) -> String {
         // 1:1 with TS `getPrompt()`.
-        "# TeamDelete\n\nRemove team and task directories when the swarm work is complete.\n\nThis operation:\n- Removes the team directory (`~/.claude/teams/{team-name}/`)\n- Removes the task directory (`~/.claude/tasks/{team-name}/`)\n- Clears team context from the current session\n\n**IMPORTANT**: TeamDelete will fail if the team still has active members. Gracefully terminate teammates first, then call TeamDelete after all teammates have shut down.\n\nUse this when all teammates have finished their work and you want to clean up the team resources. The team name is automatically determined from the current session's team context.".into()
+        "# TeamDelete\n\nRemove team and task directories when the swarm work is complete.\n\nThis operation:\n- Removes the team directory (`~/.lingxi/teams/{team-name}/`)\n- Removes the task directory (`~/.lingxi/tasks/{team-name}/`)\n- Clears team context from the current session\n\n**IMPORTANT**: TeamDelete will fail if the team still has active members. Gracefully terminate teammates first, then call TeamDelete after all teammates have shut down.\n\nUse this when all teammates have finished their work and you want to clean up the team resources. The team name is automatically determined from the current session's team context.".into()
     }
 
     async fn call(
@@ -315,7 +315,7 @@ impl Tool for TeamDeleteTool {
 
         // 4a. Team-level cleanup (TeamDeleteTool.ts:101-124): once the last
         //     worker is gone, remove the on-disk team + task directories
-        //     (`~/.claude/teams/{name}/` + `~/.claude/tasks/{name}/`), clear the
+        //     (`~/.lingxi/teams/{name}/` + `~/.lingxi/tasks/{name}/`), clear the
         //     coordinator's team context (`set_team_name(None)`), and fire
         //     `tengu_team_deleted`. Cleanup only runs when no live workers
         //     remain, so deleting one worker of a (now otherwise-terminal) team
@@ -765,7 +765,7 @@ mod tests {
         bus.attach_sink(sink.clone()).await;
 
         let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join(".claude");
+        let home = tmp.path().join(".lingxi");
 
         let team = registry();
         team.set_team_name(Some("alpha".into())).await;

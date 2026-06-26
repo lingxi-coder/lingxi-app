@@ -15,7 +15,7 @@
 //!    connection-scoped `AdapterPermissionGate`).
 //! 3. Start [`bridge::McpEndpoint::start_on_ephemeral_port_with_pump`] on
 //!    `127.0.0.1:0`.
-//! 4. Write the F2-04 discovery lockfile `~/.claude/bridge/<port>.lock` (port in
+//! 4. Write the F2-04 discovery lockfile `~/.lingxi/bridge/<port>.lock` (port in
 //!    the filename, a fresh `authToken` in the body) and enforce that SAME token
 //!    on the endpoint. The lockfile is removed on shutdown (Drop-guard).
 //! 5. Log the chosen port + lockfile path, then block until ctrl-c.
@@ -90,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
 
     // (4) Write the F2-04 discovery lockfile and enforce its token on the
     //     endpoint. The workspace folder is the resolved cwd; the lockfile lives
-    //     in `~/.claude/bridge` (created here). The token-enforce + Drop-guard
+    //     in `~/.lingxi/bridge` (created here). The token-enforce + Drop-guard
     //     reap are factored into `boot::publish_lockfile` so the headless serve
     //     test drives the SAME code with a temp dir.
     let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));

@@ -30,14 +30,14 @@
 //! `getSettingsFilePathForSource` (`settings.ts:274-294`) +
 //! `getManagedFilePath` (`managedPath.ts`):
 //! - `<claude_home>/settings.json`            → `UserSettings`
-//! - `<cwd>/.claude/settings.json`            → `ProjectSettings`
-//! - `<cwd>/.claude/settings.local.json`      → `LocalSettings`
+//! - `<cwd>/.lingxi/settings.json`            → `ProjectSettings`
+//! - `<cwd>/.lingxi/settings.local.json`      → `LocalSettings`
 //! - `<managed_dir>/managed-settings.json`    → `PolicySettings`
 //! - any `*.json` under `<managed_dir>/managed-settings.d/` → `PolicySettings`
 //!
 //! where `<managed_dir>` is the OS-specific managed root
-//! (`/Library/Application Support/ClaudeCode` on macOS,
-//! `C:\Program Files\ClaudeCode` on Windows, `/etc/claude-code` elsewhere).
+//! (`/Library/Application Support/LingXi` on macOS,
+//! `C:\Program Files\LingXi` on Windows, `/etc/lingxi` elsewhere).
 //!
 //! ## Lifecycle
 //! [`SettingsWatcher::spawn`] starts one background task per watched directory
@@ -94,11 +94,11 @@ pub fn managed_settings_dir() -> PathBuf {
         return PathBuf::from(dir);
     }
     if cfg!(target_os = "macos") {
-        PathBuf::from("/Library/Application Support/ClaudeCode")
+        PathBuf::from(branding::MANAGED_DIR_MACOS)
     } else if cfg!(target_os = "windows") {
-        PathBuf::from(r"C:\Program Files\ClaudeCode")
+        PathBuf::from(branding::MANAGED_DIR_WINDOWS)
     } else {
-        PathBuf::from("/etc/claude-code")
+        PathBuf::from(branding::MANAGED_DIR_UNIX)
     }
 }
 
@@ -144,9 +144,9 @@ pub async fn managed_settings_raw_tiers() -> Vec<String> {
 pub struct SettingsPaths {
     /// `<claude_home>/settings.json`.
     pub user_settings: PathBuf,
-    /// `<cwd>/.claude/settings.json`.
+    /// `<cwd>/.lingxi/settings.json`.
     pub project_settings: PathBuf,
-    /// `<cwd>/.claude/settings.local.json`.
+    /// `<cwd>/.lingxi/settings.local.json`.
     pub local_settings: PathBuf,
     /// `<managed_dir>/managed-settings.json`.
     pub policy_settings: PathBuf,
@@ -368,7 +368,7 @@ mod tests {
     fn paths() -> SettingsPaths {
         // Fixed roots so the mapping assertions are platform-independent for
         // the user/project/local layers (policy uses the real managed dir).
-        SettingsPaths::resolve(Path::new("/home/u/.claude"), Path::new("/work/proj"))
+        SettingsPaths::resolve(Path::new("/home/u/.lingxi"), Path::new("/work/proj"))
     }
 
     fn ev(path: &str) -> FileEvent {
@@ -382,15 +382,15 @@ mod tests {
     fn classify_user_project_local() {
         let p = paths();
         assert_eq!(
-            p.classify(Path::new("/home/u/.claude/settings.json")),
+            p.classify(Path::new("/home/u/.lingxi/settings.json")),
             Some(ConfigChangeSource::UserSettings)
         );
         assert_eq!(
-            p.classify(Path::new("/work/proj/.claude/settings.json")),
+            p.classify(Path::new("/work/proj/.lingxi/settings.json")),
             Some(ConfigChangeSource::ProjectSettings)
         );
         assert_eq!(
-            p.classify(Path::new("/work/proj/.claude/settings.local.json")),
+            p.classify(Path::new("/work/proj/.lingxi/settings.local.json")),
             Some(ConfigChangeSource::LocalSettings)
         );
     }
@@ -419,13 +419,13 @@ mod tests {
     fn classify_unrelated_path_is_none() {
         let p = paths();
         assert_eq!(
-            p.classify(Path::new("/work/proj/.claude/agents/x.md")),
+            p.classify(Path::new("/work/proj/.lingxi/agents/x.md")),
             None
         );
         assert_eq!(p.classify(Path::new("/work/proj/src/main.rs")), None);
         // A sibling json in the project .claude dir that is NOT a watched
         // settings file maps to nothing.
-        assert_eq!(p.classify(Path::new("/work/proj/.claude/other.json")), None);
+        assert_eq!(p.classify(Path::new("/work/proj/.lingxi/other.json")), None);
     }
 
     #[tokio::test]
@@ -433,9 +433,9 @@ mod tests {
         let p = paths();
         let firer = RecordingFirer::default();
 
-        handle_event(&ev("/home/u/.claude/settings.json"), &p, &firer).await;
-        handle_event(&ev("/work/proj/.claude/settings.json"), &p, &firer).await;
-        handle_event(&ev("/work/proj/.claude/settings.local.json"), &p, &firer).await;
+        handle_event(&ev("/home/u/.lingxi/settings.json"), &p, &firer).await;
+        handle_event(&ev("/work/proj/.lingxi/settings.json"), &p, &firer).await;
+        handle_event(&ev("/work/proj/.lingxi/settings.local.json"), &p, &firer).await;
         let policy = managed_settings_dir().join("managed-settings.json");
         handle_event(&ev(&policy.to_string_lossy()), &p, &firer).await;
 
@@ -444,7 +444,7 @@ mod tests {
         assert_eq!(recorded[0].0, ConfigChangeSource::UserSettings);
         assert_eq!(
             recorded[0].1,
-            Some(PathBuf::from("/home/u/.claude/settings.json"))
+            Some(PathBuf::from("/home/u/.lingxi/settings.json"))
         );
         assert_eq!(recorded[1].0, ConfigChangeSource::ProjectSettings);
         assert_eq!(recorded[2].0, ConfigChangeSource::LocalSettings);
@@ -457,7 +457,7 @@ mod tests {
         let p = paths();
         let firer = RecordingFirer::default();
         handle_event(&ev("/work/proj/src/main.rs"), &p, &firer).await;
-        handle_event(&ev("/home/u/.claude/CLAUDE.md"), &p, &firer).await;
+        handle_event(&ev("/home/u/.lingxi/LINGXI.md"), &p, &firer).await;
         assert!(firer.fired.lock().unwrap().is_empty());
     }
 
@@ -469,9 +469,9 @@ mod tests {
         let p = paths();
         let firer: Arc<RecordingFirer> = Arc::new(RecordingFirer::default());
         let events = vec![
-            ev("/home/u/.claude/settings.json"),
+            ev("/home/u/.lingxi/settings.json"),
             ev("/work/proj/src/ignored.rs"),
-            ev("/work/proj/.claude/settings.local.json"),
+            ev("/work/proj/.lingxi/settings.local.json"),
         ];
         let stream = tokio_stream::iter(events);
         run_watch_loop(Box::pin(stream), p, firer.clone()).await;
@@ -487,16 +487,16 @@ mod tests {
         let p = paths();
         let dirs = p.watch_dirs();
         // user dir, project .claude dir (covers both project + local), policy
-        // managed dir, drop-in dir. project + local share `.claude/` so dedup
+        // managed dir, drop-in dir. project + local share `.lingxi/` so dedup
         // collapses them.
-        assert!(dirs.contains(&PathBuf::from("/home/u/.claude")));
-        assert!(dirs.contains(&PathBuf::from("/work/proj/.claude")));
+        assert!(dirs.contains(&PathBuf::from("/home/u/.lingxi")));
+        assert!(dirs.contains(&PathBuf::from("/work/proj/.lingxi")));
         assert!(dirs.contains(&managed_settings_dir()));
         assert!(dirs.contains(&managed_settings_dir().join("managed-settings.d")));
         // `.claude` appears exactly once despite two files inside it.
         let claude_count = dirs
             .iter()
-            .filter(|d| *d == &PathBuf::from("/work/proj/.claude"))
+            .filter(|d| *d == &PathBuf::from("/work/proj/.lingxi"))
             .count();
         assert_eq!(claude_count, 1);
     }

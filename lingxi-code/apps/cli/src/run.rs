@@ -1386,7 +1386,7 @@ async fn run_resume_iocraft(_argv: &Argv, sink: &dyn OutputSink) -> i32 {
 
 /// Load the recent-session rows for the current cwd via the M5-08 loader.
 /// Shared by the stdio + iocraft branches (DRY). Resolves `claude_home`
-/// (`$CLAUDE_CONFIG_DIR` → `~/.claude`), the cwd, and a disk-backed
+/// (`$LINGXI_CONFIG_DIR` → `~/.claude`), the cwd, and a disk-backed
 /// [`PosixFileSystem`] — the same loader inputs M5-08 expects, then delegates
 /// to the pure [`load_resume_rows_from`].
 async fn load_resume_rows() -> Result<Vec<SessionMetadata>, LoaderError> {
@@ -1411,7 +1411,7 @@ async fn load_resume_rows_from(
 }
 
 /// Load a concrete session by UUID for the `--resume <uuid>` path, using the
-/// live `claude_home` (`$CLAUDE_CONFIG_DIR` → `~/.claude`) + process cwd. Thin
+/// live `claude_home` (`$LINGXI_CONFIG_DIR` → `~/.claude`) + process cwd. Thin
 /// env-reading wrapper over [`load_resume_session_from`] (mirrors the
 /// `load_resume_rows` / `load_resume_rows_from` split so the disk logic stays
 /// testable with no env / process-cwd reads).
@@ -1439,10 +1439,10 @@ async fn load_resume_session_from(
     load_session(claude_home, &cwd_str, session_id, fs).await
 }
 
-/// Claude config home dir. `$CLAUDE_CONFIG_DIR` when set wins (claude-code `tr()`
+/// Claude config home dir. `$LINGXI_CONFIG_DIR` when set wins (claude-code `tr()`
 /// `??`: an empty value is honored verbatim → cwd-relative), else `~/.claude`.
 /// Shared across the CLI's settings/MCP/desktop-config resolution (`lib`, `mode`,
-/// `init`) so every user-tier path honors `$CLAUDE_CONFIG_DIR`.
+/// `init`) so every user-tier path honors `$LINGXI_CONFIG_DIR`.
 pub(crate) fn claude_home_dir() -> PathBuf {
     if let Ok(explicit) = std::env::var(branding::CONFIG_DIR_ENV) {
         return PathBuf::from(explicit);

@@ -88,7 +88,7 @@ pub struct SlashCommand {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub argument_names: Vec<String>,
     /// Directory root for a directory-format skill command. Unset for ordinary
-    /// `.claude/commands/*.md` markdown commands.
+    /// `.lingxi/commands/*.md` markdown commands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_root: Option<PathBuf>,
     /// Whether a skill command is user-invocable. Kept optional so legacy command

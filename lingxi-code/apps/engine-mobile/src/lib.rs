@@ -37,7 +37,7 @@ use traits::{AuthHandle, OrchestratorHandle};
 mod host;
 
 // Audit fix (#14): the disk-backed Skill loader the FFI host wires so the mobile
-// Skill tool resolves on-disk `.claude/commands` / `.claude/skills` under the
+// Skill tool resolves on-disk `.lingxi/commands` / `.lingxi/skills` under the
 // app-private root. uniffi-gated — its `SkillLoader` impl uses `async-trait`
 // (an FFI-only optional dep) and only the FFI host constructs a real loader.
 #[cfg(feature = "uniffi")]
@@ -117,7 +117,7 @@ pub fn register_mobile_tools(reg: &mut ToolRegistry, ctx: BuiltinToolContext) {
 /// Audit fix (#14): register the mobile tool set with a FUNCTIONAL `Skill` tool
 /// backed by `skill_loader` (the disk-backed `MobileDiskSkillLoader`) instead of
 /// the inert `EmptySkillLoader`, so model-invoked skills resolve against the
-/// device's on-disk `.claude/commands` / `.claude/skills`. uniffi-gated because
+/// device's on-disk `.lingxi/commands` / `.lingxi/skills`. uniffi-gated because
 /// the loader impl needs `async-trait` (an FFI-only optional dep) and only the
 /// FFI host wires a real loader.
 #[cfg(feature = "uniffi")]

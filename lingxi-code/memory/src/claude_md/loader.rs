@@ -1,4 +1,4 @@
-//! CLAUDE.md file reader (no size cap — parity with claude-code `readFile`).
+//! LINGXI.md file reader (no size cap — parity with claude-code `readFile`).
 //!
 //! Beyond the raw [`load_file`] reader this module also ports the
 //! claude-code `@import` / `@include` expansion and the per-file body
@@ -20,7 +20,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 
-/// One loaded CLAUDE.md (or local override) file.
+/// One loaded LINGXI.md (or local override) file.
 #[derive(Debug, Clone)]
 pub struct LoadedFile {
     /// Absolute path the file was loaded from.
@@ -39,7 +39,7 @@ pub enum LoaderError {
     Io(String),
     /// Retained for the `memdir`/TUI consumers that still pattern-match it.
     ///
-    /// [`load_file`] NO LONGER produces this variant — CLAUDE.md files are
+    /// [`load_file`] NO LONGER produces this variant — LINGXI.md files are
     /// read whole (parity with claude-code, which has no size drop). The
     /// memdir scanner keeps its own [`crate::MAX_MEMORY_FILE_SIZE`] cap, and
     /// the `/memory` TUI dialog still carries a match arm for it; the variant
@@ -55,12 +55,12 @@ pub enum LoaderError {
 
 /// Telemetry event name for the memdir oversize-skip path.
 ///
-/// Not fired by the CLAUDE.md hierarchy loader anymore (it has no size drop);
+/// Not fired by the LINGXI.md hierarchy loader anymore (it has no size drop);
 /// retained for the memdir subsystem, which documents this event name as the
 /// mechanism it reports oversize files through.
 pub const TENGU_MEMORY_FILE_TOO_LARGE: &str = "tengu_memory_file_too_large";
 
-/// Load one CLAUDE.md (or local override) file — whole, no size cap.
+/// Load one LINGXI.md (or local override) file — whole, no size cap.
 ///
 /// Parity with claude-code `safelyReadMemoryFileAsync` (claudemd.ts:424-437):
 /// a plain `readFile` with no size check. Oversized files are NEVER dropped;
@@ -137,7 +137,7 @@ pub async fn emit_file_too_large(
 //     in the captured path.
 //   - Symlink resolution (safeResolvePath) is not performed; the cycle guard
 //     compares lexically-normalised paths.
-// These edges do not occur in any CLAUDE.md we ship and are documented here.
+// These edges do not occur in any LINGXI.md we ship and are documented here.
 // ---------------------------------------------------------------------------
 
 /// Maximum `@import` recursion depth (claude-code `MAX_INCLUDE_DEPTH`,
@@ -145,7 +145,7 @@ pub async fn emit_file_too_large(
 /// so a chain expands at most `MAX_INCLUDE_DEPTH` files deep (depths 0..=4).
 pub const MAX_INCLUDE_DEPTH: usize = 5;
 
-/// One expanded memory file: a discovered CLAUDE.md or an `@import`'d file,
+/// One expanded memory file: a discovered LINGXI.md or an `@import`'d file,
 /// after frontmatter + HTML-comment stripping (NOT yet `.trim()`med).
 #[derive(Debug, Clone)]
 pub struct MemoryEntry {
@@ -186,7 +186,7 @@ pub struct ParsedMemory {
 /// - `cwd`: original working dir used for the external-include gate.
 /// - `home`: used to expand `@~/...`; `None` makes `~` imports resolve to
 ///   nothing and be skipped.
-/// - `depth`: 0 for a top-level CLAUDE.md.
+/// - `depth`: 0 for a top-level LINGXI.md.
 ///
 /// Missing / unreadable files are silently ignored (the ENOENT branch of
 /// `safelyReadMemoryFileAsync`, claudemd.ts:433-436). There is no size cap —
@@ -880,7 +880,7 @@ mod tests {
     #[test]
     fn loads_small_file_into_loadedfile() {
         let tmp = TempDir::new().unwrap();
-        let p = tmp.path().join("CLAUDE.md");
+        let p = tmp.path().join("LINGXI.md");
         fs::write(&p, b"# notes\nhello\n").unwrap();
         let out = load_file(&p, None).unwrap();
         assert_eq!(out.path, p);
@@ -893,7 +893,7 @@ mod tests {
         // GAP 4: claude-code has no size drop (claudemd.ts:424-437 reads whole).
         // A file far over the old 10 MB cap must now LOAD successfully.
         let tmp = TempDir::new().unwrap();
-        let p = tmp.path().join("CLAUDE.md");
+        let p = tmp.path().join("LINGXI.md");
         let bytes = vec![b'a'; 11 * 1024 * 1024];
         fs::write(&p, &bytes).unwrap();
         let out = load_file(&p, None).expect("oversized file must load, not error");
@@ -914,10 +914,10 @@ mod tests {
             content,
         };
         let big = mk(
-            "/x/CLAUDE.md",
+            "/x/LINGXI.md",
             "x".repeat(crate::MAX_MEMORY_CHARACTER_COUNT + 1),
         );
-        let small = mk("/y/CLAUDE.md", "small".to_string());
+        let small = mk("/y/LINGXI.md", "small".to_string());
         let files = vec![big.clone(), small];
         let large = get_large_memory_files(&files);
         assert_eq!(large.len(), 1, "only the >40k file is flagged");
@@ -957,7 +957,7 @@ mod tests {
         bus.attach_sink(sink.clone()).await;
         emit_file_too_large(
             Some(&bus),
-            std::path::Path::new("/x/CLAUDE.md"),
+            std::path::Path::new("/x/LINGXI.md"),
             11 * 1024 * 1024,
         )
         .await;
@@ -994,7 +994,7 @@ mod import_tests {
         let abs = tmp.path().join("abs.md");
         fs::write(&abs, "ABS").unwrap();
 
-        let main = cwd.join("CLAUDE.md");
+        let main = cwd.join("LINGXI.md");
         fs::write(
             &main,
             format!("main notes\n@./rel.md\n@~/tilde.md\n@{}\n", abs.display()),
@@ -1065,7 +1065,7 @@ mod import_tests {
     fn missing_import_is_silently_ignored() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
-        let main = dir.join("CLAUDE.md");
+        let main = dir.join("LINGXI.md");
         fs::write(&main, "hello\n@./does-not-exist.md\n").unwrap();
 
         let mut processed = HashSet::new();
@@ -1083,7 +1083,7 @@ mod import_tests {
         fs::create_dir_all(&cwd).unwrap();
         let outside = tmp.path().join("outside.md");
         fs::write(&outside, "OUTSIDE").unwrap();
-        let main = cwd.join("CLAUDE.md");
+        let main = cwd.join("LINGXI.md");
         fs::write(&main, format!("root\n@{}\n", outside.display())).unwrap();
 
         // Gated out when external includes are disallowed.
@@ -1101,7 +1101,7 @@ mod import_tests {
     #[test]
     fn frontmatter_block_is_stripped_from_body() {
         let raw = "---\ntitle: secret\npaths: src/**\n---\nVISIBLE BODY\n";
-        let parsed = parse_memory_content(raw, Path::new("/x/CLAUDE.md"), None);
+        let parsed = parse_memory_content(raw, Path::new("/x/LINGXI.md"), None);
         assert_eq!(parsed.body, "VISIBLE BODY\n");
         assert!(!parsed.body.contains("title"));
         // GAP 2 part-1: the `paths:` glob is captured (trailing `/**` stripped),
@@ -1113,12 +1113,12 @@ mod import_tests {
     fn frontmatter_without_paths_yields_no_globs() {
         // An unconditional file (no `paths:`) has `globs == None`.
         let raw = "---\ntitle: t\n---\nBODY\n";
-        let parsed = parse_memory_content(raw, Path::new("/x/CLAUDE.md"), None);
+        let parsed = parse_memory_content(raw, Path::new("/x/LINGXI.md"), None);
         assert_eq!(parsed.globs, None);
         // And a match-all `paths: **` is also treated as unconditional.
         let all = "---\npaths: '**'\n---\nBODY\n";
         assert_eq!(
-            parse_memory_content(all, Path::new("/x/CLAUDE.md"), None).globs,
+            parse_memory_content(all, Path::new("/x/LINGXI.md"), None).globs,
             None
         );
     }

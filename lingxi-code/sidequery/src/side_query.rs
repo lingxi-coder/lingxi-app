@@ -43,7 +43,7 @@ pub struct SideQueryRequest {
     pub stop_sequences: Vec<String>,
     /// COGS tag — see [`QuerySource`].
     pub query_source: QuerySource,
-    /// Skip the engine-injected system-prompt prefix (e.g. CLAUDE.md preamble).
+    /// Skip the engine-injected system-prompt prefix (e.g. LINGXI.md preamble).
     pub skip_system_prompt_prefix: bool,
 }
 

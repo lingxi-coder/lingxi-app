@@ -334,7 +334,7 @@ fn print_status_text(
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// Build a `CredentialManager` over the platform secure store, addressing the
-/// SAME `~/.claude` (or `$CLAUDE_CONFIG_DIR`) location the desktop runtime and
+/// SAME `~/.claude` (or `$LINGXI_CONFIG_DIR`) location the desktop runtime and
 /// `/login` write to, so `status` / `logout` observe real credentials.
 async fn build_credential_manager() -> Result<secret::CredentialManager, anyhow::Error> {
     let claude_home = crate::run::claude_home_dir();

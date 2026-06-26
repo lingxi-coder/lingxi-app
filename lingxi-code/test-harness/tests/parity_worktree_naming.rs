@@ -4,7 +4,7 @@
 //! claude-code's `src/utils/worktree.ts`:
 //!
 //! - Branch prefix is the literal `worktree-` (NOT `lingxi/`, NOT `claude/`).
-//! - Worktrees live at `<repo_root>/.claude/worktrees/<flatten_slug(slug)>`.
+//! - Worktrees live at `<repo_root>/.lingxi/worktrees/<flatten_slug(slug)>`.
 //! - `flatten_slug` replaces every `/` with `+` so the layout stays flat;
 //!   `+` is outside the allowed slug character set so the mapping is
 //!   injective.

@@ -222,11 +222,11 @@ pub struct HookCondition {
 /// the user and by policy code to decide whether a hook can run at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HookSource {
-    /// `~/.claude/hooks.json` (global, user-owned).
+    /// `~/.lingxi/hooks.json` (global, user-owned).
     User,
-    /// `<project>/.claude/hooks.json` (committed project config).
+    /// `<project>/.lingxi/hooks.json` (committed project config).
     Project,
-    /// `<project>/.claude/hooks.local.json` (developer-local override).
+    /// `<project>/.lingxi/hooks.local.json` (developer-local override).
     Local,
     /// Managed policy hook (org-level, supplied via managed settings).
     Managed,

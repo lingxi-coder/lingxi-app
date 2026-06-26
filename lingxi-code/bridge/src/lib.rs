@@ -2,7 +2,7 @@
 //!
 //! This crate runs an MCP-over-WebSocket endpoint that IDE plugins
 //! (claude-code, VS Code Claude, etc.) discover via
-//! `~/.claude/ide/<port>.lock`:
+//! `~/.lingxi/ide/<port>.lock`:
 //!
 //! 1. [`lockfile::IdeLockfile`] writes the lockfile carrying the auth token
 //!    an IDE plugin must echo back in the

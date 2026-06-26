@@ -35,7 +35,7 @@ fn session_list_round_trips() {
             title: "Refactor the parser".to_string(),
             modified_rfc3339: "2026-06-02T15:04:05Z".to_string(),
             message_count: 42,
-            path: "/Users/x/.claude/projects/p/0b3e2f10.jsonl".to_string(),
+            path: "/Users/x/.lingxi/projects/p/0b3e2f10.jsonl".to_string(),
         }],
     };
     let json = serde_json::to_value(&ev).expect("serialize SessionList");
@@ -281,14 +281,14 @@ fn memory_entries_round_trips() {
     let ev = ClientEvent::MemoryEntries {
         entries: vec![
             MemoryEntryDto {
-                path: "/repo/CLAUDE.md".to_string(),
+                path: "/repo/LINGXI.md".to_string(),
                 tier: MemoryTierDto::Project,
                 body: "# Project rules".to_string(),
                 age_days: 3,
                 size_bytes: 128,
             },
             MemoryEntryDto {
-                path: "/Users/x/.claude/CLAUDE.md".to_string(),
+                path: "/Users/x/.lingxi/LINGXI.md".to_string(),
                 tier: MemoryTierDto::User,
                 body: "# User rules".to_string(),
                 age_days: 0,

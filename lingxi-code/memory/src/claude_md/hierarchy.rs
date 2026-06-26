@@ -8,13 +8,13 @@ pub const FILE_NAME: &str = branding::MEMORY_FILE;
 pub const LOCAL_OVERRIDE_NAME: &str = branding::MEMORY_LOCAL_FILE;
 
 /// Resolve the USER-tier `.claude` config directory, honoring
-/// `$CLAUDE_CONFIG_DIR` (claude-code `tr()`: `process.env.CLAUDE_CONFIG_DIR ??
-/// join(homedir(), ".claude")`). When the env var is SET its value is the config
+/// `$LINGXI_CONFIG_DIR` (claude-code `tr()`: `process.env.LINGXI_CONFIG_DIR ??
+/// join(homedir(), ".lingxi")`). When the env var is SET its value is the config
 /// dir verbatim — including a set-but-EMPTY value, which `??` honors (config-home
 /// then resolves cwd-relative), exactly as claude-code v2.1.181 does; only an
 /// UNSET var falls back to `<home>/.claude`. `home` is the caller-supplied home
 /// (production passes `dirs::home_dir()`; tests pass a temp dir) so the walk
-/// stays hermetic while the env override wins. (NOTE: the GLOBAL `~/.claude.json`
+/// stays hermetic while the env override wins. (NOTE: the GLOBAL `~/.lingxi.json`
 /// resolver in `migrations::global_config` uses `||` and so treats empty as
 /// unset — that asymmetry is itself faithful to claude-code.)
 #[must_use]
@@ -22,7 +22,7 @@ pub fn user_config_dir(home: &Path) -> PathBuf {
     resolve_user_config_dir(home, std::env::var_os(branding::CONFIG_DIR_ENV))
 }
 
-/// Pure core of [`user_config_dir`] — the `$CLAUDE_CONFIG_DIR` value is injected
+/// Pure core of [`user_config_dir`] — the `$LINGXI_CONFIG_DIR` value is injected
 /// so the resolution logic is testable without mutating process env.
 fn resolve_user_config_dir(home: &Path, config_dir_env: Option<std::ffi::OsString>) -> PathBuf {
     match config_dir_env {
@@ -44,12 +44,12 @@ pub const MANAGED_DIR_ENV: &str = "LINGXI_MANAGED_DIR";
 ///
 /// Ports claude-code `getManagedFilePath` (settings/managedPath.ts:8-25): a
 /// per-platform absolute system path holding enterprise/managed policy. The
-/// `<managed>/CLAUDE.md` + `<managed>/.claude/rules/**` discovered under it form
+/// `<managed>/LINGXI.md` + `<managed>/.lingxi/rules/**` discovered under it form
 /// the always-on Managed tier.
 ///
-/// - **macOS**:   `/Library/Application Support/ClaudeCode`
-/// - **Windows**: `C:\Program Files\ClaudeCode`
-/// - **other**:   `/etc/claude-code`
+/// - **macOS**:   `/Library/Application Support/LingXi`
+/// - **Windows**: `C:\Program Files\LingXi`
+/// - **other**:   `/etc/lingxi`
 ///
 /// The [`MANAGED_DIR_ENV`] environment variable overrides the platform default
 /// (used by hermetic tests so they don't depend on a real system path).
@@ -61,25 +61,25 @@ pub fn managed_path() -> PathBuf {
         }
     }
     if cfg!(target_os = "macos") {
-        PathBuf::from("/Library/Application Support/ClaudeCode")
+        PathBuf::from(branding::MANAGED_DIR_MACOS)
     } else if cfg!(target_os = "windows") {
-        PathBuf::from(r"C:\Program Files\ClaudeCode")
+        PathBuf::from(branding::MANAGED_DIR_WINDOWS)
     } else {
-        PathBuf::from("/etc/claude-code")
+        PathBuf::from(branding::MANAGED_DIR_UNIX)
     }
 }
 
-/// One discovered CLAUDE.md (or local override) location, post-walk.
+/// One discovered LINGXI.md (or local override) location, post-walk.
 #[derive(Debug, Clone)]
 pub struct HierarchyEntry {
     /// Absolute path to the file on disk.
     pub path: PathBuf,
-    /// Whether this is a `CLAUDE.local.md` (true) or `CLAUDE.md` (false).
+    /// Whether this is a `LINGXI.local.md` (true) or `LINGXI.md` (false).
     pub is_local_override: bool,
     /// Whether the actual filename's bytes matched `FILE_NAME` exactly
     /// (false on case-insensitive filesystems that lowercased it).
     pub exact_case: bool,
-    /// Which CLAUDE.md tier this file was discovered in. Drives the injection
+    /// Which LINGXI.md tier this file was discovered in. Drives the injection
     /// description (`getClaudeMds`, claudemd.ts:1168-1186) and the `@import`
     /// external-include policy (only [`super::ClaudeMdTier::User`] gets
     /// unconditional external includes).
@@ -95,18 +95,18 @@ pub struct Hierarchy {
     pub entries: Vec<HierarchyEntry>,
 }
 
-/// Directory name used for nested config (`.claude/` → `.lingxi/`).
+/// Directory name used for nested config (`.lingxi/` → `.lingxi/`).
 const DOT_CLAUDE: &str = branding::DOT_DIR;
-/// Subdirectory under `.claude/` holding `*.md` rule files.
+/// Subdirectory under `.lingxi/` holding `*.md` rule files.
 const RULES_DIR: &str = "rules";
 
 /// Discover the claude-code memory-file set, in `getMemoryFiles`
 /// tier order (`utils/claudemd.ts:790-934`):
-///   1. **Managed**: `<managed>/CLAUDE.md`, then `<managed>/.claude/rules/**.md`
+///   1. **Managed**: `<managed>/LINGXI.md`, then `<managed>/.lingxi/rules/**.md`
 ///      (always loaded, lowest priority — spliced first).
-///   2. **User**:    `<home>/.claude/CLAUDE.md`, then `<home>/.claude/rules/**.md`.
+///   2. **User**:    `<home>/.lingxi/LINGXI.md`, then `<home>/.lingxi/rules/**.md`.
 ///   3. **Project + Local**, from the filesystem root DOWN to `cwd`; per dir:
-///      `CLAUDE.md`, `.claude/CLAUDE.md`, `.claude/rules/**.md`, `CLAUDE.local.md`.
+///      `LINGXI.md`, `.lingxi/LINGXI.md`, `.lingxi/rules/**.md`, `LINGXI.local.md`.
 ///
 /// claude-code splices files in exactly that order (Managed first, the innermost
 /// `cwd` last). The orchestrator (`prompt::memory_block`) **reverses** this
@@ -128,7 +128,7 @@ pub fn walk(cwd: &Path, home: &Path, managed_dir: Option<&Path>) -> Hierarchy {
     let mut out = Vec::new();
     let mut processed = std::collections::HashSet::new();
 
-    // (1) Managed tier — `<managed>/CLAUDE.md` + `<managed>/.claude/rules/**`.
+    // (1) Managed tier — `<managed>/LINGXI.md` + `<managed>/.lingxi/rules/**`.
     //     Always loaded, never settings-gated (claudemd.ts:803-823). Probed
     //     FIRST so that after the final reverse it sorts first in splice order.
     if let Some(managed) = managed_dir {
@@ -148,8 +148,8 @@ pub fn walk(cwd: &Path, home: &Path, managed_dir: Option<&Path>) -> Hierarchy {
         );
     }
 
-    // (2) User tier — `<config-home>/CLAUDE.md` + `<config-home>/rules/**`, where
-    //     config-home honors `$CLAUDE_CONFIG_DIR` (else `<home>/.claude`). This
+    // (2) User tier — `<config-home>/LINGXI.md` + `<config-home>/rules/**`, where
+    //     config-home honors `$LINGXI_CONFIG_DIR` (else `<home>/.claude`). This
     //     keeps the loaded user-tier file in sync with `/memory`'s edit target.
     let user_dir = user_config_dir(home);
     emit_probe(
@@ -176,7 +176,7 @@ pub fn walk(cwd: &Path, home: &Path, managed_dir: Option<&Path>) -> Hierarchy {
     }
     dirs.reverse(); // root → cwd
     for dir in &dirs {
-        // Project: `CLAUDE.md`, then `.claude/CLAUDE.md`, then `.claude/rules/**`.
+        // Project: `LINGXI.md`, then `.lingxi/LINGXI.md`, then `.lingxi/rules/**`.
         emit_probe(
             dir,
             FILE_NAME,
@@ -340,7 +340,7 @@ fn probe(
 
 use std::sync::Arc;
 
-/// Telemetry event name emitted when a CLAUDE.md is found under a
+/// Telemetry event name emitted when a LINGXI.md is found under a
 /// different case (e.g. `claude.md` on macOS APFS).
 pub const TENGU_MEMORY_CASE_MISMATCH: &str = "tengu_memory_case_mismatch";
 
@@ -386,12 +386,12 @@ mod tests {
     #[test]
     fn user_config_dir_env_override_else_home() {
         use std::ffi::OsString;
-        // A set `$CLAUDE_CONFIG_DIR` is the `.claude` dir verbatim.
+        // A set `$LINGXI_CONFIG_DIR` is the `.claude` dir verbatim.
         assert_eq!(
             resolve_user_config_dir(Path::new("/h"), Some(OsString::from("/explicit/cfg"))),
             PathBuf::from("/explicit/cfg")
         );
-        // A set-but-EMPTY `$CLAUDE_CONFIG_DIR` is honored verbatim (claude-code
+        // A set-but-EMPTY `$LINGXI_CONFIG_DIR` is honored verbatim (claude-code
         // `??` resolves it cwd-relative), NOT treated as unset.
         assert_eq!(
             resolve_user_config_dir(Path::new("/h"), Some(OsString::new())),
@@ -400,7 +400,7 @@ mod tests {
         // Unset → `<home>/.claude` (the pre-change default).
         assert_eq!(
             resolve_user_config_dir(Path::new("/h"), None),
-            PathBuf::from("/h/.claude")
+            PathBuf::from("/h/.lingxi")
         );
     }
 
@@ -408,22 +408,22 @@ mod tests {
     fn walks_cwd_then_parents_then_home() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path().join("home");
-        fs::create_dir_all(home.join(".claude")).unwrap();
-        touch(&home.join(".claude"), "CLAUDE.md");
+        fs::create_dir_all(home.join(".lingxi")).unwrap();
+        touch(&home.join(".lingxi"), "LINGXI.md");
         let outer = tmp.path().join("repo");
         let inner = outer.join("pkg");
         fs::create_dir_all(&inner).unwrap();
-        touch(&outer, "CLAUDE.md");
-        touch(&inner, "CLAUDE.md");
+        touch(&outer, "LINGXI.md");
+        touch(&inner, "LINGXI.md");
 
         let h = walk(&inner, &home, None);
         let paths: Vec<_> = h.entries.iter().map(|e| e.path.clone()).collect();
         assert_eq!(
             paths,
             vec![
-                inner.join("CLAUDE.md"),
-                outer.join("CLAUDE.md"),
-                home.join(".claude").join("CLAUDE.md"),
+                inner.join("LINGXI.md"),
+                outer.join("LINGXI.md"),
+                home.join(".lingxi").join("LINGXI.md"),
             ],
             "walk order must be cwd → parents → home"
         );
@@ -434,15 +434,15 @@ mod tests {
     fn surfaces_local_override_alongside_canonical() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path().join("home");
-        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::create_dir_all(home.join(".lingxi")).unwrap();
         let cwd = tmp.path().join("repo");
         fs::create_dir_all(&cwd).unwrap();
-        touch(&cwd, "CLAUDE.md");
-        touch(&cwd, "CLAUDE.local.md");
+        touch(&cwd, "LINGXI.md");
+        touch(&cwd, "LINGXI.local.md");
 
         let h = walk(&cwd, &home, None);
         let kinds: Vec<_> = h.entries.iter().map(|e| e.is_local_override).collect();
-        // CLAUDE.local.md MUST come before CLAUDE.md at the same level
+        // LINGXI.local.md MUST come before LINGXI.md at the same level
         // so it can shadow the canonical entry.
         assert_eq!(kinds, vec![true, false]);
     }
@@ -452,7 +452,7 @@ mod tests {
         // walk(&Path::new("/"), &home) must not loop or panic
         let tmp = TempDir::new().unwrap();
         let home = tmp.path().join("home");
-        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::create_dir_all(home.join(".lingxi")).unwrap();
         let _h = walk(std::path::Path::new("/"), &home, None);
     }
 
@@ -487,33 +487,33 @@ mod tests {
 
     #[test]
     fn discovers_dot_claude_claude_md() {
-        // `.claude/CLAUDE.md` (Project) must be found right after `CLAUDE.md`.
+        // `.lingxi/LINGXI.md` (Project) must be found right after `LINGXI.md`.
         let tmp = TempDir::new().unwrap();
         let home = tmp.path().join("home");
         fs::create_dir_all(&home).unwrap();
         let repo = tmp.path().join("repo");
-        fs::create_dir_all(repo.join(".claude")).unwrap();
-        touch(&repo, "CLAUDE.md");
-        touch(&repo.join(".claude"), "CLAUDE.md");
+        fs::create_dir_all(repo.join(".lingxi")).unwrap();
+        touch(&repo, "LINGXI.md");
+        touch(&repo.join(".lingxi"), "LINGXI.md");
 
         let h = walk(&repo, &home, None);
         assert_eq!(
             splice_order(&h, tmp.path()),
-            vec!["repo/CLAUDE.md", "repo/.claude/CLAUDE.md"],
-            "splice order: CLAUDE.md then .claude/CLAUDE.md"
+            vec!["repo/LINGXI.md", "repo/.lingxi/LINGXI.md"],
+            "splice order: LINGXI.md then .lingxi/LINGXI.md"
         );
     }
 
     #[test]
     fn discovers_dot_claude_rules_including_nested_in_order() {
-        // `.claude/rules/**/*.md` (Project), recursive, sorted by name.
+        // `.lingxi/rules/**/*.md` (Project), recursive, sorted by name.
         let tmp = TempDir::new().unwrap();
         let home = tmp.path().join("home");
         fs::create_dir_all(&home).unwrap();
         let repo = tmp.path().join("repo");
-        let rules = repo.join(".claude").join("rules");
+        let rules = repo.join(".lingxi").join("rules");
         fs::create_dir_all(rules.join("sub")).unwrap();
-        touch(&repo, "CLAUDE.md");
+        touch(&repo, "LINGXI.md");
         touch(&rules, "b.md");
         touch(&rules, "a.md");
         touch(&rules, "ignored.txt"); // non-.md skipped
@@ -524,10 +524,10 @@ mod tests {
         assert_eq!(
             splice_order(&h, tmp.path()),
             vec![
-                "repo/CLAUDE.md",
-                "repo/.claude/rules/a.md",
-                "repo/.claude/rules/b.md",
-                "repo/.claude/rules/sub/z.md",
+                "repo/LINGXI.md",
+                "repo/.lingxi/rules/a.md",
+                "repo/.lingxi/rules/b.md",
+                "repo/.lingxi/rules/sub/z.md",
             ],
             "rules discovered recursively, sorted, .md only"
         );
@@ -535,28 +535,28 @@ mod tests {
 
     #[test]
     fn discovers_user_rules_tier() {
-        // `~/.claude/rules/**/*.md` (User) come right after `~/.claude/CLAUDE.md`.
+        // `~/.lingxi/rules/**/*.md` (User) come right after `~/.lingxi/LINGXI.md`.
         let tmp = TempDir::new().unwrap();
         let home = tmp.path().join("home");
-        let user = home.join(".claude");
+        let user = home.join(".lingxi");
         fs::create_dir_all(user.join("rules")).unwrap();
-        touch(&user, "CLAUDE.md");
+        touch(&user, "LINGXI.md");
         touch(&user.join("rules"), "u1.md");
         touch(&user.join("rules"), "u2.md");
         let cwd = tmp.path().join("repo");
         fs::create_dir_all(&cwd).unwrap();
-        touch(&cwd, "CLAUDE.md");
+        touch(&cwd, "LINGXI.md");
 
         let h = walk(&cwd, &home, None);
         assert_eq!(
             splice_order(&h, tmp.path()),
             vec![
-                "home/.claude/CLAUDE.md",
-                "home/.claude/rules/u1.md",
-                "home/.claude/rules/u2.md",
-                "repo/CLAUDE.md",
+                "home/.lingxi/LINGXI.md",
+                "home/.lingxi/rules/u1.md",
+                "home/.lingxi/rules/u2.md",
+                "repo/LINGXI.md",
             ],
-            "User CLAUDE.md + rules precede the project tier"
+            "User LINGXI.md + rules precede the project tier"
         );
     }
 
@@ -565,44 +565,44 @@ mod tests {
         // GAP 1: the MANAGED tier loads FIRST (lowest priority, spliced first).
         // The managed dir is injected explicitly (hermetic — no real system
         // path, no env-var races). Assert Managed → User → Project → Local with
-        // `.claude/CLAUDE.md`, rules, and the local override, AND that each
+        // `.lingxi/LINGXI.md`, rules, and the local override, AND that each
         // entry carries the right `ClaudeMdTier`.
         use super::super::ClaudeMdTier;
         let tmp = TempDir::new().unwrap();
 
         let managed = tmp.path().join("managed");
-        fs::create_dir_all(managed.join(".claude").join("rules")).unwrap();
-        touch(&managed, "CLAUDE.md");
-        touch(&managed.join(".claude").join("rules"), "mr.md");
+        fs::create_dir_all(managed.join(".lingxi").join("rules")).unwrap();
+        touch(&managed, "LINGXI.md");
+        touch(&managed.join(".lingxi").join("rules"), "mr.md");
 
         let home = tmp.path().join("home");
-        let user = home.join(".claude");
+        let user = home.join(".lingxi");
         fs::create_dir_all(user.join("rules")).unwrap();
-        touch(&user, "CLAUDE.md");
+        touch(&user, "LINGXI.md");
         touch(&user.join("rules"), "ur.md");
 
         let repo = tmp.path().join("repo");
         let pkg = repo.join("pkg");
-        fs::create_dir_all(pkg.join(".claude").join("rules")).unwrap();
-        touch(&repo, "CLAUDE.md");
-        touch(&pkg, "CLAUDE.md");
-        touch(&pkg.join(".claude"), "CLAUDE.md");
-        touch(&pkg.join(".claude").join("rules"), "pr.md");
-        touch(&pkg, "CLAUDE.local.md");
+        fs::create_dir_all(pkg.join(".lingxi").join("rules")).unwrap();
+        touch(&repo, "LINGXI.md");
+        touch(&pkg, "LINGXI.md");
+        touch(&pkg.join(".lingxi"), "LINGXI.md");
+        touch(&pkg.join(".lingxi").join("rules"), "pr.md");
+        touch(&pkg, "LINGXI.local.md");
 
         let h = walk(&pkg, &home, Some(&managed));
         assert_eq!(
             splice_order(&h, tmp.path()),
             vec![
-                "managed/CLAUDE.md",
-                "managed/.claude/rules/mr.md",
-                "home/.claude/CLAUDE.md",
-                "home/.claude/rules/ur.md",
-                "repo/CLAUDE.md",
-                "repo/pkg/CLAUDE.md",
-                "repo/pkg/.claude/CLAUDE.md",
-                "repo/pkg/.claude/rules/pr.md",
-                "repo/pkg/CLAUDE.local.md",
+                "managed/LINGXI.md",
+                "managed/.lingxi/rules/mr.md",
+                "home/.lingxi/LINGXI.md",
+                "home/.lingxi/rules/ur.md",
+                "repo/LINGXI.md",
+                "repo/pkg/LINGXI.md",
+                "repo/pkg/.lingxi/LINGXI.md",
+                "repo/pkg/.lingxi/rules/pr.md",
+                "repo/pkg/LINGXI.local.md",
             ],
             "tier order: Managed → User → Project(root→cwd) → Local"
         );
@@ -615,13 +615,13 @@ mod tests {
                 .unwrap_or_else(|| panic!("entry ending {suffix} not found"))
                 .tier
         };
-        assert_eq!(tier_of("managed/CLAUDE.md"), ClaudeMdTier::Managed);
-        assert_eq!(tier_of("managed/.claude/rules/mr.md"), ClaudeMdTier::Managed);
-        assert_eq!(tier_of("home/.claude/CLAUDE.md"), ClaudeMdTier::User);
-        assert_eq!(tier_of("home/.claude/rules/ur.md"), ClaudeMdTier::User);
-        assert_eq!(tier_of("repo/CLAUDE.md"), ClaudeMdTier::Project);
-        assert_eq!(tier_of("pkg/.claude/rules/pr.md"), ClaudeMdTier::Project);
-        assert_eq!(tier_of("CLAUDE.local.md"), ClaudeMdTier::Local);
+        assert_eq!(tier_of("managed/LINGXI.md"), ClaudeMdTier::Managed);
+        assert_eq!(tier_of("managed/.lingxi/rules/mr.md"), ClaudeMdTier::Managed);
+        assert_eq!(tier_of("home/.lingxi/LINGXI.md"), ClaudeMdTier::User);
+        assert_eq!(tier_of("home/.lingxi/rules/ur.md"), ClaudeMdTier::User);
+        assert_eq!(tier_of("repo/LINGXI.md"), ClaudeMdTier::Project);
+        assert_eq!(tier_of("pkg/.lingxi/rules/pr.md"), ClaudeMdTier::Project);
+        assert_eq!(tier_of("LINGXI.local.md"), ClaudeMdTier::Local);
     }
 
     #[test]
@@ -643,11 +643,11 @@ mod tests {
         // documented roots.
         assert!(def.is_absolute());
         if cfg!(target_os = "macos") {
-            assert_eq!(def, PathBuf::from("/Library/Application Support/ClaudeCode"));
+            assert_eq!(def, PathBuf::from("/Library/Application Support/LingXi"));
         } else if cfg!(target_os = "windows") {
-            assert_eq!(def, PathBuf::from(r"C:\Program Files\ClaudeCode"));
+            assert_eq!(def, PathBuf::from(r"C:\Program Files\LingXi"));
         } else {
-            assert_eq!(def, PathBuf::from("/etc/claude-code"));
+            assert_eq!(def, PathBuf::from("/etc/lingxi"));
         }
 
         // Restore prior env state for other tests.
@@ -659,16 +659,16 @@ mod tests {
 
     #[test]
     fn missing_dot_claude_and_rules_dirs_silently_ignored() {
-        // No `.claude/` dir at all: walk yields only the plain CLAUDE.md, no panic.
+        // No `.lingxi/` dir at all: walk yields only the plain LINGXI.md, no panic.
         let tmp = TempDir::new().unwrap();
         let home = tmp.path().join("home");
         fs::create_dir_all(&home).unwrap();
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).unwrap();
-        touch(&repo, "CLAUDE.md");
+        touch(&repo, "LINGXI.md");
 
         let h = walk(&repo, &home, None);
-        assert_eq!(splice_order(&h, tmp.path()), vec!["repo/CLAUDE.md"]);
+        assert_eq!(splice_order(&h, tmp.path()), vec!["repo/LINGXI.md"]);
     }
 
     #[test]
@@ -678,9 +678,9 @@ mod tests {
         let home = tmp.path().join("home");
         fs::create_dir_all(&home).unwrap();
         let repo = tmp.path().join("repo");
-        let rules = repo.join(".claude").join("rules");
+        let rules = repo.join(".lingxi").join("rules");
         fs::create_dir_all(&rules).unwrap();
-        touch(&repo, "CLAUDE.md");
+        touch(&repo, "LINGXI.md");
         touch(&rules, "r.md");
 
         // rules/loop -> rules (cycle). Skip the test if symlinks are unsupported.
@@ -692,7 +692,7 @@ mod tests {
         let h = walk(&repo, &home, None);
         let order = splice_order(&h, tmp.path());
         // Must terminate and still surface r.md (exactly once).
-        assert!(order.contains(&"repo/.claude/rules/r.md".to_string()));
+        assert!(order.contains(&"repo/.lingxi/rules/r.md".to_string()));
         assert_eq!(
             order.iter().filter(|p| p.ends_with("r.md")).count(),
             1,
@@ -703,13 +703,13 @@ mod tests {
     #[test]
     fn case_mismatch_flag_set_on_lowercased_filename() {
         // On a case-sensitive filesystem we simulate a mismatch by writing
-        // the file as `claude.md` (all-lowercase) and asserting exact_case=false.
+        // the file as `lingxi.md` (all-lowercase) and asserting exact_case=false.
         let tmp = TempDir::new().unwrap();
         let cwd = tmp.path().join("repo");
         fs::create_dir_all(&cwd).unwrap();
-        touch(&cwd, "claude.md");
+        touch(&cwd, "lingxi.md");
         let home = tmp.path().join("home");
-        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::create_dir_all(home.join(".lingxi")).unwrap();
 
         let h = walk(&cwd, &home, None);
         assert_eq!(h.entries.len(), 1, "lowercased file must still be found");

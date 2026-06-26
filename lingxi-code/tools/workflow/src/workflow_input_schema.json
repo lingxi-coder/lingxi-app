@@ -8,7 +8,7 @@
     },
     "name": {
       "type": "string",
-      "description": "Name of a predefined workflow (built-in or from .claude/workflows/). Resolves to a self-contained script."
+      "description": "Name of a predefined workflow (built-in or from .lingxi/workflows/). Resolves to a self-contained script."
     },
     "description": {
       "type": "string",

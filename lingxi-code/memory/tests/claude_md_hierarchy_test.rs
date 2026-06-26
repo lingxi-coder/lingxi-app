@@ -1,9 +1,9 @@
-//! M3-02 phase 10: full CLAUDE.md hierarchy load with mocked home dir.
+//! M3-02 phase 10: full LINGXI.md hierarchy load with mocked home dir.
 //!
 //! Exercises `claude_md::hierarchy::walk` + `claude_md::loader::load_file`
 //! together. The hierarchy must surface entries in cwd-first order with
-//! `CLAUDE.local.md` shadowing `CLAUDE.md` at the same depth. GAP 4: the
-//! CLAUDE.md loader has NO size drop (parity with claude-code `readFile`), so
+//! `LINGXI.local.md` shadowing `LINGXI.md` at the same depth. GAP 4: the
+//! LINGXI.md loader has NO size drop (parity with claude-code `readFile`), so
 //! an oversized file loads in full rather than being skipped.
 
 use memory::claude_md::hierarchy::walk;
@@ -20,16 +20,16 @@ fn touch(path: &std::path::Path, body: &str) {
 fn full_hierarchy_walk_then_load_returns_innermost_first() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
-    let user_claude = home.join(".claude");
+    let user_claude = home.join(".lingxi");
     fs::create_dir_all(&user_claude).unwrap();
-    touch(&user_claude.join("CLAUDE.md"), "# user notes\n");
+    touch(&user_claude.join("LINGXI.md"), "# user notes\n");
 
     let repo = tmp.path().join("repo");
     let pkg = repo.join("pkg");
     fs::create_dir_all(&pkg).unwrap();
-    touch(&repo.join("CLAUDE.md"), "# repo notes\n");
-    touch(&pkg.join("CLAUDE.md"), "# pkg notes\n");
-    touch(&pkg.join("CLAUDE.local.md"), "# pkg local override\n");
+    touch(&repo.join("LINGXI.md"), "# repo notes\n");
+    touch(&pkg.join("LINGXI.md"), "# pkg notes\n");
+    touch(&pkg.join("LINGXI.local.md"), "# pkg local override\n");
 
     let h = walk(&pkg, &home, None);
     let loaded: Vec<_> = h
@@ -38,15 +38,15 @@ fn full_hierarchy_walk_then_load_returns_innermost_first() {
         .map(|e| load_file(&e.path, None).unwrap())
         .collect();
 
-    // Walk order: pkg/local, pkg/CLAUDE.md, repo/CLAUDE.md, home/CLAUDE.md.
+    // Walk order: pkg/local, pkg/LINGXI.md, repo/LINGXI.md, home/LINGXI.md.
     let paths: Vec<_> = loaded.iter().map(|f| f.path.clone()).collect();
     assert_eq!(
         paths,
         vec![
-            pkg.join("CLAUDE.local.md"),
-            pkg.join("CLAUDE.md"),
-            repo.join("CLAUDE.md"),
-            user_claude.join("CLAUDE.md"),
+            pkg.join("LINGXI.local.md"),
+            pkg.join("LINGXI.md"),
+            repo.join("LINGXI.md"),
+            user_claude.join("LINGXI.md"),
         ]
     );
     assert!(loaded[0].body.contains("pkg local override"));
@@ -59,14 +59,14 @@ fn oversized_file_loads_whole_no_size_drop_other_files_also_load() {
     // larger than the legacy 10 MB cap must now LOAD in full alongside the rest.
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
-    let user_claude = home.join(".claude");
+    let user_claude = home.join(".lingxi");
     fs::create_dir_all(&user_claude).unwrap();
-    touch(&user_claude.join("CLAUDE.md"), "# small\n");
+    touch(&user_claude.join("LINGXI.md"), "# small\n");
 
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     let big = vec![b'x'; MAX_MEMORY_FILE_SIZE + 1];
-    fs::write(repo.join("CLAUDE.md"), &big).unwrap();
+    fs::write(repo.join("LINGXI.md"), &big).unwrap();
 
     let h = walk(&repo, &home, None);
     let loaded: Vec<_> = h
@@ -77,13 +77,13 @@ fn oversized_file_loads_whole_no_size_drop_other_files_also_load() {
     assert_eq!(loaded.len(), 2, "both the small and oversized files load");
 
     let by_path = |p: &std::path::Path| loaded.iter().find(|f| f.path == p).unwrap();
-    let big_loaded = by_path(&repo.join("CLAUDE.md"));
+    let big_loaded = by_path(&repo.join("LINGXI.md"));
     assert_eq!(
         big_loaded.size_bytes,
         (MAX_MEMORY_FILE_SIZE + 1) as u64,
         "oversized file is read whole, not truncated"
     );
-    assert_eq!(by_path(&user_claude.join("CLAUDE.md")).body, "# small\n");
+    assert_eq!(by_path(&user_claude.join("LINGXI.md")).body, "# small\n");
 }
 
 #[test]

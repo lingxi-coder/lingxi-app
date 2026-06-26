@@ -62,12 +62,12 @@ fn other_platform_wire() -> &'static str {
 }
 
 /// Build a deterministic, env/argv-free `DesktopConfig` rooted at `cwd`, with a
-/// `~/.claude/settings.json` written from `settings_json`.
+/// `~/.lingxi/settings.json` written from `settings_json`.
 fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfig) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let cwd = tmp.path().to_path_buf();
-    let claude_home = cwd.join(".claude");
-    std::fs::create_dir_all(&claude_home).expect("mkdir .claude");
+    let claude_home = cwd.join(".lingxi");
+    std::fs::create_dir_all(&claude_home).expect("mkdir .lingxi");
     std::fs::write(claude_home.join("settings.json"), settings_json).expect("write settings.json");
 
     let cfg = DesktopConfig {

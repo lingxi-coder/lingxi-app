@@ -1,6 +1,6 @@
 //! Memdir scanner + fixed-point u64 ranker.
 //!
-//! Enumerates `~/.claude/memdir/` (+ optional `~/.claude/team-mem/`),
+//! Enumerates `~/.lingxi/memdir/` (+ optional `~/.lingxi/team-mem/`),
 //! drops entries older than 365 days, and ranks survivors by
 //! `jaccard × age_weight × tier_weight × team_boost` in bps.
 

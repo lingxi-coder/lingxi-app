@@ -8,8 +8,8 @@
 //! [`render_skills_to_string`] oracle.
 //!
 //! Literal-lock (byte-for-byte from claude-code `SkillsMenu.tsx`): the
-//! `Skills` title, the `No skills found` / `Create skills in .claude/skills/
-//! or ~/.claude/skills/` empty state, the `{N} skill(s)` subtitle, the
+//! `Skills` title, the `No skills found` / `Create skills in .lingxi/skills/
+//! or ~/.lingxi/skills/` empty state, the `{N} skill(s)` subtitle, the
 //! per-section titles (`Project skills` / `User skills` / `Managed skills` /
 //! `Plugin skills` / `MCP skills`), the section RENDER ORDER (project, user,
 //! managed/policy, plugin, mcp), and the per-skill row
@@ -21,7 +21,7 @@
 //!
 //! Data note: the frozen `OrchestratorHandle` exposes no `list_skills`, so the
 //! TUI loads skills off disk itself via [`load_skill_sections`] — a frozen-safe
-//! `.claude/skills/` dir walk (ported from claude-code `loadSkillsFromSkillsDir`
+//! `.lingxi/skills/` dir walk (ported from claude-code `loadSkillsFromSkillsDir`
 //! and `getSkillDirCommands`) run on the blocking pool by `root::pump_open_skills`
 //! (mirroring the `/stats` open pump). When no skill exists on disk the section
 //! vec is empty → the locked empty state. Parity caveats (documented, not
@@ -50,7 +50,7 @@ pub const TITLE: &str = "Skills";
 /// Locked empty-state subtitle.
 pub const EMPTY_SUBTITLE: &str = "No skills found";
 /// Locked empty-state body line.
-pub const EMPTY_BODY: &str = "Create skills in .claude/skills/ or ~/.claude/skills/";
+pub const EMPTY_BODY: &str = "Create skills in .lingxi/skills/ or ~/.lingxi/skills/";
 
 /// One skill row, already reduced to display fields (claude-code `renderSkill`
 /// reads `name`, `description`, `when_to_use` for the token estimate and the
@@ -142,12 +142,12 @@ impl SkillsState {
 }
 
 /// Build the grouped [`SkillSection`]s for the `/skills` viewer by reading the
-/// on-disk `.claude/skills/` directories, ported from claude-code
+/// on-disk `.lingxi/skills/` directories, ported from claude-code
 /// `loadSkillsFromSkillsDir` + `getSkillDirCommands`.
 ///
 /// Two file-based sources, pushed in claude-code render order (project, user;
 /// `SkillsMenu` renders `projectSettings` then `userSettings`):
-/// - **Project** — every `<ancestor>/.claude/skills` from `cwd` up to the git
+/// - **Project** — every `<ancestor>/.lingxi/skills` from `cwd` up to the git
 ///   root (or `claude_home`'s parent) inclusive, like `getProjectDirsUpToHome`.
 /// - **User** — `<claude_home>/skills`.
 ///
@@ -382,7 +382,7 @@ mod tests {
         let out = render_skills_to_string(&s);
         assert_eq!(
             out,
-            "Skills\nNo skills found\nCreate skills in .claude/skills/ or ~/.claude/skills/\nEsc to close"
+            "Skills\nNo skills found\nCreate skills in .lingxi/skills/ or ~/.lingxi/skills/\nEsc to close"
         );
     }
 
@@ -533,7 +533,7 @@ mod tests {
         let cwd = tmp.join("proj");
         std::fs::create_dir_all(&cwd).expect("mkdir cwd");
         std::fs::create_dir_all(cwd.join(".git")).expect("mkdir .git");
-        let claude_home = tmp.join("home").join(".claude");
+        let claude_home = tmp.join("home").join(".lingxi");
         std::fs::create_dir_all(&claude_home).expect("mkdir claude_home");
         (cwd, claude_home)
     }
@@ -542,7 +542,7 @@ mod tests {
     fn loads_project_skill_with_dir_name_and_carries_fields() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (cwd, claude_home) = fixture(tmp.path());
-        let proj_skills = cwd.join(".claude").join("skills");
+        let proj_skills = cwd.join(".lingxi").join("skills");
         // Frontmatter `name` deliberately DIFFERS from the dir name to lock the
         // claude-code rule: the skill name is the ENTRY (dir) name, NOT the
         // frontmatter name.
@@ -571,10 +571,10 @@ mod tests {
         // (skills-section-subtitle-missing)
         let tmp = tempfile::tempdir().expect("tempdir");
         let (cwd, claude_home) = fixture(tmp.path());
-        std::fs::create_dir_all(cwd.join(".claude").join("skills").join("alpha"))
+        std::fs::create_dir_all(cwd.join(".lingxi").join("skills").join("alpha"))
             .expect("mkdir alpha");
         std::fs::write(
-            cwd.join(".claude").join("skills").join("alpha").join("SKILL.md"),
+            cwd.join(".lingxi").join("skills").join("alpha").join("SKILL.md"),
             "---\nname: alpha\ndescription: d\n---\nBody.\n",
         )
         .expect("write SKILL.md");
@@ -590,7 +590,7 @@ mod tests {
         // Project: relative to cwd (under cwd).
         assert_eq!(
             sections[0].subtitle.as_deref(),
-            Some(".claude/skills"),
+            Some(".lingxi/skills"),
             "{:?}",
             sections[0].subtitle
         );
@@ -599,14 +599,14 @@ mod tests {
         assert!(user_sub.ends_with("/skills"), "{user_sub:?}");
 
         let lines = content_lines(&sections);
-        assert_eq!(lines[0], "Project skills (.claude/skills)");
+        assert_eq!(lines[0], "Project skills (.lingxi/skills)");
     }
 
     #[test]
     fn user_skills_form_their_own_section_after_project() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (cwd, claude_home) = fixture(tmp.path());
-        write_skill(&cwd.join(".claude").join("skills"), "pjr", "p", None);
+        write_skill(&cwd.join(".lingxi").join("skills"), "pjr", "p", None);
         write_skill(&claude_home.join("skills"), "usr", "u", None);
 
         let sections = load_skill_sections(&cwd, &claude_home);
@@ -631,7 +631,7 @@ mod tests {
         assert!(s.is_empty());
         assert_eq!(
             render_skills_to_string(&s),
-            "Skills\nNo skills found\nCreate skills in .claude/skills/ or ~/.claude/skills/\nEsc to close"
+            "Skills\nNo skills found\nCreate skills in .lingxi/skills/ or ~/.lingxi/skills/\nEsc to close"
         );
     }
 
@@ -639,7 +639,7 @@ mod tests {
     fn entry_without_skill_md_is_skipped() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (cwd, claude_home) = fixture(tmp.path());
-        let proj_skills = cwd.join(".claude").join("skills");
+        let proj_skills = cwd.join(".lingxi").join("skills");
         // A real skill...
         write_skill(&proj_skills, "good", "g", None);
         // ...and a sibling dir with NO SKILL.md (just some other file).
@@ -656,7 +656,7 @@ mod tests {
     fn rows_sorted_by_name_within_section() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (cwd, claude_home) = fixture(tmp.path());
-        let proj_skills = cwd.join(".claude").join("skills");
+        let proj_skills = cwd.join(".lingxi").join("skills");
         // Created out of order; the loader must sort by name (str `Ord`).
         write_skill(&proj_skills, "charlie", "c", None);
         write_skill(&proj_skills, "alpha", "a", None);
@@ -671,7 +671,7 @@ mod tests {
     fn plain_md_file_directly_under_skills_is_ignored() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (cwd, claude_home) = fixture(tmp.path());
-        let proj_skills = cwd.join(".claude").join("skills");
+        let proj_skills = cwd.join(".lingxi").join("skills");
         std::fs::create_dir_all(&proj_skills).expect("mkdir skills");
         // A single `.md` file (NOT a subdir/SKILL.md) — directory format only.
         std::fs::write(

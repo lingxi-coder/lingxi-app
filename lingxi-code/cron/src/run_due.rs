@@ -422,7 +422,7 @@ mod tests {
     }
 
     const NOW: u64 = 1_700_000_000; // not on a minute boundary (…020 seconds)
-    const PATH: &str = "/proj/.claude/scheduled_tasks.json";
+    const PATH: &str = "/proj/.lingxi/scheduled_tasks.json";
 
     fn file_with(tasks_json: &str) -> Arc<MemFs> {
         MemFs::with(PATH, tasks_json)

@@ -190,11 +190,11 @@ pub struct PendingClassifierCheck {
 /// Where to persist a permission update derived from this decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PermissionUpdateDestination {
-    /// `~/.claude/settings.json`.
+    /// `~/.lingxi/settings.json`.
     UserSettings,
-    /// `.claude/settings.json` (project-checked).
+    /// `.lingxi/settings.json` (project-checked).
     ProjectSettings,
-    /// `.claude/settings.local.json` (gitignored).
+    /// `.lingxi/settings.local.json` (gitignored).
     LocalSettings,
     /// Session-only (lives until the agent exits).
     Session,

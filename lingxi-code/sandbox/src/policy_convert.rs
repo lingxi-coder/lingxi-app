@@ -41,11 +41,11 @@ pub struct SandboxConvertContext {
     /// Managed-settings drop-in dir (`getManagedSettingsDropInDir()`), added to
     /// `deny_write` (sandbox-adapter.ts:236).
     pub managed_drop_in_dir: Option<String>,
-    /// `.claude/settings*.json` + `.claude/skills` paths derived from the
+    /// `.lingxi/settings*.json` + `.lingxi/skills` paths derived from the
     /// current working directory when it differs from the original cwd, added to
     /// `deny_write` (sandbox-adapter.ts:238-255). Threaded pre-resolved.
     pub cwd_settings_paths: Vec<String>,
-    /// `.claude/skills` paths for the original (and current) cwd, added to
+    /// `.lingxi/skills` paths for the original (and current) cwd, added to
     /// `deny_write` (sandbox-adapter.ts:247-255). Threaded pre-resolved.
     pub skills_dirs: Vec<String>,
     /// Cached git-worktree main repo path (`worktreeMainRepoPath`), added to
@@ -517,7 +517,7 @@ mod resolve_fs_path_tests {
     use std::path::Path;
     #[test]
     fn tilde_expands_to_injected_home() {
-        let sd = Path::new("/home/u/.claude");
+        let sd = Path::new("/home/u/.lingxi");
         assert_eq!(
             resolve_sandbox_filesystem_path_with("~", sd, "/home/u"),
             "/home/u"
@@ -531,17 +531,17 @@ mod resolve_fs_path_tests {
     #[test]
     fn relative_dot_prefix_resolves_against_settings_dir() {
         // `./src` is relative → resolve(settings_dir, "./src") collapses `.`.
-        let sd = Path::new("/proj/.claude");
+        let sd = Path::new("/proj/.lingxi");
         assert_eq!(
             resolve_sandbox_filesystem_path_with("./src", sd, "/home/u"),
-            "/proj/.claude/src"
+            "/proj/.lingxi/src"
         );
     }
 
     #[test]
     fn absolute_collapses_dot_dot() {
         // Absolute → Node normalize(): `/a/../b` → `/b`.
-        let sd = Path::new("/proj/.claude");
+        let sd = Path::new("/proj/.lingxi");
         assert_eq!(
             resolve_sandbox_filesystem_path_with("/a/../b", sd, "/home/u"),
             "/b"
@@ -551,17 +551,17 @@ mod resolve_fs_path_tests {
     #[test]
     fn relative_dot_dot_collapses_after_join() {
         // Relative `x/../y` resolved under settings_dir → `<dir>/y`.
-        let sd = Path::new("/proj/.claude");
+        let sd = Path::new("/proj/.lingxi");
         assert_eq!(
             resolve_sandbox_filesystem_path_with("x/../y", sd, "/home/u"),
-            "/proj/.claude/y"
+            "/proj/.lingxi/y"
         );
     }
 
     #[test]
     fn tilde_rest_collapses_dot_dot() {
         // `~/a/../b` → join(home, "a/../b") collapses → `/home/u/b`.
-        let sd = Path::new("/proj/.claude");
+        let sd = Path::new("/proj/.lingxi");
         assert_eq!(
             resolve_sandbox_filesystem_path_with("~/a/../b", sd, "/home/u"),
             "/home/u/b"

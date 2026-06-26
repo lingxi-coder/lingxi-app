@@ -20,7 +20,7 @@ fn settings(allow: Vec<&str>, deny: Vec<&str>) -> SettingsJson {
             enabled: Some(true),
             ..Default::default()
         }),
-        settings_dir: Some(PathBuf::from("/home/u/.claude")),
+        settings_dir: Some(PathBuf::from("/home/u/.lingxi")),
     }
 }
 
@@ -60,7 +60,7 @@ fn extracts_read_deny_into_deny_read() {
     assert!(cfg
         .filesystem
         .deny_read
-        .contains(&"/home/u/.claude/secret".to_string()));
+        .contains(&"/home/u/.lingxi/secret".to_string()));
 }
 
 #[test]
@@ -196,16 +196,16 @@ fn default_ctx_seeds_only_dot_no_temp() {
 fn denies_settings_managed_and_skills_paths() {
     let s = settings(vec![], vec![]);
     let c = SandboxConvertContext {
-        settings_file_paths: vec!["/home/u/.claude/settings.json".into()],
+        settings_file_paths: vec!["/home/u/.lingxi/settings.json".into()],
         managed_drop_in_dir: Some("/Library/managed-settings.d".into()),
-        skills_dirs: vec!["/proj/.claude/skills".into()],
+        skills_dirs: vec!["/proj/.lingxi/skills".into()],
         ..Default::default()
     };
     let cfg = convert_settings_to_runtime_config(&s, &c);
     assert!(cfg
         .filesystem
         .deny_write
-        .contains(&"/home/u/.claude/settings.json".to_string()));
+        .contains(&"/home/u/.lingxi/settings.json".to_string()));
     assert!(cfg
         .filesystem
         .deny_write
@@ -213,7 +213,7 @@ fn denies_settings_managed_and_skills_paths() {
     assert!(cfg
         .filesystem
         .deny_write
-        .contains(&"/proj/.claude/skills".to_string()));
+        .contains(&"/proj/.lingxi/skills".to_string()));
 }
 
 #[test]
@@ -319,7 +319,7 @@ fn sandbox_filesystem_absolute_path_kept_as_is_not_settings_relative() {
     assert!(!cfg
         .filesystem
         .allow_write
-        .contains(&"/home/u/.claude/Users/foo/.cargo".to_string()));
+        .contains(&"/home/u/.lingxi/Users/foo/.cargo".to_string()));
 }
 
 #[test]
@@ -338,7 +338,7 @@ fn sandbox_filesystem_relative_path_resolved_against_settings_dir() {
     assert!(cfg
         .filesystem
         .deny_read
-        .contains(&"/home/u/.claude/secret".to_string()));
+        .contains(&"/home/u/.lingxi/secret".to_string()));
 }
 
 #[test]

@@ -177,7 +177,7 @@ pub struct OrchestratorConfig {
     /// OUTSTYLE.3: directories searched for CUSTOM output styles (`*.md` files
     /// with `name`/`description`/`keepCodingInstructions` frontmatter + a body),
     /// in INCREASING priority — e.g.
-    /// `[~/.claude/output-styles, <cwd>/.claude/output-styles]` so a project
+    /// `[~/.lingxi/output-styles, <cwd>/.lingxi/output-styles]` so a project
     /// style overrides a user one, and both override the builtins
     /// ([`outputstyles::resolve_output_style`]). EMPTY (the default) means
     /// builtin-only resolution — byte-identical to before, so non-desktop hosts
@@ -312,7 +312,7 @@ mod tests {
             is_subscriber: true,
             is_enterprise: true,
             output_style: Some("Explanatory".into()),
-            output_style_dirs: vec![std::path::PathBuf::from("/home/u/.claude/output-styles")],
+            output_style_dirs: vec![std::path::PathBuf::from("/home/u/.lingxi/output-styles")],
             max_budget_nano_usd: Some(5_000_000_000),
             transcript_classifier_enabled: true,
             refusal_fallback_model: Some("claude-sonnet-4-6".into()),
@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(back.output_style.as_deref(), Some("Explanatory"));
         assert_eq!(
             back.output_style_dirs,
-            vec![std::path::PathBuf::from("/home/u/.claude/output-styles")]
+            vec![std::path::PathBuf::from("/home/u/.lingxi/output-styles")]
         );
         assert_eq!(back.max_budget_nano_usd, Some(5_000_000_000));
         assert!(back.transcript_classifier_enabled);

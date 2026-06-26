@@ -113,7 +113,7 @@ impl std::error::Error for WorkflowLaunchError {}
 /// `scriptPath` over `script` over `name` (the schema marks `scriptPath` as
 /// "Takes precedence over `script` and `name`"). `read` loads a file's contents
 /// (the host provides real I/O); `name` resolution looks under
-/// `.claude/workflows/<name>` with common script extensions. (LingXi ships no
+/// `.lingxi/workflows/<name>` with common script extensions. (LingXi ships no
 /// built-in workflow library, so a `name` that isn't a saved file is an error.)
 pub fn resolve_script<R>(
     spec: &WorkflowLaunchSpec,
@@ -183,7 +183,7 @@ impl WorkflowTool {
         }
     }
 
-    /// List saved workflow names from `.claude/workflows/`. Returns a
+    /// List saved workflow names from `.lingxi/workflows/`. Returns a
     /// comma-joined string for the errorCode-1b message, or `None` on I/O error.
     fn list_available_workflow_names() -> Option<String> {
         let dir = std::fs::read_dir(format!("{}/workflows", branding::DOT_DIR)).ok()?;
@@ -346,7 +346,7 @@ impl Tool for WorkflowTool {
         } else if let Some(ref inline) = script {
             resolved_script = inline.clone();
         } else if let Some(ref wf_name) = name {
-            // Try to resolve from saved workflows (.claude/workflows/<name>{.js,.mjs,.ts,""}).
+            // Try to resolve from saved workflows (.lingxi/workflows/<name>{.js,.mjs,.ts,""}).
             let mut found: Option<String> = None;
             for ext in [".js", ".mjs", ".ts", ""] {
                 let candidate = format!("{}/workflows/{wf_name}{ext}", branding::DOT_DIR);
@@ -562,7 +562,7 @@ mod tests {
         use std::collections::HashMap;
         let files: HashMap<&str, &str> = HashMap::from([
             ("/abs/wf.js", "FROM_PATH"),
-            (".claude/workflows/review.js", "FROM_NAME"),
+            (".lingxi/workflows/review.js", "FROM_NAME"),
         ]);
         let read = |p: &str| {
             files
@@ -586,7 +586,7 @@ mod tests {
         };
         assert_eq!(resolve_script(&spec, &read).unwrap(), "INLINE");
 
-        // name → .claude/workflows/<name>.js.
+        // name → .lingxi/workflows/<name>.js.
         let spec = WorkflowLaunchSpec {
             name: Some("review".into()),
             ..Default::default()
@@ -725,8 +725,8 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
 
-        // Write a non-deterministic saved workflow to .claude/workflows/.
-        let dir = std::path::Path::new(".claude/workflows");
+        // Write a non-deterministic saved workflow to .lingxi/workflows/.
+        let dir = std::path::Path::new(".lingxi/workflows");
         std::fs::create_dir_all(dir).unwrap();
         let wf_path = dir.join("nondet-wf.js");
         let nondeterministic_src = concat!(
@@ -845,7 +845,7 @@ mod tests {
                 workflow_name: Some("my-wf".into()),
                 summary: Some("A test workflow".into()),
                 transcript_dir: Some(
-                    "/home/.claude/projects/-Users-me-proj/sess123/subagents/workflows/wf_abc123def456".into()
+                    "/home/.lingxi/projects/-Users-me-proj/sess123/subagents/workflows/wf_abc123def456".into()
                 ),
             },
         });
@@ -866,7 +866,7 @@ mod tests {
         assert_eq!(res.data["summary"], "A test workflow");
         assert_eq!(
             res.data["transcriptDir"],
-            "/home/.claude/projects/-Users-me-proj/sess123/subagents/workflows/wf_abc123def456"
+            "/home/.lingxi/projects/-Users-me-proj/sess123/subagents/workflows/wf_abc123def456"
         );
         assert_eq!(res.data["runId"], "wf_abc123def456");
         assert_eq!(res.data["scriptPath"], "/tmp/wf_abc123def456.js");
@@ -880,7 +880,7 @@ mod tests {
         );
         assert!(mc.contains("\nSummary: A test workflow"), "must have Summary line: {mc}");
         assert!(
-            mc.contains("\nTranscript dir: /home/.claude/projects/-Users-me-proj/sess123/subagents/workflows/wf_abc123def456"),
+            mc.contains("\nTranscript dir: /home/.lingxi/projects/-Users-me-proj/sess123/subagents/workflows/wf_abc123def456"),
             "must have Transcript dir line: {mc}"
         );
         assert!(

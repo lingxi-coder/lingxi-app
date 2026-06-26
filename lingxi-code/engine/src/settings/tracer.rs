@@ -15,9 +15,9 @@ use std::collections::BTreeMap;
 pub enum Source {
     /// `LINGXI_*` / `CLAUDE_CODE_*` / `CLAUDE_*` env var.
     Env,
-    /// `~/.claude/settings.json`.
+    /// `~/.lingxi/settings.json`.
     User,
-    /// `<project_dir>/.claude/settings.json`.
+    /// `<project_dir>/.lingxi/settings.json`.
     Project,
     /// Built-in defaults baseline.
     Defaults,
@@ -100,9 +100,9 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         let project_dir = tmp.path();
-        let user_dir = tmp.path().join("home_t9a").join(".claude");
+        let user_dir = tmp.path().join("home_t9a").join(".lingxi");
         std::fs::create_dir_all(&user_dir).unwrap();
-        let project_subdir = project_dir.join(".claude");
+        let project_subdir = project_dir.join(".lingxi");
         std::fs::create_dir_all(&project_subdir).unwrap();
 
         let mut uf = std::fs::File::create(user_dir.join("settings.json")).unwrap();
@@ -129,9 +129,9 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         let project_dir = tmp.path();
-        let user_dir = tmp.path().join("home_t9b").join(".claude");
+        let user_dir = tmp.path().join("home_t9b").join(".lingxi");
         std::fs::create_dir_all(&user_dir).unwrap();
-        let project_subdir = project_dir.join(".claude");
+        let project_subdir = project_dir.join(".lingxi");
         std::fs::create_dir_all(&project_subdir).unwrap();
 
         let mut pf = std::fs::File::create(project_subdir.join("settings.json")).unwrap();

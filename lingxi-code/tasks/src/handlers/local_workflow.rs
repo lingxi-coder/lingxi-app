@@ -1065,7 +1065,7 @@ pub async fn run_workflow_script(
 
 /// Resolve a `workflow()` reference (`{ name }` or `{ scriptPath }`) to a script
 /// source via `fs`: `scriptPath` is read directly; `name` resolves under
-/// `.claude/workflows/<name>.{js,mjs,ts}`.
+/// `.lingxi/workflows/<name>.{js,mjs,ts}`.
 async fn resolve_nested_script(
     spec: &Value,
     fs: Option<&Arc<dyn FileSystem>>,

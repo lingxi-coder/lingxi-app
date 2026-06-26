@@ -173,7 +173,7 @@ mod tests {
         let prev = SettingsJson {
             additional_directories: Some(vec![s("/x")]),
             enabled_tools: Some(vec![s("Bash")]),
-            additional_includes: Some(vec![s("CLAUDE.md")]),
+            additional_includes: Some(vec![s("LINGXI.md")]),
             ..Default::default()
         };
         let next = SettingsJson {
@@ -193,7 +193,7 @@ mod tests {
         );
         assert_eq!(
             merged.additional_includes.as_deref(),
-            Some(&[s("CLAUDE.md"), s("AGENTS.md")][..])
+            Some(&[s("LINGXI.md"), s("AGENTS.md")][..])
         );
     }
 

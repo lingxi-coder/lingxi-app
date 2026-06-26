@@ -1856,7 +1856,7 @@ mod tests {
         FsRoots {
             cwd: PathBuf::from("/proj"),
             home: Some(PathBuf::from("/home/u")),
-            claude_home: PathBuf::from("/home/u/.claude"),
+            claude_home: PathBuf::from("/home/u/.lingxi"),
         }
     }
 
@@ -2565,7 +2565,7 @@ mod tests {
         .unwrap();
         let p = PermissionPolicy::from_rules(PermissionMode::Default, rules).with_roots(roots());
         assert!(matches!(
-            p.authorize("Read", &edit("/home/u/.claude/agents/foo.md")),
+            p.authorize("Read", &edit("/home/u/.lingxi/agents/foo.md")),
             PermissionResult::Deny { .. }
         ));
         // Same relative path under cwd is NOT denied (different root).
@@ -2924,14 +2924,14 @@ mod tests {
                 ..
             }
         ));
-        // `.claude/settings.json` (claude-config) is likewise blocked → ask.
+        // `.lingxi/settings.json` (claude-config) is likewise blocked → ask.
         assert!(matches!(
-            p.authorize("Edit", &edit("/proj/.claude/settings.json")),
+            p.authorize("Edit", &edit("/proj/.lingxi/settings.json")),
             PermissionResult::Ask { .. }
         ));
-        // …but a path under `.claude/worktrees/` is structural → auto-allowed.
+        // …but a path under `.lingxi/worktrees/` is structural → auto-allowed.
         assert!(matches!(
-            p.authorize("Edit", &edit("/proj/.claude/worktrees/x/file.rs")),
+            p.authorize("Edit", &edit("/proj/.lingxi/worktrees/x/file.rs")),
             PermissionResult::Allow {
                 reason: PermissionDecisionReason::PermissionMode {
                     mode: PermissionMode::AcceptEdits

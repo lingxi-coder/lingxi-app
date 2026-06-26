@@ -358,7 +358,7 @@ async fn successful_enter_worktree_fires_worktree_create_with_name_and_path() {
     let mut registry = ToolRegistry::new();
     registry.register_builtin(Arc::new(FakeEnterWorktreeTool {
         fail: false,
-        path: "/tmp/repo-A/.claude/worktrees/user+feature".into(),
+        path: "/tmp/repo-A/.lingxi/worktrees/user+feature".into(),
         branch_name: "worktree-user+feature".into(),
     }));
     let orch = orch_with(api, hooks, registry);
@@ -377,7 +377,7 @@ async fn successful_enter_worktree_fires_worktree_create_with_name_and_path() {
     // The resolved path + branch are threaded as engine-side context.
     assert_eq!(
         seen[0].path,
-        PathBuf::from("/tmp/repo-A/.claude/worktrees/user+feature")
+        PathBuf::from("/tmp/repo-A/.lingxi/worktrees/user+feature")
     );
     assert_eq!(seen[0].branch, "worktree-user+feature");
 }
@@ -449,7 +449,7 @@ async fn failing_worktree_create_hook_does_not_break_turn() {
     let mut tools = ToolRegistry::new();
     tools.register_builtin(Arc::new(FakeEnterWorktreeTool {
         fail: false,
-        path: "/tmp/repo-A/.claude/worktrees/user+feature".into(),
+        path: "/tmp/repo-A/.lingxi/worktrees/user+feature".into(),
         branch_name: "worktree-user+feature".into(),
     }));
     let orch = orch_with(api.clone(), hooks, tools);

@@ -124,7 +124,7 @@ pub fn parse_mcp_json_string(
     Ok(build_servers_from_map(entries, scope))
 }
 
-/// Parse MCP servers from a GLOBAL CONFIG file (`~/.claude.json`): reads ONLY the
+/// Parse MCP servers from a GLOBAL CONFIG file (`~/.lingxi.json`): reads ONLY the
 /// top-level `mcpServers` object. claude-code reads `config.mcpServers` directly
 /// (`wt().mcpServers`) with NO `|| parsed` bare-map fallback — the global config
 /// holds dozens of unrelated keys (`numStartups`, `projects`, `oauthAccount`, …)
@@ -256,7 +256,7 @@ fn build_servers_from_map(
 }
 
 /// Load + merge MCP configs from the project `.mcp.json` (cwd) and the user
-/// GLOBAL CONFIG file (`~/.claude.json`). Project entries take precedence on
+/// GLOBAL CONFIG file (`~/.lingxi.json`). Project entries take precedence on
 /// name collision.
 ///
 /// The project file is parsed with the `mcpServers || parsed` bare-map fallback
@@ -272,7 +272,7 @@ pub fn load_mcp_json_with_precedence(
 ) -> Vec<McpServerConfig> {
     let mut by_name: HashMap<String, McpServerConfig> = HashMap::new();
 
-    // User-global first (lower precedence). The global path is the `~/.claude.json`
+    // User-global first (lower precedence). The global path is the `~/.lingxi.json`
     // global config, so read ONLY its `mcpServers` key (no bare-map fallback).
     if let Ok(raw) = std::fs::read_to_string(global_path) {
         match parse_global_config_mcp_servers(&raw, ConfigScope::User) {
@@ -310,7 +310,7 @@ pub fn load_mcp_json_with_precedence(
     out
 }
 
-/// Parse LOCAL-scope MCP servers from a GLOBAL CONFIG file (`~/.claude.json`):
+/// Parse LOCAL-scope MCP servers from a GLOBAL CONFIG file (`~/.lingxi.json`):
 /// reads ONLY `projects.<project_key>.mcpServers` (claude-code local scope =
 /// `wt().projects[Pt()].mcpServers`). NO bare-map fallback. An absent project
 /// entry or `mcpServers` key yields no servers.
@@ -345,7 +345,7 @@ pub fn parse_local_config_mcp_servers(
 /// - LOCAL   = `<global_config>` `projects.<cwd_key>.mcpServers`
 /// - PROJECT = `<cwd>/.mcp.json` (the bare-map `mcpServers || parsed` fallback applies)
 ///
-/// `global_config_path` is `~/.claude.json`; `cwd_key` is
+/// `global_config_path` is `~/.lingxi.json`; `cwd_key` is
 /// `migrations::global_config::project_path_for_config(cwd)`. Missing files yield
 /// empty lists; parse errors are logged and skipped — a malformed config must
 /// not break startup.
@@ -651,11 +651,11 @@ mod tests {
         assert_eq!(cfgs[0].name, "y");
     }
 
-    // ── Global config (`~/.claude.json`) user-scope MCP, mcpServers-only ──────
+    // ── Global config (`~/.lingxi.json`) user-scope MCP, mcpServers-only ──────
 
     #[test]
     fn global_config_reads_only_mcp_servers_key_not_siblings() {
-        // A real `~/.claude.json` has many unrelated top-level keys. The global
+        // A real `~/.lingxi.json` has many unrelated top-level keys. The global
         // reader must extract ONLY `mcpServers` and never treat e.g. `projects`
         // or `numStartups` as server entries (claude-code `wt().mcpServers`).
         let raw = r#"{
@@ -686,7 +686,7 @@ mod tests {
         // its `mcpServers`, ignoring sibling keys.
         let dir = TempDir::new().unwrap();
         let project = dir.path().join(".mcp.json"); // absent
-        let global = dir.path().join(".claude.json");
+        let global = dir.path().join(".lingxi.json");
         fs::write(&global, r#"{"numStartups":3,"mcpServers":{"g":{"command":"g"}}}"#).unwrap();
         let cfgs = load_mcp_json_with_precedence(&project, &global);
         assert_eq!(cfgs.len(), 1);
@@ -694,7 +694,7 @@ mod tests {
         assert_eq!(cfgs[0].scope, ConfigScope::User);
     }
 
-    // ── Local-scope MCP (`~/.claude.json` projects[<key>].mcpServers) ─────────
+    // ── Local-scope MCP (`~/.lingxi.json` projects[<key>].mcpServers) ─────────
 
     #[test]
     fn local_scope_reads_projects_keyed_mcp_servers() {
@@ -720,7 +720,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let cwd = dir.path();
         let project = cwd.join(".mcp.json");
-        let global = cwd.join(".claude.json");
+        let global = cwd.join(".lingxi.json");
         // Key BOTH the fixture and the loader via the same canonical resolver, so
         // they match regardless of temp-dir symlink canonicalization.
         let key = migrations::global_config::project_path_for_config(cwd);
@@ -747,7 +747,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let cwd = dir.path();
         let project = cwd.join(".mcp.json");
-        let global = cwd.join(".claude.json");
+        let global = cwd.join(".lingxi.json");
         let key = migrations::global_config::project_path_for_config(cwd);
         let mut projects = serde_json::Map::new();
         projects.insert(key, serde_json::json!({ "mcpServers": { "loc": { "command": "loc" } } }));

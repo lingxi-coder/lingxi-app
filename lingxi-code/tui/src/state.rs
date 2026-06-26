@@ -833,7 +833,7 @@ pub struct AppState {
     pub pending_open_stats: bool,
     /// (M9-09 real data) Set by the `/skills` submit intercept: a request to
     /// open the read-only skill-registry viewer. The SYNC submit path can't
-    /// `.await` the on-disk `.claude/skills/` dir walk (project ancestors + user
+    /// `.await` the on-disk `.lingxi/skills/` dir walk (project ancestors + user
     /// home), so it only RAISES this flag; the async open pump in `root.rs`
     /// (`pump_open_skills`, on the ticker `use_future`) walks the dirs OUTSIDE
     /// the `AppState` lock, parses each `SKILL.md`, and calls
@@ -1025,7 +1025,7 @@ pub struct AppState {
     /// [`Self::subscription_snapshot`].
     pub subscription: Option<traits::subscription::SharedSubscription>,
     /// (GAP D) Runtime keybindings keymap — the merged default + user
-    /// `~/.claude/keybindings.json` bindings the live dispatch consults BEFORE
+    /// `~/.lingxi/keybindings.json` bindings the live dispatch consults BEFORE
     /// the hardcoded `map_iocraft_key` table. Defaults to
     /// [`command_core::keybindings::Keymap::defaults`] (byte-identical to the
     /// hardcoded chords); the composition root replaces it via
@@ -1136,7 +1136,7 @@ impl AppState {
 
     /// (GAP D) Install the runtime keymap (merged default + user keybindings).
     /// Called by the composition root after [`command_core::keybindings::load_keybindings`]
-    /// resolves the customization gate + `~/.claude/keybindings.json`. Replacing
+    /// resolves the customization gate + `~/.lingxi/keybindings.json`. Replacing
     /// the default keymap is a no-op behaviorally when the gate is off (the load
     /// returns the same defaults), so this never regresses the hardcoded chords.
     pub fn set_keymap(&mut self, keymap: command_core::keybindings::Keymap) {
@@ -1349,7 +1349,7 @@ impl AppState {
 
     /// (M9-09) Open the `/skills` registry viewer with the given grouped
     /// sections. Called by `root::pump_open_skills` after the async on-disk
-    /// `.claude/skills/` walk (the frozen `OrchestratorHandle` exposes no
+    /// `.lingxi/skills/` walk (the frozen `OrchestratorHandle` exposes no
     /// `list_skills`, so the TUI reads the dirs itself off the UI executor).
     /// The sections are already in claude-code render order (project, user)
     /// with empty sections omitted; when no skill exists on disk the vec is

@@ -19,16 +19,16 @@ use std::fs;
 use std::path::Path;
 
 /// Materialize a versioned cache entry exactly as claude-code lays it out:
-/// `<root>/cache/{marketplace}/{plugin}/{version}/.claude-plugin/plugin.json`.
+/// `<root>/cache/{marketplace}/{plugin}/{version}/.lingxi-plugin/plugin.json`.
 fn write_cached_plugin(root: &Path, marketplace: &str, plugin: &str, version: &str) {
     let versioned = root
         .join("cache")
         .join(marketplace)
         .join(plugin)
         .join(version);
-    fs::create_dir_all(versioned.join(".claude-plugin")).unwrap();
+    fs::create_dir_all(versioned.join(".lingxi-plugin")).unwrap();
     fs::write(
-        versioned.join(".claude-plugin").join("plugin.json"),
+        versioned.join(".lingxi-plugin").join("plugin.json"),
         format!(r#"{{"name":"{plugin}","version":"{version}"}}"#),
     )
     .unwrap();
@@ -76,8 +76,8 @@ async fn resolves_enabled_entries_to_versioned_cache_paths() {
 
 #[tokio::test]
 async fn flat_walk_of_a_real_plugins_dir_finds_nothing() {
-    // The real ~/.claude/plugins holds cache/, npm-cache/, installed_plugins.json
-    // — none with a direct .claude-plugin/plugin.json child. The legacy flat
+    // The real ~/.lingxi/plugins holds cache/, npm-cache/, installed_plugins.json
+    // — none with a direct .lingxi-plugin/plugin.json child. The legacy flat
     // walk must therefore find ZERO (documents the layout mismatch the
     // allowlist path fixes).
     let tmp = tempfile::tempdir().unwrap();

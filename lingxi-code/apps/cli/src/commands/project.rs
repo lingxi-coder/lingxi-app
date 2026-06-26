@@ -4,7 +4,7 @@
 //! implementation of `project purge`. The single child `purge [path]` deletes a
 //! project's locally-stored Claude Code state: its session transcripts under
 //! `<config-home>/projects/<encoded>/` and its entry in the global config
-//! (`~/.claude.json` `projects` map). Two sub-stores claude also nominally
+//! (`~/.lingxi.json` `projects` map). Two sub-stores claude also nominally
 //! tracks — per-list task spools and the temp file-history — are NOT keyed by
 //! project path in this port (tasks are keyed by task-list name; file history
 //! lives in an ephemeral temp dir keyed by the raw cwd), so they are reported
@@ -105,7 +105,7 @@ fn run_purge(args: &PurgeArgs) -> i32 {
     }
 
     let Some(config_home) = migrations::global_config::claude_config_home() else {
-        eprintln!("lingxi-cli project purge: cannot resolve Claude config home (no $HOME / $CLAUDE_CONFIG_DIR)");
+        eprintln!("lingxi-cli project purge: cannot resolve Claude config home (no $HOME / $LINGXI_CONFIG_DIR)");
         return RUNTIME_ERROR;
     };
     let projects_root = config_home.join("projects");
@@ -132,7 +132,7 @@ fn run_purge(args: &PurgeArgs) -> i32 {
             },
         };
         // TWO DIFFERENT KEYS for two different stores:
-        //  - the ~/.claude.json `projects` map is keyed by the GIT-ROOT config
+        //  - the ~/.lingxi.json `projects` map is keyed by the GIT-ROOT config
         //    key (`project_path_for_config`, canonicalize + walk to repo root);
         //  - the transcript dir is keyed by the RAW cwd via the SAME writer
         //    helper the engine uses (`session::jsonl::path::project_dir_name`,
@@ -240,7 +240,7 @@ fn purge_one(
         println!("  no transcripts found ({})", target.transcript_dir.display());
     }
 
-    // (2) Config entry: remove `projects[<key>]` from `~/.claude.json`.
+    // (2) Config entry: remove `projects[<key>]` from `~/.lingxi.json`.
     match global_config {
         Some(path) => {
             if args.dry_run {

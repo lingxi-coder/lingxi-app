@@ -34,7 +34,7 @@ pub const BRIEF_TOOL_NAME: &str = "SendUserMessage";
 /// Legacy wire name still accepted as an alias (claude-code
 /// `LEGACY_BRIEF_TOOL_NAME = "Brief"`).
 pub const LEGACY_BRIEF_TOOL_NAME: &str = "Brief";
-/// Subdirectory under `~/.claude/` (wire identifier, parity-locked).
+/// Subdirectory under `~/.lingxi/` (wire identifier, parity-locked).
 pub const BRIEF_SUBDIR: &str = "brief";
 /// File extension (wire identifier, parity-locked).
 pub const BRIEF_FILE_SUFFIX: &str = ".txt";

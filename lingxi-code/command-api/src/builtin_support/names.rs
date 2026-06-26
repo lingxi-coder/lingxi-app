@@ -526,7 +526,7 @@ pub fn core_description(name: &str) -> &'static str {
         "exit" => "Exit the CLI",
         "help" => "Show help and available commands",
         "hooks" => "Manage hooks",
-        "init" => "Initialize a new CLAUDE.md file with codebase documentation",
+        "init" => "Initialize a new LINGXI.md file with codebase documentation",
         "login" => "Sign in with your Anthropic account",
         "logout" => "Sign out from your Anthropic account",
         "mcp" => "Manage MCP servers",

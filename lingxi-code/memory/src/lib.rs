@@ -30,10 +30,10 @@ pub use tier::MemoryTier;
 /// Per-file cap (10 MB). Files larger than this are skipped with
 /// `tengu_memory_file_too_large`.
 ///
-/// NB: this is the **memdir** scanner cap, NOT the CLAUDE.md hierarchy loader,
+/// NB: this is the **memdir** scanner cap, NOT the LINGXI.md hierarchy loader,
 /// which reads every file whole (no size drop — parity with claude-code
 /// `safelyReadMemoryFileAsync`). See [`get_large_memory_files`] for the
-/// non-blocking 40k-char *warning* the CLAUDE.md path surfaces instead.
+/// non-blocking 40k-char *warning* the LINGXI.md path surfaces instead.
 pub const MAX_MEMORY_FILE_SIZE: usize = 10 * 1024 * 1024;
 
 /// Recommended maximum character count for a single memory file

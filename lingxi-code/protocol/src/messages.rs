@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn memory_entry_roundtrip_json() {
         let e = MemoryEntry {
-            path: std::path::PathBuf::from("/tmp/CLAUDE.md"),
+            path: std::path::PathBuf::from("/tmp/LINGXI.md"),
             tier: MemoryEntryTier::Project,
             body: "hello".into(),
             age_days: 3,

@@ -1,6 +1,6 @@
 //! (settings-status-missing-mcp-and-setting-sources) `get_status_snapshot`'s
 //! `setting_sources` reflects real on-disk settings files for the cwd-rooted
-//! project tier. The user tier depends on `$HOME`/`$CLAUDE_CONFIG_DIR` (a
+//! project tier. The user tier depends on `$HOME`/`$LINGXI_CONFIG_DIR` (a
 //! process-global env var), so it is intentionally NOT exercised here to
 //! avoid the env-mutation test races this codebase has hit before — the
 //! project tier alone is enough to pin the file-existence mapping.
@@ -32,14 +32,14 @@ async fn setting_sources_includes_project_tier_when_its_file_exists() {
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(tmp.join(".claude")).unwrap();
-    std::fs::write(tmp.join(".claude").join("settings.json"), b"{}").unwrap();
+    std::fs::create_dir_all(tmp.join(".lingxi")).unwrap();
+    std::fs::write(tmp.join(".lingxi").join("settings.json"), b"{}").unwrap();
 
     let orch = build_orch(tmp.clone());
     let snap = orch.get_status_snapshot().await;
     assert!(
         snap.setting_sources
-            .contains(&"Project settings (.claude/settings.json)".to_string()),
+            .contains(&"Project settings (.lingxi/settings.json)".to_string()),
         "got: {:?}",
         snap.setting_sources
     );

@@ -22,7 +22,7 @@ use traits::{SecureStorage, SecureStorageError};
 ///
 /// `user` is the keychain account name (claude-code uses `$USER`).
 /// `config_dir` is the user's claude config directory (`~/.claude` or the
-/// `CLAUDE_CONFIG_DIR`-overridden path).
+/// `LINGXI_CONFIG_DIR`-overridden path).
 /// `plaintext_path` is the fallback file location — typically
 /// `<config_dir>/.credentials.json`.
 ///

@@ -8,14 +8,14 @@ fn snapshot_memory_selector() {
     let tiers = vec![
         MemoryTierEntry {
             label: "Project memory".into(),
-            description: "Checked in at ./CLAUDE.md".into(),
-            path: "/repo/CLAUDE.md".into(),
+            description: "Checked in at ./LINGXI.md".into(),
+            path: "/repo/LINGXI.md".into(),
             exists: true,
         },
         MemoryTierEntry {
             label: "User memory".into(),
-            description: "Saved in ~/.claude/CLAUDE.md".into(),
-            path: "/home/.claude/CLAUDE.md".into(),
+            description: "Saved in ~/.lingxi/LINGXI.md".into(),
+            path: "/home/.lingxi/LINGXI.md".into(),
             exists: false,
         },
     ];

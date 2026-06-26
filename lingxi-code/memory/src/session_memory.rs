@@ -141,7 +141,7 @@ impl SessionMemoryExtractor {
     /// next session re-loads through the normal selector/prefetch/surfacing path
     /// (this module adds NO second injection).
     ///
-    /// `config_home` is the resolved `$CLAUDE_CONFIG_DIR ?? $HOME/.claude`
+    /// `config_home` is the resolved `$LINGXI_CONFIG_DIR ?? $HOME/.claude`
     /// directory (see [`session_memory_path`]); the caller passes it so this
     /// stays testable with a tempdir.
     ///
@@ -241,14 +241,14 @@ fn write_session_memory(path: &Path, content: &str) -> Result<(), MemoryError> {
 }
 
 /// Resolve the config-home directory used for session-memory writes:
-/// `$CLAUDE_CONFIG_DIR` when set (claude-code `??`: an empty value is honored
+/// `$LINGXI_CONFIG_DIR` when set (claude-code `??`: an empty value is honored
 /// verbatim → cwd-relative) else `$HOME/.claude` else `$USERPROFILE/.claude`
 /// else a bare `.claude`.
 ///
-/// Delegates the `$CLAUDE_CONFIG_DIR`-vs-home resolution to the canonical
+/// Delegates the `$LINGXI_CONFIG_DIR`-vs-home resolution to the canonical
 /// [`crate::claude_md::user_config_dir`]; this fn only resolves the fallback home
 /// from `$HOME`/`$USERPROFILE` (the memory crate has no `dirs` dependency).
-/// `Path::new("").join(".claude") == ".claude"`, so the no-home case stays the
+/// `Path::new("").join(".lingxi") == ".lingxi"`, so the no-home case stays the
 /// bare `.claude` form — byte-identical to the prior inline implementation.
 #[must_use]
 pub fn config_home_dir() -> PathBuf {
@@ -436,15 +436,15 @@ mod tests {
     #[test]
     fn config_home_dir_honors_claude_config_dir_then_home() {
         // We avoid mutating real process env across threads beyond a scoped check.
-        let prev = std::env::var_os("CLAUDE_CONFIG_DIR");
-        std::env::set_var("CLAUDE_CONFIG_DIR", "/explicit/cfg");
+        let prev = std::env::var_os("LINGXI_CONFIG_DIR");
+        std::env::set_var("LINGXI_CONFIG_DIR", "/explicit/cfg");
         assert_eq!(config_home_dir(), PathBuf::from("/explicit/cfg"));
         // A set-but-EMPTY string is honored verbatim (claude-code `??`).
-        std::env::set_var("CLAUDE_CONFIG_DIR", "");
+        std::env::set_var("LINGXI_CONFIG_DIR", "");
         assert_eq!(config_home_dir(), PathBuf::from(""));
         match prev {
-            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
-            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+            Some(v) => std::env::set_var("LINGXI_CONFIG_DIR", v),
+            None => std::env::remove_var("LINGXI_CONFIG_DIR"),
         }
     }
 }

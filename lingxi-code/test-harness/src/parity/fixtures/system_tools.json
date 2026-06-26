@@ -23,7 +23,7 @@
     "brief_file_suffix": ".txt",
     "brief_task_id_prefix": "b",
     "config_file_name": "settings.json",
-    "config_subdir": ".claude",
+    "config_subdir": ".lingxi",
     "config_fields_allowed": ["model", "outputStyle", "theme", "verbose"],
     "max_skill_descriptor_len": 1024,
     "cron_subdir": "cron",
@@ -34,9 +34,9 @@
   },
 
   "path_templates": {
-    "brief":          "~/.claude/brief/<task_id>.txt",
-    "config":         "~/.claude/settings.json",
-    "schedule_cron":  "<project>/.claude/scheduled_tasks.json"
+    "brief":          "~/.lingxi/brief/<task_id>.txt",
+    "config":         "~/.lingxi/settings.json",
+    "schedule_cron":  "<project>/.lingxi/scheduled_tasks.json"
   },
 
   "telemetry_events": [

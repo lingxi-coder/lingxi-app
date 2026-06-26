@@ -136,7 +136,7 @@ struct CoordinatorFixture {
 fn make_coordinator_fixture(api: &Arc<ScriptedApiClient>) -> CoordinatorFixture {
     let tmp = tempfile::tempdir().unwrap();
     // Redirect `$HOME` to the scratch dir so the coordinator `TeamCreate` tool
-    // writes its on-disk team file (`~/.claude/teams/{name}/config.json`,
+    // writes its on-disk team file (`~/.lingxi/teams/{name}/config.json`,
     // resolved from `$HOME`) under the tempdir instead of the developer's real
     // home. The coordinator factory does not expose a home-override seam, so
     // env-redirect is the hermeticity lever here.

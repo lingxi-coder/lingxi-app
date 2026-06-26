@@ -3,11 +3,10 @@
 //! and the brand name. Every crate that needs one of these values imports it
 //! from here so the namespace is defined in exactly one place.
 //!
-//! Rollout note (TWO-STAGE): this crate currently holds the **Claude** values
-//! so introducing it and routing the scattered literals through it is a pure
-//! refactor that keeps every existing test/fixture green (Commit A). A later
-//! single commit flips the constants below to the LingXi values (Commit B),
-//! which is where the parity fixtures are intentionally updated together.
+//! These hold LingXi's namespace values. (They were introduced holding the
+//! Claude values so routing the scattered literals through this crate was a
+//! pure refactor; this commit flips them to LingXi, which is why the parity
+//! fixtures/tests were updated together.)
 //!
 //! The Anthropic *protocol* layer (model IDs, `anthropic` host/provider,
 //! `tengu_*`, beta headers, `claude-cli` User-Agent, OAuth, `ANTHROPIC_*` env)
@@ -19,10 +18,10 @@ use std::path::{Path, PathBuf};
 
 /// User config directory name under `$HOME` (e.g. `~/.lingxi`). Also the
 /// per-project config dir name (`<repo>/.lingxi/`).
-pub const DOT_DIR: &str = ".claude";
+pub const DOT_DIR: &str = ".lingxi";
 
 /// Global config file, a sibling of [`DOT_DIR`] in `$HOME` (e.g. `~/.lingxi.json`).
-pub const GLOBAL_CONFIG_FILE: &str = ".claude.json";
+pub const GLOBAL_CONFIG_FILE: &str = ".lingxi.json";
 
 /// Legacy global-config filename checked *inside* the config-home before
 /// [`GLOBAL_CONFIG_FILE`] (e.g. `<config-home>/.config.json`). The filename
@@ -30,24 +29,32 @@ pub const GLOBAL_CONFIG_FILE: &str = ".claude.json";
 pub const LEGACY_GLOBAL_CONFIG_FILE: &str = ".config.json";
 
 /// Environment variable that overrides the config-home directory.
-pub const CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
+pub const CONFIG_DIR_ENV: &str = "LINGXI_CONFIG_DIR";
 
 /// Project memory filename (case-sensitive).
-pub const MEMORY_FILE: &str = "CLAUDE.md";
+pub const MEMORY_FILE: &str = "LINGXI.md";
 
 /// Local-override memory filename.
-pub const MEMORY_LOCAL_FILE: &str = "CLAUDE.local.md";
+pub const MEMORY_LOCAL_FILE: &str = "LINGXI.local.md";
 
 /// Manifest directory name inside a plugin / marketplace package.
-pub const PLUGIN_MANIFEST_DIR: &str = ".claude-plugin";
+pub const PLUGIN_MANIFEST_DIR: &str = ".lingxi-plugin";
 
 /// Human-facing product name (banners, system-prompt identity, help text).
-pub const PRODUCT_NAME: &str = "Claude Code";
+pub const PRODUCT_NAME: &str = "LingXi";
 
 /// Prefix for the product's own (non-protocol) environment variables, e.g.
 /// `LINGXI_ENABLE_TASKS`. Protocol env vars (`ANTHROPIC_*`, the kept
 /// `CLAUDE_CODE_*` SDK contract vars) are excluded from this prefix by design.
-pub const ENV_PREFIX: &str = "CLAUDE_";
+pub const ENV_PREFIX: &str = "LINGXI_";
+
+/// Managed/enterprise policy directory per platform (admin-provisioned).
+/// macOS Application Support location.
+pub const MANAGED_DIR_MACOS: &str = "/Library/Application Support/LingXi";
+/// Windows Program Files location.
+pub const MANAGED_DIR_WINDOWS: &str = r"C:\Program Files\LingXi";
+/// Other (Linux/BSD) location.
+pub const MANAGED_DIR_UNIX: &str = "/etc/lingxi";
 
 /// Resolve the user config-home: `$LINGXI_CONFIG_DIR` when the env value is
 /// supplied (honored verbatim, including an empty value — matching the upstream
@@ -86,18 +93,20 @@ mod tests {
         assert_eq!(empty, Path::new(""));
     }
 
-    // Pre-flip guard (Commit A): values are still Claude's so the consolidation
-    // refactor stays byte-identical. This test is REPLACED by the LingXi
-    // assertions in Commit B (Task 3).
     #[test]
-    fn namespace_values_are_still_claude_pre_flip() {
-        assert_eq!(DOT_DIR, ".claude");
-        assert_eq!(GLOBAL_CONFIG_FILE, ".claude.json");
-        assert_eq!(CONFIG_DIR_ENV, "CLAUDE_CONFIG_DIR");
-        assert_eq!(MEMORY_FILE, "CLAUDE.md");
-        assert_eq!(MEMORY_LOCAL_FILE, "CLAUDE.local.md");
-        assert_eq!(PLUGIN_MANIFEST_DIR, ".claude-plugin");
-        assert_eq!(PRODUCT_NAME, "Claude Code");
-        assert_eq!(ENV_PREFIX, "CLAUDE_");
+    fn namespace_values_are_lingxi() {
+        assert_eq!(DOT_DIR, ".lingxi");
+        assert_eq!(GLOBAL_CONFIG_FILE, ".lingxi.json");
+        assert_eq!(CONFIG_DIR_ENV, "LINGXI_CONFIG_DIR");
+        assert_eq!(MEMORY_FILE, "LINGXI.md");
+        assert_eq!(MEMORY_LOCAL_FILE, "LINGXI.local.md");
+        assert_eq!(PLUGIN_MANIFEST_DIR, ".lingxi-plugin");
+        assert_eq!(PRODUCT_NAME, "LingXi");
+        assert_eq!(ENV_PREFIX, "LINGXI_");
+        // No Claude namespace leaks in our own values.
+        for v in [DOT_DIR, GLOBAL_CONFIG_FILE, CONFIG_DIR_ENV, MEMORY_FILE,
+                  MEMORY_LOCAL_FILE, PLUGIN_MANIFEST_DIR, ENV_PREFIX] {
+            assert!(!v.to_lowercase().contains("claude"), "claude leak: {v}");
+        }
     }
 }

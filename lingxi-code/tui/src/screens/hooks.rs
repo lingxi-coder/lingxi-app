@@ -27,7 +27,7 @@ pub struct HookRow {
     /// / `"agent"` / `"prompt"` / the LingXi-only `"builtin"`.
     pub hook_type: String,
     /// (hooks-detail-fields-divergent) Human-readable origin, e.g. `"User
-    /// settings (~/.claude/settings.json)"`.
+    /// settings (~/.lingxi/settings.json)"`.
     pub source: String,
     /// (hooks-detail-fields-divergent) The executor's primary content
     /// (command line / URL / prompt / handler id).
@@ -402,7 +402,7 @@ mod tests {
                 matcher: Some("Edit|Write".into()),
                 timeout_ms: 5_000,
                 hook_type: "command".into(),
-                source: "Project settings (.claude/settings.json)".into(),
+                source: "Project settings (.lingxi/settings.json)".into(),
                 content: "prettier --write".into(),
                 status_message: Some("Formatting…".into()),
             }],
@@ -419,7 +419,7 @@ mod tests {
              Event: PreToolUse\n\
              Matcher: Edit|Write\n\
              Type: command\n\
-             Source: Project settings (.claude/settings.json)\n\
+             Source: Project settings (.lingxi/settings.json)\n\
              Command: prettier --write\n\
              Status message: Formatting\u{2026}\n\
              To modify or remove this hook, edit settings.json directly or ask Claude to help.\n\

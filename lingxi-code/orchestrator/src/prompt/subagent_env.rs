@@ -252,7 +252,7 @@ You are powered by the model some-unknown-model."
     fn worktree_agent_shows_worktree_cwd_and_notice() {
         let out = subagent_env_block(
             "claude-opus-4-8[1m]",
-            &PathBuf::from("/repo/.claude/worktrees/agent-x"),
+            &PathBuf::from("/repo/.lingxi/worktrees/agent-x"),
             true,
             "darwin",
             "zsh",
@@ -260,7 +260,7 @@ You are powered by the model some-unknown-model."
             &[],
             true,
         );
-        assert!(out.contains("Working directory: /repo/.claude/worktrees/agent-x\n"));
+        assert!(out.contains("Working directory: /repo/.lingxi/worktrees/agent-x\n"));
         // The worktree notice follows the working-directory line (em-dash U+2014).
         assert!(out.contains(
             "This is a git worktree \u{2014} an isolated copy of the repository. \

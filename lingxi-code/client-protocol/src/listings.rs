@@ -173,7 +173,7 @@ pub struct SlashCommandDto {
 
 // ── Memory ───────────────────────────────────────────────────────────────────
 
-/// One CLAUDE.md memory entry — the lowered `protocol::MemoryEntry`
+/// One LINGXI.md memory entry — the lowered `protocol::MemoryEntry`
 /// (`protocol/src/messages.rs:201`). Carried by
 /// [`crate::events::ClientEvent::MemoryEntries`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

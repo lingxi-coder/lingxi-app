@@ -136,7 +136,7 @@ mod tests {
     fn scan_drops_entries_older_than_365_days() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        let memdir = home.join(".claude").join("memdir");
+        let memdir = home.join(".lingxi").join("memdir");
         fs::create_dir_all(&memdir).unwrap();
         write_dated(&memdir.join("fresh.md"), b"fresh\n", 10);
         write_dated(
@@ -164,7 +164,7 @@ mod tests {
     fn user_tier_assigned_for_user_memdir() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        let memdir = home.join(".claude").join("memdir");
+        let memdir = home.join(".lingxi").join("memdir");
         fs::create_dir_all(&memdir).unwrap();
         fs::write(memdir.join("u.md"), b"u\n").unwrap();
         let roots = memdir_path(home, false);
@@ -180,7 +180,7 @@ mod tests {
         // of session-memory, connected via the shared config-home resolution.
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        let session_dir = home.join(".claude").join("agents").join("session-memory");
+        let session_dir = home.join(".lingxi").join("agents").join("session-memory");
         fs::create_dir_all(&session_dir).unwrap();
         fs::write(session_dir.join("sess-1.md"), b"durable note\n").unwrap();
         let roots = memdir_path(home, false);
@@ -193,7 +193,7 @@ mod tests {
     fn team_tier_assigned_for_team_memdir() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
-        let team = home.join(".claude").join("team-mem");
+        let team = home.join(".lingxi").join("team-mem");
         fs::create_dir_all(&team).unwrap();
         fs::write(team.join("t.md"), b"t\n").unwrap();
         let roots = memdir_path(home, true);

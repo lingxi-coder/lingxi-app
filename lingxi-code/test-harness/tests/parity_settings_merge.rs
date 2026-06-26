@@ -69,13 +69,13 @@ async fn settings_merge_fixture_matches_implementation() {
     let home = tmp.path().join("home");
     std::env::set_var("HOME", &home);
     write_file(
-        &home.join(".claude").join("settings.json"),
+        &home.join(".lingxi").join("settings.json"),
         &serde_json::to_string(&f.input_user_settings_json).unwrap(),
     );
     write_file(
         &tmp.path()
             .join("project")
-            .join(".claude")
+            .join(".lingxi")
             .join("settings.json"),
         &serde_json::to_string(&f.input_project_settings_json).unwrap(),
     );

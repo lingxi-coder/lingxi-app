@@ -1207,8 +1207,8 @@ mod profile_text_tests {
         // Dangerous dir: absolute + glob/**.
         assert!(out.contains(&"/proj/.vscode".to_string()));
         assert!(out.contains(&"**/.vscode/**".to_string()));
-        assert!(out.contains(&"/proj/.claude/commands".to_string()));
-        assert!(out.contains(&"**/.claude/commands/**".to_string()));
+        assert!(out.contains(&"/proj/.lingxi/commands".to_string()));
+        assert!(out.contains(&"**/.lingxi/commands/**".to_string()));
         // Git hooks always blocked.
         assert!(out.contains(&"/proj/.git/hooks".to_string()));
         assert!(out.contains(&"**/.git/hooks/**".to_string()));

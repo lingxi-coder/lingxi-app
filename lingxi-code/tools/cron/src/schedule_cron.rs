@@ -1,5 +1,5 @@
 //! `CronCreateTool` — schedule a prompt on a 5-field cron schedule and persist
-//! the job into the project's single `<root>/.claude/scheduled_tasks.json` file.
+//! the job into the project's single `<root>/.lingxi/scheduled_tasks.json` file.
 //!
 //! 1:1 parity rewrite of claude-code `CronCreateTool.ts`. The model supplies a
 //! 5-field cron expression plus the prompt to enqueue at each fire time, with
@@ -11,7 +11,7 @@
 //! - `id = [d][0-9a-z]{8}` (9-char format).
 //!
 //! Persistence (1:1 with claude-code `cronTasks.ts`): a DURABLE job is appended
-//! to the single project-relative file `<projectRoot>/.claude/scheduled_tasks.json`
+//! to the single project-relative file `<projectRoot>/.lingxi/scheduled_tasks.json`
 //! shaped `{ "tasks": [ CronTask, … ] }` (camelCase fields, `createdAt` in epoch
 //! **milliseconds**, NO `durable`/next-fire on disk — those are runtime-only).
 //! A SESSION-ONLY job (`durable:false`) is NOT written to disk at all (matching
@@ -285,7 +285,7 @@ impl CronExpression {
 
 /// Tool name byte-lock.
 pub const CRON_CREATE_TOOL_NAME: &str = "CronCreate";
-/// Legacy per-job subdirectory under `~/.claude/` (retained as a wire-identifier
+/// Legacy per-job subdirectory under `~/.lingxi/` (retained as a wire-identifier
 /// lock; the durable path is now the single project file
 /// [`cron::tasks_file::SCHEDULED_TASKS_FILE`]).
 pub const CRON_SUBDIR: &str = "cron";
@@ -305,7 +305,7 @@ const MAX_JOBS: usize = 50;
 const DEFAULT_MAX_AGE_DAYS: i64 = 30;
 
 /// Absolute path to the single project tasks file
-/// (`<project_root>/.claude/scheduled_tasks.json`). 1:1 with claude-code, which
+/// (`<project_root>/.lingxi/scheduled_tasks.json`). 1:1 with claude-code, which
 /// keys cron persistence off the project root (the session cwd), NOT the user
 /// config-home. Thin re-export of [`cron::tasks_file::scheduled_tasks_path`] so
 /// every cron tool resolves the path identically.
@@ -547,7 +547,7 @@ fn build_result_content(
     scheduler_active: bool,
 ) -> String {
     let where_ = if durable {
-        "Persisted to .claude/scheduled_tasks.json"
+        "Persisted to .lingxi/scheduled_tasks.json"
     } else {
         "Session-only (not written to disk, dies when Claude exits)"
     };
@@ -611,7 +611,7 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
             },
             "durable": {
                 "type": "boolean",
-                "description": "true = persist to .claude/scheduled_tasks.json and survive restarts. false (default) = in-memory only, dies when this Claude session ends. Use true only when the user asks the task to survive across sessions."
+                "description": "true = persist to .lingxi/scheduled_tasks.json and survive restarts. false (default) = in-memory only, dies when this Claude session ends. Use true only when the user asks the task to survive across sessions."
             }
         },
         "required": ["cron", "prompt"]
@@ -669,7 +669,7 @@ impl Tool for CronCreateTool {
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: "CronCreate persists a cron job to .claude/scheduled_tasks.json".into(),
+                reason: "CronCreate persists a cron job to .lingxi/scheduled_tasks.json".into(),
             },
             updated_input: None,
             update_destination: None,
@@ -891,7 +891,7 @@ mod tests {
     }
 
     /// Read the parsed `{ "tasks": [...] }` document at
-    /// `<root>/.claude/scheduled_tasks.json` (empty if absent).
+    /// `<root>/.lingxi/scheduled_tasks.json` (empty if absent).
     async fn read_doc(root: &std::path::Path) -> cron::tasks_file::ScheduledTasks {
         let path = cron::tasks_file::scheduled_tasks_path(root);
         match tokio::fs::read_to_string(&path).await {
@@ -974,7 +974,7 @@ mod tests {
 
         let o = build_result_content("d87654321", "February 28 at 2:30pm", false, true, true);
         assert!(o.contains("Scheduled one-shot task d87654321 (February 28 at 2:30pm)."));
-        assert!(o.contains("Persisted to .claude/scheduled_tasks.json"));
+        assert!(o.contains("Persisted to .lingxi/scheduled_tasks.json"));
         assert!(o.contains("It will fire once then auto-delete."));
     }
 
@@ -984,7 +984,7 @@ mod tests {
         // does NOT promise firing — it tells the model nothing will auto-run.
         let r = build_result_content("d12345678", "Every day at 9:00am", true, true, false);
         assert!(r.contains("Scheduled recurring job d12345678 (Every day at 9:00am)."));
-        assert!(r.contains("Persisted to .claude/scheduled_tasks.json"));
+        assert!(r.contains("Persisted to .lingxi/scheduled_tasks.json"));
         assert!(r.contains("no active cron scheduler"));
         assert!(r.contains("will NOT fire automatically"));
         assert!(!r.contains("Auto-expires after 30 days"));
@@ -1106,7 +1106,7 @@ mod tests {
         // result text is the honest no-scheduler variant (mobile/iOS behavior),
         // not the desktop "It will fire once" promise.
         assert!(content.contains("no active cron scheduler"));
-        assert!(content.contains("Persisted to .claude/scheduled_tasks.json"));
+        assert!(content.contains("Persisted to .lingxi/scheduled_tasks.json"));
         // recurring:false → the optional `recurring` key is omitted on disk.
         let doc = read_doc(tmp.path()).await;
         assert_eq!(doc.tasks.len(), 1);

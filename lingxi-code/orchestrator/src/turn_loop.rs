@@ -525,7 +525,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         history_snapshot.push(reminder);
     }
 
-    // §F: per-turn, transient `conditional_rules` reminder — path-gated CLAUDE.md
+    // §F: per-turn, transient `conditional_rules` reminder — path-gated LINGXI.md
     // rules that newly activate because a touched file matches their globs.
     // Appended to THIS call's OUTGOING snapshot only (never `session.history` /
     // JSONL), after the skill-listing reminder so the locked fixtures stay
@@ -5793,7 +5793,7 @@ mod pre_tool_hook_tests {
         // produced.
         use protocol::SessionId;
 
-        let config_home = std::path::PathBuf::from("/home/user/.claude");
+        let config_home = std::path::PathBuf::from("/home/user/.lingxi");
         let cwd = std::path::PathBuf::from("/Users/me/proj");
         // Pin a known session id so the expected path is deterministic.
         let session_id = SessionId::new();

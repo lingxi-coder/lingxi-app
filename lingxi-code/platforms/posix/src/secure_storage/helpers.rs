@@ -60,7 +60,7 @@ pub fn full_service_name(
 ///
 /// `default_dir` is the engine's canonical "default" config directory;
 /// passing the actual user-home-derived default avoids env lookups inside
-/// the helper. Claude-code's source uses `process.env.CLAUDE_CONFIG_DIR`
+/// the helper. Claude-code's source uses `process.env.LINGXI_CONFIG_DIR`
 /// presence as the discriminator, which is equivalent (when the env var is
 /// unset, `getClaudeConfigHomeDir()` returns the default).
 #[must_use]
@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn dir_hash_default_returns_empty() {
-        let p = Path::new("/Users/x/.claude");
+        let p = Path::new("/Users/x/.lingxi");
         assert_eq!(compute_dir_hash(p, p), "");
     }
 }

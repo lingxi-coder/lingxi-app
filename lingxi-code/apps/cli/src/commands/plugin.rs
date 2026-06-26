@@ -11,7 +11,7 @@
 //! * REAL-IMPLEMENTED locally (read-only / pure-validation, no network, no
 //!   billable turn): `list`, `details <name>`, `validate <path>`. These drive
 //!   the `plugin` crate's on-disk discovery + manifest reading directly against
-//!   `$CLAUDE_CONFIG_DIR`/`~/.claude/plugins`.
+//!   `$LINGXI_CONFIG_DIR`/`~/.lingxi/plugins`.
 //! * NOTICE (`NOT_IMPLEMENTED`): every action that needs the network /
 //!   marketplace resolution / a settings-write seam / the heavy `PluginManager`
 //!   registry wiring — `install`, `uninstall`, `update`, `enable`, `disable`,
@@ -57,7 +57,7 @@ pub enum Sub {
     /// Enable a disabled plugin
     Enable(EnableArgs),
 
-    /// Scaffold a new plugin at ~/.claude/skills/<name>/ (auto-loads next
+    /// Scaffold a new plugin at ~/.lingxi/skills/<name>/ (auto-loads next
     /// session as <name>@skills-dir)
     #[command(name = "init", visible_alias = "new")]
     Init(InitArgs),
@@ -143,7 +143,7 @@ pub struct InitArgs {
     #[arg(long, value_name = "text")]
     pub description: Option<String>,
 
-    /// Overwrite an existing .claude-plugin/ at the target
+    /// Overwrite an existing .lingxi-plugin/ at the target
     #[arg(short = 'f', long)]
     pub force: bool,
 
@@ -235,7 +235,7 @@ pub struct TagArgs {
 #[derive(Debug, Clone, Args)]
 pub struct UninstallArgs {
     /// Preserve the plugin's persistent data directory
-    /// (~/.claude/plugins/data/{id}/)
+    /// (~/.lingxi/plugins/data/{id}/)
     #[arg(long = "keep-data")]
     pub keep_data: bool,
 
@@ -320,7 +320,7 @@ pub struct MarketplaceAddArgs {
     pub scope: Option<String>,
 
     /// Limit checkout to specific directories via git sparse-checkout (for
-    /// monorepos). Example: --sparse .claude-plugin plugins
+    /// monorepos). Example: --sparse .lingxi-plugin plugins
     #[arg(long, value_name = "paths", num_args = 1..)]
     pub sparse: Vec<String>,
 
@@ -428,13 +428,13 @@ fn notice(action: &str) -> i32 {
     NOT_IMPLEMENTED
 }
 
-/// The user-tier plugins directory: `$CLAUDE_CONFIG_DIR`/`~/.claude` + `plugins`.
+/// The user-tier plugins directory: `$LINGXI_CONFIG_DIR`/`~/.claude` + `plugins`.
 fn plugins_dir() -> std::path::PathBuf {
     crate::run::claude_home_dir().join("plugins")
 }
 
 /// `plugin list` — enumerate installed plugins from the durable on-disk install
-/// record (`~/.claude/plugins/installed_plugins.json`), resolving each to its
+/// record (`~/.lingxi/plugins/installed_plugins.json`), resolving each to its
 /// versioned cache manifest. Read-only; never fetches.
 async fn run_list(args: &ListArgs) -> i32 {
     // `--available` requires `--json` (claude gates it the same way); without a
@@ -542,7 +542,7 @@ async fn run_details(args: &DetailsArgs) -> i32 {
 
 /// `plugin validate <path>` — validate a plugin or marketplace manifest on
 /// disk. Pure local validation: no network, no install. Resolves the manifest
-/// (`.claude-plugin/plugin.json` or `.claude-plugin/marketplace.json`, whether
+/// (`.lingxi-plugin/plugin.json` or `.lingxi-plugin/marketplace.json`, whether
 /// `path` is the plugin root or the manifest file itself), parses it as JSON,
 /// and checks the required identity fields. `--strict` promotes warnings
 /// (unrecognized-but-tolerated shapes) to a non-zero exit.
@@ -550,7 +550,7 @@ async fn run_validate(args: &ValidateArgs) -> i32 {
     let root = std::path::Path::new(&args.path);
 
     // Resolve the manifest path. Accept either a directory (probe its
-    // `.claude-plugin/{plugin,marketplace}.json`) or a direct manifest file.
+    // `.lingxi-plugin/{plugin,marketplace}.json`) or a direct manifest file.
     let (manifest_path, kind) = match resolve_manifest(root).await {
         Some(v) => v,
         None => {
@@ -652,8 +652,8 @@ impl ManifestKind {
 
 /// Resolve `path` to a concrete manifest file + its kind.
 ///
-/// Accepts: a direct `plugin.json`/`marketplace.json` file; a `.claude-plugin/`
-/// directory; or a plugin/marketplace root holding `.claude-plugin/`.
+/// Accepts: a direct `plugin.json`/`marketplace.json` file; a `.lingxi-plugin/`
+/// directory; or a plugin/marketplace root holding `.lingxi-plugin/`.
 async fn resolve_manifest(path: &std::path::Path) -> Option<(std::path::PathBuf, ManifestKind)> {
     // Direct manifest file?
     if path.is_file() {
@@ -665,8 +665,8 @@ async fn resolve_manifest(path: &std::path::Path) -> Option<(std::path::PathBuf,
         };
     }
 
-    // Directory: probe `<dir>/.claude-plugin/{plugin,marketplace}.json` and
-    // also the case where `dir` already IS the `.claude-plugin` directory.
+    // Directory: probe `<dir>/.lingxi-plugin/{plugin,marketplace}.json` and
+    // also the case where `dir` already IS the `.lingxi-plugin` directory.
     for base in [path.join(branding::PLUGIN_MANIFEST_DIR), path.to_path_buf()] {
         let plugin = base.join("plugin.json");
         if tokio::fs::try_exists(&plugin).await.unwrap_or(false) {

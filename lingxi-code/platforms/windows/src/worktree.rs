@@ -60,7 +60,7 @@ pub fn validate_worktree_slug(slug: &str) -> Result<(), WorktreeError> {
 ///
 /// Each relevant line has the form `Removing worktrees/<name>: <reason>`.
 /// We strip the `<name>` and resolve it against
-/// `<repo_root>/.claude/worktrees/<name>` (where this codebase places its
+/// `<repo_root>/.lingxi/worktrees/<name>` (where this codebase places its
 /// worktrees per claude-code's layout). Lines that don't match the
 /// expected prefix are silently skipped.
 fn parse_prune_v_stdout(stdout: &str, repo_root: &std::path::Path) -> Vec<PathBuf> {
@@ -131,7 +131,7 @@ impl WorktreeManager for WindowsWorktreeManager {
             .join("worktrees")
             .join(&flat);
 
-        // git worktree add creates the leaf; the `.claude/worktrees/` parent
+        // git worktree add creates the leaf; the `.lingxi/worktrees/` parent
         // may not exist yet.
         if let Some(parent) = worktree_path.parent() {
             tokio::fs::create_dir_all(parent)
@@ -371,7 +371,7 @@ mod create_tests {
             .await
             .unwrap();
         assert_eq!(handle.branch_name, "worktree-user+feature");
-        assert_eq!(handle.path, repo.join(".claude/worktrees/user+feature"));
+        assert_eq!(handle.path, repo.join(".lingxi/worktrees/user+feature"));
         assert!(handle.path.exists());
     }
 
@@ -436,8 +436,8 @@ Removing worktrees/topic+area: gitdir file points to non-existent location
         assert_eq!(
             paths,
             vec![
-                PathBuf::from("/tmp/repo/.claude/worktrees/user+feature"),
-                PathBuf::from("/tmp/repo/.claude/worktrees/topic+area"),
+                PathBuf::from("/tmp/repo/.lingxi/worktrees/user+feature"),
+                PathBuf::from("/tmp/repo/.lingxi/worktrees/topic+area"),
             ]
         );
     }
@@ -446,7 +446,7 @@ Removing worktrees/topic+area: gitdir file points to non-existent location
     fn parse_prune_output_ignores_unrelated_lines() {
         let stdout = "some random noise\nRemoving worktrees/ok: stale\nnot a removing line\n";
         let paths = parse_prune_v_stdout(stdout, &PathBuf::from("/r"));
-        assert_eq!(paths, vec![PathBuf::from("/r/.claude/worktrees/ok")]);
+        assert_eq!(paths, vec![PathBuf::from("/r/.lingxi/worktrees/ok")]);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Git plugin-source clone (Stage 1 install arm).
 //!
 //! Unlike the Android `tool-git-mobile` clone (which is anchored to the sandbox
-//! workspace root), the plugin cache lives under `~/.claude/plugins`, OUTSIDE any
+//! workspace root), the plugin cache lives under `~/.lingxi/plugins`, OUTSIDE any
 //! workspace, so this clone is intentionally NOT workspace-anchored. It is a thin
 //! synchronous wrapper over the same vendored libgit2; callers run it on a
 //! blocking thread (`spawn_blocking`).

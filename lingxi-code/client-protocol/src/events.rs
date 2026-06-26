@@ -223,7 +223,7 @@ pub enum ClientEvent {
         commands: Vec<SlashCommandDto>,
     },
 
-    /// The CLAUDE.md memory listing (`/memory`). Maps `protocol::MemoryEntry`.
+    /// The LINGXI.md memory listing (`/memory`). Maps `protocol::MemoryEntry`.
     MemoryEntries {
         /// One entry per loaded memory file, in tier order.
         entries: Vec<MemoryEntryDto>,

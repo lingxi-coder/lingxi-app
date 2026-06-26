@@ -682,7 +682,7 @@ fn get_file_extension_for_analytics(path: &std::path::Path) -> Option<String> {
 /// path is under `<configHome>/.../session-memory/*.md`, `("session_transcript")`
 /// when under `<configHome>/.../projects/*.jsonl`, else `None`. The path is
 /// compared in forward-slash form against the resolved config home
-/// (`$CLAUDE_CONFIG_DIR ?? $HOME/.claude`, mirroring `getClaudeConfigHomeDir()`).
+/// (`$LINGXI_CONFIG_DIR ?? $HOME/.claude`, mirroring `getClaudeConfigHomeDir()`).
 /// On POSIX (the port target) `toComparable` is a no-op beyond separator
 /// normalization (no case-folding); Windows case-folding is not reproduced here.
 // The `.md` / `.jsonl` suffix checks are a faithful 1:1 port of TS's
@@ -714,8 +714,8 @@ fn to_comparable(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-/// Port of claude-code `tr()` (`$CLAUDE_CONFIG_DIR ?? join(home, ".claude")`):
-/// `$CLAUDE_CONFIG_DIR` when set is honored verbatim (`??`, incl. an empty value
+/// Port of claude-code `tr()` (`$LINGXI_CONFIG_DIR ?? join(home, ".lingxi")`):
+/// `$LINGXI_CONFIG_DIR` when set is honored verbatim (`??`, incl. an empty value
 /// → cwd-relative), else `$HOME/.claude` (falling back to `USERPROFILE` then a
 /// bare `.claude`). Mirrors the ports in `tools/task` / `commands/core`.
 fn claude_config_home_dir() -> PathBuf {
@@ -1548,7 +1548,7 @@ impl Tool for FileReadTool {
         // The GB killswitch (`tengu_read_dedup_killswitch`) is unported — LingXi
         // has no GrowthBook; dedup is always enabled (3P default = killswitch
         // off). NOTE: the partial-view (`isPartialView`) flag set by TS's
-        // CLAUDE.md / memory auto-injection has no LingXi analog; the
+        // LINGXI.md / memory auto-injection has no LingXi analog; the
         // offset/limit approximation matches for normal `Read`-sourced entries.
         if let Some(entry) = tool_api::read_file_state::get(&self.ctx.read_file_state, &canon) {
             // #13: `tengu_file_read_reread` fires whenever the file ALREADY has a

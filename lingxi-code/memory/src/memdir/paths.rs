@@ -1,5 +1,5 @@
 //! Config-home memdir resolution: `<config-home>/{memdir, agents/session-memory,
-//! team-mem}`, where config-home honors `$CLAUDE_CONFIG_DIR` (else `~/.claude`).
+//! team-mem}`, where config-home honors `$LINGXI_CONFIG_DIR` (else `~/.claude`).
 
 use std::path::{Path, PathBuf};
 
@@ -26,7 +26,7 @@ pub struct MemdirRoots {
     pub team_memdir: Option<PathBuf>,
 }
 
-/// Resolve memdir roots under `home`, honoring `$CLAUDE_CONFIG_DIR` for the
+/// Resolve memdir roots under `home`, honoring `$LINGXI_CONFIG_DIR` for the
 /// config-home (matching the `session_memory` WRITE path, so the Session-tier
 /// scan reads exactly what writes produce). Team root is `Some` only when
 /// `team_enabled == true` (the bool comes from `settings.team_memory.enabled`;
@@ -38,7 +38,7 @@ pub fn memdir_path(home: &Path, team_enabled: bool) -> MemdirRoots {
 
 /// Pure roots resolver from an already-resolved `config_home` (the `.claude`
 /// dir). Env-free, so unit tests are deterministic; [`memdir_path`] is the thin
-/// `$CLAUDE_CONFIG_DIR`-honoring wrapper.
+/// `$LINGXI_CONFIG_DIR`-honoring wrapper.
 #[must_use]
 pub fn memdir_roots_at(config_home: &Path, team_enabled: bool) -> MemdirRoots {
     MemdirRoots {
@@ -55,23 +55,23 @@ mod tests {
 
     #[test]
     fn roots_are_derived_under_config_home() {
-        let cfg = PathBuf::from("/home/u/.claude");
+        let cfg = PathBuf::from("/home/u/.lingxi");
         let roots = memdir_roots_at(&cfg, false);
-        assert_eq!(roots.user_memdir, PathBuf::from("/home/u/.claude/memdir"));
+        assert_eq!(roots.user_memdir, PathBuf::from("/home/u/.lingxi/memdir"));
         assert_eq!(
             roots.session_memdir,
-            PathBuf::from("/home/u/.claude/agents/session-memory")
+            PathBuf::from("/home/u/.lingxi/agents/session-memory")
         );
         assert_eq!(roots.team_memdir, None);
     }
 
     #[test]
     fn team_memdir_is_team_mem_when_enabled() {
-        let cfg = PathBuf::from("/home/u/.claude");
+        let cfg = PathBuf::from("/home/u/.lingxi");
         let roots = memdir_roots_at(&cfg, true);
         assert_eq!(
             roots.team_memdir,
-            Some(PathBuf::from("/home/u/.claude/team-mem"))
+            Some(PathBuf::from("/home/u/.lingxi/team-mem"))
         );
     }
 

@@ -60,7 +60,7 @@ impl MacOsKeychainStorage {
     /// `user` is the keychain account name (claude-code uses
     /// `process.env.USER || userInfo().username`).
     /// `config_dir` is the user's claude config directory (`~/.claude` or
-    /// whatever `CLAUDE_CONFIG_DIR` overrides it to).
+    /// whatever `LINGXI_CONFIG_DIR` overrides it to).
     /// `default_config_dir` is what claude-code calls the "default"
     /// `~/.claude` — passed in so the dir-hash discriminator can compare.
     /// `oauth_suffix` mirrors claude-code's `OAUTH_FILE_SUFFIX`; pass `""`
@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn service_name_default_dir_has_no_dir_hash() {
-        let s = mk_test_storage("/Users/x/.claude", "/Users/x/.claude");
+        let s = mk_test_storage("/Users/x/.lingxi", "/Users/x/.lingxi");
         assert_eq!(
             s.keychain_service_name("-credentials"),
             "Claude Code-credentials"
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn service_name_non_default_dir_has_dir_hash() {
-        let s = mk_test_storage("/Users/x/work/.claude-2", "/Users/x/.claude");
+        let s = mk_test_storage("/Users/x/work/.claude-2", "/Users/x/.lingxi");
         let svc = s.keychain_service_name("-credentials");
         assert!(svc.starts_with("Claude Code-credentials-"));
         assert_eq!(svc.len(), "Claude Code-credentials-".len() + 8);

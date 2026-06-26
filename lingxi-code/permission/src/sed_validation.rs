@@ -1256,7 +1256,7 @@ mod tests {
         FsRoots {
             cwd: PathBuf::from("/proj"),
             home: Some(PathBuf::from("/home/u")),
-            claude_home: PathBuf::from("/home/u/.claude"),
+            claude_home: PathBuf::from("/home/u/.lingxi"),
         }
     }
 

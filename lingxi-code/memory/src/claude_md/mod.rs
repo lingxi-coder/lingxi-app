@@ -1,10 +1,10 @@
-//! CLAUDE.md hierarchy loader.
+//! LINGXI.md hierarchy loader.
 //!
 //! Discovers the full claude-code memory-file set (`getMemoryFiles`): the
-//! Managed tier (`<managed>/CLAUDE.md` + `.claude/rules/**`), the User tier
-//! (`~/.claude/CLAUDE.md` + `~/.claude/rules/**`), and, per directory from the
-//! filesystem root down to cwd, `CLAUDE.md`, `.claude/CLAUDE.md`,
-//! `.claude/rules/**`, and `CLAUDE.local.md`. Each file is read whole (no size
+//! Managed tier (`<managed>/LINGXI.md` + `.lingxi/rules/**`), the User tier
+//! (`~/.lingxi/LINGXI.md` + `~/.lingxi/rules/**`), and, per directory from the
+//! filesystem root down to cwd, `LINGXI.md`, `.lingxi/LINGXI.md`,
+//! `.lingxi/rules/**`, and `LINGXI.local.md`. Each file is read whole (no size
 //! cap — parity with claude-code `readFile`). See [`hierarchy::walk`].
 
 pub mod excludes;
@@ -15,7 +15,7 @@ pub use excludes::ClaudeMdExcluder;
 pub use hierarchy::{user_config_dir, Hierarchy, HierarchyEntry};
 pub use loader::{LoadedFile, LoaderError};
 
-/// Which CLAUDE.md tier a discovered file belongs to.
+/// Which LINGXI.md tier a discovered file belongs to.
 ///
 /// 1:1 with claude-code `MemoryType` (`utils/memory/types.ts`) restricted to
 /// the four instruction tiers this port loads — the separate memdir tiers
@@ -31,15 +31,15 @@ pub use loader::{LoadedFile, LoaderError};
 /// subsystem (Project/User/Session/Team). Do NOT overload one for the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClaudeMdTier {
-    /// Enterprise / managed policy memory (`<managed>/CLAUDE.md` +
-    /// `<managed>/.claude/rules/**`). Always loaded, never settings-gated,
+    /// Enterprise / managed policy memory (`<managed>/LINGXI.md` +
+    /// `<managed>/.lingxi/rules/**`). Always loaded, never settings-gated,
     /// never excludable; lowest priority (spliced first).
     Managed,
-    /// User-global memory (`~/.claude/CLAUDE.md` + `~/.claude/rules/**`).
+    /// User-global memory (`~/.lingxi/LINGXI.md` + `~/.lingxi/rules/**`).
     User,
-    /// Project memory checked into the codebase (`CLAUDE.md`,
-    /// `.claude/CLAUDE.md`, `.claude/rules/**`).
+    /// Project memory checked into the codebase (`LINGXI.md`,
+    /// `.lingxi/LINGXI.md`, `.lingxi/rules/**`).
     Project,
-    /// Private project-local override (`CLAUDE.local.md`), not checked in.
+    /// Private project-local override (`LINGXI.local.md`), not checked in.
     Local,
 }

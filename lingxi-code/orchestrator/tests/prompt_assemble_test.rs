@@ -31,7 +31,7 @@ fn minimal_assembly_no_memory_no_tools_no_footer() {
     // Must contain the `# Environment` block (R-P1a: replaces the old `<env>`).
     assert!(out.contains("\n\n# Environment\nYou have been invoked in the following environment: "));
     assert!(!out.contains("<env>"));
-    // MUST NOT contain the memory section (R-P1c/d: CLAUDE.md is a meta message
+    // MUST NOT contain the memory section (R-P1c/d: LINGXI.md is a meta message
     // now), `<tools>`, or the `Notes:` FOOTER (R-P1b).
     assert!(!out.contains(MEMORY_PREAMBLE));
     assert!(!out.contains("Contents of "));
@@ -44,11 +44,11 @@ fn minimal_assembly_no_memory_no_tools_no_footer() {
 
 #[test]
 fn memory_files_are_not_spliced_into_the_prompt() {
-    // Even with CLAUDE.md files present, the system prompt carries NO memory
+    // Even with LINGXI.md files present, the system prompt carries NO memory
     // section — the content moves to the additional-context meta message.
     let mut ctx = ctx_minimal();
     ctx.memory_files = vec![MemoryFile {
-        path: PathBuf::from("/proj/CLAUDE.md"),
+        path: PathBuf::from("/proj/LINGXI.md"),
         body: "notes".into(),
         is_local_override: false,
         tier: memory::claude_md::ClaudeMdTier::Project,
@@ -57,7 +57,7 @@ fn memory_files_are_not_spliced_into_the_prompt() {
     ctx.tool_names = vec!["Read".into(), "Write".into()];
     let out = assemble_system_prompt(&ctx);
     assert!(!out.contains(MEMORY_PREAMBLE));
-    assert!(!out.contains("Contents of /proj/CLAUDE.md"));
+    assert!(!out.contains("Contents of /proj/LINGXI.md"));
     assert!(!out.contains("<tools>"));
     assert!(!out.contains("Notes:"));
     assert!(out.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));

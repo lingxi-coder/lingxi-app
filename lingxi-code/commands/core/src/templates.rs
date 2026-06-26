@@ -14,15 +14,15 @@
 /// Backtick-fence handling: the original TS literal uses backslash-escaped
 /// backticks for the embedded fenced code block. In Rust string literals
 /// backticks are not special, so they appear unescaped here.
-pub const OLD_INIT_PROMPT: &str = "Please analyze this codebase and create a CLAUDE.md file, which will be given to future instances of Claude Code to operate in this repository.
+pub const OLD_INIT_PROMPT: &str = "Please analyze this codebase and create a LINGXI.md file, which will be given to future instances of Claude Code to operate in this repository.
 
 What to add:
 1. Commands that will be commonly used, such as how to build, lint, and run tests. Include the necessary commands to develop in this codebase, such as how to run a single test.
 2. High-level code architecture and structure so that future instances can be productive more quickly. Focus on the \"big picture\" architecture that requires reading multiple files to understand.
 
 Usage notes:
-- If there's already a CLAUDE.md, suggest improvements to it.
-- When you make the initial CLAUDE.md, do not repeat yourself and do not include obvious instructions like \"Provide helpful error messages to users\", \"Write unit tests for all new utilities\", \"Never include sensitive information (API keys, tokens) in code or commits\".
+- If there's already a LINGXI.md, suggest improvements to it.
+- When you make the initial LINGXI.md, do not repeat yourself and do not include obvious instructions like \"Provide helpful error messages to users\", \"Write unit tests for all new utilities\", \"Never include sensitive information (API keys, tokens) in code or commits\".
 - Avoid listing every component or file structure that can be easily discovered.
 - Don't include generic development practices.
 - If there are Cursor rules (in .cursor/rules/ or .cursorrules) or Copilot rules (in .github/copilot-instructions.md), make sure to include the important parts.
@@ -31,7 +31,7 @@ Usage notes:
 - Be sure to prefix the file with the following text:
 
 ```
-# CLAUDE.md
+# LINGXI.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 ```";
@@ -43,19 +43,19 @@ mod tests {
     #[test]
     fn old_init_prompt_starts_with_locked_first_line() {
         assert!(OLD_INIT_PROMPT.starts_with(
-            "Please analyze this codebase and create a CLAUDE.md file, \
+            "Please analyze this codebase and create a LINGXI.md file, \
              which will be given to future instances of Claude Code \
              to operate in this repository."
                 .replace("             ", "")
                 .as_str()
         ) || OLD_INIT_PROMPT.starts_with(
-            "Please analyze this codebase and create a CLAUDE.md file, which will be given to future instances of Claude Code to operate in this repository."
+            "Please analyze this codebase and create a LINGXI.md file, which will be given to future instances of Claude Code to operate in this repository."
         ));
     }
 
     #[test]
     fn old_init_prompt_contains_claude_md_prefix_block() {
-        assert!(OLD_INIT_PROMPT.contains("# CLAUDE.md"));
+        assert!(OLD_INIT_PROMPT.contains("# LINGXI.md"));
         assert!(OLD_INIT_PROMPT.contains(
             "This file provides guidance to Claude Code (claude.ai/code) \
              when working with code in this repository."
@@ -110,7 +110,7 @@ mod tests {
         // 2. Run this test once; copy the actual digest from the failure.
         // 3. Paste below + into parity_init_template.json.
         assert_eq!(
-            digest, "cfdedaa2c59770dce2afbc73047805cda7078d961cc650463e39125197b55a39",
+            digest, "7836b540b43aca31123274901f24984e89bcee0c87ab3bb5c10e131a40aa36c9",
             "OLD_INIT_PROMPT byte-changed; expected hash drifted"
         );
     }

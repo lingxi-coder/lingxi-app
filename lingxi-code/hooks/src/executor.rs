@@ -3018,7 +3018,7 @@ mod command_arm_tests {
         let runner = MockRunner::ok(output("", "", 0));
         let exec = executor_with_hook(
             command_hook_with_cmd_args(
-                "${CLAUDE_PROJECT_DIR}/.claude/fmt.sh",
+                "${CLAUDE_PROJECT_DIR}/.lingxi/fmt.sh",
                 &["--root", "${CLAUDE_PROJECT_DIR}", "--plain"],
             ),
             runner.clone(),
@@ -3032,7 +3032,7 @@ mod command_arm_tests {
 
         let cmd = runner.recorded_command.lock().unwrap().clone().unwrap();
         let args = runner.recorded_args.lock().unwrap().clone().unwrap();
-        assert_eq!(cmd, "/repo/root/.claude/fmt.sh", "command token substituted");
+        assert_eq!(cmd, "/repo/root/.lingxi/fmt.sh", "command token substituted");
         assert_eq!(
             args,
             vec!["--root".to_string(), "/repo/root".to_string(), "--plain".to_string()],
@@ -3446,7 +3446,7 @@ mod command_arm_tests {
             HookEvent::ConfigChange {
                 source: crate::events::ConfigChangeSource::LocalSettings,
                 file_path: Some(std::path::PathBuf::from(
-                    "/work/.claude/settings.local.json",
+                    "/work/.lingxi/settings.local.json",
                 )),
             },
         )
@@ -3454,7 +3454,7 @@ mod command_arm_tests {
         assert!(stdin.contains(r#""hook_event_name":"ConfigChange""#));
         // `source` serializes to the snake_case wire literal.
         assert!(stdin.contains(r#""source":"local_settings""#));
-        assert!(stdin.contains(r#""file_path":"/work/.claude/settings.local.json""#));
+        assert!(stdin.contains(r#""file_path":"/work/.lingxi/settings.local.json""#));
     }
 
     #[tokio::test]
@@ -3479,7 +3479,7 @@ mod command_arm_tests {
         let stdin = dispatch_and_capture(
             HookEventType::InstructionsLoaded,
             HookEvent::InstructionsLoaded {
-                file_path: std::path::PathBuf::from("/work/CLAUDE.md"),
+                file_path: std::path::PathBuf::from("/work/LINGXI.md"),
                 memory_type: crate::events::InstructionsMemoryType::Project,
                 load_reason: crate::events::InstructionsLoadReason::SessionStart,
                 globs: None,
@@ -3489,7 +3489,7 @@ mod command_arm_tests {
         )
         .await;
         assert!(stdin.contains(r#""hook_event_name":"InstructionsLoaded""#));
-        assert!(stdin.contains(r#""file_path":"/work/CLAUDE.md""#));
+        assert!(stdin.contains(r#""file_path":"/work/LINGXI.md""#));
         // `memory_type` serializes PascalCase (no rename) per the TS enum.
         assert!(stdin.contains(r#""memory_type":"Project""#));
         // `load_reason` serializes snake_case per the TS enum.
@@ -3510,7 +3510,7 @@ mod command_arm_tests {
                 load_reason: crate::events::InstructionsLoadReason::PathGlobMatch,
                 globs: Some(vec!["src/**/*.rs".into()]),
                 trigger_file_path: Some(std::path::PathBuf::from("/work/src/main.rs")),
-                parent_file_path: Some(std::path::PathBuf::from("/work/CLAUDE.md")),
+                parent_file_path: Some(std::path::PathBuf::from("/work/LINGXI.md")),
             },
         )
         .await;
@@ -3518,7 +3518,7 @@ mod command_arm_tests {
         assert!(stdin.contains(r#""load_reason":"path_glob_match""#));
         assert!(stdin.contains(r#""globs":["src/**/*.rs"]"#));
         assert!(stdin.contains(r#""trigger_file_path":"/work/src/main.rs""#));
-        assert!(stdin.contains(r#""parent_file_path":"/work/CLAUDE.md""#));
+        assert!(stdin.contains(r#""parent_file_path":"/work/LINGXI.md""#));
     }
 
     #[tokio::test]
@@ -3760,7 +3760,7 @@ mod command_arm_tests {
             ),
             (
                 HookEvent::InstructionsLoaded {
-                    file_path: std::path::PathBuf::from("/work/CLAUDE.md"),
+                    file_path: std::path::PathBuf::from("/work/LINGXI.md"),
                     memory_type: crate::events::InstructionsMemoryType::User,
                     load_reason: crate::events::InstructionsLoadReason::Include,
                     globs: None,

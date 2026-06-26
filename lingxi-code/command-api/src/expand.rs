@@ -3,7 +3,7 @@
 //! Faithful port of the `getPromptForCommand` closure built in
 //! `claude-code/src/skills/loadSkillsDir.ts:344-399` (the regular-command path,
 //! i.e. `loadedFrom !== 'mcp'` and no `skillRoot`/`${CLAUDE_SKILL_DIR}` — that
-//! substitution applies only to MCP/skill commands, not the `.claude/commands`
+//! substitution applies only to MCP/skill commands, not the `.lingxi/commands`
 //! files this loader produces). The order of operations is:
 //!
 //! 1. [`crate::substitute_arguments_faithful`] over the markdown body with the
@@ -230,8 +230,8 @@ mod tests {
         // Full pipeline: build the command from a loaded markdown file, then expand.
         use crate::markdown_loader::{build_markdown_command, MarkdownCommandFile};
         let file = MarkdownCommandFile {
-            file_path: PathBuf::from("/x/.claude/commands/foo.md"),
-            base_dir: PathBuf::from("/x/.claude/commands"),
+            file_path: PathBuf::from("/x/.lingxi/commands/foo.md"),
+            base_dir: PathBuf::from("/x/.lingxi/commands"),
             frontmatter: CommandFrontmatter::default(),
             content: "Hello $0".to_string(),
             source: CommandSource::Project,

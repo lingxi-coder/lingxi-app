@@ -1,4 +1,4 @@
-//! Asserts the LITERAL `~/.claude/ide/<port>.lock` filename and JSON shape
+//! Asserts the LITERAL `~/.lingxi/ide/<port>.lock` filename and JSON shape
 //! from claude-code's `src/utils/ide.ts` (`LockfileJsonContent` type).
 
 use bridge::lockfile::{IdeLockfile, LockfileGuard};
@@ -121,16 +121,16 @@ fn drop_guard_removes_lockfile_on_panic() {
 
 // ── F2-04: dedicated bridge discovery lockfile ────────────────────────────
 //
-// The bridge writes its OWN `<port>.lock` under `~/.claude/bridge/` with a
+// The bridge writes its OWN `<port>.lock` under `~/.lingxi/bridge/` with a
 // distinct `ideName` so it does NOT collide with the real IDE peer that scans
-// `~/.claude/ide/` for the `IDE_NAME = "LingXi"` file.
+// `~/.lingxi/ide/` for the `IDE_NAME = "LingXi"` file.
 
 #[test]
 fn bridge_lockfile_writes_to_bridge_dir() {
     use bridge::lockfile::BRIDGE_IDE_NAME;
     let tmp = TempDir::new().unwrap();
-    // `~/.claude/bridge` is mirrored here by `<tmp>/.claude/bridge`.
-    let bridge_dir = tmp.path().join(".claude").join("bridge");
+    // `~/.lingxi/bridge` is mirrored here by `<tmp>/.lingxi/bridge`.
+    let bridge_dir = tmp.path().join(".lingxi").join("bridge");
     let lf = IdeLockfile::new_for_bridge_dir(
         bridge_dir.clone(),
         40740,

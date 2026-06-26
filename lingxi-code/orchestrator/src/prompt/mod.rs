@@ -26,7 +26,7 @@ pub use memory_block::{
     real_provider, real_provider_with_excludes, MemoryHierarchyProvider, RealMemoryHierarchyProvider,
 };
 
-/// Re-export of the CLAUDE.md tier enum so consumers that depend on
+/// Re-export of the LINGXI.md tier enum so consumers that depend on
 /// `orchestrator` (but not the `memory` crate directly) can name
 /// [`MemoryFile::tier`] without an extra dependency.
 pub use memory::claude_md::ClaudeMdTier;
@@ -88,7 +88,7 @@ pub fn assemble_system_prompt(ctx: &SystemPromptContext) -> String {
 ///    [`env_block::format`] (claude-code `Kym`).
 /// 4. `# Output Style: <name>` + body (elided when `output_style` is `None`).
 ///
-/// NO memory section (R-P1c/R-P1d: CLAUDE.md is an additional-context meta
+/// NO memory section (R-P1c/R-P1d: LINGXI.md is an additional-context meta
 /// message, not a system-prompt section), NO `<tools>` block (tools reach the
 /// model via the wire `tools:` array), and NO `Notes:` FOOTER (R-P1b: the
 /// footer is subagent-only `H$t`). gitStatus is appended to the prompt by the
@@ -146,7 +146,7 @@ pub fn assemble_system_prompt_with_style(
         s.push_str(&env_block::format(ctx));
     }
 
-    // R-P1c/R-P1d: the CLAUDE.md memory block is NO LONGER spliced into the
+    // R-P1c/R-P1d: the LINGXI.md memory block is NO LONGER spliced into the
     // MAIN system prompt. claude-code v2.1.183 carries it as an additional-
     // context `<system-reminder>` meta user message (the `claudeMd` key of
     // `A6n(re, userContext)`), prepended to each turn's messages — NOT a system-
@@ -249,7 +249,7 @@ pub struct SystemPromptContext {
     pub in_worktree: bool,
     /// Direct + once-recursive children of cwd (depth ≤ 2).
     pub file_tree: FileTree,
-    /// CLAUDE.md hierarchy — already in claude-code splice order
+    /// LINGXI.md hierarchy — already in claude-code splice order
     /// (managed → home → repo → repo-local override), each tagged with its
     /// [`MemoryFile::tier`].
     pub memory_files: Vec<MemoryFile>,
@@ -302,7 +302,7 @@ pub struct FileTreeEntry {
     pub depth: u8,
 }
 
-/// One loaded CLAUDE.md (or `CLAUDE.local.md`) file.
+/// One loaded LINGXI.md (or `LINGXI.local.md`) file.
 ///
 /// Distinct from [`memory::claude_md::LoadedFile`] — the
 /// assembler keeps a leaner representation post-trim.
@@ -314,12 +314,12 @@ pub struct MemoryFile {
     /// File body, leading/trailing whitespace trimmed. NEVER empty
     /// (whitespace-only files are filtered upstream).
     pub body: String,
-    /// `true` when this is a `CLAUDE.local.md`; `false` for `CLAUDE.md`.
+    /// `true` when this is a `LINGXI.local.md`; `false` for `LINGXI.md`.
     ///
     /// Retained for backward compatibility; the injection description is now
     /// driven by [`MemoryFile::tier`] (a `Local` tier implies this is `true`).
     pub is_local_override: bool,
-    /// Which CLAUDE.md tier the file came from. Selects the injection
+    /// Which LINGXI.md tier the file came from. Selects the injection
     /// description (`getClaudeMds`, claudemd.ts:1168-1186): Managed and User
     /// share the global-instructions wording; Project and Local each have
     /// their own.
@@ -380,7 +380,7 @@ mod tests {
     #[test]
     fn memory_file_constructs() {
         let f = MemoryFile {
-            path: PathBuf::from("/proj/CLAUDE.md"),
+            path: PathBuf::from("/proj/LINGXI.md"),
             body: "# title\nbody\n".into(),
             is_local_override: false,
             tier: memory::claude_md::ClaudeMdTier::Project,
@@ -484,7 +484,7 @@ mod tests {
             keep_coding_instructions: true,
         };
         let out = assemble_system_prompt_with_style(&ctx, Some(style));
-        // No memory section (CLAUDE.md is a meta message now) and no tools section.
+        // No memory section (LINGXI.md is a meta message now) and no tools section.
         assert!(!out.contains("Codebase and user instructions are shown below."));
         assert!(!out.contains("<tools>"));
         // The style is NOT the last section — context management follows.

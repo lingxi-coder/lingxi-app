@@ -48,7 +48,7 @@ fn mk_storage(tag: &str) -> Option<Arc<MacOsKeychainStorage>> {
         std::process::id(),
         tag
     ));
-    let default = PathBuf::from("/Users/_lingxi_test_default/.claude");
+    let default = PathBuf::from("/Users/_lingxi_test_default/.lingxi");
     MacOsKeychainStorage::new(user, cfg, default, String::new())
         .ok()
         .map(Arc::new)

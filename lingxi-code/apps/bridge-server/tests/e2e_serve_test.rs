@@ -45,7 +45,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         api_base: "https://api.anthropic.com".to_string(),
         api_key: String::new(),
         cwd: cwd.clone(),
-        claude_home: cwd.join(".claude"),
+        claude_home: cwd.join(".lingxi"),
         default_model: "claude-sonnet-4-20250514".to_string(),
         fallback_model: None,
         provider_profiles: None,

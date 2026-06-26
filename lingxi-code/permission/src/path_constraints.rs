@@ -624,7 +624,7 @@ mod tests {
         FsRoots {
             cwd: PathBuf::from("/proj/work"),
             home: Some(PathBuf::from("/home/u")),
-            claude_home: PathBuf::from("/home/u/.claude"),
+            claude_home: PathBuf::from("/home/u/.lingxi"),
         }
     }
 
@@ -766,7 +766,7 @@ mod tests {
 
     #[test]
     fn cd_with_redirection_compound_asks() {
-        // `cd .claude/ && echo x > settings.json` — cd + redirection compound.
+        // `cd .lingxi/ && echo x > settings.json` — cd + redirection compound.
         // The cd target (./.claude under cwd) is INSIDE cwd, so step 6 wouldn't
         // fire; the cd+redirection guard (step 3) is what asks.
         let a = check("cd ./.claude && echo x > settings.json").expect("should ask");

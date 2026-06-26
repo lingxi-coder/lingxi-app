@@ -2639,7 +2639,7 @@ mod tests {
     use super::*;
 
     /// Process-global lock shared by every test that mutates the env vars the
-    /// file-backed [`TodoStore`] resolves at call time (`CLAUDE_CONFIG_DIR`,
+    /// file-backed [`TodoStore`] resolves at call time (`LINGXI_CONFIG_DIR`,
     /// `CLAUDE_CODE_TASK_LIST_ID`) or the swarm gate
     /// (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`). Without serialization these
     /// tests race on the shared env and a store read can land in another test's
@@ -2959,7 +2959,7 @@ mod tests {
         /// Restore-on-drop guard for the two process-global env vars this test
         /// flips, plus cleanup of the throwaway store dir — runs even if an
         /// assertion panics. Holds the shared [`super::ENV_LOCK`] so it does not
-        /// race other env-mutating tests on `CLAUDE_CONFIG_DIR`.
+        /// race other env-mutating tests on `LINGXI_CONFIG_DIR`.
         struct EnvGuard {
             prev_config: Option<std::ffi::OsString>,
             prev_list: Option<std::ffi::OsString>,
@@ -2970,8 +2970,8 @@ mod tests {
         impl Drop for EnvGuard {
             fn drop(&mut self) {
                 match &self.prev_config {
-                    Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
-                    None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+                    Some(v) => std::env::set_var("LINGXI_CONFIG_DIR", v),
+                    None => std::env::remove_var("LINGXI_CONFIG_DIR"),
                 }
                 match &self.prev_list {
                     Some(v) => std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", v),
@@ -3009,7 +3009,7 @@ mod tests {
             );
             let dir = std::env::temp_dir().join(&unique);
             let _guard = EnvGuard {
-                prev_config: std::env::var_os("CLAUDE_CONFIG_DIR"),
+                prev_config: std::env::var_os("LINGXI_CONFIG_DIR"),
                 prev_list: std::env::var_os("CLAUDE_CODE_TASK_LIST_ID"),
                 prev_verif: std::env::var_os("CLAUDE_CODE_VERIFICATION_AGENT"),
                 dir: dir.clone(),
@@ -3017,7 +3017,7 @@ mod tests {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner),
             };
-            std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
+            std::env::set_var("LINGXI_CONFIG_DIR", &dir);
             std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", &unique);
             // T13: the nudge FEATURE is OFF by default (matching prod claude). The
             // store-level transition logic is unchanged; the feature gate is the
@@ -3127,7 +3127,7 @@ mod tests {
         impl Drop for Guard {
             fn drop(&mut self) {
                 restore("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", &self.prev_swarm);
-                restore("CLAUDE_CONFIG_DIR", &self.prev_config);
+                restore("LINGXI_CONFIG_DIR", &self.prev_config);
                 restore("CLAUDE_CODE_TASK_LIST_ID", &self.prev_list);
                 let _ = std::fs::remove_dir_all(&self.dir);
             }
@@ -3180,7 +3180,7 @@ mod tests {
             let dir = std::env::temp_dir().join(&unique);
             let guard = Guard {
                 prev_swarm: std::env::var_os("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
-                prev_config: std::env::var_os("CLAUDE_CONFIG_DIR"),
+                prev_config: std::env::var_os("LINGXI_CONFIG_DIR"),
                 prev_list: std::env::var_os("CLAUDE_CODE_TASK_LIST_ID"),
                 dir: dir.clone(),
                 _lock: lock,
@@ -3190,7 +3190,7 @@ mod tests {
             } else {
                 std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS");
             }
-            std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
+            std::env::set_var("LINGXI_CONFIG_DIR", &dir);
             std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", &unique);
             (guard, unique, Arc::new(RecordingRouter::default()))
         }
@@ -3907,7 +3907,7 @@ mod tests {
 
         /// Restore-on-drop guard for the store env vars; removes the throwaway
         /// dir. Runs even on assertion panic. Holds `ENV_LOCK` so it does not
-        /// race other env-mutating tests on `CLAUDE_CONFIG_DIR`.
+        /// race other env-mutating tests on `LINGXI_CONFIG_DIR`.
         struct Guard {
             prev_config: Option<std::ffi::OsString>,
             prev_list: Option<std::ffi::OsString>,
@@ -3917,8 +3917,8 @@ mod tests {
         impl Drop for Guard {
             fn drop(&mut self) {
                 match &self.prev_config {
-                    Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
-                    None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+                    Some(v) => std::env::set_var("LINGXI_CONFIG_DIR", v),
+                    None => std::env::remove_var("LINGXI_CONFIG_DIR"),
                 }
                 match &self.prev_list {
                     Some(v) => std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", v),
@@ -3943,12 +3943,12 @@ mod tests {
             );
             let dir = std::env::temp_dir().join(&unique);
             let guard = Guard {
-                prev_config: std::env::var_os("CLAUDE_CONFIG_DIR"),
+                prev_config: std::env::var_os("LINGXI_CONFIG_DIR"),
                 prev_list: std::env::var_os("CLAUDE_CODE_TASK_LIST_ID"),
                 dir: dir.clone(),
                 _lock: lock,
             };
-            std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
+            std::env::set_var("LINGXI_CONFIG_DIR", &dir);
             std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", &unique);
             (guard, unique)
         }

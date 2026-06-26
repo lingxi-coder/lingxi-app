@@ -119,7 +119,7 @@ pub struct SettingsJson {
     pub additional_includes: Option<Vec<String>>,
 
     /// `claudeMdExcludes` (array-merge, concat-dedup): glob patterns or absolute
-    /// paths of `CLAUDE.md` files to exclude from loading (claude-code
+    /// paths of `LINGXI.md` files to exclude from loading (claude-code
     /// `settings/types.ts:1053`, gate `isClaudeMdExcluded`, `claudemd.ts:547`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_md_excludes: Option<Vec<String>>,

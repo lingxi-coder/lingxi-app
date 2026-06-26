@@ -152,7 +152,7 @@ async fn fire_config_change_dispatches_with_source_and_file_path() {
     exec.register_builtin(Arc::new(RecordingHandler { log: log.clone() }));
     let orch = orch_with(Arc::new(exec));
 
-    let path = PathBuf::from("/work/.claude/settings.local.json");
+    let path = PathBuf::from("/work/.lingxi/settings.local.json");
     orch.fire_config_change(ConfigChangeSource::LocalSettings, Some(path.clone()))
         .await;
 
@@ -230,7 +230,7 @@ async fn fire_config_change_is_noop_without_a_registered_hook() {
 
     orch.fire_config_change(
         ConfigChangeSource::ProjectSettings,
-        Some(PathBuf::from("/work/.claude/settings.json")),
+        Some(PathBuf::from("/work/.lingxi/settings.json")),
     )
     .await;
 

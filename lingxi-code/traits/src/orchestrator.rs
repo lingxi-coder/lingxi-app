@@ -132,7 +132,7 @@ pub enum TurnOutcome {
 /// editor error).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryEditorOutcome {
-    /// The CLAUDE.md path that was edited (may have been created if absent).
+    /// The LINGXI.md path that was edited (may have been created if absent).
     pub edited_path: PathBuf,
     /// Exit code of the spawned `$EDITOR` process. 0 = success.
     pub exit_code: i32,
@@ -181,7 +181,7 @@ pub struct HookInfo {
     pub hook_type: String,
     /// (hooks-detail-fields-divergent) Human-readable origin (claude-code
     /// `hookSourceDescriptionDisplayString`), e.g. `"User settings
-    /// (~/.claude/settings.json)"`.
+    /// (~/.lingxi/settings.json)"`.
     pub source: String,
     /// (hooks-detail-fields-divergent) The executor's primary content field
     /// (claude-code `getContentFieldValue`): the shell command line for
@@ -300,7 +300,7 @@ pub struct StatusSnapshot {
     /// (settings-status-missing-mcp-and-setting-sources) Display strings for
     /// every settings-file tier that currently has a file on disk (claude-code
     /// `buildSettingSourcesProperties`'s `sourcesWithSettings` filter), e.g.
-    /// `"Project settings (.claude/settings.json)"`. Empty when none exist
+    /// `"Project settings (.lingxi/settings.json)"`. Empty when none exist
     /// (the `/status` row is omitted entirely, matching TS).
     pub setting_sources: Vec<String>,
 }
@@ -433,7 +433,7 @@ pub trait OrchestratorHandle: Send + Sync {
     /// has been called at least once.
     async fn current_should_exit(&self) -> bool;
 
-    /// Open `$EDITOR` on `<config-dir>/claude/CLAUDE.md` (creating the file
+    /// Open `$EDITOR` on `<config-dir>/claude/LINGXI.md` (creating the file
     /// if it does not exist), block until the editor exits, then return the
     /// outcome.
     ///

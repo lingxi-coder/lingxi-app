@@ -15,8 +15,8 @@
     "team_name_pattern_desc": "[a-zA-Z0-9_-]+"
   },
 
-  "team_dir_template": "~/.claude/team-mem/<team_name>/",
-  "team_config_template": "~/.claude/team-mem/<team_name>/config.json",
+  "team_dir_template": "~/.lingxi/team-mem/<team_name>/",
+  "team_config_template": "~/.lingxi/team-mem/<team_name>/config.json",
 
   "telemetry_events": [
     "tengu_tool_team_create_started",

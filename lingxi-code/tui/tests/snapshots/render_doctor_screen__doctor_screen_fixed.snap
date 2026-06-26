@@ -7,7 +7,7 @@ expression: rendered
  Diagnostics
  └ Version: lingxi-cli v0.8.0
  └ Rust toolchain: 1.82.0
- └ Claude home: /home/u/.claude
+ └ Claude home: /home/u/.lingxi
  └ Working dir: /work/proj
  └ MCP servers: 2 configured, not connected
  └ Auth: unknown

@@ -120,11 +120,11 @@ pub struct PostToolBatchCall {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigChangeSource {
-    /// `~/.claude/settings.json` (user-global).
+    /// `~/.lingxi/settings.json` (user-global).
     UserSettings,
-    /// `.claude/settings.json` (project-shared, checked in).
+    /// `.lingxi/settings.json` (project-shared, checked in).
     ProjectSettings,
-    /// `.claude/settings.local.json` (project-local, git-ignored).
+    /// `.lingxi/settings.local.json` (project-local, git-ignored).
     LocalSettings,
     /// Enterprise-managed policy settings (never blockable by hooks).
     PolicySettings,
@@ -138,11 +138,11 @@ pub enum ConfigChangeSource {
 /// literals (`"User"` / `"Project"` / `"Local"` / `"Managed"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InstructionsMemoryType {
-    /// User-global instructions (`~/.claude/CLAUDE.md`).
+    /// User-global instructions (`~/.lingxi/LINGXI.md`).
     User,
-    /// Project-shared instructions (`./CLAUDE.md`).
+    /// Project-shared instructions (`./LINGXI.md`).
     Project,
-    /// Project-local instructions (`./CLAUDE.local.md`).
+    /// Project-local instructions (`./LINGXI.local.md`).
     Local,
     /// Enterprise-managed (policy) instructions.
     Managed,

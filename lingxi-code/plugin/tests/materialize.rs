@@ -27,9 +27,9 @@ use platform_posix::{
 
 fn write_fixture_plugin(root: &Path, name: &str) {
     let plugin_dir = root.join(name);
-    fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
     fs::write(
-        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        plugin_dir.join(".lingxi-plugin").join("plugin.json"),
         r#"{"name":"myplugin","version":"1.0.0"}"#,
     )
     .unwrap();
@@ -203,9 +203,9 @@ async fn enable_rejects_agent_with_escalating_frontmatter() {
     // be rejected by the privilege gate (validate_plugin_agent_frontmatter).
     let tmp = tempfile::tempdir().unwrap();
     let plugin_dir = tmp.path().join("evil");
-    fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
     fs::write(
-        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        plugin_dir.join(".lingxi-plugin").join("plugin.json"),
         r#"{"name":"evil","version":"1.0.0"}"#,
     )
     .unwrap();
@@ -265,9 +265,9 @@ async fn escalating_agent_leaves_no_orphan_command_registered() {
     // rejected agent cannot leave an orphaned command in the live registry.
     let tmp = tempfile::tempdir().unwrap();
     let plugin_dir = tmp.path().join("mixed");
-    fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
     fs::write(
-        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        plugin_dir.join(".lingxi-plugin").join("plugin.json"),
         r#"{"name":"mixed","version":"1.0.0"}"#,
     )
     .unwrap();
@@ -388,9 +388,9 @@ async fn install_marketplace_arm_returns_typed_error_not_panic() {
 /// the claude-code layout), an output-style, an `.mcp.json`, and a `.lsp.json`.
 fn write_full_component_plugin(root: &Path, dir_name: &str, plugin_name: &str) {
     let plugin_dir = root.join(dir_name);
-    fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
     fs::write(
-        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        plugin_dir.join(".lingxi-plugin").join("plugin.json"),
         format!(r#"{{"name":"{plugin_name}","version":"1.0.0"}}"#),
     )
     .unwrap();
@@ -552,9 +552,9 @@ fn init_git_plugin_repo(dir: &Path, plugin_name: &str) {
 }
 
 fn init_git_plugin_repo_versioned(dir: &Path, plugin_name: &str, version: &str) {
-    fs::create_dir_all(dir.join(".claude-plugin")).unwrap();
+    fs::create_dir_all(dir.join(".lingxi-plugin")).unwrap();
     fs::write(
-        dir.join(".claude-plugin").join("plugin.json"),
+        dir.join(".lingxi-plugin").join("plugin.json"),
         format!(r#"{{"name":"{plugin_name}","version":"{version}"}}"#),
     )
     .unwrap();
@@ -639,7 +639,7 @@ async fn install_git_arm_clones_materializes_and_registers() {
     let cache_root = install_root.join("cache");
     let mut found_manifest = false;
     for entry in walkdir(&cache_root) {
-        if entry.ends_with(".claude-plugin/plugin.json") {
+        if entry.ends_with(".lingxi-plugin/plugin.json") {
             found_manifest = true;
         }
     }
@@ -681,31 +681,31 @@ async fn install_git_arm_malicious_version_cannot_escape_cache() {
     let cache_root = install_root.join("cache");
     let manifests: Vec<String> = walkdir(&cache_root)
         .into_iter()
-        .filter(|p| p.ends_with(".claude-plugin/plugin.json"))
+        .filter(|p| p.ends_with(".lingxi-plugin/plugin.json"))
         .collect();
     assert_eq!(manifests.len(), 1, "exactly one manifest materialized: {manifests:?}");
     assert!(
-        manifests[0].contains("/evil/-/.claude-plugin/plugin.json"),
+        manifests[0].contains("/evil/-/.lingxi-plugin/plugin.json"),
         "version must be neutralized to '-' and stay nested; got {}",
         manifests[0]
     );
 }
 
-/// Build a git marketplace repo: a `.claude-plugin/marketplace.json` catalog
+/// Build a git marketplace repo: a `.lingxi-plugin/marketplace.json` catalog
 /// listing one path-based plugin that lives at `plugins/<plugin>/` in the repo.
 fn init_git_marketplace_repo(dir: &Path, marketplace: &str, plugin: &str) {
-    fs::create_dir_all(dir.join(".claude-plugin")).unwrap();
+    fs::create_dir_all(dir.join(".lingxi-plugin")).unwrap();
     fs::write(
-        dir.join(".claude-plugin").join("marketplace.json"),
+        dir.join(".lingxi-plugin").join("marketplace.json"),
         format!(
             r#"{{"name":"{marketplace}","plugins":[{{"name":"{plugin}","path":"plugins/{plugin}"}}]}}"#
         ),
     )
     .unwrap();
     let pdir = dir.join("plugins").join(plugin);
-    fs::create_dir_all(pdir.join(".claude-plugin")).unwrap();
+    fs::create_dir_all(pdir.join(".lingxi-plugin")).unwrap();
     fs::write(
-        pdir.join(".claude-plugin").join("plugin.json"),
+        pdir.join(".lingxi-plugin").join("plugin.json"),
         format!(r#"{{"name":"{plugin}","version":"3.0.0"}}"#),
     )
     .unwrap();
@@ -791,9 +791,9 @@ async fn install_marketplace_arm_rejects_symlink_escape() {
     let tmp = tempfile::tempdir().unwrap();
     // The exfiltration target OUTSIDE the marketplace repo (stands in for ~/.ssh).
     let outside = tmp.path().join("outside");
-    fs::create_dir_all(outside.join(".claude-plugin")).unwrap();
+    fs::create_dir_all(outside.join(".lingxi-plugin")).unwrap();
     fs::write(
-        outside.join(".claude-plugin").join("plugin.json"),
+        outside.join(".lingxi-plugin").join("plugin.json"),
         r#"{"name":"secret","version":"1.0.0"}"#,
     )
     .unwrap();
@@ -802,9 +802,9 @@ async fn install_marketplace_arm_rejects_symlink_escape() {
     // A malicious catalog: entry path "link" is a single Normal component (passes
     // the lexical guard) but is a symlink pointing OUT of the repo.
     let mkt_repo = tmp.path().join("mkt-repo");
-    fs::create_dir_all(mkt_repo.join(".claude-plugin")).unwrap();
+    fs::create_dir_all(mkt_repo.join(".lingxi-plugin")).unwrap();
     fs::write(
-        mkt_repo.join(".claude-plugin").join("marketplace.json"),
+        mkt_repo.join(".lingxi-plugin").join("marketplace.json"),
         r#"{"name":"m","plugins":[{"name":"p","path":"link"}]}"#,
     )
     .unwrap();
@@ -864,7 +864,7 @@ async fn install_mcpb_arm_unpacks_materializes_and_registers() {
     write_mcpb(
         &bundle,
         &[
-            (".claude-plugin/plugin.json", r#"{"name":"bundleplugin","version":"1.0.0"}"#),
+            (".lingxi-plugin/plugin.json", r#"{"name":"bundleplugin","version":"1.0.0"}"#),
             ("commands/zip.md", "---\ndescription: from a bundle\n---\nZipped command.\n"),
         ],
     );
@@ -915,7 +915,7 @@ async fn install_mcpb_arm_rejects_hash_mismatch() {
     let bundle = tmp.path().join("p.mcpb");
     write_mcpb(
         &bundle,
-        &[(".claude-plugin/plugin.json", r#"{"name":"p","version":"1.0.0"}"#)],
+        &[(".lingxi-plugin/plugin.json", r#"{"name":"p","version":"1.0.0"}"#)],
     );
     let (manager, _) = make_manager(&tmp.path().join("plugins"), &tmp.path().join("secrets")).await;
 

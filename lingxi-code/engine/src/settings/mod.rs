@@ -76,7 +76,7 @@ pub use schema::SettingsJson;
 pub struct LoadInputs<'a> {
     /// Process env snapshot.
     pub env: &'a std::collections::BTreeMap<String, String>,
-    /// Project root — used to locate `<project_dir>/.claude/settings.json`.
+    /// Project root — used to locate `<project_dir>/.lingxi/settings.json`.
     pub project_dir: &'a std::path::Path,
     /// Defaults baseline. Lowest priority.
     pub defaults: SettingsJson,
@@ -161,8 +161,8 @@ impl Settings {
     /// Like [`Settings::load`] but GATES the user / project file layers — the
     /// substrate for claude-code's `--setting-sources <user,project,local>`
     /// (scope which setting sources load). `include_user` / `include_project`
-    /// select whether the `~/.claude/settings.json` and
-    /// `<project>/.claude/settings.json` layers contribute; `defaults` and the
+    /// select whether the `~/.lingxi/settings.json` and
+    /// `<project>/.lingxi/settings.json` layers contribute; `defaults` and the
     /// `env` layer ALWAYS apply (env vars are not a "setting source" claude
     /// scopes off). Both `true` is identical to [`Settings::load`].
     ///
@@ -405,9 +405,9 @@ mod load_tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         let project_dir = tmp.path();
-        let user_dir = tmp.path().join("home").join(".claude");
+        let user_dir = tmp.path().join("home").join(".lingxi");
         std::fs::create_dir_all(&user_dir).unwrap();
-        let project_subdir = project_dir.join(".claude");
+        let project_subdir = project_dir.join(".lingxi");
         std::fs::create_dir_all(&project_subdir).unwrap();
 
         let mut pf = std::fs::File::create(project_subdir.join("settings.json")).unwrap();
@@ -443,9 +443,9 @@ mod load_tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         let project_dir = tmp.path();
-        let user_dir = tmp.path().join("home2").join(".claude");
+        let user_dir = tmp.path().join("home2").join(".lingxi");
         std::fs::create_dir_all(&user_dir).unwrap();
-        let project_subdir = project_dir.join(".claude");
+        let project_subdir = project_dir.join(".lingxi");
         std::fs::create_dir_all(&project_subdir).unwrap();
 
         let mut pf = std::fs::File::create(project_subdir.join("settings.json")).unwrap();
@@ -471,9 +471,9 @@ mod load_tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         let project_dir = tmp.path();
-        let user_dir = tmp.path().join("home3").join(".claude");
+        let user_dir = tmp.path().join("home3").join(".lingxi");
         std::fs::create_dir_all(&user_dir).unwrap();
-        let project_subdir = project_dir.join(".claude");
+        let project_subdir = project_dir.join(".lingxi");
         std::fs::create_dir_all(&project_subdir).unwrap();
 
         let mut pf = std::fs::File::create(project_subdir.join("settings.json")).unwrap();
@@ -674,7 +674,7 @@ mod load_tests {
 
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path().join("home_t10c"));
-        let project_subdir = tmp.path().join(".claude");
+        let project_subdir = tmp.path().join(".lingxi");
         std::fs::create_dir_all(&project_subdir).unwrap();
         // Malformed JSON in the project layer.
         let mut pf = std::fs::File::create(project_subdir.join("settings.json")).unwrap();

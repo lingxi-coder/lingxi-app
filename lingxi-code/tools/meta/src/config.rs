@@ -1,4 +1,4 @@
-//! `ConfigTool` — get/set Claude Code settings against `~/.claude/settings.json`.
+//! `ConfigTool` — get/set Claude Code settings against `~/.lingxi/settings.json`.
 //!
 //! no-truncation: ConfigTool returns a single bounded value — one setting's
 //! value (get) or a short confirmation/status (set/list) — never large content,
@@ -12,9 +12,9 @@
 //!
 //! Input shape (TS `{setting, value?}`): `value` omitted ⇒ GET, present ⇒ SET.
 //!
-//! Backing store: this Rust stub keeps a single file (`~/.claude/settings.json`)
+//! Backing store: this Rust stub keeps a single file (`~/.lingxi/settings.json`)
 //! for both `source: 'global'` and `source: 'settings'` entries — the upstream
-//! global-config (`~/.claude.json`) vs settings-file split has no substrate
+//! global-config (`~/.lingxi.json`) vs settings-file split has no substrate
 //! here. Dotted `path` (e.g. `permissions.defaultMode`) is honored via
 //! `build_nested_object`/`get_value`.
 //!
@@ -53,7 +53,7 @@ use tool_api::tool_trait::{
 pub const CONFIG_TOOL_NAME: &str = "Config";
 /// Backing-store filename.
 pub const CONFIG_FILE_NAME: &str = "settings.json";
-/// `~/.claude/` subdirectory.
+/// `~/.lingxi/` subdirectory.
 pub const CONFIG_SUBDIR: &str = branding::DOT_DIR;
 
 // ─── legacy wire-identifier surface (pre-registry M4-08 parity fixture) ───
@@ -110,10 +110,10 @@ const TEAMMATE_MODES: &[&str] = &["auto", "tmux", "in-process"];
 const PERMISSION_DEFAULT_MODES: &[&str] = &["default", "plan", "acceptEdits", "dontAsk"];
 
 /// Storage source for a setting. Both currently back to the single
-/// `~/.claude/settings.json` file in this Rust stub.
+/// `~/.lingxi/settings.json` file in this Rust stub.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
-    /// Upstream: `~/.claude.json` global config.
+    /// Upstream: `~/.lingxi.json` global config.
     Global,
     /// Upstream: the user settings file.
     Settings,
@@ -405,7 +405,7 @@ pub(crate) fn config_path(home: &Path) -> PathBuf {
     config_home_dir(home).join(CONFIG_FILE_NAME)
 }
 
-/// User config-home: `$CLAUDE_CONFIG_DIR` when set (claude-code `tr()` `??`: an
+/// User config-home: `$LINGXI_CONFIG_DIR` when set (claude-code `tr()` `??`: an
 /// empty value is honored verbatim → cwd-relative), else `<home>/<CONFIG_SUBDIR>`.
 #[must_use]
 fn config_home_dir(home: &Path) -> PathBuf {
@@ -606,7 +606,7 @@ impl Tool for ConfigTool {
         if input.get("value").is_none() {
             return PermissionResult::Allow {
                 reason: PermissionDecisionReason::Other {
-                    reason: "Config reads ~/.claude/settings.json (read-only)".into(),
+                    reason: "Config reads ~/.lingxi/settings.json (read-only)".into(),
                 },
                 updated_input: None,
                 update_destination: None,
@@ -621,7 +621,7 @@ impl Tool for ConfigTool {
         let message = format!("Set {setting} to {}", json_stringify(&value));
         PermissionResult::Ask {
             reason: PermissionDecisionReason::Other {
-                reason: "Config writes ~/.claude/settings.json".into(),
+                reason: "Config writes ~/.lingxi/settings.json".into(),
             },
             prompt: PermissionPrompt {
                 title: "Config".into(),
@@ -867,7 +867,7 @@ mod tests {
     fn constants_locked() {
         assert_eq!(CONFIG_TOOL_NAME, "Config");
         assert_eq!(CONFIG_FILE_NAME, "settings.json");
-        assert_eq!(CONFIG_SUBDIR, ".claude");
+        assert_eq!(CONFIG_SUBDIR, ".lingxi");
         // legacy parity-fixture surface
         assert_eq!(CONFIG_FIELDS_ALLOWED.len(), 4);
         assert_eq!(

@@ -404,7 +404,7 @@ pub fn get_default_write_paths_with(home_dir: &str) -> Vec<String> {
         "/tmp/claude".to_string(),
         "/private/tmp/claude".to_string(),
         format!("{home_dir}/.npm/_logs"),
-        format!("{home_dir}/.claude/debug"),
+        format!("{home_dir}/.lingxi/debug"),
     ]
 }
 
@@ -571,14 +571,14 @@ mod tests {
 
     #[test]
     fn dangerous_directories_excludes_git_adds_claude() {
-        // TS filters out .git and appends .claude/commands + .claude/agents.
+        // TS filters out .git and appends .lingxi/commands + .lingxi/agents.
         assert_eq!(
             get_dangerous_directories(),
             vec![
                 ".vscode".to_string(),
                 ".idea".to_string(),
-                ".claude/commands".to_string(),
-                ".claude/agents".to_string(),
+                ".lingxi/commands".to_string(),
+                ".lingxi/agents".to_string(),
             ]
         );
     }
@@ -588,8 +588,8 @@ mod tests {
     #[test]
     fn normalize_case_always_lowercases() {
         assert_eq!(
-            normalize_case_for_comparison(".cLauDe/Settings.locaL.json"),
-            ".claude/settings.local.json"
+            normalize_case_for_comparison(".lInGxi/Settings.locaL.json"),
+            ".lingxi/settings.local.json"
         );
         assert_eq!(normalize_case_for_comparison("/Foo/BAR"), "/foo/bar");
     }
@@ -804,7 +804,7 @@ mod tests {
                 "/tmp/claude".to_string(),
                 "/private/tmp/claude".to_string(),
                 "/home/me/.npm/_logs".to_string(),
-                "/home/me/.claude/debug".to_string(),
+                "/home/me/.lingxi/debug".to_string(),
             ]
         );
     }

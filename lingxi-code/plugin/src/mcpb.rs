@@ -3,7 +3,7 @@
 //! and normalize it into a loadable plugin directory.
 //!
 //! A `.mcpb` is a zip archive. The common bundle ships a plugin tree with
-//! `.claude-plugin/plugin.json`; an MCP-style bundle roots a `manifest.json`
+//! `.lingxi-plugin/plugin.json`; an MCP-style bundle roots a `manifest.json`
 //! instead, which we translate into a minimal synthetic `plugin.json` so the
 //! shared loader can read it.
 
@@ -103,7 +103,7 @@ fn unpack_mcpb_limited(
     Ok(())
 }
 
-/// Ensure the extracted bundle at `dir` has a `.claude-plugin/plugin.json` the
+/// Ensure the extracted bundle at `dir` has a `.lingxi-plugin/plugin.json` the
 /// shared loader can read. If it is missing but a root `manifest.json` (MCPB
 /// schema) is present, translate the `name`/`version` into a minimal synthetic
 /// `plugin.json`.

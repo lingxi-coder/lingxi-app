@@ -12,7 +12,7 @@ pub const CURRENT_MIGRATION_VERSION: u64 = 11;
 /// Run the sync migration set if `migrationVersion != 11`, then bump.
 /// Mirrors the TS guard exactly (`!==`, so a downgrade re-runs too).
 ///
-/// SAFETY CONTRACT: a broken/unreadable `~/.claude.json` skips the whole run
+/// SAFETY CONTRACT: a broken/unreadable `~/.lingxi.json` skips the whole run
 /// (no writes, no version bump — stricter than TS's defaults-fallback,
 /// documented divergence). Per-migration failure handling DELIBERATELY
 /// DIVERGES from TS: `runMigrations` has NO catch, so a `saveGlobalConfig`

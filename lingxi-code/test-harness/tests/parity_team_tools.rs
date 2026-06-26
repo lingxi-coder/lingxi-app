@@ -107,12 +107,12 @@ fn telemetry_constant_symbols_match_event_strings() {
 fn team_dir_template_matches_resolve_team_dir() {
     let fx = fx();
     let tmpl = fx["team_dir_template"].as_str().unwrap();
-    assert_eq!(tmpl, "~/.claude/team-mem/<team_name>/");
+    assert_eq!(tmpl, "~/.lingxi/team-mem/<team_name>/");
     let home = std::path::PathBuf::from("/tmp/parity-home");
     let dir = tool_team::team::resolve_team_dir(&home, "example");
     assert_eq!(
         dir,
-        std::path::PathBuf::from("/tmp/parity-home/.claude/team-mem/example")
+        std::path::PathBuf::from("/tmp/parity-home/.lingxi/team-mem/example")
     );
 }
 

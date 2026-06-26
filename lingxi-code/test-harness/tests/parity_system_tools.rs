@@ -200,7 +200,7 @@ fn brief_path_template_matches_resolver() {
     let fx = fx();
     assert_eq!(
         fx["path_templates"]["brief"].as_str().unwrap(),
-        "~/.claude/brief/<task_id>.txt"
+        "~/.lingxi/brief/<task_id>.txt"
     );
 }
 
@@ -209,7 +209,7 @@ fn config_path_template_matches_resolver() {
     let fx = fx();
     assert_eq!(
         fx["path_templates"]["config"].as_str().unwrap(),
-        "~/.claude/settings.json"
+        "~/.lingxi/settings.json"
     );
 }
 
@@ -217,13 +217,13 @@ fn config_path_template_matches_resolver() {
 fn cron_path_template_matches_resolver() {
     let fx = fx();
     // Cron persistence is the single project-relative tasks file
-    // `<project>/.claude/scheduled_tasks.json` (1:1 with claude-code
+    // `<project>/.lingxi/scheduled_tasks.json` (1:1 with claude-code
     // `cronTasks.ts`), NOT a per-job file under the user config-home.
     assert_eq!(
         fx["path_templates"]["schedule_cron"].as_str().unwrap(),
-        "<project>/.claude/scheduled_tasks.json"
+        "<project>/.lingxi/scheduled_tasks.json"
     );
     // The fixture template agrees with the production resolver.
     let resolved = cron::tasks_file::scheduled_tasks_path(std::path::Path::new("<project>"));
-    assert_eq!(resolved.to_string_lossy(), "<project>/.claude/scheduled_tasks.json");
+    assert_eq!(resolved.to_string_lossy(), "<project>/.lingxi/scheduled_tasks.json");
 }

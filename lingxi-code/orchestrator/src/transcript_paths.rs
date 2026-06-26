@@ -50,27 +50,27 @@ mod tests {
 
     #[test]
     fn main_transcript_path_matches_session_path_shape() {
-        let home = Path::new("/home/.claude");
+        let home = Path::new("/home/.lingxi");
         let got = main_transcript_path(home, "/Users/me/proj", "abc-123");
         assert_eq!(
             got,
-            PathBuf::from("/home/.claude/projects/-Users-me-proj/abc-123.jsonl"),
+            PathBuf::from("/home/.lingxi/projects/-Users-me-proj/abc-123.jsonl"),
         );
     }
 
     #[test]
     fn subagents_dir_nests_session_then_subagents() {
-        let home = Path::new("/home/.claude");
+        let home = Path::new("/home/.lingxi");
         let got = subagents_dir(home, "/Users/me/proj", "abc-123");
         assert_eq!(
             got,
-            PathBuf::from("/home/.claude/projects/-Users-me-proj/abc-123/subagents"),
+            PathBuf::from("/home/.lingxi/projects/-Users-me-proj/abc-123/subagents"),
         );
         // The leaf `agent-<id>.jsonl` then sits directly under it — the value
         // `agent_transcript_path` resolves to (claude-code getAgentTranscriptPath).
         assert_eq!(
             got.join("agent-xyz.jsonl"),
-            PathBuf::from("/home/.claude/projects/-Users-me-proj/abc-123/subagents/agent-xyz.jsonl"),
+            PathBuf::from("/home/.lingxi/projects/-Users-me-proj/abc-123/subagents/agent-xyz.jsonl"),
         );
     }
 }

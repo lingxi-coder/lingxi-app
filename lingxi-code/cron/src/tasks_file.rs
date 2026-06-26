@@ -2,7 +2,7 @@
 //! `utils/cronTasks.ts`.
 //!
 //! claude-code stores ALL scheduled (durable) cron jobs in ONE project-relative
-//! file `<projectRoot>/.claude/scheduled_tasks.json` shaped
+//! file `<projectRoot>/.lingxi/scheduled_tasks.json` shaped
 //! `{ "tasks": [ CronTask, … ] }`, NOT one file per job. This module owns the
 //! single authoritative [`CronTask`] / [`ScheduledTasks`] definition (camelCase
 //! JSON, epoch **milliseconds**) plus path + (de)serialization helpers, shared
@@ -71,14 +71,14 @@ pub struct ScheduledTasks {
 }
 
 /// Absolute path to the single tasks file for `project_root`
-/// (`<project_root>/.claude/scheduled_tasks.json`).
+/// (`<project_root>/.lingxi/scheduled_tasks.json`).
 #[must_use]
 pub fn scheduled_tasks_path(project_root: &Path) -> PathBuf {
     project_root.join(CLAUDE_DIR).join(SCHEDULED_TASKS_FILE)
 }
 
 /// Absolute path to the lock file beside the tasks file
-/// (`<project_root>/.claude/scheduled_tasks.lock`).
+/// (`<project_root>/.lingxi/scheduled_tasks.lock`).
 #[must_use]
 pub fn scheduled_tasks_lock_path(project_root: &Path) -> PathBuf {
     project_root.join(CLAUDE_DIR).join(SCHEDULED_TASKS_LOCK)
@@ -111,9 +111,9 @@ mod tests {
     #[test]
     fn path_is_project_relative() {
         let p = scheduled_tasks_path(Path::new("/proj"));
-        assert_eq!(p, Path::new("/proj/.claude/scheduled_tasks.json"));
+        assert_eq!(p, Path::new("/proj/.lingxi/scheduled_tasks.json"));
         let l = scheduled_tasks_lock_path(Path::new("/proj"));
-        assert_eq!(l, Path::new("/proj/.claude/scheduled_tasks.lock"));
+        assert_eq!(l, Path::new("/proj/.lingxi/scheduled_tasks.lock"));
     }
 
     #[test]

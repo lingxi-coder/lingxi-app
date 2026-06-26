@@ -1,8 +1,8 @@
 //! Custom output-style DISK discovery (OUTSTYLE.3 — claude-code
 //! `getOutputStyleDirStyles` + `markdownConfigLoader`).
 //!
-//! claude-code loads custom output styles from `~/.claude/output-styles/` and
-//! `<cwd>/.claude/output-styles/` (each a `*.md` file: optional `---`-YAML
+//! claude-code loads custom output styles from `~/.lingxi/output-styles/` and
+//! `<cwd>/.lingxi/output-styles/` (each a `*.md` file: optional `---`-YAML
 //! frontmatter + a markdown body that becomes the system-prompt addendum), and
 //! merges them OVER the two compiled-in builtins (`Explanatory`/`Learning`) so a
 //! `settings.outputStyle` naming a custom style activates it. The Rust port
@@ -114,8 +114,8 @@ pub fn parse_output_style(raw: &str, stem: &str) -> DiskOutputStyle {
     }
 }
 
-/// Load every `*.md` output style from `dir` (e.g. `~/.claude/output-styles` or
-/// `<cwd>/.claude/output-styles`). A missing/unreadable directory yields an
+/// Load every `*.md` output style from `dir` (e.g. `~/.lingxi/output-styles` or
+/// `<cwd>/.lingxi/output-styles`). A missing/unreadable directory yields an
 /// empty list. Thin glue over [`parse_output_style`].
 #[must_use]
 pub fn load_output_styles_from_dir(dir: &Path) -> Vec<DiskOutputStyle> {

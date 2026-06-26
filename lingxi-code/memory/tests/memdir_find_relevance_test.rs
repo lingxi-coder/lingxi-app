@@ -1,6 +1,6 @@
 //! M3-02 phase 10: full memdir scan + `find_relevant` ranking.
 //!
-//! Builds a small `~/.claude/memdir/` with three entries of varying age
+//! Builds a small `~/.lingxi/memdir/` with three entries of varying age
 //! and content, runs `scan_memdir_at` + `find_relevant`, and asserts the
 //! top-`k` matches the deterministic expected ordering.
 
@@ -21,7 +21,7 @@ fn write_dated(path: &std::path::Path, body: &str, age_days: u64, now: SystemTim
 fn full_memdir_scan_then_find_relevant_returns_byte_identical_ordering() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path();
-    let memdir = home.join(".claude").join("memdir");
+    let memdir = home.join(".lingxi").join("memdir");
     fs::create_dir_all(&memdir).unwrap();
     let now = SystemTime::now();
     write_dated(&memdir.join("fresh-alpha.md"), "alpha beta gamma", 0, now);
@@ -66,7 +66,7 @@ fn full_memdir_scan_then_find_relevant_returns_byte_identical_ordering() {
 fn ranking_is_deterministic_across_repeated_runs() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path();
-    let memdir = home.join(".claude").join("memdir");
+    let memdir = home.join(".lingxi").join("memdir");
     fs::create_dir_all(&memdir).unwrap();
     let now = SystemTime::now();
     write_dated(&memdir.join("a.md"), "x y z", 0, now);
@@ -104,7 +104,7 @@ fn ranking_is_deterministic_across_repeated_runs() {
 fn entries_older_than_365_dropped_at_scan_not_in_results() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path();
-    let memdir = home.join(".claude").join("memdir");
+    let memdir = home.join(".lingxi").join("memdir");
     fs::create_dir_all(&memdir).unwrap();
     let now = SystemTime::now();
     write_dated(&memdir.join("ancient.md"), "alpha beta", 400, now);

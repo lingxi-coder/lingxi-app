@@ -17,7 +17,7 @@
 //!   `CompactionOrchestrator`.
 //! - `request_exit` flips an `AtomicBool` on the orchestrator. The REPL
 //!   (M5-13) reads this between turns and breaks out of the loop.
-//! - `open_memory_editor` ensures `<config>/claude/CLAUDE.md` exists, then
+//! - `open_memory_editor` ensures `<config>/claude/LINGXI.md` exists, then
 //!   spawns the user's `$EDITOR`. Falls back to `VISUAL`, then `vi`
 //!   (Unix) / `notepad.exe` (Windows). Inherits `stdin`/`stdout`/`stderr`
 //!   so TUI editors render correctly.
@@ -123,11 +123,11 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn open_memory_editor(&self) -> Result<MemoryEditorOutcome, HandleError> {
-        // `/memory` edits the USER-tier CLAUDE.md — the SAME file the system-prompt
-        // hierarchy loads (memory::claude_md::user_config_dir): `$CLAUDE_CONFIG_DIR`
-        // when set, else `~/.claude/CLAUDE.md`. (Previously this targeted
-        // `dirs::config_dir()/claude/CLAUDE.md` — a different, never-loaded path that
-        // also ignored `$CLAUDE_CONFIG_DIR`.)
+        // `/memory` edits the USER-tier LINGXI.md — the SAME file the system-prompt
+        // hierarchy loads (memory::claude_md::user_config_dir): `$LINGXI_CONFIG_DIR`
+        // when set, else `~/.lingxi/LINGXI.md`. (Previously this targeted
+        // `dirs::config_dir()/claude/LINGXI.md` — a different, never-loaded path that
+        // also ignored `$LINGXI_CONFIG_DIR`.)
         let home = dirs::home_dir().ok_or_else(|| {
             HandleError::ActionFailed("home dir unavailable on this platform".into())
         })?;
@@ -197,7 +197,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn run_doctor_checks(&self) -> DoctorReport {
-        // Probe the real config-home tree: `$CLAUDE_CONFIG_DIR` when set, else
+        // Probe the real config-home tree: `$LINGXI_CONFIG_DIR` when set, else
         // `~/.claude` (claude-code `tr()` — the SAME dir `/memory`, settings, and
         // the TUI doctor screen use). NOT `dirs::config_dir()` (≈ `~/Library/
         // Application Support` on macOS), which is a different, never-used tree.
@@ -205,8 +205,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
             || std::path::PathBuf::from("."),
             |h| memory::claude_md::user_config_dir(&h),
         );
-        // Also diagnose the global config `~/.claude.json` (the one path NOT under
-        // `tr()`: `($CLAUDE_CONFIG_DIR || $HOME)/.claude.json`), which claude-code's
+        // Also diagnose the global config `~/.lingxi.json` (the one path NOT under
+        // `tr()`: `($LINGXI_CONFIG_DIR || $HOME)/.lingxi.json`), which claude-code's
         // doctor probes alongside the tree.
         crate::diagnostics::run_all(
             &config_dir,
@@ -242,7 +242,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn edit_config_file(&self) -> Result<MemoryEditorOutcome, HandleError> {
         // claude-code has no standalone `config.json`: `/config` reads/writes
-        // `<config-home>/settings.json` (`$CLAUDE_CONFIG_DIR` else `~/.claude`).
+        // `<config-home>/settings.json` (`$LINGXI_CONFIG_DIR` else `~/.claude`).
         // Edit that real file, not a phantom under `dirs::config_dir()`.
         let home = dirs::home_dir().ok_or_else(|| {
             HandleError::ActionFailed("home dir unavailable on this platform".into())
@@ -378,7 +378,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
     async fn list_resumable_sessions(&self) -> Vec<(String, String)> {
         // Enumerate the on-disk JSONL session store the resume path reads
         // from: `<config-home>/projects/<project_dir_name(cwd)>/<uuid>.jsonl`.
-        // `config-home` is `$CLAUDE_CONFIG_DIR` (else `~/.claude`) — the SAME
+        // `config-home` is `$LINGXI_CONFIG_DIR` (else `~/.claude`) — the SAME
         // env-aware resolver the CLI loader (`run::claude_home_dir`) uses, so the
         // picker lists exactly what `--resume` can load. Each entry maps to
         // `(session_id, label)`; label is the id (the first-prompt label +
@@ -491,11 +491,11 @@ fn hook_executor_type_and_content(executor: &hooks::HookExecutor) -> (String, St
 fn hook_source_description(source: hooks::HookSource) -> String {
     use hooks::HookSource as S;
     match source {
-        S::User => "User settings (~/.claude/settings.json)",
-        S::Project => "Project settings (.claude/settings.json)",
-        S::Local => "Local settings (.claude/settings.local.json)",
+        S::User => "User settings (~/.lingxi/settings.json)",
+        S::Project => "Project settings (.lingxi/settings.json)",
+        S::Local => "Local settings (.lingxi/settings.local.json)",
         S::Managed => "Managed settings (enterprise policy)",
-        S::Plugin => "Plugin hooks (~/.claude/plugins/*/hooks/hooks.json)",
+        S::Plugin => "Plugin hooks (~/.lingxi/plugins/*/hooks/hooks.json)",
         S::FrontMatter => "Agent front matter",
         S::Session => "Session hooks (in-memory, temporary)",
         S::Skill => "Skill bundle",
@@ -531,10 +531,10 @@ fn agent_source_group_label(source: agent::AgentSource) -> &'static str {
 fn setting_sources_for(cwd: &std::path::Path) -> Vec<String> {
     let mut out = Vec::new();
     if engine::settings::loader::project_settings_path(cwd).is_file() {
-        out.push("Project settings (.claude/settings.json)".to_string());
+        out.push("Project settings (.lingxi/settings.json)".to_string());
     }
     if engine::settings::loader::user_settings_path().is_some_and(|p| p.is_file()) {
-        out.push("User settings (~/.claude/settings.json)".to_string());
+        out.push("User settings (~/.lingxi/settings.json)".to_string());
     }
     out
 }

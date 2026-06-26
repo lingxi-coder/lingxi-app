@@ -2,7 +2,7 @@
 //!
 //! LingXi-internal feature with no upstream `claude-code/src/tools/`
 //! counterpart. Both tools operate on the M3-02 team-mem root
-//! `~/.claude/team-mem/<team_name>/`. The `config.json` body is a LingXi
+//! `~/.lingxi/team-mem/<team_name>/`. The `config.json` body is a LingXi
 //! schema-versioned descriptor; the directory itself becomes the
 //! watcher root when `settings.team_memory.enabled == true` (M3-02).
 //!
@@ -36,7 +36,7 @@ use tool_api::tool_trait::{
 
 // -- Wire identifier locks (spec §7 lines 501-507) ---------------------------
 
-/// M3-02 lock: the `~/.claude/team-mem/` subdirectory name.
+/// M3-02 lock: the `~/.lingxi/team-mem/` subdirectory name.
 ///
 /// **Deviation from plan Task 0 step 2:** the plan called for importing
 /// `memory::memdir::paths::TEAM_MEM_SUBDIR`, but `lingxi-memory`
@@ -93,7 +93,7 @@ impl TeamDeleteTool {
 
 // -- Path helpers ------------------------------------------------------------
 
-/// Resolve the on-disk team directory: `<home>/.claude/team-mem/<team_name>/`.
+/// Resolve the on-disk team directory: `<home>/.lingxi/team-mem/<team_name>/`.
 ///
 /// The use of [`TEAM_MEM_SUBDIR`] (symbol, not literal) makes the M3-02 lock
 /// observable at compile time.
@@ -102,7 +102,7 @@ pub fn resolve_team_dir(home: &Path, team_name: &str) -> PathBuf {
     config_home_dir(home).join(TEAM_MEM_SUBDIR).join(team_name)
 }
 
-/// User config-home: `$CLAUDE_CONFIG_DIR` when set (claude-code `tr()` `??`: an
+/// User config-home: `$LINGXI_CONFIG_DIR` when set (claude-code `tr()` `??`: an
 /// empty value is honored verbatim → cwd-relative), else `<home>/.claude`.
 #[must_use]
 fn config_home_dir(home: &Path) -> PathBuf {
@@ -291,7 +291,7 @@ impl Tool for TeamCreateTool {
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
-        "Create a team-memory directory under ~/.claude/team-mem/<team_name>/.".into()
+        "Create a team-memory directory under ~/.lingxi/team-mem/<team_name>/.".into()
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {

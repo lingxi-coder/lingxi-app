@@ -8,7 +8,7 @@
 //! this path too sensitive to silently auto-allow an edit to?" When it returns
 //! [`AutoEditSafety::Unsafe`] the caller must fall through to an interactive
 //! ask instead of auto-allowing. It protects `.git/`, `.vscode/`, `.idea/`,
-//! `.claude/` (except the structural `.claude/worktrees/`), shell/config
+//! `.lingxi/` (except the structural `.lingxi/worktrees/`), shell/config
 //! dotfiles (`.bashrc`, `.gitconfig`, `.mcp.json`, …), and a battery of
 //! suspicious Windows path shapes (NTFS ADS, 8.3 short names, long-path
 //! prefixes, trailing dot/space, DOS device names, `...`, UNC).
@@ -149,7 +149,7 @@ pub fn is_dangerous_file_path_to_auto_edit(path: &Path, raw: &str) -> bool {
                 continue;
             }
 
-            // Special case: `.claude/worktrees/` is a structural path (where
+            // Special case: `.lingxi/worktrees/` is a structural path (where
             // Claude stores git worktrees), not a user-created dangerous
             // directory. Skip THIS `.claude` segment when it is immediately
             // followed by `worktrees`; keep scanning later segments so a
@@ -262,7 +262,7 @@ pub fn has_suspicious_windows_path_pattern(raw: &str) -> bool {
 ///
 /// Branch order (byte-faithful):
 /// 1. Suspicious Windows path pattern → `Unsafe { classifier_approvable: false }`.
-/// 2. Claude config file (`.claude/settings.json`, `.claude/commands|agents|
+/// 2. Claude config file (`.lingxi/settings.json`, `.lingxi/commands|agents|
 ///    skills/…`) → `Unsafe { classifier_approvable: true }`.
 /// 3. Dangerous file/directory ([`is_dangerous_file_path_to_auto_edit`]) →
 ///    `Unsafe { classifier_approvable: true }`.
@@ -314,16 +314,16 @@ pub fn check_path_safety_for_auto_edit(raw: &str, roots: &FsRoots) -> AutoEditSa
 /// structural half of `isClaudeSettingsPath` (`:200-222`).
 ///
 /// We port the universal, structural checks that need no process-global state:
-/// - ends with `/.claude/settings.json` or `/.claude/settings.local.json`
+/// - ends with `/.lingxi/settings.json` or `/.lingxi/settings.local.json`
 ///   (case-folded), matching the "include even for other projects" arm; and
-/// - lives inside `<cwd>/.claude/commands`, `<cwd>/.claude/agents`, or
-///   `<cwd>/.claude/skills`.
+/// - lives inside `<cwd>/.lingxi/commands`, `<cwd>/.lingxi/agents`, or
+///   `<cwd>/.lingxi/skills`.
 ///
 /// The TS additionally compares against every resolved settings-file path
 /// returned by `getSettingsPaths()` (managed/CLI-arg settings). Those depend on
 /// `SETTING_SOURCES` process state not plumbed into this crate, so they are
 /// NOT ported here. This is a safe under-approximation: anything under
-/// `.claude/` is already caught by [`is_dangerous_file_path_to_auto_edit`]
+/// `.lingxi/` is already caught by [`is_dangerous_file_path_to_auto_edit`]
 /// (`.claude` ∈ [`DANGEROUS_DIRECTORIES`]) with the SAME
 /// `classifier_approvable: true` outcome — so the only observable effect of
 /// this branch is preferring the "haven't granted it yet" message over the
@@ -332,13 +332,13 @@ fn is_claude_config_file_path(expanded: &Path, roots: &FsRoots) -> bool {
     let normalized = normalize_case_for_comparison(&expanded.to_string_lossy());
 
     // `isClaudeSettingsPath` structural arm — POSIX separator (`/`).
-    if normalized.ends_with("/.claude/settings.json")
-        || normalized.ends_with("/.claude/settings.local.json")
+    if normalized.ends_with("/.lingxi/settings.json")
+        || normalized.ends_with("/.lingxi/settings.local.json")
     {
         return true;
     }
 
-    // Inside `<cwd>/.claude/{commands,agents,skills}` — `pathInWorkingPath`
+    // Inside `<cwd>/.lingxi/{commands,agents,skills}` — `pathInWorkingPath`
     // (case-insensitive containment). We reuse the lexical containment shape:
     // the expanded path must be at-or-under the directory.
     let cwd = &roots.cwd;
@@ -522,7 +522,7 @@ mod tests {
         FsRoots {
             cwd: PathBuf::from("/proj"),
             home: Some(PathBuf::from("/home/u")),
-            claude_home: PathBuf::from("/home/u/.claude"),
+            claude_home: PathBuf::from("/home/u/.lingxi"),
         }
     }
 
@@ -546,21 +546,21 @@ mod tests {
 
     #[test]
     fn claude_settings_is_dangerous_directory() {
-        // `.claude/` directory segment → dangerous.
-        assert!(is_dangerous("/proj/.claude/settings.json"));
+        // `.lingxi/` directory segment → dangerous.
+        assert!(is_dangerous("/proj/.lingxi/settings.json"));
     }
 
     #[test]
     fn claude_worktrees_is_not_dangerous() {
-        // `.claude/worktrees/...` is structural — NOT dangerous.
-        assert!(!is_dangerous("/proj/.claude/worktrees/x/file.rs"));
+        // `.lingxi/worktrees/...` is structural — NOT dangerous.
+        assert!(!is_dangerous("/proj/.lingxi/worktrees/x/file.rs"));
     }
 
     #[test]
     fn nested_claude_inside_worktree_is_dangerous() {
         // A nested `.claude` NOT followed by `worktrees` is still blocked.
         assert!(is_dangerous(
-            "/proj/.claude/worktrees/x/.claude/settings.json"
+            "/proj/.lingxi/worktrees/x/.lingxi/settings.json"
         ));
     }
 
@@ -584,8 +584,8 @@ mod tests {
     fn mixed_case_git_dir_is_dangerous() {
         // Case-insensitive: `.GiT/` still matches `.git`.
         assert!(is_dangerous("/proj/.GiT/config"));
-        // Mixed-case `.cLaUdE` still matches `.claude`.
-        assert!(is_dangerous("/proj/.cLaUdE/settings.json"));
+        // Mixed-case `.lInGxI` still matches `.lingxi`.
+        assert!(is_dangerous("/proj/.lInGxI/settings.json"));
     }
 
     #[test]
@@ -616,12 +616,12 @@ mod tests {
                 ".profile",
                 ".ripgreprc",
                 ".mcp.json",
-                ".claude.json",
+                ".lingxi.json",
             ]
         );
         assert_eq!(
             DANGEROUS_DIRECTORIES,
-            &[".git", ".vscode", ".idea", ".claude"]
+            &[".git", ".vscode", ".idea", ".lingxi"]
         );
     }
 
@@ -737,8 +737,8 @@ mod tests {
 
     #[test]
     fn claude_settings_is_unsafe_classifier_approvable() {
-        // `.claude/settings.json` → claude-config branch ("haven't granted").
-        match safety("/proj/.claude/settings.json") {
+        // `.lingxi/settings.json` → claude-config branch ("haven't granted").
+        match safety("/proj/.lingxi/settings.json") {
             AutoEditSafety::Unsafe {
                 classifier_approvable,
                 message,
@@ -752,8 +752,8 @@ mod tests {
 
     #[test]
     fn claude_commands_dir_is_unsafe_classifier_approvable() {
-        // `<cwd>/.claude/commands/x.md` → claude-config branch.
-        match safety("/proj/.claude/commands/x.md") {
+        // `<cwd>/.lingxi/commands/x.md` → claude-config branch.
+        match safety("/proj/.lingxi/commands/x.md") {
             AutoEditSafety::Unsafe {
                 classifier_approvable,
                 message,
@@ -798,9 +798,9 @@ mod tests {
 
     #[test]
     fn worktrees_path_is_safe() {
-        // `.claude/worktrees/x/file.rs` passes all branches → Safe.
+        // `.lingxi/worktrees/x/file.rs` passes all branches → Safe.
         assert_eq!(
-            safety("/proj/.claude/worktrees/x/file.rs"),
+            safety("/proj/.lingxi/worktrees/x/file.rs"),
             AutoEditSafety::Safe
         );
     }
@@ -820,7 +820,7 @@ mod tests {
 
     #[test]
     fn normalize_case_lowercases() {
-        assert_eq!(normalize_case_for_comparison(".CLAUDE"), ".claude");
+        assert_eq!(normalize_case_for_comparison(".LINGXI"), ".lingxi");
         assert_eq!(normalize_case_for_comparison("Foo/Bar"), "foo/bar");
     }
 }

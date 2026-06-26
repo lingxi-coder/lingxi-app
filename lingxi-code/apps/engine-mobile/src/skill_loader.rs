@@ -1,7 +1,7 @@
 //! Disk-backed `Skill`-tool loader for the mobile engine (audit fix #14).
 //!
 //! Makes the mobile `Skill` tool functional. It discovers on-disk
-//! `.claude/commands/**.md` + directory-format `.claude/skills/<name>/SKILL.md`
+//! `.lingxi/commands/**.md` + directory-format `.lingxi/skills/<name>/SKILL.md`
 //! under the device's app-private root (`app_files_root` = Android `filesDir`,
 //! with `claude_home = <app_files_root>/.claude`) and resolves a model-supplied
 //! skill name to a real prompt [`SkillDescriptor`] — the mobile analog of
@@ -104,7 +104,7 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
 }
 
 /// [`SkillLoader`] backed by a registry built once from the device's on-disk
-/// `.claude/commands` + `.claude/skills` layers.
+/// `.lingxi/commands` + `.lingxi/skills` layers.
 pub struct MobileDiskSkillLoader {
     registry: CommandRegistry,
     /// Per-session id stamped on resolved descriptors (`${CLAUDE_SESSION_ID}`),
@@ -169,14 +169,14 @@ impl SkillLoader for MobileDiskSkillLoader {
 mod tests {
     use super::*;
 
-    /// The deferred #14 test: a disk-authored `.claude/commands/*.md` under the
+    /// The deferred #14 test: a disk-authored `.lingxi/commands/*.md` under the
     /// app-private root resolves through the loader as a prompt skill (proving the
     /// mobile Skill tool is no longer inert), and an unknown name resolves to None.
     #[tokio::test]
     async fn resolves_on_disk_command_as_prompt_skill() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let cmd_dir = root.join(".claude").join("commands");
+        let cmd_dir = root.join(".lingxi").join("commands");
         tokio::fs::create_dir_all(&cmd_dir).await.unwrap();
         tokio::fs::write(
             cmd_dir.join("review-pr.md"),
@@ -188,7 +188,7 @@ mod tests {
         // Mirror the mobile host wiring: claude_home = <root>/.claude, home = root
         // (so home/.claude == claude_home; the loaders dedup by name across layers).
         let loader =
-            MobileDiskSkillLoader::load_from_disk(root, &root.join(".claude"), root, None).await;
+            MobileDiskSkillLoader::load_from_disk(root, &root.join(".lingxi"), root, None).await;
 
         let desc = loader
             .load("review-pr")

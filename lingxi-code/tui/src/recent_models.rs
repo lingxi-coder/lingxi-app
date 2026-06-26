@@ -1,4 +1,4 @@
-//! Best-effort recent-model persistence via `~/.claude/settings.json`
+//! Best-effort recent-model persistence via `~/.lingxi/settings.json`
 //! `recentModels` field (mirrors `theme_persist.rs`; no new persistence engine).
 //!
 //! Stored as an ordered array (most-recent-first) of `{ "provider": ..,

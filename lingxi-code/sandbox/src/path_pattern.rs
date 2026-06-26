@@ -54,8 +54,8 @@ pub(crate) fn lexically_normalize_absolute(path: &str) -> String {
 /// prefix conventions.
 ///
 /// `settings_dir` is the directory the settings file with this rule lives in.
-/// For `~/.claude/settings.json` that's `~/.claude`. For
-/// `<project>/.claude/settings.json` that's `<project>/.claude`. For ad-hoc /
+/// For `~/.lingxi/settings.json` that's `~/.claude`. For
+/// `<project>/.lingxi/settings.json` that's `<project>/.claude`. For ad-hoc /
 /// in-memory settings, callers may pass any path; only `/path` patterns are
 /// affected.
 #[must_use]
@@ -113,11 +113,11 @@ mod tests {
 
     #[test]
     fn path_pattern_normalizes_settings_relative() {
-        let dir = Path::new("/proj/.claude");
+        let dir = Path::new("/proj/.lingxi");
         // `/x/../y` joined under settings dir then collapsed → `<dir>/y`.
         assert_eq!(
             resolve_path_pattern_for_sandbox("/x/../y", dir),
-            "/proj/.claude/y"
+            "/proj/.lingxi/y"
         );
         // `//abs` escape strips one slash and does NOT settings-relativize.
         assert_eq!(resolve_path_pattern_for_sandbox("//etc", dir), "/etc");

@@ -1,4 +1,4 @@
-//! Best-effort theme persistence via `~/.claude/settings.json` `theme` field.
+//! Best-effort theme persistence via `~/.lingxi/settings.json` `theme` field.
 //!
 //! No new persistence engine (spec §4 R7): this read-modify-writes the same
 //! JSON object the existing `ConfigTool` allowlists (the `theme` field is
@@ -15,7 +15,7 @@ use serde_json::{Map, Value};
 use crate::theme::ThemeSetting;
 
 /// Resolve `<config-home>/settings.json` (the same target the config tool uses):
-/// `$CLAUDE_CONFIG_DIR` when set, else `~/.claude`.
+/// `$LINGXI_CONFIG_DIR` when set, else `~/.claude`.
 #[must_use]
 fn settings_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| memory::claude_md::user_config_dir(&h).join("settings.json"))

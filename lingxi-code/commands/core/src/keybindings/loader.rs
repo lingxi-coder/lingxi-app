@@ -4,7 +4,7 @@
 //! ## What is ported
 //!
 //! `loadKeybindings` / `loadKeybindingsSyncWithWarnings`: gate
-//! (`isKeybindingCustomizationEnabled`) → read `~/.claude/keybindings.json` →
+//! (`isKeybindingCustomizationEnabled`) → read `~/.lingxi/keybindings.json` →
 //! require the `{ "bindings": [...] }` object wrapper (else `parse_error`) →
 //! validate block structure → merge `[...defaults, ...userParsed]` (user
 //! appended so last-wins overrides) → raw-JSON duplicate-key check +
@@ -182,7 +182,7 @@ pub fn load_keybindings(enabled: bool, path: &Path, is_macos: bool) -> Keybindin
     }
 }
 
-/// Convenience: load against the real `~/.claude/keybindings.json` path on the
+/// Convenience: load against the real `~/.lingxi/keybindings.json` path on the
 /// host platform. Mirrors `getKeybindingsPath()` via the existing handler's
 /// [`super::keybindings_path`].
 #[must_use]

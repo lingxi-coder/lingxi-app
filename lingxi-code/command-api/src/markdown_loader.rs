@@ -1,11 +1,11 @@
-//! Filesystem loader for custom markdown slash commands (`.claude/commands/**.md`).
+//! Filesystem loader for custom markdown slash commands (`.lingxi/commands/**.md`).
 //!
 //! Faithful port of the discovery half of
 //! `claude-code/src/utils/markdownConfigLoader.ts` plus the namespacing helpers
 //! from `claude-code/src/skills/loadSkillsDir.ts`:
 //!
 //! * [`project_dirs_up_to_home`] — the git-root-bounded upward walk collecting
-//!   `.claude/<subdir>` directories (TS `getProjectDirsUpToHome`).
+//!   `.lingxi/<subdir>` directories (TS `getProjectDirsUpToHome`).
 //! * [`load_command_markdown_files`] — walks managed / user / project dirs,
 //!   recursively finds `*.md` via native `std::fs` (TS `findMarkdownFilesNative`
 //!   — the `CLAUDE_CODE_USE_NATIVE_FILE_SEARCH` path), parses frontmatter, and
@@ -29,11 +29,11 @@
 //!   walk stops at the nearest `.git` above `cwd`. The worktree fallback in
 //!   [`load_command_markdown_files`] is ported in shape: when the nearest `.git`
 //!   is a *file* (worktree marker) pointing at a `gitdir`, the resolved main
-//!   repo's `.claude/<subdir>` is added iff the worktree itself lacks one.
+//!   repo's `.lingxi/<subdir>` is added iff the worktree itself lacks one.
 //! * Frontmatter parsing reuses the existing `serde_yaml` dependency and the
 //!   `---`/`\n---\n` splitter pattern from `skill-api::frontmatter`
 //!   (`parse_skill_markdown`) without depending on `skill-api`.
-//! * Directory-format `.claude/skills/<name>/SKILL.md` files use a separate
+//! * Directory-format `.lingxi/skills/<name>/SKILL.md` files use a separate
 //!   loader path because their command name comes from the skill directory, not
 //!   the `SKILL.md` file stem.
 
@@ -54,7 +54,7 @@ use std::os::unix::fs::MetadataExt;
 pub struct MarkdownCommandFile {
     /// Absolute path to the `.md` file on disk.
     pub file_path: PathBuf,
-    /// The `.claude/<subdir>` directory the file was discovered under, used as
+    /// The `.lingxi/<subdir>` directory the file was discovered under, used as
     /// the namespace base (TS `baseDir`).
     pub base_dir: PathBuf,
     /// Parsed YAML frontmatter (defaults when absent).
@@ -236,7 +236,7 @@ fn build_namespace(target_dir: &Path, base_dir: &Path) -> String {
 }
 
 /// Traverse from `cwd` up to the git root (or home if not in a git repo),
-/// collecting existing `.claude/<subdir>` directories. Faithful port of TS
+/// collecting existing `.lingxi/<subdir>` directories. Faithful port of TS
 /// `getProjectDirsUpToHome` with the simplified `resolveStopBoundary` (nearest
 /// `.git` above `cwd`; see the module divergence note).
 ///
@@ -327,7 +327,7 @@ fn canonical_git_root(git_root: &Path) -> Option<PathBuf> {
 /// * `claude_home` — the user config dir (TS `getClaudeConfigHomeDir()`); the
 ///   user layer is `claude_home/commands`.
 /// * `managed_dir` — the managed-policy root (TS `getManagedFilePath()`); the
-///   managed layer is `managed_dir/.claude/commands`.
+///   managed layer is `managed_dir/.lingxi/commands`.
 /// * `home` — the user's home directory, the upward-walk stop boundary.
 ///
 /// Files are returned deduplicated by `(dev, ino)` with `managed > user >
@@ -346,7 +346,7 @@ pub async fn load_command_markdown_files(
     let mut project_dirs = project_dirs_up_to_home(SUBDIR, cwd, home);
 
     // Worktree fallback: when cwd's nearest .git is a worktree marker whose main
-    // repo differs, and the worktree lacks its own `.claude/<subdir>`, add the
+    // repo differs, and the worktree lacks its own `.lingxi/<subdir>`, add the
     // main repo's copy (TS `loadMarkdownFilesForSubdir` lines 320-335).
     if let Some(git_root) = nearest_git_root(cwd) {
         if let Some(canonical_root) = canonical_git_root(&git_root) {
@@ -381,7 +381,7 @@ pub async fn load_command_markdown_files(
     deduplicate_by_inode(all_files)
 }
 
-/// Load directory-format `.claude/skills/<name>/SKILL.md` files from user and
+/// Load directory-format `.lingxi/skills/<name>/SKILL.md` files from user and
 /// project skill directories.
 #[must_use]
 pub async fn load_skill_markdown_files(
@@ -392,7 +392,7 @@ pub async fn load_skill_markdown_files(
     load_skill_markdown_files_with_roots(cwd, claude_home, None, home, &[]).await
 }
 
-/// Load directory-format `.claude/skills/<name>/SKILL.md` files from managed,
+/// Load directory-format `.lingxi/skills/<name>/SKILL.md` files from managed,
 /// user, project, and additional skill directories.
 ///
 /// The returned order is the command-resolution priority order:
@@ -813,7 +813,7 @@ pub fn build_markdown_command(file: &MarkdownCommandFile, source: CommandSource)
         // `argument_names`, so carry it through verbatim. This is what drives the
         // in-TUI progressive argument-hint (`generateProgressiveArgumentHint`).
         argument_names: file.frontmatter.argument_names.clone(),
-        // SLASH.3: legacy `.claude/commands/**.md` files load through TS
+        // SLASH.3: legacy `.lingxi/commands/**.md` files load through TS
         // `loadSkillsFromCommandsDir`, which tags every command it builds with
         // `loadedFrom: 'commands_DEPRECATED'`.
         loaded_from: Some("commands_DEPRECATED".to_string()),
@@ -940,21 +940,21 @@ mod tests {
 
     #[test]
     fn command_name_top_level() {
-        let base = Path::new("/root/.claude/commands");
+        let base = Path::new("/root/.lingxi/commands");
         let file = base.join("foo.md");
         assert_eq!(command_name_from_path(&file, base), "foo");
     }
 
     #[test]
     fn command_name_namespaced() {
-        let base = Path::new("/root/.claude/commands");
+        let base = Path::new("/root/.lingxi/commands");
         let file = base.join("sub").join("bar.md");
         assert_eq!(command_name_from_path(&file, base), "sub:bar");
     }
 
     #[test]
     fn command_name_deep_namespace() {
-        let base = Path::new("/root/.claude/commands");
+        let base = Path::new("/root/.lingxi/commands");
         let file = base.join("a").join("b").join("c.md");
         assert_eq!(command_name_from_path(&file, base), "a:b:c");
     }
@@ -1076,8 +1076,8 @@ mod tests {
     #[test]
     fn build_markdown_command_uses_extracted_description() {
         let file = MarkdownCommandFile {
-            file_path: PathBuf::from("/root/.claude/commands/foo.md"),
-            base_dir: PathBuf::from("/root/.claude/commands"),
+            file_path: PathBuf::from("/root/.lingxi/commands/foo.md"),
+            base_dir: PathBuf::from("/root/.lingxi/commands"),
             frontmatter: CommandFrontmatter::default(),
             content: "# Foo Title\n\nHello $1".to_string(),
             source: CommandSource::Project,
@@ -1100,8 +1100,8 @@ mod tests {
             ..CommandFrontmatter::default()
         };
         let file = MarkdownCommandFile {
-            file_path: PathBuf::from("/r/.claude/commands/x.md"),
-            base_dir: PathBuf::from("/r/.claude/commands"),
+            file_path: PathBuf::from("/r/.lingxi/commands/x.md"),
+            base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: fm,
             content: "# Ignored Title".to_string(),
             source: CommandSource::User,
@@ -1119,8 +1119,8 @@ mod tests {
             ..CommandFrontmatter::default()
         };
         let file = MarkdownCommandFile {
-            file_path: PathBuf::from("/r/.claude/commands/x.md"),
-            base_dir: PathBuf::from("/r/.claude/commands"),
+            file_path: PathBuf::from("/r/.lingxi/commands/x.md"),
+            base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: fm,
             content: "# Body".to_string(),
             source: CommandSource::Project,
@@ -1139,8 +1139,8 @@ mod tests {
             ..CommandFrontmatter::default()
         };
         let file = MarkdownCommandFile {
-            file_path: PathBuf::from("/r/.claude/commands/x.md"),
-            base_dir: PathBuf::from("/r/.claude/commands"),
+            file_path: PathBuf::from("/r/.lingxi/commands/x.md"),
+            base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: fm,
             content: "# Body".to_string(),
             source: CommandSource::Project,
@@ -1156,8 +1156,8 @@ mod tests {
     fn build_markdown_command_defaults_argument_names_to_empty() {
         // No `arguments` frontmatter → empty list (the built-in default).
         let file = MarkdownCommandFile {
-            file_path: PathBuf::from("/r/.claude/commands/x.md"),
-            base_dir: PathBuf::from("/r/.claude/commands"),
+            file_path: PathBuf::from("/r/.lingxi/commands/x.md"),
+            base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: CommandFrontmatter::default(),
             content: "# Body".to_string(),
             source: CommandSource::Project,
@@ -1220,8 +1220,8 @@ mod tests {
         let (fm, _) = parse_frontmatter("---\nwhen_to_use: use for X\n---\nbody");
         assert_eq!(fm.when_to_use.as_deref(), Some("use for X"));
         let file = MarkdownCommandFile {
-            file_path: PathBuf::from("/r/.claude/commands/x.md"),
-            base_dir: PathBuf::from("/r/.claude/commands"),
+            file_path: PathBuf::from("/r/.lingxi/commands/x.md"),
+            base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: fm,
             content: "# Body".to_string(),
             source: CommandSource::Project,
@@ -1236,8 +1236,8 @@ mod tests {
         // registry model-invocable filter (`!disable_model_invocation`) drops it.
         let (fm, _) = parse_frontmatter("---\ndisable-model-invocation: true\n---\nx");
         let file = MarkdownCommandFile {
-            file_path: PathBuf::from("/r/.claude/commands/hidden.md"),
-            base_dir: PathBuf::from("/r/.claude/commands"),
+            file_path: PathBuf::from("/r/.lingxi/commands/hidden.md"),
+            base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: fm,
             content: "# Body".to_string(),
             source: CommandSource::Project,
@@ -1251,8 +1251,8 @@ mod tests {
         // No `argument-hint` frontmatter -> top-level hint stays `None`, but the
         // `commands_DEPRECATED` marker is still set.
         let file = MarkdownCommandFile {
-            file_path: PathBuf::from("/r/.claude/commands/y.md"),
-            base_dir: PathBuf::from("/r/.claude/commands"),
+            file_path: PathBuf::from("/r/.lingxi/commands/y.md"),
+            base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: CommandFrontmatter::default(),
             content: "# Body".to_string(),
             source: CommandSource::Project,
@@ -1288,13 +1288,13 @@ mod tests {
     #[tokio::test]
     async fn loads_top_level_and_namespaced_commands() {
         let root = temp_dir("names");
-        let cmds = root.join("proj").join(".claude").join("commands");
+        let cmds = root.join("proj").join(".lingxi").join("commands");
         write(&cmds.join("foo.md"), "Hello $1");
         write(&cmds.join("sub").join("bar.md"), "Bar body");
 
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = root.join("home").join(".claude");
+        let claude_home = root.join("home").join(".lingxi");
         let managed = root.join("managed-none");
 
         let files =
@@ -1318,16 +1318,16 @@ mod tests {
         fs::create_dir_all(&home).unwrap();
 
         let project = root.join("proj");
-        let proj_cmds = project.join(".claude").join("commands");
+        let proj_cmds = project.join(".lingxi").join("commands");
         write(&proj_cmds.join("shared.md"), "shared body");
 
         let managed = root.join("managed");
-        let managed_cmds = managed.join(".claude").join("commands");
+        let managed_cmds = managed.join(".lingxi").join("commands");
         fs::create_dir_all(&managed_cmds).unwrap();
         // Hardlink the same inode into the managed dir.
         fs::hard_link(proj_cmds.join("shared.md"), managed_cmds.join("shared.md")).unwrap();
 
-        let claude_home = root.join("home").join(".claude");
+        let claude_home = root.join("home").join(".lingxi");
         let files = load_command_markdown_files(&project, &claude_home, &managed, &home).await;
         let shared: Vec<&MarkdownCommandFile> = files
             .iter()
@@ -1355,12 +1355,12 @@ mod tests {
         fs::create_dir_all(&home).unwrap();
 
         let project = root.join("proj");
-        let proj_cmds = project.join(".claude").join("commands");
+        let proj_cmds = project.join(".lingxi").join("commands");
         write(&proj_cmds.join("real.md"), "real body");
 
         // The user commands dir is a SYMLINK to the project's commands dir, so the
         // same `real.md` is reachable as both project and user.
-        let claude_home = root.join("home").join(".claude");
+        let claude_home = root.join("home").join(".lingxi");
         fs::create_dir_all(&claude_home).unwrap();
         std::os::unix::fs::symlink(&proj_cmds, claude_home.join("commands")).unwrap();
 
@@ -1382,7 +1382,7 @@ mod tests {
         let root = temp_dir("empty");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = root.join("home").join(".claude");
+        let claude_home = root.join("home").join(".lingxi");
         let managed = root.join("nope");
         let files =
             load_command_markdown_files(&root.join("noproj"), &claude_home, &managed, &home).await;
@@ -1398,16 +1398,16 @@ mod tests {
 
         let repo = root.join("repo");
         fs::create_dir_all(repo.join(".git")).unwrap();
-        let skill_dir = repo.join(".claude").join("skills").join("demo");
+        let skill_dir = repo.join(".lingxi").join("skills").join("demo");
         let skill_markdown = "---\ndescription: Demo skill\nwhen_to_use: when demo is useful\n---\nUse $ARGUMENTS well\n";
         write(&skill_dir.join("SKILL.md"), skill_markdown);
 
         write(
-            &repo.join(".claude").join("commands").join("demo.md"),
+            &repo.join(".lingxi").join("commands").join("demo.md"),
             "# Legacy demo\n",
         );
 
-        let claude_home = home.join(".claude");
+        let claude_home = home.join(".lingxi");
         let skill_files = load_skill_markdown_files(&repo, &claude_home, &home).await;
         assert_eq!(skill_files.len(), 1);
 
@@ -1451,7 +1451,7 @@ mod tests {
         let root = temp_dir("skill-collision");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = home.join(".claude");
+        let claude_home = home.join(".lingxi");
 
         let repo = root.join("repo");
         fs::create_dir_all(repo.join(".git")).unwrap();
@@ -1461,7 +1461,7 @@ mod tests {
         );
         write(
             &repo
-                .join(".claude")
+                .join(".lingxi")
                 .join("skills")
                 .join("dup")
                 .join("SKILL.md"),
@@ -1484,7 +1484,7 @@ mod tests {
         let root = temp_dir("skill-layering");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = home.join(".claude");
+        let claude_home = home.join(".lingxi");
         let managed = root.join("managed");
         let additional = root.join("extra-skills");
 
@@ -1492,7 +1492,7 @@ mod tests {
         fs::create_dir_all(repo.join(".git")).unwrap();
         write(
             &managed
-                .join(".claude")
+                .join(".lingxi")
                 .join("skills")
                 .join("dup")
                 .join("SKILL.md"),
@@ -1504,7 +1504,7 @@ mod tests {
         );
         write(
             &repo
-                .join(".claude")
+                .join(".lingxi")
                 .join("skills")
                 .join("dup")
                 .join("SKILL.md"),
@@ -1548,22 +1548,22 @@ mod tests {
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
 
-        // root/repo/.git , root/repo/.claude/commands , root/repo/nested/.claude/commands
+        // root/repo/.git , root/repo/.lingxi/commands , root/repo/nested/.lingxi/commands
         let repo = root.join("repo");
         fs::create_dir_all(repo.join(".git")).unwrap();
-        fs::create_dir_all(repo.join(".claude").join("commands")).unwrap();
+        fs::create_dir_all(repo.join(".lingxi").join("commands")).unwrap();
         let nested = repo.join("nested");
-        fs::create_dir_all(nested.join(".claude").join("commands")).unwrap();
-        // Above the repo: a .claude/commands that must NOT be collected.
-        fs::create_dir_all(root.join(".claude").join("commands")).unwrap();
+        fs::create_dir_all(nested.join(".lingxi").join("commands")).unwrap();
+        // Above the repo: a .lingxi/commands that must NOT be collected.
+        fs::create_dir_all(root.join(".lingxi").join("commands")).unwrap();
 
         let dirs = project_dirs_up_to_home("commands", &nested, &home);
         // Most-specific first: nested, then repo. Stops at repo (git root).
         assert_eq!(
             dirs,
             vec![
-                nested.join(".claude").join("commands"),
-                repo.join(".claude").join("commands"),
+                nested.join(".lingxi").join("commands"),
+                repo.join(".lingxi").join("commands"),
             ]
         );
 

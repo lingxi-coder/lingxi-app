@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-/// Resolve `~/.claude/team-mem/` when explicitly enabled.
+/// Resolve `~/.lingxi/team-mem/` when explicitly enabled.
 ///
 /// Returns `None` when `enabled == false`. Auto-detection from
 /// filesystem presence is intentionally NOT used — caller must opt in
@@ -25,7 +25,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let home = tmp.path();
         // Pretend the dir exists on disk anyway:
-        std::fs::create_dir_all(home.join(".claude").join("team-mem")).unwrap();
+        std::fs::create_dir_all(home.join(".lingxi").join("team-mem")).unwrap();
         assert_eq!(resolve_team_memory_dir(home, false), None);
     }
 
@@ -33,6 +33,6 @@ mod tests {
     fn enabled_returns_dot_claude_team_mem() {
         let home = std::path::PathBuf::from("/home/u");
         let p = resolve_team_memory_dir(&home, true).expect("Some");
-        assert_eq!(p, std::path::PathBuf::from("/home/u/.claude/team-mem"));
+        assert_eq!(p, std::path::PathBuf::from("/home/u/.lingxi/team-mem"));
     }
 }

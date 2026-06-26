@@ -5,9 +5,9 @@
 //! full-screen viewer from `tui::screens::skills`; this handler covers the
 //! registry/bridge/headless path where no interactive screen can be opened.
 //!
-//! The data model mirrors the TUI viewer: project `.claude/skills/` directories
+//! The data model mirrors the TUI viewer: project `.lingxi/skills/` directories
 //! from the current directory up to the nearest git root, then
-//! `~/.claude/skills/`, directory-format skills only, and each skill's display
+//! `~/.lingxi/skills/`, directory-format skills only, and each skill's display
 //! name comes from the directory name rather than frontmatter.
 
 use async_trait::async_trait;
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 const DESCRIPTION: &str = "List available skills";
 const TITLE: &str = "Skills";
 const EMPTY_SUBTITLE: &str = "No skills found";
-const EMPTY_BODY: &str = "Create skills in .claude/skills/ or ~/.claude/skills/";
+const EMPTY_BODY: &str = "Create skills in .lingxi/skills/ or ~/.lingxi/skills/";
 
 trait SkillRowExt {
     fn estimated_tokens(&self) -> usize;
@@ -125,7 +125,7 @@ impl BuiltinCommandHandler for SkillsHandler {
 }
 
 fn claude_home_dir() -> PathBuf {
-    // claude-code `tr()`: `$CLAUDE_CONFIG_DIR` when set wins (`??`: an empty value
+    // claude-code `tr()`: `$LINGXI_CONFIG_DIR` when set wins (`??`: an empty value
     // is honored verbatim → cwd-relative), else `$HOME/.claude` (with a
     // `$USERPROFILE` fallback for Windows, matching tools/file + tools/task).
     if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
@@ -252,13 +252,13 @@ mod tests {
     fn empty_state_matches_tui_copy() {
         let root = tmp_root("empty");
         let cwd = root.join("repo");
-        let home = root.join("home").join(".claude");
+        let home = root.join("home").join(".lingxi");
         fs::create_dir_all(&cwd).expect("create cwd");
         fs::create_dir_all(&home).expect("create home");
 
         assert_eq!(
             render_available_skills(&cwd, &home),
-            "Skills\nNo skills found\nCreate skills in .claude/skills/ or ~/.claude/skills/\nEsc to close"
+            "Skills\nNo skills found\nCreate skills in .lingxi/skills/ or ~/.lingxi/skills/\nEsc to close"
         );
         fs::remove_dir_all(root).ok();
     }
@@ -268,13 +268,13 @@ mod tests {
         let root = tmp_root("list");
         let repo = root.join("repo");
         let cwd = repo.join("nested");
-        let home = root.join("home").join(".claude");
+        let home = root.join("home").join(".lingxi");
         fs::create_dir_all(repo.join(".git")).expect("create git marker");
         fs::create_dir_all(&cwd).expect("create cwd");
         fs::create_dir_all(&home).expect("create home");
 
         write_skill(
-            &cwd.join(".claude").join("skills"),
+            &cwd.join(".lingxi").join("skills"),
             "alpha",
             "does alpha things",
             None,
@@ -301,8 +301,8 @@ mod tests {
     fn ignores_loose_markdown_files() {
         let root = tmp_root("loose");
         let cwd = root.join("repo");
-        let home = root.join("home").join(".claude");
-        let skills = cwd.join(".claude").join("skills");
+        let home = root.join("home").join(".lingxi");
+        let skills = cwd.join(".lingxi").join("skills");
         fs::create_dir_all(&skills).expect("create skills dir");
         fs::create_dir_all(&home).expect("create home");
         fs::write(skills.join("loose.md"), "---\ndescription: x\n---\n").expect("write loose");
@@ -322,11 +322,11 @@ mod tests {
     async fn handler_with_roots_uses_configured_roots() {
         let root = tmp_root("configured-roots");
         let cwd = root.join("repo");
-        let home = root.join("home").join(".claude");
+        let home = root.join("home").join(".lingxi");
         fs::create_dir_all(cwd.join(".git")).expect("create git marker");
         fs::create_dir_all(&home).expect("create home");
         write_skill(
-            &cwd.join(".claude").join("skills"),
+            &cwd.join(".lingxi").join("skills"),
             "configured",
             "configured skill",
             None,
@@ -352,14 +352,14 @@ mod tests {
     async fn handler_with_all_roots_lists_managed_and_additional_sections() {
         let root = tmp_root("handler-all-roots");
         let cwd = root.join("repo");
-        let home = root.join("home").join(".claude");
+        let home = root.join("home").join(".lingxi");
         let managed = root.join("managed");
         let additional = root.join("extra-skills");
         fs::create_dir_all(cwd.join(".git")).expect("create git marker");
         fs::create_dir_all(&home).expect("create home");
 
         write_skill(
-            &managed.join(".claude").join("skills"),
+            &managed.join(".lingxi").join("skills"),
             "org",
             "managed skill",
             None,

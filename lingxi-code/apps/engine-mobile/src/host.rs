@@ -192,11 +192,11 @@ pub struct MobileConfig {
     /// the token never enters the broadly-cloned public ctx. `None` until Task 10
     /// wires it from `android-aar`; `tool-git-mobile` reads it at call time.
     pub android_git_secret: Option<tool_api::AndroidGitSecret>,
-    /// P0.2 (mobile CLAUDE.md hierarchy): the memory hierarchy provider the
+    /// P0.2 (mobile LINGXI.md hierarchy): the memory hierarchy provider the
     /// orchestrator loads its instruction files from. The production FFI entry
     /// points (`ios-framework` / `android-aar`) inject
     /// `Some(orchestrator::prompt::real_provider())` so the orchestrator loads
-    /// the real `<cwd>/CLAUDE.md` + `<claude_home>/CLAUDE.md` hierarchy into the
+    /// the real `<cwd>/LINGXI.md` + `<claude_home>/LINGXI.md` hierarchy into the
     /// system prompt (claude-code parity) and the session-start
     /// `fire_instructions_loaded()` fires over those files. `None` (the default +
     /// every off-device host test) falls back to the empty
@@ -682,7 +682,7 @@ pub async fn build_mobile_inner(
     let output: Arc<dyn OutputStream> = Arc::new(AdapterOutputStream::new(event_sink.clone()));
 
     // (3c) No `.with_persist` on mobile: a device session has no project
-    // `.claude/settings.local.json` convention to write back to, so AllowAlways
+    // `.lingxi/settings.local.json` convention to write back to, so AllowAlways
     // stays session-only here (the desktop transport gate persists; this does not).
     let adapter_gate = Arc::new(AdapterPermissionGate::new(permission_sink));
     // Wrap the adapter gate with a local `PolicyPermissionGate` so the CORE
@@ -778,7 +778,7 @@ pub async fn build_mobile_inner(
     // loaded hooks.
     //
     // (6a) HookRegistry — read settings.json hooks from project
-    //      (`<cwd>/.claude/settings.json`) then user
+    //      (`<cwd>/.lingxi/settings.json`) then user
     //      (`<claude_home>/settings.json`), project last so it wins on identical
     //      command registration (same precedence as desktop). The files are read
     //      via `tokio::fs` (NOT the workspace-constrained `FileSystem::read_file`)
@@ -852,7 +852,7 @@ pub async fn build_mobile_inner(
 
     // P0.2: the production FFI entry points inject
     // `cfg.memory_provider = Some(orchestrator::prompt::real_provider())` so the
-    // orchestrator loads the real `<cwd>/CLAUDE.md` + `<claude_home>/CLAUDE.md`
+    // orchestrator loads the real `<cwd>/LINGXI.md` + `<claude_home>/LINGXI.md`
     // hierarchy into its system prompt (claude-code parity) and step (9)'s
     // `fire_instructions_loaded()` fires over those files. `None` (the default +
     // every host test) falls back to the empty `StaticMemoryProvider`, so a
@@ -950,7 +950,7 @@ pub async fn build_mobile_inner(
          enabling sandboxing requires injecting one (see the sandbox_runner coupling note)"
     );
     // Audit fix (#14): build a disk-backed Skill loader so the mobile Skill tool
-    // resolves on-disk `.claude/commands` / `.claude/skills` under the device's
+    // resolves on-disk `.lingxi/commands` / `.lingxi/skills` under the device's
     // app-private root (`claude_home` = `<app_files_root>/.claude`). `home` = cwd
     // so `home/.claude` resolves to the same app-private `.claude` as claude_home
     // (the loaders dedup by name across project/user/managed layers). No
@@ -982,7 +982,7 @@ pub async fn build_mobile_inner(
         if traits::env::is_env_truthy(std::env::var("CLAUDE_CODE_MEMDIR_PREFETCH").ok().as_deref())
         {
             // `cfg.claude_home` is the device `.claude` dir; the helper re-appends
-            // `.claude/memdir`, so pass its PARENT as `home` ⇒ `<claude_home>/memdir`.
+            // `.lingxi/memdir`, so pass its PARENT as `home` ⇒ `<claude_home>/memdir`.
             let home = cfg
                 .claude_home
                 .parent()
@@ -1087,8 +1087,8 @@ pub async fn build_mobile_inner(
     //     - `fire_session_start("startup")`: `build_mobile` assembles exactly one
     //       fresh session per call, so the byte-faithful `source` is `"startup"`
     //       (claude-code `utils/hooks.ts` SessionStart path).
-    //     - `fire_instructions_loaded()`: fires once per eager CLAUDE.md /
-    //       `CLAUDE.local.md` the memory provider yields (load_reason
+    //     - `fire_instructions_loaded()`: fires once per eager LINGXI.md /
+    //       `LINGXI.local.md` the memory provider yields (load_reason
     //       `session_start`), exactly as desktop. With the default empty provider
     //       this is a no-op over zero files; with the injected `real_provider()`
     //       it fires over the real hierarchy.
@@ -1212,7 +1212,7 @@ pub struct MobileEngineHandle {
     /// ([`Self::run_due_cron_now`]) can rebuild a FRESH, throwaway
     /// [`MobileRuntime`] per fired job (an isolated session that never pollutes
     /// the user's live conversation). Also carries `cwd`, which resolves the
-    /// `<cwd>/.claude/scheduled_tasks.json` the cron FFI reads/writes.
+    /// `<cwd>/.lingxi/scheduled_tasks.json` the cron FFI reads/writes.
     firer_cfg: MobileConfig,
     /// The aggregate device `Platform`, captured alongside `firer_cfg` so the
     /// cron firing path can call `build_mobile_inner` (and reach `filesystem()` /
@@ -1962,7 +1962,7 @@ fn lower_auth_state(
 // long-lived daemon, and the mobile engine binds no `TaskRegistry` / subagent
 // spawner). Instead the Android foreground service — woken by an exact
 // `AlarmManager` alarm — calls `run_due_cron_now()` to evaluate
-// `<cwd>/.claude/scheduled_tasks.json` ONCE and fire whatever is due, then
+// `<cwd>/.lingxi/scheduled_tasks.json` ONCE and fire whatever is due, then
 // `next_cron_fire_time()` to arm the next alarm. Due-detection + bookkeeping is
 // `cron::run_due` (1:1 with the desktop tick loop); firing is a fresh, throwaway
 // orchestrator turn. Permission strategy is claude-code parity: the fired turn
@@ -2430,7 +2430,7 @@ mod tests {
         };
 
         let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(tmp.path().join(".claude")).expect("mk .claude");
+        std::fs::create_dir_all(tmp.path().join(".lingxi")).expect("mk .lingxi");
         let platform: Arc<dyn traits::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let handle = new_engine_with_streaming(
@@ -2667,22 +2667,22 @@ mod tests {
     // ── P0.2: mobile hook lifecycle (real HookExecutorImpl + lifecycle fires) ─
     //
     // The mobile composition root now builds the REAL `HookExecutorImpl` (loaded
-    // from `cwd/.claude/settings.json` + `claude_home/settings.json`) in place of
+    // from `cwd/.lingxi/settings.json` + `claude_home/settings.json`) in place of
     // the `noop_hook_executor()` stub, and fires `SessionStart` (source=startup)
-    // + `InstructionsLoaded` (once per loaded CLAUDE.md) at boot — exactly the
+    // + `InstructionsLoaded` (once per loaded LINGXI.md) at boot — exactly the
     // desktop `build()` lifecycle (engine-desktop §7 / §7.1). These mirror the
     // desktop `build_fires_session_start_against_a_registered_hook` /
     // `build_fires_instructions_loaded_against_a_registered_hook` /
     // `build_with_injected_memory_reaches_system_prompt` tests.
 
     /// Write a single command hook for `event` into the project settings the
-    /// mobile hook loader reads at boot (`<cwd>/.claude/settings.json`). The
+    /// mobile hook loader reads at boot (`<cwd>/.lingxi/settings.json`). The
     /// `"true"` command is a side-effect-free no-op (the in-build lifecycle fire
     /// is best-effort), so this asserts hook *registration*, not the command's
     /// effect.
     fn write_project_hook(cwd: &std::path::Path, event: &str) {
-        let claude_dir = cwd.join(".claude");
-        std::fs::create_dir_all(&claude_dir).expect("mk .claude");
+        let claude_dir = cwd.join(".lingxi");
+        std::fs::create_dir_all(&claude_dir).expect("mk .lingxi");
         std::fs::write(
             claude_dir.join("settings.json"),
             format!(
@@ -2763,7 +2763,7 @@ mod tests {
 
     /// P0.2: the injectable `cfg.memory_provider` seam (production wires
     /// `orchestrator::prompt::real_provider()`). We inject a CONTROLLED in-memory
-    /// provider (NOT the real FS) carrying one project CLAUDE.md and prove it
+    /// provider (NOT the real FS) carrying one project LINGXI.md and prove it
     /// flows through `build_mobile` into the orchestrator's system prompt (the
     /// GAP-3 memory section — preamble + tier-tagged `Contents of …:` + body).
     /// The default-empty sibling elides the memory section, so its presence is
@@ -2773,7 +2773,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut cfg = test_config(tmp.path());
 
-        let memory_path = cfg.cwd.join("CLAUDE.md");
+        let memory_path = cfg.cwd.join("LINGXI.md");
         let memory_body = "PROJECT MEMORY: always be terse.";
         let memory_file = orchestrator::prompt::MemoryFile {
             path: memory_path.clone(),
@@ -2813,18 +2813,18 @@ mod tests {
                 "Contents of {} (project instructions, checked into the codebase):",
                 memory_path.display()
             )),
-            "the injected CLAUDE.md must emit a tier-tagged `Contents of …:` marker: {ctx}"
+            "the injected LINGXI.md must emit a tier-tagged `Contents of …:` marker: {ctx}"
         );
         assert!(
             ctx.contains(memory_body),
-            "the injected CLAUDE.md body must appear in the additional-context meta: {ctx}"
+            "the injected LINGXI.md body must appear in the additional-context meta: {ctx}"
         );
     }
 
     /// P0.2 determinism guard: a default-config `build_mobile`
     /// (`cfg.memory_provider == None`) loads NO memory, so the system prompt
     /// emits NO memory section — pinning that the existing boot tests stay
-    /// deterministic (they never read the real `~/.claude/CLAUDE.md`).
+    /// deterministic (they never read the real `~/.lingxi/LINGXI.md`).
     #[tokio::test]
     async fn build_mobile_default_loads_no_memory() {
         let tmp = tempfile::tempdir().expect("tempdir");

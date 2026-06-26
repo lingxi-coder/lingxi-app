@@ -547,11 +547,11 @@ impl WebFetchTool {
     /// body or on a write failure (matching `if(!("error"in h))`, which silently
     /// skips persistence and the footer on error).
     ///
-    /// Temp dir: `<workspace>/.claude/tool-results` (the same project-local
+    /// Temp dir: `<workspace>/.lingxi/tool-results` (the same project-local
     /// tool-results dir other tools use, e.g. `tools/mcp`'s binary-blob persist).
     /// claude-code uses `<config>/<session>/tool-results`; LingXi's tool context
     /// exposes the workspace root, not the config/session root, so the artifact is
-    /// written under the project's `.claude/tool-results`. (Residual: see report.)
+    /// written under the project's `.lingxi/tool-results`. (Residual: see report.)
     fn persist_binary(
         &self,
         content_type: &str,
@@ -2836,9 +2836,9 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             )),
             "missing binary footer: {content}"
         );
-        // The persisted file exists under <workspace>/.claude/tool-results with a
+        // The persisted file exists under <workspace>/.lingxi/tool-results with a
         // .pdf extension.
-        let results_dir = tmp.path().join(".claude").join("tool-results");
+        let results_dir = tmp.path().join(".lingxi").join("tool-results");
         let entries: Vec<_> = std::fs::read_dir(&results_dir)
             .expect("tool-results dir created")
             .filter_map(Result::ok)
@@ -2881,7 +2881,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let content = res.data["result"].as_str().unwrap();
         assert!(!content.contains("[Binary content"), "no footer for text/*");
         assert!(
-            !tmp.path().join(".claude").join("tool-results").exists(),
+            !tmp.path().join(".lingxi").join("tool-results").exists(),
             "no tool-results dir created for non-binary content"
         );
     }

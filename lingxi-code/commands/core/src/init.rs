@@ -1,5 +1,5 @@
 //! `/init` — returns the locked `OLD_INIT_PROMPT` template as an injected
-//! user message so the next turn analyses the codebase and writes CLAUDE.md.
+//! user message so the next turn analyses the codebase and writes LINGXI.md.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-10-commands-batch-1.md`
 //! Task 8.
@@ -87,7 +87,7 @@ mod tests {
         assert_eq!(h.name(), "init");
         assert_eq!(
             h.description(),
-            "Initialize a new CLAUDE.md file with codebase documentation"
+            "Initialize a new LINGXI.md file with codebase documentation"
         );
     }
 }

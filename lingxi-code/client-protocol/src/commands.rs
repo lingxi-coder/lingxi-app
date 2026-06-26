@@ -285,7 +285,7 @@ pub enum ListingKindDto {
     Agents,
     /// Slash-command catalog → `SlashCommandCatalog`.
     SlashCommands,
-    /// CLAUDE.md memory listing → `MemoryEntries`.
+    /// LINGXI.md memory listing → `MemoryEntries`.
     Memory,
     /// `/status` panel snapshot → `StatusSnapshot`.
     Status,

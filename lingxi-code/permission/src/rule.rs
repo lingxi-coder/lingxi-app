@@ -160,11 +160,11 @@ pub enum PermissionBehavior {
 /// `UserSettings` is the lowest. See `priority` for the canonical ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PermissionRuleSource {
-    /// `~/.claude/settings.json` (global user config).
+    /// `~/.lingxi/settings.json` (global user config).
     UserSettings,
-    /// `.claude/settings.json` checked into the project.
+    /// `.lingxi/settings.json` checked into the project.
     ProjectSettings,
-    /// `.claude/settings.local.json` (gitignored per-clone overrides).
+    /// `.lingxi/settings.local.json` (gitignored per-clone overrides).
     LocalSettings,
     /// Rules attached to a feature flag.
     FlagSettings,

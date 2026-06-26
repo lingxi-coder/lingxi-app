@@ -58,7 +58,7 @@ fn build_prompt() -> String {
     // TS `changelogSection` default value.
     let changelog_section = "\n\n## Changelog\n<!-- CHANGELOG:START -->\n[If this PR contains user-facing changes, add a changelog entry here. Otherwise, remove this section.]\n<!-- CHANGELOG:END -->";
     // TS `slackStep` default value.
-    let slack_step = "\n\n5. After creating/updating the PR, check if the user's CLAUDE.md mentions posting to Slack channels. If it does, use ToolSearch to search for \"slack send message\" tools. If ToolSearch finds a Slack tool, ask the user if they'd like you to post the PR URL to the relevant Slack channel. Only post if the user confirms. If ToolSearch returns no results or errors, skip this step silently—do not mention the failure, do not attempt workarounds, and do not try alternative approaches.";
+    let slack_step = "\n\n5. After creating/updating the PR, check if the user's LINGXI.md mentions posting to Slack channels. If it does, use ToolSearch to search for \"slack send message\" tools. If ToolSearch finds a Slack tool, ask the user if they'd like you to post the PR URL to the relevant Slack channel. Only post if the user confirms. If ToolSearch returns no results or errors, skip this step silently—do not mention the failure, do not attempt workarounds, and do not try alternative approaches.";
 
     // `commitAttribution` is non-empty on the default path, so the conditional
     // `, ending with the attribution text shown in the example below` is

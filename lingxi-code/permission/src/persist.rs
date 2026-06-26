@@ -34,7 +34,7 @@
 //! - The `localSettings` `.gitignore` side-effect is NOT ported: when writing
 //!   `settings.local.json`, claude-code also `addFileGlobRuleToGitignore`s it
 //!   (`settings.ts`) so the per-clone file is ignored. We only write the file;
-//!   a project that does not already ignore `.claude/settings.local.json` could
+//!   a project that does not already ignore `.lingxi/settings.local.json` could
 //!   accidentally commit it. (Porting the gitignore write is a follow-up.)
 //! - The `markInternalWrite` file-watcher hint is not ported (no settings
 //!   watcher seam in-tree); a future watcher would see this self-write as an
@@ -52,8 +52,8 @@ use std::path::{Path, PathBuf};
 pub struct PermissionPaths {
     /// Claude config home (`~/.claude`) — holds `userSettings`.
     pub claude_home: PathBuf,
-    /// Project working directory — holds `.claude/settings.json` (project) and
-    /// `.claude/settings.local.json` (local).
+    /// Project working directory — holds `.lingxi/settings.json` (project) and
+    /// `.lingxi/settings.local.json` (local).
     pub cwd: PathBuf,
 }
 
@@ -515,20 +515,20 @@ mod tests {
     #[test]
     fn destination_paths() {
         let p = PermissionPaths {
-            claude_home: PathBuf::from("/home/u/.claude"),
+            claude_home: PathBuf::from("/home/u/.lingxi"),
             cwd: PathBuf::from("/proj"),
         };
         assert_eq!(
             p.destination_path(PermissionUpdateDestination::UserSettings),
-            Some(PathBuf::from("/home/u/.claude/settings.json"))
+            Some(PathBuf::from("/home/u/.lingxi/settings.json"))
         );
         assert_eq!(
             p.destination_path(PermissionUpdateDestination::ProjectSettings),
-            Some(PathBuf::from("/proj/.claude/settings.json"))
+            Some(PathBuf::from("/proj/.lingxi/settings.json"))
         );
         assert_eq!(
             p.destination_path(PermissionUpdateDestination::LocalSettings),
-            Some(PathBuf::from("/proj/.claude/settings.local.json"))
+            Some(PathBuf::from("/proj/.lingxi/settings.local.json"))
         );
         assert!(p
             .destination_path(PermissionUpdateDestination::Session)
@@ -545,14 +545,14 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("lx-3c-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let paths = PermissionPaths {
-            claude_home: tmp.join("home/.claude"),
+            claude_home: tmp.join("home/.lingxi"),
             cwd: tmp.join("proj"),
         };
         let update = allow_rule("Bash", PermissionUpdateDestination::LocalSettings);
 
-        // First persist writes the file + creates .claude/.
+        // First persist writes the file + creates .lingxi/.
         assert!(persist_permission_update(&update, &paths).await.unwrap());
-        let path = tmp.join("proj/.claude/settings.local.json");
+        let path = tmp.join("proj/.lingxi/settings.local.json");
         let written = std::fs::read_to_string(&path).unwrap();
         let v: Value = serde_json::from_str(&written).unwrap();
         assert_eq!(v["permissions"]["allow"], json!(["Bash"]));
@@ -566,7 +566,7 @@ mod tests {
     #[tokio::test]
     async fn persist_session_destination_is_noop() {
         let paths = PermissionPaths {
-            claude_home: PathBuf::from("/nonexistent/.claude"),
+            claude_home: PathBuf::from("/nonexistent/.lingxi"),
             cwd: PathBuf::from("/nonexistent/proj"),
         };
         let update = allow_rule("Bash", PermissionUpdateDestination::Session);
@@ -578,13 +578,13 @@ mod tests {
     async fn persist_broken_json_errors_without_clobber() {
         let tmp = std::env::temp_dir().join(format!("lx-3c-broken-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        let dir = tmp.join("proj/.claude");
+        let dir = tmp.join("proj/.lingxi");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.local.json");
         std::fs::write(&path, "{ broken").unwrap();
 
         let paths = PermissionPaths {
-            claude_home: tmp.join("home/.claude"),
+            claude_home: tmp.join("home/.lingxi"),
             cwd: tmp.join("proj"),
         };
         let update = allow_rule("Bash", PermissionUpdateDestination::LocalSettings);
@@ -655,7 +655,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("proj")).unwrap();
         let paths = PermissionPaths {
-            claude_home: tmp.join("home/.claude"),
+            claude_home: tmp.join("home/.lingxi"),
             cwd: tmp.join("proj"),
         };
         // Add → file created with the dir.
@@ -668,7 +668,7 @@ mod tests {
         .await
         .unwrap();
         assert!(added);
-        let path = tmp.join("proj/.claude/settings.local.json");
+        let path = tmp.join("proj/.lingxi/settings.local.json");
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("/work/extra"));
         // Remove → gone.

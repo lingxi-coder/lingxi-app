@@ -300,7 +300,7 @@ impl PluginManager {
                 let tmp_path = tmp.path().to_path_buf();
                 tokio::task::spawn_blocking(move || {
                     crate::mcpb::unpack_mcpb(&bytes, &tmp_path)?;
-                    // 4. Normalize: ensure a `.claude-plugin/plugin.json` exists
+                    // 4. Normalize: ensure a `.lingxi-plugin/plugin.json` exists
                     //    (translate a root `manifest.json` if needed).
                     crate::mcpb::ensure_plugin_manifest(&tmp_path)
                 })
@@ -347,7 +347,7 @@ impl PluginManager {
     /// cache layout `cache/<marketplace>/<plugin>/<version>/` that
     /// [`crate::discovery::discover_enabled_plugins`] resolves. `<marketplace>`
     /// is the sanitized source identity (`repo_subpath`); `<plugin>`/`<version>`
-    /// come from the just-fetched `.claude-plugin/plugin.json` (version falls
+    /// come from the just-fetched `.lingxi-plugin/plugin.json` (version falls
     /// back to `"unknown"` when absent). Returns the landed `<version>/` dir.
     async fn copy_into_cache(
         &self,
@@ -634,7 +634,7 @@ impl PluginManager {
         //     discovery loader already stamps `ConfigScope::Dynamic`). These
         //     scoped configs are connected at enable time through the SAME
         //     `McpRegistry::connect_all` path the engine uses for configured
-        //     `.mcp.json` servers (claude-code `getClaudeCodeMcpConfigs`
+        //     `.mcp.json` servers (claude-code `getLingXiMcpConfigs`
         //     merges plugin servers into the SAME configs map that the
         //     connection manager dials eagerly at startup — `config.ts:1114`).
         let mcp_scoped: Vec<McpServerConfig> = if self

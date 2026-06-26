@@ -43,6 +43,7 @@ pub mod prompting_gate;
 pub mod runtime;
 pub mod sandbox;
 pub mod secure_storage;
+pub mod session_flags;
 pub mod share;
 pub mod skill_loader;
 pub mod stt;

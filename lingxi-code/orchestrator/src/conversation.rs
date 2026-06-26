@@ -1005,6 +1005,12 @@ impl ConversationOrchestrator {
     ) -> Self {
         // M5-14 Task 10: emit release markers once per process lifetime.
         telemetry::emit_release_markers_once();
+        // Publish the session interactivity to the process-global flag (the port's
+        // `getIsNonInteractiveSession()` analog) so prompt builders without a
+        // `ToolUseContext` — e.g. the `AgentTool` fork gate — see the right mode.
+        // `is_non_interactive_session == !interactive_permissions` (turn_loop's
+        // own derivation).
+        traits::session_flags::set_non_interactive_session(!config.interactive_permissions);
         let session = SessionState::empty(SessionId::new(), config.model.clone());
         Self {
             config,

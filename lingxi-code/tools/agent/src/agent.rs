@@ -345,12 +345,18 @@ impl AgentTool {
     /// may be unwired ⇒ `None` ⇒ no block, matching the binary's unknown-plan
     /// default).
     ///
-    /// Deferred vs binary (no behavioral surface here): the `o` fork-subagent
-    /// branch (the fork subagent_type sentence + `(except subagent_type: "fork")`
-    /// qualifiers), the `m` embedded-grep hint swap, teammate (`yB`/`_m`) notes,
-    /// and the remote-isolation (`V8t`) note. The fabricated "# MCP Servers" note
-    /// (NOT present in the 2.1.193 binary) is removed; `_mcp_server_names` is
-    /// retained for signature stability.
+    /// The `o` fork-subagent gate (`isForkSubagentEnabled`) IS modeled: when fork
+    /// is enabled (`is_fork_subagent_enabled(is_coordinator, is_non_interactive)`,
+    /// reading the process-global [`traits::session_flags::is_non_interactive_session`]),
+    /// the subagent_type sentence explains `"fork"`, a fork addendum follows
+    /// `## When to use`, and the SendMessage bullet gains the `(except
+    /// subagent_type: "fork", …)` qualifier. Inert unless `CLAUDE_CODE_FORK_SUBAGENT`
+    /// is set (default OFF) ⇒ the non-fork text, byte-identical to the pre-F4 prompt.
+    ///
+    /// Deferred vs binary (no behavioral surface here): the `m` embedded-grep hint
+    /// swap, teammate (`yB`/`_m`) notes, and the remote-isolation (`V8t`) note. The
+    /// fabricated "# MCP Servers" note (NOT present in the 2.1.193 binary) is
+    /// removed; `_mcp_server_names` is retained for signature stability.
     fn build_prompt(
         agents: &[traits::subagent_spawn::SubagentListingEntry],
         _mcp_server_names: &[String],
@@ -386,13 +392,38 @@ impl AgentTool {
             ""
         };
 
+        // Fork-subagent gate `o` (binary `o=isForkSubagentEnabled()`): when fork
+        // is enabled, the subagent_type sentence explains the `"fork"` type, the
+        // body gains a fork addendum, and the SendMessage bullet notes the fork
+        // exception. The gate is `is_fork_subagent_enabled(is_coordinator,
+        // is_non_interactive)` — env `CLAUDE_CODE_FORK_SUBAGENT` AND !coordinator
+        // AND !non-interactive; the non-interactive flag is read from the
+        // process-global session flag (the port's `getIsNonInteractiveSession()`
+        // analog, set by `ConversationOrchestrator::new`). Default OFF ⇒ the
+        // non-fork text below, byte-identical to the pre-F4 prompt.
+        let is_fork = traits::fork_subagent::is_fork_subagent_enabled(
+            is_coordinator,
+            traits::session_flags::is_non_interactive_session(),
+        );
+
+        // Subagent_type sentence — fork variant (binary `${o?…:…}`).
+        let subagent_sentence = if is_fork {
+            format!(
+                "When using the {AGENT_TOOL_NAME} tool, specify a subagent_type to select an agent: `\"fork\"` forks yourself (the fork inherits your full conversation context and always runs on your model — a `model` override is ignored); any other type — or omitting it — starts a fresh agent (general-purpose by default)."
+            )
+        } else {
+            format!(
+                "When using the {AGENT_TOOL_NAME} tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used."
+            )
+        };
+
         // Intro `p` (binary ~208233723): the catalog line sits between the two
         // intro sentences (with the `${d}` pro-block appended to it); the
         // subagent_type sentence closes it.
         let intro = format!(
             "Launch a new agent to handle complex, multi-step tasks. Each agent type has specific capabilities and tools available to it.\n\n\
 {agent_list_section}{pro_block}\n\n\
-When using the {AGENT_TOOL_NAME} tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used."
+{subagent_sentence}"
         );
 
         // Coordinator mode gets the slim intro only (binary `if(t)return p`).
@@ -417,10 +448,27 @@ Reach for this when the task matches an available agent type, when you have inde
         } else {
             ""
         };
+        // Fork addendum (binary `${o?…:""}`), after `## When to use`, before the
+        // bullets.
+        let fork_addendum = if is_fork {
+            "\n\nA fork runs in the background and keeps its tool output out of your context. If you are the fork, execute directly — don't re-delegate."
+        } else {
+            ""
+        };
+        // SendMessage bullet — fork qualifier (binary `${o?' (except …)':""}`).
+        let send_message_bullet = if is_fork {
+            format!(
+                "- Use SendMessage with the agent's ID or name to continue a previously spawned agent with its context intact; a new {AGENT_TOOL_NAME} call starts fresh (except subagent_type: \"fork\", which inherits your context)."
+            )
+        } else {
+            format!(
+                "- Use SendMessage with the agent's ID or name to continue a previously spawned agent with its context intact; a new {AGENT_TOOL_NAME} call starts fresh."
+            )
+        };
         format!(
-            "{intro}{when_to_use}\n\n\
+            "{intro}{when_to_use}{fork_addendum}\n\n\
 - The agent's final message is returned to you as the tool result; it is not shown to the user — relay what matters.\n\
-- Use SendMessage with the agent's ID or name to continue a previously spawned agent with its context intact; a new {AGENT_TOOL_NAME} call starts fresh.\n\
+{send_message_bullet}\n\
 - `isolation: \"worktree\"` gives the agent its own git worktree (auto-cleaned if unchanged).\n\
 - `run_in_background: true` runs the agent asynchronously; you'll be notified when it completes."
         )
@@ -2016,7 +2064,7 @@ mod tests {
         // Acquire the fork-gate lock + clear the var: with the gate ON an omitted
         // subagent_type would take the FORK path, not general-purpose. Serialize
         // against the gate-ON tests so this default-OFF assertion is stable.
-        let _g = FORK_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = AGENT_LIST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
 
         let spawner = arc_mock_spawner();
@@ -2147,12 +2195,10 @@ mod tests {
     }
 
     // ── codex #5: fork-subagent path ──
-
-    /// `CLAUDE_CODE_FORK_SUBAGENT` is process-global; serialize the tests whose
-    /// behavior depends on the fork gate so a gate-ON test never races a
-    /// default-OFF assertion. Every such test acquires this AND removes the var
-    /// first (mirrors `AGENT_LIST_ENV_LOCK`).
-    static FORK_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // NOTE: fork-gate tests serialize on `AGENT_LIST_ENV_LOCK` (not a separate
+    // lock): `build_prompt` now reads BOTH `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES`
+    // and `CLAUDE_CODE_FORK_SUBAGENT`, so any test that sets EITHER env (or reads
+    // the prompt) must share ONE lock to avoid racing through the prompt builder.
 
     /// Build a `ToolUseContext` carrying the given conversation history (for the
     /// fork-path assistant-message selection + recursion guard).
@@ -2188,7 +2234,7 @@ mod tests {
     // test never flips the env under it.)
     #[tokio::test]
     async fn fork_gate_off_omitted_spawns_general_purpose_no_fork_fields() {
-        let _g = FORK_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = AGENT_LIST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
 
         let spawner = arc_mock_spawner();
@@ -2219,7 +2265,7 @@ mod tests {
     // fork_context_messages == [assistant_clone, user(tool_results + directive)].
     #[tokio::test]
     async fn fork_gate_on_omitted_takes_fork_path() {
-        let _g = FORK_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = AGENT_LIST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("CLAUDE_CODE_FORK_SUBAGENT", "1");
 
         let spawner = arc_mock_spawner();
@@ -2276,7 +2322,7 @@ mod tests {
     // `override.systemPrompt = forkParentSystemPrompt`, AgentTool.tsx:622-623).
     #[tokio::test]
     async fn fork_threads_parent_system_prompt_onto_request() {
-        let _g = FORK_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = AGENT_LIST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("CLAUDE_CODE_FORK_SUBAGENT", "1");
 
         let spawner = arc_mock_spawner();
@@ -2313,7 +2359,7 @@ mod tests {
     // and the spawner is NOT invoked.
     #[tokio::test]
     async fn fork_recursion_guard_rejects_inside_fork_child() {
-        let _g = FORK_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = AGENT_LIST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("CLAUDE_CODE_FORK_SUBAGENT", "1");
 
         let spawner = arc_mock_spawner();
@@ -2353,7 +2399,7 @@ mod tests {
     // an explicit type never forks).
     #[tokio::test]
     async fn fork_gate_on_explicit_type_does_not_fork() {
-        let _g = FORK_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = AGENT_LIST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("CLAUDE_CODE_FORK_SUBAGENT", "1");
 
         let spawner = arc_mock_spawner();
@@ -2646,6 +2692,82 @@ mod tests {
         traits::subscription::set_current_subscription(None);
         assert!(!p.contains("**Do not spawn agents unless the user asks.**"));
         assert!(p.contains("## When to use"));
+    }
+
+    // Fork-subagent gate `o` (binary `o=isForkSubagentEnabled()`): with the fork
+    // env ON + interactive + non-coordinator, the description switches to the fork
+    // variants (subagent_type sentence, addendum, SendMessage qualifier). Default
+    // (env OFF) keeps the non-fork text. Serialized on the build-prompt env lock
+    // (`CLAUDE_CODE_FORK_SUBAGENT` + the non-interactive global are process-wide).
+    #[test]
+    fn build_prompt_fork_gate() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+            agent_type: "general-purpose".into(),
+            when_to_use: "anything".into(),
+            tools_description: "All tools".into(),
+        }];
+
+        // Default (fork env OFF): non-fork subagent_type sentence, no addendum.
+        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
+        let p_off = AgentTool::build_prompt(&agents, &[], false);
+        assert!(p_off.contains(
+            "specify a subagent_type parameter to select which agent type to use"
+        ));
+        assert!(!p_off.contains("forks yourself"));
+        assert!(!p_off.contains("A fork runs in the background"));
+
+        // Fork ON: env truthy + interactive (non_interactive=false) + non-coordinator.
+        traits::session_flags::set_non_interactive_session(false);
+        std::env::set_var("CLAUDE_CODE_FORK_SUBAGENT", "1");
+        let p_on = AgentTool::build_prompt(&agents, &[], false);
+        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
+
+        assert!(
+            p_on.contains(
+                "specify a subagent_type to select an agent: `\"fork\"` forks yourself (the fork inherits your full conversation context and always runs on your model — a `model` override is ignored)"
+            ),
+            "fork subagent_type sentence missing; was:\n{p_on}"
+        );
+        assert!(
+            p_on.contains(
+                "A fork runs in the background and keeps its tool output out of your context. If you are the fork, execute directly — don't re-delegate."
+            ),
+            "fork addendum missing"
+        );
+        assert!(
+            p_on.contains(
+                "a new Agent call starts fresh (except subagent_type: \"fork\", which inherits your context)."
+            ),
+            "SendMessage fork qualifier missing"
+        );
+        // The non-fork sentence must be GONE in the fork variant.
+        assert!(!p_on.contains(
+            "specify a subagent_type parameter to select which agent type to use"
+        ));
+    }
+
+    // The fork gate is OFF in a non-interactive session even with the env set
+    // (binary `isForkSubagentEnabled` ⇒ `!getIsNonInteractiveSession()`).
+    #[test]
+    fn build_prompt_fork_gate_off_when_non_interactive() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+            agent_type: "general-purpose".into(),
+            when_to_use: "anything".into(),
+            tools_description: "All tools".into(),
+        }];
+        traits::session_flags::set_non_interactive_session(true);
+        std::env::set_var("CLAUDE_CODE_FORK_SUBAGENT", "1");
+        let p = AgentTool::build_prompt(&agents, &[], false);
+        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
+        traits::session_flags::set_non_interactive_session(false);
+        assert!(!p.contains("forks yourself"), "non-interactive disables fork text");
+        assert!(p.contains("specify a subagent_type parameter to select which agent type to use"));
     }
 
     // The fabricated "# MCP Servers" note is NOT present in v2.1.193 — the agent

@@ -254,8 +254,10 @@ async fn dispatch_routes_fqn_tool_use_to_server_call_tool() {
         "the mock server's call_tool must have been reached exactly once for tool `a`"
     );
 
-    // The result round-trips into a non-error ToolResult carrying the server
-    // content. `MCPTool::call` returns {server_name, tool_name, content, is_error}.
+    // After the MCP-result unwrap, `MCPTool::call` returns the server's `content`
+    // DIRECTLY as `data` (1:1 with the binary `data = mcpResult.content`) — there
+    // is NO {server_name, tool_name, is_error} wrapper. Server routing (incl. the
+    // unprefixed tool name) is already verified by `mock.called_tools()` above.
     let events = output.snapshot().await;
     let tool_result = events
         .iter()
@@ -267,24 +269,13 @@ async fn dispatch_routes_fqn_tool_use_to_server_call_tool() {
         })
         .expect("a ToolResult for mcp__mock__a must be emitted");
     assert_eq!(
-        tool_result.get("server_name").and_then(|v| v.as_str()),
-        Some("mock"),
-        "result must name the server"
+        tool_result,
+        serde_json::json!("ok"),
+        "result `data` is the server's content verbatim (unwrapped)"
     );
-    assert_eq!(
-        tool_result.get("tool_name").and_then(|v| v.as_str()),
-        Some("a"),
-        "result must name the (unprefixed) tool"
-    );
-    assert_eq!(
-        tool_result.get("content"),
-        Some(&serde_json::json!("ok")),
-        "result must carry the server's content verbatim"
-    );
-    assert_eq!(
-        tool_result.get("is_error"),
-        Some(&serde_json::json!(false)),
-        "a successful MCP call must not be flagged as error"
+    assert!(
+        tool_result.get("server_name").is_none() && tool_result.get("tool_name").is_none(),
+        "the {{server_name, tool_name, is_error}} wrapper is gone"
     );
 
     // Two API calls (tool_use turn + end_turn turn) confirm the result was fed

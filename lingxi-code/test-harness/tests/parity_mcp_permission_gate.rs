@@ -312,9 +312,15 @@ async fn allowed_fqn_tool_use_reaches_server() {
             _ => None,
         })
         .expect("a ToolResult for mcp__mock__b must be emitted");
-    assert_eq!(
-        tool_result.get("is_error"),
-        Some(&serde_json::json!(false)),
-        "an allowed, successful MCP call must not be flagged as error"
+    // After the MCP-result unwrap, the result `data` is the server's `content`
+    // DIRECTLY — a successful call carries the content (not an error string) and
+    // has no `is_error` wrapper key.
+    assert!(
+        tool_result.get("is_error").is_none(),
+        "the unwrapped result data has no is_error wrapper key"
+    );
+    assert!(
+        !tool_result.is_null(),
+        "an allowed, successful MCP call carries the server's content"
     );
 }

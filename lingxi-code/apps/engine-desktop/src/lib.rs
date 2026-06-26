@@ -4080,15 +4080,42 @@ pub async fn build(
     // expansion. The dispatcher pairs it with a context provider that reads the
     // orchestrator's live session id (`orch.expansion_hook_context()`).
     let expansion_hook_executor = hooks.clone();
+    // Gap #5: PERSIST the interactive session to JSONL so `--resume` / `-c` / the
+    // resume screen (all backed by `session::jsonl::loader`, which scans
+    // `<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`) can find sessions
+    // this desktop/CLI TUI itself created. Prior to this the production
+    // composition root wired NO `JsonlWriter` (every `with_jsonl_writer` call
+    // site was a test), so the projects dir stayed empty and resume never found
+    // a TUI-created session. We point the writer at the SAME `main_transcript_path`
+    // (`<cfg.claude_home>/projects/<sanitize(cwd)>/<main_session_uuid>.jsonl`)
+    // already computed (FIX A) for the hook payloads' `transcript_path` and the
+    // leaf firers, so the on-disk transcript, the hook `transcript_path`, and the
+    // orchestrator's live session id are one consistent file end-to-end. The
+    // writer creates the file (mode 0o600) + project dir (mode 0o700) lazily on
+    // the first append; the orchestrator's existing per-block / per-message
+    // persist machinery (`persist_assistant_per_block`,
+    // `persist_message_to_jsonl_with_parent`) then appends user/assistant lines
+    // the loader counts as a resumable session (title falls back to the first
+    // user message). `PosixFileSystem` does not confine `append_file_with_mode`
+    // to its workspace root, so rooting it at `watch_cwd` is fine for a path
+    // under `claude_home`.
+    let main_jsonl_writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
+        main_transcript_path.clone(),
+        Arc::new(PosixFileSystem::new(watch_cwd.clone())) as Arc<dyn traits::FileSystem>,
+    ));
     let orch_builder = ConversationOrchestrator::new_with_streaming(
         orch_cfg, api_client, streaming_api, tools, hooks, perms, output, memory, cwd,
     )
+    // Gap #5: wire the production JSONL writer (constructed just above) so the
+    // session is persisted + discoverable by the resume loader.
+    .with_jsonl_writer(main_jsonl_writer)
     // FIX A: hand the orchestrator the resolved claude-home so its hook payloads
     // carry a deterministically-computed `transcript_path`
     // (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
-    // `getTranscriptPathForSession`) even though PRODUCTION wires NO `JsonlWriter`
-    // (every `with_jsonl_writer` call site is a test). Without this every
-    // PreToolUse / PostToolBatch / lifecycle hook fired with an empty path.
+    // `getTranscriptPathForSession`). This is the SAME path the Gap #5
+    // `JsonlWriter` (wired just above) persists to, so the hook payload path and
+    // the on-disk transcript agree. Without this every PreToolUse /
+    // PostToolBatch / lifecycle hook fired with an empty path.
     .with_config_home(cfg.claude_home.clone())
     // Share the SAME mutable-cwd cell the `cwd_changed_firer` writes on a Bash
     // `cd`, so hook payloads read the post-`cd` directory (claude-code parity).

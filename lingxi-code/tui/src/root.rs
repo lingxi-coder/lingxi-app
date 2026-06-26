@@ -1988,10 +1988,13 @@ pub async fn pump_compact(
             // Mirror the bridge `CompactionCompleted` handler (streaming.rs):
             // a `CompactBoundary` carrying the before/after counts → the UI
             // renders `✻ Conversation compacted (ctrl+o for history)`.
-            st.push_message(crate::state::RenderedMessage::CompactBoundary {
-                messages_before: summary.messages_before,
-                messages_after: summary.messages_after,
-            });
+            //
+            // Gap #4: in the desktop build the real `force_compact` ALSO emits
+            // `OutputEvent::CompactionCompleted`, which the output bridge turns
+            // into `TurnEvent::CompactionCompleted` → streaming.rs pushes a
+            // boundary too. `push_compact_boundary` de-dupes consecutive
+            // boundaries so a single `/compact` renders ONE marker, not two.
+            st.push_compact_boundary(summary.messages_before, summary.messages_after);
         }
         Err(e) => {
             st.push_message(crate::state::RenderedMessage::SystemText {

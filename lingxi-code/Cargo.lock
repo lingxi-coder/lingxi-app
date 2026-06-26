@@ -1300,6 +1300,7 @@ dependencies = [
  "sandbox-runtime-runner",
  "secret",
  "serde_json",
+ "session",
  "sidequery",
  "skill-api",
  "tasks",

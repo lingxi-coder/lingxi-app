@@ -168,10 +168,13 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
             // `[Compacted N → M messages]` SystemText placeholder). Renders
             // `✻ Conversation compacted (ctrl+o for history)` (counts retained
             // on the variant for debug/telemetry parity but not rendered).
-            state.messages.push(RenderedMessage::CompactBoundary {
-                messages_before,
-                messages_after,
-            });
+            //
+            // Gap #4: a manual `/compact` ALSO folds a boundary in
+            // `root::pump_compact` (it pushes from the `force_compact` result),
+            // so for one compaction both this bridge path and pump_compact
+            // fire. `push_compact_boundary` de-dupes consecutive boundaries →
+            // exactly one marker renders.
+            state.push_compact_boundary(messages_before, messages_after);
         }
         TurnEvent::RateLimit {
             status,

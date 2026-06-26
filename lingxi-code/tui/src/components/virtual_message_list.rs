@@ -110,9 +110,29 @@ fn render_text_for_measure(msg: &RenderedMessage, width: usize) -> String {
             crate::components::messages::assistant_text::render_assistant_text_to_string(body, width)
         }
         RenderedMessage::AssistantToolUse { tool, .. } => format!("● {tool}(…)"),
-        RenderedMessage::UserToolResult { result, .. } => result
-            .as_str()
-            .map_or_else(|| result.to_string(), str::to_string),
+        // (gap-3) A live Bash result is the structured `{"stdout":…}` object;
+        // the renderer extracts stdout/stderr through the bash-output span
+        // pipeline (ANSI-stripped), so measure the SAME parsed body — otherwise
+        // height counts the raw single-line JSON while the component draws the
+        // multi-line output. Replay / non-Bash results keep the raw-payload
+        // proxy (bare string verbatim, else compact JSON).
+        RenderedMessage::UserToolResult { tool, result, .. } => {
+            if tool == "Bash" {
+                if let Some((stdout, stderr)) =
+                    crate::components::messages::user_tool_result::bash_structured_output(result)
+                {
+                    return crate::components::messages::bash_output::render_bash_output_spans(
+                        &stdout, &stderr,
+                    )
+                    .into_iter()
+                    .map(|s| s.text)
+                    .collect::<String>();
+                }
+            }
+            result
+                .as_str()
+                .map_or_else(|| result.to_string(), str::to_string)
+        }
         // ---- (M7-04) batch-1 system/assistant renderers ----------------
         // Each arm reproduces the line layout that `render_message` draws for
         // the variant (via its `render_*_to_string` pure renderer). Markers
@@ -873,6 +893,35 @@ mod tests {
             file_path: None,
         };
         assert_eq!(measured_height(&m, 80), 2);
+    }
+
+    #[test]
+    fn measured_height_structured_bash_matches_renderer() {
+        // (gap-3) A live Bash result is the structured `{"stdout":…}` object.
+        // The renderer extracts stdout/stderr through the bash-output span
+        // pipeline, so measurement MUST route through the same pipeline (NOT
+        // count the raw single-line JSON). 2 stdout lines + 1 stderr → 3 rows.
+        use crate::components::messages::bash_output::render_bash_output_spans;
+        let m = RenderedMessage::UserToolResult {
+            id: ToolUseId::new(),
+            tool: "Bash".into(),
+            result: serde_json::json!({
+                "stdout": "line1\nline2",
+                "stderr": "err",
+                "interrupted": false,
+                "isImage": false,
+                "noOutputExpected": false,
+            }),
+            old_string: None,
+            new_string: None,
+            file_path: None,
+        };
+        let rendered: String = render_bash_output_spans("line1\nline2", "err")
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        assert_eq!(measured_height(&m, 80), rendered.lines().count());
+        assert_eq!(measured_height(&m, 80), 3);
     }
 
     #[test]

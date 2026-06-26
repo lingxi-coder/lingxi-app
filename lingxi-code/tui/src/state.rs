@@ -1463,6 +1463,36 @@ impl AppState {
         self.messages.push(msg);
     }
 
+    /// Push a [`RenderedMessage::CompactBoundary`], de-duplicating consecutive
+    /// boundaries (Gap #4).
+    ///
+    /// A single manual `/compact` can drive TWO push paths in the desktop
+    /// build: [`crate::root::pump_compact`] folds the `force_compact` result
+    /// into a boundary, AND the orchestrator emits
+    /// `OutputEvent::CompactionCompleted`, which the desktop output bridge
+    /// converts to `TurnEvent::CompactionCompleted` and the streaming handler
+    /// also renders as a boundary. Both firing for one compaction would render
+    /// the `✻ Conversation compacted (ctrl+o for history)` marker TWICE.
+    ///
+    /// Collapsing consecutive boundaries yields exactly ONE marker regardless
+    /// of which path(s) fire — and is context-independent: in unit tests where
+    /// the mock `force_compact` does NOT emit the event, only `pump_compact`
+    /// pushes (→ 1); in production both the bridge and `pump_compact` push
+    /// (→ still 1). Two genuinely distinct compactions are always separated by
+    /// the intervening conversation, so they never collapse.
+    pub fn push_compact_boundary(&mut self, messages_before: u32, messages_after: u32) {
+        if matches!(
+            self.messages.last(),
+            Some(RenderedMessage::CompactBoundary { .. })
+        ) {
+            return;
+        }
+        self.messages.push(RenderedMessage::CompactBoundary {
+            messages_before,
+            messages_after,
+        });
+    }
+
     /// Seed the scrollback from a RESUMED session's prior conversation, before
     /// the first render. `msgs` are the persisted turns already mapped to
     /// scrollback rows (via [`crate::replay::rebuild_messages`]); they REPLACE

@@ -1,10 +1,14 @@
 package com.lingxi.code
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import com.lingxi.code.vision.CameraController
 import com.lingxi.code.share.ShareController
 import com.lingxi.code.notify.NotificationController
@@ -59,6 +63,14 @@ class MainActivity : ComponentActivity() {
         val pickMediaLauncher = registerForActivityResult(
             ActivityResultContracts.PickVisualMedia(),
         ) { uri -> CameraController.onMediaPicked(uri) }
+        // Android 13+ (TIRAMISU) gates posting on the POST_NOTIFICATIONS runtime
+        // permission — declaring it in the manifest is NOT enough at targetSdk 33+.
+        // Without this request the permission stays denied and EVERY notification
+        // (the engine `notification` tool AND the cron result / foreground-service
+        // notifications) silently fails. Registered before STARTED; launched below.
+        val notificationPermLauncher = registerForActivityResult(
+            ActivityResultContracts.RequestPermission(),
+        ) { /* best-effort: nothing to do on grant/deny — posting self-gates */ }
         CameraController.attach(
             CameraController.makeLaunchers(
                 context = applicationContext,
@@ -102,6 +114,20 @@ class MainActivity : ComponentActivity() {
 
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+
+        // Request POST_NOTIFICATIONS on Android 13+ if not already granted (launched
+        // AFTER super.onCreate so the ActivityResultRegistry can dispatch). The OS
+        // shows the dialog only when undecided; an already-granted or
+        // permanently-denied state returns immediately with no prompt, so launching
+        // on every start is safe. Notifications stay denied (and silent) until this.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
         setContent {
             val store = remember { AppearanceStore(applicationContext) }
             val scope = rememberCoroutineScope()

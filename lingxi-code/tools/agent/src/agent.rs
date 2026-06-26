@@ -336,13 +336,21 @@ impl AgentTool {
     /// `is_coordinator` selects the slim coordinator prompt (intro only; the
     /// coordinator system prompt already covers usage / examples).
     ///
+    /// The `d` pro-plan gate (`vi()==="pro"`) IS modeled: a `pro` subscription
+    /// (read from the process-global [`traits::subscription::is_pro_plan`]) injects
+    /// the "Do not spawn agents unless the user asks" block after the catalog
+    /// pointer line and suppresses `## When to use`. It is inert until a
+    /// composition root resolves the plan via
+    /// [`traits::subscription::set_current_subscription`] (subscription resolution
+    /// may be unwired ⇒ `None` ⇒ no block, matching the binary's unknown-plan
+    /// default).
+    ///
     /// Deferred vs binary (no behavioral surface here): the `o` fork-subagent
     /// branch (the fork subagent_type sentence + `(except subagent_type: "fork")`
-    /// qualifiers), the `d` pro-plan "Do not spawn agents unless the user asks"
-    /// block (`vi()==="pro"`; needs subscription threading), the `m` embedded-grep
-    /// hint swap, teammate (`yB`/`_m`) notes, and the remote-isolation (`V8t`)
-    /// note. The fabricated "# MCP Servers" note (NOT present in the 2.1.193
-    /// binary) is removed; `_mcp_server_names` is retained for signature stability.
+    /// qualifiers), the `m` embedded-grep hint swap, teammate (`yB`/`_m`) notes,
+    /// and the remote-isolation (`V8t`) note. The fabricated "# MCP Servers" note
+    /// (NOT present in the 2.1.193 binary) is removed; `_mcp_server_names` is
+    /// retained for signature stability.
     fn build_prompt(
         agents: &[traits::subagent_spawn::SubagentListingEntry],
         _mcp_server_names: &[String],
@@ -365,11 +373,25 @@ impl AgentTool {
             format!("Available agent types and the tools they have access to:\n{agent_lines}")
         };
 
+        // Pro-plan gate `d` (binary `d=vi()==="pro"?<block>:""`): on the `pro`
+        // plan, discourage spawning. Read from the process-global subscription
+        // (the port's `vi()` analog); `None`/non-pro ⇒ empty (the common case,
+        // since subscription resolution may be unwired ⇒ gate inert, matching the
+        // binary's unknown-plan default). The block is injected right after the
+        // catalog pointer line, and (below) it SUPPRESSES the `## When to use`
+        // section — both per the binary's `${d}` / `${d?"":…}` placements.
+        let pro_block = if traits::subscription::is_pro_plan() {
+            "\n\n**Do not spawn agents unless the user asks.** Each spawn starts cold and re-derives context you already have — it's the expensive path on this plan. A task with \"multiple angles,\" \"thorough,\" or several parts is not a request to spawn; handle it inline with your own tools. Only use this tool when the user explicitly says to use a subagent, or names one of the available agent types."
+        } else {
+            ""
+        };
+
         // Intro `p` (binary ~208233723): the catalog line sits between the two
-        // intro sentences; the subagent_type sentence closes it.
+        // intro sentences (with the `${d}` pro-block appended to it); the
+        // subagent_type sentence closes it.
         let intro = format!(
             "Launch a new agent to handle complex, multi-step tasks. Each agent type has specific capabilities and tools available to it.\n\n\
-{agent_list_section}\n\n\
+{agent_list_section}{pro_block}\n\n\
 When using the {AGENT_TOOL_NAME} tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used."
         );
 
@@ -385,10 +407,18 @@ When using the {AGENT_TOOL_NAME} tool, specify a subagent_type parameter to sele
         // background-enabled default (the binary's `h`; the
         // `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` / teammate suppressions are not
         // modeled here).
+        //
+        // `## When to use` is SUPPRESSED on the pro plan (binary `${d?"":…}`):
+        // when the pro-block is present, the discouragement replaces the
+        // when-to-use guidance. The four bullets are NOT gated and always render.
+        let when_to_use = if pro_block.is_empty() {
+            "\n\n## When to use\n\n\
+Reach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps. For a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result."
+        } else {
+            ""
+        };
         format!(
-            "{intro}\n\n\
-## When to use\n\n\
-Reach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps. For a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result.\n\n\
+            "{intro}{when_to_use}\n\n\
 - The agent's final message is returned to you as the tool result; it is not shown to the user — relay what matters.\n\
 - Use SendMessage with the agent's ID or name to continue a previously spawned agent with its context intact; a new {AGENT_TOOL_NAME} call starts fresh.\n\
 - `isolation: \"worktree\"` gives the agent its own git worktree (auto-cleaned if unchanged).\n\
@@ -2540,6 +2570,82 @@ mod tests {
         assert!(!slim.contains("## When to use"));
         // Both carry the agent catalog (legacy inline path).
         assert!(slim.contains("- general-purpose: anything (Tools: All tools)"));
+    }
+
+    // Pro-plan gate `d` (binary `d=vi()==="pro"?<block>:""`): a `pro`
+    // subscription injects the "Do not spawn agents" block after the catalog
+    // pointer line AND suppresses `## When to use`; the four bullets still render.
+    // Non-pro (incl. unknown) renders neither change. Serialized on the build
+    // prompt env lock (the subscription global is process-wide).
+    #[test]
+    fn build_prompt_pro_plan_gate() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+            agent_type: "general-purpose".into(),
+            when_to_use: "anything".into(),
+            tools_description: "All tools".into(),
+        }];
+
+        // Default (unknown plan): no pro-block, `## When to use` present.
+        traits::subscription::set_current_subscription(None);
+        let p_default = AgentTool::build_prompt(&agents, &[], false);
+        assert!(!p_default.contains("**Do not spawn agents unless the user asks.**"));
+        assert!(p_default.contains("## When to use"));
+
+        // Pro plan: pro-block present, `## When to use` SUPPRESSED, bullets kept.
+        traits::subscription::set_current_subscription(Some(
+            traits::subscription::SubscriptionSnapshot {
+                is_subscriber: true,
+                subscription_type: Some("pro".into()),
+                ..traits::subscription::SubscriptionSnapshot::default()
+            },
+        ));
+        let p_pro = AgentTool::build_prompt(&agents, &[], false);
+        traits::subscription::set_current_subscription(None);
+
+        assert!(
+            p_pro.contains(
+                "**Do not spawn agents unless the user asks.** Each spawn starts cold and re-derives context you already have — it's the expensive path on this plan."
+            ),
+            "pro plan must inject the discouragement block; was:\n{p_pro}"
+        );
+        assert!(
+            !p_pro.contains("## When to use"),
+            "pro plan must suppress the `## When to use` section"
+        );
+        // The block sits right after the catalog pointer line, before the
+        // subagent_type sentence.
+        assert!(p_pro.contains(
+            "conversation.\n\n**Do not spawn agents unless the user asks.**"
+        ));
+        // The four bullets are NOT gated on the plan.
+        assert!(p_pro.contains("- `run_in_background: true` runs the agent asynchronously"));
+    }
+
+    // A non-pro tier (e.g. max) does NOT trip the pro gate.
+    #[test]
+    fn build_prompt_non_pro_tier_no_gate() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+            agent_type: "general-purpose".into(),
+            when_to_use: "anything".into(),
+            tools_description: "All tools".into(),
+        }];
+        traits::subscription::set_current_subscription(Some(
+            traits::subscription::SubscriptionSnapshot {
+                is_subscriber: true,
+                subscription_type: Some("max".into()),
+                ..traits::subscription::SubscriptionSnapshot::default()
+            },
+        ));
+        let p = AgentTool::build_prompt(&agents, &[], false);
+        traits::subscription::set_current_subscription(None);
+        assert!(!p.contains("**Do not spawn agents unless the user asks.**"));
+        assert!(p.contains("## When to use"));
     }
 
     // The fabricated "# MCP Servers" note is NOT present in v2.1.193 — the agent

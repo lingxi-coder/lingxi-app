@@ -3046,23 +3046,19 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             );
         }
 
-        // MCP results carry a content-block array directly in `data.content` (1:1
-        // with the binary's MCPTool result `data` — no `model_content_blocks`
-        // sidecar) so the egress can send it VERBATIM as `tool_result.content`
-        // (claude-code passes the MCP content array directly — images/resources
-        // stay structured). When `data.content` is an ARRAY it IS that wire form;
-        // a bare-string `content` (or large-output file replacement) is not. Gated
-        // to MCP tools so non-MCP tools that happen to put an array under
-        // `data.content` (e.g. the Agent tool's transcript blocks) are unaffected.
-        // A hook-mutated result (output replaced or additionalContext appended)
-        // drops to the text-only `final_content`.
+        // MCP results carry the content-block array directly AS `data` (1:1 with
+        // the binary's MCPTool result `data = mcpResult.content`) so the egress can
+        // send it VERBATIM as `tool_result.content` (claude-code passes the MCP
+        // content array directly — images/resources stay structured). When `data`
+        // is an ARRAY it IS that wire form; a bare-string `data` (or large-output
+        // file replacement) is not. Gated to MCP tools so non-MCP tools whose
+        // `data` happens to be an array (e.g. the Agent tool's transcript blocks)
+        // are unaffected. A hook-mutated result (output replaced or
+        // additionalContext appended) drops to the text-only `final_content`.
         let content_blocks = if mutated || !tool_handle.is_mcp() {
             None
         } else {
-            emit_payload
-                .get("content")
-                .and_then(serde_json::Value::as_array)
-                .cloned()
+            emit_payload.as_array().cloned()
         };
         results.push(ContentBlock::ToolResult {
             tool_use_id: tool_use_id.clone(),

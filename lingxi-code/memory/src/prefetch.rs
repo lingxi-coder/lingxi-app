@@ -30,7 +30,7 @@ use crate::memdir::{scan_memdir, MemdirRoots};
 use crate::selector::{memory_entry_to_memory_file, MemorySelector};
 use crate::surfacing::SurfacedMemory;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use traits::RuntimeSpawner;
@@ -170,6 +170,64 @@ impl MemoryPrefetch {
     }
 }
 
+/// Per-surfaced-file caps for relevant-memory surfacing, 1:1 with claude-code
+/// `readMemoriesForSurfacing` (`Bbl`): each file is read through
+/// `k_t(path, 0, xHo, vbl, …, {truncateOnByteLimit:true})` — at most `xHo` lines
+/// AND `vbl` bytes — and, when truncated, the model-facing content gets a
+/// one-line notice pointing at the Read tool. These are DISTINCT from the
+/// MEMORY.md entrypoint caps ([`crate::MAX_ENTRYPOINT_LINES`] /
+/// [`crate::MAX_ENTRYPOINT_BYTES`] = binary `Mz`/`Jae`); the binary uses
+/// separate constants here (`xHo=200`, `vbl=4096`).
+const SURFACED_MEMORY_MAX_LINES: usize = 200;
+const SURFACED_MEMORY_MAX_BYTES: usize = 4096;
+
+/// Truncate one surfaced memory file's content to the surfacing caps and append
+/// the truncation notice when it overflows, 1:1 with `Bbl`/`k_t`/`pam`:
+///
+/// - accumulate lines `[0, xHo)` while the running UTF-8 byte total (including
+///   the `\n` separators, counted only between kept lines — binary `h(_)`'s
+///   `T=c.length>0?1:0`) stays ≤ `vbl`; a byte-budget stop sets
+///   `truncated_by_bytes` (binary `f`);
+/// - the `\n` line model matches `pam` exactly: split on `\n` (a trailing `\n`
+///   yields a final empty segment, mirroring the post-loop `u++`) and strip a
+///   trailing `\r` per line (CRLF→LF normalization), so under-cap LF content is
+///   returned byte-identical;
+/// - the notice is APPENDED to the already-truncated body (NOT a replacement)
+///   and fires when `total_lines > xHo || truncated_by_bytes` (binary `i`), with
+///   the `truncated_by_bytes`-conditional wording.
+fn truncate_surfaced_content(content: &str, path: &Path) -> String {
+    let lines: Vec<&str> = content.split('\n').collect();
+    let total_lines = lines.len();
+    let mut kept: Vec<&str> = Vec::new();
+    let mut running_bytes = 0usize;
+    let mut truncated_by_bytes = false;
+    for line in lines.iter().take(SURFACED_MEMORY_MAX_LINES) {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let sep = usize::from(!kept.is_empty());
+        let next = running_bytes + sep + line.len();
+        if next > SURFACED_MEMORY_MAX_BYTES {
+            truncated_by_bytes = true;
+            break;
+        }
+        running_bytes = next;
+        kept.push(line);
+    }
+    let body = kept.join("\n");
+    if total_lines > SURFACED_MEMORY_MAX_LINES || truncated_by_bytes {
+        let reason = if truncated_by_bytes {
+            format!("{SURFACED_MEMORY_MAX_BYTES} byte limit")
+        } else {
+            format!("first {SURFACED_MEMORY_MAX_LINES} lines")
+        };
+        format!(
+            "{body}\n> This memory file was truncated ({reason}). Use the Read tool to view the complete file at: {}",
+            path.display()
+        )
+    } else {
+        body
+    }
+}
+
 /// Scan the memdir, ask the selector which entries are relevant to `query`, and
 /// map the chosen entries to the renderable [`SurfacedMemory`] shape.
 ///
@@ -206,7 +264,7 @@ async fn select_surfaced(
                 let f = memory_entry_to_memory_file(e);
                 SurfacedMemory {
                     path: e.path.clone(),
-                    content: f.content,
+                    content: truncate_surfaced_content(&f.content, &e.path),
                     age_days: e.age_days,
                     mtime: f.mtime,
                 }
@@ -322,5 +380,51 @@ mod tests {
             .take()
             .await;
         assert!(surfaced.is_empty(), "absent memdir surfaces nothing: {surfaced:?}");
+    }
+
+    #[test]
+    fn surfaced_content_under_caps_is_byte_identical() {
+        // LF content under both caps is returned verbatim (binary `a=s.content`
+        // with `s.content` === input on the no-truncation path), including a
+        // trailing newline (split→join round-trips the final empty segment).
+        let p = Path::new("/m/a.md");
+        assert_eq!(truncate_surfaced_content("one\ntwo\nthree", p), "one\ntwo\nthree");
+        assert_eq!(truncate_surfaced_content("one\ntwo\n", p), "one\ntwo\n");
+        assert_eq!(truncate_surfaced_content("", p), "");
+    }
+
+    #[test]
+    fn surfaced_content_over_line_cap_appends_first_n_lines_notice() {
+        // > 200 lines ⇒ keep the first 200 and APPEND the notice with the
+        // "first 200 lines" wording (binary `i = totalLines > xHo`, byte budget
+        // not hit).
+        let content = (1..=250)
+            .map(|i| format!("L{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let out = truncate_surfaced_content(&content, Path::new("/m/big.md"));
+        assert!(out.starts_with("L1\nL2\n"), "kept body starts at line 1");
+        assert!(out.contains("\nL200\n> This memory file was truncated"), "notice after the 200th kept line: {out}");
+        assert!(
+            out.ends_with(
+                "This memory file was truncated (first 200 lines). Use the Read tool to view the complete file at: /m/big.md"
+            ),
+            "byte-exact first-N-lines notice: {out}"
+        );
+        assert!(!out.contains("L201"), "lines past the cap are dropped");
+    }
+
+    #[test]
+    fn surfaced_content_over_byte_cap_appends_byte_limit_notice() {
+        // A single line longer than 4096 bytes trips the byte budget on the
+        // FIRST line (binary `h(_)`: `0 + 0 + len > vbl` ⇒ f=true, nothing
+        // kept) ⇒ "4096 byte limit" wording, empty body before the notice.
+        let huge = "x".repeat(5000);
+        let out = truncate_surfaced_content(&huge, Path::new("/m/wide.md"));
+        assert_eq!(
+            out,
+            "\n> This memory file was truncated (4096 byte limit). Use the Read tool to view the complete file at: /m/wide.md",
+            "byte-limit notice appended to an empty body when line 1 alone exceeds the cap"
+        );
     }
 }

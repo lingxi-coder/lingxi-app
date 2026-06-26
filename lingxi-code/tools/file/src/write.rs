@@ -350,22 +350,16 @@ impl Tool for FileWriteTool {
         let content_message = write_result_message(file_path, is_create);
         let type_str = if is_create { "create" } else { "update" };
 
-        // Pre-write content tracking → diff preview (`FileWriteTool.ts:359-376`):
-        // an `update` (pre-existing non-empty file, `if (oldContent)`) emits a
-        // structured patch of the prior content → the new content
-        // (`getPatchForDisplay({ fileContents: oldContent, … })`). A `create`
-        // emits the empty patch (TS `structuredPatch: []`). The prior content
-        // was captured before the write as `prior_decoded`; we reuse it here so
-        // the TUI can render the diff. Like Edit's `structuredPatch`, this is a
-        // TUI-only field (the model sees only the message via `model_content`);
-        // we use the same flat `+`/`-`/` ` preview builder for a uniform Rust
-        // patch representation (the structured hunk array is a larger lift —
-        // PARTIAL carryover, same caveat as Edit).
-        let patch_preview = if is_create {
-            String::new()
+        // Pre-write content tracking → structured patch (`FileWriteTool.ts:359-376`):
+        // an `update` (pre-existing non-empty file, `if (oldContent)`) emits the
+        // jsdiff `structuredPatch` hunk array of the prior content → the new
+        // content; a `create` emits `[]` (TS `structuredPatch: []`). Same 1:1
+        // jsdiff port as Edit (`structured_patch::build_structured_patch`).
+        let structured_patch = if is_create {
+            serde_json::json!([])
         } else {
             let prior = prior_decoded.as_deref().unwrap_or("");
-            crate::edit::FileEditTool::build_patch_preview(prior, content)
+            serde_json::json!(crate::structured_patch::build_structured_patch(prior, content))
         };
 
         // `data` is byte-faithful to claude-code's Write result `data` object —
@@ -381,9 +375,9 @@ impl Tool for FileWriteTool {
         //   - `content`         = the FILE BYTES WRITTEN (the model-sent
         //                          `content`), NOT the result message. claude's
         //                          schema: "content that was written to the file".
-        //   - `structuredPatch` = the +/-/space diff preview (LingXi's existing
-        //                          preview structure, renamed to the binary's
-        //                          camelCase key). `create` → empty.
+        //   - `structuredPatch` = the jsdiff hunk array
+        //                          `[{oldStart,oldLines,newStart,newLines,lines}]`
+        //                          (1:1 port). `create` → `[]`.
         //   - `originalFile`    = the pre-write file content (`null` for a
         //                          create, the prior bytes for an update). claude
         //                          schema: nullable, "null for new files".
@@ -403,7 +397,7 @@ impl Tool for FileWriteTool {
                 "type": type_str,
                 "filePath": file_path,
                 "content": content,
-                "structuredPatch": patch_preview,
+                "structuredPatch": structured_patch,
                 "originalFile": original_file,
                 "userModified": false,
             }),
@@ -578,7 +572,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data["type"], "create");
-        assert_eq!(result.data["structuredPatch"], "");
+        // create → `structuredPatch: []` (empty hunk array, TS parity).
+        assert_eq!(result.data["structuredPatch"], json!([]));
         // `create` → originalFile is null (TS "null for new files").
         assert_eq!(result.data["originalFile"], Value::Null);
         // `data.content` is the FILE BYTES written, not the message.
@@ -606,13 +601,21 @@ mod tests {
         // `originalFile` is the pre-write content; `content` is the new bytes.
         assert_eq!(result.data["originalFile"], "alpha\nbeta\ngamma\n");
         assert_eq!(result.data["content"], "alpha\nBETA\ngamma\n");
-        // The diff preview captures the changed middle line (prior content was
-        // tracked before the write).
-        let preview = result.data["structuredPatch"].as_str().unwrap();
-        assert!(preview.contains(" alpha"), "preview: {preview}");
-        assert!(preview.contains("-beta"), "preview: {preview}");
-        assert!(preview.contains("+BETA"), "preview: {preview}");
-        assert!(preview.contains(" gamma"), "preview: {preview}");
+        // The structuredPatch is the jsdiff hunk array capturing the changed
+        // middle line (1:1: context + `-beta`/`+BETA` + context).
+        let sp = result.data["structuredPatch"].as_array().expect("hunk array");
+        assert_eq!(sp.len(), 1, "one hunk");
+        assert_eq!(sp[0]["oldStart"], 1);
+        assert_eq!(sp[0]["oldLines"], 3);
+        assert_eq!(sp[0]["newStart"], 1);
+        assert_eq!(sp[0]["newLines"], 3);
+        let lines: Vec<&str> = sp[0]["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l.as_str().unwrap())
+            .collect();
+        assert_eq!(lines, vec![" alpha", "-beta", "+BETA", " gamma"]);
     }
 
     #[tokio::test]

@@ -12,6 +12,9 @@ protocol = { path = "../../protocol" }
 permission = { path = "../../permission" }
 telemetry = { path = "../../telemetry" }
 async-trait.workspace = true
+# Line-level Myers diff for the FileEdit/Write `structuredPatch` hunk array
+# (1:1 port of jsdiff `structuredPatch`). Pinned to match the tui render crate.
+similar = "=2.7.0"
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["fs"] }

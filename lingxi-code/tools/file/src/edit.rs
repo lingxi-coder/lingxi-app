@@ -733,7 +733,6 @@ impl Tool for FileEditTool {
             },
         );
 
-        let patch_preview = Self::build_patch_preview(&before, &after);
         let duration_ms = started.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, replacements, duration_ms)
             .await;
@@ -760,7 +759,7 @@ impl Tool for FileEditTool {
                 "oldString": old_string,
                 "newString": new_string,
                 "originalFile": before,
-                "structuredPatch": patch_preview,
+                "structuredPatch": crate::structured_patch::build_structured_patch(&before, &after),
                 "userModified": false,
                 "replaceAll": replace_all,
             }),
@@ -1690,7 +1689,10 @@ that bypasses Perforce tracking."
     }
 
     #[tokio::test]
-    async fn patch_preview_truncates_with_suffix() {
+    async fn structured_patch_is_a_hunk_array() {
+        // `data.structuredPatch` is the binary's jsdiff hunk ARRAY (not a string
+        // preview): each hunk carries oldStart/oldLines/newStart/newLines + lines
+        // with ` `/`+`/`-` prefixes. (No truncation — the hunk array is complete.)
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("big.txt");
         let big: String = (0..100).map(|i| format!("L{i}\n")).collect();
@@ -1711,14 +1713,18 @@ that bypasses Perforce tracking."
             )
             .await
             .unwrap();
-        let preview = result.data["structuredPatch"].as_str().unwrap();
+        let sp = result.data["structuredPatch"].as_array().expect("hunk array");
+        assert!(!sp.is_empty(), "expected at least one hunk");
+        let h0 = &sp[0];
+        assert!(h0["oldStart"].is_number());
+        assert!(h0["oldLines"].is_number());
+        assert!(h0["newStart"].is_number());
+        assert!(h0["newLines"].is_number());
+        let lines = h0["lines"].as_array().expect("hunk lines");
+        let first = lines[0].as_str().unwrap();
         assert!(
-            preview.contains("lines truncated] ..."),
-            "preview missing truncation suffix: {preview}"
-        );
-        assert!(
-            preview.contains("\n\n... ["),
-            "preview missing suffix prefix: {preview}"
+            matches!(first.chars().next(), Some(' ' | '+' | '-')),
+            "hunk line must carry a diff prefix: {first:?}"
         );
     }
 

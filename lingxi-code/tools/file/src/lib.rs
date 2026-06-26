@@ -47,6 +47,7 @@ mod pdf_render;
 pub mod quotes;
 pub mod read;
 pub mod shared;
+pub mod structured_patch;
 pub mod write;
 
 pub use edit::FileEditTool;

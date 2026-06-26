@@ -48,8 +48,13 @@ pub const LOOP_DYNAMIC_WAKEUP_AGED_OUT: &str = "tengu_loop_dynamic_wakeup_aged_o
 /// NOTE: emitting this requires the orchestrator turn-end branch (still pending).
 pub const LOOP_DYNAMIC_WAKEUP_ENDS_TURN: &str = "tengu_loop_dynamic_wakeup_ends_turn";
 
-/// Every reachable kairos/loop telemetry event name (string-lock only, NOT in
-/// `ALL_EVENT_NAMES`).
+/// `tengu_push_notification_send` (binary `PushNotification` tool `call`) — a
+/// notification was sent (or suppressed). Fields: `message_length`, `push_sent`,
+/// `local_sent`, `is_remote`, `disabled_reason`.
+pub const PUSH_NOTIFICATION_SEND: &str = "tengu_push_notification_send";
+
+/// Every reachable kairos/loop/push telemetry event name (string-lock only, NOT
+/// in `ALL_EVENT_NAMES`).
 pub const NAMES: &[&str] = &[
     LOOP_PERSISTENT_ACTIVATED,
     LOOP_ENDED,
@@ -57,6 +62,7 @@ pub const NAMES: &[&str] = &[
     LOOP_KEEPALIVE_FIRED,
     LOOP_DYNAMIC_WAKEUP_AGED_OUT,
     LOOP_DYNAMIC_WAKEUP_ENDS_TURN,
+    PUSH_NOTIFICATION_SEND,
 ];
 
 #[cfg(test)]
@@ -64,11 +70,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn names_are_kairos_or_loop_prefixed() {
+    fn names_are_kairos_loop_or_push_prefixed() {
         for n in NAMES {
             assert!(
-                n.starts_with("tengu_kairos_") || n.starts_with("tengu_loop_"),
-                "{n} must be tengu_kairos_* or tengu_loop_*"
+                n.starts_with("tengu_kairos_")
+                    || n.starts_with("tengu_loop_")
+                    || n.starts_with("tengu_push_"),
+                "{n} must be tengu_kairos_* / tengu_loop_* / tengu_push_*"
             );
         }
     }
@@ -81,6 +89,7 @@ mod tests {
         assert_eq!(LOOP_DYNAMIC_WAKEUP_SCHEDULED, "tengu_loop_dynamic_wakeup_scheduled");
         assert_eq!(LOOP_KEEPALIVE_FIRED, "tengu_loop_keepalive_fired");
         assert_eq!(LOOP_DYNAMIC_WAKEUP_AGED_OUT, "tengu_loop_dynamic_wakeup_aged_out");
+        assert_eq!(PUSH_NOTIFICATION_SEND, "tengu_push_notification_send");
         assert_eq!(LOOP_DYNAMIC_WAKEUP_ENDS_TURN, "tengu_loop_dynamic_wakeup_ends_turn");
     }
 }

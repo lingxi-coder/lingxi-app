@@ -119,6 +119,30 @@ pub fn emit_loop_ended(reason: &str, via_keepalive: Option<bool>) {
     }
 }
 
+/// Emit `tengu_push_notification_send`.
+///
+/// PARITY: binary `PushNotification` tool `call` — `W("tengu_push_notification_send",
+/// {message_length, push_sent, local_sent, is_remote, disabled_reason})`. The
+/// `disabled_reason` is the raw literal (`config_off` | `user_present` |
+/// `no_transport`) or `""` on the success path (binary `Mo(p)` is identity,
+/// `undefined` for success).
+pub fn emit_push_notification_send(
+    message_length: usize,
+    push_sent: bool,
+    local_sent: bool,
+    is_remote: bool,
+    disabled_reason: &str,
+) {
+    tracing::info!(
+        event = crate::tengu::kairos::PUSH_NOTIFICATION_SEND,
+        message_length = message_length,
+        push_sent = push_sent,
+        local_sent = local_sent,
+        is_remote = is_remote,
+        disabled_reason = %disabled_reason,
+    );
+}
+
 /// Emit `tengu_loop_keepalive_fired`.
 ///
 /// PARITY: binary `cKi` keepalive branch —

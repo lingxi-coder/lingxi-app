@@ -774,30 +774,23 @@ impl Tool for MCPTool {
                     &output_dir,
                     now_millis,
                 );
-                // 1:1 with the binary's MCPTool result `data`
-                // (`{server_name, tool_name, content, is_error}`): `content` holds
-                // the model-faithful structured block ARRAY (or a bare string /
-                // large-output file replacement) DIRECTLY. The binary surfaces NO
-                // `model_content` / `model_content_blocks` sidecar — the egress
-                // sources the block array from `data.content`
-                // (turn_loop reads `data.content` when it is an array) and the
-                // model-facing TEXT is carried out-of-band on
-                // `ToolCallResult.model_content` below.
-                let data = json!({
-                    "server_name": server,
-                    "tool_name": tool,
-                    "content": content,
-                    "is_error": dto.is_error,
-                });
-                // Model-facing render: claude-code passes the MCP result content
-                // DIRECTLY as the `tool_result` content (`MCPTool.ts:70-76`). The
-                // dispatch's `tool_result_to_model_text` would JSON-dump an ARRAY
-                // `content`, so when the result is all-text we hand it the joined
-                // string here via `ToolCallResult.model_content` (the model sees
-                // the tool's STRING, never the JSON object). A bare-string
-                // `content` is already model-faithful through the dispatch's
-                // `content` fallback, so it leaves `model_content` as `None`.
-                let model_content = mcp_all_text_content_to_string(&data["content"]);
+                // 1:1 with the binary's MCPTool result `data`: claude-code sets
+                // `data = mcpResult.content` DIRECTLY (the content-block ARRAY, a
+                // bare string, or a large-output file replacement) — there is NO
+                // `{server_name, tool_name, is_error}` wrapper. The egress sends
+                // `data` VERBATIM as the `tool_result` content blocks when it is an
+                // array. `dto.is_error` rides the analytics path only (the dispatch
+                // sets the block's `is_error` separately — it never read this key).
+                let data = content;
+                // Model-facing render: claude-code passes the MCP content directly
+                // as the `tool_result` content (`MCPTool.ts:70-76`). The dispatch's
+                // `tool_result_to_model_text` would JSON-dump an ARRAY/string `data`
+                // (which `data` now IS), so hand it the joined text (all-text
+                // result) or the bare string here via `ToolCallResult.model_content`
+                // (a non-text array carries its structure via the egress
+                // `content_blocks` instead, leaving `model_content` as `None`).
+                let model_content = mcp_all_text_content_to_string(&data)
+                    .or_else(|| data.as_str().map(str::to_string));
                 Ok(ToolCallResult {
                     data,
                     model_content,

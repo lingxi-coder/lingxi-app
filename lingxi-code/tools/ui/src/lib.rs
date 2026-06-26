@@ -18,11 +18,13 @@
 )]
 pub mod ask_user_question;
 pub mod brief;
+pub mod push_notification;
 pub mod send_message;
 pub mod sleep;
 pub mod synthetic_output;
 pub use ask_user_question::AskUserQuestionTool;
 pub use brief::BriefTool;
+pub use push_notification::PushNotificationTool;
 pub use send_message::SendMessageTool;
 pub use sleep::SleepTool;
 pub use synthetic_output::SyntheticOutputTool;
@@ -61,5 +63,10 @@ fn register_with_options(
     }
     reg.register_builtin(Arc::new(AskUserQuestionTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(BriefTool::new(ctx.clone())));
+    // PARITY: the `PushNotification` tool (binary `Wzp`). Registered always; its
+    // `is_enabled` (flag `tengu_kairos_push_notifications`, default off) gates
+    // exposure — so by default it is invisible to the model, exactly like the
+    // shipped binary.
+    reg.register_builtin(Arc::new(PushNotificationTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(SyntheticOutputTool::new(ctx)));
 }

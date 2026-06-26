@@ -255,6 +255,61 @@ async fn stop_block_continues_until_cap_then_overrides() {
 }
 
 #[tokio::test]
+async fn stop_block_coinciding_with_max_turns_ends_without_feedback() {
+    // Binary blocking-branch order: max-turns is checked BEFORE the block cap
+    // (`let dt=ie+1,nn=te+1; if(c&&dt>c) return G("tengu_stop_hook_block_count",
+    // {count:nn,hit_max_turns:!0,hit_cap:!1}),…,{reason:"max_turns",turnCount:dt}`).
+    // So when a blocking Stop hook fires on the turn that hits `max_turns`, the
+    // turn ends on the MAX-TURNS terminal and — unlike the `LoopAgain` path — does
+    // NOT append the stop-hook feedback message (the binary returns before the
+    // append). With `max_turns = 1`: turn 1 runs, the hook blocks, `turn_count(1)
+    // >= max_turns(1)` ⇒ end as MaxTurnsReached, exactly ONE API call, and the
+    // "Stop hook feedback:…" message must be absent from history.
+    let api = Arc::new(MockApiClient::new(vec![end_turn("1"), end_turn("2")]));
+    let hooks = exec_with(
+        Arc::new(StopBlockHandler),
+        builtin_hook("stop-block", HookEventType::Stop),
+    )
+    .await;
+    let mut cfg = OrchestratorConfig::default();
+    cfg.max_turns = 1;
+    let o = Arc::new(ConversationOrchestrator::new(
+        cfg,
+        api.clone(),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        hooks,
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    ));
+
+    let result = o.run_turn("hi").await;
+    assert!(
+        matches!(
+            result,
+            Err(orchestrator::OrchestratorError::MaxTurnsReached { max_turns: 1 })
+        ),
+        "a blocking Stop hook coinciding with max_turns must end on the max-turns \
+         terminal, not the block cap: {result:?}"
+    );
+    assert_eq!(
+        api.captured_msgs().await.len(),
+        1,
+        "exactly one API call — the blocking branch ends immediately at max_turns"
+    );
+    let history = o.session().lock().await.history.clone();
+    assert!(
+        !history
+            .iter()
+            .any(|m| m.text_content() == "Stop hook feedback:\ndo X first"),
+        "the stop-hook feedback must NOT be appended when the block coincides with \
+         max_turns (the binary returns before appending): {:?}",
+        history.iter().map(|m| m.text_content()).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
 async fn stop_prevent_continuation_terminates() {
     let api = Arc::new(MockApiClient::new(vec![end_turn("done")]));
     let hooks = exec_with(

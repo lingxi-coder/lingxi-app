@@ -324,15 +324,14 @@ impl Tool for EnterPlanModeTool {
         let duration_ms = started_at.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, duration_ms).await;
         Ok(ToolCallResult {
-            data: json!({
-                "marker": PLAN_MODE_ENTER_MARKER,
-                "plan_mode": true,
-                // Instruction block ported from TS `mapToolResultToToolResultBlockParam`
-                // (`EnterPlanModeTool.ts:103-125`) so the exploration guidance reaches
-                // the model (TS embeds it as the `tool_result` content).
-                "instructions": ENTER_PLAN_MODE_INSTRUCTIONS,
-            }),
-            model_content: None,
+            // claude-code EnterPlanModeTool result: `{message}` (the exploration
+            // guidance — `EnterPlanModeTool.ts:96-125`). The model reads it via the
+            // `model_content` channel (the prior `{marker, plan_mode, instructions}`
+            // shape JSON-dumped to the model, since `instructions` is not in the
+            // `tool_result_to_model_text` fallback chain). Plan mode is entered via
+            // the session lock above — the marker/plan_mode flags were vestigial.
+            data: json!({ "message": ENTER_PLAN_MODE_INSTRUCTIONS }),
+            model_content: Some(ENTER_PLAN_MODE_INSTRUCTIONS.to_string()),
             new_messages: Vec::new(),
             context_modifier: None,
             mcp_meta: None,
@@ -560,11 +559,14 @@ mod tests {
             .call(json!({}), use_ctx, fresh_tx())
             .await
             .expect("enter must succeed on fresh session");
-        assert_eq!(res.data["marker"], "[PLAN MODE]");
-        assert_eq!(res.data["plan_mode"], true);
-        // Instruction block (TS `mapToolResultToToolResultBlockParam`) reaches the model.
-        assert_eq!(res.data["instructions"], ENTER_PLAN_MODE_INSTRUCTIONS);
-        let instructions = res.data["instructions"].as_str().unwrap();
+        // binary EnterPlanModeTool result = {message}; the model reads it via the
+        // model_content channel. The marker/plan_mode flags are gone (plan mode is
+        // entered via the session lock, asserted below).
+        assert_eq!(res.data["message"], ENTER_PLAN_MODE_INSTRUCTIONS);
+        assert!(res.data.get("marker").is_none());
+        assert!(res.data.get("plan_mode").is_none());
+        assert_eq!(res.model_content.as_deref(), Some(ENTER_PLAN_MODE_INSTRUCTIONS));
+        let instructions = res.data["message"].as_str().unwrap();
         assert!(instructions.starts_with("Entered plan mode."));
         assert!(instructions.contains("6. When ready, use ExitPlanMode to present your plan for approval"));
         assert!(instructions.contains("DO NOT write or edit any files yet"));

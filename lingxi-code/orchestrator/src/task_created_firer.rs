@@ -45,7 +45,7 @@ pub struct OrchestratorTaskCreatedFirer {
     /// The SAME executor the orchestrator fires its other hooks through.
     hooks: Arc<HookExecutorImpl>,
     /// Engine cwd, threaded into the `TaskCreated` hook payload (`cwd`) and the
-    /// per-hook Command-arm `CLAUDE_PROJECT_DIR` fallback.
+    /// per-hook Command-arm `LINGXI_PROJECT_DIR` fallback.
     cwd: PathBuf,
     /// The MAIN orchestrator session's transcript path
     /// (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
@@ -87,7 +87,7 @@ impl TaskCreatedFirer for OrchestratorTaskCreatedFirer {
             team_name: fire.team_name,
         };
         // Context-light: a task-creation transition has no live per-turn session
-        // here, so we thread the engine cwd (also the CLAUDE_PROJECT_DIR fallback)
+        // here, so we thread the engine cwd (also the LINGXI_PROJECT_DIR fallback)
         // and the main session's `transcript_path` (FIX B — claude-code's
         // `createBaseHookInput` ALWAYS stamps it). Everything else defaults —
         // matching the `OrchestratorTaskCompletedFirer`.

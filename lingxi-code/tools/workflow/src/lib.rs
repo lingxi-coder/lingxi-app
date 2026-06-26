@@ -218,7 +218,7 @@ impl Tool for WorkflowTool {
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         // Port of `fbn()` + `pA()` from claude-code v2.1.186 (offset 196461282).
         // `fbn()` returns true (= disable) when:
-        //   `isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_WORKFLOWS)` OR
+        //   `isEnvTruthy(process.env.LINGXI_DISABLE_WORKFLOWS)` OR
         //   `$H()?.settings.disableWorkflows === true`
         //
         // LingXi: the env-var branch is implemented faithfully.
@@ -232,7 +232,7 @@ impl Tool for WorkflowTool {
         // (`tengu_workflows_enabled`), and plan-availability gates have no LingXi
         // backing and are treated as permissive (enabled), matching the
         // Max/Team/null-plan default.
-        !is_env_truthy(std::env::var("CLAUDE_CODE_DISABLE_WORKFLOWS").ok().as_deref())
+        !is_env_truthy(std::env::var("LINGXI_DISABLE_WORKFLOWS").ok().as_deref())
     }
     fn max_result_size_chars(&self) -> usize {
         100000
@@ -289,7 +289,7 @@ impl Tool for WorkflowTool {
         // fire the byte-exact message on the env-var branch (same branch as
         // `is_enabled`) as a faithful-equivalent gate for local builds. The managed-
         // setting arm is NOT reachable from this ctx.
-        if is_env_truthy(std::env::var("CLAUDE_CODE_DISABLE_WORKFLOWS").ok().as_deref()) {
+        if is_env_truthy(std::env::var("LINGXI_DISABLE_WORKFLOWS").ok().as_deref()) {
             return Err(ValidationError(
                 "Dynamic workflows are disabled by managed settings (`disableWorkflows`).".into(),
             ));
@@ -659,7 +659,7 @@ mod tests {
         let t = tool(None);
         let ctx = tool_api::test_support::fresh_ctx();
         let _g = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
 
         let err = t.validate_input(&json!({}), &ctx).await.unwrap_err();
         assert_eq!(err.0, "Must provide script, name, or scriptPath");
@@ -677,7 +677,7 @@ mod tests {
         let t = tool(None);
         let ctx = tool_api::test_support::fresh_ctx();
         let _g = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
 
         // A script with no meta block at all triggers the "must be first statement" error.
         let err = t
@@ -697,7 +697,7 @@ mod tests {
         let t = tool(None);
         let ctx = tool_api::test_support::fresh_ctx();
         let _g = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
 
         let script = concat!(
             "export const meta = { name: 'bad', description: 'non-det' };\n",
@@ -723,7 +723,7 @@ mod tests {
         let t = tool(None);
         let ctx = tool_api::test_support::fresh_ctx();
         let _g = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
 
         // Write a non-deterministic saved workflow to .lingxi/workflows/.
         let dir = std::path::Path::new(".lingxi/workflows");
@@ -750,15 +750,15 @@ mod tests {
 
     #[tokio::test]
     async fn validate_error_5_disable_workflows_env() {
-        // errorCode 5 — CLAUDE_CODE_DISABLE_WORKFLOWS=1 fires the managed-settings message.
+        // errorCode 5 — LINGXI_DISABLE_WORKFLOWS=1 fires the managed-settings message.
         let t = tool(None);
         let ctx = tool_api::test_support::fresh_ctx();
         let _g = ENV_LOCK.lock().unwrap();
-        std::env::set_var("CLAUDE_CODE_DISABLE_WORKFLOWS", "1");
+        std::env::set_var("LINGXI_DISABLE_WORKFLOWS", "1");
         let result = t
             .validate_input(&json!({ "script": VALID_SCRIPT }), &ctx)
             .await;
-        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
 
         let err = result.unwrap_err();
         assert_eq!(
@@ -774,7 +774,7 @@ mod tests {
         let t = tool(None);
         let ctx = tool_api::test_support::fresh_ctx();
         let _g = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
 
         t.validate_input(&json!({ "script": VALID_SCRIPT }), &ctx)
             .await
@@ -982,7 +982,7 @@ mod tests {
 
     // is_enabled gate tests — port of `fbn()` / `pA()` local-deterministic subset.
     //
-    // Env vars are process-global; all tests that touch CLAUDE_CODE_DISABLE_WORKFLOWS
+    // Env vars are process-global; all tests that touch LINGXI_DISABLE_WORKFLOWS
     // must hold ENV_LOCK so they don't race with each other.
     use std::sync::Mutex;
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -991,7 +991,7 @@ mod tests {
     #[test]
     fn is_enabled_default() {
         let _g = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
         let t = tool(None);
         assert!(
             t.is_enabled(&ToolStaticContext::default()),
@@ -999,47 +999,47 @@ mod tests {
         );
     }
 
-    /// CLAUDE_CODE_DISABLE_WORKFLOWS=1 → tool is disabled.
+    /// LINGXI_DISABLE_WORKFLOWS=1 → tool is disabled.
     #[test]
     fn is_enabled_disabled_by_env_1() {
         let _g = ENV_LOCK.lock().unwrap();
-        std::env::set_var("CLAUDE_CODE_DISABLE_WORKFLOWS", "1");
+        std::env::set_var("LINGXI_DISABLE_WORKFLOWS", "1");
         let t = tool(None);
         let enabled = t.is_enabled(&ToolStaticContext::default());
-        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
         assert!(!enabled, "Workflow must be disabled when env var is '1'");
     }
 
-    /// CLAUDE_CODE_DISABLE_WORKFLOWS=true → tool is disabled.
+    /// LINGXI_DISABLE_WORKFLOWS=true → tool is disabled.
     #[test]
     fn is_enabled_disabled_by_env_true() {
         let _g = ENV_LOCK.lock().unwrap();
-        std::env::set_var("CLAUDE_CODE_DISABLE_WORKFLOWS", "true");
+        std::env::set_var("LINGXI_DISABLE_WORKFLOWS", "true");
         let t = tool(None);
         let enabled = t.is_enabled(&ToolStaticContext::default());
-        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
         assert!(!enabled, "Workflow must be disabled when env var is 'true'");
     }
 
-    /// CLAUDE_CODE_DISABLE_WORKFLOWS=yes → tool is disabled.
+    /// LINGXI_DISABLE_WORKFLOWS=yes → tool is disabled.
     #[test]
     fn is_enabled_disabled_by_env_yes() {
         let _g = ENV_LOCK.lock().unwrap();
-        std::env::set_var("CLAUDE_CODE_DISABLE_WORKFLOWS", "yes");
+        std::env::set_var("LINGXI_DISABLE_WORKFLOWS", "yes");
         let t = tool(None);
         let enabled = t.is_enabled(&ToolStaticContext::default());
-        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
         assert!(!enabled, "Workflow must be disabled when env var is 'yes'");
     }
 
-    /// CLAUDE_CODE_DISABLE_WORKFLOWS=0 (falsy) → tool remains enabled.
+    /// LINGXI_DISABLE_WORKFLOWS=0 (falsy) → tool remains enabled.
     #[test]
     fn is_enabled_falsy_env_value_stays_enabled() {
         let _g = ENV_LOCK.lock().unwrap();
-        std::env::set_var("CLAUDE_CODE_DISABLE_WORKFLOWS", "0");
+        std::env::set_var("LINGXI_DISABLE_WORKFLOWS", "0");
         let t = tool(None);
         let enabled = t.is_enabled(&ToolStaticContext::default());
-        std::env::remove_var("CLAUDE_CODE_DISABLE_WORKFLOWS");
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
         assert!(enabled, "Workflow must stay enabled when env var is '0' (falsy)");
     }
 }

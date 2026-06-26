@@ -30,12 +30,12 @@ use traits::{
 /// (`hooks/src/executor.rs` — `bypass_with_audit(pcmd, "hook_command")`).
 ///
 /// claude-code assembles a hook command's env as `{...WO(), ...Uot(o),
-/// CLAUDE_PROJECT_DIR}` with `o.source==="harness"` (BIN off 205727901 /
+/// LINGXI_PROJECT_DIR}` with `o.source==="harness"` (BIN off 205727901 /
 /// 199137330). For `source==="harness"`, `Uot` does NOT emit `AI_AGENT`
 /// (that is gated `source==="agent"`), and the hook env carries no
 /// `GIT_EDITOR` (that is a Bash-spawn-only var). The hooks crate already
-/// folds the full `Uot(harness)` set (`CLAUDECODE` / `CLAUDE_CODE_SESSION_ID`
-/// / `CLAUDE_CODE_CHILD_SESSION` / `CLAUDE_EFFORT`) into the command env, so
+/// folds the full `Uot(harness)` set (`CLAUDECODE` / `LINGXI_SESSION_ID`
+/// / `LINGXI_CHILD_SESSION` / `LINGXI_EFFORT`) into the command env, so
 /// the runner must NOT layer the Bash-spawn `AI_AGENT` / `GIT_EDITOR` on top
 /// of a hook child. We detect a hook command by this audit reason and skip
 /// those two vars — every other command (Bash / REPL / PowerShell tool calls)
@@ -55,22 +55,22 @@ const HOOK_COMMAND_AUDIT_REASON: &str = "hook_command";
 /// is already correct via that path.
 const HOOK_ENV_DENYLIST: &[&str] = &[
     "CLAUDE_CODE_OAUTH_TOKEN",
-    "CLAUDE_CODE_SUBSCRIPTION_TYPE",
-    "CLAUDE_CODE_RATE_LIMIT_TIER",
-    "CLAUDE_BG_AUTH_SNAPSHOT_PATH",
-    "CLAUDE_BG_SOCKET_TOKENS_PATH",
-    "CLAUDE_BG_RV_AUTH",
-    "CLAUDE_BG_PTY_AUTH",
-    "CLAUDE_CODE_SESSION_KIND",
-    "CLAUDE_BG_SOURCE",
-    "CLAUDE_BG_ISOLATION",
-    "CLAUDE_BG_BACKEND",
-    "CLAUDE_CODE_SESSION_NAME",
-    "CLAUDE_CODE_RESUME_INTERRUPTED_TURN",
-    "CLAUDE_CODE_RESUME_PROMPT",
-    "CLAUDE_BG_SESSION_PERMISSION_RULES",
-    "CLAUDE_BG_MEMORY_TOGGLED_OFF",
-    "CLAUDE_CODE_OTEL_DIAG_STDERR",
+    "LINGXI_SUBSCRIPTION_TYPE",
+    "LINGXI_RATE_LIMIT_TIER",
+    "LINGXI_BG_AUTH_SNAPSHOT_PATH",
+    "LINGXI_BG_SOCKET_TOKENS_PATH",
+    "LINGXI_BG_RV_AUTH",
+    "LINGXI_BG_PTY_AUTH",
+    "LINGXI_SESSION_KIND",
+    "LINGXI_BG_SOURCE",
+    "LINGXI_BG_ISOLATION",
+    "LINGXI_BG_BACKEND",
+    "LINGXI_SESSION_NAME",
+    "LINGXI_RESUME_INTERRUPTED_TURN",
+    "LINGXI_RESUME_PROMPT",
+    "LINGXI_BG_SESSION_PERMISSION_RULES",
+    "LINGXI_BG_MEMORY_TOGGLED_OFF",
+    "LINGXI_OTEL_DIAG_STDERR",
 ];
 
 /// Prefix `WO()` sweeps from the hook child env: every key starting with
@@ -83,7 +83,7 @@ const HOOK_ENV_DENY_PREFIX: &str = "OTEL_";
 /// `utils/subprocessEnv.ts:86`). claude-code-action sets it when running with
 /// untrusted content; truthy ⇒ scrub [`GHA_SUBPROCESS_SCRUB`] from EVERY
 /// subprocess env (Bash AND hook children both spawn via `subprocessEnv()`).
-const ENV_SUBPROCESS_ENV_SCRUB: &str = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB";
+const ENV_SUBPROCESS_ENV_SCRUB: &str = "LINGXI_SUBPROCESS_ENV_SCRUB";
 
 /// Secret-bearing keys `subprocessEnv()` `delete`s from a child env when
 /// [`ENV_SUBPROCESS_ENV_SCRUB`] is truthy (`subprocessEnv.ts:15-53`,
@@ -136,7 +136,7 @@ impl PosixProcess {
     /// 2. `CLAUDECODE=1`, `GIT_EDITOR=true`, `AI_AGENT=<Mer("agent")>`, and
     ///    `SHELL=<inner.command>` (the last only for the bash provider) —
     ///    overwritten on top so callers cannot accidentally clobber them.
-    /// 3. `CLAUDE_CODE_SESSION_ID` is propagated only when the caller has
+    /// 3. `LINGXI_SESSION_ID` is propagated only when the caller has
     ///    explicitly injected it through the env map (the engine layer
     ///    decides whether to set it).
     ///
@@ -184,7 +184,7 @@ impl PosixProcess {
         // #7: claude-code `Uot` injects `AI_AGENT=Mer("agent")` for the Bash
         // spawn (`source:"agent"`); a hook child (`source:"harness"`) gets
         // neither `AI_AGENT` nor `GIT_EDITOR` (#43 — the hook env is
-        // `{...WO(), ...Uot(harness), CLAUDE_PROJECT_DIR}`).
+        // `{...WO(), ...Uot(harness), LINGXI_PROJECT_DIR}`).
         if !is_hook_command {
             tcmd.env(ENV_AI_AGENT, ai_agent_value());
             tcmd.env(ENV_GIT_EDITOR.0, ENV_GIT_EDITOR.1);
@@ -224,12 +224,12 @@ impl PosixProcess {
         } else {
             tcmd.env_remove(ENV_SHELL);
         }
-        // 3. CLAUDE_CODE_SESSION_ID propagated only if explicitly provided.
+        // 3. LINGXI_SESSION_ID propagated only if explicitly provided.
         if let Some(sess) = inner.env.get(ENV_CLAUDE_CODE_SESSION_ID) {
             tcmd.env(ENV_CLAUDE_CODE_SESSION_ID, sess);
         }
         // 4. GHA subprocess secret-scrub (`subprocessEnv()`, subprocessEnv.ts:86-97):
-        //    when `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` is truthy (claude-code-action's
+        //    when `LINGXI_SUBPROCESS_ENV_SCRUB` is truthy (claude-code-action's
         //    untrusted-content mode), `delete` each secret-bearing key + its
         //    `INPUT_<KEY>` GitHub-Actions twin from the child env — for BOTH the
         //    Bash and the hook child (both spawn via `subprocessEnv()`), so a
@@ -400,7 +400,7 @@ mod hook_env_tests {
 
     /// A hook command (`source:"harness"`) gets neither `AI_AGENT` nor
     /// `GIT_EDITOR` from the runner — matching claude-code's `{...WO(),
-    /// ...Uot(harness), CLAUDE_PROJECT_DIR}` hook env, which carries neither.
+    /// ...Uot(harness), LINGXI_PROJECT_DIR}` hook env, which carries neither.
     /// The pre-seeded sentinel therefore survives untouched.
     #[tokio::test]
     async fn hook_command_omits_ai_agent_and_git_editor() {
@@ -416,7 +416,7 @@ mod hook_env_tests {
         );
         // The always-present `Uot` markers are still set on a hook child.
         assert!(lines.iter().any(|l| *l == "CLAUDECODE=1"));
-        assert!(lines.iter().any(|l| *l == "CLAUDE_CODE_CHILD_SESSION=1"));
+        assert!(lines.iter().any(|l| *l == "LINGXI_CHILD_SESSION=1"));
     }
 
     /// A non-hook command (Bash/REPL/PowerShell tool call, `source:"agent"`)

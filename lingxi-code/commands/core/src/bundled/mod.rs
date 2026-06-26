@@ -15,7 +15,7 @@ pub mod loop_skill;
 /// `bundledSkills.ts`).
 ///
 /// `cron_enabled` is the host's `isKairosCronEnabled` equivalent
-/// (`cron_scheduler_enabled(CLAUDE_CODE_DISABLE_CRON)` on desktop). When `false`
+/// (`cron_scheduler_enabled(LINGXI_DISABLE_CRON)` on desktop). When `false`
 /// the `/loop` skill is not registered — mirroring the reference
 /// `isEnabled: isKairosCronEnabled` gate (loop.ts:83).
 pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {

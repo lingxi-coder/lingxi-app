@@ -112,21 +112,21 @@ pub(crate) fn can_execute(executing_safe_flags: &[bool], candidate_safe: bool) -
 /// Byte-locked to the v2.1.183 binary's `r1p` getter:
 /// ```js
 /// function r1p() {
-///   let e = parseInt(process.env.CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY || "", 10);
+///   let e = parseInt(process.env.LINGXI_MAX_TOOL_USE_CONCURRENCY || "", 10);
 ///   return e > 0 ? e : 10;
 /// }
 /// ```
 pub(crate) const DEFAULT_MAX_TOOL_USE_CONCURRENCY: usize = 10;
 
 /// Resolve the maximum number of concurrency-safe tools to run at once,
-/// mirroring the binary's `r1p()`. Reads `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY`
+/// mirroring the binary's `r1p()`. Reads `LINGXI_MAX_TOOL_USE_CONCURRENCY`
 /// and uses it only when it parses to a value `> 0`; otherwise the default of
 /// [`DEFAULT_MAX_TOOL_USE_CONCURRENCY`] (10).
 ///
 /// Injectable form for tests: [`max_tool_use_concurrency_from`].
 pub(crate) fn max_tool_use_concurrency() -> usize {
     max_tool_use_concurrency_from(
-        std::env::var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY")
+        std::env::var("LINGXI_MAX_TOOL_USE_CONCURRENCY")
             .ok()
             .as_deref(),
     )
@@ -306,7 +306,7 @@ impl<'a> StreamingToolExecutor<'a> {
     ///
     /// The v2.1.183 binary runs a contiguous concurrency-safe group through
     /// `i1p`, which merges the per-tool generators with a bounded window of
-    /// `r1p()` (`CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY`, default 10). So no more
+    /// `r1p()` (`LINGXI_MAX_TOOL_USE_CONCURRENCY`, default 10). So no more
     /// than N concurrency-safe tools execute simultaneously; the rest of the
     /// group waits for a slot. We enforce the same bound here: a queued safe
     /// tool may only start when the number of currently-`Executing`
@@ -1085,7 +1085,7 @@ mod tests {
     async fn process_queue_caps_safe_tools_at_default_ten() {
         let _guard = tool_concurrency_env_guard();
         // Ensure no env override leaks in from the environment.
-        std::env::remove_var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY");
+        std::env::remove_var("LINGXI_MAX_TOOL_USE_CONCURRENCY");
         assert_eq!(max_tool_use_concurrency(), DEFAULT_MAX_TOOL_USE_CONCURRENCY);
 
         let orch = orch_with_safe_tool();
@@ -1132,18 +1132,18 @@ mod tests {
         }
     }
 
-    /// `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY` overrides the cap. With the env
+    /// `LINGXI_MAX_TOOL_USE_CONCURRENCY` overrides the cap. With the env
     /// set to 3 and 10 safe tools queued, exactly 3 start.
     /// (Mutates env → `--test-threads=1`.)
     #[tokio::test]
     async fn process_queue_respects_env_concurrency_override() {
         let _guard = tool_concurrency_env_guard();
-        std::env::set_var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY", "3");
+        std::env::set_var("LINGXI_MAX_TOOL_USE_CONCURRENCY", "3");
         // Guard so a panic/assert failure still clears the env for sibling tests.
         struct Clear;
         impl Drop for Clear {
             fn drop(&mut self) {
-                std::env::remove_var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY");
+                std::env::remove_var("LINGXI_MAX_TOOL_USE_CONCURRENCY");
             }
         }
         let _clear = Clear;
@@ -1181,11 +1181,11 @@ mod tests {
     #[tokio::test]
     async fn process_queue_starts_next_safe_when_slot_frees() {
         let _guard = tool_concurrency_env_guard();
-        std::env::set_var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY", "2");
+        std::env::set_var("LINGXI_MAX_TOOL_USE_CONCURRENCY", "2");
         struct Clear;
         impl Drop for Clear {
             fn drop(&mut self) {
-                std::env::remove_var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY");
+                std::env::remove_var("LINGXI_MAX_TOOL_USE_CONCURRENCY");
             }
         }
         let _clear = Clear;

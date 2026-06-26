@@ -66,10 +66,10 @@ pub const MAX_BACKOFF_MS: u64 = 32_000;
 /// `withRetry.ts:52` (`const DEFAULT_MAX_RETRIES = 10`). Combined with the
 /// loop bound `attempt <= maxRetries + 1` (`withRetry.ts:189`) this permits up
 /// to 11 executions / 10 sleeps at the default. Overridable via
-/// `CLAUDE_CODE_MAX_RETRIES` (see [`max_retries_from_env`]).
+/// `LINGXI_MAX_RETRIES` (see [`max_retries_from_env`]).
 pub const DEFAULT_MAX_RETRIES: u32 = 10;
 
-/// Resolve the configured max-retries from a raw `CLAUDE_CODE_MAX_RETRIES`
+/// Resolve the configured max-retries from a raw `LINGXI_MAX_RETRIES`
 /// value. Mirrors claude-code `getDefaultMaxRetries` (`withRetry.ts:789-793`):
 /// when the env var is present its `parseInt` is used, otherwise (absent or
 /// unparseable) the default of [`DEFAULT_MAX_RETRIES`] applies.
@@ -81,12 +81,12 @@ pub fn max_retries_from_env_value(v: Option<&str>) -> u32 {
     }
 }
 
-/// Read `CLAUDE_CODE_MAX_RETRIES` from the process environment and resolve the
+/// Read `LINGXI_MAX_RETRIES` from the process environment and resolve the
 /// effective max-retries. Mirrors claude-code `getDefaultMaxRetries`
 /// (`withRetry.ts:789-796`).
 #[must_use]
 pub fn max_retries_from_env() -> u32 {
-    max_retries_from_env_value(std::env::var("CLAUDE_CODE_MAX_RETRIES").ok().as_deref())
+    max_retries_from_env_value(std::env::var("LINGXI_MAX_RETRIES").ok().as_deref())
 }
 
 /// Consecutive-529 threshold before the fallback / repeated-overload decision
@@ -196,7 +196,7 @@ pub struct RetryControl {
     pub max_529_retries: u8,
     /// Maximum number of retries. Defaults to [`DEFAULT_MAX_RETRIES`] (10).
     ///
-    /// Overridable via `CLAUDE_CODE_MAX_RETRIES` — wired by
+    /// Overridable via `LINGXI_MAX_RETRIES` — wired by
     /// [`resolve_retry_control`] reading [`ResolveRetryEnv::max_retries`].
     /// Mirrors `withRetry.ts:789-796` (`getMaxRetries`).
     pub max_retries: u32,
@@ -257,7 +257,7 @@ pub struct ResolveRetryEnv {
     /// Whether `IS_SANDBOX` is defined at all. Any defined value (including
     /// empty string) counts as sandboxed — mirrors TS `!!process.env.IS_SANDBOX`.
     pub is_sandbox_defined: bool,
-    /// Raw value of `CLAUDE_CODE_MAX_RETRIES`. When `Some`, parsed as `u32`;
+    /// Raw value of `LINGXI_MAX_RETRIES`. When `Some`, parsed as `u32`;
     /// absent or unparseable → [`DEFAULT_MAX_RETRIES`].
     /// Mirrors `withRetry.ts:789-796` (`getMaxRetries`).
     pub max_retries: Option<String>,
@@ -271,7 +271,7 @@ impl ResolveRetryEnv {
             fallback_for_all: std::env::var("FALLBACK_FOR_ALL_PRIMARY_MODELS").ok(),
             user_type: std::env::var("USER_TYPE").ok(),
             is_sandbox_defined: std::env::var_os("IS_SANDBOX").is_some(),
-            max_retries: std::env::var("CLAUDE_CODE_MAX_RETRIES").ok(),
+            max_retries: std::env::var("LINGXI_MAX_RETRIES").ok(),
         }
     }
 }
@@ -287,7 +287,7 @@ impl ResolveRetryEnv {
 ///   (`!is_subscriber` and `is_non_custom_opus(model)`)
 /// - `is_external` = `USER_TYPE == "external"`
 /// - `is_sandbox` = `IS_SANDBOX` env var is defined (any value)
-/// - `max_retries` = `CLAUDE_CODE_MAX_RETRIES` parsed as `u32`, or
+/// - `max_retries` = `LINGXI_MAX_RETRIES` parsed as `u32`, or
 ///   [`DEFAULT_MAX_RETRIES`] when absent/unparseable (mirrors
 ///   `withRetry.ts:789-796`)
 ///
@@ -308,7 +308,7 @@ pub fn resolve_retry_control(
 ///
 /// ## Precedence
 ///
-/// `CLAUDE_CODE_MAX_RETRIES` env **>** `settings_max_retries` **>** [`DEFAULT_MAX_RETRIES`].
+/// `LINGXI_MAX_RETRIES` env **>** `settings_max_retries` **>** [`DEFAULT_MAX_RETRIES`].
 ///
 /// When `env.max_retries` is present and parseable, it wins regardless of
 /// `settings_max_retries`.  When the env var is absent, `settings_max_retries`
@@ -391,7 +391,7 @@ pub fn resolve_retry_control_with_settings(
 /// 6. Budget exhaustion: once `state.attempt >= ctl.max_retries`, every
 ///    otherwise-retryable class → [`DriveStep::Terminal`].
 ///    `ctl.max_retries` defaults to [`DEFAULT_MAX_RETRIES`] and is overridden
-///    by `CLAUDE_CODE_MAX_RETRIES` via [`resolve_retry_control`].
+///    by `LINGXI_MAX_RETRIES` via [`resolve_retry_control`].
 pub fn next_step(
     state: &mut RetryState,
     ctl: &RetryControl,
@@ -654,7 +654,7 @@ mod jittered_delay_tests {
         assert_eq!(DEFAULT_MAX_RETRIES, 10);
     }
 
-    /// claude-code `withRetry.ts:789-796` — `CLAUDE_CODE_MAX_RETRIES` overrides
+    /// claude-code `withRetry.ts:789-796` — `LINGXI_MAX_RETRIES` overrides
     /// the default when present and parseable; falls back to 10 otherwise.
     #[test]
     fn claude_code_max_retries_env_overrides() {
@@ -1606,13 +1606,13 @@ mod resolve_retry_control_tests {
         let _ = ResolveRetryEnv::from_process_env();
     }
 
-    // --- Fix 1: CLAUDE_CODE_MAX_RETRIES drives next_step via resolve_retry_control ---
+    // --- Fix 1: LINGXI_MAX_RETRIES drives next_step via resolve_retry_control ---
 
-    /// `CLAUDE_CODE_MAX_RETRIES=2` → `ctl.max_retries = 2` → `next_step` returns
+    /// `LINGXI_MAX_RETRIES=2` → `ctl.max_retries = 2` → `next_step` returns
     /// `Terminal` after 3 executions (2 sleeps), not 11.
     ///
     /// Mirrors `withRetry.ts:789-796` `getMaxRetries → options.maxRetries ??
-    /// CLAUDE_CODE_MAX_RETRIES ?? 10`.
+    /// LINGXI_MAX_RETRIES ?? 10`.
     #[test]
     fn claude_code_max_retries_env_drives_next_step() {
         // Inject max_retries="2" via ResolveRetryEnv (avoids mutating std::env).
@@ -1637,18 +1637,18 @@ mod resolve_retry_control_tests {
         assert_eq!(
             final_step,
             DriveStep::Terminal,
-            "3rd call must be Terminal (CLAUDE_CODE_MAX_RETRIES=2)"
+            "3rd call must be Terminal (LINGXI_MAX_RETRIES=2)"
         );
     }
 
-    /// Absent or unparseable `CLAUDE_CODE_MAX_RETRIES` falls back to `DEFAULT_MAX_RETRIES`.
+    /// Absent or unparseable `LINGXI_MAX_RETRIES` falls back to `DEFAULT_MAX_RETRIES`.
     #[test]
     fn claude_code_max_retries_absent_uses_default() {
         let env = ResolveRetryEnv::default(); // max_retries: None
         let ctl = resolve_retry_control(SONNET_MODEL, None, false, &env);
         assert_eq!(
             ctl.max_retries, DEFAULT_MAX_RETRIES,
-            "absent CLAUDE_CODE_MAX_RETRIES must default to {DEFAULT_MAX_RETRIES}"
+            "absent LINGXI_MAX_RETRIES must default to {DEFAULT_MAX_RETRIES}"
         );
     }
 
@@ -1662,13 +1662,13 @@ mod resolve_retry_control_tests {
         let ctl = resolve_retry_control(SONNET_MODEL, None, false, &env);
         assert_eq!(
             ctl.max_retries, DEFAULT_MAX_RETRIES,
-            "unparseable CLAUDE_CODE_MAX_RETRIES must default to {DEFAULT_MAX_RETRIES}"
+            "unparseable LINGXI_MAX_RETRIES must default to {DEFAULT_MAX_RETRIES}"
         );
     }
 
     // ── Precedence: env > settings > default ──────────────────────────────────
 
-    /// `CLAUDE_CODE_MAX_RETRIES` env beats `settings_max_retries`.
+    /// `LINGXI_MAX_RETRIES` env beats `settings_max_retries`.
     #[test]
     fn env_beats_settings_max_retries() {
         let env = ResolveRetryEnv {

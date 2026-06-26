@@ -26,7 +26,7 @@
 //!   by `head_limit` (default 250). A large `RECORDS_CAP` (10_000) bounds the
 //!   *recorded* lines per file as a memory safety valve, but never limits the
 //!   *count* — so totals stay accurate even when recording stops.
-//! - A wall-clock walk budget honors `CLAUDE_CODE_GLOB_TIMEOUT_SECONDS`
+//! - A wall-clock walk budget honors `LINGXI_GLOB_TIMEOUT_SECONDS`
 //!   (default 20s, 60s on WSL); a timeout with zero results is surfaced as an
 //!   error (`utils/ripgrep.ts:130-133,444-454`), partial results are returned.
 //! - File-read ignore-patterns (`GrepTool.ts:411-427`) are WIRED: the active
@@ -248,12 +248,12 @@ pub(crate) fn is_env_truthy(name: &str, default: bool) -> bool {
 }
 
 /// Walk wall-clock budget (`utils/ripgrep.ts:130-133`):
-/// `CLAUDE_CODE_GLOB_TIMEOUT_SECONDS` (parsed as integer seconds, >0) overrides;
+/// `LINGXI_GLOB_TIMEOUT_SECONDS` (parsed as integer seconds, >0) overrides;
 /// otherwise the platform default of 20s (60s on WSL, which has a 3-5x file-read
 /// penalty). `pub(crate)` so `glob` shares the identical budget.
 pub(crate) fn ripgrep_timeout(is_wsl: bool) -> Duration {
     let default_secs = if is_wsl { 60 } else { 20 };
-    let secs = std::env::var("CLAUDE_CODE_GLOB_TIMEOUT_SECONDS")
+    let secs = std::env::var("LINGXI_GLOB_TIMEOUT_SECONDS")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .filter(|n| *n > 0)
@@ -657,7 +657,7 @@ impl Tool for GrepTool {
         let mut total_matches: u64 = 0;
 
         // --- Wall-clock budget on the walk (`utils/ripgrep.ts:130-133`) ---
-        // `CLAUDE_CODE_GLOB_TIMEOUT_SECONDS` overrides; else 20s (60s on WSL).
+        // `LINGXI_GLOB_TIMEOUT_SECONDS` overrides; else 20s (60s on WSL).
         // The in-process equivalent of `rg`'s execFile timeout is a deadline
         // checked each walk step (the walk is synchronous CPU/IO work — no tokio
         // timer / extra dep needed). `Platform::as_str()` returns `getPlatform()`
@@ -1091,18 +1091,18 @@ mod tests {
 
     #[test]
     fn ripgrep_timeout_defaults_and_override() {
-        std::env::remove_var("CLAUDE_CODE_GLOB_TIMEOUT_SECONDS");
+        std::env::remove_var("LINGXI_GLOB_TIMEOUT_SECONDS");
         assert_eq!(ripgrep_timeout(false), Duration::from_secs(20));
         assert_eq!(ripgrep_timeout(true), Duration::from_secs(60)); // WSL
-        std::env::set_var("CLAUDE_CODE_GLOB_TIMEOUT_SECONDS", "5");
+        std::env::set_var("LINGXI_GLOB_TIMEOUT_SECONDS", "5");
         assert_eq!(ripgrep_timeout(false), Duration::from_secs(5));
         assert_eq!(ripgrep_timeout(true), Duration::from_secs(5)); // override wins over WSL
         // Non-positive / garbage → default.
-        std::env::set_var("CLAUDE_CODE_GLOB_TIMEOUT_SECONDS", "0");
+        std::env::set_var("LINGXI_GLOB_TIMEOUT_SECONDS", "0");
         assert_eq!(ripgrep_timeout(false), Duration::from_secs(20));
-        std::env::set_var("CLAUDE_CODE_GLOB_TIMEOUT_SECONDS", "nope");
+        std::env::set_var("LINGXI_GLOB_TIMEOUT_SECONDS", "nope");
         assert_eq!(ripgrep_timeout(false), Duration::from_secs(20));
-        std::env::remove_var("CLAUDE_CODE_GLOB_TIMEOUT_SECONDS");
+        std::env::remove_var("LINGXI_GLOB_TIMEOUT_SECONDS");
     }
 
     #[test]

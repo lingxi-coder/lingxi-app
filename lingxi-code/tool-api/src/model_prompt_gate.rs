@@ -87,8 +87,8 @@ fn uwu_standard_model(model: &str) -> bool {
 /// ```js
 /// Dh = wn((e)=>{
 ///   if(!e) return false;                                            // no model → false
-///   if(st(process.env.CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT)) return true;   // env-truthy → simple
-///   if(_l(process.env.CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT)) return false;  // env-defined-falsy → standard
+///   if(st(process.env.LINGXI_SIMPLE_SYSTEM_PROMPT)) return true;   // env-truthy → simple
+///   if(_l(process.env.LINGXI_SIMPLE_SYSTEM_PROMPT)) return false;  // env-defined-falsy → standard
 ///   return !UWu(e) || FWu(e);
 /// });
 /// ```
@@ -110,7 +110,7 @@ pub fn dh_simple_system_prompt(model: Option<&str>) -> bool {
     let Some(model) = model.filter(|m| !m.is_empty()) else {
         return false;
     };
-    let env = std::env::var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT").ok();
+    let env = std::env::var("LINGXI_SIMPLE_SYSTEM_PROMPT").ok();
     if traits::env::is_env_truthy(env.as_deref()) {
         return true;
     }

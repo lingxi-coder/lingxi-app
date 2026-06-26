@@ -45,7 +45,7 @@ pub struct OrchestratorHookDispatcher {
     /// The SAME executor the orchestrator fires its other hooks through.
     hooks: Arc<HookExecutorImpl>,
     /// Engine cwd, threaded into the `Elicitation` hook payload (`cwd`) and the
-    /// per-hook Command-arm `CLAUDE_PROJECT_DIR` fallback.
+    /// per-hook Command-arm `LINGXI_PROJECT_DIR` fallback.
     cwd: PathBuf,
     /// The MAIN orchestrator session's transcript path
     /// (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
@@ -95,7 +95,7 @@ impl HookDispatcher for OrchestratorHookDispatcher {
             requested_schema: request.requested_schema,
         };
         // Minimal context: the inbound elicitation path has no live per-turn
-        // session, so we thread the engine cwd (also used as the CLAUDE_PROJECT_DIR
+        // session, so we thread the engine cwd (also used as the LINGXI_PROJECT_DIR
         // fallback) and the main session's `transcript_path` (FIX B). Everything
         // else defaults — matching the orchestrator's other "context-light" fires.
         let ctx = HookContext {

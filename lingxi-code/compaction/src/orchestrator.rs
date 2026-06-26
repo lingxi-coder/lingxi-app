@@ -189,7 +189,7 @@ impl CompactionOrchestrator {
 
         // --- Layer 1: snip (cheapest, no LLM) ----------------------------- //
         // COMPACT.4: TS gates the snip pass behind `feature('HISTORY_SNIP')`
-        // (`query.ts:401`), which resolves to `envBool('CLAUDE_CODE_HISTORY_SNIP',
+        // (`query.ts:401`), which resolves to `envBool('LINGXI_HISTORY_SNIP',
         // false)` (`shims/bun-bundle.ts:20`) — OFF by default in the reference
         // checkout. The prior code ran the snip pass UNCONDITIONALLY, shedding
         // the oldest messages on every iteration even with the feature off; gate
@@ -328,13 +328,13 @@ impl CompactionOrchestrator {
 /// Whether the `HISTORY_SNIP` snip pass runs (COMPACT.4).
 ///
 /// Mirrors TS `feature('HISTORY_SNIP')`, which resolves to
-/// `envBool('CLAUDE_CODE_HISTORY_SNIP', false)` (`shims/bun-bundle.ts:20,33-37`):
+/// `envBool('LINGXI_HISTORY_SNIP', false)` (`shims/bun-bundle.ts:20,33-37`):
 /// the env var must be exactly `"1"` or `"true"` (byte-exact — `envBool` does NOT
 /// trim or case-fold, unlike `isEnvTruthy`). Absent or any other value → `false`,
 /// matching the reference checkout's default-off so the snip layer is a no-op
 /// unless explicitly enabled.
 fn history_snip_enabled() -> bool {
-    match std::env::var("CLAUDE_CODE_HISTORY_SNIP") {
+    match std::env::var("LINGXI_HISTORY_SNIP") {
         Ok(v) => v == "1" || v == "true",
         Err(_) => false,
     }
@@ -497,7 +497,7 @@ mod tests {
     // --- COMPACT.4: HISTORY_SNIP gating ---------------------------------- //
 
     /// Serializes the env-mutating COMPACT.4 tests so the shared
-    /// `CLAUDE_CODE_HISTORY_SNIP` process var isn't raced. The body runs with the
+    /// `LINGXI_HISTORY_SNIP` process var isn't raced. The body runs with the
     /// var set to `value` (or removed when `None`); the prior value is always
     /// restored. The body is sync (drives async work via a local runtime) so the
     /// guard is never held across an `.await`.
@@ -507,15 +507,15 @@ mod tests {
         let _guard = SNIP_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let saved = std::env::var("CLAUDE_CODE_HISTORY_SNIP").ok();
+        let saved = std::env::var("LINGXI_HISTORY_SNIP").ok();
         match value {
-            Some(v) => std::env::set_var("CLAUDE_CODE_HISTORY_SNIP", v),
-            None => std::env::remove_var("CLAUDE_CODE_HISTORY_SNIP"),
+            Some(v) => std::env::set_var("LINGXI_HISTORY_SNIP", v),
+            None => std::env::remove_var("LINGXI_HISTORY_SNIP"),
         }
         let out = body();
         match saved {
-            Some(v) => std::env::set_var("CLAUDE_CODE_HISTORY_SNIP", v),
-            None => std::env::remove_var("CLAUDE_CODE_HISTORY_SNIP"),
+            Some(v) => std::env::set_var("LINGXI_HISTORY_SNIP", v),
+            None => std::env::remove_var("LINGXI_HISTORY_SNIP"),
         }
         out
     }
@@ -558,7 +558,7 @@ mod tests {
 
     #[test]
     fn history_snip_env_flag_enables_snip() {
-        // COMPACT.4: with CLAUDE_CODE_HISTORY_SNIP=1 the snip pass runs again,
+        // COMPACT.4: with LINGXI_HISTORY_SNIP=1 the snip pass runs again,
         // sheds the oldest messages down to the protected tail, and records the
         // Snip layer (mirroring TS `feature('HISTORY_SNIP')` on).
         with_snip_env(Some("1"), || {
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn history_snip_enabled_parses_envbool() {
-        // Byte-faithful `envBool('CLAUDE_CODE_HISTORY_SNIP', false)`: only the
+        // Byte-faithful `envBool('LINGXI_HISTORY_SNIP', false)`: only the
         // exact strings "1" and "true" enable it (no trim / case-fold), absent or
         // anything else → false.
         with_snip_env(None, || assert!(!history_snip_enabled()));

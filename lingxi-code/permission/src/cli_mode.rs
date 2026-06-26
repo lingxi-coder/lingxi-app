@@ -13,7 +13,7 @@
 //!   only the settings-disable notice is reachable.
 //! - `auto` / `TRANSCRIPT_CLASSIFIER` mode — classifier is ant-only; an
 //!   `"auto"` CLI value falls to `Default` exactly like TS in a non-ant build.
-//! - `CLAUDE_CODE_REMOTE` filtering of settings `defaultMode` (CCR) — `LingXi`
+//! - `LINGXI_REMOTE` filtering of settings `defaultMode` (CCR) — `LingXi`
 //!   has no CCR remote entrypoint; the `tengu_ccr_unsupported_default_mode_ignored`
 //!   event is not reproduced. The caller passes `default_mode` straight through.
 

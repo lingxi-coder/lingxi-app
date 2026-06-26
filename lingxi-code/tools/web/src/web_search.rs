@@ -1225,8 +1225,8 @@ mod tests {
     fn select_prompt_gates_concise_for_current_gen_models() {
         use std::env;
         // Neutralize any ambient env override so the model branch alone decides.
-        let prev = env::var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT").ok();
-        env::remove_var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT");
+        let prev = env::var("LINGXI_SIMPLE_SYSTEM_PROMPT").ok();
+        env::remove_var("LINGXI_SIMPLE_SYSTEM_PROMPT");
 
         // `None`/empty ⇒ Dh(undefined) ⇒ VERBOSE.
         assert_eq!(select_web_search_prompt(None), web_search_description());
@@ -1260,16 +1260,16 @@ mod tests {
 
         // Restore the prior env state.
         match prev {
-            Some(v) => env::set_var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", v),
-            None => env::remove_var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT"),
+            Some(v) => env::set_var("LINGXI_SIMPLE_SYSTEM_PROMPT", v),
+            None => env::remove_var("LINGXI_SIMPLE_SYSTEM_PROMPT"),
         }
     }
 
     #[tokio::test]
     async fn prompt_method_selects_concise_via_model_opt() {
         use std::env;
-        let prev = env::var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT").ok();
-        env::remove_var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT");
+        let prev = env::var("LINGXI_SIMPLE_SYSTEM_PROMPT").ok();
+        env::remove_var("LINGXI_SIMPLE_SYSTEM_PROMPT");
 
         // `PromptOptions::model = Some("claude-opus-4-8")` ⇒ CONCISE via the
         // tool's `prompt()` method (the `async prompt({model:e}){return CNi(e)}`
@@ -1287,8 +1287,8 @@ mod tests {
         assert_eq!(verbose, web_search_description());
 
         match prev {
-            Some(v) => env::set_var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", v),
-            None => env::remove_var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT"),
+            Some(v) => env::set_var("LINGXI_SIMPLE_SYSTEM_PROMPT", v),
+            None => env::remove_var("LINGXI_SIMPLE_SYSTEM_PROMPT"),
         }
     }
 

@@ -187,7 +187,7 @@ pub struct SettingsJson {
     ///   Per-model entry wins over the global `DesktopConfig.fallback_model` /
     ///   argv fallback.  Only chain[0] is used; longer chains log a warning.
     /// - `retry.maxAttempts`: **WIRED** — sets `RetryControl.max_retries`.
-    ///   Precedence: `CLAUDE_CODE_MAX_RETRIES` env > `maxAttempts` > default (10).
+    ///   Precedence: `LINGXI_MAX_RETRIES` env > `maxAttempts` > default (10).
     /// - `retry.backoffMs`: **WIRED** — sets the exponential-backoff ladder's
     ///   first rung (overrides the default base of 500ms). Ladder is
     ///   `min(backoffMs * 2^attempt, 32000)`; `backoffMs=1000` →

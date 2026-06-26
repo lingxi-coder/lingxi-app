@@ -62,7 +62,7 @@ pub struct OrchestratorTaskLifecycleHookFirer {
     /// SAME one the registry firers wrap).
     hooks: Arc<HookExecutorImpl>,
     /// Engine cwd, threaded into the hook payload (`cwd`) and the per-hook
-    /// Command-arm `CLAUDE_PROJECT_DIR` fallback.
+    /// Command-arm `LINGXI_PROJECT_DIR` fallback.
     cwd: PathBuf,
     /// The MAIN orchestrator session's transcript path
     /// (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
@@ -87,7 +87,7 @@ impl OrchestratorTaskLifecycleHookFirer {
 
     /// Build the context-light [`HookContext`] used by every fire here. A task
     /// lifecycle transition has no live per-turn session, so the engine cwd (also
-    /// the `CLAUDE_PROJECT_DIR` fallback) and the main session's `transcript_path`
+    /// the `LINGXI_PROJECT_DIR` fallback) and the main session's `transcript_path`
     /// (FIX B) are threaded; everything else defaults — matching the
     /// orchestrator's other context-light firers.
     fn ctx(&self) -> HookContext {

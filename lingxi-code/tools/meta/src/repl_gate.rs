@@ -43,21 +43,21 @@ pub const REPL_ONLY_TOOLS: &[&str] = &[
 /// (`REPLTool/constants.ts:23-30`).
 ///
 /// REPL mode is default-on for ants in the interactive CLI (opt out with
-/// `CLAUDE_CODE_REPL=0`). The legacy `CLAUDE_REPL_MODE=1` also forces it on.
+/// `LINGXI_REPL=0`). The legacy `LINGXI_REPL_MODE=1` also forces it on.
 ///
 /// SDK entrypoints are NOT defaulted on — SDK consumers script direct tool
 /// calls (Bash, Read, etc.) and REPL mode hides those tools.
 ///
 /// Logic (1:1 with TS):
-/// - `CLAUDE_CODE_REPL` defined-falsy (`0`/`false`/`no`/`off`) → `false`
-/// - else `CLAUDE_REPL_MODE` truthy (`1`/`true`/`yes`/`on`) → `true`
+/// - `LINGXI_REPL` defined-falsy (`0`/`false`/`no`/`off`) → `false`
+/// - else `LINGXI_REPL_MODE` truthy (`1`/`true`/`yes`/`on`) → `true`
 /// - else `USER_TYPE == "ant" && CLAUDE_CODE_ENTRYPOINT == "cli"`
 #[must_use]
 pub fn is_repl_mode_enabled() -> bool {
-    if is_env_defined_falsy(std::env::var("CLAUDE_CODE_REPL").ok().as_deref()) {
+    if is_env_defined_falsy(std::env::var("LINGXI_REPL").ok().as_deref()) {
         return false;
     }
-    if is_env_truthy(std::env::var("CLAUDE_REPL_MODE").ok().as_deref()) {
+    if is_env_truthy(std::env::var("LINGXI_REPL_MODE").ok().as_deref()) {
         return true;
     }
     std::env::var("USER_TYPE").ok().as_deref() == Some("ant")
@@ -92,8 +92,8 @@ mod tests {
     /// Clears every env var the gate reads, so each case starts from a known
     /// baseline regardless of the ambient environment.
     fn clear_env() {
-        std::env::remove_var("CLAUDE_CODE_REPL");
-        std::env::remove_var("CLAUDE_REPL_MODE");
+        std::env::remove_var("LINGXI_REPL");
+        std::env::remove_var("LINGXI_REPL_MODE");
         std::env::remove_var("USER_TYPE");
         std::env::remove_var("CLAUDE_CODE_ENTRYPOINT");
     }
@@ -114,8 +114,8 @@ mod tests {
         // Even with ant+cli (which would otherwise enable), the falsy opt-out wins.
         std::env::set_var("USER_TYPE", "ant");
         std::env::set_var("CLAUDE_CODE_ENTRYPOINT", "cli");
-        std::env::set_var("CLAUDE_REPL_MODE", "1");
-        std::env::set_var("CLAUDE_CODE_REPL", "0");
+        std::env::set_var("LINGXI_REPL_MODE", "1");
+        std::env::set_var("LINGXI_REPL", "0");
         assert!(!is_repl_mode_enabled());
         clear_env();
     }
@@ -124,7 +124,7 @@ mod tests {
     fn claude_repl_mode_truthy_forces_on() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_env();
-        std::env::set_var("CLAUDE_REPL_MODE", "1");
+        std::env::set_var("LINGXI_REPL_MODE", "1");
         assert!(is_repl_mode_enabled());
         clear_env();
     }

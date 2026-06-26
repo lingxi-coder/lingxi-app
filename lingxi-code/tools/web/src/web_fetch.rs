@@ -1610,8 +1610,8 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         // variant; the default (no model) gets the LONG = `IMPORTANT: WebFetch
         // WILL FAIL…` auth-prefix + the DESCRIPTION.
         let _env = SKIP_ENV_LOCK.lock().await;
-        let prev = std::env::var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT").ok();
-        std::env::remove_var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT");
+        let prev = std::env::var("LINGXI_SIMPLE_SYSTEM_PROMPT").ok();
+        std::env::remove_var("LINGXI_SIMPLE_SYSTEM_PROMPT");
 
         let (ctx, _http, _sink) = make_web_ctx();
         let tool = WebFetchTool::new(ctx);
@@ -1646,8 +1646,8 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         );
 
         match prev {
-            Some(v) => std::env::set_var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", v),
-            None => std::env::remove_var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT"),
+            Some(v) => std::env::set_var("LINGXI_SIMPLE_SYSTEM_PROMPT", v),
+            None => std::env::remove_var("LINGXI_SIMPLE_SYSTEM_PROMPT"),
         }
     }
 

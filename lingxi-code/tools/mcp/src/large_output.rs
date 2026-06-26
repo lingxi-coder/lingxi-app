@@ -281,12 +281,12 @@ fn compute_line_stats(content: &str) -> LineStats {
 /// `R$d` (`mcpOutputStorage`): the default file-read max-output token budget.
 const DEFAULT_FILE_READ_MAX_OUTPUT_TOKENS: u64 = 25_000;
 
-/// `khe().maxTokens` (`mcpOutputStorage`): `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`
+/// `khe().maxTokens` (`mcpOutputStorage`): `LINGXI_FILE_READ_MAX_OUTPUT_TOKENS`
 /// when a valid positive integer, else [`DEFAULT_FILE_READ_MAX_OUTPUT_TOKENS`].
 /// The `tengu_amber_wren` Statsig config layer is unportable and omitted; its
 /// `{}` default selects the same constant, so this matches the runtime default.
 fn file_read_max_output_tokens() -> u64 {
-    std::env::var("CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS")
+    std::env::var("LINGXI_FILE_READ_MAX_OUTPUT_TOKENS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|&t| t > 0)

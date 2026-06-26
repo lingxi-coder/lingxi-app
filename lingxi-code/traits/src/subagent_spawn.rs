@@ -366,17 +366,17 @@ pub fn format_agent_line(entry: &SubagentListingEntry) -> String {
 /// embedded inline in the `AgentTool` description.
 ///
 /// Port of claude-code `shouldInjectAgentListInMessages`
-/// (`AgentTool/prompt.ts`): honor the `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES`
+/// (`AgentTool/prompt.ts`): honor the `LINGXI_AGENT_LIST_IN_MESSAGES`
 /// override (`isEnvTruthy` ⇒ true, `isEnvDefinedFalsy` ⇒ false), else the
 /// default. **Default is now ON**: in claude-code v2.1.193 the agent catalog is
 /// ALWAYS externalized to the per-turn `<system-reminder>` attachment (the
 /// `AgentTool` description carries only the static pointer line — there is no
 /// inline-catalog variant left). An explicit
-/// `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES=false` opts back into a LEGACY inline
+/// `LINGXI_AGENT_LIST_IN_MESSAGES=false` opts back into a LEGACY inline
 /// catalog (not a 2.1.193 form), retained only as an escape hatch.
 #[must_use]
 pub fn should_inject_agent_list_in_messages() -> bool {
-    let v = std::env::var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES").ok();
+    let v = std::env::var("LINGXI_AGENT_LIST_IN_MESSAGES").ok();
     if crate::env::is_env_truthy(v.as_deref()) {
         return true;
     }
@@ -517,21 +517,21 @@ mod tests {
         static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         assert!(
             should_inject_agent_list_in_messages(),
             "v2.1.193 default must be ON (catalog externalized)"
         );
 
-        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "1");
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
         assert!(should_inject_agent_list_in_messages(), "truthy ⇒ ON");
 
-        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "false");
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
         assert!(
             !should_inject_agent_list_in_messages(),
             "explicit defined-falsy ⇒ OFF (legacy inline escape hatch)"
         );
 
-        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
     }
 }

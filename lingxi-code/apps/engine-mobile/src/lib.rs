@@ -198,7 +198,7 @@ pub fn mobile_command_registry(
     // kill-switch (loop.ts:83); mobile starts no cron scheduler so a scheduled
     // job is inert, but the skill's listing/usage path is harmless and faithful.
     let cron_enabled = !traits::env::is_env_truthy(
-        std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref(),
+        std::env::var("LINGXI_DISABLE_CRON").ok().as_deref(),
     );
     command_core::register_bundled_skills(&mut reg, cron_enabled);
     register_core_batch_1(&mut reg, handle.clone());

@@ -23,7 +23,7 @@
   },
   "input_env": {
     "LINGXI_TRUSTED_DIRECTORIES": "/tmp/emergency",
-    "CLAUDE_CODE_MODEL": "claude-haiku-4-5"
+    "LINGXI_MODEL": "claude-haiku-4-5"
   },
   "expected_effective_settings": {
     "model": "claude-haiku-4-5",

@@ -1,5 +1,5 @@
 //! Foreground `run` injects the claude-code spawn-env contract into the child:
-//! `CLAUDECODE`/`CLAUDE_CODE_CHILD_SESSION`/`GIT_EDITOR`/`AI_AGENT` always, plus
+//! `CLAUDECODE`/`LINGXI_CHILD_SESSION`/`GIT_EDITOR`/`AI_AGENT` always, plus
 //! `SHELL` for the bash provider only (claude-code `SHELL: n==="bash"?S:void 0`).
 
 #![cfg(unix)]
@@ -45,11 +45,11 @@ async fn run_injects_spawn_env_contract_for_bash_provider() {
             shell,
             vec![
                 "-c",
-                "echo CC=$CLAUDECODE CS=$CLAUDE_CODE_CHILD_SESSION GE=$GIT_EDITOR \
-                 AA=$AI_AGENT SH=$SHELL SESS=$CLAUDE_CODE_SESSION_ID",
+                "echo CC=$CLAUDECODE CS=$LINGXI_CHILD_SESSION GE=$GIT_EDITOR \
+                 AA=$AI_AGENT SH=$SHELL SESS=$LINGXI_SESSION_ID",
             ],
             HashMap::from([(
-                "CLAUDE_CODE_SESSION_ID".to_string(),
+                "LINGXI_SESSION_ID".to_string(),
                 "session-abc".to_string(),
             )]),
         ))
@@ -58,7 +58,7 @@ async fn run_injects_spawn_env_contract_for_bash_provider() {
     assert!(out.stdout.contains("CC=1"), "missing CLAUDECODE=1: {out:?}");
     assert!(
         out.stdout.contains("CS=1"),
-        "missing CLAUDE_CODE_CHILD_SESSION=1: {out:?}"
+        "missing LINGXI_CHILD_SESSION=1: {out:?}"
     );
     assert!(
         out.stdout.contains("GE=true"),
@@ -95,12 +95,12 @@ async fn run_strips_wo_denylist_from_hook_command_env() {
     // runner inherits the parent env (tokio default), so these reach `env`
     // unless stripped.
     std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", "secret-oauth");
-    std::env::set_var("CLAUDE_CODE_SUBSCRIPTION_TYPE", "max");
-    std::env::set_var("CLAUDE_CODE_RATE_LIMIT_TIER", "tier-9");
-    std::env::set_var("CLAUDE_BG_RV_AUTH", "bg-rv");
-    std::env::set_var("CLAUDE_CODE_RESUME_PROMPT", "resume-me");
+    std::env::set_var("LINGXI_SUBSCRIPTION_TYPE", "max");
+    std::env::set_var("LINGXI_RATE_LIMIT_TIER", "tier-9");
+    std::env::set_var("LINGXI_BG_RV_AUTH", "bg-rv");
+    std::env::set_var("LINGXI_RESUME_PROMPT", "resume-me");
     std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel");
-    std::env::set_var("CLAUDE_CODE_OTEL_DIAG_STDERR", "1");
+    std::env::set_var("LINGXI_OTEL_DIAG_STDERR", "1");
     std::env::set_var("LX_HOOK_SURVIVOR", "i-survive");
 
     let env_bin = ["/usr/bin/env", "/bin/env"]
@@ -126,12 +126,12 @@ async fn run_strips_wo_denylist_from_hook_command_env() {
 
     for denied in [
         "CLAUDE_CODE_OAUTH_TOKEN=",
-        "CLAUDE_CODE_SUBSCRIPTION_TYPE=",
-        "CLAUDE_CODE_RATE_LIMIT_TIER=",
-        "CLAUDE_BG_RV_AUTH=",
-        "CLAUDE_CODE_RESUME_PROMPT=",
+        "LINGXI_SUBSCRIPTION_TYPE=",
+        "LINGXI_RATE_LIMIT_TIER=",
+        "LINGXI_BG_RV_AUTH=",
+        "LINGXI_RESUME_PROMPT=",
         "OTEL_EXPORTER_OTLP_ENDPOINT=",
-        "CLAUDE_CODE_OTEL_DIAG_STDERR=",
+        "LINGXI_OTEL_DIAG_STDERR=",
     ] {
         assert!(
             !out.stdout.lines().any(|l| l.starts_with(denied)),
@@ -162,12 +162,12 @@ async fn run_strips_wo_denylist_from_hook_command_env() {
 
     for k in [
         "CLAUDE_CODE_OAUTH_TOKEN",
-        "CLAUDE_CODE_SUBSCRIPTION_TYPE",
-        "CLAUDE_CODE_RATE_LIMIT_TIER",
-        "CLAUDE_BG_RV_AUTH",
-        "CLAUDE_CODE_RESUME_PROMPT",
+        "LINGXI_SUBSCRIPTION_TYPE",
+        "LINGXI_RATE_LIMIT_TIER",
+        "LINGXI_BG_RV_AUTH",
+        "LINGXI_RESUME_PROMPT",
         "OTEL_EXPORTER_OTLP_ENDPOINT",
-        "CLAUDE_CODE_OTEL_DIAG_STDERR",
+        "LINGXI_OTEL_DIAG_STDERR",
         "LX_HOOK_SURVIVOR",
     ] {
         std::env::remove_var(k);
@@ -175,7 +175,7 @@ async fn run_strips_wo_denylist_from_hook_command_env() {
 }
 
 /// GHA subprocess secret-scrub (`subprocessEnv()`): with
-/// `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` truthy, secret keys + their `INPUT_<KEY>`
+/// `LINGXI_SUBPROCESS_ENV_SCRUB` truthy, secret keys + their `INPUT_<KEY>`
 /// twins are stripped from the child env; inert without the flag.
 #[tokio::test]
 async fn run_scrubs_gha_secrets_only_when_flagged() {
@@ -189,12 +189,12 @@ async fn run_scrubs_gha_secrets_only_when_flagged() {
     std::env::set_var("LX_GHA_SURVIVOR", "i-survive");
 
     // FLAG ON → secrets + the INPUT_ twin scrubbed; a non-listed var survives.
-    std::env::set_var("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1");
+    std::env::set_var("LINGXI_SUBPROCESS_ENV_SCRUB", "1");
     let out = PosixProcess::new()
         .run(&mk(env_bin, vec![], HashMap::new()))
         .await
         .expect("run");
-    std::env::remove_var("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB");
+    std::env::remove_var("LINGXI_SUBPROCESS_ENV_SCRUB");
     for scrubbed in [
         "ANTHROPIC_API_KEY=",
         "INPUT_ANTHROPIC_API_KEY=",

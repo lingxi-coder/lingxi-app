@@ -120,10 +120,10 @@ pub fn assemble_system_prompt_with_style(
     let keep_coding = output_style.map_or(true, |s| s.keep_coding_instructions);
     // `is_interactive` = true for the standard interactive CLI path (main assembler
     // is always interactive). `has_agent_tool` and `fork_mode_enabled` are derived
-    // from the tool set and the CLAUDE_CODE_FORK_SUBAGENT env var respectively.
+    // from the tool set and the LINGXI_FORK_SUBAGENT env var respectively.
     // For the main assembler the fork mode is disabled by default.
     let has_agent = ctx.tool_names.iter().any(|t| t == "Agent");
-    let fork_mode = std::env::var("CLAUDE_CODE_FORK_SUBAGENT")
+    let fork_mode = std::env::var("LINGXI_FORK_SUBAGENT")
         .map(|v| !v.is_empty() && v != "0" && v != "false")
         .unwrap_or(false);
     s.push_str(&body_sections::format(

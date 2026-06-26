@@ -336,7 +336,7 @@ fn should_enforce_permissions(
 
 /// Whether the live cron scheduler should run. Faithful to claude-code's
 /// `isKairosCronEnabled` LOCAL kill-switch (`ScheduleCronTool/prompt.ts:34/38`):
-/// the `CLAUDE_CODE_DISABLE_CRON` env override (truthy ⇒ cron OFF) "wins over"
+/// the `LINGXI_DISABLE_CRON` env override (truthy ⇒ cron OFF) "wins over"
 /// the GrowthBook fleet flag. That flag defaults to `true`, so this wired-on
 /// scheduler already matches the default-enabled fleet state — only the local
 /// disable override was missing. (The remote GB gate itself is not portable —
@@ -448,12 +448,12 @@ fn managed_only_sandbox_overrides(
 
 /// claude-code `getClaudeTempDir()` + `getClaudeTempDirName()` analog (Shell.ts:307),
 /// identical to the canonical private `claude_temp_dir()` in `tool-shell`'s
-/// `prompt.rs`: `baseTmpDir = CLAUDE_CODE_TMPDIR || (windows ? tmpdir() : "/tmp")`,
+/// `prompt.rs`: `baseTmpDir = LINGXI_TMPDIR || (windows ? tmpdir() : "/tmp")`,
 /// realpath-resolved, name `claude` on Windows else `claude-{uid}`, joined with a
 /// trailing separator. Seeded into the sandbox `allow_write` so the shell's
 /// cwd-tracking file stays writable.
 fn claude_temp_dir() -> String {
-    let base: std::path::PathBuf = std::env::var_os("CLAUDE_CODE_TMPDIR")
+    let base: std::path::PathBuf = std::env::var_os("LINGXI_TMPDIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             if cfg!(target_os = "windows") {
@@ -1334,11 +1334,11 @@ pub async fn desktop_command_registry(
     register_all_builtin_commands(&mut reg);
     // Bundled programmatic skills (`/loop`), port of `registerBundledSkills`.
     // Gated on the same cron kill-switch the scheduler uses
-    // (`isKairosCronEnabled` ↔ `cron_scheduler_enabled(CLAUDE_CODE_DISABLE_CRON)`,
+    // (`isKairosCronEnabled` ↔ `cron_scheduler_enabled(LINGXI_DISABLE_CRON)`,
     // loop.ts:83). Registered AFTER builtins; `/loop` is not a builtin name so no
     // shadow conflict.
     let cron_enabled =
-        cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref());
+        cron_scheduler_enabled(std::env::var("LINGXI_DISABLE_CRON").ok().as_deref());
     command_core::register_bundled_skills(&mut reg, cron_enabled);
     register_core_batch_1(&mut reg, handle.clone());
     register_core_batch_2(&mut reg, handle.clone(), auth);
@@ -1877,13 +1877,13 @@ fn claude_temp_dir_name() -> String {
 }
 
 /// Base Claude temp dir for the task spool — port of `getClaudeTempDir`
-/// (`permissions/filesystem.ts:331-346`): `$CLAUDE_CODE_TMPDIR || /tmp`, joined
+/// (`permissions/filesystem.ts:331-346`): `$LINGXI_TMPDIR || /tmp`, joined
 /// with [`claude_temp_dir_name`]. (claude resolves symlinks; the spool path only
 /// needs to be writable + session-unique, so the realpath step is omitted.)
 /// Distinct from the sandbox-seed [`claude_temp_dir`] (which returns the
 /// realpath-resolved, trailing-separator String form).
 fn claude_temp_dir_path() -> std::path::PathBuf {
-    let base = std::env::var_os("CLAUDE_CODE_TMPDIR").map_or_else(
+    let base = std::env::var_os("LINGXI_TMPDIR").map_or_else(
         || std::path::PathBuf::from("/tmp"),
         std::path::PathBuf::from,
     );
@@ -3291,7 +3291,7 @@ pub async fn build(
     //        scratchpad gate/path is wired on desktop). A true per-turn
     //        recomputation is DEFERRED until a per-turn user-context seam exists.
     if coordinator_mode.is_enabled() && orch_cfg.system_prompt_override.is_none() {
-        let simple = coordinator::is_env_truthy(std::env::var("CLAUDE_CODE_SIMPLE").ok().as_deref());
+        let simple = coordinator::is_env_truthy(std::env::var("LINGXI_SIMPLE").ok().as_deref());
         let mut prompt = coordinator::coordinator_system_prompt(simple);
         // Connected MCP server names for the worker-tools user context.
         let mcp_names: Vec<String> = mcp_registry
@@ -3521,10 +3521,10 @@ pub async fn build(
     //        posix RuntimeSpawner (D17). The detached tick task holds a self-clone
     //        of the scheduler, so it runs for the process lifetime without being
     //        stored on `DesktopRuntime`.
-    //        Gated by the `CLAUDE_CODE_DISABLE_CRON` local kill-switch
+    //        Gated by the `LINGXI_DISABLE_CRON` local kill-switch
     //        (claude-code `prompt.ts:34/38` — the env override that wins over the
     //        GrowthBook fleet flag, which itself defaults on).
-    if cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref()) {
+    if cron_scheduler_enabled(std::env::var("LINGXI_DISABLE_CRON").ok().as_deref()) {
         let tasks_file = cron::tasks_file::scheduled_tasks_path(&cwd);
         let scheduler = Arc::new(cron::CronScheduler::new(
             task_registry.clone(),
@@ -4126,7 +4126,7 @@ pub async fn build(
     // needs no provider; it reads `session.todos` directly.
     .with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()));
 
-    // P0.1 ACTIVATION (gated, default OFF). When `CLAUDE_CODE_MEMDIR_PREFETCH`
+    // P0.1 ACTIVATION (gated, default OFF). When `LINGXI_MEMDIR_PREFETCH`
     // is truthy, wire the memdir-backed memory selector so relevant
     // `~/.lingxi/memdir` entries surface each turn (a Haiku-class side query per
     // turn over `side_query_client`). The composition-root presence of the
@@ -4134,7 +4134,7 @@ pub async fn build(
     // (default false), so unset/false leaves the surfacing channel inert and the
     // locked fixtures byte-identical (`memory_prefetch.is_some() == false`).
     let orch_builder = match (
-        is_env_truthy("CLAUDE_CODE_MEMDIR_PREFETCH"),
+        is_env_truthy("LINGXI_MEMDIR_PREFETCH"),
         dirs::home_dir(),
     ) {
         (true, Some(home)) => orch_builder.with_memory_prefetch(
@@ -4148,7 +4148,7 @@ pub async fn build(
     };
 
     // P1 session-memory standalone trigger (§6.5, gated, default OFF). When
-    // `CLAUDE_CODE_SESSION_MEMORY` is truthy, wire the threshold-gated extractor
+    // `LINGXI_SESSION_MEMORY` is truthy, wire the threshold-gated extractor
     // so durable notes are background-distilled (a Haiku-class fork) once the
     // tool-call threshold crosses and written to
     // `<configHome>/agents/session-memory/<id>.md`, which the Session-tier memdir
@@ -4156,7 +4156,7 @@ pub async fn build(
     // 30/30 tool calls is a tunable default. Unset/false ⇒ no handle ⇒ inert, so
     // the locked fixtures stay byte-identical.
     let orch_builder = match (
-        is_env_truthy("CLAUDE_CODE_SESSION_MEMORY"),
+        is_env_truthy("LINGXI_SESSION_MEMORY"),
         dirs::home_dir(),
     ) {
         (true, Some(home)) => orch_builder.with_session_memory(
@@ -4232,7 +4232,7 @@ pub async fn build(
     //       `loadPluginsFromMarketplaces({cacheOnly})`; `setup.ts:318`
     //       `loadPluginHooks`). Plugins live under `getPluginsDirectory()` =
     //       `~/.lingxi/plugins` (`pluginDirectories.ts:53`), honoring the
-    //       `CLAUDE_CODE_PLUGIN_CACHE_DIR` override. Discovery is allowlist-
+    //       `LINGXI_PLUGIN_CACHE_DIR` override. Discovery is allowlist-
     //       driven (faithful): the `settings.enabledPlugins`
     //       (`plugin@marketplace` → enabled) entries resolve to versioned cache
     //       dirs `cache/{marketplace}/{plugin}/{version}/`, the layout
@@ -4254,7 +4254,7 @@ pub async fn build(
     //       non-panicking while only commands + hooks reach the engine's live
     //       registries.
     {
-        let plugins_dir = std::env::var_os("CLAUDE_CODE_PLUGIN_CACHE_DIR").map_or_else(
+        let plugins_dir = std::env::var_os("LINGXI_PLUGIN_CACHE_DIR").map_or_else(
             || cfg.claude_home.join("plugins"),
             std::path::PathBuf::from,
         );
@@ -6164,7 +6164,7 @@ mod tests {
         use super::cron_scheduler_enabled;
         // Unset ⇒ enabled (matches the GrowthBook fleet flag's `true` default).
         assert!(cron_scheduler_enabled(None));
-        // Truthy CLAUDE_CODE_DISABLE_CRON ⇒ disabled (the local kill-switch).
+        // Truthy LINGXI_DISABLE_CRON ⇒ disabled (the local kill-switch).
         assert!(!cron_scheduler_enabled(Some("1")));
         assert!(!cron_scheduler_enabled(Some("true")));
         assert!(!cron_scheduler_enabled(Some("on")));
@@ -6870,18 +6870,18 @@ mod tests {
     fn session_task_output_dir_is_session_scoped_under_project_temp() {
         // T16: the task-output dir must be `<projectTempDir>/<sessionId>/tasks`
         // (claude-code `getTaskOutputDir`), NOT an in-repo `.lingxi/...` path.
-        // Pin CLAUDE_CODE_TMPDIR so the base is deterministic for the assert.
+        // Pin LINGXI_TMPDIR so the base is deterministic for the assert.
         // (Single-threaded test sets + clears the env var around the call.)
-        let prev = std::env::var_os("CLAUDE_CODE_TMPDIR");
-        std::env::set_var("CLAUDE_CODE_TMPDIR", "/pin-tmp");
+        let prev = std::env::var_os("LINGXI_TMPDIR");
+        std::env::set_var("LINGXI_TMPDIR", "/pin-tmp");
 
         let cwd = std::path::Path::new("/Users/me/proj");
         let dir = super::session_task_output_dir(cwd, "sess:abc-123");
 
         // Restore the env var before asserting (so a failure doesn't leak it).
         match prev {
-            Some(v) => std::env::set_var("CLAUDE_CODE_TMPDIR", v),
-            None => std::env::remove_var("CLAUDE_CODE_TMPDIR"),
+            Some(v) => std::env::set_var("LINGXI_TMPDIR", v),
+            None => std::env::remove_var("LINGXI_TMPDIR"),
         }
 
         // The cwd is sanitized (`-Users-me-proj`); the session id is used

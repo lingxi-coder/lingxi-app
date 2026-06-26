@@ -24,7 +24,7 @@ use traits::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner}
 use traits::sandbox::SandboxedCommand;
 
 /// Serializes EVERY test whose correctness depends on
-/// `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR` (TFo) having a fixed value. The
+/// `LINGXI_BASH_MAINTAIN_PROJECT_WORKING_DIR` (TFo) having a fixed value. The
 /// `maintain_*` test SETS that process-global env var; every other cwd test
 /// reads it via `tfo_maintain_cwd` and assumes it is UNSET (so an in-workspace
 /// `cd` persists rather than resets). Because `cargo test` runs the file's tests
@@ -494,7 +494,7 @@ async fn no_firer_registered_is_a_silent_noop() {
 //
 // claude-code `J2n`: after a command, if the shell cwd moved away from the
 // original (workspace) AND is NOT contained in an allowed dir — or the env
-// `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR` forces it — chdir back to the
+// `LINGXI_BASH_MAINTAIN_PROJECT_WORKING_DIR` forces it — chdir back to the
 // original, emit `tengu_bash_tool_reset_to_original_dir` (non-env branch only),
 // and append `Y2n`'s `\nShell cwd was reset to {original}` to stderr.
 
@@ -608,20 +608,20 @@ async fn cd_outside_workspace_preserves_existing_stderr() {
     );
 }
 
-/// RAII guard: removes `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR` on drop so a
+/// RAII guard: removes `LINGXI_BASH_MAINTAIN_PROJECT_WORKING_DIR` on drop so a
 /// panicking assert in the `maintain_*` test can NEVER leave the process-global
 /// env var set (which would poison every other cwd test in the file).
 struct MaintainEnvGuard;
 impl Drop for MaintainEnvGuard {
     fn drop(&mut self) {
-        std::env::remove_var("CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR");
+        std::env::remove_var("LINGXI_BASH_MAINTAIN_PROJECT_WORKING_DIR");
     }
 }
 
 #[tokio::test]
 async fn maintain_env_resets_even_in_workspace() {
     let _g = maintain_lock();
-    // `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1` (TFo) forces a reset even for
+    // `LINGXI_BASH_MAINTAIN_PROJECT_WORKING_DIR=1` (TFo) forces a reset even for
     // an in-workspace `cd` that would otherwise persist.
     let workspace = TempDir::new().unwrap();
     let workspace_canon = std::fs::canonicalize(workspace.path()).unwrap();
@@ -631,7 +631,7 @@ async fn maintain_env_resets_even_in_workspace() {
     let runner = RecordingRunner::new(vec![Some(sub_canon.clone()), None], false);
     let tool = tool_with(&workspace_canon, runner.clone());
 
-    std::env::set_var("CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR", "1");
+    std::env::set_var("LINGXI_BASH_MAINTAIN_PROJECT_WORKING_DIR", "1");
     // Restored on scope exit even if an assert below panics (keeps the env var
     // from leaking to the other lock-holders).
     let _env_guard = MaintainEnvGuard;

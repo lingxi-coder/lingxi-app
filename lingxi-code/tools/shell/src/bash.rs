@@ -255,7 +255,7 @@ pub fn resolve_timeout_ms(input: &Value) -> u64 {
 /// Resolve the shell binary to spawn under.
 ///
 /// Mirrors `findSuitableShell()` in `src/utils/Shell.ts`: if
-/// `CLAUDE_CODE_SHELL` is set to a non-empty value that contains `"bash"` or
+/// `LINGXI_SHELL` is set to a non-empty value that contains `"bash"` or
 /// `"zsh"`, return it verbatim (no executable-check — that matches the TS
 /// behaviour which only validates that the path exists/is-executable, not
 /// that it runs successfully). Fall back to the compile-time OS default when
@@ -265,7 +265,7 @@ pub fn resolve_timeout_ms(input: &Value) -> u64 {
 /// signature stays `&'static str`) or a compile-time constant.
 #[must_use]
 pub fn resolve_shell_path() -> &'static str {
-    if let Ok(v) = std::env::var("CLAUDE_CODE_SHELL") {
+    if let Ok(v) = std::env::var("LINGXI_SHELL") {
         if !v.is_empty() && (v.contains("bash") || v.contains("zsh")) {
             return Box::leak(v.into_boxed_str());
         }
@@ -344,14 +344,14 @@ pub fn bash_max_output_length() -> usize {
 }
 
 /// Port of claude-code `TFo` (`function TFo(){return
-/// st(process.env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR)}`): when truthy, the
+/// st(process.env.LINGXI_BASH_MAINTAIN_PROJECT_WORKING_DIR)}`): when truthy, the
 /// shell cwd is ALWAYS reset to the original (workspace) after a command, even
 /// for an in-workspace `cd`. `st` is the strict env-truthy allowlist
 /// (`1`/`true`/`yes`/`on`) — delegated to the canonical [`traits::env::is_env_truthy`]
 /// so it cannot drift. DEFAULT FALSE (unset/empty ⇒ false).
 fn tfo_maintain_cwd() -> bool {
     traits::env::is_env_truthy(
-        std::env::var("CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR")
+        std::env::var("LINGXI_BASH_MAINTAIN_PROJECT_WORKING_DIR")
             .ok()
             .as_deref(),
     )
@@ -647,10 +647,10 @@ fn parse_data_uri(s: &str) -> Option<(String, String)> {
 /// prefix is prepended to the user command before it is spawned.
 #[must_use]
 pub fn disable_extglob_command(shell_path: &str) -> Option<String> {
-    // When CLAUDE_CODE_SHELL_PREFIX is set, the wrapper may run a different
+    // When LINGXI_SHELL_PREFIX is set, the wrapper may run a different
     // shell than `shell_path`, so emit commands for BOTH shells. Redirect
     // stdout+stderr because zsh's `command_not_found_handler` writes to stdout.
-    if std::env::var("CLAUDE_CODE_SHELL_PREFIX").is_ok_and(|v| !v.is_empty()) {
+    if std::env::var("LINGXI_SHELL_PREFIX").is_ok_and(|v| !v.is_empty()) {
         return Some(
             "{ shopt -u extglob || setopt NO_EXTENDED_GLOB; } >/dev/null 2>&1 || true".into(),
         );
@@ -1328,7 +1328,7 @@ impl Tool for BashTool {
                 let prevent_cwd_changes = ctx.agent_id.is_some();
                 // claude-code `J2n` (the cwd-reset gate): when the readback shows
                 // the shell navigated OUTSIDE the allowed dirs — or the
-                // `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR` env forces it — chdir
+                // `LINGXI_BASH_MAINTAIN_PROJECT_WORKING_DIR` env forces it — chdir
                 // the shell back to the original (workspace) cwd and warn. We do
                 // not chdir a real shell (the cwd is reasserted by the next call's
                 // `cwd:` spawn arg), so "reset" here = keep `shell_cwd` at the
@@ -1782,8 +1782,8 @@ mod tests {
 
     #[test]
     fn resolve_shell_path_matches_host_os() {
-        // Ensure CLAUDE_CODE_SHELL is unset so we hit the OS-fallback branch.
-        std::env::remove_var("CLAUDE_CODE_SHELL");
+        // Ensure LINGXI_SHELL is unset so we hit the OS-fallback branch.
+        std::env::remove_var("LINGXI_SHELL");
         if cfg!(target_os = "macos") {
             assert_eq!(resolve_shell_path(), "/bin/zsh");
         } else {
@@ -1791,33 +1791,33 @@ mod tests {
         }
     }
 
-    /// CLAUDE_CODE_SHELL override: a bash path is honoured.
+    /// LINGXI_SHELL override: a bash path is honoured.
     #[test]
     fn resolve_shell_path_honours_claude_code_shell_bash() {
-        std::env::set_var("CLAUDE_CODE_SHELL", "/opt/homebrew/bin/bash");
+        std::env::set_var("LINGXI_SHELL", "/opt/homebrew/bin/bash");
         let result = resolve_shell_path();
-        std::env::remove_var("CLAUDE_CODE_SHELL");
+        std::env::remove_var("LINGXI_SHELL");
         assert_eq!(result, "/opt/homebrew/bin/bash");
     }
 
-    /// CLAUDE_CODE_SHELL override: a zsh path is honoured.
+    /// LINGXI_SHELL override: a zsh path is honoured.
     #[test]
     fn resolve_shell_path_honours_claude_code_shell_zsh() {
-        std::env::set_var("CLAUDE_CODE_SHELL", "/usr/local/bin/zsh");
+        std::env::set_var("LINGXI_SHELL", "/usr/local/bin/zsh");
         let result = resolve_shell_path();
-        std::env::remove_var("CLAUDE_CODE_SHELL");
+        std::env::remove_var("LINGXI_SHELL");
         assert_eq!(result, "/usr/local/bin/zsh");
     }
 
-    /// CLAUDE_CODE_SHELL set to an unsupported shell (neither bash nor zsh)
+    /// LINGXI_SHELL set to an unsupported shell (neither bash nor zsh)
     /// falls back to the OS default — matches TS fallback path.
     #[test]
     fn resolve_shell_path_rejects_unsupported_shell() {
-        std::env::set_var("CLAUDE_CODE_SHELL", "/bin/sh");
-        std::env::remove_var("CLAUDE_CODE_SHELL"); // first clear; now test with fish
-        std::env::set_var("CLAUDE_CODE_SHELL", "/usr/bin/fish");
+        std::env::set_var("LINGXI_SHELL", "/bin/sh");
+        std::env::remove_var("LINGXI_SHELL"); // first clear; now test with fish
+        std::env::set_var("LINGXI_SHELL", "/usr/bin/fish");
         let result = resolve_shell_path();
-        std::env::remove_var("CLAUDE_CODE_SHELL");
+        std::env::remove_var("LINGXI_SHELL");
         // fish contains neither "bash" nor "zsh", so OS default is used.
         if cfg!(target_os = "macos") {
             assert_eq!(result, "/bin/zsh");
@@ -1826,12 +1826,12 @@ mod tests {
         }
     }
 
-    /// Empty CLAUDE_CODE_SHELL falls back to OS default.
+    /// Empty LINGXI_SHELL falls back to OS default.
     #[test]
     fn resolve_shell_path_ignores_empty_claude_code_shell() {
-        std::env::set_var("CLAUDE_CODE_SHELL", "");
+        std::env::set_var("LINGXI_SHELL", "");
         let result = resolve_shell_path();
-        std::env::remove_var("CLAUDE_CODE_SHELL");
+        std::env::remove_var("LINGXI_SHELL");
         if cfg!(target_os = "macos") {
             assert_eq!(result, "/bin/zsh");
         } else {
@@ -2460,9 +2460,9 @@ mod tests {
 
     #[test]
     fn disable_extglob_command_byte_locked_per_shell() {
-        // The CLAUDE_CODE_SHELL_PREFIX branch overrides the shell-specific form;
+        // The LINGXI_SHELL_PREFIX branch overrides the shell-specific form;
         // only assert the per-shell strings when that env var is unset.
-        if !std::env::var("CLAUDE_CODE_SHELL_PREFIX").is_ok_and(|v| !v.is_empty()) {
+        if !std::env::var("LINGXI_SHELL_PREFIX").is_ok_and(|v| !v.is_empty()) {
             assert_eq!(
                 disable_extglob_command("/bin/bash").as_deref(),
                 Some("shopt -u extglob 2>/dev/null || true")

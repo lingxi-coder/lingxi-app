@@ -7,10 +7,10 @@
 //! the active task-list id and reading the store, mirroring the binary's `KF()`
 //! precedence (`utils/tasks.ts`):
 //!
-//! 1. `CLAUDE_CODE_TASK_LIST_ID` env (explicit override);
+//! 1. `LINGXI_TASK_LIST_ID` env (explicit override);
 //! 2. in-process teammate `teamName` — N/A at the orchestrator seam (no tool
 //!    `ToolUseContext` here), so skipped;
-//! 3. `CLAUDE_CODE_TEAM_NAME` env (`zp()`, process-based teammate);
+//! 3. `LINGXI_TEAM_NAME` env (`zp()`, process-based teammate);
 //! 4. leader team name ([`traits::team_registry::leader_team_name`]);
 //! 5. session id fallback — see RESIDUAL below.
 //!
@@ -24,7 +24,7 @@
 //! constructs this provider does not see that session id. So this adapter does
 //! NOT implement the level-5 session-id fallback for a standalone session with
 //! no env/team list-id; in that case it reads the default-named store (empty
-//! unless `CLAUDE_CODE_TASK_LIST_ID` was set), so the reminder renders with its
+//! unless `LINGXI_TASK_LIST_ID` was set), so the reminder renders with its
 //! base text only. V1 (`todo_reminder`, the default-when-tasks-disabled path)
 //! needs no provider and is unaffected.
 
@@ -51,13 +51,13 @@ impl TodoStoreReminderTasks {
     /// here), in which case the reminder lists no tasks.
     fn resolve_list_id() -> Option<String> {
         // 1. Explicit env override.
-        if let Some(explicit) = std::env::var_os("CLAUDE_CODE_TASK_LIST_ID") {
+        if let Some(explicit) = std::env::var_os("LINGXI_TASK_LIST_ID") {
             if !explicit.is_empty() {
                 return Some(explicit.to_string_lossy().into_owned());
             }
         }
-        // 3. `CLAUDE_CODE_TEAM_NAME` env (process-based teammate; TS `getTeamName()`).
-        if let Some(team) = std::env::var_os("CLAUDE_CODE_TEAM_NAME") {
+        // 3. `LINGXI_TEAM_NAME` env (process-based teammate; TS `getTeamName()`).
+        if let Some(team) = std::env::var_os("LINGXI_TEAM_NAME") {
             if !team.is_empty() {
                 return Some(team.to_string_lossy().into_owned());
             }
@@ -105,19 +105,19 @@ mod tests {
         // With no env/team list id, the provider lists nothing (the reminder
         // renders base-text-only). Guarded against env interference by checking
         // the unset path directly through the resolver.
-        let prev = std::env::var_os("CLAUDE_CODE_TASK_LIST_ID");
-        let prev_team = std::env::var_os("CLAUDE_CODE_TEAM_NAME");
-        std::env::remove_var("CLAUDE_CODE_TASK_LIST_ID");
-        std::env::remove_var("CLAUDE_CODE_TEAM_NAME");
+        let prev = std::env::var_os("LINGXI_TASK_LIST_ID");
+        let prev_team = std::env::var_os("LINGXI_TEAM_NAME");
+        std::env::remove_var("LINGXI_TASK_LIST_ID");
+        std::env::remove_var("LINGXI_TEAM_NAME");
         // (leader_team_name is None in a fresh test process)
         assert!(TodoStoreReminderTasks::resolve_list_id().is_none());
         let items = TodoStoreReminderTasks::new().task_items().await;
         assert!(items.is_empty());
         if let Some(v) = prev {
-            std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", v);
+            std::env::set_var("LINGXI_TASK_LIST_ID", v);
         }
         if let Some(v) = prev_team {
-            std::env::set_var("CLAUDE_CODE_TEAM_NAME", v);
+            std::env::set_var("LINGXI_TEAM_NAME", v);
         }
     }
 }

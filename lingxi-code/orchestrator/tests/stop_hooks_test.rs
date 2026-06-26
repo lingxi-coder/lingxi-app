@@ -2,7 +2,7 @@
 //! Exercises the core Stop continuation contract (TS `query.ts:1262-1308`):
 //! - a Stop hook `Block` (keep working) continues with the blocking message
 //!   appended + `stop_hook_active=true`; consecutive blocks loop up to
-//!   `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` (default 8), then the cap surfaces an
+//!   `LINGXI_STOP_HOOK_BLOCK_CAP` (default 8), then the cap surfaces an
 //!   override warning and ends the turn (no infinite loop);
 //! - `preventContinuation` (`continue:false`) terminates as `StopHookPrevented`;
 //! - a `UserPromptSubmit` `Block` aborts the turn BEFORE any API call.
@@ -182,7 +182,7 @@ fn end_turn(text: &str) -> llm_client::LlmResponse {
 #[tokio::test]
 async fn stop_block_continues_until_cap_then_overrides() {
     // A perpetually-blocking Stop hook drives consecutive continuations up to
-    // the default CLAUDE_CODE_STOP_HOOK_BLOCK_CAP of 8 (binary v2.1.191:
+    // the default LINGXI_STOP_HOOK_BLOCK_CAP of 8 (binary v2.1.191:
     // `bo=Number.isNaN(jr)?8:jr; if(bo>0&&ar>bo) …yield warning…{reason:"completed"}`),
     // NOT the old boolean guard that stopped after ONE continuation. Blocks 1..8
     // loop (counts 1..8 ≤ 8); the 9th block has next-count 9 > 8 ⇒ the cap fires,
@@ -230,7 +230,7 @@ async fn stop_block_continues_until_cap_then_overrides() {
     // (em-dash U+2014; count 9 == the would-be next consecutive block).
     let texts = output.text_events().await;
     assert!(
-        texts.iter().any(|t| t == "A hook blocked the turn from ending 9 consecutive times — overriding and ending turn. For Stop/SubagentStop hooks, check stop_hook_active in the input and return success while it's true. Set CLAUDE_CODE_STOP_HOOK_BLOCK_CAP to raise this limit."),
+        texts.iter().any(|t| t == "A hook blocked the turn from ending 9 consecutive times — overriding and ending turn. For Stop/SubagentStop hooks, check stop_hook_active in the input and return success while it's true. Set LINGXI_STOP_HOOK_BLOCK_CAP to raise this limit."),
         "the byte-exact override warning must be surfaced when the cap is exceeded: {texts:?}"
     );
     // The blocking REASON (blockingError) is appended as a meta user message,

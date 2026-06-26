@@ -35,7 +35,7 @@
 //! reachable in-tree, so every reachable model resolves to the API default
 //! `high`, computed rather than hard-coded.
 //!
-//! The env override (`CLAUDE_CODE_EFFORT_LEVEL`) is honoured in every branch.
+//! The env override (`LINGXI_EFFORT_LEVEL`) is honoured in every branch.
 
 use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
@@ -90,7 +90,7 @@ Effort levels:\n\
 }
 
 /// Environment variable that pins / clears the effort level for the session.
-const EFFORT_ENV_VAR: &str = "CLAUDE_CODE_EFFORT_LEVEL";
+const EFFORT_ENV_VAR: &str = "LINGXI_EFFORT_LEVEL";
 
 /// `x4(js())` — claude's dynamic-workflow-orchestration gate that unlocks the
 /// `ultracode` pseudo-level. `x4(e) = Ow() && (e===void 0 || yve(e))`, where
@@ -181,7 +181,7 @@ fn parse_effort_level(s: &str) -> Option<EffortLevel> {
     }
 }
 
-/// Resolved state of the `CLAUDE_CODE_EFFORT_LEVEL` env override
+/// Resolved state of the `LINGXI_EFFORT_LEVEL` env override
 /// (`getEffortEnvOverride`).
 enum EnvOverride {
     /// Env unset or unparseable — TS `undefined`.
@@ -346,7 +346,7 @@ fn get_displayed_effort_level(model: &str, app_state: Option<EffortLevel>) -> Ef
     convert_effort_value_to_level(resolved)
 }
 
-/// Read and classify `CLAUDE_CODE_EFFORT_LEVEL` (`getEffortEnvOverride`).
+/// Read and classify `LINGXI_EFFORT_LEVEL` (`getEffortEnvOverride`).
 fn effort_env_override() -> EnvOverride {
     let Ok(raw) = std::env::var(EFFORT_ENV_VAR) else {
         return EnvOverride::Unset;
@@ -552,7 +552,7 @@ impl BuiltinCommandHandler for EffortHandler {
 
 #[cfg(test)]
 // The env-serialization guard is deliberately held across the command's
-// `.await`: it keeps `CLAUDE_CODE_EFFORT_LEVEL` stable for the duration of
+// `.await`: it keeps `LINGXI_EFFORT_LEVEL` stable for the duration of
 // `handle()` so the process-global env var can't race between parallel tests.
 // `#[tokio::test]` runs on a single-thread runtime and nothing re-locks
 // `ENV_LOCK` inside the awaited future, so there is no deadlock risk.
@@ -562,13 +562,13 @@ mod tests {
     use orchestrator::test_support::MockOrchestratorHandle;
 
     /// Env-mutating tests must run serialized: they share the one process-wide
-    /// `CLAUDE_CODE_EFFORT_LEVEL` *and* `HOME` (now that the set/clear paths
+    /// `LINGXI_EFFORT_LEVEL` *and* `HOME` (now that the set/clear paths
     /// write `~/.lingxi/settings.json`). A module-level mutex serializes them.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// RAII test fixture: holds [`ENV_LOCK`], redirects `HOME` to a fresh
     /// per-test temp dir (so persistence never touches the real `~/.claude`),
-    /// and clears `CLAUDE_CODE_EFFORT_LEVEL`. On drop it restores the prior
+    /// and clears `LINGXI_EFFORT_LEVEL`. On drop it restores the prior
     /// `HOME` and removes the temp dir. Mirrors the `HOME_LOCK` pattern in
     /// `engine/src/settings`; uses `std::env::temp_dir()` rather than the
     /// `tempfile` crate, matching the `export.rs` test precedent (no new dep).
@@ -793,7 +793,7 @@ Effort levels:\n\
         std::env::set_var(EFFORT_ENV_VAR, "low");
         assert_eq!(
             run("max").await,
-            "Not applied: CLAUDE_CODE_EFFORT_LEVEL=low overrides effort this session, and max is session-only (nothing saved)"
+            "Not applied: LINGXI_EFFORT_LEVEL=low overrides effort this session, and max is session-only (nothing saved)"
         );
     }
 
@@ -820,7 +820,7 @@ Effort levels:\n\
         std::env::set_var(EFFORT_ENV_VAR, "high");
         assert_eq!(
             run("auto").await,
-            "Cleared effort from settings, but CLAUDE_CODE_EFFORT_LEVEL=high still controls this session"
+            "Cleared effort from settings, but LINGXI_EFFORT_LEVEL=high still controls this session"
         );
     }
 
@@ -926,7 +926,7 @@ Effort levels:\n\
         std::env::set_var(EFFORT_ENV_VAR, "low");
         assert_eq!(
             run("high").await,
-            "CLAUDE_CODE_EFFORT_LEVEL=low overrides this session — clear it and high takes over"
+            "LINGXI_EFFORT_LEVEL=low overrides this session — clear it and high takes over"
         );
         // Persistable set still wrote to disk (env only wins at resolve time).
         assert_eq!(
@@ -949,7 +949,7 @@ Effort levels:\n\
 
     #[test]
     fn resolver_unit() {
-        // `get_displayed_effort_level` reads `CLAUDE_CODE_EFFORT_LEVEL`, so
+        // `get_displayed_effort_level` reads `LINGXI_EFFORT_LEVEL`, so
         // serialize against the env-mutating tests (TestEnv clears it).
         let _env = TestEnv::new();
         assert_eq!(get_default_effort_for_model("claude-opus-4-6"), None);

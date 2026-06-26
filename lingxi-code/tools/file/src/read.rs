@@ -51,7 +51,7 @@ pub const MAX_LINES_TO_READ: u64 = 2000;
 /// [`format_max_tokens_exceeded`]. LingXi has no GrowthBook / env override and
 /// `ToolUseContext` carries no `fileReadingLimits`, so the effective budget is
 /// always this default (the `tengu_amber_wren` GB override + the
-/// `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS` env tier are unported — 3P default).
+/// `LINGXI_FILE_READ_MAX_OUTPUT_TOKENS` env tier are unported — 3P default).
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 25_000;
 
 /// Tool name byte-lock — matches claude-code tool registry.
@@ -1402,7 +1402,7 @@ impl Tool for FileReadTool {
         // Model-gated, mirroring claude-code `Yhi(e,…){if(Dh(e))return SHORT;
         // return LONG}` (binary offset 195602689). `Dh(model)` selects the terse
         // variant for current-gen default models (opus-4-8 / fable-5 / mythos-5)
-        // and whenever `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` is env-truthy; classic
+        // and whenever `LINGXI_SIMPLE_SYSTEM_PROMPT` is env-truthy; classic
         // models and `None` (the `Dh(undefined)` path) get the verbose one. The
         // predicate is shared with TodoWrite via `tool_api`.
         if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {

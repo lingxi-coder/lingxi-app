@@ -11,10 +11,10 @@
 //! [`resolve_agent_model`].
 //!
 //! ## Precedence (`getAgentModel`, agent.ts:43-94)
-//! 1. **`CLAUDE_CODE_SUBAGENT_MODEL`** env override (HIGHEST) → resolved via
+//! 1. **`LINGXI_SUBAGENT_MODEL`** env override (HIGHEST) → resolved via
 //!    `parseUserSpecifiedModel`, bypassing the Bedrock region prefix (the TS
 //!    early-return at agent.ts:43-45 returns before `applyParentRegionPrefix`).
-//!    The TS guard `if (process.env.CLAUDE_CODE_SUBAGENT_MODEL)` is falsy for
+//!    The TS guard `if (process.env.LINGXI_SUBAGENT_MODEL)` is falsy for
 //!    BOTH unset and empty-string, hence the `.filter(|s| !s.is_empty())`.
 //! 2. **`toolSpecifiedModel`** (agent.ts:70-76) — NOT separately ported here.
 //!    The LingXi spawn path (`handle.rs::spawn`) already converts AgentTool's
@@ -413,10 +413,10 @@ pub fn resolve_agent_model(
     permission_mode: PermissionMode,
     model_setting: Option<&str>,
 ) -> String {
-    // 1. CLAUDE_CODE_SUBAGENT_MODEL env override (HIGHEST). The TS guard is falsy
+    // 1. LINGXI_SUBAGENT_MODEL env override (HIGHEST). The TS guard is falsy
     //    for both unset AND empty-string. This branch bypasses the Bedrock prefix
     //    (the TS early-return precedes applyParentRegionPrefix).
-    if let Some(v) = std::env::var("CLAUDE_CODE_SUBAGENT_MODEL")
+    if let Some(v) = std::env::var("LINGXI_SUBAGENT_MODEL")
         .ok()
         .filter(|s| !s.is_empty())
     {
@@ -476,7 +476,7 @@ mod tests {
 
     // ---- env-var serialization -------------------------------------------
     //
-    // CLAUDE_CODE_SUBAGENT_MODEL / CLAUDE_CODE_USE_BEDROCK / ANTHROPIC_DEFAULT_*
+    // LINGXI_SUBAGENT_MODEL / CLAUDE_CODE_USE_BEDROCK / ANTHROPIC_DEFAULT_*
     // mutate process-global env. To avoid cross-test races (cargo runs tests in
     // parallel within a crate), all env-mutating tests share one Mutex and clean
     // up after themselves. (migrations/src/context.rs sets env directly; we add a
@@ -653,7 +653,7 @@ mod tests {
     #[test]
     fn subagent_model_env_override_wins_over_everything() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _g = EnvGuard::set("CLAUDE_CODE_SUBAGENT_MODEL", "haiku");
+        let _g = EnvGuard::set("LINGXI_SUBAGENT_MODEL", "haiku");
         // Override beats Inherit, Alias, and Explicit alike — resolved via
         // parse_user_specified_model.
         assert_eq!(
@@ -683,7 +683,7 @@ mod tests {
     #[test]
     fn subagent_model_env_override_empty_string_is_ignored() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _g = EnvGuard::set("CLAUDE_CODE_SUBAGENT_MODEL", "");
+        let _g = EnvGuard::set("LINGXI_SUBAGENT_MODEL", "");
         // Empty-string is falsy in the TS guard → not honored; Inherit falls
         // through to the parent.
         assert_eq!(

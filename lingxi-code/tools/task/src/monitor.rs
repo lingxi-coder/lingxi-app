@@ -142,11 +142,11 @@ fn shell_available() -> bool {
     true
 }
 
-/// Binary `Mnl` (`applyCcrTimeoutCap`): under `CLAUDE_CODE_REMOTE` a persistent
+/// Binary `Mnl` (`applyCcrTimeoutCap`): under `LINGXI_REMOTE` a persistent
 /// monitor is capped to a 30-minute timeout (persistent→false); otherwise the
 /// requested `(timeout_ms, persistent)` pass through unchanged.
 fn apply_ccr_timeout_cap(timeout_ms: u64, persistent: bool) -> (u64, bool) {
-    let remote = traits::env::is_env_truthy(std::env::var("CLAUDE_CODE_REMOTE").ok().as_deref());
+    let remote = traits::env::is_env_truthy(std::env::var("LINGXI_REMOTE").ok().as_deref());
     if !remote {
         return (timeout_ms, persistent);
     }
@@ -382,7 +382,7 @@ mod tests {
     fn guard() -> std::sync::MutexGuard<'static, ()> {
         static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("CLAUDE_CODE_REMOTE");
+        std::env::remove_var("LINGXI_REMOTE");
         telemetry::test_clear_flag(AMBER_SENTINEL_FLAG);
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
         g

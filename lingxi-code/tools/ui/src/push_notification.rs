@@ -14,7 +14,7 @@
 //! **Capability seams.** The binary's transport/presence probes map to port seams
 //! that default to "absent" — exactly the binary's behavior on a terminal-only
 //! host with no Remote Control and no focus/idle tracking:
-//!   - `sa()` (remote workspace) → false; `is_remote` honors only `CLAUDE_CODE_REMOTE`.
+//!   - `sa()` (remote workspace) → false; `is_remote` honors only `LINGXI_REMOTE`.
 //!   - `mH()` (REPL-bridge mobile-push transport) → false → no mobile transport.
 //!   - `mc("agentPushNotifEnabled",false)` setting → false (no setting backend).
 //!   - `xur()` (user-present: focus `H1e()` or last-keystroke `N0()` within
@@ -117,11 +117,11 @@ impl PushNotificationTool {
 
 // ── Capability seams (binary `sa`/`mH`/`xur`/`mc`/`_in`) ──────────────────────
 
-/// `rt(process.env.CLAUDE_CODE_REMOTE) || sa()` — is this a remote session? The
+/// `rt(process.env.LINGXI_REMOTE) || sa()` — is this a remote session? The
 /// port has no `Nt.caps.workspace` remote-workspace tracking (`sa()`=false), so
 /// only the env override applies.
 fn is_remote() -> bool {
-    traits::env::is_env_truthy(std::env::var("CLAUDE_CODE_REMOTE").ok().as_deref())
+    traits::env::is_env_truthy(std::env::var("LINGXI_REMOTE").ok().as_deref())
 }
 
 /// `mH()` (`Nt.replBridgeActive`) — is a mobile-push transport (Remote Control /
@@ -417,7 +417,7 @@ mod tests {
     fn guard() -> std::sync::MutexGuard<'static, ()> {
         static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("CLAUDE_CODE_REMOTE");
+        std::env::remove_var("LINGXI_REMOTE");
         std::env::remove_var("CLAUDE_CODE_ENTRYPOINT");
         telemetry::test_clear_flag(PUSH_NOTIFICATION_FLAG);
         g
@@ -477,7 +477,7 @@ mod tests {
     #[tokio::test]
     async fn remote_session_succeeds() {
         let _g = guard();
-        std::env::set_var("CLAUDE_CODE_REMOTE", "1");
+        std::env::set_var("LINGXI_REMOTE", "1");
         let t = PushNotificationTool::new(shell_test_ctx(dummy_out()));
         let out = t
             .call(
@@ -491,7 +491,7 @@ mod tests {
         // success.
         assert_eq!(out.data["pushSent"], json!(true));
         assert!(out.data.get("disabledReason").is_none());
-        std::env::remove_var("CLAUDE_CODE_REMOTE");
+        std::env::remove_var("LINGXI_REMOTE");
     }
 
     #[test]

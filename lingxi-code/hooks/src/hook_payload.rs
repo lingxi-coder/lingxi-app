@@ -137,7 +137,7 @@ hook_event_name_marker!(HookEventNameElicitationResult, "ElicitationResult");
 /// without effort support. `level` is the active effort level for the turn
 /// (`"low"` / `"medium"` / `"high"` / `"xhigh"` / `"max"`), after any silent
 /// downgrade for the selected model — the same value exposed to hook commands
-/// and Bash as the `CLAUDE_EFFORT` env var. Same shape as
+/// and Bash as the `LINGXI_EFFORT` env var. Same shape as
 /// `StatusLineCommandInput.effort`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]

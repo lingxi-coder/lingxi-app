@@ -39,7 +39,7 @@ pub struct OrchestratorFileChangedFirer {
     /// The SAME executor the orchestrator fires its other hooks through.
     hooks: Arc<HookExecutorImpl>,
     /// Engine cwd, threaded into the `FileChanged` hook payload `cwd` field (the
-    /// session base dir) and the per-hook Command-arm `CLAUDE_PROJECT_DIR`
+    /// session base dir) and the per-hook Command-arm `LINGXI_PROJECT_DIR`
     /// fallback. Distinct from the fire's `path`, which becomes the wire
     /// `file_path`.
     cwd: PathBuf,
@@ -76,7 +76,7 @@ impl FileChangedFirer for OrchestratorFileChangedFirer {
             kind: fire.kind,
         };
         // Context-light: a file change has no live per-turn session here, so we
-        // thread the engine cwd (also the CLAUDE_PROJECT_DIR fallback) and the main
+        // thread the engine cwd (also the LINGXI_PROJECT_DIR fallback) and the main
         // session's `transcript_path` (FIX B). Everything else defaults — matching
         // `OrchestratorCwdChangedFirer`.
         let ctx = HookContext {

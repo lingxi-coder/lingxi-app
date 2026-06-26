@@ -23,7 +23,7 @@ pub async fn run(env: &MigrationEnv) {
         return;
     }
     // isLegacyModelRemapEnabled (`model.ts:552-554`) = NOT env-truthy opt-out.
-    if env_var_truthy("CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP") {
+    if env_var_truthy("LINGXI_DISABLE_LEGACY_MODEL_REMAP") {
         return;
     }
 
@@ -88,8 +88,8 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn rewrites_each_legacy_string_and_stamps_timestamp() {
-        let _g = env_lock(); // reads CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP
-        std::env::remove_var("CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP");
+        let _g = env_lock(); // reads LINGXI_DISABLE_LEGACY_MODEL_REMAP
+        std::env::remove_var("LINGXI_DISABLE_LEGACY_MODEL_REMAP");
         for legacy in [
             "claude-opus-4-20250514",
             "claude-opus-4-1-20250805",
@@ -117,7 +117,7 @@ mod tests {
     async fn settings_write_failure_still_stamps_timestamp() {
         use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
-        std::env::remove_var("CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP");
+        std::env::remove_var("LINGXI_DISABLE_LEGACY_MODEL_REMAP");
         let t = temp_config();
         let sp = settings_path(SettingsSource::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
@@ -144,7 +144,7 @@ mod tests {
     #[tokio::test]
     async fn happy_path_emits_event_with_original_from_model() {
         let _g = env_lock();
-        std::env::remove_var("CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP");
+        std::env::remove_var("LINGXI_DISABLE_LEGACY_MODEL_REMAP");
         let t = temp_config();
         let sp = settings_path(SettingsSource::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
@@ -164,7 +164,7 @@ mod tests {
     #[tokio::test]
     async fn non_first_party_or_optout_or_other_model_noop() {
         let _g = env_lock();
-        std::env::remove_var("CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP");
+        std::env::remove_var("LINGXI_DISABLE_LEGACY_MODEL_REMAP");
         let t = temp_config();
         let sp = settings_path(SettingsSource::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
@@ -177,10 +177,10 @@ mod tests {
         assert_eq!(read_settings_map(&sp).unwrap()["model"], json!("claude-opus-4-0"));
 
         // env opt-out
-        std::env::set_var("CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP", "1");
+        std::env::set_var("LINGXI_DISABLE_LEGACY_MODEL_REMAP", "1");
         run(&test_env(&t)).await;
         assert_eq!(read_settings_map(&sp).unwrap()["model"], json!("claude-opus-4-0"));
-        std::env::remove_var("CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP");
+        std::env::remove_var("LINGXI_DISABLE_LEGACY_MODEL_REMAP");
 
         // non-legacy model
         std::fs::write(&sp, r#"{"model": "sonnet"}"#).unwrap();

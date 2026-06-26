@@ -13,15 +13,15 @@
 //!   BASENAME at ANY depth — so `*.rs` matches `sub/x.rs`, not just the root.
 //!   (This fixes the headline bug where the old `globset` matcher was tested
 //!   against the base-relative path, making a bare `*.rs` root-only.)
-//! - `CLAUDE_CODE_GLOB_NO_IGNORE` (DEFAULT **true** → `--no-ignore`): when truthy,
+//! - `LINGXI_GLOB_NO_IGNORE` (DEFAULT **true** → `--no-ignore`): when truthy,
 //!   `.gitignore`/global/exclude files are NOT respected.
-//! - `CLAUDE_CODE_GLOB_HIDDEN` (DEFAULT **true** → `--hidden`): when truthy,
+//! - `LINGXI_GLOB_HIDDEN` (DEFAULT **true** → `--hidden`): when truthy,
 //!   hidden (dot) files ARE included.
 //!   NB (verified against ripgrep 14.1.1): a whitelist `--glob` force-includes a
 //!   gitignored/hidden top-level *file* regardless of these toggles — the
 //!   toggles govern whether gitignored/hidden *directories* are descended into.
 //!   The `ignore` crate matches `rg` here exactly.
-//! - `CLAUDE_CODE_GLOB_TIMEOUT_SECONDS` (default 20; 60 on WSL): wall-clock budget
+//! - `LINGXI_GLOB_TIMEOUT_SECONDS` (default 20; 60 on WSL): wall-clock budget
 //!   on the walk (`utils/ripgrep.ts:130-133`).
 //!
 //! Wire locks:
@@ -280,8 +280,8 @@ impl Tool for GlobTool {
         // --- Env toggles (`utils/glob.ts:98-99`, `isEnvTruthy(... || 'true')`) ---
         // DEFAULT TRUE for both: NO_IGNORE → don't respect .gitignore;
         // HIDDEN → include dotfiles.
-        let no_ignore = is_env_truthy("CLAUDE_CODE_GLOB_NO_IGNORE", true);
-        let hidden = is_env_truthy("CLAUDE_CODE_GLOB_HIDDEN", true);
+        let no_ignore = is_env_truthy("LINGXI_GLOB_NO_IGNORE", true);
+        let hidden = is_env_truthy("LINGXI_GLOB_HIDDEN", true);
 
         let mut wb = WalkBuilder::new(&canon_base);
         wb.overrides(overrides);
@@ -298,7 +298,7 @@ impl Tool for GlobTool {
         }
 
         // --- Wall-clock budget on the walk (`utils/ripgrep.ts:130-133`) ---
-        // `CLAUDE_CODE_GLOB_TIMEOUT_SECONDS` overrides; else 20s (60s on WSL).
+        // `LINGXI_GLOB_TIMEOUT_SECONDS` overrides; else 20s (60s on WSL).
         // (The TS path shells `rg` with an execFile timeout + SIGKILL; the
         // in-process equivalent is a deadline checked each walk step. No tokio
         // timer / new dep needed — the walk is synchronous CPU/IO work.)
@@ -469,9 +469,9 @@ mod tests {
     /// HIDDEN=true). The returned guard is held for the whole test body.
     async fn lock_and_clear_glob_env() -> tokio::sync::MutexGuard<'static, ()> {
         let g = ENV_MUTEX.lock().await;
-        std::env::remove_var("CLAUDE_CODE_GLOB_NO_IGNORE");
-        std::env::remove_var("CLAUDE_CODE_GLOB_HIDDEN");
-        std::env::remove_var("CLAUDE_CODE_GLOB_TIMEOUT_SECONDS");
+        std::env::remove_var("LINGXI_GLOB_NO_IGNORE");
+        std::env::remove_var("LINGXI_GLOB_HIDDEN");
+        std::env::remove_var("LINGXI_GLOB_TIMEOUT_SECONDS");
         g
     }
 
@@ -687,7 +687,7 @@ mod tests {
         assert!(err.to_string().contains("invalid glob pattern"));
     }
 
-    // --- ignore toggle (CLAUDE_CODE_GLOB_NO_IGNORE) ---
+    // --- ignore toggle (LINGXI_GLOB_NO_IGNORE) ---
 
     /// `--no-ignore` controls whether ignored *directories* are descended into.
     /// A `.ignore` file (honored standalone by `rg` / the `ignore` crate — no
@@ -729,7 +729,7 @@ mod tests {
         }
 
         // NO_IGNORE=false → respect .gitignore: vendor/ is pruned.
-        std::env::set_var("CLAUDE_CODE_GLOB_NO_IGNORE", "false");
+        std::env::set_var("LINGXI_GLOB_NO_IGNORE", "false");
         {
             let (ctx, _s) = make_ctx(&tmp);
             let tool = GlobTool::new(ctx);
@@ -752,7 +752,7 @@ mod tests {
         // `_env` guard clears the toggles + releases the lock at scope end.
     }
 
-    // --- hidden toggle (CLAUDE_CODE_GLOB_HIDDEN) ---
+    // --- hidden toggle (LINGXI_GLOB_HIDDEN) ---
 
     /// `--hidden` controls whether hidden (dot) *directories* are descended into.
     /// (Like gitignore, a whitelist `--glob` force-includes a hidden top-level
@@ -788,7 +788,7 @@ mod tests {
         }
 
         // HIDDEN=false: .hiddendir/ is pruned.
-        std::env::set_var("CLAUDE_CODE_GLOB_HIDDEN", "false");
+        std::env::set_var("LINGXI_GLOB_HIDDEN", "false");
         {
             let (ctx, _s) = make_ctx(&tmp);
             let tool = GlobTool::new(ctx);

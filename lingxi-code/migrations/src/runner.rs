@@ -100,7 +100,7 @@ mod tests {
     #[tokio::test]
     async fn below_version_runs_set_and_bumps_to_11() {
         let _g = env_lock(); // legacy-opus migration reads env opt-out
-        std::env::remove_var("CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP");
+        std::env::remove_var("LINGXI_DISABLE_LEGACY_MODEL_REMAP");
         let t = temp_config();
         std::fs::write(&t.global, r#"{"replBridgeEnabled": true}"#).unwrap();
         run_migrations(&test_env(&t)).await;
@@ -118,7 +118,7 @@ mod tests {
     #[tokio::test]
     async fn second_run_is_noop_after_bump() {
         let _g = env_lock();
-        std::env::remove_var("CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP");
+        std::env::remove_var("LINGXI_DISABLE_LEGACY_MODEL_REMAP");
         let t = temp_config();
         run_migrations(&test_env(&t)).await;
         let after_first = std::fs::read_to_string(&t.global).unwrap();
@@ -131,7 +131,7 @@ mod tests {
     #[tokio::test]
     async fn version_above_11_reruns_like_ts() {
         let _g = env_lock();
-        std::env::remove_var("CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP");
+        std::env::remove_var("LINGXI_DISABLE_LEGACY_MODEL_REMAP");
         let t = temp_config();
         std::fs::write(
             &t.global,

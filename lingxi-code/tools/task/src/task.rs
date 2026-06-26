@@ -176,7 +176,7 @@ fn env_truthy(key: &str) -> bool {
 }
 
 /// Pure core of [`is_todo_v2_enabled`] — 1:1 with the v2.1.183 binary `TE()`:
-/// `function TE(){if(_l(process.env.CLAUDE_CODE_ENABLE_TASKS))return!1;return!0}`.
+/// `function TE(){if(_l(process.env.LINGXI_ENABLE_TASKS))return!1;return!0}`.
 /// i.e. V2-Task-tools-enabled = NOT (the env normalizes to `0`/`false`/`no`/`off`).
 /// `_l` = [`traits::env::is_env_defined_falsy`] (byte-exact: `e===void 0`⇒false,
 /// boolean⇒`!e`, else lowercased+trimmed ∈ {`0`,`false`,`no`,`off`}).
@@ -191,7 +191,7 @@ fn todo_v2_enabled_inner(enable_tasks_env_defined_falsy: bool) -> bool {
 /// Whether the Product-A V2 Task tools are advertised (and `TodoWrite` hidden).
 ///
 /// Port of `isTodoV2Enabled()` (binary `TE()`): enabled UNLESS
-/// `CLAUDE_CODE_ENABLE_TASKS` is a *defined falsy* value (`0`/`false`/`no`/`off`,
+/// `LINGXI_ENABLE_TASKS` is a *defined falsy* value (`0`/`false`/`no`/`off`,
 /// case-insensitive, trimmed). Unset, empty, or any other value ⇒ enabled.
 ///
 /// The `ctx` parameter is retained for the `Tool::is_enabled` signature but is
@@ -200,7 +200,7 @@ fn todo_v2_enabled_inner(enable_tasks_env_defined_falsy: bool) -> bool {
 #[must_use]
 pub fn is_todo_v2_enabled(_ctx: &ToolStaticContext) -> bool {
     todo_v2_enabled_inner(traits::env::is_env_defined_falsy(
-        std::env::var("CLAUDE_CODE_ENABLE_TASKS").ok().as_deref(),
+        std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref(),
     ))
 }
 
@@ -223,13 +223,13 @@ fn agent_swarms_enabled_inner(user_type_ant: bool, experimental_env: bool) -> bo
 /// [`ToolStaticContext`] feature flag (see `tool_team_create.rs`); the
 /// side-effect path runs inside `call()` where only env signals are available,
 /// so it mirrors the env-driven core of `agentSwarmsEnabled.ts` directly
-/// (`USER_TYPE === 'ant'` OR a truthy `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`).
+/// (`USER_TYPE === 'ant'` OR a truthy `LINGXI_EXPERIMENTAL_AGENT_TEAMS`).
 #[must_use]
 pub fn is_agent_swarms_enabled() -> bool {
     let user_type_ant = std::env::var("USER_TYPE").is_ok_and(|v| v == "ant");
     agent_swarms_enabled_inner(
         user_type_ant,
-        env_truthy("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
+        env_truthy("LINGXI_EXPERIMENTAL_AGENT_TEAMS"),
     )
 }
 
@@ -274,7 +274,7 @@ pub(crate) fn matches_verif(s: &str) -> bool {
 /// is OFF by default — matching prod claude (no suffix). Swap this for the real
 /// `feature(...) && getFeatureValue(...)` terms once the host threads them in.
 pub(crate) fn verification_feature_enabled() -> bool {
-    env_truthy("CLAUDE_CODE_VERIFICATION_AGENT")
+    env_truthy("LINGXI_VERIFICATION_AGENT")
 }
 
 /// Shared predicate for the structural verification nudge — the common core of
@@ -354,11 +354,11 @@ enum StatusInput {
 /// Resolve the task-list id — 1:1 port of `getTaskListId()`
 /// (`utils/tasks.ts:199-210`). Five-level precedence:
 ///
-/// 1. `CLAUDE_CODE_TASK_LIST_ID` env (explicit override).
+/// 1. `LINGXI_TASK_LIST_ID` env (explicit override).
 /// 2. In-process teammate `teamName` ([`ToolUseContext::team_name`], TS
 ///    `getTeammateContext()?.teamName`) — so in-process teammates share the
 ///    leader's task list.
-/// 3. `CLAUDE_CODE_TEAM_NAME` env (TS `getTeamName()`, set when running as a
+/// 3. `LINGXI_TEAM_NAME` env (TS `getTeamName()`, set when running as a
 ///    process-based teammate).
 /// 4. Leader team name ([`traits::team_registry::leader_team_name`], TS
 ///    `leaderTeamName` set by `TeamCreate`).
@@ -367,7 +367,7 @@ enum StatusInput {
 /// The leader and its in-process teammates resolve to the SAME on-disk task dir.
 async fn resolve_task_list_id(ctx: &ToolUseContext) -> String {
     // 1. Explicit env override.
-    if let Some(explicit) = std::env::var_os("CLAUDE_CODE_TASK_LIST_ID") {
+    if let Some(explicit) = std::env::var_os("LINGXI_TASK_LIST_ID") {
         if !explicit.is_empty() {
             return explicit.to_string_lossy().into_owned();
         }
@@ -376,8 +376,8 @@ async fn resolve_task_list_id(ctx: &ToolUseContext) -> String {
     if let Some(team) = ctx.team_name.as_deref().filter(|t| !t.is_empty()) {
         return team.to_string();
     }
-    // 3. CLAUDE_CODE_TEAM_NAME env (process-based teammate; TS getTeamName()).
-    if let Some(team) = std::env::var_os("CLAUDE_CODE_TEAM_NAME") {
+    // 3. LINGXI_TEAM_NAME env (process-based teammate; TS getTeamName()).
+    if let Some(team) = std::env::var_os("LINGXI_TEAM_NAME") {
         if !team.is_empty() {
             return team.to_string_lossy().into_owned();
         }
@@ -2640,8 +2640,8 @@ mod tests {
 
     /// Process-global lock shared by every test that mutates the env vars the
     /// file-backed [`TodoStore`] resolves at call time (`LINGXI_CONFIG_DIR`,
-    /// `CLAUDE_CODE_TASK_LIST_ID`) or the swarm gate
-    /// (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`). Without serialization these
+    /// `LINGXI_TASK_LIST_ID`) or the swarm gate
+    /// (`LINGXI_EXPERIMENTAL_AGENT_TEAMS`). Without serialization these
     /// tests race on the shared env and a store read can land in another test's
     /// throwaway config dir (→ spurious "Task not found").
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -2764,7 +2764,7 @@ mod tests {
 
     #[test]
     fn todo_v2_enabled_inner_matches_ts_predicate() {
-        // Binary TE(): enabled = NOT(_l(CLAUDE_CODE_ENABLE_TASKS)), i.e.
+        // Binary TE(): enabled = NOT(_l(LINGXI_ENABLE_TASKS)), i.e.
         // NOT(env is defined-falsy). No non-interactive term.
         assert!(todo_v2_enabled_inner(false)); // env not defined-falsy (unset/empty/garbage/truthy) → on
         assert!(!todo_v2_enabled_inner(true)); // env defined-falsy (0/false/no/off) → off
@@ -2772,14 +2772,14 @@ mod tests {
 
     #[test]
     fn is_todo_v2_enabled_matches_te_defined_falsy() {
-        // The ctx is unused by TE(); the gate is purely the CLAUDE_CODE_ENABLE_TASKS
+        // The ctx is unused by TE(); the gate is purely the LINGXI_ENABLE_TASKS
         // defined-falsy check. Default (unset env) → enabled. We don't mutate the
         // global env here (to avoid races); the defined-falsy truth table is
         // covered by `todo_v2_enabled_inner` + `traits::env::is_env_defined_falsy`.
         let ctx = ToolStaticContext::default();
-        // Holds whenever CLAUDE_CODE_ENABLE_TASKS is NOT a defined-falsy value.
+        // Holds whenever LINGXI_ENABLE_TASKS is NOT a defined-falsy value.
         if !traits::env::is_env_defined_falsy(
-            std::env::var("CLAUDE_CODE_ENABLE_TASKS").ok().as_deref(),
+            std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref(),
         ) {
             assert!(is_todo_v2_enabled(&ctx));
         } else {
@@ -2974,12 +2974,12 @@ mod tests {
                     None => std::env::remove_var("LINGXI_CONFIG_DIR"),
                 }
                 match &self.prev_list {
-                    Some(v) => std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", v),
-                    None => std::env::remove_var("CLAUDE_CODE_TASK_LIST_ID"),
+                    Some(v) => std::env::set_var("LINGXI_TASK_LIST_ID", v),
+                    None => std::env::remove_var("LINGXI_TASK_LIST_ID"),
                 }
                 match &self.prev_verif {
-                    Some(v) => std::env::set_var("CLAUDE_CODE_VERIFICATION_AGENT", v),
-                    None => std::env::remove_var("CLAUDE_CODE_VERIFICATION_AGENT"),
+                    Some(v) => std::env::set_var("LINGXI_VERIFICATION_AGENT", v),
+                    None => std::env::remove_var("LINGXI_VERIFICATION_AGENT"),
                 }
                 let _ = std::fs::remove_dir_all(&self.dir);
             }
@@ -3010,19 +3010,19 @@ mod tests {
             let dir = std::env::temp_dir().join(&unique);
             let _guard = EnvGuard {
                 prev_config: std::env::var_os("LINGXI_CONFIG_DIR"),
-                prev_list: std::env::var_os("CLAUDE_CODE_TASK_LIST_ID"),
-                prev_verif: std::env::var_os("CLAUDE_CODE_VERIFICATION_AGENT"),
+                prev_list: std::env::var_os("LINGXI_TASK_LIST_ID"),
+                prev_verif: std::env::var_os("LINGXI_VERIFICATION_AGENT"),
                 dir: dir.clone(),
                 _lock: super::ENV_LOCK
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner),
             };
             std::env::set_var("LINGXI_CONFIG_DIR", &dir);
-            std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", &unique);
+            std::env::set_var("LINGXI_TASK_LIST_ID", &unique);
             // T13: the nudge FEATURE is OFF by default (matching prod claude). The
             // store-level transition logic is unchanged; the feature gate is the
             // only difference. Turn it ON for the transition assertions below.
-            std::env::remove_var("CLAUDE_CODE_VERIFICATION_AGENT");
+            std::env::remove_var("LINGXI_VERIFICATION_AGENT");
 
             // 3-item list, none /verif/: two completed + one pending.
             let store = TodoStore::for_list(&unique);
@@ -3063,7 +3063,7 @@ mod tests {
                 .await;
 
             // Enable the feature for the remaining (gate-on) assertions.
-            std::env::set_var("CLAUDE_CODE_VERIFICATION_AGENT", "1");
+            std::env::set_var("LINGXI_VERIFICATION_AGENT", "1");
 
             // Phase 1 — NO-OP: re-send `completed` on the already-completed #1.
             // Raw input status == "completed" (the OLD buggy gate would fire),
@@ -3126,9 +3126,9 @@ mod tests {
         }
         impl Drop for Guard {
             fn drop(&mut self) {
-                restore("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", &self.prev_swarm);
+                restore("LINGXI_EXPERIMENTAL_AGENT_TEAMS", &self.prev_swarm);
                 restore("LINGXI_CONFIG_DIR", &self.prev_config);
-                restore("CLAUDE_CODE_TASK_LIST_ID", &self.prev_list);
+                restore("LINGXI_TASK_LIST_ID", &self.prev_list);
                 let _ = std::fs::remove_dir_all(&self.dir);
             }
         }
@@ -3179,19 +3179,19 @@ mod tests {
             );
             let dir = std::env::temp_dir().join(&unique);
             let guard = Guard {
-                prev_swarm: std::env::var_os("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
+                prev_swarm: std::env::var_os("LINGXI_EXPERIMENTAL_AGENT_TEAMS"),
                 prev_config: std::env::var_os("LINGXI_CONFIG_DIR"),
-                prev_list: std::env::var_os("CLAUDE_CODE_TASK_LIST_ID"),
+                prev_list: std::env::var_os("LINGXI_TASK_LIST_ID"),
                 dir: dir.clone(),
                 _lock: lock,
             };
             if swarm_on {
-                std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
+                std::env::set_var("LINGXI_EXPERIMENTAL_AGENT_TEAMS", "1");
             } else {
-                std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS");
+                std::env::remove_var("LINGXI_EXPERIMENTAL_AGENT_TEAMS");
             }
             std::env::set_var("LINGXI_CONFIG_DIR", &dir);
-            std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", &unique);
+            std::env::set_var("LINGXI_TASK_LIST_ID", &unique);
             (guard, unique, Arc::new(RecordingRouter::default()))
         }
 
@@ -3642,12 +3642,12 @@ mod tests {
         impl Drop for Guard {
             fn drop(&mut self) {
                 match &self.prev_list {
-                    Some(v) => std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", v),
-                    None => std::env::remove_var("CLAUDE_CODE_TASK_LIST_ID"),
+                    Some(v) => std::env::set_var("LINGXI_TASK_LIST_ID", v),
+                    None => std::env::remove_var("LINGXI_TASK_LIST_ID"),
                 }
                 match &self.prev_team {
-                    Some(v) => std::env::set_var("CLAUDE_CODE_TEAM_NAME", v),
-                    None => std::env::remove_var("CLAUDE_CODE_TEAM_NAME"),
+                    Some(v) => std::env::set_var("LINGXI_TEAM_NAME", v),
+                    None => std::env::remove_var("LINGXI_TEAM_NAME"),
                 }
                 traits::team_registry::clear_leader_team_name();
             }
@@ -3658,13 +3658,13 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let g = Guard {
-                prev_list: std::env::var_os("CLAUDE_CODE_TASK_LIST_ID"),
-                prev_team: std::env::var_os("CLAUDE_CODE_TEAM_NAME"),
+                prev_list: std::env::var_os("LINGXI_TASK_LIST_ID"),
+                prev_team: std::env::var_os("LINGXI_TEAM_NAME"),
                 _lock: lock,
             };
             // Start from a clean slate for every level.
-            std::env::remove_var("CLAUDE_CODE_TASK_LIST_ID");
-            std::env::remove_var("CLAUDE_CODE_TEAM_NAME");
+            std::env::remove_var("LINGXI_TASK_LIST_ID");
+            std::env::remove_var("LINGXI_TEAM_NAME");
             traits::team_registry::clear_leader_team_name();
             g
         }
@@ -3672,9 +3672,9 @@ mod tests {
         #[tokio::test]
         async fn level1_env_task_list_id_wins() {
             let _g = guard();
-            std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", "explicit-list");
+            std::env::set_var("LINGXI_TASK_LIST_ID", "explicit-list");
             // Even with every lower level set, the explicit env wins.
-            std::env::set_var("CLAUDE_CODE_TEAM_NAME", "env-team");
+            std::env::set_var("LINGXI_TEAM_NAME", "env-team");
             traits::team_registry::set_leader_team_name("leader-team");
             let mut ctx = tool_api::test_support::fresh_ctx();
             ctx.team_name = Some("teammate-team".into());
@@ -3685,7 +3685,7 @@ mod tests {
         async fn level2_teammate_team_name() {
             let _g = guard();
             // No env override; teammate ctx team_name wins over env + leader.
-            std::env::set_var("CLAUDE_CODE_TEAM_NAME", "env-team");
+            std::env::set_var("LINGXI_TEAM_NAME", "env-team");
             traits::team_registry::set_leader_team_name("leader-team");
             let mut ctx = tool_api::test_support::fresh_ctx();
             ctx.team_name = Some("teammate-team".into());
@@ -3695,9 +3695,9 @@ mod tests {
         #[tokio::test]
         async fn level3_env_team_name() {
             let _g = guard();
-            std::env::set_var("CLAUDE_CODE_TEAM_NAME", "env-team");
+            std::env::set_var("LINGXI_TEAM_NAME", "env-team");
             traits::team_registry::set_leader_team_name("leader-team");
-            // No teammate ctx team_name ⇒ CLAUDE_CODE_TEAM_NAME wins over leader.
+            // No teammate ctx team_name ⇒ LINGXI_TEAM_NAME wins over leader.
             let ctx = tool_api::test_support::fresh_ctx();
             assert_eq!(resolve_task_list_id(&ctx).await, "env-team");
         }
@@ -3750,8 +3750,8 @@ mod tests {
         impl Drop for Guard {
             fn drop(&mut self) {
                 match &self.prev {
-                    Some(v) => std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", v),
-                    None => std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
+                    Some(v) => std::env::set_var("LINGXI_EXPERIMENTAL_AGENT_TEAMS", v),
+                    None => std::env::remove_var("LINGXI_EXPERIMENTAL_AGENT_TEAMS"),
                 }
             }
         }
@@ -3760,13 +3760,13 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let g = Guard {
-                prev: std::env::var_os("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
+                prev: std::env::var_os("LINGXI_EXPERIMENTAL_AGENT_TEAMS"),
                 _lock: lock,
             };
             if on {
-                std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
+                std::env::set_var("LINGXI_EXPERIMENTAL_AGENT_TEAMS", "1");
             } else {
-                std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS");
+                std::env::remove_var("LINGXI_EXPERIMENTAL_AGENT_TEAMS");
             }
             g
         }
@@ -3921,8 +3921,8 @@ mod tests {
                     None => std::env::remove_var("LINGXI_CONFIG_DIR"),
                 }
                 match &self.prev_list {
-                    Some(v) => std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", v),
-                    None => std::env::remove_var("CLAUDE_CODE_TASK_LIST_ID"),
+                    Some(v) => std::env::set_var("LINGXI_TASK_LIST_ID", v),
+                    None => std::env::remove_var("LINGXI_TASK_LIST_ID"),
                 }
                 let _ = std::fs::remove_dir_all(&self.dir);
             }
@@ -3944,12 +3944,12 @@ mod tests {
             let dir = std::env::temp_dir().join(&unique);
             let guard = Guard {
                 prev_config: std::env::var_os("LINGXI_CONFIG_DIR"),
-                prev_list: std::env::var_os("CLAUDE_CODE_TASK_LIST_ID"),
+                prev_list: std::env::var_os("LINGXI_TASK_LIST_ID"),
                 dir: dir.clone(),
                 _lock: lock,
             };
             std::env::set_var("LINGXI_CONFIG_DIR", &dir);
-            std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", &unique);
+            std::env::set_var("LINGXI_TASK_LIST_ID", &unique);
             (guard, unique)
         }
 

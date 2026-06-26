@@ -45,7 +45,7 @@ fn no_tui_flag_takes_stdio_path() {
 /// (retryable) "connection failed" — so the single turn fails and the binary
 /// exits. We only care that it exits without the TUI hijacking the terminal.
 ///
-/// `CLAUDE_CODE_MAX_RETRIES=0` is REQUIRED for determinism: with the default of
+/// `LINGXI_MAX_RETRIES=0` is REQUIRED for determinism: with the default of
 /// 10 retries the retryable stub error is retried with exponential backoff,
 /// whose accumulated sleeps exceed any short test timeout (the binary would
 /// eventually exit, but only after the full backoff sequence). Capping retries
@@ -55,7 +55,7 @@ fn no_tui_flag_takes_stdio_path() {
 fn print_mode_unaffected_by_tui_routing() {
     let mut cmd = Command::cargo_bin("lingxi-cli").unwrap();
     cmd.arg("-p").arg("hello");
-    cmd.env("CLAUDE_CODE_MAX_RETRIES", "0");
+    cmd.env("LINGXI_MAX_RETRIES", "0");
     cmd.timeout(Duration::from_secs(10));
     // Exit code may be 0 or 1 depending on the env. We assert only that the
     // process terminates within the timeout (no TUI takeover).

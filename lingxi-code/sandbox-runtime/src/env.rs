@@ -38,7 +38,7 @@ const NO_PROXY_ADDRESSES: &str =
     "localhost,127.0.0.1,::1,*.local,.local,169.254.0.0/16,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16";
 
 /// `generateProxyEnvVars` (sandbox-utils.js:272-377). `tmpdir` is the resolved
-/// `CLAUDE_CODE_TMPDIR || CLAUDE_TMPDIR || /tmp/claude` (resolved by the caller
+/// `LINGXI_TMPDIR || LINGXI_TMPDIR || /tmp/claude` (resolved by the caller
 /// to keep this pure). Returns ordered `(key, value)` pairs.
 #[must_use]
 pub fn generate_proxy_env_vars(

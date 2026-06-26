@@ -42,7 +42,7 @@ pub struct OrchestratorCwdChangedFirer {
     /// The SAME executor the orchestrator fires its other hooks through.
     hooks: Arc<HookExecutorImpl>,
     /// Engine cwd, threaded into the `CwdChanged` hook payload `cwd` field (the
-    /// session base dir) and the per-hook Command-arm `CLAUDE_PROJECT_DIR`
+    /// session base dir) and the per-hook Command-arm `LINGXI_PROJECT_DIR`
     /// fallback. This is distinct from the fire's `old`/`new` shell cwd, which
     /// becomes the `old_cwd` / `new_cwd` payload fields.
     cwd: PathBuf,
@@ -98,7 +98,7 @@ impl CwdChangedFirer for OrchestratorCwdChangedFirer {
             new: fire.new,
         };
         // Context-light: a cwd change has no live per-turn session here, so we
-        // thread the engine cwd (also the CLAUDE_PROJECT_DIR fallback) and the main
+        // thread the engine cwd (also the LINGXI_PROJECT_DIR fallback) and the main
         // session's `transcript_path` (FIX B). Everything else defaults — matching
         // the `OrchestratorTaskCreatedFirer`.
         let ctx = HookContext {

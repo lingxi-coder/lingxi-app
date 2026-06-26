@@ -4,7 +4,7 @@
 //! `Task*` (V2) tools "haven't been used recently". The reminder fires only
 //! when BOTH counters cross their thresholds (`TURNS_SINCE_WRITE` /
 //! `TURNS_BETWEEN_REMINDERS`, each `10`), is killswitched by
-//! `CLAUDE_CODE_TODO_REMINDER_MODE === "off"`, and selects V1 vs V2 via `TE()`
+//! `LINGXI_TODO_REMINDER_MODE === "off"`, and selects V1 vs V2 via `TE()`
 //! (`is_todo_v2_enabled`).
 //!
 //! ## Binary ground truth (`bin/claude.exe`, v2.1.183)
@@ -14,7 +14,7 @@
 //!
 //! Killswitch (`wgo()`, offset ~203087087):
 //! ```js
-//! function wgo(){let e=process.env.CLAUDE_CODE_TODO_REMINDER_MODE;
+//! function wgo(){let e=process.env.LINGXI_TODO_REMINDER_MODE;
 //!   if(e!==void 0)return e;
 //!   return ct("tengu_soft_slate_nudge","baseline")==="off"?"off":"baseline"}
 //! ```
@@ -23,11 +23,11 @@
 //!
 //! V1/V2 selection (`TE()`, offset ~199285430):
 //! ```js
-//! function TE(){if(_l(process.env.CLAUDE_CODE_ENABLE_TASKS))return false;return true}
+//! function TE(){if(_l(process.env.LINGXI_ENABLE_TASKS))return false;return true}
 //! ```
 //! where `_l(e)` is "explicitly disabled" (`true` iff the value lowercases to
 //! one of `0/false/no/off`). So `TE()` returns `true` (V2 task_reminder) by
-//! DEFAULT and `false` (V1 todo_reminder) only when `CLAUDE_CODE_ENABLE_TASKS`
+//! DEFAULT and `false` (V1 todo_reminder) only when `LINGXI_ENABLE_TASKS`
 //! is explicitly disabled. The producer (`ytl`, offset ~203087213) is
 //! `()=>TE()?B4p(...):M4p(...)` — V2 when `TE()`, else V1.
 //!
@@ -75,7 +75,7 @@ const V2_ITEMS_HEADER: &str = "Here are the existing tasks:";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReminderMode {
     /// `todo_reminder` — V1, reads `session.todos`. Selected when `TE()` is
-    /// false (`CLAUDE_CODE_ENABLE_TASKS` explicitly disabled).
+    /// false (`LINGXI_ENABLE_TASKS` explicitly disabled).
     V1Todo,
     /// `task_reminder` — V2, reads the file-backed task store. The default.
     V2Task,
@@ -91,13 +91,13 @@ fn status_wire(s: TodoState) -> &'static str {
     }
 }
 
-/// `wgo() === "off"` — the killswitch. Honors `CLAUDE_CODE_TODO_REMINDER_MODE`
+/// `wgo() === "off"` — the killswitch. Honors `LINGXI_TODO_REMINDER_MODE`
 /// verbatim when SET (`"off"` ⇒ suppressed); with no GrowthBook the unset case
 /// is NOT off.
 #[must_use]
 pub fn is_killswitched() -> bool {
     matches!(
-        std::env::var("CLAUDE_CODE_TODO_REMINDER_MODE").ok().as_deref(),
+        std::env::var("LINGXI_TODO_REMINDER_MODE").ok().as_deref(),
         Some("off")
     )
 }
@@ -113,10 +113,10 @@ fn is_explicitly_disabled(val: Option<&str>) -> bool {
 
 /// `TE()` (`is_todo_v2_enabled`) → the active [`ReminderMode`]. Returns
 /// [`ReminderMode::V2Task`] by default, [`ReminderMode::V1Todo`] only when
-/// `CLAUDE_CODE_ENABLE_TASKS` is explicitly disabled.
+/// `LINGXI_ENABLE_TASKS` is explicitly disabled.
 #[must_use]
 pub fn select_mode() -> ReminderMode {
-    if is_explicitly_disabled(std::env::var("CLAUDE_CODE_ENABLE_TASKS").ok().as_deref()) {
+    if is_explicitly_disabled(std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref()) {
         ReminderMode::V1Todo
     } else {
         ReminderMode::V2Task

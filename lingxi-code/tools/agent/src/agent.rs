@@ -324,7 +324,7 @@ impl AgentTool {
     /// messages in the conversation." — there is NO inline-catalog variant in the
     /// description. The `should_inject_agent_list_in_messages()` gate (now default
     /// ON, see [`traits::subagent_spawn`]) reflects that: ON ⇒ pointer (the
-    /// 2.1.193 default); an explicit `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES=false`
+    /// 2.1.193 default); an explicit `LINGXI_AGENT_LIST_IN_MESSAGES=false`
     /// opt-out keeps a LEGACY inline-catalog body (not a 2.1.193 form).
     ///
     /// The body is the 2.1.193 SHORT form (`if(c)` branch — the live default):
@@ -350,7 +350,7 @@ impl AgentTool {
     /// reading the process-global [`traits::session_flags::is_non_interactive_session`]),
     /// the subagent_type sentence explains `"fork"`, a fork addendum follows
     /// `## When to use`, and the SendMessage bullet gains the `(except
-    /// subagent_type: "fork", …)` qualifier. Inert unless `CLAUDE_CODE_FORK_SUBAGENT`
+    /// subagent_type: "fork", …)` qualifier. Inert unless `LINGXI_FORK_SUBAGENT`
     /// is set (default OFF) ⇒ the non-fork text, byte-identical to the pre-F4 prompt.
     ///
     /// Deferred vs binary (no behavioral surface here): the `m` embedded-grep hint
@@ -365,7 +365,7 @@ impl AgentTool {
         // Catalog placement (binary intro `p`): the 2.1.193 default externalizes
         // the catalog to the orchestrator's `<system-reminder>` attachment, so the
         // description carries only the static pointer line. A LEGACY inline body is
-        // retained behind an explicit `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES=false`
+        // retained behind an explicit `LINGXI_AGENT_LIST_IN_MESSAGES=false`
         // opt-out (gate OFF) — not a 2.1.193 form, but a usable escape hatch.
         let agent_list_section = if traits::subagent_spawn::should_inject_agent_list_in_messages() {
             "Available agent types are listed in <system-reminder> messages in the conversation."
@@ -396,7 +396,7 @@ impl AgentTool {
         // is enabled, the subagent_type sentence explains the `"fork"` type, the
         // body gains a fork addendum, and the SendMessage bullet notes the fork
         // exception. The gate is `is_fork_subagent_enabled(is_coordinator,
-        // is_non_interactive)` — env `CLAUDE_CODE_FORK_SUBAGENT` AND !coordinator
+        // is_non_interactive)` — env `LINGXI_FORK_SUBAGENT` AND !coordinator
         // AND !non-interactive; the non-interactive flag is read from the
         // process-global session flag (the port's `getIsNonInteractiveSession()`
         // analog, set by `ConversationOrchestrator::new`). Default OFF ⇒ the
@@ -436,7 +436,7 @@ impl AgentTool {
         // use`, NO `## Usage notes`, NO `<example>`s (those are the FULL form).
         // Em-dashes are U+2014. The `run_in_background` bullet is the
         // background-enabled default (the binary's `h`; the
-        // `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` / teammate suppressions are not
+        // `LINGXI_DISABLE_BACKGROUND_TASKS` / teammate suppressions are not
         // modeled here).
         //
         // `## When to use` is SUPPRESSED on the pro plan (binary `${d?"":…}`):
@@ -1266,7 +1266,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             .await;
         // claude `is_async = (run_in_background === true || selectedAgent.background
         // === true) && !isBackgroundTasksDisabled` (AgentTool.tsx:426; the binary
-        // `K = …&& !dqt` where `dqt = CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`). The
+        // `K = …&& !dqt` where `dqt = LINGXI_DISABLE_BACKGROUND_TASKS`). The
         // agent definition's `background` frontmatter flag is surfaced on
         // `SelectedAgentMeta.background`, so a `background: true` agent dispatches
         // async even when the caller omits `run_in_background`. The env kill-switch
@@ -1276,7 +1276,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // `run_in_background` value drives BOTH the telemetry `is_async` flag and
         // the async-dispatch branch below.
         let background_tasks_disabled =
-            traits::env::is_env_truthy(std::env::var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS").ok().as_deref());
+            traits::env::is_env_truthy(std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS").ok().as_deref());
         let run_in_background = (parsed.run_in_background.unwrap_or(false)
             || selected.background)
             && !background_tasks_disabled;
@@ -1682,7 +1682,7 @@ mod tests {
     use traits::budget::BudgetEnforcerHandle;
     use traits::subagent_spawn::SubagentSpawner;
 
-    /// `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES` is process-global; serialize the
+    /// `LINGXI_AGENT_LIST_IN_MESSAGES` is process-global; serialize the
     /// tests whose `build_prompt`/`prompt` output depends on the
     /// `should_inject_agent_list_in_messages()` gate so a gate-ON test never
     /// races a default-OFF test. Every such test acquires this AND removes the
@@ -2065,7 +2065,7 @@ mod tests {
         // subagent_type would take the FORK path, not general-purpose. Serialize
         // against the gate-ON tests so this default-OFF assertion is stable.
         let _g = AGENT_LIST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
 
         let spawner = arc_mock_spawner();
         let bctx = wired_ctx(
@@ -2092,7 +2092,7 @@ mod tests {
         );
     }
 
-    // Serializes the CLAUDE_CODE_DISABLE_BACKGROUND_TASKS env across the two
+    // Serializes the LINGXI_DISABLE_BACKGROUND_TASKS env across the two
     // background tests below (env is process-global).
     static BG_DISABLE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -2104,7 +2104,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn async_launch_payload_has_resolved_model_and_threads_tool_use_id() {
         let _g = BG_DISABLE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS");
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         let spawner = arc_mock_spawner();
         let bctx = wired_ctx(
             spawner.clone(),
@@ -2138,14 +2138,14 @@ mod tests {
         );
     }
 
-    // `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` forces a `run_in_background:true`
+    // `LINGXI_DISABLE_BACKGROUND_TASKS` forces a `run_in_background:true`
     // agent to run SYNCHRONOUSLY (claude `K = … && !dqt`) — the result is a sync
     // completion, NOT `async_launched`.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn disable_background_tasks_env_forces_sync() {
         let _g = BG_DISABLE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
+        std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
         let spawner = arc_mock_spawner();
         let bctx = wired_ctx(
             spawner.clone(),
@@ -2161,7 +2161,7 @@ mod tests {
             "run_in_background": true
         });
         let result = tool.call(input, ctx, fresh_tx()).await.expect("sync ok");
-        std::env::remove_var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS");
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         assert_ne!(
             result.data["status"], "async_launched",
             "the kill-switch must force a run_in_background agent to run sync"
@@ -2196,8 +2196,8 @@ mod tests {
 
     // ── codex #5: fork-subagent path ──
     // NOTE: fork-gate tests serialize on `AGENT_LIST_ENV_LOCK` (not a separate
-    // lock): `build_prompt` now reads BOTH `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES`
-    // and `CLAUDE_CODE_FORK_SUBAGENT`, so any test that sets EITHER env (or reads
+    // lock): `build_prompt` now reads BOTH `LINGXI_AGENT_LIST_IN_MESSAGES`
+    // and `LINGXI_FORK_SUBAGENT`, so any test that sets EITHER env (or reads
     // the prompt) must share ONE lock to avoid racing through the prompt builder.
 
     /// Build a `ToolUseContext` carrying the given conversation history (for the
@@ -2235,7 +2235,7 @@ mod tests {
     #[tokio::test]
     async fn fork_gate_off_omitted_spawns_general_purpose_no_fork_fields() {
         let _g = AGENT_LIST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
 
         let spawner = arc_mock_spawner();
         let bctx = wired_ctx(
@@ -2257,7 +2257,7 @@ mod tests {
         assert!(inv[0].request.fork_context_messages.is_none());
         assert!(inv[0].request.fork_parent_system_prompt.is_none());
 
-        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
 
     // Gate ON + omitted subagent_type + a parent assistant-with-tool_use in
@@ -2266,7 +2266,7 @@ mod tests {
     #[tokio::test]
     async fn fork_gate_on_omitted_takes_fork_path() {
         let _g = AGENT_LIST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("CLAUDE_CODE_FORK_SUBAGENT", "1");
+        std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
 
         let spawner = arc_mock_spawner();
         let bctx = wired_ctx(
@@ -2313,7 +2313,7 @@ mod tests {
             other => panic!("expected User, got {other:?}"),
         }
 
-        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
 
     // Fork system-prompt threading (codex #5 follow-up): when the turn loop has
@@ -2323,7 +2323,7 @@ mod tests {
     #[tokio::test]
     async fn fork_threads_parent_system_prompt_onto_request() {
         let _g = AGENT_LIST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("CLAUDE_CODE_FORK_SUBAGENT", "1");
+        std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
 
         let spawner = arc_mock_spawner();
         let bctx = wired_ctx(
@@ -2351,7 +2351,7 @@ mod tests {
             "fork child must carry the parent's exact rendered system prompt bytes"
         );
 
-        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
 
     // Recursion guard: gate ON + ctx.messages already contains a
@@ -2360,7 +2360,7 @@ mod tests {
     #[tokio::test]
     async fn fork_recursion_guard_rejects_inside_fork_child() {
         let _g = AGENT_LIST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("CLAUDE_CODE_FORK_SUBAGENT", "1");
+        std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
 
         let spawner = arc_mock_spawner();
         let bctx = wired_ctx(
@@ -2392,7 +2392,7 @@ mod tests {
         );
         assert!(spawner.invocations().is_empty(), "spawner must NOT be invoked");
 
-        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
 
     // Explicit subagent_type wins over fork even when the gate is ON (claude:
@@ -2400,7 +2400,7 @@ mod tests {
     #[tokio::test]
     async fn fork_gate_on_explicit_type_does_not_fork() {
         let _g = AGENT_LIST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("CLAUDE_CODE_FORK_SUBAGENT", "1");
+        std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
 
         let spawner = arc_mock_spawner();
         let bctx = wired_ctx(
@@ -2425,7 +2425,7 @@ mod tests {
         assert_eq!(inv[0].request.subagent_type, "Explore", "explicit wins; no fork");
         assert!(inv[0].request.fork_context_messages.is_none());
 
-        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
 
     // The new params thread into the spawn request.
@@ -2477,7 +2477,7 @@ mod tests {
         // The inline catalog lines live only on the LEGACY gate-OFF path (the
         // 2.1.193 default externalizes them to the orchestrator reminder), so
         // force the inline path to exercise `formatAgentLine` rendering here.
-        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "false");
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
         let spawner = arc_mock_spawner();
         let bctx = wired_ctx(
             spawner.clone(),
@@ -2492,7 +2492,7 @@ mod tests {
                 model: None,
             })
             .await;
-        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         assert!(prompt.contains("Available agent types and the tools they have access to:"));
         // formatAgentLine: `- {type}: {whenToUse} (Tools: {tools})`.
         assert!(
@@ -2536,7 +2536,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         // Inline catalog lines (and thus the deny filter's visible effect) live
         // on the LEGACY gate-OFF path; force it.
-        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "false");
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
         let spawner = arc_mock_spawner();
         let mut bctx = wired_ctx(
             spawner.clone(),
@@ -2552,7 +2552,7 @@ mod tests {
                 model: None,
             })
             .await;
-        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         assert!(
             prompt.contains("- general-purpose:"),
             "general-purpose should remain; prompt was:\n{prompt}"
@@ -2603,7 +2603,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // Force the legacy inline path so the catalog line is in the description.
-        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "false");
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
         let agents = vec![traits::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
@@ -2611,7 +2611,7 @@ mod tests {
         }];
         let full = AgentTool::build_prompt(&agents, &[], false);
         let slim = AgentTool::build_prompt(&agents, &[], true);
-        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         assert!(full.contains("## When to use"));
         assert!(!slim.contains("## When to use"));
         // Both carry the agent catalog (legacy inline path).
@@ -2698,7 +2698,7 @@ mod tests {
     // env ON + interactive + non-coordinator, the description switches to the fork
     // variants (subagent_type sentence, addendum, SendMessage qualifier). Default
     // (env OFF) keeps the non-fork text. Serialized on the build-prompt env lock
-    // (`CLAUDE_CODE_FORK_SUBAGENT` + the non-interactive global are process-wide).
+    // (`LINGXI_FORK_SUBAGENT` + the non-interactive global are process-wide).
     #[test]
     fn build_prompt_fork_gate() {
         let _g = AGENT_LIST_ENV_LOCK
@@ -2711,7 +2711,7 @@ mod tests {
         }];
 
         // Default (fork env OFF): non-fork subagent_type sentence, no addendum.
-        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
         let p_off = AgentTool::build_prompt(&agents, &[], false);
         assert!(p_off.contains(
             "specify a subagent_type parameter to select which agent type to use"
@@ -2721,9 +2721,9 @@ mod tests {
 
         // Fork ON: env truthy + interactive (non_interactive=false) + non-coordinator.
         traits::session_flags::set_non_interactive_session(false);
-        std::env::set_var("CLAUDE_CODE_FORK_SUBAGENT", "1");
+        std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
         let p_on = AgentTool::build_prompt(&agents, &[], false);
-        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
 
         assert!(
             p_on.contains(
@@ -2762,9 +2762,9 @@ mod tests {
             tools_description: "All tools".into(),
         }];
         traits::session_flags::set_non_interactive_session(true);
-        std::env::set_var("CLAUDE_CODE_FORK_SUBAGENT", "1");
+        std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
         let p = AgentTool::build_prompt(&agents, &[], false);
-        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
         traits::session_flags::set_non_interactive_session(false);
         assert!(!p.contains("forks yourself"), "non-interactive disables fork text");
         assert!(p.contains("specify a subagent_type parameter to select which agent type to use"));
@@ -2777,7 +2777,7 @@ mod tests {
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         let agents = vec![traits::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
@@ -2799,7 +2799,7 @@ mod tests {
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "1");
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
 
         let agents = vec![traits::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
@@ -2808,7 +2808,7 @@ mod tests {
         }];
         let p = AgentTool::build_prompt(&agents, &[], false);
 
-        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
 
         assert!(
             p.contains(

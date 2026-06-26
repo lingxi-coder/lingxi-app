@@ -1,21 +1,19 @@
 // lingxi-code/crates/core/src/settings/env_parser.rs
-//! Walk a process-env snapshot, picking up keys under the three prefixes
-//! `LINGXI_*` (highest) → `CLAUDE_CODE_*` → `CLAUDE_*` (lowest).
+//! Walk a process-env snapshot, picking up keys under the `LINGXI_*` prefix
+//! (clean break: no `CLAUDE_*` fallback).
 //!
-//! The three prefixes overlay each other: when the same logical field is
-//! set under multiple prefixes, the highest-priority prefix wins. Within
-//! each prefix the `SCREAMING_SNAKE_CASE` key is mapped to the camelCase
-//! field name in [`crate::settings::schema::SettingsJson`].
+//! Each `SCREAMING_SNAKE_CASE` key is mapped to the camelCase field name in
+//! [`crate::settings::schema::SettingsJson`].
 //!
-//! Multi-valued fields (arrays) use `:` as element separator, matching
-//! claude-code's PATH-style convention (spec §7).
+//! Multi-valued fields (arrays) use `:` as element separator (PATH-style, spec §7).
 
 use crate::settings::schema::SettingsJson;
 use crate::settings::SettingsError;
 use std::collections::BTreeMap;
 
-/// Ordered (highest-priority first) prefix list. Locked by spec §7.
-pub const PREFIX_PRIORITY: &[&str] = &["LINGXI_", "CLAUDE_CODE_", "CLAUDE_"];
+/// Settings env-override prefix. Clean break: LingXi reads only `LINGXI_*`
+/// settings overrides (no `CLAUDE_*` fallback).
+pub const PREFIX_PRIORITY: &[&str] = &["LINGXI_"];
 
 /// Mapping from `SCREAMING_SNAKE_CASE` suffix → camelCase field name.
 ///
@@ -137,24 +135,10 @@ mod tests {
     }
 
     #[test]
-    fn lingxi_prefix_wins_over_claude_code() {
-        let env = env(&[
-            ("LINGXI_MODEL", "claude-opus-4-7"),
-            ("CLAUDE_CODE_MODEL", "claude-sonnet-4-5"),
-            ("CLAUDE_MODEL", "claude-sonnet-4"),
-        ]);
+    fn lingxi_prefix_is_read() {
+        let env = env(&[("LINGXI_MODEL", "claude-opus-4-7")]);
         let (parsed, _) = parse_env(&env).unwrap();
         assert_eq!(parsed.model.as_deref(), Some("claude-opus-4-7"));
-    }
-
-    #[test]
-    fn claude_code_prefix_wins_over_claude() {
-        let env = env(&[
-            ("CLAUDE_CODE_MODEL", "claude-sonnet-4-5"),
-            ("CLAUDE_MODEL", "claude-sonnet-4"),
-        ]);
-        let (parsed, _) = parse_env(&env).unwrap();
-        assert_eq!(parsed.model.as_deref(), Some("claude-sonnet-4-5"));
     }
 
     #[test]

@@ -28,14 +28,14 @@
 //! with the binary's EXACT per-gate env-vs-flag split:
 //!   - resolution gate `isLoopDefaultPromptEnabled` = `nt("tengu_kairos_loop_prompt",false)` (FLAG-ONLY)
 //!   - dynamic gate `isLoopDynamic` = `nt("tengu_kairos_loop_dynamic",false)` (FLAG-ONLY)
-//!   - preamble variant `isLoopPersistentPreambleEnabled` = env `CLAUDE_CODE_LOOP_PERSISTENT` || `nt("tengu_kairos_loop_persistent",false)`
-//!   - keepalive gate `isLoopKeepaliveEnabled` = env `CLAUDE_CODE_LOOP_KEEPALIVE` || `nt("tengu_kairos_loop_keepalive",false)`
+//!   - preamble variant `isLoopPersistentPreambleEnabled` = env `LINGXI_LOOP_PERSISTENT` || `nt("tengu_kairos_loop_persistent",false)`
+//!   - keepalive gate `isLoopKeepaliveEnabled` = env `LINGXI_LOOP_KEEPALIVE` || `nt("tengu_kairos_loop_keepalive",false)`
 //!   - `PushNotification` addendum `Yke()` = `nt("tengu_kairos_push_notifications",false)` && `agentPushNotifEnabled` setting
 //! With no live GrowthBook fetcher wired (the prod default) every flag is at its
 //! shipped `false`, so the whole subsystem is inert and byte-identical to the
 //! shipped binary. Tests flip a flag via [`telemetry::test_set_flag`] (binary's
 //! `ROt`/`Uvi` override layer) rather than env vars. NOTE: the earlier
-//! `CLAUDE_CODE_LOOP_PROMPT`/`CLAUDE_CODE_LOOP_DYNAMIC` env stand-ins were REMOVED
+//! `LINGXI_LOOP_PROMPT`/`CLAUDE_CODE_LOOP_DYNAMIC` env stand-ins were REMOVED
 //! — the binary's `fJr`/`q_e` are flag-only (no env layer), so those envs were a
 //! false-positive divergence. Only PERSISTENT/KEEPALIVE keep an env layer (the
 //! binary's `YIn`/`iKi` genuinely have one).
@@ -84,10 +84,10 @@ const PUSH_NOTIFICATION: &str = "PushNotification";
 // PROMPT/DYNAMIC are FLAG-ONLY (`fJr`/`q_e` have NO env layer in the binary).
 
 /// `YIn` / `isLoopPersistentPreambleEnabled` (cc_all.txt:504950):
-/// `rt(process.env.CLAUDE_CODE_LOOP_PERSISTENT) || nt("tengu_kairos_loop_persistent",false)`.
+/// `rt(process.env.LINGXI_LOOP_PERSISTENT) || nt("tengu_kairos_loop_persistent",false)`.
 #[must_use]
 pub fn is_loop_persistent_preamble_enabled() -> bool {
-    env_truthy("CLAUDE_CODE_LOOP_PERSISTENT")
+    env_truthy("LINGXI_LOOP_PERSISTENT")
         || telemetry::flag_bool("tengu_kairos_loop_persistent", false)
 }
 
@@ -113,7 +113,7 @@ pub fn is_loop_dynamic_enabled() -> bool {
 }
 
 /// `iKi` / `isLoopKeepaliveEnabled` (cc_all.txt:504966):
-/// `rt(process.env.CLAUDE_CODE_LOOP_KEEPALIVE) || nt("tengu_kairos_loop_keepalive",false)`.
+/// `rt(process.env.LINGXI_LOOP_KEEPALIVE) || nt("tengu_kairos_loop_keepalive",false)`.
 /// Gates the keepalive fallback heartbeat (the `lKi`/`cKi` re-arm when a dynamic
 /// loop tick completes without the model rescheduling).
 // PARITY: the keepalive *gate* is ported here; the keepalive *scheduling*
@@ -123,7 +123,7 @@ pub fn is_loop_dynamic_enabled() -> bool {
 // being available for that follow-on work.
 #[must_use]
 pub fn is_loop_keepalive_enabled() -> bool {
-    env_truthy("CLAUDE_CODE_LOOP_KEEPALIVE")
+    env_truthy("LINGXI_LOOP_KEEPALIVE")
         || telemetry::flag_bool("tengu_kairos_loop_keepalive", false)
 }
 
@@ -613,7 +613,7 @@ mod tests {
     fn guard() -> std::sync::MutexGuard<'static, ()> {
         let g = super::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_autonomous_loop_delivered();
-        std::env::remove_var("CLAUDE_CODE_LOOP_PERSISTENT");
+        std::env::remove_var("LINGXI_LOOP_PERSISTENT");
         telemetry::test_clear_flag("tengu_kairos_loop_persistent");
         // The resolver gate (`fJr`/`is_loop_default_prompt_enabled`) DEFAULTS off
         // (binary `tengu_kairos_loop_prompt=false`, FLAG-ONLY — no env). Turn it on
@@ -662,12 +662,12 @@ mod tests {
     fn preamble_persistent_selected_by_env() {
         let _g = guard();
         assert_eq!(get_autonomous_loop_preamble(), PREAMBLE_DEFAULT);
-        std::env::set_var("CLAUDE_CODE_LOOP_PERSISTENT", "1");
+        std::env::set_var("LINGXI_LOOP_PERSISTENT", "1");
         assert!(is_loop_persistent_preamble_enabled());
         assert_eq!(get_autonomous_loop_preamble(), PREAMBLE_PERSISTENT);
         assert!(PREAMBLE_PERSISTENT.contains("the *spirit* of the task"));
         assert!(PREAMBLE_PERSISTENT.contains("Persistence is the point of autonomous mode."));
-        std::env::remove_var("CLAUDE_CODE_LOOP_PERSISTENT");
+        std::env::remove_var("LINGXI_LOOP_PERSISTENT");
     }
 
     #[test]
@@ -680,8 +680,8 @@ mod tests {
         telemetry::test_clear_flag("tengu_kairos_loop_persistent");
         telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
-        std::env::remove_var("CLAUDE_CODE_LOOP_PERSISTENT");
-        std::env::remove_var("CLAUDE_CODE_LOOP_KEEPALIVE");
+        std::env::remove_var("LINGXI_LOOP_PERSISTENT");
+        std::env::remove_var("LINGXI_LOOP_KEEPALIVE");
         assert!(!is_loop_default_prompt_enabled());
         assert!(!is_loop_dynamic_enabled());
         assert!(!is_loop_persistent_preamble_enabled());
@@ -695,12 +695,12 @@ mod tests {
         assert!(is_loop_dynamic_enabled());
         // The removed env vars must NOT influence the flag-only gates.
         telemetry::test_clear_flag("tengu_kairos_loop_prompt");
-        std::env::set_var("CLAUDE_CODE_LOOP_PROMPT", "1");
+        std::env::set_var("LINGXI_LOOP_PROMPT", "1");
         assert!(
             !is_loop_default_prompt_enabled(),
-            "CLAUDE_CODE_LOOP_PROMPT must NOT enable the flag-only gate (binary fJr is flag-only)"
+            "LINGXI_LOOP_PROMPT must NOT enable the flag-only gate (binary fJr is flag-only)"
         );
-        std::env::remove_var("CLAUDE_CODE_LOOP_PROMPT");
+        std::env::remove_var("LINGXI_LOOP_PROMPT");
         telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
 
         // PERSISTENT/KEEPALIVE: env || flag (binary YIn/iKi have both).
@@ -708,16 +708,16 @@ mod tests {
         assert!(is_loop_persistent_preamble_enabled(), "flag arm");
         telemetry::test_clear_flag("tengu_kairos_loop_persistent");
         assert!(!is_loop_persistent_preamble_enabled());
-        std::env::set_var("CLAUDE_CODE_LOOP_PERSISTENT", "1");
+        std::env::set_var("LINGXI_LOOP_PERSISTENT", "1");
         assert!(is_loop_persistent_preamble_enabled(), "env arm");
-        std::env::remove_var("CLAUDE_CODE_LOOP_PERSISTENT");
+        std::env::remove_var("LINGXI_LOOP_PERSISTENT");
 
         telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
         assert!(is_loop_keepalive_enabled(), "flag arm");
         telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
-        std::env::set_var("CLAUDE_CODE_LOOP_KEEPALIVE", "1");
+        std::env::set_var("LINGXI_LOOP_KEEPALIVE", "1");
         assert!(is_loop_keepalive_enabled(), "env arm");
-        std::env::remove_var("CLAUDE_CODE_LOOP_KEEPALIVE");
+        std::env::remove_var("LINGXI_LOOP_KEEPALIVE");
 
         // Yke: push flag alone is not enough (agentPushNotifEnabled setting is
         // unsupported → false), so Yke stays false — matching the binary default.

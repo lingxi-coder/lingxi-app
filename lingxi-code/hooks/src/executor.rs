@@ -64,10 +64,10 @@ pub const HOOK_AGENT_TIMEOUT_MS: u64 = 60_000;
 
 /// Process-env override for the `SessionEnd` hook *batch* shutdown deadline
 /// (claude-code `Wqt`, BIN off 205715763:
-/// `process.env.CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`). When this parses as a
+/// `process.env.LINGXI_SESSIONEND_HOOKS_TIMEOUT_MS`). When this parses as a
 /// finite integer `> 0` it is used verbatim (NOT clamped — the binary returns it
 /// directly, bypassing the floor/cap).
-pub const SESSION_END_HOOKS_TIMEOUT_ENV: &str = "CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS";
+pub const SESSION_END_HOOKS_TIMEOUT_ENV: &str = "LINGXI_SESSIONEND_HOOKS_TIMEOUT_MS";
 
 /// Floor for the computed `SessionEnd` batch deadline (claude-code `nzn`, BIN off
 /// 205765355: `nzn=1500`, exported as `SESSION_END_HOOK_TIMEOUT_MS_DEFAULT`).
@@ -88,7 +88,7 @@ pub const SESSION_END_HOOK_TIMEOUT_CAP_MS: u64 = 60_000;
 ///
 /// ```text
 /// function Wqt(){
-///   let e=process.env.CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS,
+///   let e=process.env.LINGXI_SESSIONEND_HOOKS_TIMEOUT_MS,
 ///       t=e?parseInt(e,10):NaN;
 ///   if(Number.isFinite(t)&&t>0)return t;            // env override wins, UNCLAMPED
 ///   let n=0,r=uE()?[]:Kj()?.SessionEnd??[],
@@ -99,7 +99,7 @@ pub const SESSION_END_HOOK_TIMEOUT_CAP_MS: u64 = 60_000;
 /// }
 /// ```
 ///
-/// * `env_value` is the raw `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` string (or
+/// * `env_value` is the raw `LINGXI_SESSIONEND_HOOKS_TIMEOUT_MS` string (or
 ///   `None`). A value that parses (base-10, leading-digit, JS `parseInt`-style)
 ///   to a finite `> 0` integer is returned VERBATIM — the env override bypasses
 ///   the floor/cap, exactly as the binary does.
@@ -932,16 +932,16 @@ impl Dispatcher {
                     Some(t) if !t.is_zero() => t,
                     _ => Duration::from_millis(HOOK_COMMAND_TIMEOUT_MS),
                 };
-                // B2: inject `CLAUDE_PROJECT_DIR` into the child env so hook
-                // scripts referencing `$CLAUDE_PROJECT_DIR` resolve to the
+                // B2: inject `LINGXI_PROJECT_DIR` into the child env so hook
+                // scripts referencing `$LINGXI_PROJECT_DIR` resolve to the
                 // stable project root. claude-code builds the env as
-                // `{ ...subprocessEnv(), CLAUDE_PROJECT_DIR: toHookPath(projectDir) }`
+                // `{ ...subprocessEnv(), LINGXI_PROJECT_DIR: toHookPath(projectDir) }`
                 // (`utils/hooks.ts:882-885`): the engine value is spread AFTER
                 // the base env, so it wins over any pre-existing entry. We
                 // mirror that precedence — start from the hook's declared `env`
                 // (our analog of the base/subprocess env), then `insert` the
                 // engine value last so it overwrites a user-supplied
-                // `CLAUDE_PROJECT_DIR`. The value is the stable project root,
+                // `LINGXI_PROJECT_DIR`. The value is the stable project root,
                 // falling back to `ctx.cwd` when no root is wired yet
                 // (`HookContext.project_dir == None`).
                 //
@@ -952,22 +952,22 @@ impl Dispatcher {
                 // are out of B2 scope.
                 let mut child_env = env.clone();
                 // #43: `...Uot(o)` child-session env spread. claude-code assembles
-                // the hook command env as `P={...WO(), ...Uot(o), CLAUDE_PROJECT_DIR}`
+                // the hook command env as `P={...WO(), ...Uot(o), LINGXI_PROJECT_DIR}`
                 // (BIN off 205727901) where `o=u9e(hookInput)={sessionId:session_id,
                 // effortLevel:effort?.level, source:"harness"}` (BIN off 199137330).
                 // `Uot` emits, in order:
                 //   CLAUDECODE="1"                       (always)
-                //   CLAUDE_CODE_SESSION_ID=sessionId     (always)
-                //   CLAUDE_CODE_CHILD_SESSION="1"        (always)
+                //   LINGXI_SESSION_ID=sessionId     (always)
+                //   LINGXI_CHILD_SESSION="1"        (always)
                 //   AI_AGENT=Mer("agent")                ONLY when source==="agent"
-                //   CLAUDE_EFFORT=effortLevel            ONLY when effortLevel set
+                //   LINGXI_EFFORT=effortLevel            ONLY when effortLevel set
                 //   TRACEPARENT=<otel>                   ONLY when Evt() (OTel on)
                 // For hooks `source==="harness"`, so `AI_AGENT` is NEVER emitted on a
                 // hook child — distinct from the Bash spawn (`source:"agent"`, which
                 // DOES set AI_AGENT). We mirror exactly: set CLAUDECODE /
-                // CLAUDE_CODE_SESSION_ID / CLAUDE_CODE_CHILD_SESSION unconditionally,
-                // CLAUDE_EFFORT only when `ctx.effort` carries a level, and we do NOT
-                // set AI_AGENT. Spread BEFORE CLAUDE_PROJECT_DIR so the engine project
+                // LINGXI_SESSION_ID / LINGXI_CHILD_SESSION unconditionally,
+                // LINGXI_EFFORT only when `ctx.effort` carries a level, and we do NOT
+                // set AI_AGENT. Spread BEFORE LINGXI_PROJECT_DIR so the engine project
                 // dir still wins (no key overlap, so order is cosmetic, but it tracks
                 // the binary's spread position).
                 //
@@ -976,16 +976,16 @@ impl Dispatcher {
                 // same documented residual as the Bash spawn path.
                 child_env.insert("CLAUDECODE".to_string(), "1".to_string());
                 child_env.insert(
-                    "CLAUDE_CODE_SESSION_ID".to_string(),
+                    "LINGXI_SESSION_ID".to_string(),
                     ctx.session_id.to_string(),
                 );
-                child_env.insert("CLAUDE_CODE_CHILD_SESSION".to_string(), "1".to_string());
+                child_env.insert("LINGXI_CHILD_SESSION".to_string(), "1".to_string());
                 if let Some(effort) = &ctx.effort {
-                    child_env.insert("CLAUDE_EFFORT".to_string(), effort.level.clone());
+                    child_env.insert("LINGXI_EFFORT".to_string(), effort.level.clone());
                 }
                 let project_dir = ctx.project_dir.clone().unwrap_or_else(|| ctx.cwd.clone());
                 let project_dir_str = project_dir.to_string_lossy().into_owned();
-                child_env.insert("CLAUDE_PROJECT_DIR".to_string(), project_dir_str.clone());
+                child_env.insert("LINGXI_PROJECT_DIR".to_string(), project_dir_str.clone());
                 // #43: COLUMNS/LINES from the controlling-terminal size. claude
                 // reads `{columns:L,rows:D}=process.stdout` then
                 // `if(L)P.COLUMNS=String(L);if(D)P.LINES=String(D)` (BIN off
@@ -999,12 +999,12 @@ impl Dispatcher {
                 if let Some(rows) = ctx.terminal_rows.filter(|r| *r != 0) {
                     child_env.insert("LINES".to_string(), rows.to_string());
                 }
-                // #43: literal `${CLAUDE_PROJECT_DIR}` token substitution in the
+                // #43: literal `${LINGXI_PROJECT_DIR}` token substitution in the
                 // command AND every arg (claude-code `_e` mapper, BIN off
                 // 205727901: `if(!fe.includes("${"))return fe; fe=fe.replaceAll(
-                // "${CLAUDE_PROJECT_DIR}",()=>S)`, applied as `k=[_e(e.command),
+                // "${LINGXI_PROJECT_DIR}",()=>S)`, applied as `k=[_e(e.command),
                 // e.args.map(_e)]`). A non-shell exec / arg never gets a shell to
-                // expand `$CLAUDE_PROJECT_DIR`, so the literal `${…}` token must be
+                // expand `$LINGXI_PROJECT_DIR`, so the literal `${…}` token must be
                 // replaced here. `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}`
                 // need plugin scope (not on `HookExecutor::Command`) and are a
                 // documented residual — a string carrying only those tokens passes
@@ -1249,11 +1249,11 @@ impl HookExecutorImpl {
     }
 }
 
-/// #43: substitute every literal `${CLAUDE_PROJECT_DIR}` token in `s` with
+/// #43: substitute every literal `${LINGXI_PROJECT_DIR}` token in `s` with
 /// `project_dir`.
 ///
 /// Byte-faithful port of claude-code's `_e` mapper (BIN off 205727901):
-/// `if(!fe.includes("${"))return fe; fe=fe.replaceAll("${CLAUDE_PROJECT_DIR}",
+/// `if(!fe.includes("${"))return fe; fe=fe.replaceAll("${LINGXI_PROJECT_DIR}",
 /// ()=>S)` — the `${`-presence fast-path guard (a string with no `${` is returned
 /// untouched, skipping the scan) and `replaceAll` (EVERY occurrence) semantics.
 /// `()=>S` is a replacer FUNCTION in JS, so a literal `$1` / `$&` in the project
@@ -1263,14 +1263,14 @@ impl HookExecutorImpl {
 /// The plugin tokens `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}` are NOT
 /// handled here: they require plugin scope (`pluginRoot` / `pluginData`), which
 /// `HookExecutor::Command` does not carry — a documented residual. A string
-/// containing only those tokens (and no `${CLAUDE_PROJECT_DIR}`) passes through
+/// containing only those tokens (and no `${LINGXI_PROJECT_DIR}`) passes through
 /// unchanged, matching claude when no plugin scope is bound.
 fn substitute_project_dir(s: &str, project_dir: &str) -> String {
     // `if(!fe.includes("${"))return fe` — fast path: no template token at all.
     if !s.contains("${") {
         return s.to_string();
     }
-    s.replace("${CLAUDE_PROJECT_DIR}", project_dir)
+    s.replace("${LINGXI_PROJECT_DIR}", project_dir)
 }
 
 /// Build the serialized envelope body + `expected_event` marker for an event.
@@ -2231,7 +2231,7 @@ mod constants_tests {
         assert_eq!(SESSION_END_HOOK_TIMEOUT_CAP_MS, 60_000);
         assert_eq!(
             SESSION_END_HOOKS_TIMEOUT_ENV,
-            "CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS"
+            "LINGXI_SESSIONEND_HOOKS_TIMEOUT_MS"
         );
     }
 }
@@ -2441,7 +2441,7 @@ mod session_end_batch_deadline_tests {
     }
 
     /// Both env-driven deadline behaviors in ONE test (the two halves share the
-    /// process-global `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`, so they must not
+    /// process-global `LINGXI_SESSIONEND_HOOKS_TIMEOUT_MS`, so they must not
     /// race in parallel — merging them keeps the env mutation single-threaded):
     ///
     /// * a SessionEnd hook running LONGER than the batch deadline is cut off
@@ -2553,9 +2553,9 @@ mod command_arm_tests {
         result: Mutex<Option<Result<ProcessOutput, ProcessError>>>,
         recorded_stdin: Mutex<Option<String>>,
         /// B2: the child env the arm handed to the sandbox, captured so tests
-        /// can assert `CLAUDE_PROJECT_DIR` injection + precedence.
+        /// can assert `LINGXI_PROJECT_DIR` injection + precedence.
         recorded_env: Mutex<Option<HashMap<String, String>>>,
-        /// #43: the resolved command + args (after `${CLAUDE_PROJECT_DIR}`
+        /// #43: the resolved command + args (after `${LINGXI_PROJECT_DIR}`
         /// substitution), captured so tests can assert the token replacement.
         recorded_command: Mutex<Option<String>>,
         recorded_args: Mutex<Option<Vec<String>>>,
@@ -2872,7 +2872,7 @@ mod command_arm_tests {
         assert!(r.stderr.contains("command executor not wired"));
     }
 
-    // ---- B2: CLAUDE_PROJECT_DIR injection into the Command child env -----
+    // ---- B2: LINGXI_PROJECT_DIR injection into the Command child env -----
 
     /// A Command hook whose declared `env` is seeded with `entries`.
     fn command_hook_with_env(entries: &[(&str, &str)]) -> HookDefinition {
@@ -2912,7 +2912,7 @@ mod command_arm_tests {
 
         let env = runner.recorded_env.lock().unwrap().clone().unwrap();
         assert_eq!(
-            env.get("CLAUDE_PROJECT_DIR").map(String::as_str),
+            env.get("LINGXI_PROJECT_DIR").map(String::as_str),
             Some("/repo/root"),
             "engine project_dir is injected verbatim",
         );
@@ -2920,13 +2920,13 @@ mod command_arm_tests {
 
     #[tokio::test]
     async fn command_env_engine_project_dir_wins_over_user_env() {
-        // The hook declares its own CLAUDE_PROJECT_DIR; the engine value is set
+        // The hook declares its own LINGXI_PROJECT_DIR; the engine value is set
         // AFTER the base spread in claude-code (`utils/hooks.ts:882-885`), so
         // the engine value wins. Match that precedence.
         let runner = MockRunner::ok(output("", "", 0));
         let exec = executor_with_hook(
             command_hook_with_env(&[
-                ("CLAUDE_PROJECT_DIR", "/user/override"),
+                ("LINGXI_PROJECT_DIR", "/user/override"),
                 ("MY_VAR", "keep-me"),
             ]),
             runner.clone(),
@@ -2940,7 +2940,7 @@ mod command_arm_tests {
 
         let env = runner.recorded_env.lock().unwrap().clone().unwrap();
         assert_eq!(
-            env.get("CLAUDE_PROJECT_DIR").map(String::as_str),
+            env.get("LINGXI_PROJECT_DIR").map(String::as_str),
             Some("/engine/root"),
             "engine value overrides the user-supplied hook.env entry",
         );
@@ -2950,7 +2950,7 @@ mod command_arm_tests {
 
     #[tokio::test]
     async fn command_env_project_dir_falls_back_to_cwd() {
-        // No project_dir wired → CLAUDE_PROJECT_DIR falls back to ctx.cwd, the
+        // No project_dir wired → LINGXI_PROJECT_DIR falls back to ctx.cwd, the
         // faithful approximation until the orchestrator populates a project root.
         let runner = MockRunner::ok(output("", "", 0));
         let exec = executor_with(runner.clone());
@@ -2964,13 +2964,13 @@ mod command_arm_tests {
 
         let env = runner.recorded_env.lock().unwrap().clone().unwrap();
         assert_eq!(
-            env.get("CLAUDE_PROJECT_DIR").map(String::as_str),
+            env.get("LINGXI_PROJECT_DIR").map(String::as_str),
             Some("/some/cwd"),
             "absent project_dir falls back to ctx.cwd",
         );
     }
 
-    // ---- #43: COLUMNS/LINES env + ${CLAUDE_PROJECT_DIR} substitution -------
+    // ---- #43: COLUMNS/LINES env + ${LINGXI_PROJECT_DIR} substitution -------
 
     /// A Command hook with a custom `command` + `args`, so #43 substitution can
     /// be asserted against the recorded resolved values.
@@ -2988,10 +2988,10 @@ mod command_arm_tests {
 
     #[test]
     fn substitute_project_dir_replaces_every_occurrence() {
-        // `replaceAll` semantics — every `${CLAUDE_PROJECT_DIR}` token is
+        // `replaceAll` semantics — every `${LINGXI_PROJECT_DIR}` token is
         // replaced, not just the first.
         assert_eq!(
-            substitute_project_dir("${CLAUDE_PROJECT_DIR}/a:${CLAUDE_PROJECT_DIR}/b", "/root"),
+            substitute_project_dir("${LINGXI_PROJECT_DIR}/a:${LINGXI_PROJECT_DIR}/b", "/root"),
             "/root/a:/root/b",
         );
     }
@@ -3018,8 +3018,8 @@ mod command_arm_tests {
         let runner = MockRunner::ok(output("", "", 0));
         let exec = executor_with_hook(
             command_hook_with_cmd_args(
-                "${CLAUDE_PROJECT_DIR}/.lingxi/fmt.sh",
-                &["--root", "${CLAUDE_PROJECT_DIR}", "--plain"],
+                "${LINGXI_PROJECT_DIR}/.lingxi/fmt.sh",
+                &["--root", "${LINGXI_PROJECT_DIR}", "--plain"],
             ),
             runner.clone(),
         );
@@ -3079,8 +3079,8 @@ mod command_arm_tests {
     #[tokio::test]
     async fn command_env_sets_uot_harness_vars() {
         // #43: the hook command env spreads `...Uot(o)` with `source:"harness"`
-        // (BIN off 205727901 / 199137330): CLAUDECODE=1, CLAUDE_CODE_SESSION_ID,
-        // CLAUDE_CODE_CHILD_SESSION=1 are always present. `AI_AGENT` is gated on
+        // (BIN off 205727901 / 199137330): CLAUDECODE=1, LINGXI_SESSION_ID,
+        // LINGXI_CHILD_SESSION=1 are always present. `AI_AGENT` is gated on
         // `source==="agent"`, so a hook child must NOT carry it.
         let runner = MockRunner::ok(output("", "", 0));
         let exec = executor_with(runner.clone());
@@ -3092,11 +3092,11 @@ mod command_arm_tests {
         let env = runner.recorded_env.lock().unwrap().clone().unwrap();
         assert_eq!(env.get("CLAUDECODE").map(String::as_str), Some("1"));
         assert_eq!(
-            env.get("CLAUDE_CODE_CHILD_SESSION").map(String::as_str),
+            env.get("LINGXI_CHILD_SESSION").map(String::as_str),
             Some("1"),
         );
         assert_eq!(
-            env.get("CLAUDE_CODE_SESSION_ID").map(String::as_str),
+            env.get("LINGXI_SESSION_ID").map(String::as_str),
             Some(expected_session.as_str()),
             "Uot threads the session id into the hook child",
         );
@@ -3108,7 +3108,7 @@ mod command_arm_tests {
 
     #[tokio::test]
     async fn command_env_sets_effort_only_when_present() {
-        // `Uot` sets `CLAUDE_EFFORT=effortLevel` only when `effortLevel` is set
+        // `Uot` sets `LINGXI_EFFORT=effortLevel` only when `effortLevel` is set
         // (`o.effortLevel = hookInput.effort?.level`). No effort on the ctx ⇒
         // the env var is omitted; an effort level ⇒ it is set verbatim.
         let runner = MockRunner::ok(output("", "", 0));
@@ -3121,8 +3121,8 @@ mod command_arm_tests {
                 .unwrap()
                 .clone()
                 .unwrap()
-                .contains_key("CLAUDE_EFFORT"),
-            "no effort on ctx ⇒ no CLAUDE_EFFORT",
+                .contains_key("LINGXI_EFFORT"),
+            "no effort on ctx ⇒ no LINGXI_EFFORT",
         );
 
         let runner2 = MockRunner::ok(output("", "", 0));
@@ -3139,10 +3139,10 @@ mod command_arm_tests {
                 .unwrap()
                 .clone()
                 .unwrap()
-                .get("CLAUDE_EFFORT")
+                .get("LINGXI_EFFORT")
                 .map(String::as_str),
             Some("high"),
-            "effort level surfaces as CLAUDE_EFFORT",
+            "effort level surfaces as LINGXI_EFFORT",
         );
     }
 

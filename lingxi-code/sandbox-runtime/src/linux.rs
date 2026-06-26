@@ -515,9 +515,9 @@ pub struct WrapParams<'a> {
     pub http_socket_path: Option<&'a str>,
     /// SOCKS bridge Unix socket path (host side). Bound into the sandbox.
     pub socks_socket_path: Option<&'a str>,
-    /// Host HTTP proxy port (for the `CLAUDE_CODE_HOST_HTTP_PROXY_PORT` setenv).
+    /// Host HTTP proxy port (for the `LINGXI_HOST_HTTP_PROXY_PORT` setenv).
     pub http_proxy_port: Option<u16>,
-    /// Host SOCKS proxy port (for the `CLAUDE_CODE_HOST_SOCKS_PROXY_PORT` setenv).
+    /// Host SOCKS proxy port (for the `LINGXI_HOST_SOCKS_PROXY_PORT` setenv).
     pub socks_proxy_port: Option<u16>,
     /// CA cert path threaded into the proxy env vars (TLS-MITM trust).
     pub ca_cert_path: Option<&'a str>,
@@ -611,12 +611,12 @@ fn push_network_args(bwrap_args: &mut Vec<String>, params: &WrapParams<'_>) -> i
     // Host proxy port env vars (debugging/transparency).
     if let Some(p) = params.http_proxy_port {
         bwrap_args.push("--setenv".into());
-        bwrap_args.push("CLAUDE_CODE_HOST_HTTP_PROXY_PORT".into());
+        bwrap_args.push("LINGXI_HOST_HTTP_PROXY_PORT".into());
         bwrap_args.push(p.to_string());
     }
     if let Some(p) = params.socks_proxy_port {
         bwrap_args.push("--setenv".into());
-        bwrap_args.push("CLAUDE_CODE_HOST_SOCKS_PROXY_PORT".into());
+        bwrap_args.push("LINGXI_HOST_SOCKS_PROXY_PORT".into());
         bwrap_args.push(p.to_string());
     }
     Ok(())
@@ -1150,8 +1150,8 @@ mod tests {
             "cmd: {cmd}"
         );
         // Host port transparency vars.
-        assert!(cmd.contains("--setenv CLAUDE_CODE_HOST_HTTP_PROXY_PORT 8080"), "cmd: {cmd}");
-        assert!(cmd.contains("--setenv CLAUDE_CODE_HOST_SOCKS_PROXY_PORT 8081"), "cmd: {cmd}");
+        assert!(cmd.contains("--setenv LINGXI_HOST_HTTP_PROXY_PORT 8080"), "cmd: {cmd}");
+        assert!(cmd.contains("--setenv LINGXI_HOST_SOCKS_PROXY_PORT 8081"), "cmd: {cmd}");
         // The sandbox socat command (build_sandbox_command) is embedded.
         assert!(cmd.contains("TCP-LISTEN:3128,fork,reuseaddr"), "cmd: {cmd}");
         assert!(cmd.contains("TCP-LISTEN:1080,fork,reuseaddr"), "cmd: {cmd}");

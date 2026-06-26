@@ -50,13 +50,13 @@ pub fn format_security_warning(reason: &str) -> String {
 ///
 /// OFF by default — there is no GrowthBook in Rust, so this mirrors claude's
 /// default-OFF feature flag via an opt-in env override
-/// (`CLAUDE_CODE_TRANSCRIPT_CLASSIFIER`). When OFF (the default),
+/// (`LINGXI_TRANSCRIPT_CLASSIFIER`). When OFF (the default),
 /// [`classify_handoff_if_needed`] is a strict no-op and the result content is
 /// byte-identical to today.
 #[must_use]
 pub fn is_transcript_classifier_enabled() -> bool {
     traits::env::is_env_truthy(
-        std::env::var("CLAUDE_CODE_TRANSCRIPT_CLASSIFIER")
+        std::env::var("LINGXI_TRANSCRIPT_CLASSIFIER")
             .ok()
             .as_deref(),
     )
@@ -121,13 +121,13 @@ mod tests {
         static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-        std::env::remove_var("CLAUDE_CODE_TRANSCRIPT_CLASSIFIER");
+        std::env::remove_var("LINGXI_TRANSCRIPT_CLASSIFIER");
         assert!(!is_transcript_classifier_enabled(), "default OFF");
 
-        std::env::set_var("CLAUDE_CODE_TRANSCRIPT_CLASSIFIER", "1");
+        std::env::set_var("LINGXI_TRANSCRIPT_CLASSIFIER", "1");
         assert!(is_transcript_classifier_enabled(), "truthy ⇒ ON");
 
-        std::env::remove_var("CLAUDE_CODE_TRANSCRIPT_CLASSIFIER");
+        std::env::remove_var("LINGXI_TRANSCRIPT_CLASSIFIER");
     }
 
     /// With the feature OFF (default), the classify call is a strict no-op even
@@ -137,7 +137,7 @@ mod tests {
         use std::sync::Mutex;
         static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("CLAUDE_CODE_TRANSCRIPT_CLASSIFIER");
+        std::env::remove_var("LINGXI_TRANSCRIPT_CLASSIFIER");
 
         assert_eq!(classify_handoff_if_needed(PermissionMode::Auto).await, None);
         assert_eq!(

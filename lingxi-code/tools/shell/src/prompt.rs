@@ -103,9 +103,9 @@ fn is_env_truthy(name: &str) -> bool {
 }
 
 /// Port of `getBackgroundUsageNote` (`prompt.ts:35`). Returns `None` when
-/// `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` is truthy.
+/// `LINGXI_DISABLE_BACKGROUND_TASKS` is truthy.
 fn background_usage_note() -> Option<String> {
-    if is_env_truthy("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS") {
+    if is_env_truthy("LINGXI_DISABLE_BACKGROUND_TASKS") {
         return None;
     }
     Some(
@@ -121,12 +121,12 @@ fn background_usage_note() -> Option<String> {
 /// Port of `shouldIncludeGitInstructions` (`aOt()`, `utils/gitSettings.ts`).
 ///
 /// R-MINOR: claude-code omits the git/PR section when
-/// `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS` is set (truthy), else honors a settings
+/// `LINGXI_DISABLE_GIT_INSTRUCTIONS` is set (truthy), else honors a settings
 /// `git.includeGitInstructions` toggle (default true). LingXi has no
 /// `gitSettings` source in this crate, so it models the env half (the settings
 /// toggle defaults to "on", so the env check is the only observable gate here).
 fn should_include_git_instructions() -> bool {
-    !is_env_truthy("CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS")
+    !is_env_truthy("LINGXI_DISABLE_GIT_INSTRUCTIONS")
 }
 
 // ===== Sandbox section ======================================================
@@ -153,13 +153,13 @@ fn dedup(items: &[String]) -> Vec<String> {
 /// Port of claude-code `getClaudeTempDir` (`utils/permissions/filesystem.ts:331`)
 /// + `getClaudeTempDirName` (`:307`).
 ///
-/// `baseTmpDir = CLAUDE_CODE_TMPDIR || (windows ? tmpdir() : "/tmp")`, then the
+/// `baseTmpDir = LINGXI_TMPDIR || (windows ? tmpdir() : "/tmp")`, then the
 /// base is realpath-resolved (`/tmp` → `/private/tmp` on macOS) falling back to
 /// the unresolved base on failure. The directory NAME is `claude` on Windows
 /// (tmpdir is already per-user) or `claude-{uid}` elsewhere. The result is
 /// `join(resolvedBase, name) + sep` (trailing separator included).
 fn claude_temp_dir() -> String {
-    let base: std::path::PathBuf = std::env::var_os("CLAUDE_CODE_TMPDIR")
+    let base: std::path::PathBuf = std::env::var_os("LINGXI_TMPDIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             if cfg!(target_os = "windows") {
@@ -619,7 +619,7 @@ fn concise_git_section() -> String {
 ///   path; the external default takes the find/grep-INCLUSIVE list — IDENTICAL
 ///   to the VERBOSE prompt's hardcoded `avoid_commands`.
 /// - `t` (`gXa()!==null`) ⟺ [`background_usage_note`] is `Some` (gated by
-///   `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`). When present, the detached
+///   `LINGXI_DISABLE_BACKGROUND_TASKS`). When present, the detached
 ///   `run_in_background` bullet is emitted; `sq()` (the `tengu_amber_sentinel`
 ///   / Monitor gate) is default-false here, so the trailing "Foreground `sleep`
 ///   is blocked…" clause is omitted — same default as the VERBOSE sleep block.
@@ -687,7 +687,7 @@ mod tests {
     #[test]
     fn prompt_contains_locked_anchors() {
         let _g = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS");
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         let p = simple_prompt(&disabled_sandbox());
 
         // Header.
@@ -739,7 +739,7 @@ mod tests {
     #[test]
     fn timeout_sentence_substitutes_locked_constants() {
         let _g = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS");
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         let p = simple_prompt(&disabled_sandbox());
         // 120000ms / 600000ms substituted from BASH_DEFAULT_TIMEOUT_MS /
         // BASH_MAX_TIMEOUT_MS — and the minute conversions.
@@ -767,31 +767,31 @@ mod tests {
     #[test]
     fn background_note_absent_when_env_disabled() {
         let _g = ENV_LOCK.lock().unwrap();
-        std::env::set_var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
+        std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
         let p = simple_prompt(&disabled_sandbox());
-        std::env::remove_var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS");
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         assert!(
             !p.contains("You can use the `run_in_background` parameter"),
-            "run_in_background note should be absent when CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1"
+            "run_in_background note should be absent when LINGXI_DISABLE_BACKGROUND_TASKS=1"
         );
     }
 
     #[test]
     fn git_section_absent_when_disabled_via_env() {
-        // R-MINOR: CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS (truthy) omits the git/PR
+        // R-MINOR: LINGXI_DISABLE_GIT_INSTRUCTIONS (truthy) omits the git/PR
         // section (claude-code `aOt()`); default-unset keeps it.
         let _g = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS");
+        std::env::remove_var("LINGXI_DISABLE_GIT_INSTRUCTIONS");
         assert!(
             simple_prompt(&disabled_sandbox()).contains("# Committing changes with git"),
             "git section present by default"
         );
-        std::env::set_var("CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS", "1");
+        std::env::set_var("LINGXI_DISABLE_GIT_INSTRUCTIONS", "1");
         let p = simple_prompt(&disabled_sandbox());
-        std::env::remove_var("CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS");
+        std::env::remove_var("LINGXI_DISABLE_GIT_INSTRUCTIONS");
         assert!(
             !p.contains("# Committing changes with git"),
-            "git section should be absent when CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1"
+            "git section should be absent when LINGXI_DISABLE_GIT_INSTRUCTIONS=1"
         );
     }
 
@@ -941,11 +941,11 @@ mod tests {
     #[test]
     fn sandbox_section_normalizes_claude_temp_dir_to_tmpdir_literal() {
         let _g = ENV_LOCK.lock().unwrap();
-        // Pin the temp-dir base via CLAUDE_CODE_TMPDIR so claude_temp_dir() is
+        // Pin the temp-dir base via LINGXI_TMPDIR so claude_temp_dir() is
         // deterministic across hosts/users.
         let tmp_base = tempfile::tempdir().unwrap();
-        let prior = std::env::var_os("CLAUDE_CODE_TMPDIR");
-        std::env::set_var("CLAUDE_CODE_TMPDIR", tmp_base.path());
+        let prior = std::env::var_os("LINGXI_TMPDIR");
+        std::env::set_var("LINGXI_TMPDIR", tmp_base.path());
 
         let claude_dir = claude_temp_dir();
         let cfg = SandboxRuntimeConfig {
@@ -961,8 +961,8 @@ mod tests {
         let p = simple_prompt(&cfg);
 
         match prior {
-            Some(v) => std::env::set_var("CLAUDE_CODE_TMPDIR", v),
-            None => std::env::remove_var("CLAUDE_CODE_TMPDIR"),
+            Some(v) => std::env::set_var("LINGXI_TMPDIR", v),
+            None => std::env::remove_var("LINGXI_TMPDIR"),
         }
 
         assert!(

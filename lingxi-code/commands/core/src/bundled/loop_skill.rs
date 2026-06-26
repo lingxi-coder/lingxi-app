@@ -18,7 +18,7 @@
 //! wired they sit at the binary's shipped `false`, so only branch 3 is reachable
 //! — byte-identical to the shipped binary. (Unlike PERSISTENT/KEEPALIVE, the
 //! PROMPT/DYNAMIC gates are FLAG-ONLY — the binary `fJr`/`q_e` have no env layer,
-//! so there is no `CLAUDE_CODE_LOOP_PROMPT`/`_DYNAMIC` env; tests flip the flags
+//! so there is no `LINGXI_LOOP_PROMPT`/`_DYNAMIC` env; tests flip the flags
 //! via `telemetry::test_set_flag`.) The flag-on builders live in
 //! [`tool_cron`]'s `autonomous_loop` module (loop.md detection, the preamble, the
 //! sentinels, `logAutonomousLoopActivation`), imported here exactly as the binary
@@ -563,7 +563,7 @@ mod tests {
         // Establish the shipped-binary default: persistent off (preamble = aJr),
         // and the prompt/dynamic flags cleared. Gates now read the flag override
         // layer (binary `nt`), so reset it rather than env vars.
-        std::env::remove_var("CLAUDE_CODE_LOOP_PERSISTENT");
+        std::env::remove_var("LINGXI_LOOP_PERSISTENT");
         telemetry::test_clear_flag("tengu_kairos_loop_persistent");
         telemetry::test_clear_flag("tengu_kairos_loop_prompt");
         telemetry::test_clear_flag("tengu_kairos_loop_dynamic");

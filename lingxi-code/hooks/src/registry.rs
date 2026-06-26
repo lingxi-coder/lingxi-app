@@ -39,10 +39,10 @@ pub struct HookContext {
     /// Subagent capability bundle the Agent-arm executor inherits when it
     /// spawns. `None` for hooks that never reach the Agent arm. M5-06.
     pub inherit: Option<SubagentInheritance>,
-    /// Stable project root injected into Command hooks as `CLAUDE_PROJECT_DIR`
+    /// Stable project root injected into Command hooks as `LINGXI_PROJECT_DIR`
     /// (B2). claude-code derives this from `getProjectRoot()` — the real repo
     /// root, deliberately *not* updated when entering a git worktree — so a
-    /// hook script's `$CLAUDE_PROJECT_DIR` always resolves to the repo root
+    /// hook script's `$LINGXI_PROJECT_DIR` always resolves to the repo root
     /// (`utils/hooks.ts:813-816`). When `None`, the Command arm falls back to
     /// `cwd`, the faithful approximation until the orchestrator populates a
     /// distinct project-root concept (that wiring lives in `turn_loop.rs`,

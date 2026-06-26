@@ -81,12 +81,12 @@ fn host_os() -> HostOs {
     }
 }
 
-/// Resolve the sandbox tmpdir (`CLAUDE_CODE_TMPDIR || CLAUDE_TMPDIR ||
+/// Resolve the sandbox tmpdir (`LINGXI_TMPDIR || LINGXI_TMPDIR ||
 /// /tmp/claude`), matching the TS env resolution baked into
 /// `generateProxyEnvVars`.
 fn resolve_tmpdir() -> String {
-    std::env::var("CLAUDE_CODE_TMPDIR")
-        .or_else(|_| std::env::var("CLAUDE_TMPDIR"))
+    std::env::var("LINGXI_TMPDIR")
+        .or_else(|_| std::env::var("LINGXI_TMPDIR"))
         .unwrap_or_else(|_| "/tmp/claude".to_string())
 }
 

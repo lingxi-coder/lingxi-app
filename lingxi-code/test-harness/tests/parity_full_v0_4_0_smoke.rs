@@ -119,11 +119,7 @@ fn full_v0_4_0_smoke_fixture_loads_and_self_consistent() {
     );
     assert_eq!(
         fx.settings.env_prefix_priority,
-        vec![
-            "LINGXI_".to_string(),
-            "CLAUDE_CODE_".to_string(),
-            "CLAUDE_".to_string()
-        ]
+        vec!["LINGXI_".to_string()]
     );
     assert_eq!(fx.settings.tengu_settings_events.len(), 3);
     assert!(fx

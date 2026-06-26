@@ -208,8 +208,8 @@ pub struct Argv {
     #[arg(long = "verbose")]
     pub verbose: bool,
 
-    /// Minimal mode: skip hooks, LSP, plugin sync...Sets CLAUDE_CODE_SIMPLE=1
-    // TODO(bare): wire into CLAUDE_CODE_SIMPLE env + skip hooks/LSP/plugin behavior
+    /// Minimal mode: skip hooks, LSP, plugin sync...Sets LINGXI_SIMPLE=1
+    // TODO(bare): wire into LINGXI_SIMPLE env + skip hooks/LSP/plugin behavior
     #[arg(long = "bare")]
     pub bare: bool,
 

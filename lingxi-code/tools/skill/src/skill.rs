@@ -243,7 +243,7 @@ fn resolve_skill_shell_path() -> &'static str {
 
 /// BASH.1 extglob-disable guard, 1:1 with `bash.rs::disable_extglob_command`.
 fn skill_disable_extglob(shell_path: &str) -> Option<String> {
-    if std::env::var("CLAUDE_CODE_SHELL_PREFIX").is_ok_and(|v| !v.is_empty()) {
+    if std::env::var("LINGXI_SHELL_PREFIX").is_ok_and(|v| !v.is_empty()) {
         return Some(
             "{ shopt -u extglob || setopt NO_EXTENDED_GLOB; } >/dev/null 2>&1 || true".into(),
         );

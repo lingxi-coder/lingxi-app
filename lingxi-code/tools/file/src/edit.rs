@@ -97,7 +97,7 @@ pub const ESCAPE_SWAP_NOTE: &str = "\n(note: Edit also tried swapping \\uXXXX es
 /// `H7e(_)` (binary offset 193220147): `cfr() && (mode & 128) === 0`.
 ///
 /// Returns `true` when Perforce mode is enabled (`cfr()` ==
-/// `is_env_truthy(CLAUDE_CODE_PERFORCE_MODE)`) AND the file's owner-write bit
+/// `is_env_truthy(LINGXI_PERFORCE_MODE)`) AND the file's owner-write bit
 /// ([`OWNER_WRITE_BIT`]) is unset — a read-only file that has not been checked
 /// out via `p4 edit`. On non-Unix targets the POSIX mode is unavailable, so the
 /// guard never fires (the binary's `mode & 128` is a POSIX concept).
@@ -117,11 +117,11 @@ fn is_perforce_read_only(metadata: &std::fs::Metadata) -> bool {
     }
 }
 
-/// `cfr()` (binary offset 193219993): `st(process.env.CLAUDE_CODE_PERFORCE_MODE)`
-/// — env-truthiness (`1`/`true`/`yes`/`on`) of `CLAUDE_CODE_PERFORCE_MODE`,
+/// `cfr()` (binary offset 193219993): `st(process.env.LINGXI_PERFORCE_MODE)`
+/// — env-truthiness (`1`/`true`/`yes`/`on`) of `LINGXI_PERFORCE_MODE`,
 /// mirrored by [`traits::env::is_env_truthy`].
 fn is_perforce_mode_enabled() -> bool {
-    traits::env::is_env_truthy(std::env::var("CLAUDE_CODE_PERFORCE_MODE").ok().as_deref())
+    traits::env::is_env_truthy(std::env::var("LINGXI_PERFORCE_MODE").ok().as_deref())
 }
 
 /// Build the byte-locked patch-truncation suffix with `n` substituted.
@@ -480,7 +480,7 @@ impl Tool for FileEditTool {
                 //   if(H7e(_))return{result:!1,behavior:"ask",
                 //     message:k7e,errorCode:11}
                 // where `H7e(e)=cfr()&&(e&128)===0` and
-                //   `cfr()=st(process.env.CLAUDE_CODE_PERFORCE_MODE)`.
+                //   `cfr()=st(process.env.LINGXI_PERFORCE_MODE)`.
                 // i.e. reject when Perforce mode is enabled (the env var is
                 // env-truthy: `1`/`true`/`yes`/`on`, via `st` == LingXi
                 // `traits::env::is_env_truthy`) AND the stat'd file's owner-write
@@ -1236,12 +1236,12 @@ that bypasses Perforce tracking."
     #[cfg(unix)]
     #[tokio::test]
     async fn perforce_read_only_gate_fires_only_when_mode_enabled() {
-        // ALL `CLAUDE_CODE_PERFORCE_MODE`-dependent assertions live in this ONE
+        // ALL `LINGXI_PERFORCE_MODE`-dependent assertions live in this ONE
         // test (crate convention — no `serial_test` dep) so the process-global
         // env var is mutated within a single sequential unit. We restore the
         // prior value at the end.
         use std::os::unix::fs::PermissionsExt;
-        let prior = std::env::var("CLAUDE_CODE_PERFORCE_MODE").ok();
+        let prior = std::env::var("LINGXI_PERFORCE_MODE").ok();
 
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("ro.txt");
@@ -1252,7 +1252,7 @@ that bypasses Perforce tracking."
         // (1) Perforce mode OFF (env unset) → guard does NOT fire even though
         // the file is read-only; the edit proceeds past the gate (and fails
         // later only on the unread-file staleness guard, NOT the Perforce msg).
-        std::env::remove_var("CLAUDE_CODE_PERFORCE_MODE");
+        std::env::remove_var("LINGXI_PERFORCE_MODE");
         {
             let (ctx, _sink) = make_ctx(&tmp);
             let tool = FileEditTool::new(ctx);
@@ -1276,7 +1276,7 @@ that bypasses Perforce tracking."
 
         // (2) Perforce mode ON + owner-write unset → reject with the byte-exact
         // `k7e` message (errorCode 11).
-        std::env::set_var("CLAUDE_CODE_PERFORCE_MODE", "1");
+        std::env::set_var("LINGXI_PERFORCE_MODE", "1");
         {
             let (ctx, _sink) = make_ctx(&tmp);
             let tool = FileEditTool::new(ctx);
@@ -1325,17 +1325,17 @@ that bypasses Perforce tracking."
         // (4) is_env_truthy semantics flow through `cfr`: "on"/"true"/"yes" are
         // truthy; "0"/"false"/"" are not. Spot-check via the helper directly so
         // the gate's enable condition is locked to the env-truthiness allowlist.
-        std::env::set_var("CLAUDE_CODE_PERFORCE_MODE", "on");
+        std::env::set_var("LINGXI_PERFORCE_MODE", "on");
         assert!(is_perforce_mode_enabled());
-        std::env::set_var("CLAUDE_CODE_PERFORCE_MODE", "0");
+        std::env::set_var("LINGXI_PERFORCE_MODE", "0");
         assert!(!is_perforce_mode_enabled());
-        std::env::set_var("CLAUDE_CODE_PERFORCE_MODE", "");
+        std::env::set_var("LINGXI_PERFORCE_MODE", "");
         assert!(!is_perforce_mode_enabled());
 
         // Restore prior env state.
         match prior {
-            Some(v) => std::env::set_var("CLAUDE_CODE_PERFORCE_MODE", v),
-            None => std::env::remove_var("CLAUDE_CODE_PERFORCE_MODE"),
+            Some(v) => std::env::set_var("LINGXI_PERFORCE_MODE", v),
+            None => std::env::remove_var("LINGXI_PERFORCE_MODE"),
         }
     }
 

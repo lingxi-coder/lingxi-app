@@ -148,7 +148,7 @@ pub fn rapid_refill_count(state: &AutoCompactTrackingState) -> u32 {
 ///
 /// Mirrors `getEffectiveContextWindowSize` (`autoCompact.ts:33-49`):
 /// `context_window − min(max_output_tokens, MAX_OUTPUT_TOKENS_FOR_SUMMARY)`,
-/// honoring the `CLAUDE_CODE_AUTO_COMPACT_WINDOW` env clamp (a positive integer
+/// honoring the `LINGXI_AUTO_COMPACT_WINDOW` env clamp (a positive integer
 /// caps the context window via `min`).
 #[must_use]
 pub fn effective_context_window_size(model: &str, betas: &[String]) -> u64 {
@@ -156,7 +156,7 @@ pub fn effective_context_window_size(model: &str, betas: &[String]) -> u64 {
         max_output_tokens_for_model(model).min(MAX_OUTPUT_TOKENS_FOR_SUMMARY);
     let mut context_window = context_window_for_model(model, betas);
 
-    if let Ok(raw) = std::env::var("CLAUDE_CODE_AUTO_COMPACT_WINDOW") {
+    if let Ok(raw) = std::env::var("LINGXI_AUTO_COMPACT_WINDOW") {
         if let Some(parsed) = parse_positive_u64(&raw) {
             context_window = context_window.min(parsed);
         }
@@ -169,14 +169,14 @@ pub fn effective_context_window_size(model: &str, betas: &[String]) -> u64 {
 ///
 /// Mirrors `getAutoCompactThreshold` (`autoCompact.ts:72-91`):
 /// `effective − AUTOCOMPACT_BUFFER_TOKENS`, honoring the
-/// `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` env override (a float in `(0, 100]` yields
+/// `LINGXI_AUTOCOMPACT_PCT_OVERRIDE` env override (a float in `(0, 100]` yields
 /// `floor(effective × pct/100)`, then `min`'d with the buffer-based threshold).
 #[must_use]
 pub fn auto_compact_threshold(model: &str, betas: &[String]) -> u64 {
     let effective_context_window = effective_context_window_size(model, betas);
     let autocompact_threshold = effective_context_window.saturating_sub(AUTOCOMPACT_BUFFER_TOKENS);
 
-    if let Ok(raw) = std::env::var("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") {
+    if let Ok(raw) = std::env::var("LINGXI_AUTOCOMPACT_PCT_OVERRIDE") {
         if let Ok(parsed) = raw.trim().parse::<f64>() {
             if parsed.is_finite() && parsed > 0.0 && parsed <= 100.0 {
                 // Math.floor(effective * (pct / 100)).
@@ -219,7 +219,7 @@ pub struct TokenWarningState {
 ///
 /// Mirrors `calculateTokenWarningState` (`autoCompact.ts:93-145`). The
 /// `auto_compact_enabled` flag is supplied by the caller (see module docs);
-/// `CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE` is honored here.
+/// `LINGXI_BLOCKING_LIMIT_OVERRIDE` is honored here.
 #[must_use]
 pub fn calculate_token_warning_state(
     token_usage: u64,
@@ -250,7 +250,7 @@ pub fn calculate_token_warning_state(
     let default_blocking_limit = actual_context_window.saturating_sub(MANUAL_COMPACT_BUFFER_TOKENS);
 
     // Allow override for testing (positive integer wins, else the default).
-    let blocking_limit = std::env::var("CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE")
+    let blocking_limit = std::env::var("LINGXI_BLOCKING_LIMIT_OVERRIDE")
         .ok()
         .and_then(|raw| parse_positive_u64(&raw))
         .unwrap_or(default_blocking_limit);
@@ -337,11 +337,11 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     const ENV_VARS: &[&str] = &[
-        "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
-        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
-        "CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE",
-        "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
-        "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+        "LINGXI_AUTO_COMPACT_WINDOW",
+        "LINGXI_AUTOCOMPACT_PCT_OVERRIDE",
+        "LINGXI_BLOCKING_LIMIT_OVERRIDE",
+        "LINGXI_MAX_CONTEXT_TOKENS",
+        "LINGXI_MAX_OUTPUT_TOKENS",
         "CLAUDE_CODE_DISABLE_1M_CONTEXT",
         "USER_TYPE",
         "DISABLE_COMPACT",
@@ -508,11 +508,11 @@ mod tests {
         // Construct a fraction that rounds half away from zero (JS Math.round).
         // threshold = 200 (via override), usage = 99 → (200-99)/200*100 = 50.5 → 51.
         with_clean_env(|| {
-            std::env::set_var("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "100");
+            std::env::set_var("LINGXI_AUTOCOMPACT_PCT_OVERRIDE", "100");
             // pct=100 makes autocompact_threshold = min(floor(effective*1.0), effective-buffer)
             //   = min(180_000, 167_000) = 167_000. Not what we want for a tiny threshold.
             // Instead use the helper directly for the rounding invariant.
-            std::env::remove_var("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE");
+            std::env::remove_var("LINGXI_AUTOCOMPACT_PCT_OVERRIDE");
             assert_eq!(super::percent_left_of(200, 99), 51);
             // 50.4 → 50: usage=101 → (200-101)/200*100 = 49.5 → 50.
             assert_eq!(super::percent_left_of(200, 101), 50);
@@ -527,15 +527,15 @@ mod tests {
     fn auto_compact_window_clamps_context() {
         with_clean_env(|| {
             // Clamp context window to 50_000. reserved = 20_000 → effective = 30_000.
-            std::env::set_var("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "50000");
+            std::env::set_var("LINGXI_AUTO_COMPACT_WINDOW", "50000");
             assert_eq!(effective_context_window_size(MODEL, &[]), 30_000);
             // A clamp larger than the real window is a no-op (min picks the smaller).
-            std::env::set_var("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "999999");
+            std::env::set_var("LINGXI_AUTO_COMPACT_WINDOW", "999999");
             assert_eq!(effective_context_window_size(MODEL, &[]), EFFECTIVE);
             // Invalid / zero values are ignored.
-            std::env::set_var("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "0");
+            std::env::set_var("LINGXI_AUTO_COMPACT_WINDOW", "0");
             assert_eq!(effective_context_window_size(MODEL, &[]), EFFECTIVE);
-            std::env::set_var("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "abc");
+            std::env::set_var("LINGXI_AUTO_COMPACT_WINDOW", "abc");
             assert_eq!(effective_context_window_size(MODEL, &[]), EFFECTIVE);
         });
     }
@@ -544,16 +544,16 @@ mod tests {
     fn autocompact_pct_override() {
         with_clean_env(|| {
             // pct=10 → floor(180_000 * 0.10) = 18_000; min(18_000, 167_000) = 18_000.
-            std::env::set_var("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "10");
+            std::env::set_var("LINGXI_AUTOCOMPACT_PCT_OVERRIDE", "10");
             assert_eq!(auto_compact_threshold(MODEL, &[]), 18_000);
             // pct=100 → floor(180_000) = 180_000; min(180_000, 167_000) = 167_000.
-            std::env::set_var("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "100");
+            std::env::set_var("LINGXI_AUTOCOMPACT_PCT_OVERRIDE", "100");
             assert_eq!(auto_compact_threshold(MODEL, &[]), AUTOCOMPACT);
             // Out of range (>100) ignored.
-            std::env::set_var("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "150");
+            std::env::set_var("LINGXI_AUTOCOMPACT_PCT_OVERRIDE", "150");
             assert_eq!(auto_compact_threshold(MODEL, &[]), AUTOCOMPACT);
             // Zero / negative ignored.
-            std::env::set_var("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "0");
+            std::env::set_var("LINGXI_AUTOCOMPACT_PCT_OVERRIDE", "0");
             assert_eq!(auto_compact_threshold(MODEL, &[]), AUTOCOMPACT);
         });
     }
@@ -561,13 +561,13 @@ mod tests {
     #[test]
     fn blocking_limit_override() {
         with_clean_env(|| {
-            std::env::set_var("CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE", "100000");
+            std::env::set_var("LINGXI_BLOCKING_LIMIT_OVERRIDE", "100000");
             let below = calculate_token_warning_state(99_999, MODEL, &[], true);
             assert!(!below.is_at_blocking_limit);
             let at = calculate_token_warning_state(100_000, MODEL, &[], true);
             assert!(at.is_at_blocking_limit);
             // Invalid override falls back to the default (177_000).
-            std::env::set_var("CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE", "notanumber");
+            std::env::set_var("LINGXI_BLOCKING_LIMIT_OVERRIDE", "notanumber");
             let st = calculate_token_warning_state(100_000, MODEL, &[], true);
             assert!(!st.is_at_blocking_limit);
         });

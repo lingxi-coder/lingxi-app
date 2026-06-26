@@ -16,7 +16,7 @@
 //!   capability registry is reachable from `compaction/`.
 //! - `resolveAntModel` / `USER_TYPE === 'ant'` ant-model context-window and
 //!   max-token overrides — the ant-model registry lives elsewhere. The
-//!   `CLAUDE_CODE_MAX_CONTEXT_TOKENS` override (which TS *also* gates on
+//!   `LINGXI_MAX_CONTEXT_TOKENS` override (which TS *also* gates on
 //!   `USER_TYPE === 'ant'`) IS honored here because it is a pure env read.
 //! - `getSonnet1mExpTreatmentEnabled` (`GrowthBook` `coral_reef_sonnet`
 //!   client-data-cache flag) — `GrowthBook` config has no Rust equivalent here;
@@ -24,7 +24,7 @@
 //! - `isMaxTokensCapEnabled` (`GrowthBook` `tengu_otk_slot_v1` slot-reservation
 //!   cap → drop default to [`CAPPED_DEFAULT_MAX_TOKENS`]) — `GrowthBook` flag is
 //!   unwired in Rust, so the cap is NOT applied; [`max_output_tokens_for_model`]
-//!   returns the model's native default. The `CLAUDE_CODE_MAX_OUTPUT_TOKENS`
+//!   returns the model's native default. The `LINGXI_MAX_OUTPUT_TOKENS`
 //!   env override (a pure env read) IS honored, clamped to the upper limit.
 
 use traits::env::is_env_truthy;
@@ -158,10 +158,10 @@ pub fn is_claude_family(model: &str) -> bool {
 /// model-capability and ant-model registry branches (see module docs).
 #[must_use]
 pub fn context_window_for_model(model: &str, betas: &[String]) -> u64 {
-    // CLAUDE_CODE_MAX_CONTEXT_TOKENS override (TS gates on USER_TYPE === 'ant').
+    // LINGXI_MAX_CONTEXT_TOKENS override (TS gates on USER_TYPE === 'ant').
     // Takes precedence over all other resolution, including 1M detection.
     if std::env::var("USER_TYPE").ok().as_deref() == Some("ant") {
-        if let Ok(raw) = std::env::var("CLAUDE_CODE_MAX_CONTEXT_TOKENS") {
+        if let Ok(raw) = std::env::var("LINGXI_MAX_CONTEXT_TOKENS") {
             if let Some(parsed) = parse_positive_i64(&raw) {
                 return parsed;
             }
@@ -244,16 +244,16 @@ fn model_max_output_tokens(model: &str) -> (u64, u64) {
 /// Mirrors `getMaxOutputTokensForModel` (`api/claude.ts:3399-3419`). The
 /// GrowthBook-gated `isMaxTokensCapEnabled` slot cap is unwired in Rust (see
 /// module docs), so the native default is used; the
-/// `CLAUDE_CODE_MAX_OUTPUT_TOKENS` env override is honored, clamped to the
+/// `LINGXI_MAX_OUTPUT_TOKENS` env override is honored, clamped to the
 /// model's upper limit.
 #[must_use]
 pub fn max_output_tokens_for_model(model: &str) -> u64 {
     let (default_tokens, upper_limit) = model_max_output_tokens(model);
 
-    // validateBoundedIntEnvVar('CLAUDE_CODE_MAX_OUTPUT_TOKENS', …, default, upper):
+    // validateBoundedIntEnvVar('LINGXI_MAX_OUTPUT_TOKENS', …, default, upper):
     // a positive integer override is clamped to the upper limit; otherwise the
     // default is used.
-    if let Ok(raw) = std::env::var("CLAUDE_CODE_MAX_OUTPUT_TOKENS") {
+    if let Ok(raw) = std::env::var("LINGXI_MAX_OUTPUT_TOKENS") {
         if let Some(parsed) = parse_positive_i64(&raw) {
             return parsed.min(upper_limit);
         }

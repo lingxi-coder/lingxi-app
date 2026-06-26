@@ -24,15 +24,15 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// these on top of the caller-supplied env.
 pub const ENV_CLAUDECODE: (&str, &str) = ("CLAUDECODE", "1");
 /// Marks every spawned process as running inside a claude-code CHILD session —
-/// claude-code `Uot` sets `CLAUDE_CODE_CHILD_SESSION:"1"` UNCONDITIONALLY (#7).
-pub const ENV_CLAUDE_CODE_CHILD_SESSION: (&str, &str) = ("CLAUDE_CODE_CHILD_SESSION", "1");
+/// claude-code `Uot` sets `LINGXI_CHILD_SESSION:"1"` UNCONDITIONALLY (#7).
+pub const ENV_CLAUDE_CODE_CHILD_SESSION: (&str, &str) = ("LINGXI_CHILD_SESSION", "1");
 /// Forces `git`'s editor to a no-op so interactive git commands cannot
 /// block the shell.
 pub const ENV_GIT_EDITOR: (&str, &str) = ("GIT_EDITOR", "true");
 /// Name of the `SHELL` env var inherited from the user's environment.
 pub const ENV_SHELL: &str = "SHELL";
 /// Name of the session-id env var the IDE bridge / hooks consume.
-pub const ENV_CLAUDE_CODE_SESSION_ID: &str = "CLAUDE_CODE_SESSION_ID";
+pub const ENV_CLAUDE_CODE_SESSION_ID: &str = "LINGXI_SESSION_ID";
 /// Name of the agent-identity env var claude-code's `Uot` injects into child
 /// shell spawns. The value (see [`ai_agent_value`]) mirrors claude-code's
 /// `Mer("agent")`.
@@ -94,7 +94,7 @@ pub fn task_output_path(task_id: &str) -> PathBuf {
 /// `shell_path` is the absolute path of the spawn binary (`/bin/bash`,
 /// `/bin/zsh`, …) so we pick the right idiom. When
 /// `claude_code_shell_prefix_set` is true (caller's
-/// `CLAUDE_CODE_SHELL_PREFIX` env is non-empty), the combined bash+zsh
+/// `LINGXI_SHELL_PREFIX` env is non-empty), the combined bash+zsh
 /// idiom is used because the wrapper may pick a different shell than
 /// `shell_path`.
 #[must_use]
@@ -152,11 +152,11 @@ mod tests {
         assert_eq!(ENV_CLAUDECODE, ("CLAUDECODE", "1"));
         assert_eq!(
             ENV_CLAUDE_CODE_CHILD_SESSION,
-            ("CLAUDE_CODE_CHILD_SESSION", "1")
+            ("LINGXI_CHILD_SESSION", "1")
         );
         assert_eq!(ENV_GIT_EDITOR, ("GIT_EDITOR", "true"));
         assert_eq!(ENV_SHELL, "SHELL");
-        assert_eq!(ENV_CLAUDE_CODE_SESSION_ID, "CLAUDE_CODE_SESSION_ID");
+        assert_eq!(ENV_CLAUDE_CODE_SESSION_ID, "LINGXI_SESSION_ID");
         assert_eq!(ENV_AI_AGENT, "AI_AGENT");
     }
 

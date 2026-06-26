@@ -2,7 +2,7 @@
 //! v2.1.183 (`bin/claude.exe`, the `J0` system-prompt assembler).
 //!
 //! claude-code's `J0(e,t,n,r)` returns, for the DEFAULT (non-simple) path
-//! (`o = Dh(t)` is false unless `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` is set),
+//! (`o = Dh(t)` is false unless `LINGXI_SIMPLE_SYSTEM_PROMPT` is set),
 //! these STATIC sections in this exact order, immediately after the
 //! `DEFAULT_PREFIX` header:
 //!
@@ -138,7 +138,7 @@ When the conversation grows long, some or all of the current context is summariz
 ///
 /// `is_interactive` maps to claude-code `Hr()` (the interactive flag).
 /// `has_agent_tool` maps to `e.has(ns)` where `ns = "Agent"`.
-/// `fork_mode_enabled` maps to `Kz()` (CLAUDE_CODE_FORK_SUBAGENT env).
+/// `fork_mode_enabled` maps to `Kz()` (LINGXI_FORK_SUBAGENT env).
 fn session_guidance(
     is_interactive: bool,
     has_agent_tool: bool,
@@ -293,7 +293,7 @@ fn using_your_tools(tool_names: &[String]) -> Option<String> {
 ///   `# Session-specific guidance` `! <command>` bullet.
 /// * `has_agent_tool` — whether `"Agent"` is in the tool set. Used for the
 ///   Agent delegation bullet in `# Session-specific guidance`.
-/// * `fork_mode_enabled` — whether CLAUDE_CODE_FORK_SUBAGENT is active
+/// * `fork_mode_enabled` — whether LINGXI_FORK_SUBAGENT is active
 ///   (`Kz()`). Suppresses the standard Agent-tool bullet in favour of the
 ///   fork variant (not implemented here; pass `false` for the default path).
 ///

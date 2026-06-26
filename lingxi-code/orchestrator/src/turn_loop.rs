@@ -545,7 +545,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     }
 
     // `agent_listing_delta`: per-turn, transient agent catalog reminder, emitted
-    // when the `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES` gate is ON (the v2.1.193
+    // when the `LINGXI_AGENT_LIST_IN_MESSAGES` gate is ON (the v2.1.193
     // DEFAULT — the catalog is externalized here, the `AgentTool` description
     // carries only the pointer line; an explicit `=false` opts into the legacy
     // inline catalog ⇒ `None` here). Appended to THIS call's OUTGOING snapshot
@@ -1462,7 +1462,7 @@ pub(crate) fn terminal_api_error_text(
 ) -> Option<String> {
     match stop_reason {
         "max_tokens" => Some(format!(
-            "API Error: Claude's response exceeded the {} output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.",
+            "API Error: Claude's response exceeded the {} output token maximum. To configure this behavior, set the LINGXI_MAX_OUTPUT_TOKENS environment variable.",
             compaction::max_output_tokens_for_model(model)
         )),
         "model_context_window_exceeded" => {

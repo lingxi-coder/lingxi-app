@@ -42,12 +42,12 @@ pub const TOOL_NAME: &str = "TodoWrite";
 /// claude-code v2.1.183 `FWd` (binary offset 199291572): the SHORT
 /// TodoWrite tool prompt selected by the `Dh` gate for new models
 /// (claude-opus-4-8 / claude-fable-5 / claude-mythos-5) and whenever
-/// `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` is env-truthy. Byte-exact.
+/// `LINGXI_SIMPLE_SYSTEM_PROMPT` is env-truthy. Byte-exact.
 pub const TODO_WRITE_PROMPT_SIMPLE: &str = "Create and update a task list for the current session. The list is rendered to the user as your working plan.\n\n- Each todo has `content`, `status` (\"pending\" | \"in_progress\" | \"completed\"), and `activeForm` (present-tense label shown while in progress).\n- Send the full list each call; it replaces the previous one.\n- Keep one item `in_progress` at a time and mark it `completed` when done.";
 
 /// claude-code v2.1.183 `UWd` (binary offset 199292278): the long
 /// standard TodoWrite tool prompt selected by the `Dh` gate for classic
-/// models and whenever `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` is
+/// models and whenever `LINGXI_SIMPLE_SYSTEM_PROMPT` is
 /// env-defined-falsy. The single `${Ua}` substitution renders as the
 /// `Edit` tool name (`Ua="Edit"`). Byte-exact: the binary template literal
 /// (`UWd=` at offset 199292273) ends with `...successfully.\n` — a trailing
@@ -243,7 +243,7 @@ use tool_api::dh_simple_system_prompt;
 /// Port of claude-code `Xla(model)` = `Dh(model) ? FWd : UWd`
 /// (`prompt({model:e}){return Xla(e)}`). Selects the SHORT `FWd`
 /// ([`TODO_WRITE_PROMPT_SIMPLE`]) for new models (opus-4-8 / fable-5 /
-/// mythos-5) and whenever `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` is env-truthy, and
+/// mythos-5) and whenever `LINGXI_SIMPLE_SYSTEM_PROMPT` is env-truthy, and
 /// the long `UWd` ([`TODO_WRITE_PROMPT_FULL`]) for classic models and whenever
 /// the env override is defined-falsy. The session/subagent model is threaded
 /// via [`PromptOptions::model`]; `None` mirrors `Dh(undefined)` → `UWd`.
@@ -453,7 +453,7 @@ impl Tool for TodoWriteTool {
         // `function Xla(e){return Dh(e)?FWd:UWd}`. `Dh(model)` selects the SHORT
         // `FWd` prompt for new models (opus-4-8 / fable-5 / mythos-5) and the
         // long `UWd` for classic models, gated up front by the
-        // `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` env override. The session model is
+        // `LINGXI_SIMPLE_SYSTEM_PROMPT` env override. The session model is
         // threaded via `opts.model`; absent ⇒ `Dh(undefined)` → `UWd`.
         select_todo_write_prompt(opts.model.as_deref()).into()
     }
@@ -1136,7 +1136,7 @@ mod tests {
     //
     // All cases live in ONE test (no `serial_test` dep) so the parallel test
     // runner never has two bodies mutating the shared
-    // `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` env var at once. The `EnvGuard`
+    // `LINGXI_SIMPLE_SYSTEM_PROMPT` env var at once. The `EnvGuard`
     // restores the prior value on drop. No other test module reads this var.
 
     #[tokio::test]
@@ -1155,7 +1155,7 @@ mod tests {
         // Default (var unset): no model threaded ⇒ `Dh(undefined)` is false ⇒
         // the long UWd prompt — NOT the old custom 3-sentence blurb.
         {
-            let _g = EnvGuard::clear("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT");
+            let _g = EnvGuard::clear("LINGXI_SIMPLE_SYSTEM_PROMPT");
             let p = tool.prompt(&opts).await;
             assert_eq!(p, TODO_WRITE_PROMPT_FULL);
             // Binary-locked head + tail of UWd.
@@ -1176,7 +1176,7 @@ mod tests {
         // Model-class gate (var unset). `Dh(model) = !UWu(model)` (FWu=false):
         // classic UWu models → UWd; new (opus-4-8 / fable-5 / mythos-5) → FWd.
         {
-            let _g = EnvGuard::clear("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT");
+            let _g = EnvGuard::clear("LINGXI_SIMPLE_SYSTEM_PROMPT");
             // UWu == true ⇒ long UWd.
             for classic in [
                 "claude-opus-4-7",
@@ -1214,10 +1214,10 @@ mod tests {
             }
         }
 
-        // `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` truthy ⇒ the short FWd prompt
+        // `LINGXI_SIMPLE_SYSTEM_PROMPT` truthy ⇒ the short FWd prompt
         // (overrides the model branch — fires even for a classic model).
         for truthy in ["1", "true", "yes", "on", " On "] {
-            let _g = EnvGuard::set("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", truthy);
+            let _g = EnvGuard::set("LINGXI_SIMPLE_SYSTEM_PROMPT", truthy);
             let p = tool.prompt(&with_model("claude-opus-4-7")).await;
             assert_eq!(p, TODO_WRITE_PROMPT_SIMPLE, "truthy {truthy:?} ⇒ FWd");
             assert!(p.starts_with(
@@ -1227,10 +1227,10 @@ mod tests {
             assert!(!p.contains("has id"));
         }
 
-        // `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` defined-falsy ⇒ the long UWd prompt
+        // `LINGXI_SIMPLE_SYSTEM_PROMPT` defined-falsy ⇒ the long UWd prompt
         // (overrides the model branch — fires even for opus-4-8).
         for falsy in ["0", "false", "no", "off"] {
-            let _g = EnvGuard::set("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", falsy);
+            let _g = EnvGuard::set("LINGXI_SIMPLE_SYSTEM_PROMPT", falsy);
             let p = tool.prompt(&with_model("claude-opus-4-8")).await;
             assert_eq!(p, TODO_WRITE_PROMPT_FULL, "defined-falsy {falsy:?} ⇒ UWd");
         }
@@ -1238,14 +1238,14 @@ mod tests {
         // `if(!e) return false`: even with the env truthy, a MISSING model still
         // short-circuits to UWd (the binary's `Dh(undefined)` guard runs first).
         {
-            let _g = EnvGuard::set("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", "1");
+            let _g = EnvGuard::set("LINGXI_SIMPLE_SYSTEM_PROMPT", "1");
             assert_eq!(tool.prompt(&opts).await, TODO_WRITE_PROMPT_FULL);
         }
 
         // Any other (non-truthy, non-defined-falsy) value falls through to the
         // model-class branch (here: classic ⇒ UWd; with no model ⇒ UWd).
         {
-            let _g = EnvGuard::set("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", "garbage");
+            let _g = EnvGuard::set("LINGXI_SIMPLE_SYSTEM_PROMPT", "garbage");
             assert_eq!(
                 tool.prompt(&with_model("claude-opus-4-7")).await,
                 TODO_WRITE_PROMPT_FULL
@@ -1259,14 +1259,14 @@ mod tests {
 
         // Selector helper agrees with the tool method.
         {
-            let _g = EnvGuard::set("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", "yes");
+            let _g = EnvGuard::set("LINGXI_SIMPLE_SYSTEM_PROMPT", "yes");
             assert_eq!(
                 select_todo_write_prompt(Some("claude-opus-4-7")),
                 TODO_WRITE_PROMPT_SIMPLE
             );
         }
         {
-            let _g = EnvGuard::clear("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT");
+            let _g = EnvGuard::clear("LINGXI_SIMPLE_SYSTEM_PROMPT");
             assert_eq!(select_todo_write_prompt(None), TODO_WRITE_PROMPT_FULL);
             assert_eq!(
                 select_todo_write_prompt(Some("claude-opus-4-8")),

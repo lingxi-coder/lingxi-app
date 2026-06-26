@@ -82,8 +82,8 @@ fn reasoning_budget(reasoning: Option<crate::ReasoningConfig>) -> u32 {
 }
 
 /// `true` when the named env var is truthy under the strict claude-code
-/// allowlist (`1`/`true`/`yes`/`on`). Used for the `CLAUDE_CODE_DISABLE_THINKING`
-/// / `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING` gates.
+/// allowlist (`1`/`true`/`yes`/`on`). Used for the `LINGXI_DISABLE_THINKING`
+/// / `LINGXI_DISABLE_ADAPTIVE_THINKING` gates.
 fn is_thinking_env_disabled(name: &str) -> bool {
     traits::env::is_env_truthy(std::env::var(name).ok().as_deref())
 }
@@ -201,7 +201,7 @@ pub struct ApiService {
     alias_to_display: std::collections::BTreeMap<String, String>,
     /// `routing.retry.maxAttempts` override.
     ///
-    /// Precedence: `CLAUDE_CODE_MAX_RETRIES` env > this > `DEFAULT_MAX_RETRIES`.
+    /// Precedence: `LINGXI_MAX_RETRIES` env > this > `DEFAULT_MAX_RETRIES`.
     settings_max_retries: Option<u32>,
     /// `routing.retry.backoffMs` override.
     ///
@@ -426,7 +426,7 @@ impl ApiService {
     ///
     /// ## Retry precedence
     ///
-    /// `CLAUDE_CODE_MAX_RETRIES` env > `settings_max_retries` > `DEFAULT_MAX_RETRIES` (10).
+    /// `LINGXI_MAX_RETRIES` env > `settings_max_retries` > `DEFAULT_MAX_RETRIES` (10).
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_routing(
@@ -610,7 +610,7 @@ impl ApiService {
     /// LingXi resolves the concrete provider downstream of this provider-agnostic
     /// request builder and has no GrowthBook rollout bucketing, so the feature is
     /// kept **dormant**: it requires an explicit opt-in env
-    /// (`CLAUDE_CODE_GLOBAL_CACHE_SCOPE`) — mirroring the experimental-beta gating
+    /// (`LINGXI_GLOBAL_CACHE_SCOPE`) — mirroring the experimental-beta gating
     /// pattern used elsewhere — AND the subscriber (firstParty) signal, AND the
     /// shared experimental-betas kill switch must not be set. Default: off.
     fn should_use_global_cache_scope(&self) -> bool {
@@ -619,7 +619,7 @@ impl ApiService {
         }
         // `firstParty` approximation at this layer: a Claude.ai subscriber (the
         // OAuth/first-party path). Opt-in env arms the otherwise-dormant feature.
-        cache_env_truthy("CLAUDE_CODE_GLOBAL_CACHE_SCOPE")
+        cache_env_truthy("LINGXI_GLOBAL_CACHE_SCOPE")
             && self.effective_subscriber().is_subscriber
     }
 
@@ -642,7 +642,7 @@ impl ApiService {
     /// LingXi resolves the concrete provider downstream of this provider-agnostic
     /// request builder and has no querySource allowlist, so — exactly like
     /// [`Self::should_use_global_cache_scope`] — the feature is kept **dormant**:
-    /// it requires an explicit opt-in env (`CLAUDE_CODE_CACHE_EDITING`), the
+    /// it requires an explicit opt-in env (`LINGXI_CACHE_EDITING`), the
     /// shared experimental-betas kill switch must not be set, AND the subscriber
     /// (firstParty) signal must be present. Default: off → no `cache_edits` /
     /// `cache_reference` ever emitted, so 3P traffic is byte-unchanged.
@@ -655,7 +655,7 @@ impl ApiService {
         if cache_env_truthy("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") {
             return false;
         }
-        cache_env_truthy("CLAUDE_CODE_CACHE_EDITING") && self.effective_subscriber().is_subscriber
+        cache_env_truthy("LINGXI_CACHE_EDITING") && self.effective_subscriber().is_subscriber
     }
 
     // ── Shared request build ─────────────────────────────────────────────────
@@ -791,7 +791,7 @@ impl ApiService {
             use crate::ReasoningConfig;
 
             let has_thinking = self.thinking != ThinkingConfig::Disabled
-                && !is_thinking_env_disabled("CLAUDE_CODE_DISABLE_THINKING");
+                && !is_thinking_env_disabled("LINGXI_DISABLE_THINKING");
 
             // The byte-faithful claude-code thinking shape (Adaptive default,
             // canonical max-output budget cap) is Anthropic-specific. The
@@ -805,7 +805,7 @@ impl ApiService {
             } else if is_claude {
                 // Claude path — unchanged from claude-code.
                 if model_supports_thinking(model) {
-                    if !is_thinking_env_disabled("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING")
+                    if !is_thinking_env_disabled("LINGXI_DISABLE_ADAPTIVE_THINKING")
                         && model_supports_adaptive_thinking(model)
                     {
                         Some(ReasoningConfig::Adaptive)
@@ -2962,7 +2962,7 @@ mod tests {
         use crate::prompt_format::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
         let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DISABLE_PROMPT_CACHING");
-        std::env::remove_var("CLAUDE_CODE_GLOBAL_CACHE_SCOPE");
+        std::env::remove_var("LINGXI_GLOBAL_CACHE_SCOPE");
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter_with_subscriber(
             transport,
@@ -2999,7 +2999,7 @@ mod tests {
         let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DISABLE_PROMPT_CACHING");
         std::env::remove_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS");
-        std::env::set_var("CLAUDE_CODE_GLOBAL_CACHE_SCOPE", "1");
+        std::env::set_var("LINGXI_GLOBAL_CACHE_SCOPE", "1");
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter_with_subscriber(
             transport,
@@ -3022,7 +3022,7 @@ mod tests {
                 Some(1024),
             )
             .expect("build_request");
-        std::env::remove_var("CLAUDE_CODE_GLOBAL_CACHE_SCOPE");
+        std::env::remove_var("LINGXI_GLOBAL_CACHE_SCOPE");
         assert_eq!(req.system.len(), 3);
         assert_eq!(req.system[0].text, HEADER);
         assert_eq!(req.system[0].cache_control, None); // prefix uncached
@@ -3087,7 +3087,7 @@ mod tests {
         use crate::ContentBlock as LlmContentBlock;
         let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DISABLE_PROMPT_CACHING");
-        std::env::remove_var("CLAUDE_CODE_CACHE_EDITING");
+        std::env::remove_var("LINGXI_CACHE_EDITING");
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         // Even a subscriber + injected edits must stay inert without the env.
         let adapter = make_adapter_with_subscriber(
@@ -3140,7 +3140,7 @@ mod tests {
         let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DISABLE_PROMPT_CACHING");
         std::env::remove_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS");
-        std::env::set_var("CLAUDE_CODE_CACHE_EDITING", "1");
+        std::env::set_var("LINGXI_CACHE_EDITING", "1");
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         // pinned (pos 1, the tool_result user msg) deletes ref "dup" + "p1";
         // new (last user msg) deletes "dup" (collapsed by dedup) + "n1".
@@ -3183,7 +3183,7 @@ mod tests {
                 Some(1024),
             )
             .expect("build_request");
-        std::env::remove_var("CLAUDE_CODE_CACHE_EDITING");
+        std::env::remove_var("LINGXI_CACHE_EDITING");
 
         // (a) cache_reference stamped on the tool_result (it precedes the marker).
         let mut stamped = 0;
@@ -3280,13 +3280,13 @@ mod tests {
     // ── build_request thinking / temperature / max_tokens (DIV-1/3/4) ────────
 
     // Serialize the env-touching thinking tests: they mutate process-global
-    // CLAUDE_CODE_DISABLE_THINKING. A module-level mutex keeps them from racing
+    // LINGXI_DISABLE_THINKING. A module-level mutex keeps them from racing
     // each other (and is poison-tolerant).
     static THINKING_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn clear_thinking_env() {
-        std::env::remove_var("CLAUDE_CODE_DISABLE_THINKING");
-        std::env::remove_var("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING");
+        std::env::remove_var("LINGXI_DISABLE_THINKING");
+        std::env::remove_var("LINGXI_DISABLE_ADAPTIVE_THINKING");
     }
 
     #[test]
@@ -3353,7 +3353,7 @@ mod tests {
     fn build_request_disable_thinking_env_drops_reasoning_sets_temperature() {
         let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_thinking_env();
-        std::env::set_var("CLAUDE_CODE_DISABLE_THINKING", "1");
+        std::env::set_var("LINGXI_DISABLE_THINKING", "1");
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
 
@@ -5547,7 +5547,7 @@ mod tests {
 
     /// `settings_max_retries=2` causes terminal after 3 executions (not 11).
     ///
-    /// The adapter reads `CLAUDE_CODE_MAX_RETRIES` from the process env in
+    /// The adapter reads `LINGXI_MAX_RETRIES` from the process env in
     /// `messages_create`.  To avoid interference with parallel tests we verify
     /// via the retry.rs layer (which is injected, not process-env) rather than
     /// through the adapter's env path.  The adapter's `settings_max_retries`
@@ -5557,7 +5557,7 @@ mod tests {
     #[tokio::test]
     async fn settings_max_retries_beats_default() {
         // We can test the settings path directly: when the env var is absent
-        // the settings_max_retries field applies.  We control CLAUDE_CODE_MAX_RETRIES
+        // the settings_max_retries field applies.  We control LINGXI_MAX_RETRIES
         // for the duration of this test — accept minor isolation risk since the
         // pre-existing test suite also does this.
         let transport = FakeTransport::sequence(vec![FakeResponse::Ok(ProviderResponse::json(
@@ -5572,10 +5572,10 @@ mod tests {
             None,
         );
 
-        // Temporarily unset CLAUDE_CODE_MAX_RETRIES so settings value wins.
-        let saved = std::env::var("CLAUDE_CODE_MAX_RETRIES").ok();
+        // Temporarily unset LINGXI_MAX_RETRIES so settings value wins.
+        let saved = std::env::var("LINGXI_MAX_RETRIES").ok();
         #[allow(deprecated)]
-        std::env::remove_var("CLAUDE_CODE_MAX_RETRIES");
+        std::env::remove_var("LINGXI_MAX_RETRIES");
 
         let result = adapter
             .messages_create(
@@ -5590,7 +5590,7 @@ mod tests {
         // Restore.
         if let Some(v) = saved {
             #[allow(deprecated)]
-            std::env::set_var("CLAUDE_CODE_MAX_RETRIES", v);
+            std::env::set_var("LINGXI_MAX_RETRIES", v);
         }
 
         assert!(result.is_err(), "must fail after exhausting budget");
@@ -5602,7 +5602,7 @@ mod tests {
         );
     }
 
-    /// Env `CLAUDE_CODE_MAX_RETRIES` beats `settings_max_retries`.
+    /// Env `LINGXI_MAX_RETRIES` beats `settings_max_retries`.
     ///
     /// Proven via `resolve_retry_control_with_settings` unit tests in retry.rs;
     /// this adapter-level test verifies the wiring by injecting through

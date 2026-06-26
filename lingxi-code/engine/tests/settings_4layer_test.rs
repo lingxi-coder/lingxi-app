@@ -93,18 +93,16 @@ fn four_layer_priority_env_user_project_defaults() {
 }
 
 #[test]
-fn env_prefix_priority_lingxi_then_claude_code_then_claude() {
+fn env_prefix_lingxi_is_read() {
     let _guard = HOME_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tmp = tempfile::tempdir().unwrap();
     std::env::set_var("HOME", tmp.path().join("home_eppp"));
 
-    // Three competing env vars — LINGXI_ must win.
+    // Clean break: only the LINGXI_ prefix is read for settings overrides.
     let mut env = BTreeMap::new();
     env.insert("LINGXI_MODEL".into(), "from-lingxi".into());
-    env.insert("CLAUDE_CODE_MODEL".into(), "from-claude-code".into());
-    env.insert("CLAUDE_MODEL".into(), "from-claude".into());
 
     let eff = Settings::load(LoadInputs {
         env: &env,

@@ -14,8 +14,8 @@
 //! - [`should_auto_compact`] ↔ the threshold test inside `shouldAutoCompact`
 //!   (`autoCompact.ts:225-238`), including the `snipTokensFreed` subtraction.
 //!
-//! The env-override branches (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`,
-//! `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`) live in the model-aware
+//! The env-override branches (`LINGXI_AUTO_COMPACT_WINDOW`,
+//! `LINGXI_AUTOCOMPACT_PCT_OVERRIDE`) live in the model-aware
 //! [`crate::thresholds`] functions; these kernels take post-resolution numbers.
 
 use crate::thresholds::{AUTOCOMPACT_BUFFER_TOKENS, MAX_OUTPUT_TOKENS_FOR_SUMMARY};
@@ -35,7 +35,7 @@ pub fn effective_context_window(max_output_tokens: u64, context_window: u64) -> 
 /// `effective_window − AUTOCOMPACT_BUFFER_TOKENS`.
 ///
 /// Mirrors `getAutoCompactThreshold` (`autoCompact.ts:72-91`) without the
-/// `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` env branch (that lives in the model-aware
+/// `LINGXI_AUTOCOMPACT_PCT_OVERRIDE` env branch (that lives in the model-aware
 /// [`crate::thresholds::auto_compact_threshold`]). Saturating so a tiny window
 /// never underflows.
 #[must_use]

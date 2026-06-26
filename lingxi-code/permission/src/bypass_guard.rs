@@ -44,7 +44,7 @@ pub async fn enforce_bypass_safety(env: &dyn BypassEnv) -> Result<(), String> {
     if !env.is_windows()
         && env.effective_uid() == 0
         && env.env("IS_SANDBOX").as_deref() != Some("1")
-        && !env_truthy(env.env("CLAUDE_CODE_BUBBLEWRAP"))
+        && !env_truthy(env.env("LINGXI_BUBBLEWRAP"))
     {
         return Err(
             "--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons"
@@ -60,7 +60,7 @@ pub async fn enforce_bypass_safety(env: &dyn BypassEnv) -> Result<(), String> {
         && entrypoint.as_deref() != Some("claude-desktop")
     {
         let is_docker = env.is_docker();
-        let is_bubblewrap = env_truthy(env.env("CLAUDE_CODE_BUBBLEWRAP"));
+        let is_bubblewrap = env_truthy(env.env("LINGXI_BUBBLEWRAP"));
         let is_sandbox = env.env("IS_SANDBOX").as_deref() == Some("1");
         let sandboxed = is_docker || is_bubblewrap || is_sandbox;
         let has_internet = env.has_internet().await;
@@ -122,7 +122,7 @@ mod tests {
     #[tokio::test]
     async fn root_with_bubblewrap_passes_check_one() {
         let mut e = FakeEnv { euid: 0, ..FakeEnv::default() };
-        e.vars.insert("CLAUDE_CODE_BUBBLEWRAP".into(), "1".into());
+        e.vars.insert("LINGXI_BUBBLEWRAP".into(), "1".into());
         assert!(enforce_bypass_safety(&e).await.is_ok());
     }
 

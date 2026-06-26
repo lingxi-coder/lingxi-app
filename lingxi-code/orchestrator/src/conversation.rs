@@ -893,7 +893,7 @@ pub struct ConversationOrchestrator {
     /// set (attachments.ts:1524-1530) — kept in memory here (like
     /// [`Self::sent_skill_names`]) rather than rebuilt from prior deltas. When no
     /// new type appears, [`Self::agent_listing_reminder_message`] returns `None`.
-    /// Only consulted when the gate (`CLAUDE_CODE_AGENT_LIST_IN_MESSAGES`) is ON;
+    /// Only consulted when the gate (`LINGXI_AGENT_LIST_IN_MESSAGES`) is ON;
     /// inert (never read) in the default OFF build.
     pub(crate) sent_agent_names: Mutex<std::collections::HashSet<String>>,
     /// P0.1: the memory-selector prefetcher, fired at turn start to score +
@@ -3552,7 +3552,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // longer the old `!stop_hook_active` boolean (which let a blocking
             // hook drive exactly ONE extra turn). The binary carries a
             // `stopHookBlockingCount` and only ends after it exceeds
-            // `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` (default 8); that counter cap is
+            // `LINGXI_STOP_HOOK_BLOCK_CAP` (default 8); that counter cap is
             // enforced in `handle_stop_at_end`, not here. `stop_hook_active` is
             // still threaded into the hook CONTEXT above so the hook can read it
             // and return success while it is true (the documented escape hatch).
@@ -3672,11 +3672,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     self.fire_stop_hook_block_count(next_count, true, false).await;
                     return StopHookFlow::TerminateMaxTurns;
                 }
-                // `parseInt(process.env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP??"",10)`
+                // `parseInt(process.env.LINGXI_STOP_HOOK_BLOCK_CAP??"",10)`
                 // with `Number.isNaN(jr)?8:jr` ⇒ unset / non-numeric → 8. A
                 // `cap <= 0` disables the cap (binary `if(bo>0&&…)`), letting a
                 // blocking hook drive until the max_turns top-of-loop guard ends it.
-                let cap: i64 = std::env::var("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP")
+                let cap: i64 = std::env::var("LINGXI_STOP_HOOK_BLOCK_CAP")
                     .ok()
                     .and_then(|v| v.trim().parse::<i64>().ok())
                     .unwrap_or(8);
@@ -3690,7 +3690,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // (`Boolean(N.agentId)`); the main-loop value is `false`.
                     self.fire_stop_hook_block_count(next_count, false, true).await;
                     let warning = format!(
-                        "A hook blocked the turn from ending {next_count} consecutive times — overriding and ending turn. For Stop/SubagentStop hooks, check stop_hook_active in the input and return success while it's true. Set CLAUDE_CODE_STOP_HOOK_BLOCK_CAP to raise this limit."
+                        "A hook blocked the turn from ending {next_count} consecutive times — overriding and ending turn. For Stop/SubagentStop hooks, check stop_hook_active in the input and return success while it's true. Set LINGXI_STOP_HOOK_BLOCK_CAP to raise this limit."
                     );
                     self.output.emit_text(&warning).await;
                     return StopHookFlow::FallThrough;
@@ -4004,7 +4004,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // Route through the SessionEnd *batch-deadline* path (claude-code `lje`
         // → `cH({signal: AbortSignal.timeout(Wqt())})`): the whole SessionEnd
         // hook batch is capped by a single shutdown budget
-        // (`CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`, else `max(1500,
+        // (`LINGXI_SESSIONEND_HOOKS_TIMEOUT_MS`, else `max(1500,
         // min(maxPerHookMs, 60000))`), so a slow / hung teardown hook cannot
         // stall session exit — NOT the generic 10-minute per-hook `execute`.
         let _ = self
@@ -4153,7 +4153,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let mut stop_hook_active = false;
         // #2 consecutive Stop-hook block counter (binary `stopHookBlockingCount`):
         // bumped per block; ends the turn via the cap once it would exceed
-        // CLAUDE_CODE_STOP_HOOK_BLOCK_CAP (default 8). Fresh per turn-driver run.
+        // LINGXI_STOP_HOOK_BLOCK_CAP (default 8). Fresh per turn-driver run.
         let mut stop_hook_blocking_count: u32 = 0;
         // A3: token-budget continuation bookkeeping. `Some` only when the gate
         // is enabled AND a budget is set; otherwise the budget check is a
@@ -4358,7 +4358,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let mut stop_hook_active = false;
         // #2 consecutive Stop-hook block counter (binary `stopHookBlockingCount`):
         // bumped per block; ends the turn via the cap once it would exceed
-        // CLAUDE_CODE_STOP_HOOK_BLOCK_CAP (default 8). Fresh per turn-driver run.
+        // LINGXI_STOP_HOOK_BLOCK_CAP (default 8). Fresh per turn-driver run.
         let mut stop_hook_blocking_count: u32 = 0;
         // A3: token-budget continuation bookkeeping (streaming twin). `Some`
         // only when the gate is enabled AND a budget is set; otherwise the
@@ -4562,7 +4562,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 
             // `agent_listing_delta` (streaming twin): per-turn, transient agent
             // catalog reminder, emitted ONLY when the
-            // `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES` gate is ON (default OFF ⇒
+            // `LINGXI_AGENT_LIST_IN_MESSAGES` gate is ON (default OFF ⇒
             // `None`, keeping the locked streaming fixtures byte-identical and
             // the inline catalog in place). Appended to THIS turn's OUTGOING
             // snapshot only (never `session.history` / JSONL). See
@@ -4734,7 +4734,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 // exhaustion we end the turn with the byte-exact prompt_too_long /
                 // rapid_refill copy — identical to the proactive preempt and the
                 // batched path. NOT gated on
-                // `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK` (that flag governs
+                // `LINGXI_DISABLE_NONSTREAMING_FALLBACK` (that flag governs
                 // the 529 overload fallback; PTL recovery is the always-on batched
                 // behavior). Previously a streaming 413 bubbled as a hard
                 // `OrchestratorError::Streaming` error (documented divergence).
@@ -4895,13 +4895,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // 3. Pump the stream (with mid-stream 529 → non-streaming fallback).
             //
             // Task 7 / claude.ts parity: if the stream errors with `LlmError::Overloaded`
-            // after the first event — AND `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK` is not
+            // after the first event — AND `LINGXI_DISABLE_NONSTREAMING_FALLBACK` is not
             // set — discard the partial accumulation and issue a fresh non-streaming call
             // seeded with `initial_consecutive_overloaded = 1`.  This mirrors
             // `claude.ts:2469-2594` + `withRetry.ts:186` (`initialConsecutive529Errors`).
             //
             // The env gate name is locked byte-for-byte to TS:
-            //   `process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK` (claude.ts:2470)
+            //   `process.env.LINGXI_DISABLE_NONSTREAMING_FALLBACK` (claude.ts:2470)
             // Truthiness follows `isEnvTruthy` (non-empty, non-"false", non-"0").
             //
             // M1 parity note (Task 7 review): TS yields partial deltas LIVE to callers
@@ -4935,7 +4935,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 Err(OrchestratorError::Streaming(
                     ref e @ (LlmError::Overloaded { .. } | LlmError::ProviderInternal),
                 )) if !is_env_truthy(
-                    std::env::var("CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK")
+                    std::env::var("LINGXI_DISABLE_NONSTREAMING_FALLBACK")
                         .as_deref()
                         .ok(),
                 ) =>
@@ -5688,7 +5688,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let mut stop_hook_active = false;
         // #2 consecutive Stop-hook block counter (binary `stopHookBlockingCount`):
         // bumped per block; ends the turn via the cap once it would exceed
-        // CLAUDE_CODE_STOP_HOOK_BLOCK_CAP (default 8). Fresh per turn-driver run.
+        // LINGXI_STOP_HOOK_BLOCK_CAP (default 8). Fresh per turn-driver run.
         let mut stop_hook_blocking_count: u32 = 0;
         // A3: token-budget continuation bookkeeping (no-op unless gated + set).
         let mut budget = self.new_budget_tracker();
@@ -6524,7 +6524,7 @@ As you answer the user's questions, you can use the following context:\n\
     /// `normalizeAttachmentForAPI`'s `'agent_listing_delta'` case,
     /// messages.ts:4194-4215):
     /// - GATE: `shouldInjectAgentListInMessages()` (env
-    ///   `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES`, default OFF — see
+    ///   `LINGXI_AGENT_LIST_IN_MESSAGES`, default OFF — see
     ///   [`agent::should_inject_agent_list_in_messages`]). When ON, `AgentTool`'s
     ///   description drops the inline catalog for a static pointer line and the
     ///   catalog is conveyed here instead, so the tool-schema prompt cache stops
@@ -6982,7 +6982,7 @@ fn llm_response_to_pumped_turn(resp: &LlmResponse) -> crate::streaming_loop::Pum
 /// (including `"no"`, `"off"`, `"2"`, `"enabled"`, …) are falsy.
 ///
 /// Locked against the TS helper used at `claude.ts:2470`:
-/// `isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK)`.
+/// `isEnvTruthy(process.env.LINGXI_DISABLE_NONSTREAMING_FALLBACK)`.
 fn is_env_truthy(val: Option<&str>) -> bool {
     match val {
         None => false,
@@ -7316,7 +7316,7 @@ mod turn_recovery_tests {
 
     /// A Stop hook that blocks EXACTLY ONCE, then passes. Used by tests that need
     /// precisely one stop-hook continuation, isolated from the consecutive-block
-    /// CAP (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`, default 8): a block-every-time hook
+    /// CAP (`LINGXI_STOP_HOOK_BLOCK_CAP`, default 8): a block-every-time hook
     /// would now drive up to 8 continuations, so a test asserting a single
     /// continuation must bound the blocking deterministically.
     struct BlockOnceStopHandler {
@@ -7802,7 +7802,7 @@ mod turn_recovery_tests {
             // Block-ONCE: this test isolates the recovery-reset on a SINGLE
             // stop-hook continuation. A block-every-time hook would now (post
             // #2 cap-counter) also block the final recovery-exhaustion end and
-            // drive further continuations up to CLAUDE_CODE_STOP_HOOK_BLOCK_CAP
+            // drive further continuations up to LINGXI_STOP_HOOK_BLOCK_CAP
             // (default 8), exhausting the scripted responses.
             exec_block_once_stop().await,
             Arc::new(NoOpPermissionGate),
@@ -8789,7 +8789,7 @@ mod skill_model_override_tests {
 // Task 7: mid-stream 529 → non-streaming fallback tests
 //
 // Parity: `claude.ts:2469-2594`, `withRetry.ts:141,186`
-// Env gate: `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK` (claude.ts:2470)
+// Env gate: `LINGXI_DISABLE_NONSTREAMING_FALLBACK` (claude.ts:2470)
 // Error copy: `errors.ts:166` REPEATED_529_ERROR_MESSAGE = "Repeated 529 Overloaded errors"
 // ============================================================================
 #[cfg(test)]
@@ -8805,7 +8805,7 @@ mod task7_midstream_fallback_tests {
     use std::sync::Arc;
     use tool_api::registry::ToolRegistry;
 
-    const DISABLE_FALLBACK_ENV: &str = "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK";
+    const DISABLE_FALLBACK_ENV: &str = "LINGXI_DISABLE_NONSTREAMING_FALLBACK";
 
     /// Serializes the two midstream tests that read/write `DISABLE_FALLBACK_ENV`.
     ///
@@ -8953,7 +8953,7 @@ mod task7_midstream_fallback_tests {
         );
     }
 
-    /// Task 7 Step 1 (twin with CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1):
+    /// Task 7 Step 1 (twin with LINGXI_DISABLE_NONSTREAMING_FALLBACK=1):
     /// When the env gate is set, the streaming error propagates instead of
     /// triggering the non-streaming fallback.
     ///
@@ -9468,7 +9468,7 @@ mod skill_listing_reminder_tests {
 // - GATE OFF (default): always `None`, and the inline `AgentTool` prompt is
 //   unchanged (asserted in `tool-agent` — here we just confirm the orchestrator
 //   side stays silent).
-// - GATE ON (`CLAUDE_CODE_AGENT_LIST_IN_MESSAGES=1`, guarded by a process-wide
+// - GATE ON (`LINGXI_AGENT_LIST_IN_MESSAGES=1`, guarded by a process-wide
 //   lock): turn-0 full listing + "Available agent types for the Agent tool:"
 //   header; a later turn with no new types ⇒ `None`; a newly-added type ⇒ a
 //   delta with the "New agent types are now available…" header and ONLY the new
@@ -9491,7 +9491,7 @@ mod agent_listing_reminder_tests {
         ValidationError,
     };
 
-    /// `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES` is process-global; serialize the
+    /// `LINGXI_AGENT_LIST_IN_MESSAGES` is process-global; serialize the
     /// gate-sensitive tests (every one removes/sets the var under this lock).
     static AGENT_LIST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -9631,7 +9631,7 @@ mod agent_listing_reminder_tests {
         // v2.1.193 default is ON (catalog externalized); the LEGACY inline path
         // (explicit `=false`) keeps the catalog in the description, so the
         // orchestrator emits no reminder.
-        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "false");
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
 
         let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
             "general-purpose",
@@ -9642,7 +9642,7 @@ mod agent_listing_reminder_tests {
         )]));
         let orch = orch_with(reg_with_agent_tool(), Some(catalog));
         let got = orch.agent_listing_reminder_message().await;
-        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         assert!(got.is_none(), "explicit gate OFF ⇒ no reminder (inline path)");
     }
 
@@ -9657,10 +9657,10 @@ mod agent_listing_reminder_tests {
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "1");
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
         let orch = orch_with(reg_with_agent_tool(), None);
         let got = orch.agent_listing_reminder_message().await;
-        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         let text = got
             .expect("built-ins must be announced even with no disk catalog")
             .text_content();
@@ -9680,7 +9680,7 @@ mod agent_listing_reminder_tests {
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "1");
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
         let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
             "general-purpose",
             "anything",
@@ -9691,7 +9691,7 @@ mod agent_listing_reminder_tests {
         // Empty registry — the Agent tool is not present this turn.
         let orch = orch_with(ToolRegistry::new(), Some(catalog));
         let got = orch.agent_listing_reminder_message().await;
-        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         assert!(got.is_none(), "Agent tool absent ⇒ no reminder");
     }
 
@@ -9700,7 +9700,7 @@ mod agent_listing_reminder_tests {
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "1");
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
         // Catalog supplies a custom type; built-ins are merged in too.
         let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
             "custom-agent",
@@ -9710,7 +9710,7 @@ mod agent_listing_reminder_tests {
         let orch = orch_with(reg_with_agent_tool(), Some(catalog));
 
         let msg = orch.agent_listing_reminder_message().await;
-        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         let text = msg.expect("turn-0 reminder present").text_content();
 
         assert!(text.starts_with("<system-reminder>"), "got: {text}");
@@ -9736,7 +9736,7 @@ mod agent_listing_reminder_tests {
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "1");
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
         let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
             "custom-agent",
             "a project agent",
@@ -9751,7 +9751,7 @@ mod agent_listing_reminder_tests {
         assert!(t0.is_some(), "turn-0 must emit");
         // Turn 1 with the same catalog ⇒ nothing new ⇒ None.
         let t1 = orch.agent_listing_reminder_message().await;
-        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         assert!(t1.is_none(), "no new types ⇒ no reminder");
     }
 
@@ -9760,7 +9760,7 @@ mod agent_listing_reminder_tests {
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "1");
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
         let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
             "alpha-agent",
             "the alpha agent",
@@ -9792,7 +9792,7 @@ mod agent_listing_reminder_tests {
             .await
             .expect("turn-1 delta")
             .text_content();
-        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
 
         assert!(
             t1.contains("New agent types are now available for the Agent tool:"),
@@ -10121,7 +10121,7 @@ mod relevant_memory_reminder_tests {
         // ⇒ a strict no-op (no panic, nothing spawned), so the locked fixtures
         // stay byte-identical. The enabled path's extract+write is covered by
         // `memory::session_memory` tests; the composition-root wiring is gated
-        // behind `CLAUDE_CODE_SESSION_MEMORY` (default off).
+        // behind `LINGXI_SESSION_MEMORY` (default off).
         let orch = orch_bare();
         assert!(orch.session_memory.is_none());
         orch.maybe_extract_session_memory().await;
@@ -11167,7 +11167,7 @@ mod todo_reminder_tests {
     #[tokio::test]
     async fn note_tool_call_resets_write_counter_on_todowrite_v1() {
         let _g = ENV_LOCK.lock().await;
-        std::env::set_var("CLAUDE_CODE_ENABLE_TASKS", "off"); // ⇒ V1 selected
+        std::env::set_var("LINGXI_ENABLE_TASKS", "off"); // ⇒ V1 selected
         let orch = orch_with(reg_with(&["TodoWrite"]));
         {
             let mut s = orch.session.lock().await;
@@ -11192,13 +11192,13 @@ mod todo_reminder_tests {
         orch.note_todo_reminder_tool_call(&["Read".to_string()])
             .await;
         assert_eq!(orch.session.lock().await.turns_since_last_todo_write, 5);
-        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
+        std::env::remove_var("LINGXI_ENABLE_TASKS");
     }
 
     #[tokio::test]
     async fn note_tool_call_resets_on_taskupdate_v2_default() {
         let _g = ENV_LOCK.lock().await;
-        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS"); // default ⇒ V2
+        std::env::remove_var("LINGXI_ENABLE_TASKS"); // default ⇒ V2
         let orch = orch_with(reg_with(&["TaskUpdate"]));
         {
             let mut s = orch.session.lock().await;
@@ -11222,8 +11222,8 @@ mod todo_reminder_tests {
     #[tokio::test]
     async fn no_fire_below_threshold() {
         let _g = ENV_LOCK.lock().await;
-        std::env::remove_var("CLAUDE_CODE_TODO_REMINDER_MODE");
-        std::env::set_var("CLAUDE_CODE_ENABLE_TASKS", "off"); // V1
+        std::env::remove_var("LINGXI_TODO_REMINDER_MODE");
+        std::env::set_var("LINGXI_ENABLE_TASKS", "off"); // V1
         let orch = orch_with(reg_with(&["TodoWrite"]));
         prime_session(&orch, 9, 10).await; // write ctr one short
         assert!(orch.todo_reminder_message().await.is_none());
@@ -11233,13 +11233,13 @@ mod todo_reminder_tests {
             s.turns_since_last_todo_write = 10;
         }
         assert!(orch.todo_reminder_message().await.is_some());
-        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
+        std::env::remove_var("LINGXI_ENABLE_TASKS");
     }
 
     #[tokio::test]
     async fn no_fire_when_history_empty() {
         let _g = ENV_LOCK.lock().await;
-        std::env::set_var("CLAUDE_CODE_ENABLE_TASKS", "off");
+        std::env::set_var("LINGXI_ENABLE_TASKS", "off");
         let orch = orch_with(reg_with(&["TodoWrite"]));
         // counters armed but NO history.
         {
@@ -11251,43 +11251,43 @@ mod todo_reminder_tests {
             orch.todo_reminder_message().await.is_none(),
             "empty history suppresses the reminder"
         );
-        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
+        std::env::remove_var("LINGXI_ENABLE_TASKS");
     }
 
     #[tokio::test]
     async fn no_fire_when_tool_absent() {
         let _g = ENV_LOCK.lock().await;
-        std::env::set_var("CLAUDE_CODE_ENABLE_TASKS", "off"); // V1 needs TodoWrite
+        std::env::set_var("LINGXI_ENABLE_TASKS", "off"); // V1 needs TodoWrite
         let orch = orch_with(reg_with(&["Read"])); // no TodoWrite
         prime_session(&orch, 10, 10).await;
         assert!(orch.todo_reminder_message().await.is_none());
-        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
+        std::env::remove_var("LINGXI_ENABLE_TASKS");
     }
 
     #[tokio::test]
     async fn no_fire_when_brief_present() {
         let _g = ENV_LOCK.lock().await;
-        std::env::set_var("CLAUDE_CODE_ENABLE_TASKS", "off");
+        std::env::set_var("LINGXI_ENABLE_TASKS", "off");
         // TodoWrite present AND Brief (SendUserMessage) present ⇒ skip.
         let orch = orch_with(reg_with(&["TodoWrite", "SendUserMessage"]));
         prime_session(&orch, 10, 10).await;
         assert!(orch.todo_reminder_message().await.is_none());
-        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
+        std::env::remove_var("LINGXI_ENABLE_TASKS");
     }
 
     #[tokio::test]
     async fn killswitch_off_suppresses() {
         let _g = ENV_LOCK.lock().await;
-        std::env::set_var("CLAUDE_CODE_ENABLE_TASKS", "off");
-        std::env::set_var("CLAUDE_CODE_TODO_REMINDER_MODE", "off");
+        std::env::set_var("LINGXI_ENABLE_TASKS", "off");
+        std::env::set_var("LINGXI_TODO_REMINDER_MODE", "off");
         let orch = orch_with(reg_with(&["TodoWrite"]));
         prime_session(&orch, 10, 10).await;
         assert!(
             orch.todo_reminder_message().await.is_none(),
             "killswitch \"off\" suppresses the reminder"
         );
-        std::env::remove_var("CLAUDE_CODE_TODO_REMINDER_MODE");
-        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
+        std::env::remove_var("LINGXI_TODO_REMINDER_MODE");
+        std::env::remove_var("LINGXI_ENABLE_TASKS");
     }
 
     // ── exact text + reminder-counter reset on fire ──────────────────────────
@@ -11295,8 +11295,8 @@ mod todo_reminder_tests {
     #[tokio::test]
     async fn v1_fires_with_exact_text_no_items_and_resets_reminder_ctr() {
         let _g = ENV_LOCK.lock().await;
-        std::env::remove_var("CLAUDE_CODE_TODO_REMINDER_MODE");
-        std::env::set_var("CLAUDE_CODE_ENABLE_TASKS", "off"); // V1
+        std::env::remove_var("LINGXI_TODO_REMINDER_MODE");
+        std::env::set_var("LINGXI_ENABLE_TASKS", "off"); // V1
         let orch = orch_with(reg_with(&["TodoWrite"]));
         prime_session(&orch, 10, 10).await;
         let msg = orch.todo_reminder_message().await.expect("fires");
@@ -11307,14 +11307,14 @@ mod todo_reminder_tests {
         );
         // The reminder counter reset to 0 on fire.
         assert_eq!(orch.session.lock().await.turns_since_last_reminder, 0);
-        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
+        std::env::remove_var("LINGXI_ENABLE_TASKS");
     }
 
     #[tokio::test]
     async fn v1_fires_with_items_byte_exact() {
         let _g = ENV_LOCK.lock().await;
-        std::env::remove_var("CLAUDE_CODE_TODO_REMINDER_MODE");
-        std::env::set_var("CLAUDE_CODE_ENABLE_TASKS", "off"); // V1
+        std::env::remove_var("LINGXI_TODO_REMINDER_MODE");
+        std::env::set_var("LINGXI_ENABLE_TASKS", "off"); // V1
         let orch = orch_with(reg_with(&["TodoWrite"]));
         prime_session(&orch, 10, 10).await;
         {
@@ -11336,14 +11336,14 @@ mod todo_reminder_tests {
         assert!(msg.text_content().ends_with(
             "\n\nHere are the existing contents of your todo list:\n\n[1. [pending] first\n2. [in_progress] second]"
         ), "got: {:?}", msg.text_content());
-        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
+        std::env::remove_var("LINGXI_ENABLE_TASKS");
     }
 
     #[tokio::test]
     async fn v2_fires_with_items_from_provider_byte_exact() {
         let _g = ENV_LOCK.lock().await;
-        std::env::remove_var("CLAUDE_CODE_TODO_REMINDER_MODE");
-        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS"); // default ⇒ V2
+        std::env::remove_var("LINGXI_TODO_REMINDER_MODE");
+        std::env::remove_var("LINGXI_ENABLE_TASKS"); // default ⇒ V2
         let orch = orch_with(reg_with(&["TaskUpdate"])).with_todo_reminder_tasks(Arc::new(
             StaticTasks(vec![
                 TaskReminderItem {
@@ -11371,14 +11371,14 @@ mod todo_reminder_tests {
             ),
             "got: {text:?}"
         );
-        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
+        std::env::remove_var("LINGXI_ENABLE_TASKS");
     }
 
     #[tokio::test]
     async fn v2_fires_base_only_without_provider() {
         let _g = ENV_LOCK.lock().await;
-        std::env::remove_var("CLAUDE_CODE_TODO_REMINDER_MODE");
-        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS"); // V2
+        std::env::remove_var("LINGXI_TODO_REMINDER_MODE");
+        std::env::remove_var("LINGXI_ENABLE_TASKS"); // V2
         let orch = orch_with(reg_with(&["TaskUpdate"])); // no task provider
         prime_session(&orch, 10, 10).await;
         let msg = orch.todo_reminder_message().await.expect("fires");
@@ -11386,6 +11386,6 @@ mod todo_reminder_tests {
             msg.text_content(),
             "The task tools haven't been used recently. If you're working on tasks that would benefit from tracking progress, consider using TaskCreate to add new tasks and TaskUpdate to update task status (set to in_progress when starting, completed when done). Also consider cleaning up the task list if it has become stale. Only use these if relevant to the current work. This is just a gentle reminder - ignore if not applicable.\n"
         );
-        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
+        std::env::remove_var("LINGXI_ENABLE_TASKS");
     }
 }

@@ -4,7 +4,7 @@
   "settings": {
     "user_settings_file_suffix": "/.lingxi/settings.json",
     "project_settings_file_suffix": ".lingxi/settings.json",
-    "env_prefix_priority": ["LINGXI_", "CLAUDE_CODE_", "CLAUDE_"],
+    "env_prefix_priority": ["LINGXI_"],
     "tengu_settings_events": [
       "tengu_settings_loaded",
       "tengu_settings_invalid_env",

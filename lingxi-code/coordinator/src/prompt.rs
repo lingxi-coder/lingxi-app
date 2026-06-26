@@ -8,7 +8,7 @@
 //!
 //! The TS strings are lifted VERBATIM; the only dynamic toggle is
 //! `workerCapabilities` / the worker-tools allow-list, which varies on the
-//! `simple` flag (TS reads `process.env.CLAUDE_CODE_SIMPLE` via `isEnvTruthy`;
+//! `simple` flag (TS reads `process.env.LINGXI_SIMPLE` via `isEnvTruthy`;
 //! the composition root computes `simple` and passes it in here).
 //!
 //! Tool-name interpolation uses the canonical wire names so the prompt is
@@ -92,7 +92,7 @@ fn worker_tools_list(simple: bool) -> String {
 /// strings) ⇒ false. This is a strict whitelist, NOT "non-empty, non-false".
 ///
 /// Used by the composition root to compute the `simple` flag from
-/// `$CLAUDE_CODE_SIMPLE` before calling [`coordinator_system_prompt`] /
+/// `$LINGXI_SIMPLE` before calling [`coordinator_system_prompt`] /
 /// [`coordinator_user_context`].
 #[must_use]
 pub fn is_env_truthy(value: Option<&str>) -> bool {
@@ -149,7 +149,7 @@ pub fn coordinator_user_context(
 /// `getCoordinatorSystemPrompt()` (coordinatorMode.ts:111-369).
 ///
 /// `simple` drives the single dynamic toggle (`workerCapabilities`,
-/// coordinatorMode.ts:112-114): when `true` (TS `CLAUDE_CODE_SIMPLE` truthy) the
+/// coordinatorMode.ts:112-114): when `true` (TS `LINGXI_SIMPLE` truthy) the
 /// "Workers have access to Bash, Read, and Edit tools…" line is used; otherwise
 /// the standard-tools line. Every other byte is a literal lift of the TS
 /// template, with `${AGENT_TOOL_NAME}` / `${SEND_MESSAGE_TOOL_NAME}` /

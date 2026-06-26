@@ -50,7 +50,7 @@ use std::collections::BTreeMap;
 ///   the chain on consecutive overload events: chain[0] fires first, chain[1]
 ///   when chain[0] is also overloaded, and so on until exhausted.
 /// - `max_retries`: `routing.retry.maxAttempts` parsed as `u32`. When `None`,
-///   `CLAUDE_CODE_MAX_RETRIES` env (then `DEFAULT_MAX_RETRIES`) applies.
+///   `LINGXI_MAX_RETRIES` env (then `DEFAULT_MAX_RETRIES`) applies.
 /// - `backoff_ms`: `routing.retry.backoffMs` as the base-delay for the
 ///   exponential backoff ladder's first rung (overrides `BASE_DELAY_MS` = 500,
 ///   keeping `min(b * 2^attempt, 32000)` growth + cap). When `None`, the
@@ -137,7 +137,7 @@ pub fn builtin_anthropic_config(api_base: &str, oauth_path: bool) -> ClientConfi
 ///   is an [`LlmError::InvalidRequest`].
 /// - `fallback` / `retry`: **parsed but inert** — `fallback_model` comes from
 ///   `DesktopConfig`/argv today; retry policy comes from
-///   `CLAUDE_CODE_MAX_RETRIES`. Wiring them is future work and is documented
+///   `LINGXI_MAX_RETRIES`. Wiring them is future work and is documented
 ///   in `engine/src/settings/schema.rs`.
 ///
 /// ## Errors
@@ -227,7 +227,7 @@ fn resolve_display_model<'a>(
 ///
 /// ## Precedence (adapter)
 ///
-/// `CLAUDE_CODE_MAX_RETRIES` env > `routing.retry.maxAttempts` > `DEFAULT_MAX_RETRIES` (10).
+/// `LINGXI_MAX_RETRIES` env > `routing.retry.maxAttempts` > `DEFAULT_MAX_RETRIES` (10).
 /// Per-model `routing.fallback` entry wins over the adapter's global `fallback_model`.
 ///
 /// # Errors

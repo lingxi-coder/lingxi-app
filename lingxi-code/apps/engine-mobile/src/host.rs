@@ -21,7 +21,7 @@
 //! `build_mobile` takes every functional input through [`MobileConfig`] and the
 //! OS handles through `Arc<dyn Platform>`. It reads a SMALL, fixed set of
 //! `std::env` vars purely to mirror desktop parity behavior — the
-//! `CLAUDE_CODE_MEMDIR_PREFETCH` activation gate, the `ANTHROPIC_SMALL_FAST_MODEL`
+//! `LINGXI_MEMDIR_PREFETCH` activation gate, the `ANTHROPIC_SMALL_FAST_MODEL`
 //! / `ANTHROPIC_DEFAULT_HAIKU_MODEL` model ids a `prompt` hook may resolve to, and
 //! `HOME` for the permission `FsRoots` (absent on a sandboxed device ⇒ `None`).
 //! These are all unset on a real device, so on-device behavior stays
@@ -970,7 +970,7 @@ pub async fn build_mobile_inner(
     let tools = Arc::new(mobile_tool_registry_with_skill_loader(tool_ctx, skill_loader));
 
     // P0.1 ACTIVATION on mobile (gated, default OFF) — the same gate as desktop,
-    // `CLAUDE_CODE_MEMDIR_PREFETCH`. When truthy, wire the memdir-backed memory
+    // `LINGXI_MEMDIR_PREFETCH`. When truthy, wire the memdir-backed memory
     // selector so relevant `<claude_home>/memdir` entries surface each turn via a
     // Haiku-class side query (a `ProviderSideQueryClient` over the device HTTP
     // transport + `cfg.api_key`, independent of the multi-provider turn client).
@@ -979,7 +979,7 @@ pub async fn build_mobile_inner(
     // off unless the host app explicitly sets it. A missing/unusable key makes the
     // side query fail → empty surfaced set (never breaks a turn).
     let memdir_prefetch =
-        if traits::env::is_env_truthy(std::env::var("CLAUDE_CODE_MEMDIR_PREFETCH").ok().as_deref())
+        if traits::env::is_env_truthy(std::env::var("LINGXI_MEMDIR_PREFETCH").ok().as_deref())
         {
             // `cfg.claude_home` is the device `.claude` dir; the helper re-appends
             // `.lingxi/memdir`, so pass its PARENT as `home` ⇒ `<claude_home>/memdir`.

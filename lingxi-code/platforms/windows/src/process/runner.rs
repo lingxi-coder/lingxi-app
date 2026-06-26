@@ -21,7 +21,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const ENV_CLAUDECODE: (&str, &str) = ("CLAUDECODE", "1");
 const ENV_GIT_EDITOR: (&str, &str) = ("GIT_EDITOR", "true");
 const ENV_SHELL: &str = "SHELL";
-const ENV_CLAUDE_CODE_SESSION_ID: &str = "CLAUDE_CODE_SESSION_ID";
+const ENV_CLAUDE_CODE_SESSION_ID: &str = "LINGXI_SESSION_ID";
 
 /// Production [`ProcessRunner`] using `tokio::process`.
 #[derive(Default)]

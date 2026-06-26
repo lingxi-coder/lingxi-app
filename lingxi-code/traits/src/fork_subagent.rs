@@ -44,7 +44,7 @@ const FORK_PLACEHOLDER_RESULT: &str = "Fork started — processing in background
 ///
 /// claude gates on the `FORK_SUBAGENT` GrowthBook feature; there is no
 /// GrowthBook in Rust, so the faithful substitute is an env var
-/// (`CLAUDE_CODE_FORK_SUBAGENT`, default OFF) — the same pattern
+/// (`LINGXI_FORK_SUBAGENT`, default OFF) — the same pattern
 /// `should_inject_agent_list_in_messages` uses for its missing GrowthBook flag.
 /// When the env var is truthy AND not in coordinator mode AND not a
 /// non-interactive session → `true`; else `false`.
@@ -54,7 +54,7 @@ const FORK_PLACEHOLDER_RESULT: &str = "Fork started — processing in background
 /// `isCoordinatorMode()` + `getIsNonInteractiveSession()` which it calls inline.
 #[must_use]
 pub fn is_fork_subagent_enabled(is_coordinator: bool, is_non_interactive: bool) -> bool {
-    let v = std::env::var("CLAUDE_CODE_FORK_SUBAGENT").ok();
+    let v = std::env::var("LINGXI_FORK_SUBAGENT").ok();
     if crate::env::is_env_truthy(v.as_deref()) {
         // Mutually exclusive with coordinator mode (claude `forkSubagent.ts:34`)
         // — coordinator already owns the orchestration role.
@@ -237,7 +237,7 @@ mod tests {
     use serde_json::json;
     use std::sync::Mutex;
 
-    /// `CLAUDE_CODE_FORK_SUBAGENT` is process-global; serialize the gate tests.
+    /// `LINGXI_FORK_SUBAGENT` is process-global; serialize the gate tests.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
@@ -254,29 +254,29 @@ mod tests {
     #[test]
     fn fork_gate_off_by_default() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
         assert!(!is_fork_subagent_enabled(false, false), "default OFF");
-        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
 
     #[test]
     fn fork_gate_on_when_truthy_and_not_coordinator_not_noninteractive() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("CLAUDE_CODE_FORK_SUBAGENT", "1");
+        std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
         assert!(is_fork_subagent_enabled(false, false), "truthy + interactive + non-coordinator ⇒ ON");
         // coordinator → OFF (claude forkSubagent.ts:34).
         assert!(!is_fork_subagent_enabled(true, false), "coordinator ⇒ OFF");
         // non-interactive → OFF (claude forkSubagent.ts:35).
         assert!(!is_fork_subagent_enabled(false, true), "non-interactive ⇒ OFF");
-        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
 
     #[test]
     fn fork_gate_off_when_env_falsy() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("CLAUDE_CODE_FORK_SUBAGENT", "false");
+        std::env::set_var("LINGXI_FORK_SUBAGENT", "false");
         assert!(!is_fork_subagent_enabled(false, false), "falsy ⇒ OFF");
-        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
 
     #[test]

@@ -11,6 +11,11 @@ android {
     defaultConfig {
         applicationId = "com.lingxi.code"
         minSdk = 26
+        // Explicit targetSdk (documented intent; AGP's unset-default is ambiguous
+        // across versions). Required so the Android 13/14 foreground-service-type,
+        // exact-alarm, and runtime-notification semantics the cron subsystem relies
+        // on are actually enforced (and so the build is Play-uploadable).
+        targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
 

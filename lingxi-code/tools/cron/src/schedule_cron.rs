@@ -314,8 +314,12 @@ pub(crate) fn cron_file_path(project_root: &Path) -> PathBuf {
     cron::tasks_file::scheduled_tasks_path(project_root)
 }
 
+/// Generate a fresh 9-char cron task id (`d` + 8 base36 chars), 1:1 with
+/// claude-code. Exposed so the mobile FFI `cron_create` path mints ids in the
+/// SAME format as the `CronCreate` tool (no on-disk drift between a UI-created
+/// and a model-created job).
 #[must_use]
-pub(crate) fn generate_cron_task_id() -> String {
+pub fn generate_cron_task_id() -> String {
     use rand::Rng;
     const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     let mut rng = rand::rng();
@@ -417,7 +421,10 @@ fn format_time_utc(minute: u32, hour: u32) -> String {
 }
 
 /// Render a 5-field cron expression as a human-readable schedule string.
-pub(crate) fn cron_to_human(cron: &str) -> String {
+/// Exposed so the mobile cron-management UI can show the same human schedule the
+/// tool surfaces (e.g. "every day at 9:00am").
+#[must_use]
+pub fn cron_to_human(cron: &str) -> String {
     let parts: Vec<&str> = cron.split_whitespace().collect();
     if parts.len() != 5 {
         return cron.to_string();

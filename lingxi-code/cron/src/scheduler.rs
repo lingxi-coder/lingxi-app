@@ -57,7 +57,7 @@ pub struct CronTaskDef {
 /// expiry exemption — so every recurring job is subject to the max age, matching
 /// the unconditional "Auto-expires after 30 days" the tool reports.)
 #[must_use]
-fn is_recurring_task_aged(
+pub(crate) fn is_recurring_task_aged(
     now: SystemTime,
     created_at: SystemTime,
     recurring: bool,
@@ -78,7 +78,7 @@ fn is_recurring_task_aged(
 /// once at the next match, then auto-delete", `schedule_cron.rs` schema). A
 /// recurring job records `last_run` in place and returns `false`. A missing id
 /// is a no-op (`false`).
-fn finalize_fired_job(
+pub(crate) fn finalize_fired_job(
     tasks: &mut HashMap<String, CronTaskDef>,
     id: &str,
     now: SystemTime,
@@ -105,7 +105,7 @@ fn finalize_fired_job(
 /// Recording the last-fire time is what makes missed-run CATCH-UP safe ACROSS
 /// RESTARTS — without it a reloaded job would re-fire a run it already fired in
 /// a prior session (claude-code persists `lastFiredAt` for the same reason).
-fn tasks_file_with_last_fired(body: &str, id: &str, last_fired_at_ms: u64) -> Option<String> {
+pub(crate) fn tasks_file_with_last_fired(body: &str, id: &str, last_fired_at_ms: u64) -> Option<String> {
     let mut doc = crate::tasks_file::parse_tasks(body);
     let task = doc.tasks.iter_mut().find(|t| t.id == id)?;
     task.last_fired_at = Some(last_fired_at_ms);
@@ -116,7 +116,7 @@ fn tasks_file_with_last_fired(body: &str, id: &str, last_fired_at_ms: u64) -> Op
 /// document body, returning the re-serialized file. Returns `None` if the id is
 /// absent (caller leaves the file untouched). Used when a one-shot job has fired
 /// (auto-delete) and when a recurring job ages out.
-fn tasks_file_without(body: &str, id: &str) -> Option<String> {
+pub(crate) fn tasks_file_without(body: &str, id: &str) -> Option<String> {
     let mut doc = crate::tasks_file::parse_tasks(body);
     let before = doc.tasks.len();
     doc.tasks.retain(|t| t.id != id);
@@ -135,7 +135,7 @@ fn tasks_file_without(body: &str, id: &str) -> Option<String> {
 /// run is never re-fired — including across restarts, once the loader restores
 /// `last_run` from the descriptor. 1:1 with claude-code's
 /// `nextCronRunMs(lastFiredAt ?? createdAt) <= now` due-detection.
-fn is_job_due(task: &CronTaskDef, now: SystemTime) -> bool {
+pub(crate) fn is_job_due(task: &CronTaskDef, now: SystemTime) -> bool {
     if !task.enabled {
         return false;
     }

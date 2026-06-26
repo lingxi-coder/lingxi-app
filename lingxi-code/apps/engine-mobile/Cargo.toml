@@ -145,7 +145,7 @@ session = { path = "../../session", optional = true }
 # into a `uuid::Uuid`. Parse-only (no v4/serde) — optional + uniffi-gated.
 uuid = { version = "1.10", optional = true }
 
-tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 # F3-05: `CancellationToken` for the cancelable streaming turn the async `submit`
 # spawns. Optional + pulled ONLY under the `uniffi` feature (engine-tier).
 tokio-util = { workspace = true, optional = true }
@@ -164,6 +164,10 @@ tool-web = { path = "../../tools/web", features = ["web-markdown"] }
 tool-plan = { path = "../../tools/plan" }
 tool-meta = { path = "../../tools/meta" }
 tool-cron = { path = "../../tools/cron" }
+# Cron firing core (`run_due_jobs` / `next_fire_epoch_ms`) the Android background
+# scheduler drives over FFI. The desktop tick loop is unavailable on mobile, so
+# the host evaluates the persisted tasks file single-shot through this crate.
+cron = { path = "../../cron" }
 tool-ui = { path = "../../tools/ui" }
 tool-skill = { path = "../../tools/skill" }
 # Mobile-exclusive tool crates.

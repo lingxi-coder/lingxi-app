@@ -108,8 +108,14 @@ fun MainSettingsPage(
             SettingsRow(
                 icon = LXIconName.Dream, iconColor = Color(red = 0.809f, green = 0.4552f, blue = 0.8891f),
                 label = "Dream 模式", sub = "后台离线思考与整理",
-                value = if (state.dream.enabled) "开启" else "关闭", isLast = true,
+                value = if (state.dream.enabled) "开启" else "关闭",
                 onTap = { navController.navigate(SettingsRoutes.DREAM) },
+            )
+            SettingsRow(
+                icon = LXIconName.Clock, iconColor = Color(red = 0.95f, green = 0.6f, blue = 0.2f),
+                label = "定时任务", sub = "按 Cron 计划后台执行",
+                isLast = true,
+                onTap = { navController.navigate(SettingsRoutes.CRON) },
             )
         }
 

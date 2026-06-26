@@ -5282,6 +5282,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 break;
             }
 
+            // #78 nudge guard `!Pt(ce)` (streaming twin): suppress the
+            // thinking-only nudge during a StructuredOutput exchange. Computed
+            // before the match (a match guard cannot `.await` the session lock);
+            // reused by all three streaming nudge sites (end_turn / stop_sequence
+            // / missing). The current assistant response is already in `history`.
+            let prior_structured_output = {
+                let s = self.session.lock().await;
+                crate::turn_loop::prior_assistant_used_structured_output(&s.history)
+            };
+
             // 6. Decide loop disposition.
             match pumped.stop_reason.as_deref() {
                 // #1 needsFollowUp gate (claude-code `query.ts:554-558`/`832-835`/
@@ -5310,7 +5320,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // `!isApiErrorMessage` holds because API errors are caught as
                     // `Err(..)` upstream of this match. Once nudged, a still-empty
                     // continuation falls through to the normal end.
-                    if !thinking_only_nudged && !pumped_has_visible_text(&pumped.assistant_blocks) {
+                    if !thinking_only_nudged
+                        && !pumped_has_visible_text(&pumped.assistant_blocks)
+                        && !prior_structured_output
+                    {
                         self.inject_meta_user_message(THINKING_ONLY_NUDGE).await;
                         thinking_only_nudged = true;
                         continue;
@@ -5435,7 +5448,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 // the generic terminal arm; once nudged it falls through.
                 Some("stop_sequence")
                     if !thinking_only_nudged
-                        && !pumped_has_visible_text(&pumped.assistant_blocks) =>
+                        && !pumped_has_visible_text(&pumped.assistant_blocks)
+                        && !prior_structured_output =>
                 {
                     self.inject_meta_user_message(THINKING_ONLY_NUDGE).await;
                     thinking_only_nudged = true;
@@ -5504,7 +5518,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // (claude-code `stop_reason ?? <default>`), so the
                     // thinking-only nudge applies here on the same terms and,
                     // like the `end_turn` arm, fires BEFORE the Stop hooks.
-                    if !thinking_only_nudged && !pumped_has_visible_text(&pumped.assistant_blocks) {
+                    if !thinking_only_nudged
+                        && !pumped_has_visible_text(&pumped.assistant_blocks)
+                        && !prior_structured_output
+                    {
                         self.inject_meta_user_message(THINKING_ONLY_NUDGE).await;
                         thinking_only_nudged = true;
                         continue;

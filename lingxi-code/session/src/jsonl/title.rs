@@ -9,25 +9,20 @@
 //! stored `firstPrompt` is capped at 200 chars (`sessionStorage.ts:1732`) and an
 //! empty/absent prompt is shown as `'(session)'` (`sessionStorage.ts:5052-5054`).
 //!
-//! Sub-rules ported from `getFirstMeaningfulUserMessageTextContent`:
-//!  - newline→space + trim + 200-char cap (`extractFirstPrompt`, 1728-1734);
-//!  - skip `isMeta` user messages (1750) and `isCompactSummary` (1752) — both
-//!    read from `JsonlMessage::extra`;
-//!  - iterate ALL `text` blocks across messages, not just the first (1761-1809);
-//!  - command-name handling: format custom-with-args as `<name> <args>` instead
-//!    of emitting raw `<command-name>` XML (1775-1793);
-//!  - bash-input → `! <cmd>` prefix (1797-1800);
+//! Sub-rules — aligned to the v2.1.193 binary's title fn (`Jxt`/`Dln`/`wps`,
+//! @199254565), which REWROTE the command path vs the older src:
+//!  - PER-BLOCK normalize FIRST (`i=s.replaceAll('\n',' ').trim(); if(!i)continue`)
+//!    — every check below runs on the normalized `i`, and the winner is capped to
+//!    200 chars with `…`;
+//!  - skip `isMeta` user messages and `isCompactSummary` (`JsonlMessage::extra`);
+//!  - a `tool_result` block ABORTS the whole message (Jxt array branch `return`);
+//!  - command-name: capture the BARE name into a `commandFallback` (first wins)
+//!    and `continue` — v2.1.193 NO LONGER reads `<command-args>`, formats
+//!    `<name> <args>`, or consults `builtInCommandNames()`. The fallback is
+//!    returned ONLY when no message yields real text;
+//!  - bash-input → `! <cmd>` prefix (uncapped);
 //!  - `SKIP_FIRST_PROMPT_PATTERN` skip of leading lowercase XML tags /
-//!    `[Request interrupted…]` markers (1804; pattern 125-126).
-//!
-//! KNOWN DIVERGENCE: `getFirstMeaningfulUserMessageTextContent` (1781) skips
-//! BUILT-IN slash commands (e.g. `/model sonnet`) via `builtInCommandNames()`.
-//! That registry lives in the `command-api` crate, which the `session` crate
-//! does not depend on (adding the dep is out of scope here). We therefore treat
-//! every `<command-name>` block as a CUSTOM command: keep it only when it has
-//! `<command-args>`, otherwise skip. This matches claude-code for custom
-//! commands; a built-in command that carries args would surface here where
-//! claude-code would skip it. See the parity report for the follow-up.
+//!    `[Request interrupted…]` markers.
 
 use crate::jsonl::schema::JsonlMessage;
 use once_cell::sync::Lazy;
@@ -55,21 +50,17 @@ static SKIP_FIRST_PROMPT_PATTERN: Lazy<Regex> = Lazy::new(|| {
         .expect("SKIP_FIRST_PROMPT_PATTERN is a valid regex")
 });
 
-/// `extractTag(text, 'command-name')` (`constants/xml.ts:2`).
-static COMMAND_NAME_RE: Lazy<Regex> = Lazy::new(|| tag_regex("command-name"));
-/// `extractTag(text, 'command-args')` (`constants/xml.ts:4`).
-static COMMAND_ARGS_RE: Lazy<Regex> = Lazy::new(|| tag_regex("command-args"));
-/// `extractTag(text, 'bash-input')` (`constants/xml.ts:8`).
-static BASH_INPUT_RE: Lazy<Regex> = Lazy::new(|| tag_regex("bash-input"));
-
-/// Build the `extractTag` regex for a fixed tag name: opening tag with optional
-/// attributes, non-greedy content, closing tag — case-insensitive
-/// (`messages.ts:633-687`). Same-tag nesting (the depth check in the TS) does not
-/// occur for the command/bash tags, so the leftmost match is faithful.
-fn tag_regex(tag: &str) -> Regex {
-    Regex::new(&format!(r"(?i)<{tag}(?:\s+[^>]*?)?>([\s\S]*?)</{tag}>"))
-        .expect("tag_regex pattern is valid")
-}
+/// Title-path command-name regex — the binary's inlined `Lyu`
+/// (`/<command-name>(.*?)<\/command-name>/`, v2.1.193 @199254820): case-SENSITIVE,
+/// NO attribute allowance, `.` (single-line) content. NOT the generic case-
+/// insensitive `extractTag` builder — the title path uses this dedicated literal.
+static COMMAND_NAME_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"<command-name>(.*?)</command-name>").expect("valid"));
+/// Title-path bash-input regex — the binary's inlined
+/// `/<bash-input>([\s\S]*?)<\/bash-input>/` (v2.1.193 @199254560): case-SENSITIVE,
+/// no attrs, `[\s\S]` content.
+static BASH_INPUT_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"<bash-input>([\s\S]*?)</bash-input>").expect("valid"));
 
 /// Returns the session title.
 ///
@@ -81,14 +72,11 @@ fn tag_regex(tag: &str) -> Regex {
 ///    meaningful is found OR the processed text is empty.
 #[must_use]
 pub fn extract_title(messages: &[JsonlMessage]) -> String {
-    let title = match first_meaningful_user_text(messages) {
-        Some(text) => post_process(&text),
-        None => String::new(),
-    };
-    if title.is_empty() {
-        EMPTY_TITLE_FALLBACK.to_string()
-    } else {
-        title
+    // first_meaningful_user_text already normalizes per-block (newline→space,
+    // trim, 200-cap) like the binary's Jxt, so no further post_process here.
+    match first_meaningful_user_text(messages) {
+        Some(text) if !text.is_empty() => text,
+        _ => EMPTY_TITLE_FALLBACK.to_string(),
     }
 }
 
@@ -96,6 +84,12 @@ pub fn extract_title(messages: &[JsonlMessage]) -> String {
 /// (`sessionStorage.ts:1746-1812`). Returns the raw selected text (pre
 /// newline-collapse / cap) or `None`.
 fn first_meaningful_user_text(messages: &[JsonlMessage]) -> Option<String> {
+    // `commandFallback` (binary `t.commandFallback`): the bare command name of the
+    // FIRST `<command-name>` block seen, returned ONLY if no later message yields
+    // real text. v2.1.193 dropped the old `builtInCommandNames()` skip + the
+    // `<command-args>` formatting — every command now contributes just its bare
+    // name as a last-resort fallback.
+    let mut command_fallback: Option<String> = None;
     for m in messages {
         // `if (msg.type !== 'user' || msg.isMeta) continue` (1750).
         if m.message_type != "user" || extra_flag(m, "isMeta") {
@@ -111,39 +105,51 @@ fn first_meaningful_user_text(messages: &[JsonlMessage]) -> Option<String> {
             continue;
         };
 
-        // Collect ALL text blocks (string → [content]; array → each text block).
-        for text in collect_texts(content) {
-            // `if (!textContent) continue` (1773): empty strings are skipped.
-            if text.is_empty() {
+        // Collect text blocks. `None` = the message carried a `tool_result` block
+        // ⇒ the binary's Jxt `return`s (whole message yields nothing) — skip it.
+        let Some(texts) = collect_texts(content) else {
+            continue;
+        };
+        for raw in texts {
+            // Per-block normalize FIRST (binary `i=s.replaceAll('\n',' ').trim()`),
+            // then run every check against the normalized `i`.
+            let normalized = raw.replace('\n', " ");
+            let i = normalized.trim();
+            // `if (!i) continue` (empty after trim).
+            if i.is_empty() {
                 continue;
             }
 
-            // Command-name handling (1775-1793). Without the built-in registry we
-            // treat every command as custom: keep only if it carries args.
-            if let Some(command_name) = extract_tag(&text, &COMMAND_NAME_RE) {
-                let args = extract_tag(&text, &COMMAND_ARGS_RE)
-                    .map(|a| a.trim().to_string())
-                    .filter(|a| !a.is_empty());
-                match args {
-                    Some(args) => return Some(format!("{command_name} {args}")),
-                    None => continue,
+            // Command-name (binary `a=Lyu.exec(i); if(a){if(!t.commandFallback)
+            // t.commandFallback=a[1]; continue}`): capture the bare name as the
+            // fallback (first wins), then CONTINUE — never returns directly, never
+            // reads args.
+            if let Some(command_name) = extract_tag(i, &COMMAND_NAME_RE) {
+                if command_fallback.is_none() {
+                    command_fallback = Some(command_name);
                 }
-            }
-
-            // Bash input → `! <cmd>` (1797-1800), checked before the XML skip.
-            if let Some(bash) = extract_tag(&text, &BASH_INPUT_RE) {
-                return Some(format!("! {bash}"));
-            }
-
-            // Skip leading-XML / interrupt markers (1804).
-            if SKIP_FIRST_PROMPT_PATTERN.is_match(&text) {
                 continue;
             }
 
-            return Some(text);
+            // Bash input → `! <cmd>` (binary `l=...exec(i); if(l)return`!
+            // ${l[1].trim()}``), checked before the XML skip. NOT capped.
+            if let Some(bash) = extract_tag(i, &BASH_INPUT_RE) {
+                return Some(format!("! {}", bash.trim()));
+            }
+
+            // Skip leading-XML / interrupt markers (binary `if(Oyu.test(i))continue`).
+            if SKIP_FIRST_PROMPT_PATTERN.is_match(i) {
+                continue;
+            }
+
+            // Winner: cap to 200 chars (binary `if(i.length>200)i=i.slice(0,200)
+            // .trim()+'…'; return i`).
+            return Some(truncate_with_ellipsis(i));
         }
     }
-    None
+    // No message yielded real text → the bare command name, if any (binary
+    // `return t.commandFallback`).
+    command_fallback
 }
 
 /// `extractFirstPrompt` post-processing (`sessionStorage.ts:1728-1734`):
@@ -172,26 +178,31 @@ pub(crate) fn truncate_title(text: &str) -> String {
 }
 
 /// Collect text from message content. String → one element; array → the `text`
-/// of every `type: "text"` block (1761-1770); anything else → empty.
-fn collect_texts(content: &Value) -> Vec<String> {
+/// of every `type: "text"` block, ABORTING the whole message (`None`) on the
+/// first `type: "tool_result"` block — the binary's Jxt array branch
+/// `for(let s of r){...if(s.type==="tool_result")return;
+/// if(s.type==="text"&&typeof s.text==="string")o.push(s.text)}` (a tool_result
+/// carrier yields nothing). Non-string/non-array content → `Some(empty)`.
+fn collect_texts(content: &Value) -> Option<Vec<String>> {
     if let Some(s) = content.as_str() {
-        vec![s.to_string()]
+        Some(vec![s.to_string()])
     } else if let Some(arr) = content.as_array() {
-        arr.iter()
-            .filter_map(|block| {
-                let ty = block.get("type").and_then(Value::as_str)?;
-                if ty == "text" {
-                    block
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                } else {
-                    None
+        let mut out = Vec::new();
+        for block in arr {
+            let ty = block.get("type").and_then(Value::as_str);
+            // First tool_result block aborts the entire message.
+            if ty == Some("tool_result") {
+                return None;
+            }
+            if ty == Some("text") {
+                if let Some(t) = block.get("text").and_then(Value::as_str) {
+                    out.push(t.to_string());
                 }
-            })
-            .collect()
+            }
+        }
+        Some(out)
     } else {
-        Vec::new()
+        Some(Vec::new())
     }
 }
 
@@ -383,18 +394,21 @@ mod tests {
     }
 
     #[test]
-    fn custom_command_with_args_is_formatted() {
+    fn command_only_session_falls_back_to_bare_name() {
+        // v2.1.193: command args are NOT read; a command-only session returns the
+        // bare command name as the last-resort fallback (not `<name> <args>`).
         let m = user(json!(
             "<command-name>/review</command-name><command-args>reticulate splines</command-args>"
         ));
-        assert_eq!(extract_title(&[m]), "/review reticulate splines");
+        assert_eq!(extract_title(&[m]), "/review");
     }
 
     #[test]
-    fn command_without_args_is_skipped() {
-        // No <command-args> ⇒ treated as a content-free command ⇒ skipped ⇒ fallback.
+    fn command_without_args_falls_back_to_command_name() {
+        // v2.1.193: a command-only message yields its bare name as the fallback
+        // (was `(session)` under the old args-required skip).
         let m = user(json!("<command-name>/clear</command-name>"));
-        assert_eq!(extract_title(&[m]), "(session)");
+        assert_eq!(extract_title(&[m]), "/clear");
     }
 
     #[test]

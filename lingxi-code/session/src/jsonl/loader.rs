@@ -407,14 +407,68 @@ async fn collect_dir(
             title,
             modified,
             created,
-            // `read_routed().messages_in_order` is exactly what `read_all`
-            // returned (chain-participant lines, file order), so this preserves
-            // the prior `message_count` semantics byte-for-byte.
-            message_count: loaded.messages_in_order.len(),
+            // claude-code `messageCount: countVisibleMessages(chain)`
+            // (sessionStorage.ts:2509/4665): only user/assistant lines with
+            // VISIBLE content count — NOT every chain-participant line. A raw
+            // `.len()` over-counts tool_result-only user lines, tool_use-only
+            // assistant lines, isMeta lines, and system/attachment lines.
+            message_count: count_visible_messages(&loaded.messages_in_order),
             path,
         });
     }
     Ok(true)
+}
+
+/// Count the VISIBLE messages in a chain — port of `countVisibleMessages`
+/// (`sessionStorage.ts:2453-2477`). Only `user`/`assistant` lines with visible
+/// content count; `system`/`attachment`/`summary` lines, `isMeta` user lines,
+/// `tool_result`-only user lines, and `tool_use`/`thinking`-only assistant lines
+/// are excluded.
+fn count_visible_messages(messages: &[JsonlMessage]) -> usize {
+    messages.iter().filter(|m| is_visible_message(m)).count()
+}
+
+fn is_visible_message(m: &JsonlMessage) -> bool {
+    let content = m.message.get("content");
+    match m.message_type.as_str() {
+        "user" => {
+            // Skip isMeta user lines.
+            if m.extra.get("isMeta").and_then(Value::as_bool).unwrap_or(false) {
+                return false;
+            }
+            has_visible_content(content, /* assistant = */ false)
+        }
+        "assistant" => has_visible_content(content, /* assistant = */ true),
+        // system / attachment / summary / progress → never counted.
+        _ => false,
+    }
+}
+
+/// Whether a message's `content` carries user-visible output. String content is
+/// visible when non-empty after trim. Array content is visible when it contains a
+/// `text` block with non-empty trimmed text (both roles), or — for USER messages
+/// only — an `image`/`document` block. A `tool_result`-only user message and a
+/// `tool_use`/`thinking`-only assistant message are NOT visible.
+fn has_visible_content(content: Option<&Value>, assistant: bool) -> bool {
+    let Some(content) = content else { return false };
+    if let Some(s) = content.as_str() {
+        return !s.trim().is_empty();
+    }
+    let Some(arr) = content.as_array() else {
+        return false;
+    };
+    arr.iter().any(|block| {
+        match block.get("type").and_then(Value::as_str) {
+            Some("text") => block
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|t| !t.trim().is_empty()),
+            // Images/documents make a USER message visible; assistant messages
+            // are visible only via text blocks.
+            Some("image" | "document") => !assistant,
+            _ => false,
+        }
+    })
 }
 
 /// Resolve the project dir for `cwd` and return up to `limit` most-recently-modified

@@ -205,10 +205,14 @@ impl JsonlReader {
         // we slice the first N bytes of the read result for downstream
         // extraction so very long line-1 payloads still cap at 64 KiB.
         let read = self.fs.read_file(path_str, None, None).await?;
-        let head = if read.content.len() > super::LITE_READ_BUF_SIZE {
-            &read.content[..super::LITE_READ_BUF_SIZE]
+        // Strip a leading UTF-8 BOM (claude-code parseJSONLBuffer, live in
+        // v2.1.193) so `extract_json_string_field` sees a clean line 1 — without
+        // it a BOM-prefixed transcript's first line yields no sessionId/cwd.
+        let content = read.content.strip_prefix('\u{FEFF}').unwrap_or(&read.content);
+        let head = if content.len() > super::LITE_READ_BUF_SIZE {
+            &content[..super::LITE_READ_BUF_SIZE]
         } else {
-            read.content.as_str()
+            content
         };
         let line1 = head.split('\n').next().unwrap_or("");
         let session_id = extract_json_string_field(line1, "sessionId")
@@ -244,6 +248,12 @@ impl JsonlReader {
 #[must_use]
 pub fn route_lines(content: &str) -> LoadedTranscript {
     let mut out = LoadedTranscript::default();
+    // Strip a leading UTF-8 BOM before splitting (claude-code json.ts
+    // parseJSONLBuffer: `if(buf[0]===0xef&&buf[1]===0xbb&&buf[2]===0xbf) start=3`,
+    // confirmed live in v2.1.193). Rust `str::trim()` does NOT treat U+FEFF as
+    // whitespace, so without this the BOM survives onto line 1 and
+    // `serde_json::from_str` rejects it → the first message is silently dropped.
+    let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -327,18 +337,28 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
                     .push(tag.to_string());
             }
         } else if ty == "agent-name" {
-            // Binary `Yle`: `agentNames.set(N.agentId, N.agentName)`.
-            if let (Some(agent_id), Some(agent_name)) = (
-                value.get("agentId").and_then(Value::as_str),
+            // Binary v2.1.193 @211658974: `else if(j.type==="agent-name"&&j.sessionId)
+            // a.set(j.sessionId,j.agentName)` — keyed by `sessionId` (NOT `agentId`;
+            // the write side `{type:"agent-name",agentName,sessionId}` carries no
+            // `agentId`, so the old `agentId` guard dropped every real entry).
+            if let (Some(sid), Some(agent_name)) = (
+                value.get("sessionId").and_then(Value::as_str),
                 value.get("agentName").and_then(Value::as_str),
             ) {
                 out.agent_names
-                    .insert(agent_id.to_string(), agent_name.to_string());
+                    .insert(sid.to_string(), agent_name.to_string());
             }
         } else if ty == "agent-setting" {
-            // Binary `Yle`: `agentSettings.set(N.agentId, N)`.
-            if let Some(agent_id) = value.get("agentId").and_then(Value::as_str) {
-                out.agent_settings.insert(agent_id.to_string(), value);
+            // Binary v2.1.193 @211659124: `else if(j.type==="agent-setting"&&j.sessionId)
+            // c.set(j.sessionId,j.agentSetting)` — keyed by `sessionId` and stores the
+            // inner `agentSetting` payload (write side
+            // `{type:"agent-setting",agentSetting,sessionId}`), not `agentId`/whole-entry.
+            if let (Some(sid), Some(agent_setting)) = (
+                value.get("sessionId").and_then(Value::as_str),
+                value.get("agentSetting"),
+            ) {
+                out.agent_settings
+                    .insert(sid.to_string(), agent_setting.clone());
             }
         } else if ty == "mode" {
             // Binary `Yle`: `modes.set(N.sessionId, N.mode)`.

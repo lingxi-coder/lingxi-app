@@ -66,11 +66,24 @@ impl FileStateCache {
     }
 
     /// Look up a cached file state by path. Returns `None` if not cached.
+    ///
+    /// A hit PROMOTES the entry to most-recently-used (moves it to the tail of
+    /// `order`), mirroring `lru-cache`'s `moveToTail` on get (default
+    /// `updateRecencyOnGet`), confirmed in the v2.1.193 binary. Without this, a
+    /// file Read once then re-Read many times could be evicted under cache
+    /// pressure while claude-code retains it — changing which Edit gets a
+    /// NotInCache/ModifiedSinceRead outcome.
     #[must_use]
     pub fn get(&self, path: &str) -> Option<FileState> {
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
         let p = normalize(path);
-        inner.map.get(&p).cloned()
+        let state = inner.map.get(&p).cloned();
+        if state.is_some() {
+            // Promote to MRU (tail).
+            inner.order.retain(|k| k != &p);
+            inner.order.push(p);
+        }
+        state
     }
 
     /// Insert or update a cached file state, evicting older entries as needed

@@ -132,6 +132,30 @@ impl FileSystem for PosixFileSystem {
         f.flush().await.map_err(|e| FsError::Io(e.to_string()))
     }
 
+    async fn append_file_with_mode(
+        &self,
+        path: &str,
+        content: &str,
+        mode: u32,
+    ) -> Result<(), FsError> {
+        // claude-code `appendToFile` (`sessionStorage.ts:634`):
+        // `fsAppendFile(path, data, { mode: 0o600 })` — the create applies `mode`
+        // (ignored when the file already exists), so the session transcript is
+        // owner-only. `.mode()` sets the create permission bits (pre-umask).
+        use tokio::io::AsyncWriteExt;
+        let mut f = tokio::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(mode)
+            .open(path)
+            .await
+            .map_err(|e| FsError::Io(e.to_string()))?;
+        f.write_all(content.as_bytes())
+            .await
+            .map_err(|e| FsError::Io(e.to_string()))?;
+        f.flush().await.map_err(|e| FsError::Io(e.to_string()))
+    }
+
     async fn truncate(&self, path: &str, len: u64) -> Result<(), FsError> {
         let f = std::fs::OpenOptions::new()
             .write(true)

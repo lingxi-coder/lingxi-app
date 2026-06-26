@@ -82,6 +82,28 @@ pub trait FileSystem: Send + Sync {
         self.append_file(path, content).await
     }
 
+    /// Append `content` to `path`, creating the file with the given unix
+    /// permission `mode` if it does not yet exist.
+    ///
+    /// Mirrors claude-code's session-transcript `appendToFile`
+    /// (`sessionStorage.ts:634`), which appends with `{ mode: 0o600 }` so the
+    /// `<uuid>.jsonl` transcript (prompt + tool content) is owner-only, never
+    /// group/other-readable. `mode` is ignored when the file already exists
+    /// (only the create applies it) and on non-unix platforms.
+    ///
+    /// The default implementation delegates to [`append_file`](Self::append_file)
+    /// (no mode control); the POSIX platform overrides it with an
+    /// `OpenOptions::mode(mode)` create.
+    async fn append_file_with_mode(
+        &self,
+        path: &str,
+        content: &str,
+        mode: u32,
+    ) -> Result<(), FsError> {
+        let _ = mode;
+        self.append_file(path, content).await
+    }
+
     /// Truncate `path` to exactly `len` bytes.
     ///
     /// Used by the crash-safe JSONL reader to drop a torn tail after a power

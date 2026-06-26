@@ -554,31 +554,30 @@ fn route_lines_parses_tag_entries() {
 
 #[test]
 fn route_lines_parses_agent_name_entries() {
-    // Binary: `agentNames.set(N.agentId, N.agentName)`.
+    // Binary v2.1.193 @211658974: `agentNames.set(N.sessionId, N.agentName)` —
+    // keyed by sessionId (the write side carries no agentId).
     let content = concat!(
-        r#"{"type":"agent-name","agentId":"agent-1","agentName":"Alice"}"#,
+        r#"{"type":"agent-name","sessionId":"s1","agentName":"Alice"}"#,
         "\n",
-        r#"{"type":"agent-name","agentId":"agent-2","agentName":"Bob"}"#,
+        r#"{"type":"agent-name","sessionId":"s2","agentName":"Bob"}"#,
         "\n",
     );
     let t = route_lines(content);
-    assert_eq!(t.agent_names.get("agent-1").map(String::as_str), Some("Alice"));
-    assert_eq!(t.agent_names.get("agent-2").map(String::as_str), Some("Bob"));
+    assert_eq!(t.agent_names.get("s1").map(String::as_str), Some("Alice"));
+    assert_eq!(t.agent_names.get("s2").map(String::as_str), Some("Bob"));
 }
 
 #[test]
 fn route_lines_parses_agent_setting_entries() {
-    // Binary: `agentSettings.set(N.agentId, N)` — stores the whole entry.
+    // Binary v2.1.193 @211659124: `agentSettings.set(N.sessionId, N.agentSetting)`
+    // — keyed by sessionId, stores the inner `agentSetting` payload.
     let content = concat!(
-        r#"{"type":"agent-setting","agentId":"agent-1","setting":"foo","value":42}"#,
+        r#"{"type":"agent-setting","sessionId":"s1","agentSetting":{"model":"opus","value":42}}"#,
         "\n",
     );
     let t = route_lines(content);
-    let setting = t.agent_settings.get("agent-1").expect("agent setting");
-    assert_eq!(
-        setting.get("agentId").and_then(|v| v.as_str()),
-        Some("agent-1")
-    );
+    let setting = t.agent_settings.get("s1").expect("agent setting");
+    assert_eq!(setting.get("model").and_then(|v| v.as_str()), Some("opus"));
     assert_eq!(setting.get("value").and_then(|v| v.as_i64()), Some(42));
 }
 

@@ -68,13 +68,29 @@ impl JsonlWriter {
             if !parent.as_os_str().is_empty() && !parent.exists() {
                 // Sync std::fs is fine here — we already hold the in-process
                 // mutex and parent-dir creation is a one-shot syscall.
+                // claude-code `appendToFile` creates the project dir with
+                // `{ mode: 0o700 }` (owner-only); mirror that on unix.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+                    std::fs::DirBuilder::new()
+                        .recursive(true)
+                        .mode(0o700)
+                        .create(parent)
+                        .map_err(|e| FsError::Io(e.to_string()))?;
+                }
+                #[cfg(not(unix))]
                 std::fs::create_dir_all(parent).map_err(|e| FsError::Io(e.to_string()))?;
             }
         }
         let mut payload = String::with_capacity(line.len() + 1);
         payload.push_str(&line);
         payload.push('\n');
-        self.fs.append_file(path_str, &payload).await?;
+        // claude-code `appendToFile`: `fsAppendFile(path, data, { mode: 0o600 })`
+        // — the `<uuid>.jsonl` transcript is owner-only (prompt + tool content).
+        self.fs
+            .append_file_with_mode(path_str, &payload, 0o600)
+            .await?;
         Ok(())
     }
 }

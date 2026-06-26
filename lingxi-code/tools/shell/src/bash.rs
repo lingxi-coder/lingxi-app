@@ -481,6 +481,49 @@ fn bash_model_content(
     parts.join("\n")
 }
 
+/// Build the BashTool result `data` — claude-code 2.1.191 `BashTool` outputSchema
+/// (pure metadata; the model-facing render rides on `ToolCallResult.model_content`,
+/// NOT inside `data`). Field order mirrors the binary's `return{data:{…}}`
+/// construction (`preserve_order` is on): `stdout, stderr, interrupted, isImage,
+/// returnCodeInterpretation?, noOutputExpected, backgroundTaskId?`. The two
+/// `?`-fields are OPTIONAL in the schema and are OMITTED when absent — the binary
+/// sets them to `p?.message` / `undefined`, which `JSON.stringify` drops. The
+/// telemetry-only fields LingXi used to carry here (`exit_code`, `is_error`,
+/// `timed_out`, `truncated`) are NOT part of the result data — they live in the
+/// `tengu`/`BASH_COMPLETED` analytics payload only.
+fn bash_result_data(
+    stdout: &str,
+    stderr: &str,
+    interrupted: bool,
+    is_image: bool,
+    return_code_interpretation: Option<&str>,
+    no_output_expected: bool,
+    background_task_id: Option<&str>,
+) -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    m.insert("stdout".into(), serde_json::Value::String(stdout.to_string()));
+    m.insert("stderr".into(), serde_json::Value::String(stderr.to_string()));
+    m.insert("interrupted".into(), serde_json::Value::Bool(interrupted));
+    m.insert("isImage".into(), serde_json::Value::Bool(is_image));
+    if let Some(rci) = return_code_interpretation {
+        m.insert(
+            "returnCodeInterpretation".into(),
+            serde_json::Value::String(rci.to_string()),
+        );
+    }
+    m.insert(
+        "noOutputExpected".into(),
+        serde_json::Value::Bool(no_output_expected),
+    );
+    if let Some(bid) = background_task_id {
+        m.insert(
+            "backgroundTaskId".into(),
+            serde_json::Value::String(bid.to_string()),
+        );
+    }
+    serde_json::Value::Object(m)
+}
+
 /// Build the SUCCESSFUL `tool_result` for a timed-out / interrupted Bash run,
 /// mirroring claude-code's interrupted shape (`BashTool.tsx` ~602-605 / 720):
 /// `interrupted: true`, `timed_out: true`, partial stdout normalized + truncated
@@ -493,7 +536,9 @@ fn build_interrupted_result(stdout_partial: &str, stderr_partial: &str, cmd_str:
     let (stderr_clean, _ansi_err) = strip_ansi_count(stderr_partial);
     let normalized =
         crate::shared::strip_empty_lines(&crate::shared::normalize_stdout(&stdout_clean));
-    let (stdout_final, truncated_out) = truncate_bash_output(normalized, bash_max_output_length());
+    // `truncated` is telemetry-only, not part of the result data — discard it.
+    let (stdout_final, _truncated_out) =
+        truncate_bash_output(normalized, bash_max_output_length());
 
     // claude-code appends the abort marker to stderr, preceded by EOL when
     // stderr is non-empty (`BashTool.tsx:602-604`).
@@ -509,23 +554,18 @@ fn build_interrupted_result(stdout_partial: &str, stderr_partial: &str, cmd_str:
     let model_content = bash_model_content(&stdout_final, &stderr_clean, true, None);
 
     ToolCallResult {
-        data: json!({
-            "model_content": model_content,
-            // No exit code on a killed process; claude-code carries the
-            // ShellError code (-1 when killed). Mirror that.
-            "exit_code": -1,
-            "stdout": stdout_final,
-            "stderr": stderr_final,
-            // `is_error: interrupted` (BashTool.tsx) → true.
-            "is_error": true,
-            "isImage": false,
-            "return_code_interpretation": serde_json::Value::Null,
-            "timed_out": true,
-            "interrupted": true,
-            "truncated": truncated_out,
-            "no_output_expected": crate::silent::is_silent_bash_command(cmd_str),
-        }),
-        model_content: None,
+        // A killed/interrupted command: `interrupted: true`. No exit code or
+        // `returnCodeInterpretation` on kill (the binary's `p?.message` is absent).
+        data: bash_result_data(
+            &stdout_final,
+            &stderr_final,
+            true,
+            false,
+            None,
+            crate::silent::is_silent_bash_command(cmd_str),
+            None,
+        ),
+        model_content: Some(model_content),
         new_messages: vec![],
         context_modifier: None,
         mcp_meta: None,
@@ -1146,13 +1186,19 @@ impl Tool for BashTool {
                     );
                     let model_content = bash_model_content("", "", false, Some(&note));
                     Ok(ToolCallResult {
-                        data: json!({
-                            "model_content":    model_content,
-                            "pid":              handle.pid,
-                            "task_id":          handle.task_id,
-                            "task_output_path": out_path,
-                        }),
-                        model_content: None,
+                        // Backgrounded launch: the binary's result data is the
+                        // main shape with empty stdout/stderr + `backgroundTaskId`
+                        // (the ID + output path ride in the model note, NOT data).
+                        data: bash_result_data(
+                            "",
+                            "",
+                            false,
+                            false,
+                            None,
+                            crate::silent::is_silent_bash_command(&cmd_str),
+                            Some(&handle.task_id),
+                        ),
+                        model_content: Some(model_content),
                         new_messages: vec![],
                         context_modifier: None,
                         mcp_meta: None,
@@ -1472,21 +1518,25 @@ impl Tool for BashTool {
                             out.exit_code,
                         );
                         return Ok(ToolCallResult {
-                            data: json!({
-                                "type": "image",
-                                "isImage": true,
-                                "media_type": media_type,
-                                "model_content": "[Image content provided in the following message.]",
-                                "exit_code": out.exit_code,
-                                "stderr": stderr_clean,
-                                "is_error": interp.is_error,
-                                "return_code_interpretation": interp.message,
-                                "timed_out": false,
-                                "interrupted": false,
-                                "truncated": false,
-                                "no_output_expected": crate::silent::is_silent_bash_command(&cmd_str),
-                            }),
-                            model_content: None,
+                            // Image output: the binary's result data is the main
+                            // shape with `isImage: true`. `isImage` flags that
+                            // `stdout` CONTAINS the image (the data-URI) — the
+                            // result mapper builds the image block FROM `stdout`
+                            // (`mapToolResultToToolResultBlockParam`). So `stdout`
+                            // carries the (untruncated) URI; the model also gets
+                            // the image as a separate content block via `new_messages`.
+                            data: bash_result_data(
+                                &normalized,
+                                &stderr_clean,
+                                false,
+                                true,
+                                interp.message.as_deref(),
+                                crate::silent::is_silent_bash_command(&cmd_str),
+                                None,
+                            ),
+                            model_content: Some(
+                                "[Image content provided in the following message.]".to_string(),
+                            ),
                             new_messages: vec![msg],
                             context_modifier: None,
                             mcp_meta: None,
@@ -1505,7 +1555,6 @@ impl Tool for BashTool {
                 // e.g. `grep` no-match (exit 1) is NOT an error.
                 let interp =
                     crate::command_semantics::interpret_command_result(&cmd_str, out.exit_code);
-                let is_error = interp.is_error;
 
                 let elapsed_ms = SystemTime::now()
                     .duration_since(started_at)
@@ -1534,27 +1583,20 @@ impl Tool for BashTool {
                 // object — which stays for the TUI / PostToolUse hook.
                 let model_content = bash_model_content(&stdout_final, &stderr_clean, false, None);
                 Ok(ToolCallResult {
-                    data: json!({
-                        "model_content": model_content,
-                        "exit_code": out.exit_code,
-                        "stdout":    stdout_final,
-                        "stderr":    stderr_clean,
-                        "is_error":  is_error,
-                        // claude-code `BashTool.tsx:284` outputSchema field
-                        // `isImage`: false on a normal text command. The image
-                        // short-circuit above is the only path that sets it true.
-                        "isImage":   false,
-                        "return_code_interpretation": interp.message,
-                        "timed_out": false,
-                        // claude-code `BashTool.tsx:283` outputSchema field
-                        // `interrupted`: a successfully-completed command was
-                        // not interrupted. (Timeout is surfaced as a hard
-                        // `Err` below — see the follow-up note on that arm.)
-                        "interrupted": false,
-                        "truncated": truncated_out,
-                        "no_output_expected": crate::silent::is_silent_bash_command(&cmd_str),
-                    }),
-                    model_content: None,
+                    // claude-code 2.1.191 `BashTool` outputSchema (pure metadata).
+                    // A completed text command: `interrupted: false`, `isImage:
+                    // false`; `returnCodeInterpretation` only when the exit code
+                    // carries a semantic meaning (`interp.message`, else omitted).
+                    data: bash_result_data(
+                        &stdout_final,
+                        &stderr_clean,
+                        false,
+                        false,
+                        interp.message.as_deref(),
+                        crate::silent::is_silent_bash_command(&cmd_str),
+                        None,
+                    ),
+                    model_content: Some(model_content),
                     new_messages: vec![],
                     context_modifier: None,
                     mcp_meta: None,
@@ -1819,12 +1861,17 @@ mod tests {
             .call(json!({"command": "echo hello"}), use_ctx(), fresh_tx())
             .await
             .expect("call should succeed");
-        assert_eq!(res.data["exit_code"], 0);
         // claude-code normalizes model-facing stdout (trimEnd + stripEmptyLines),
         // so the trailing newline is dropped.
         assert_eq!(res.data["stdout"], "hello");
-        assert_eq!(res.data["is_error"], false);
-        assert_eq!(res.data["timed_out"], false);
+        assert_eq!(res.data["interrupted"], false);
+        assert_eq!(res.data["isImage"], false);
+        // `exit_code`/`is_error`/`timed_out` are telemetry-only — NOT result data.
+        assert!(res.data.get("exit_code").is_none());
+        assert!(res.data.get("is_error").is_none());
+        assert!(res.data.get("timed_out").is_none());
+        // exit 0 → no semantic interpretation → field omitted (binary `p?.message`).
+        assert!(res.data.get("returnCodeInterpretation").is_none());
     }
 
     /// PHASE-2: when `ctx.cancel` is a token that is already fired, the
@@ -1877,11 +1924,11 @@ mod tests {
             .await
             .expect("no token → normal completion");
         assert_eq!(res.data["stdout"], "hello");
-        assert_eq!(res.data["is_error"], false);
+        assert_eq!(res.data["interrupted"], false);
     }
 
     #[tokio::test]
-    async fn foreground_nonzero_exit_is_ok_with_is_error_true() {
+    async fn foreground_nonzero_exit_is_ok_data_not_err() {
         let out = ProcessOutput {
             stdout: String::new(),
             stderr: "boom\n".into(),
@@ -1893,8 +1940,44 @@ mod tests {
             .call(json!({"command": "exit 7"}), use_ctx(), fresh_tx())
             .await
             .expect("non-zero exit is data, not Err");
-        assert_eq!(res.data["exit_code"], 7);
-        assert_eq!(res.data["is_error"], true);
+        // A non-zero exit is a SUCCESSFUL result (Ok data), not a hard error.
+        // claude-code surfaces no `exit_code`/`is_error` in result data — the
+        // failure rides via stderr, the model render, and the non-zero default
+        // `returnCodeInterpretation` ("Command failed with exit code N").
+        assert!(res.data["stderr"].as_str().unwrap().contains("boom"));
+        assert_eq!(res.data["interrupted"], false);
+        assert_eq!(
+            res.data["returnCodeInterpretation"],
+            "Command failed with exit code 7"
+        );
+        assert!(res.data.get("exit_code").is_none());
+        assert!(res.data.get("is_error").is_none());
+    }
+
+    #[tokio::test]
+    async fn foreground_grep_no_match_carries_return_code_interpretation() {
+        // `grep` exit 1 = "no matches": a NON-error carrying a semantic
+        // `returnCodeInterpretation` (claude-code `interpretCommandResult`). The
+        // field is present (string); there is still no `is_error` in `data`.
+        let out = ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 1,
+            timed_out: false,
+        };
+        let tool = BashTool::new(shell_test_ctx(out));
+        let res = tool
+            .call(
+                json!({"command": "grep needle file"}),
+                use_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("grep no-match is Ok data");
+        assert_eq!(res.data["returnCodeInterpretation"], "No matches found");
+        assert_eq!(res.data["interrupted"], false);
+        assert!(res.data.get("is_error").is_none());
+        assert!(res.data.get("exit_code").is_none());
     }
 
     #[tokio::test]
@@ -1917,9 +2000,9 @@ mod tests {
             .await
             .expect("timeout should be Ok(interrupted)");
         assert_eq!(res.data["interrupted"], true);
-        assert_eq!(res.data["timed_out"], true);
-        assert_eq!(res.data["is_error"], true);
         assert_eq!(res.data["stdout"], "partial-out");
+        assert!(res.data.get("timed_out").is_none());
+        assert!(res.data.get("is_error").is_none());
         assert!(
             res.data["stderr"]
                 .as_str()
@@ -1976,9 +2059,9 @@ mod tests {
             .await
             .expect("process-timeout should be Ok(interrupted)");
         assert_eq!(res.data["interrupted"], true);
-        assert_eq!(res.data["timed_out"], true);
-        assert_eq!(res.data["is_error"], true);
         assert_eq!(res.data["stdout"], "");
+        assert!(res.data.get("timed_out").is_none());
+        assert!(res.data.get("is_error").is_none());
     }
 
     /// Serializes every test that mutates the process-global
@@ -2198,7 +2281,7 @@ mod tests {
             .call(json!({"command": "mkdir foo"}), use_ctx(), fresh_tx())
             .await
             .expect("ok");
-        assert_eq!(res.data["no_output_expected"], true);
+        assert_eq!(res.data["noOutputExpected"], true);
     }
 
     #[tokio::test]
@@ -2214,7 +2297,7 @@ mod tests {
             .call(json!({"command": "ls -la"}), use_ctx(), fresh_tx())
             .await
             .expect("ok");
-        assert_eq!(res.data["no_output_expected"], false);
+        assert_eq!(res.data["noOutputExpected"], false);
     }
 
     #[test]
@@ -2291,8 +2374,8 @@ mod tests {
             .await
             .expect("ok");
         let s = res.data["stdout"].as_str().unwrap();
-        // New TS-form truncation message with a correct N (6).
-        assert_eq!(res.data["truncated"], true);
+        // New TS-form truncation message with a correct N (6). (`truncated` is
+        // telemetry-only — the truncation is observable in the stdout suffix.)
         assert!(
             s.ends_with("... [6 lines truncated] ..."),
             "expected TS lines-truncated suffix with N=6, got tail: {:?}",
@@ -2337,7 +2420,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn background_returns_pid_and_task_output_path() {
+    async fn background_returns_background_task_id() {
         let mut ctx = shell_test_ctx(ProcessOutput {
             stdout: String::new(),
             stderr: String::new(),
@@ -2354,12 +2437,18 @@ mod tests {
             )
             .await
             .expect("ok");
-        assert_eq!(res.data["pid"], 4242);
-        assert_eq!(res.data["task_id"], "task-abc123");
-        let p = res.data["task_output_path"].as_str().expect("path string");
+        // claude-code backgrounded result: the main shape with `backgroundTaskId`
+        // + empty stdout/stderr. No `pid`/`task_output_path` in `data` — the ID
+        // and output path ride in the model note (`model_content`).
+        assert_eq!(res.data["backgroundTaskId"], "task-abc123");
+        assert_eq!(res.data["stdout"], "");
+        assert_eq!(res.data["interrupted"], false);
+        assert!(res.data.get("pid").is_none());
+        assert!(res.data.get("task_output_path").is_none());
+        let note = res.model_content.as_deref().expect("background model note");
         assert!(
-            p.contains("task-abc123"),
-            "task_output_path should embed task_id, got {p}",
+            note.contains("task-abc123") && note.contains("Command running in background"),
+            "note must carry the task id + path, got: {note}",
         );
     }
 
@@ -2692,8 +2781,9 @@ mod tests {
     async fn image_stdout_emits_image_message_not_text() {
         // A command whose stdout is a valid `data:image/png;base64,…` URI is
         // returned as an IMAGE: the payload rides on `new_messages` via
-        // `ImageSource::Base64`; `data.isImage == true`; the URI is NOT echoed
-        // back as `stdout` text.
+        // `ImageSource::Base64` and `data.isImage == true`. The model sees the
+        // image block (not the URI text); the URI itself stays in `data.stdout`
+        // (binary: `isImage` flags that stdout contains the image).
         let uri = format!("data:image/png;base64,{TINY_PNG_B64}");
         let out = ProcessOutput {
             stdout: format!("{uri}\n"),
@@ -2707,22 +2797,22 @@ mod tests {
             .await
             .expect("ok");
 
-        // `data` flags an image + carries the placeholder, NOT the raw stdout.
+        // `data` is the main result shape with `isImage: true`; no LingXi-only
+        // `type`/`media_type`/`truncated` keys, and the model placeholder rides
+        // on `model_content`, not inside `data`.
         assert_eq!(res.data["isImage"], true);
-        assert_eq!(res.data["type"], "image");
-        assert_eq!(res.data["media_type"], "image/png");
-        assert_eq!(
-            res.data["model_content"],
-            "[Image content provided in the following message.]"
-        );
-        assert_eq!(res.data["truncated"], false);
         assert_eq!(res.data["interrupted"], false);
-        // The base64 image data is NOT present in any `stdout` text field.
-        assert!(
-            res.data.get("stdout").is_none(),
-            "image result must not echo stdout text, got {:?}",
-            res.data.get("stdout")
+        assert_eq!(
+            res.model_content.as_deref(),
+            Some("[Image content provided in the following message.]")
         );
+        assert!(res.data.get("type").is_none());
+        assert!(res.data.get("media_type").is_none());
+        assert!(res.data.get("truncated").is_none());
+        // `isImage` flags that `stdout` CONTAINS the image: the (untruncated)
+        // data-URI rides in `stdout`, and the result mapper derives the image
+        // block from it. (The model also receives the image via `new_messages`.)
+        assert_eq!(res.data["stdout"], uri);
 
         // Exactly one follow-up message carrying the image as base64.
         assert_eq!(res.new_messages.len(), 1);

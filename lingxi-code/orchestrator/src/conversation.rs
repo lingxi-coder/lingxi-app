@@ -6473,8 +6473,10 @@ As you answer the user's questions, you can use the following context:\n\
 
     /// The per-turn, transient `agent_listing_delta` reminder, or `None` when
     /// the gate is OFF (the default — keeps the inline-catalog build
-    /// byte-identical), no agent catalog is wired, the `Agent` tool is absent
-    /// this turn, or no NEW agent type has appeared since the last reminder.
+    /// byte-identical), the `Agent` tool is absent this turn, or no NEW agent
+    /// type has appeared since the last reminder. A wired DISK catalog is NOT
+    /// required — built-ins are always announced (binary `aLe` uses
+    /// `activeAgents`, which includes built-ins).
     ///
     /// 1:1 with claude-code's `agent_listing_delta` attachment
     /// (`getAgentListingDeltaAttachment`, attachments.ts:1490-1554 →
@@ -6515,22 +6517,27 @@ As you answer the user's questions, you can use the following context:\n\
         if !agent::should_inject_agent_list_in_messages() {
             return None;
         }
-        // Require a wired catalog (DISK agents; built-ins are merged below).
-        let catalog = self.agent_catalog.as_ref()?;
         // Gate on the Agent tool being available this turn (attachments.ts:1497).
-        // `find_by_name` also matches the legacy `Task` alias.
+        // `find_by_name` also matches the legacy `Task` alias. This is the ONLY
+        // structural gate in the binary's `aLe` — it does NOT gate on a wired
+        // DISK catalog (see below).
         if self.tools.find_by_name("Agent").is_none() {
             return None;
         }
 
-        // Merge BUILT-INS first, then the wired catalog (DISK agents only) on
-        // top — `agent_catalog` does NOT include built-ins, so we prepend them
-        // here. Later-wins precedence means a same-named catalog agent overrides
+        // Merge BUILT-INS first, then the wired DISK catalog (if any) on top.
+        // Built-ins are ALWAYS part of the listing — the binary's `aLe` builds
+        // the delta from `activeAgents` (= built-ins + user/project agents via
+        // `getAgents`), so a session with NO disk catalog still announces the
+        // built-in agents. (Previously this early-returned when `agent_catalog`
+        // was unset, suppressing built-ins entirely under the gate — a divergence
+        // from `aLe`.) Later-wins precedence: a same-named catalog agent overrides
         // a built-in, matching the inline `AgentTool` prompt's
-        // `PoolSubagentSpawner::listing_entries` (built-in < user/project) and TS
-        // (`activeAgents` already includes built-ins via `getAgents`).
+        // `PoolSubagentSpawner::listing_entries` (built-in < user/project).
         let mut defs = agent::builtin_agent_definitions();
-        defs.extend(catalog.read().await.iter().cloned());
+        if let Some(catalog) = self.agent_catalog.as_ref() {
+            defs.extend(catalog.read().await.iter().cloned());
+        }
         let entries = agent::agent_listing_entries(&defs);
 
         // DELTA: keep only types not yet announced, then record them as sent.
@@ -9598,7 +9605,13 @@ mod agent_listing_reminder_tests {
     }
 
     #[tokio::test]
-    async fn gate_on_but_no_catalog_is_none() {
+    async fn gate_on_no_catalog_still_announces_builtins() {
+        // Binary `aLe` builds the delta from `activeAgents` (built-ins +
+        // user/project), gating ONLY on the Agent tool's presence — NOT on a
+        // wired DISK catalog. So a session with the gate ON, the Agent tool
+        // present, and NO disk catalog still announces the BUILT-IN agents
+        // (e.g. general-purpose). (Previously this early-returned `None`,
+        // suppressing built-ins under the gate — a divergence from `aLe`.)
         let _g = AGENT_LIST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -9606,7 +9619,18 @@ mod agent_listing_reminder_tests {
         let orch = orch_with(reg_with_agent_tool(), None);
         let got = orch.agent_listing_reminder_message().await;
         std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
-        assert!(got.is_none(), "no catalog ⇒ no reminder even when gate ON");
+        let text = got
+            .expect("built-ins must be announced even with no disk catalog")
+            .text_content();
+        assert!(text.starts_with("<system-reminder>"), "got: {text}");
+        assert!(
+            text.contains("Available agent types for the Agent tool:"),
+            "turn-0 initial header expected; got: {text}"
+        );
+        assert!(
+            text.contains("- general-purpose:"),
+            "built-ins must be listed with no disk catalog; got: {text}"
+        );
     }
 
     #[tokio::test]

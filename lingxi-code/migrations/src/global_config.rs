@@ -69,7 +69,7 @@ pub type JsonMap = Map<String, Value>;
 /// path, not `~/.claude`. That is pathological, not a behavior worth porting;
 /// this port treats `""` as unset everywhere.
 fn claude_config_dir_env() -> Option<PathBuf> {
-    std::env::var_os("CLAUDE_CONFIG_DIR")
+    std::env::var_os(branding::CONFIG_DIR_ENV)
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
 }
@@ -82,7 +82,7 @@ pub fn claude_config_home() -> Option<PathBuf> {
     if let Some(dir) = claude_config_dir_env() {
         return Some(dir);
     }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude"))
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(branding::DOT_DIR))
 }
 
 /// `getGlobalClaudeFile` (`env.ts:14-26`): legacy `<config-home>/.config.json`
@@ -96,13 +96,13 @@ pub fn claude_config_home() -> Option<PathBuf> {
 #[must_use]
 pub fn global_config_path() -> Option<PathBuf> {
     let home = claude_config_home()?;
-    let legacy = home.join(".config.json");
+    let legacy = home.join(branding::LEGACY_GLOBAL_CONFIG_FILE);
     if legacy.exists() {
         return Some(legacy);
     }
     let base =
         claude_config_dir_env().or_else(|| std::env::var_os("HOME").map(PathBuf::from))?;
-    Some(base.join(".claude.json"))
+    Some(base.join(branding::GLOBAL_CONFIG_FILE))
 }
 
 /// Errors from the `GlobalConfig` substrate. All callers treat any error as

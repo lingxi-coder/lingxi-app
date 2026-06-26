@@ -100,9 +100,9 @@ pub async fn secure_storage_for_platform(
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn default_claude_dir() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".claude")
+        PathBuf::from(home).join(branding::DOT_DIR)
     } else {
-        PathBuf::from("/.claude")
+        PathBuf::from("/").join(branding::DOT_DIR)
     }
 }
 

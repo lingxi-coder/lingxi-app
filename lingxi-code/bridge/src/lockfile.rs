@@ -105,9 +105,9 @@ impl IdeLockfile {
         // Honor `$CLAUDE_CONFIG_DIR` (set+non-empty) else `~/.claude`, like the
         // rest of the config-home tree, so the IDE discovery lockfile lands where
         // the engine/peers look for it.
-        let config_home = std::env::var_os("CLAUDE_CONFIG_DIR")
+        let config_home = std::env::var_os(branding::CONFIG_DIR_ENV)
             .map(PathBuf::from)
-            .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
+            .or_else(|| dirs::home_dir().map(|h| h.join(branding::DOT_DIR)))
             .ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory")
             })?;
@@ -141,9 +141,9 @@ impl IdeLockfile {
     pub fn for_bridge(port: u16, workspace_folders: Vec<PathBuf>) -> std::io::Result<Self> {
         // Honor `$CLAUDE_CONFIG_DIR` (set+non-empty) else `~/.claude`, matching
         // the config-home tree (the Electron app reads this discovery file).
-        let config_home = std::env::var_os("CLAUDE_CONFIG_DIR")
+        let config_home = std::env::var_os(branding::CONFIG_DIR_ENV)
             .map(PathBuf::from)
-            .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
+            .or_else(|| dirs::home_dir().map(|h| h.join(branding::DOT_DIR)))
             .ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory")
             })?;

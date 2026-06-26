@@ -175,6 +175,10 @@ authors = ["LingXi Code Contributors"]
 repository = "https://github.com/lingxi/lingxi-code"
 
 [workspace.dependencies]
+# Single source of truth for the product namespace (paths, filenames, env
+# prefix, brand name). Path is workspace-root-relative so every member uses
+# `branding.workspace = true` regardless of its own depth.
+branding = { path = "branding" }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps `serde_json::Map` keys in insertion order across
 # Value round-trips. Required for claude-code wire-byte fidelity: outbound

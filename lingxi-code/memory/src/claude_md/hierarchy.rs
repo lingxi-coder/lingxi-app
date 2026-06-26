@@ -3,9 +3,9 @@
 use std::path::{Path, PathBuf};
 
 /// Filename of the project memory file (case-sensitive).
-pub const FILE_NAME: &str = "CLAUDE.md";
+pub const FILE_NAME: &str = branding::MEMORY_FILE;
 /// Filename of the local-override memory file.
-pub const LOCAL_OVERRIDE_NAME: &str = "CLAUDE.local.md";
+pub const LOCAL_OVERRIDE_NAME: &str = branding::MEMORY_LOCAL_FILE;
 
 /// Resolve the USER-tier `.claude` config directory, honoring
 /// `$CLAUDE_CONFIG_DIR` (claude-code `tr()`: `process.env.CLAUDE_CONFIG_DIR ??
@@ -19,7 +19,7 @@ pub const LOCAL_OVERRIDE_NAME: &str = "CLAUDE.local.md";
 /// unset — that asymmetry is itself faithful to claude-code.)
 #[must_use]
 pub fn user_config_dir(home: &Path) -> PathBuf {
-    resolve_user_config_dir(home, std::env::var_os("CLAUDE_CONFIG_DIR"))
+    resolve_user_config_dir(home, std::env::var_os(branding::CONFIG_DIR_ENV))
 }
 
 /// Pure core of [`user_config_dir`] — the `$CLAUDE_CONFIG_DIR` value is injected
@@ -95,8 +95,8 @@ pub struct Hierarchy {
     pub entries: Vec<HierarchyEntry>,
 }
 
-/// Directory name claude-code uses for nested config (`.claude/`).
-const DOT_CLAUDE: &str = ".claude";
+/// Directory name used for nested config (`.claude/` → `.lingxi/`).
+const DOT_CLAUDE: &str = branding::DOT_DIR;
 /// Subdirectory under `.claude/` holding `*.md` rule files.
 const RULES_DIR: &str = "rules";
 

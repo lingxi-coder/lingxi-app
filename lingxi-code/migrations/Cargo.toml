@@ -9,6 +9,7 @@ license.workspace = true
 # SubscriptionType for the subscriber-gated migrations' fail-closed context.
 llm-client = { path = "../llm-client" }
 telemetry = { path = "../telemetry" }
+branding.workspace = true
 serde_json.workspace = true
 # `get_or_create_user_id` device-id generation (randomBytes(32).toString('hex')).
 uuid = { version = "1.10", features = ["v4"] }

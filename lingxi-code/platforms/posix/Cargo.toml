@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 protocol = { path = "../../protocol" }
 traits = { path = "../../traits" }
+branding.workspace = true
 jsonrpc = { path = "../../jsonrpc" }
 # `mcp::RawConnectionProvider` is implemented on `PosixMcpTransport` so the
 # registry can bridge the transport-owned `Arc<jsonrpc::Connection>` into a

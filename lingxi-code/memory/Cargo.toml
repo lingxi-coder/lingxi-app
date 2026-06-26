@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
+branding.workspace = true
 sidequery = { path = "../sidequery" }
 secret = { path = "../secret" }
 telemetry = { path = "../telemetry" }

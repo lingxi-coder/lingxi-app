@@ -50,21 +50,21 @@ pub fn user_settings_path() -> Option<PathBuf> {
     config_home_dir().map(|h| h.join("settings.json"))
 }
 
-/// User config-home: `$CLAUDE_CONFIG_DIR` when set (claude-code `tr()` `??`: an
-/// empty value is honored verbatim → cwd-relative), else `<home>/.claude`.
+/// User config-home: `$branding::CONFIG_DIR_ENV` when set (`??`: an empty value
+/// is honored verbatim → cwd-relative), else `<home>/<branding::DOT_DIR>`.
 /// Returns `None` only when neither the env override nor `$HOME` resolves.
 #[must_use]
 fn config_home_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+    if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
         return Some(PathBuf::from(dir));
     }
-    home_dir().map(|h| h.join(".claude"))
+    home_dir().map(|h| branding::config_home(&h, None))
 }
 
-/// Path to the project settings file: `<project_dir>/.claude/settings.json`.
+/// Path to the project settings file: `<project_dir>/<branding::DOT_DIR>/settings.json`.
 #[must_use]
 pub fn project_settings_path(project_dir: &Path) -> PathBuf {
-    project_dir.join(".claude").join("settings.json")
+    project_dir.join(branding::DOT_DIR).join("settings.json")
 }
 
 fn home_dir() -> Option<PathBuf> {

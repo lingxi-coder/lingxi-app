@@ -159,24 +159,15 @@ pub(crate) fn render_transcript(messages: &[RenderedMessage]) -> String {
                 out.push_str(&format!("● {tool}({input})"));
             }
             RenderedMessage::UserToolResult { tool, result, .. } => {
-                // #3 residual: the transcript/export formatter dumped the raw
-                // structured Bash result (`{"stdout":...,"stderr":...}`) instead
-                // of its stdout/stderr text. Route Bash through the SAME
-                // extractor the inline renderer uses (None ⇒ replay bare-string /
-                // {"content":…} shapes ⇒ unchanged `{result}` fallback).
-                if tool == "Bash" {
-                    if let Some((stdout, stderr)) =
-                        crate::components::messages::user_tool_result::bash_structured_output(result)
-                    {
-                        let body =
-                            crate::components::messages::bash_output::join_bash_output(&stdout, &stderr);
-                        out.push_str(&format!("└ {tool}: {body}"));
-                    } else {
-                        out.push_str(&format!("└ {tool}: {result}"));
-                    }
-                } else {
-                    out.push_str(&format!("└ {tool}: {result}"));
-                }
+                // #3: the transcript/export formatter dumped the raw structured
+                // result (Bash `{"stdout":…}`, Read `{type,file:{…}}`, …) instead
+                // of its human text. Route through the SAME `display_body` the
+                // inline renderer uses — Bash stdout/stderr, else `body_text`
+                // (which surfaces the bridge-carried `model_content`, falling
+                // back to the bare-string / `{"content":…}` replay shapes).
+                let body =
+                    crate::components::messages::user_tool_result::display_body(tool, result);
+                out.push_str(&format!("└ {tool}: {body}"));
             }
             other => out.push_str(&searchable_text(other)),
         }

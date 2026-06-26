@@ -189,6 +189,18 @@ pub fn body_text(result: &serde_json::Value) -> String {
             return out;
         }
     }
+    // (gap-3 general) The orchestrator bridge carries every tool's human/model
+    // -facing body into the structured `data` object as `model_content` (see
+    // `orchestrator_bridge::emit_tool_result`). When a tool returns a structured
+    // result with no `content` of its own (Read's `{type,file:{…}}`, …), surface
+    // that text instead of pretty-printing the raw JSON. Sits AFTER the
+    // `content` cases so tools that already carry a display string (Grep, …) and
+    // the replay bare-string path are byte-unchanged.
+    if let Some(s) = result.get("model_content").and_then(|c| c.as_str()) {
+        if !s.is_empty() {
+            return s.to_string();
+        }
+    }
     serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string())
 }
 
@@ -220,7 +232,7 @@ pub fn bash_structured_output(result: &serde_json::Value) -> Option<(String, Str
 /// (the structured `{"stdout":…}` object, see [`bash_structured_output`]) this
 /// is the joined stdout/stderr; every other shape falls back to [`body_text`].
 #[must_use]
-fn display_body(tool: &str, result: &serde_json::Value) -> String {
+pub(crate) fn display_body(tool: &str, result: &serde_json::Value) -> String {
     if tool == "Bash" {
         if let Some((stdout, stderr)) = bash_structured_output(result) {
             return crate::components::messages::bash_output::join_bash_output(&stdout, &stderr);

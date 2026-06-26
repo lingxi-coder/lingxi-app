@@ -485,6 +485,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 
 [[package]]
+name = "branding"
+version = "0.1.0"
+
+[[package]]
 name = "bridge"
 version = "0.12.0"
 dependencies = [

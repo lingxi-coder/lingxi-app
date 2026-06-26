@@ -316,7 +316,7 @@ pub(crate) fn build_pages_payload(
     canon: &std::path::Path,
     original_size: u64,
     page_jpegs: Vec<Vec<u8>>,
-) -> Result<(Vec<protocol::ImageSource>, serde_json::Value), String> {
+) -> Result<(Vec<protocol::ImageSource>, serde_json::Value, String), String> {
     let count = page_jpegs.len();
     let mut sources = Vec::with_capacity(count);
     for jpeg in page_jpegs {
@@ -331,14 +331,18 @@ pub(crate) fn build_pages_payload(
         "PDF pages extracted: {count} page(s) from {path_str} ({})",
         format_file_size(original_size)
     );
+    // binary `parts` is file-splitting (`file:{filePath, originalSize, outputDir,
+    // count}`); LingXi reuses `type:"parts"` for PDF→page-images (no outputDir),
+    // so `file` carries the available metadata + the render rides on model_content.
     let data = serde_json::json!({
         "type": "parts",
-        "file_path": path_str,
-        "original_size": original_size,
-        "count": count,
-        "model_content": model_content,
+        "file": {
+            "filePath": path_str,
+            "originalSize": original_size,
+            "count": count,
+        },
     });
-    Ok((sources, data))
+    Ok((sources, data, model_content))
 }
 
 /// Build the too-large error message — byte-locked VERBATIM to claude-code
@@ -1088,7 +1092,9 @@ impl FileReadTool {
 
         let source = protocol::ImageSource::Base64 {
             media_type: processed.media_type.clone(),
-            data: processed.base64,
+            // clone so the base64 also rides in the result `data.file.base64`
+            // (binary parity — the FileRead result carries the image bytes).
+            data: processed.base64.clone(),
         };
         let text = match processed.resized {
             Some((ow, oh, dw, dh)) => {
@@ -1117,14 +1123,17 @@ impl FileReadTool {
             .await;
 
         Ok(ToolCallResult {
+            // binary `{type:"image", file:{base64, type:<mediaType>, originalSize}}`
+            // (no filePath); the model receives the image via `new_messages`.
             data: serde_json::json!({
                 "type": "image",
-                "file_path": canon.display().to_string(),
-                "media_type": processed.media_type,
-                "original_size": original_size,
-                "model_content": "[Image content provided in the following message.]",
+                "file": {
+                    "base64": processed.base64,
+                    "type": processed.media_type,
+                    "originalSize": original_size,
+                },
             }),
-            model_content: None,
+            model_content: Some("[Image content provided in the following message.]".to_string()),
             new_messages: vec![msg],
             context_modifier: None,
             mcp_meta: None,
@@ -1150,7 +1159,7 @@ impl FileReadTool {
                 return Err(ToolError::Io(e.message(&canon.display().to_string())));
             }
         };
-        let (sources, data) = match build_pages_payload(canon, original_size, page_jpegs) {
+        let (sources, data, model_content) = match build_pages_payload(canon, original_size, page_jpegs) {
             Ok(v) => v,
             Err(e) => {
                 self.emit_failed(invocation_id, "pdf_page_encode").await;
@@ -1166,7 +1175,7 @@ impl FileReadTool {
             .await;
         Ok(ToolCallResult {
             data,
-            model_content: None,
+            model_content: Some(model_content),
             new_messages: vec![msg],
             context_modifier: None,
             mcp_meta: None,
@@ -1299,7 +1308,8 @@ impl FileReadTool {
         let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
         let source = protocol::DocumentSource::Base64 {
             media_type: "application/pdf".to_string(),
-            data,
+            // clone so the base64 also rides in the result `data.file.base64`.
+            data: data.clone(),
         };
         let msg = protocol::ConversationMessage::user_with_documents(
             protocol::MessageId::new(),
@@ -1312,14 +1322,20 @@ impl FileReadTool {
         // file size as the `bytes_read` figure.
         self.emit_completed(invocation_id, original_size, started.elapsed().as_millis() as u64)
             .await;
+        let model_content =
+            format!("PDF file read: {} ({})", canon.display(), format_file_size(original_size));
         Ok(ToolCallResult {
+            // binary `{type:"pdf", file:{filePath, base64, originalSize}}`; the
+            // model receives the PDF as a document block via `new_messages`.
             data: serde_json::json!({
                 "type": "pdf",
-                "file_path": canon.display().to_string(),
-                "original_size": original_size,
-                "model_content": format!("PDF file read: {} ({})", canon.display(), format_file_size(original_size)),
+                "file": {
+                    "filePath": canon.display().to_string(),
+                    "base64": data,
+                    "originalSize": original_size,
+                },
             }),
-            model_content: None,
+            model_content: Some(model_content),
             new_messages: vec![msg],
             context_modifier: None,
             mcp_meta: None,
@@ -1556,12 +1572,13 @@ impl Tool for FileReadTool {
                 self.emit_completed(&invocation_id, 0, started.elapsed().as_millis() as u64)
                     .await;
                 return Ok(ToolCallResult {
+                    // binary `{type:"file_unchanged", file:{filePath}}`; the stub
+                    // rides on `model_content`, not inside `data`.
                     data: json!({
                         "type": "file_unchanged",
-                        "content": FILE_UNCHANGED_STUB,
-                        "model_content": FILE_UNCHANGED_STUB,
+                        "file": { "filePath": canon.display().to_string() },
                     }),
-                    model_content: None,
+                    model_content: Some(FILE_UNCHANGED_STUB.to_string()),
                     new_messages: vec![],
                     context_modifier: None,
                     mcp_meta: None,
@@ -1743,13 +1760,13 @@ impl Tool for FileReadTool {
             );
 
             return Ok(ToolCallResult {
+                // binary `{type:"notebook", file:{filePath, cells}}`; the rendered
+                // cells text rides on `model_content`.
                 data: json!({
                     "type": "notebook",
-                    "file_path": file_path,
-                    "cells": cells,
-                    "model_content": model_content,
+                    "file": { "filePath": canon.display().to_string(), "cells": cells },
                 }),
-                model_content: None,
+                model_content: Some(model_content),
                 new_messages: vec![],
                 context_modifier: None,
                 mcp_meta: None,
@@ -1784,7 +1801,6 @@ impl Tool for FileReadTool {
         };
         let mut slice: String = all_lines[start_idx..end_idx].concat();
         let line_range_start = offset;
-        let mut line_range_end = end_idx as u64;
         // `read_lines` is the model-facing line count of the returned slice; it
         // starts as the raw slice line count and is overwritten by a graceful
         // truncation (`S` in claude-code).
@@ -1821,7 +1837,6 @@ impl Tool for FileReadTool {
                 );
                 slice = trunc.content;
                 read_lines = trunc.line_count;
-                line_range_end = trunc.line_count;
                 partial_note = Some(trunc.note);
             } else {
                 self.emit_failed(&invocation_id, "max_tokens_exceeded").await;
@@ -1900,9 +1915,9 @@ impl Tool for FileReadTool {
             // `oIt` in claude-code). Only set on a FULL read that exceeded the
             // token cap and was shrunk by [`truncate_to_token_budget`]; the note
             // tells the model the partial view's range and how to page on.
-            if let Some(note) = partial_note {
+            if let Some(note) = &partial_note {
                 mc.push_str("\n\n");
-                mc.push_str(&note);
+                mc.push_str(note);
             }
             // NOTE (parity verdict 12/14): no per-read cyber-risk/malware reminder
             // is appended — claude-code v2.1.183 does not have one; the
@@ -1910,14 +1925,24 @@ impl Tool for FileReadTool {
             mc
         };
 
+        // claude-code FileRead result `data` (2.1.191): `{type, file:{…}}` — pure
+        // metadata; the cat -n model render rides on `model_content`. The text
+        // `file` is `{filePath, content, numLines, startLine, totalLines,
+        // truncatedByTokenCap?}` — `truncatedByTokenCap` is added only on a
+        // token-cap-shrunk read (binary spreads `{truncatedByTokenCap:!0}` last).
+        let mut file = json!({
+            "filePath": canon.display().to_string(),
+            "content": slice,
+            "numLines": read_lines,
+            "startLine": line_range_start,
+            "totalLines": total_lines,
+        });
+        if partial_note.is_some() {
+            file["truncatedByTokenCap"] = json!(true);
+        }
         Ok(ToolCallResult {
-            data: json!({
-                "content": slice,
-                "model_content": model_content,
-                "line_range": [line_range_start, line_range_end],
-                "total_lines": total_lines
-            }),
-            model_content: None,
+            data: json!({ "type": "text", "file": file }),
+            model_content: Some(model_content),
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -2102,13 +2127,13 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result.data["content"], "hello\nworld\n");
+        assert_eq!(result.data["file"]["content"], "hello\nworld\n");
         // FILE.4: TS counts the trailing newline's empty final fragment as a line
         // ("hello\nworld\n" => 3, matching readFileInRange `lineIndex`).
-        assert_eq!(result.data["total_lines"], 3);
+        assert_eq!(result.data["file"]["totalLines"], 3);
         // Model-facing string: cat -n (compact tab format, 1-based from offset).
         // No cyber-risk reminder (parity verdict 12/14 — removed).
-        assert_eq!(result.data["model_content"], "1\thello\n2\tworld\n3\t");
+        assert_eq!(result.model_content.as_deref().unwrap(), "1\thello\n2\tworld\n3\t");
         let events = sink.events().await;
         let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"tengu_tool_read_started"));
@@ -2161,7 +2186,7 @@ mod tests {
             )
             .await
             .expect("ranged read of an oversize file must succeed");
-        assert_eq!(result.data["content"], "second\nthird\n");
+        assert_eq!(result.data["file"]["content"], "second\nthird\n");
     }
 
     #[tokio::test]
@@ -2277,15 +2302,15 @@ mod tests {
             .await
             .expect("no-limit read must succeed");
         // ALL 2500 lines returned (no cap).
-        assert_eq!(result.data["content"].as_str().unwrap().lines().count(), 2500);
-        assert!(result.data["content"].as_str().unwrap().ends_with("L2500\n"));
-        // line_range = [1, 2500] (end_idx = number of split_inclusive chunks);
-        // total_lines = 2501 (trailing-newline phantom line).
-        assert_eq!(result.data["line_range"][0], 1);
-        assert_eq!(result.data["line_range"][1], 2500);
-        assert_eq!(result.data["total_lines"], 2501);
+        assert_eq!(result.data["file"]["content"].as_str().unwrap().lines().count(), 2500);
+        assert!(result.data["file"]["content"].as_str().unwrap().ends_with("L2500\n"));
+        // startLine = 1, numLines = 2500 (lines returned); totalLines = 2501
+        // (trailing-newline phantom line).
+        assert_eq!(result.data["file"]["startLine"], 1);
+        assert_eq!(result.data["file"]["numLines"], 2500);
+        assert_eq!(result.data["file"]["totalLines"], 2501);
         // NO truncation note of any kind.
-        let mc = result.data["model_content"].as_str().unwrap();
+        let mc = result.model_content.as_deref().unwrap();
         assert!(
             !mc.contains("Truncated") && !mc.contains("File truncated"),
             "within-budget full read must not surface any truncation note, got tail: {}",
@@ -2316,8 +2341,8 @@ mod tests {
             .await
             .expect("explicit-limit read must succeed");
         // 2200 lines returned (> 2000 — not clamped).
-        assert_eq!(result.data["content"].as_str().unwrap().lines().count(), 2200);
-        let mc = result.data["model_content"].as_str().unwrap();
+        assert_eq!(result.data["file"]["content"].as_str().unwrap().lines().count(), 2200);
+        let mc = result.model_content.as_deref().unwrap();
         assert!(
             !mc.contains("Truncated") && !mc.contains("File truncated"),
             "explicit limit must not emit a truncation note"
@@ -2400,9 +2425,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result.data["content"], "line1\n");
+        assert_eq!(result.data["file"]["content"], "line1\n");
         // cat -n numbers from offset=1. No cyber-risk reminder (verdict 12/14).
-        assert_eq!(result.data["model_content"], "1\tline1\n2\t");
+        assert_eq!(result.model_content.as_deref().unwrap(), "1\tline1\n2\t");
     }
 
     #[tokio::test]
@@ -2420,10 +2445,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result.data["content"], "line2\n");
+        assert_eq!(result.data["file"]["content"], "line2\n");
         // Numbering starts at the requested offset (2), not 1. No cyber-risk
         // reminder (verdict 12/14).
-        assert_eq!(result.data["model_content"], "2\tline2\n3\t");
+        assert_eq!(result.model_content.as_deref().unwrap(), "2\tline2\n3\t");
     }
 
     #[tokio::test]
@@ -2441,7 +2466,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result.data["content"], "line2\n");
+        assert_eq!(result.data["file"]["content"], "line2\n");
     }
 
     #[tokio::test]
@@ -2459,9 +2484,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result.data["content"], "alpha\nbeta\ngamma\n");
+        assert_eq!(result.data["file"]["content"], "alpha\nbeta\ngamma\n");
         // FILE.4: trailing newline => phantom final line ("...\n" => 4).
-        assert_eq!(result.data["total_lines"], 4);
+        assert_eq!(result.data["file"]["totalLines"], 4);
     }
 
     #[tokio::test]
@@ -2552,7 +2577,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result.data["content"], "hello");
+        assert_eq!(result.data["file"]["content"], "hello");
     }
 
     #[cfg(unix)]
@@ -2607,9 +2632,9 @@ mod tests {
             .unwrap();
         // TUI payload `content` stays the raw (empty) slice; the model sees the
         // empty-file warning instead of an empty string.
-        assert_eq!(result.data["content"], "");
-        assert_eq!(result.data["total_lines"], 0);
-        assert_eq!(result.data["model_content"], EMPTY_FILE_WARNING);
+        assert_eq!(result.data["file"]["content"], "");
+        assert_eq!(result.data["file"]["totalLines"], 0);
+        assert_eq!(result.model_content.as_deref().unwrap(), EMPTY_FILE_WARNING);
     }
 
     #[tokio::test]
@@ -2627,11 +2652,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result.data["content"], "");
+        assert_eq!(result.data["file"]["content"], "");
         // FILE.4: "a\nb\nc\n" has 3 newlines => TS total_lines 4 (phantom final line).
-        assert_eq!(result.data["total_lines"], 4);
+        assert_eq!(result.data["file"]["totalLines"], 4);
         assert_eq!(
-            result.data["model_content"],
+            result.model_content.as_deref().unwrap(),
             "<system-reminder>Warning: the file exists but is shorter than the provided offset (10). The file has 4 lines.</system-reminder>"
         );
     }
@@ -2693,7 +2718,7 @@ mod tests {
             .unwrap();
         // Notebook result variant: structured `cells`, NOT line-numbered text.
         assert_eq!(result.data["type"], "notebook");
-        let cells = result.data["cells"].as_array().unwrap();
+        let cells = result.data["file"]["cells"].as_array().unwrap();
         assert_eq!(cells.len(), 2);
         // Code cell: camelCase cellType, joined source, execution_count, language.
         assert_eq!(cells[0]["cellType"], "code");
@@ -2708,7 +2733,7 @@ mod tests {
         assert!(cells[1].get("language").is_none());
         // The model-facing string is the cell-block text projection.
         assert_eq!(
-            result.data["model_content"],
+            result.model_content.as_deref().unwrap(),
             "<cell id=\"c1\">print('hi')</cell id=\"c1\">\n\nhi\n\n<cell id=\"c2\"><cell_type>markdown</cell_type># Title</cell id=\"c2\">"
         );
     }
@@ -2779,7 +2804,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(first.data["content"], "alpha\nbeta\n");
+        assert_eq!(first.data["file"]["content"], "alpha\nbeta\n");
         // Second identical read → file_unchanged stub.
         let second = tool
             .call(
@@ -2790,8 +2815,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second.data["type"], "file_unchanged");
-        assert_eq!(second.data["content"], FILE_UNCHANGED_STUB);
-        assert_eq!(second.data["model_content"], FILE_UNCHANGED_STUB);
+        // file_unchanged data = {type, file:{filePath}}; the stub rides on the
+        // model_content channel, not inside data.
+        assert!(second.data.get("content").is_none());
+        assert!(second.data["file"]["filePath"].is_string());
+        assert_eq!(second.model_content.as_deref(), Some(FILE_UNCHANGED_STUB));
     }
 
     #[tokio::test]
@@ -2822,8 +2850,8 @@ mod tests {
             .await
             .unwrap();
         // Fresh content returned, not the stub.
-        assert_eq!(again.data["content"], "v1\n");
-        assert!(again.data.get("type").is_none());
+        assert_eq!(again.data["file"]["content"], "v1\n");
+        assert_eq!(again.data["type"], "text", "fresh read is a text result, not a dedup");
     }
 
     #[tokio::test]
@@ -2851,8 +2879,8 @@ mod tests {
             .await
             .unwrap();
         // Different range → real content, no stub.
-        assert_eq!(ranged.data["content"], "l2\n");
-        assert!(ranged.data.get("type").is_none());
+        assert_eq!(ranged.data["file"]["content"], "l2\n");
+        assert_eq!(ranged.data["type"], "text", "fresh read is a text result, not a dedup");
     }
 
     #[tokio::test]
@@ -2894,8 +2922,8 @@ mod tests {
             .await
             .unwrap();
         // Real content returned (the write entry is not a dedup candidate).
-        assert_eq!(result.data["content"], "seed\n");
-        assert!(result.data.get("type").is_none());
+        assert_eq!(result.data["file"]["content"], "seed\n");
+        assert_eq!(result.data["type"], "text", "fresh read is a text result, not a dedup");
     }
 
     // ───────────────────────── Token-budget gate ────────────────────────────
@@ -2979,7 +3007,7 @@ mod tests {
             )
             .await
             .expect("over-budget full read must gracefully truncate, not error");
-        let mc = result.data["model_content"].as_str().unwrap();
+        let mc = result.model_content.as_deref().unwrap();
         // Exact note shape (line-paging branch): prefix + em-dash + range.
         assert!(
             mc.contains("[Truncated: PARTIAL view \u{2014} showing lines 1-"),
@@ -2991,7 +3019,7 @@ mod tests {
         assert!(mc.contains(" or Grep to find a specific section."));
         assert!(mc.contains("Do NOT answer from this page alone"));
         // The returned slice is strictly smaller than the whole file.
-        let returned_lines = result.data["content"].as_str().unwrap().lines().count();
+        let returned_lines = result.data["file"]["content"].as_str().unwrap().lines().count();
         assert!(returned_lines < 14_000, "must be truncated, got {returned_lines}");
         // Emits read_COMPLETED (graceful path), not read_failed.
         let events = sink.events().await;
@@ -3057,7 +3085,7 @@ mod tests {
             )
             .await
             .expect("small slice of a huge file passes the token gate");
-        assert_eq!(result.data["content"], "first\nsecond\n");
+        assert_eq!(result.data["file"]["content"], "first\nsecond\n");
     }
 
     #[tokio::test]
@@ -3076,7 +3104,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result.data["content"], "hello\nworld\n");
+        assert_eq!(result.data["file"]["content"], "hello\nworld\n");
     }
 
     #[test]
@@ -3140,7 +3168,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result.data["content"], "alpha\nbeta\ngamma\n");
+        assert_eq!(result.data["file"]["content"], "alpha\nbeta\ngamma\n");
 
         let events = sink.events().await;
         let ev = find_event(&events, "tengu_session_file_read")
@@ -3547,7 +3575,7 @@ mod tests {
         }
 
         let pages = vec![jpeg(50, 50), jpeg(40, 60)];
-        let (sources, data) =
+        let (sources, data, model_content) =
             build_pages_payload(std::path::Path::new("/docs/report.pdf"), 4096, pages).unwrap();
 
         assert_eq!(sources.len(), 2, "one ImageSource per rendered page");
@@ -3561,9 +3589,11 @@ mod tests {
             }
         }
         assert_eq!(data["type"], "parts");
-        assert_eq!(data["file_path"], "/docs/report.pdf");
+        assert_eq!(data["file"]["filePath"], "/docs/report.pdf");
+        assert_eq!(data["file"]["count"], 2);
+        assert!(data.get("model_content").is_none(), "render rides on the channel");
         assert_eq!(
-            data["model_content"],
+            model_content,
             "PDF pages extracted: 2 page(s) from /docs/report.pdf (4KB)"
         );
     }

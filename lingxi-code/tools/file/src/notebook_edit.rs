@@ -327,7 +327,9 @@ Usage:\n\
                         "original_file": "",
                         "updated_file": "",
                     }),
-                    model_content: None,
+                    // The soft error rides on `model_content` (the data carries no
+                    // content/model_content key, so the fallback would JSON-dump).
+                    model_content: Some("Notebook is not valid JSON.".to_string()),
                     new_messages: vec![],
                     context_modifier: None,
                     mcp_meta: None,
@@ -425,9 +427,18 @@ Usage:\n\
         // claude-code's `NotebookEditTool` mapper (`NotebookEditTool.ts:145-170`).
         // FILE.A's serialization rule emits `data["content"]` verbatim to the
         // model (`cells_edited` below remains the structured TUI payload).
+        // The result record echoes the new source even on delete (binary `t`).
+        let new_source_result = new_source.clone().unwrap_or_default();
+        // Capture the cell's prior source for the result `old_source` (binary
+        // NotebookEdit field); stays `None` on insert (no prior cell).
+        let mut old_source: Option<String> = None;
         let content = match effective_mode {
             EDIT_MODE_DELETE => {
                 // `cell_id` was required + resolved above, so the index is valid.
+                old_source = cells[cell_index]
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
                 cells.remove(cell_index);
                 format!("Deleted cell {display_id}")
             }
@@ -464,6 +475,7 @@ Usage:\n\
                 })?;
                 let msg = format!("Updated cell {display_id} with {src}");
                 let target = &mut cells[cell_index];
+                old_source = target.get("source").and_then(Value::as_str).map(str::to_string);
                 let was_code = target.get("cell_type").and_then(Value::as_str) == Some("code");
                 target["source"] = json!(src);
                 // A modified CODE cell drops its now-stale outputs +
@@ -538,9 +550,32 @@ Usage:\n\
         let duration_ms = started.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, 1, duration_ms).await;
 
+        // claude-code NotebookEditTool result data (2.1.191): the full edit record
+        // `{new_source, old_source?, cell_type, language, edit_mode, cell_id?,
+        // error, notebook_path, original_file, updated_file}` (preserve_order).
+        // `old_source`/`cell_id` are omitted when absent (binary `void 0`); `error`
+        // is "" on success. The model-facing message rides on `model_content`.
+        let mut nb_data = serde_json::Map::new();
+        nb_data.insert("new_source".to_string(), json!(new_source_result));
+        if let Some(os) = &old_source {
+            nb_data.insert("old_source".to_string(), json!(os));
+        }
+        nb_data.insert(
+            "cell_type".to_string(),
+            json!(cell_type.as_deref().unwrap_or("code")),
+        );
+        nb_data.insert("language".to_string(), json!("python"));
+        nb_data.insert("edit_mode".to_string(), json!(edit_mode));
+        if let Some(cid) = cell_id {
+            nb_data.insert("cell_id".to_string(), json!(cid));
+        }
+        nb_data.insert("error".to_string(), json!(""));
+        nb_data.insert("notebook_path".to_string(), json!(canon.display().to_string()));
+        nb_data.insert("original_file".to_string(), json!(raw));
+        nb_data.insert("updated_file".to_string(), json!(serialized));
         Ok(ToolCallResult {
-            data: json!({ "content": content, "cells_edited": 1 }),
-            model_content: None,
+            data: Value::Object(nb_data),
+            model_content: Some(content),
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -637,11 +672,18 @@ mod tests {
             )
             .await
             .unwrap();
-        // Model-facing string is byte-faithful to NotebookEditTool.ts:147-151.
+        // Model-facing string rides on model_content (the binary result `data` is
+        // the {new_source, old_source, …} record — no `content` field).
         assert_eq!(
-            result.data["content"],
-            "Updated cell c1 with print('world')"
+            result.model_content.as_deref(),
+            Some("Updated cell c1 with print('world')")
         );
+        assert_eq!(result.data["new_source"], "print('world')");
+        assert_eq!(result.data["old_source"], "print('hello')");
+        assert_eq!(result.data["edit_mode"], "replace");
+        assert_eq!(result.data["error"], "");
+        assert!(result.data.get("content").is_none());
+        assert!(result.data["updated_file"].is_string());
         let modified: Value =
             serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
         assert_eq!(modified["cells"][0]["source"], "print('world')");
@@ -703,8 +745,10 @@ mod tests {
             )
             .await
             .unwrap();
-        // Model-facing string is byte-faithful to NotebookEditTool.ts:158-162.
-        assert_eq!(result.data["content"], "Deleted cell c1");
+        // Model-facing string rides on model_content; data is the edit record.
+        assert_eq!(result.model_content.as_deref(), Some("Deleted cell c1"));
+        assert_eq!(result.data["edit_mode"], "delete");
+        assert_eq!(result.data["old_source"], "print('hello')");
         let modified: Value =
             serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
         let cells = modified["cells"].as_array().unwrap();
@@ -737,9 +781,12 @@ mod tests {
         // The message renders the FRESH cell id (NB.2 / NotebookEditTool.ts:
         // 152-156 with cell_id = new_cell_id), so only the static framing is
         // byte-fixed.
-        let content = result.data["content"].as_str().unwrap();
+        let content = result.model_content.as_deref().unwrap();
         assert!(content.starts_with("Inserted cell "));
         assert!(content.ends_with(" with print('inserted')"));
+        // Insert has no prior cell → old_source omitted (binary `void 0`).
+        assert!(result.data.get("old_source").is_none());
+        assert_eq!(result.data["edit_mode"], "insert");
         let modified: Value =
             serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
         let cells = modified["cells"].as_array().unwrap();

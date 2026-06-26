@@ -1396,6 +1396,67 @@ pub async fn desktop_command_registry(
 /// depend on `apps/cli` — app→app is a leaf, `scripts/check_deps.py:99`)
 /// construct an identical orchestrator. The CLI now derives a `DesktopConfig`
 /// from `Argv`/env and calls `build`.
+/// (`!` bash mode) Desktop implementation of the TUI's
+/// [`tui::bash_runner::BashRunner`] seam.
+///
+/// Runs a TUI `!command` through the SAME sandboxed [`tool_shell::BashTool`] the
+/// model's `Bash` tool uses — NEVER a raw `std::process`/`Command`. It holds a
+/// clone of the session [`BuiltinToolContext`] (which carries the live
+/// `sandbox_runner` + `sandbox_runtime` config + process runner), constructs a
+/// fresh `BashTool` per call, and maps the tool's result `data.{stdout,stderr}`
+/// into a [`tui::bash_runner::BashRunOutput`]. Because the command rides the same
+/// `BashTool::call` path, it is wrapped by the same M2-04 sandbox decision matrix
+/// and `sandbox-runtime` runner as a model-issued Bash call. `BashTool`'s
+/// `check_permissions` is an allow-all gate, so a user-typed `!` runs sandboxed
+/// without a separate permission prompt (matching claude-code's bash mode).
+struct DesktopBashRunner {
+    ctx: BuiltinToolContext,
+}
+
+#[async_trait::async_trait]
+impl tui::bash_runner::BashRunner for DesktopBashRunner {
+    async fn run(&self, command: &str) -> tui::bash_runner::BashRunOutput {
+        use tool_api::Tool as _;
+        let tool = tool_shell::BashTool::new(self.ctx.clone());
+        // Progress channel is required by the `Tool::call` signature but Bash
+        // emits no progress for a foreground run; drop the receiver.
+        let (progress_tx, _progress_rx) = tool_api::progress_channel();
+        // A minimal per-call context for a user-initiated `!` command: no
+        // tool_use_id, empty history, inert options. The model id is unused for
+        // execution (only `BashTool::prompt` reads it).
+        let use_ctx = tool_api::ToolUseContext::model_seed(self.ctx.default_model.clone());
+        match tool
+            .call(
+                serde_json::json!({ "command": command }),
+                use_ctx,
+                progress_tx,
+            )
+            .await
+        {
+            Ok(result) => {
+                let field = |key: &str| {
+                    result
+                        .data
+                        .get(key)
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                tui::bash_runner::BashRunOutput {
+                    stdout: field("stdout"),
+                    stderr: field("stderr"),
+                }
+            }
+            // A spawn/IO/validation error surfaces as stderr text so the TUI
+            // still renders a `UserBashOutput` row (no LLM turn, no raw spawn).
+            Err(e) => tui::bash_runner::BashRunOutput {
+                stdout: String::new(),
+                stderr: e.to_string(),
+            },
+        }
+    }
+}
+
 pub struct DesktopRuntime {
     /// The fully-constructed orchestrator (cost tracker + MCP/hook/agent
     /// registries + compaction wired), bound to the supplied output stream and
@@ -1488,6 +1549,12 @@ pub struct DesktopRuntime {
     /// same seam every in-`build` spawner uses (D17: never a direct
     /// `tokio::spawn`).
     pub runtime_spawner: Arc<dyn traits::RuntimeSpawner>,
+    /// (`!` bash mode) The sandboxed Bash runner for the TUI's `!command` path,
+    /// built over the SAME `BuiltinToolContext` (sandbox runner + runtime config)
+    /// the model's `Bash` tool uses. The CLI threads it into the TUI `Runtime`
+    /// (`Runtime::with_bash_runner`) so a typed `!ls` runs sandboxed and renders
+    /// inline with no LLM turn — never a raw process.
+    pub bash_runner: Arc<dyn tui::bash_runner::BashRunner>,
 }
 
 /// Errors surfaced while building a [`DesktopRuntime`].
@@ -3845,6 +3912,12 @@ pub async fn build(
     //        MCP partitions, then `Arc`-wrap. `tool_ctx` is consumed by
     //        `register_desktop_tools`, so the builder gets a clone taken first.
     let mcp_tool_ctx = tool_ctx.clone();
+    // (`!` bash mode) Clone the session tool context for the TUI's sandboxed Bash
+    // runner BEFORE `tool_ctx` is moved into `register_desktop_tools` below. The
+    // runner builds a `tool_shell::BashTool` over this exact context, so a typed
+    // `!command` runs through the SAME sandbox path as a model-issued Bash call.
+    let bash_runner: Arc<dyn tui::bash_runner::BashRunner> =
+        Arc::new(DesktopBashRunner { ctx: tool_ctx.clone() });
     let mut tools_inner = ToolRegistry::new();
     // `RemoteTrigger`'s in-process OAuth resolver, backed by the credential
     // store built at (3). Reads tokens at call-time so the refresh driver wired
@@ -4564,6 +4637,7 @@ pub async fn build(
         structured_output_slot,
         wakeup_scheduler_cell,
         runtime_spawner: Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
+        bash_runner,
     })
 }
 

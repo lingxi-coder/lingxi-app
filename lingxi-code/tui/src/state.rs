@@ -707,6 +707,15 @@ pub struct AppState {
     /// expanded prompt; Handled/Unknown → display the text). `None` between
     /// submits.
     pub pending_slash: Option<String>,
+    /// A user-typed `!`-prefixed bash-mode command line (the text AFTER the
+    /// `!`). The sync `Submit` arm raises it here — it cannot `.await` the
+    /// sandboxed Bash executor — and echoes the command as a `UserBashInput`
+    /// row. The async `root::pump_bash` consumes the flag, runs the command
+    /// through the host `BashRunner` (the SAME sandboxed `BashTool` the model
+    /// uses), and folds the captured stdout/stderr into a `UserBashOutput` row.
+    /// `None` between submits, and on mounts with no runner wired the flag is
+    /// simply left/cleared (no LLM turn, no raw spawn).
+    pub pending_bash: Option<String>,
     /// (M6-04) Currently focused tool block (Up/Down in scroll mode walks
     /// this through the `AssistantToolUse` entries in scrollback order).
     pub focused_tool_id: Option<ToolUseId>,
@@ -1072,6 +1081,7 @@ impl AppState {
             pending_compact: false,
             pending_turn: None,
             pending_slash: None,
+            pending_bash: None,
             focused_tool_id: None,
             expanded: HashMap::new(),
             tool_call_inputs: HashMap::new(),

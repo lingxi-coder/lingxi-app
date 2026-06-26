@@ -1329,6 +1329,7 @@ dependencies = [
  "tool-worktree",
  "tracing",
  "traits",
+ "tui",
  "workflow",
 ]
 

@@ -70,6 +70,12 @@ pub struct Runtime {
     /// it as a turn. `None` (smoke gates / resume picker / no-CLI mounts) makes
     /// `root::pump_slash` run a typed slash line raw — the pre-dispatch behavior.
     pub dispatcher: Option<Arc<dyn traits::SlashCommandDispatcher>>,
+    /// (`!` bash mode) Host seam that runs a `!`-prefixed command through the
+    /// SAME sandboxed `BashTool` the model uses, threaded into the root so the
+    /// live submit path's `root::pump_bash` can execute it and render the
+    /// output inline (no LLM turn). `None` (smoke gates / resume picker / no-CLI
+    /// mounts) makes the `!` line inert — echoed but not run.
+    pub bash_runner: Option<Arc<dyn crate::bash_runner::BashRunner>>,
     /// Prior conversation, mapped to scrollback rows, that a RESUMED session
     /// seeds into `AppState.messages` BEFORE the first render — the Rust analog
     /// of claude-code's REPL `initialMessages` prop (`main.tsx` →
@@ -127,6 +133,7 @@ impl Runtime {
             turn_tx: None,
             command_registry: None,
             dispatcher: None,
+            bash_runner: None,
             resumed_messages: Vec::new(),
             subscription: None,
             status_line_config: None,
@@ -153,6 +160,7 @@ impl Runtime {
             turn_tx: None,
             command_registry: None,
             dispatcher: None,
+            bash_runner: None,
             resumed_messages: Vec::new(),
             subscription: None,
             status_line_config: None,
@@ -232,6 +240,17 @@ impl Runtime {
         dispatcher: Arc<dyn traits::SlashCommandDispatcher>,
     ) -> Self {
         self.dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// (`!` bash mode) Attach the host's sandboxed Bash runner so the live
+    /// submit path's `root::pump_bash` runs a typed `!command` through the SAME
+    /// `BashTool` the model uses and renders its output inline (no LLM turn).
+    /// `None` leaves the `!` line inert — echoed but not run (smoke gates /
+    /// resume picker).
+    #[must_use]
+    pub fn with_bash_runner(mut self, runner: Arc<dyn crate::bash_runner::BashRunner>) -> Self {
+        self.bash_runner = Some(runner);
         self
     }
 
@@ -460,6 +479,7 @@ pub async fn run_tui_session(
             multiagent_feed: runtime.multiagent_feed.clone(),
             turn_tx: runtime.turn_tx.clone(),
             dispatcher: runtime.dispatcher.clone(),
+            bash_runner: runtime.bash_runner.clone(),
         )
     }
     .fullscreen()

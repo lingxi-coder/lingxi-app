@@ -501,6 +501,28 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
             // their text. Plain (non-slash) text is raised as `pending_turn` and
             // run verbatim by `pump_turn`. Both echo the typed line as `UserText`.
             // (Matches how the CLI/bridge/mobile surfaces route a typed slash.)
+            // (`!` bash mode) A `!`-prefixed line is NOT sent to the model: it
+            // RUNS the command through the host's sandboxed Bash executor (the
+            // SAME `BashTool` the model uses) and renders its output inline, with
+            // no LLM turn — 1:1 with claude-code's bash mode. The sync dispatcher
+            // can't `.await` that executor, so it echoes the command as a
+            // `UserBashInput` row and RAISES `pending_bash`; the async
+            // `root::pump_bash` observes the flag, runs it through the wired
+            // `BashRunner`, and folds the captured stdout/stderr into a
+            // `UserBashOutput` row. A BARE `!` (nothing after the prefix) is just
+            // the composer's bash-mode marker, not a command — it falls through to
+            // the normal prompt/slash routing below.
+            if let Some(rest) = line.strip_prefix('!') {
+                let command = rest.trim_start();
+                if !command.is_empty() {
+                    let command = command.to_string();
+                    st.push_message(RenderedMessage::UserBashInput {
+                        command: command.clone(),
+                    });
+                    st.pending_bash = Some(command);
+                    return true;
+                }
+            }
             if line.starts_with('/') {
                 st.pending_slash = Some(line.clone());
             } else {
@@ -1571,6 +1593,42 @@ mod dispatch_tests {
         assert_eq!(st.messages.len(), 1);
         assert!(matches!(&st.messages[0], RenderedMessage::UserText { body, .. } if body == "hi"));
         assert_eq!(st.history.last().map(String::as_str), Some("hi"));
+    }
+
+    /// (`!` bash mode) Submitting `!echo hi` does NOT raise a turn/slash: it
+    /// echoes a `UserBashInput` row and raises `pending_bash` with the command
+    /// text (the `!` stripped, leading ws trimmed) for `root::pump_bash` to run.
+    #[test]
+    fn submit_bang_command_raises_pending_bash_not_a_turn() {
+        let mut st = s();
+        for c in "!  echo hi".chars() {
+            dispatch(KeyAction::InsertChar(c), &mut st);
+        }
+        let acted = dispatch(KeyAction::Submit, &mut st);
+        assert!(acted);
+        assert_eq!(st.prompt_text, "");
+        assert_eq!(st.pending_bash.as_deref(), Some("echo hi"));
+        assert!(st.pending_turn.is_none(), "a `!` line must NOT raise a turn");
+        assert!(st.pending_slash.is_none(), "a `!` line must NOT raise a slash");
+        assert!(
+            matches!(
+                st.messages.last(),
+                Some(RenderedMessage::UserBashInput { command }) if command == "echo hi"
+            ),
+            "the command must be echoed as a UserBashInput row"
+        );
+    }
+
+    /// A BARE `!` (no command after the prefix) is just the composer's bash-mode
+    /// marker — it falls through to the normal prompt path (raises `pending_turn`).
+    #[test]
+    fn submit_bare_bang_falls_through_to_normal_prompt() {
+        let mut st = s();
+        dispatch(KeyAction::InsertChar('!'), &mut st);
+        let acted = dispatch(KeyAction::Submit, &mut st);
+        assert!(acted);
+        assert!(st.pending_bash.is_none(), "bare `!` must NOT raise pending_bash");
+        assert_eq!(st.pending_turn.as_deref(), Some("!"));
     }
 
     #[test]

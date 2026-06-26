@@ -87,6 +87,12 @@ pub struct Runtime {
     /// under `--json-schema`; the print path reads it after each turn to validate
     /// the model's `StructuredOutput` result against the schema and retry.
     pub structured_output_slot: Option<orchestrator::structured_output::StructuredOutputSlot>,
+    /// (`!` bash mode) The sandboxed Bash runner, projected straight from
+    /// [`engine_desktop::DesktopRuntime::bash_runner`]. Built over the SAME
+    /// `BuiltinToolContext`/`BashTool` the model uses. The TUI mount threads a
+    /// clone into `tui::session::Runtime::with_bash_runner` so a typed `!command`
+    /// runs sandboxed and renders inline with no LLM turn.
+    pub bash_runner: std::sync::Arc<dyn tui::bash_runner::BashRunner>,
 }
 
 /// Build-result for the TUI startup path. (M6-03)
@@ -533,6 +539,7 @@ pub async fn build_runtime_from_config(
         model_providers: rt.model_providers,
         provider_key_store: rt.credentials,
         structured_output_slot: rt.structured_output_slot,
+        bash_runner: rt.bash_runner,
     })
 }
 

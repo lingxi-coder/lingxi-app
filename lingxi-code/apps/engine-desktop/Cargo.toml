@@ -123,6 +123,13 @@ tool-lsp = { path = "../../tools/lsp" }
 tool-team = { path = "../../tools/team" }
 tool-worktree = { path = "../../tools/worktree" }
 
+# (`!` bash mode) The TUI's `BashRunner` seam — engine-desktop constructs the
+# sandboxed host impl (over the same `BuiltinToolContext` + `tool-shell::BashTool`
+# the model uses) and surfaces it on `DesktopRuntime` for the CLI to thread into
+# the TUI `Runtime`. tui depends on `engine` (a lower crate), not engine-desktop,
+# so this edge is acyclic.
+tui = { path = "../../tui" }
+
 # `getClaudeTempDir` dir-name uses the REAL uid (1:1 TS `process.getuid?.()`).
 # `nix::unistd::getuid()` is a SAFE wrapper around `getuid(2)`, so this crate
 # needs no `unsafe` (a raw `libc::getuid()` would). Same pattern as `apps/cli`.

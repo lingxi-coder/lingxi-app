@@ -62,8 +62,11 @@ local"
 }
 
 #[test]
-fn managed_tier_uses_global_instructions_description() {
-    // Managed shares the User "global instructions" wording (claudemd.ts:1177).
+fn managed_tier_uses_organization_managed_description() {
+    // Binary `getClaudeMds` (`nUt`) gives Managed its OWN description
+    // "(organization-managed policy instructions)" — it does NOT share the User
+    // "global instructions" wording (the prior claudemd.ts:1177 citation was
+    // stale src; verified against the v2.1.193 binary switch).
     let out = memory_block::format(&[mf(
         "/Library/Application Support/ClaudeCode/CLAUDE.md",
         "policy",
@@ -71,7 +74,7 @@ fn managed_tier_uses_global_instructions_description() {
     )]);
     let expected = format!(
         "{PREAMBLE}\n\n\
-Contents of /Library/Application Support/ClaudeCode/CLAUDE.md (user's private global instructions for all projects):\n\n\
+Contents of /Library/Application Support/ClaudeCode/CLAUDE.md (organization-managed policy instructions):\n\n\
 policy"
     );
     assert_eq!(out, expected);

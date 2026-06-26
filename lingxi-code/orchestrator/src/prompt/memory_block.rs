@@ -364,10 +364,12 @@ fn tier_description(tier: memory::claude_md::ClaudeMdTier) -> &'static str {
     match tier {
         ClaudeMdTier::Project => " (project instructions, checked into the codebase)",
         ClaudeMdTier::Local => " (user's private project instructions, not checked in)",
-        // Managed and User both use the global-instructions wording.
-        ClaudeMdTier::User | ClaudeMdTier::Managed => {
-            " (user's private global instructions for all projects)"
-        }
+        // Binary `getClaudeMds` (`nUt`) 5-way switch on `o.type`: Managed has its
+        // OWN description; only the default (User) gets the global-instructions
+        // wording. (Previously Managed was folded into the User arm — a
+        // divergence whenever an org-managed CLAUDE.md is loaded.)
+        ClaudeMdTier::Managed => " (organization-managed policy instructions)",
+        ClaudeMdTier::User => " (user's private global instructions for all projects)",
     }
 }
 

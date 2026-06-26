@@ -142,7 +142,8 @@ When summarizing the conversation focus on typescript code changes and also reme
 <example>
 # Summary instructions
 When you are using compact - please focus on test output and code changes. Include file reads verbatim.
-</example>";
+</example>
+";
 
 /// Assemble the base compact prompt — prompt.ts:293-303 (`getCompactPrompt`).
 ///
@@ -322,14 +323,18 @@ pub fn get_compact_user_summary_message(
 mod tests {
     use super::*;
 
-    /// Binary oracle: BASE_COMPACT_PROMPT must be exactly 5426 bytes — confirmed
-    /// against v2.1.186 at offset 198743995 (`tail -c +198743996 | head -c 5426`).
+    /// Binary oracle: BASE_COMPACT_PROMPT must be exactly 5427 bytes in v2.1.193
+    /// — the base literal ends `</example>\n` (verified via `od -c` at the closing
+    /// backtick: `…verbatim.\n</example>\n` then `` `;…dea=`\n\nREMINDER… ``). This
+    /// is a 2.1.186→2.1.193 drift: v2.1.186 was 5426 bytes (no trailing `\n`); a
+    /// `\n` was added after the final `</example>` so the assembled prompt reads
+    /// `</example>\n\n\nREMINDER…` (base `\n` + the trailer's `\n\n`).
     #[test]
     fn base_compact_prompt_byte_length_matches_binary() {
         assert_eq!(
             BASE_COMPACT_PROMPT.len(),
-            5426,
-            "BASE_COMPACT_PROMPT must be 5426 bytes (binary oracle v2.1.186)"
+            5427,
+            "BASE_COMPACT_PROMPT must be 5427 bytes (binary oracle v2.1.193)"
         );
         // Spot-check the two trailing-space lines that account for the
         // 5424→5426 difference vs the older TS source.

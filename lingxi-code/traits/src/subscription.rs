@@ -109,6 +109,43 @@ impl SubscriptionSnapshot {
 /// fetch lands; readers treat `None` as `SubscriptionSnapshot::default()`.
 pub type SharedSubscription = Arc<RwLock<Option<SubscriptionSnapshot>>>;
 
+/// Process-global current-subscription cache — the port's analog of claude-code's
+/// module-level `getSubscriptionType()` / `getOauthAccountInfo()` (`vi()` reads a
+/// cached global, not a threaded value). `None` until a composition root resolves
+/// the OAuth profile and calls [`set_current_subscription`]; readers that need a
+/// process-wide tier (e.g. the `AgentTool` pro-plan prompt gate) consult it
+/// without taking a dependency on any per-instance [`SharedSubscription`] slot.
+static CURRENT_SUBSCRIPTION: RwLock<Option<SubscriptionSnapshot>> = RwLock::new(None);
+
+/// Set (or clear) the process-global subscription snapshot. Called by the
+/// composition root after it resolves the signed-in user's plan; clears to
+/// `None` on logout. Mirrors claude-code caching the resolved subscription in
+/// module state for later `vi()` reads.
+pub fn set_current_subscription(snapshot: Option<SubscriptionSnapshot>) {
+    if let Ok(mut slot) = CURRENT_SUBSCRIPTION.write() {
+        *slot = snapshot;
+    }
+}
+
+/// Process-global `getSubscriptionType()` (`vi()`): the current subscription type
+/// string (`"pro" | "max" | "team" | "enterprise"`), or `None` when unknown / not
+/// yet resolved. A poisoned lock degrades to `None` (conservative, matching the
+/// "unknown subscription ⇒ every predicate false" contract).
+#[must_use]
+pub fn current_subscription_type() -> Option<String> {
+    CURRENT_SUBSCRIPTION
+        .read()
+        .ok()
+        .and_then(|slot| slot.as_ref().and_then(|s| s.subscription_type.clone()))
+}
+
+/// Whether the signed-in user is on the `"pro"` plan specifically (binary
+/// `vi()==="pro"`). `false` when the tier is unknown or any non-`pro` value.
+#[must_use]
+pub fn is_pro_plan() -> bool {
+    current_subscription_type().as_deref() == Some("pro")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

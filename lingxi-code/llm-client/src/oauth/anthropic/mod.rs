@@ -49,7 +49,8 @@ pub use profile::{
 pub use credential_provider::OAuthCredentialProvider;
 pub use refresh::{AuthState, RefreshDriver};
 pub use subscription::{
-    apply_profile, has_profile_scope, is_enterprise, is_subscriber_tier, subscription_from_scopes,
+    apply_profile, has_profile_scope, is_enterprise, is_subscriber_tier, publish_subscription,
+    resolve_subscription_snapshot, subscription_from_scopes,
 };
 pub use resolver::{resolve, AuthSource, ResolverContext};
 pub use scope_upgrade::{

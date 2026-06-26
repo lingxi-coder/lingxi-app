@@ -3157,6 +3157,7 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 let overlay_active = st.pending_permission.is_some()
                     || st.active_screen.is_some()
                     || st.history_search.is_some()
+                    || st.message_selector.open
                     || st.palette.open
                     || st.completion.open
                     // Vim NORMAL/VISUAL: printable keys are COMMANDS (motions,

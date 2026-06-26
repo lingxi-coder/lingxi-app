@@ -570,6 +570,16 @@ pub struct ConversationOrchestrator {
     pub(crate) perms: Arc<dyn PermissionGate>,
     pub(crate) output: Arc<dyn OutputStream>,
     pub(crate) session: Arc<Mutex<SessionState>>,
+    /// `queryTracking.chainId` for analytics (claude-code `query.ts:347-358`): a
+    /// random uuid grouping a query chain, stamped onto the `queryChainId` field
+    /// of `tengu_query_error` / `tengu_auto_compact_*` events. In claude-code a
+    /// subagent INHERITS the parent's chainId and increments `depth`; in this
+    /// port subagents never run through `ConversationOrchestrator` (the `agent`
+    /// crate is a separate path), so every orchestrator IS a top-level chain —
+    /// `queryDepth` is always 0 and each orchestrator owns one fresh chainId.
+    /// The byte value is a host-minted uuid (shape-parity only — never matches
+    /// the binary's per-run uuid).
+    pub(crate) query_chain_id: String,
     /// CLAUDE.md hierarchy provider (M5-03). The orchestrator calls
     /// `memory.load(&cwd).await` once per `run_turn` to gather the
     /// memory files spliced into the system prompt.
@@ -1000,6 +1010,7 @@ impl ConversationOrchestrator {
             config,
             api,
             streaming_api,
+            query_chain_id: uuid::Uuid::new_v4().to_string(),
             tools,
             hooks,
             perms,
@@ -2099,6 +2110,14 @@ impl ConversationOrchestrator {
             "turnsSincePreviousCompact".into(),
             telemetry::AnalyticsValue::Int(turns_since_previous_compact),
         );
+        // queryTracking fields (binary v2.1.193 rapid-refill breaker payload
+        // `{…,queryChainId:se,queryDepth:ne.depth}`). `queryDepth` is always 0 in
+        // this port (subagents never run through `ConversationOrchestrator`).
+        metadata.insert(
+            "queryChainId".into(),
+            telemetry::AnalyticsValue::String(self.query_chain_id.clone()),
+        );
+        metadata.insert("queryDepth".into(), telemetry::AnalyticsValue::Int(0));
         if reactive {
             metadata.insert("reactive".into(), telemetry::AnalyticsValue::Bool(true));
         }

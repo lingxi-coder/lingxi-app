@@ -1628,17 +1628,23 @@ pub(crate) fn is_carveout_propagated(e: &OrchestratorError) -> bool {
 /// NOTE vs the TS catch: `yield* yieldMissingToolResultBlocks(...)` is a NO-OP in
 /// this port — both twins persist the assistant message only AFTER a successful
 /// response/pump, so an error here leaves NO orphaned `tool_use` in history to
-/// repair. The `tengu_query_error` payload's `assistantMessages`/`toolUses`
-/// counts and `queryChainId`/`queryDepth` are omitted (we do not model the
-/// per-query-chain recursion-tracking subsystem — same deferral as the rapid-
-/// refill querytracking fields); the event itself fires for parity.
+/// repair. The `tengu_query_error` payload carries `queryChainId`/`queryDepth`
+/// (`query.ts:965`); `queryDepth` is always 0 because subagents never run
+/// through `ConversationOrchestrator` in this port. The `assistantMessages`/
+/// `toolUses` counts are omitted (turn-scoped assistant-message bookkeeping not
+/// tracked here).
 pub(crate) async fn surface_model_error(
     orch: &ConversationOrchestrator,
     error_text: &str,
 ) -> MessageId {
     if let Some(bus) = orch.analytics_bus.as_ref() {
-        bus.log_event("tengu_query_error", telemetry::LogEventMetadata::new())
-            .await;
+        let mut metadata = telemetry::LogEventMetadata::new();
+        metadata.insert(
+            "queryChainId".into(),
+            telemetry::AnalyticsValue::String(orch.query_chain_id.clone()),
+        );
+        metadata.insert("queryDepth".into(), telemetry::AnalyticsValue::Int(0));
+        bus.log_event("tengu_query_error", metadata).await;
     }
     // `createAssistantAPIErrorMessage({ content })` renders `content` verbatim,
     // falling back to the `NO_CONTENT_MESSAGE` placeholder when empty.

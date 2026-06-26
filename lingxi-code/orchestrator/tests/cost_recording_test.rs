@@ -215,3 +215,48 @@ async fn no_budget_cap_never_stops_on_budget() {
         "no cap must not stop on budget, got {outcome:?}"
     );
 }
+
+/// querytracking parity (`query.ts:965`): the `tengu_query_error` event carries
+/// `queryChainId` (a uuid) + `queryDepth`. `queryDepth` is always 0 in this port
+/// because subagents never run through `ConversationOrchestrator`.
+#[tokio::test]
+async fn query_error_carries_querytracking_fields() {
+    use telemetry::{AnalyticsBus, AnalyticsValue, InMemorySink};
+    // Empty mock → first call exhausts (Transport) → #10 graceful model_error →
+    // `tengu_query_error` fires.
+    let api = Arc::new(MockApiClient::new(vec![]));
+    let bus = Arc::new(AnalyticsBus::new());
+    let sink = Arc::new(InMemorySink::new());
+    bus.attach_sink(sink.clone()).await;
+    let orch = Arc::new(
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api,
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_analytics_bus(bus),
+    );
+    let _ = orch.run_turn("hi").await;
+
+    let events = sink.events().await;
+    let qe = events
+        .iter()
+        .find(|e| e.name == "tengu_query_error")
+        .expect("tengu_query_error must fire on the model_error path");
+    match qe.metadata.get("queryChainId") {
+        Some(AnalyticsValue::String(s)) => {
+            assert!(!s.is_empty(), "queryChainId must be a non-empty uuid")
+        }
+        other => panic!("queryChainId must be a String, got {other:?}"),
+    }
+    assert!(
+        matches!(qe.metadata.get("queryDepth"), Some(AnalyticsValue::Int(0))),
+        "queryDepth must be 0; got {:?}",
+        qe.metadata.get("queryDepth")
+    );
+}

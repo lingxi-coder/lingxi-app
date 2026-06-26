@@ -655,7 +655,6 @@ impl Tool for GrepTool {
         let mut count_lines: Vec<String> = Vec::new();
         let mut files_matched: Vec<(PathBuf, SystemTime)> = Vec::new();
         let mut total_matches: u64 = 0;
-        let mut overflow_any = false;
 
         // --- Wall-clock budget on the walk (`utils/ripgrep.ts:130-133`) ---
         // `CLAUDE_CODE_GLOB_TIMEOUT_SECONDS` overrides; else 20s (60s on WSL).
@@ -701,9 +700,6 @@ impl Tool for GrepTool {
             };
             let _ = searcher.search_path(&matcher, path, &mut sink);
 
-            if sink.overflow {
-                overflow_any = true;
-            }
             total_matches += sink.match_count as u64;
             if sink.match_count == 0 {
                 continue;
@@ -753,8 +749,14 @@ impl Tool for GrepTool {
             return Err(ToolError::Io(RIPGREP_TIMEOUT_MSG(is_wsl)));
         }
 
-        // --- Assemble per-mode model string + metadata ---
+        // --- Assemble per-mode result data (claude-code GrepTool outputSchema,
+        // 2.1.191) + the model text. Field order mirrors the binary's construction
+        // (preserve_order). content/count keep the matching text IN `data.content`
+        // (the model reads it via the fallback); files_with_matches has NO content
+        // (the filenames ARE the result), so its model text rides on
+        // `model_content`. No `truncated` — not part of the binary result. ---
         let mut data = Map::new();
+        let mut mc_channel: Option<String> = None;
         let applied_offset = if offset > 0 { Some(offset) } else { None };
 
         if content_mode {
@@ -772,18 +774,18 @@ impl Tool for GrepTool {
             } else {
                 format!("{result_content}\n\n[Showing results with pagination = {limit_info}]")
             };
-            data.insert("content".to_string(), json!(model));
+            // binary: {mode, numFiles, filenames:[], content, numLines, appliedLimit?, appliedOffset?}
             data.insert("mode".to_string(), json!("content"));
-            data.insert("num_files".to_string(), json!(0));
+            data.insert("numFiles".to_string(), json!(0));
             data.insert("filenames".to_string(), json!([] as [String; 0]));
-            data.insert("num_lines".to_string(), json!(num_lines));
+            data.insert("content".to_string(), json!(model));
+            data.insert("numLines".to_string(), json!(num_lines));
             if let Some(l) = applied_limit {
-                data.insert("applied_limit".to_string(), json!(l));
+                data.insert("appliedLimit".to_string(), json!(l));
             }
             if let Some(o) = applied_offset {
-                data.insert("applied_offset".to_string(), json!(o));
+                data.insert("appliedOffset".to_string(), json!(o));
             }
-            data.insert("truncated".to_string(), json!(overflow_any));
         } else if count_mode {
             let (limited, applied_limit) = apply_head_limit(count_lines, head_limit, offset);
             // Re-parse totals from the (limited) `relpath:count` lines.
@@ -815,18 +817,18 @@ impl Tool for GrepTool {
             let summary =
                 format!("\n\nFound {total} total {occ} across {file_count} {fpl}.{pag}");
             let model = format!("{raw_content}{summary}");
-            data.insert("content".to_string(), json!(model));
+            // binary: {mode, numFiles, filenames:[], content, numMatches, appliedLimit?, appliedOffset?}
             data.insert("mode".to_string(), json!("count"));
-            data.insert("num_files".to_string(), json!(file_count));
+            data.insert("numFiles".to_string(), json!(file_count));
             data.insert("filenames".to_string(), json!([] as [String; 0]));
-            data.insert("num_matches".to_string(), json!(total));
+            data.insert("content".to_string(), json!(model));
+            data.insert("numMatches".to_string(), json!(total));
             if let Some(l) = applied_limit {
-                data.insert("applied_limit".to_string(), json!(l));
+                data.insert("appliedLimit".to_string(), json!(l));
             }
             if let Some(o) = applied_offset {
-                data.insert("applied_offset".to_string(), json!(o));
+                data.insert("appliedOffset".to_string(), json!(o));
             }
-            data.insert("truncated".to_string(), json!(overflow_any));
         } else {
             // files_with_matches (default). Sort mtime-desc + filename tiebreak;
             // pure filename sort under cfg!(test) (TS NODE_ENV === 'test').
@@ -868,22 +870,23 @@ impl Tool for GrepTool {
                     relpaths.join("\n")
                 )
             };
-            data.insert("content".to_string(), json!(model));
+            // binary: {mode, filenames, numFiles, appliedLimit?, appliedOffset?} —
+            // NO content (the filenames ARE the result); model text → channel.
             data.insert("mode".to_string(), json!("files_with_matches"));
-            data.insert("num_files".to_string(), json!(num_files));
             data.insert("filenames".to_string(), json!(relpaths));
+            data.insert("numFiles".to_string(), json!(num_files));
             if let Some(l) = applied_limit {
-                data.insert("applied_limit".to_string(), json!(l));
+                data.insert("appliedLimit".to_string(), json!(l));
             }
             if let Some(o) = applied_offset {
-                data.insert("applied_offset".to_string(), json!(o));
+                data.insert("appliedOffset".to_string(), json!(o));
             }
-            data.insert("truncated".to_string(), json!(overflow_any));
+            mc_channel = Some(model);
         }
 
         Ok(ToolCallResult {
             data: Value::Object(data),
-            model_content: None,
+            model_content: mc_channel,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -930,7 +933,15 @@ mod tests {
     }
 
     fn content_str(result: &ToolCallResult) -> String {
-        result.data["content"].as_str().unwrap().to_string()
+        // content/count keep the text in `data.content`; files_with_matches has no
+        // content field, so its model text rides on `model_content`.
+        result
+            .data
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .or(result.model_content.as_deref())
+            .expect("content in data or model_content channel")
+            .to_string()
     }
 
     #[test]
@@ -996,8 +1007,8 @@ mod tests {
             .await
             .unwrap();
         // True count (150), not the old GREP_PER_FILE_CAP (100).
-        assert_eq!(result.data["num_matches"], 150);
-        assert_eq!(result.data["num_files"], 1);
+        assert_eq!(result.data["numMatches"], 150);
+        assert_eq!(result.data["numFiles"], 1);
         let c = content_str(&result);
         assert!(c.contains("big.rs:150"), "per-file count should be 150: {c}");
         assert!(
@@ -1024,9 +1035,8 @@ mod tests {
             .await
             .unwrap();
         // All 150 lines recorded (old cap would have stopped at 100).
-        assert_eq!(result.data["num_lines"], 150);
-        // Not truncated — well under the 10k records valve.
-        assert_eq!(result.data["truncated"], false);
+        assert_eq!(result.data["numLines"], 150);
+        // (`truncated` is not part of the binary GrepTool result.)
     }
 
     #[test]
@@ -1128,7 +1138,7 @@ mod tests {
             .unwrap();
         // Filename sort under cfg!(test): a.rs before b.rs.
         assert_eq!(content_str(&result), "Found 2 files\na.rs\nb.rs");
-        assert_eq!(result.data["num_files"], 2);
+        assert_eq!(result.data["numFiles"], 2);
         assert_eq!(result.data["mode"], "files_with_matches");
     }
 
@@ -1143,7 +1153,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content_str(&result), "No files found");
-        assert_eq!(result.data["num_files"], 0);
+        assert_eq!(result.data["numFiles"], 0);
     }
 
     #[tokio::test]
@@ -1248,7 +1258,7 @@ mod tests {
             .unwrap();
         // -n defaults true: relpath:line:text.
         assert_eq!(content_str(&result), "a.rs:1:fn foo() {}\na.rs:2:fn bar() {}");
-        assert_eq!(result.data["num_lines"], 2);
+        assert_eq!(result.data["numLines"], 2);
     }
 
     #[tokio::test]
@@ -1362,8 +1372,8 @@ mod tests {
             c.ends_with("\n\n[Showing results with pagination = limit: 3]"),
             "pagination note: {c}"
         );
-        assert_eq!(result.data["num_lines"], 3);
-        assert_eq!(result.data["applied_limit"], 3);
+        assert_eq!(result.data["numLines"], 3);
+        assert_eq!(result.data["appliedLimit"], 3);
     }
 
     #[tokio::test]
@@ -1388,7 +1398,7 @@ mod tests {
         );
         // limit 0 = unlimited, so no applied_limit even though offset applied.
         assert!(result.data.get("applied_limit").is_none());
-        assert_eq!(result.data["applied_offset"], 2);
+        assert_eq!(result.data["appliedOffset"], 2);
     }
 
     #[tokio::test]
@@ -1433,8 +1443,8 @@ mod tests {
         );
         assert!(c.contains("a.rs:2"), "per-file count: {c}");
         assert!(c.contains("b.rs:1"), "per-file count: {c}");
-        assert_eq!(result.data["num_matches"], 3);
-        assert_eq!(result.data["num_files"], 2);
+        assert_eq!(result.data["numMatches"], 3);
+        assert_eq!(result.data["numFiles"], 2);
     }
 
     #[tokio::test]
@@ -1514,8 +1524,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result.data["truncated"], true, "valve should trip truncated");
-        assert_eq!(result.data["num_lines"], GREP_RECORDS_CAP as i64);
+        // The records valve trips at GREP_RECORDS_CAP — observable as numLines
+        // capped (`truncated` is not part of the binary GrepTool result).
+        assert_eq!(result.data["numLines"], GREP_RECORDS_CAP as i64);
 
         // Count mode still reports the TRUE total (valve doesn't cap counting).
         let count = tool
@@ -1526,7 +1537,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(count.data["num_matches"], n as i64);
+        assert_eq!(count.data["numMatches"], n as i64);
     }
 
     #[tokio::test]

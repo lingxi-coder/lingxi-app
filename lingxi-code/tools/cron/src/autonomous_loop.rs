@@ -99,6 +99,21 @@ pub fn is_loop_default_prompt_enabled() -> bool {
     env_truthy("CLAUDE_CODE_LOOP_PROMPT")
 }
 
+/// `q_e` (cc_all.txt:521920 dispatch): `nt("tengu_kairos_loop_dynamic",false)`.
+/// Selects the DYNAMIC-pacing builders (`hZm` usage / `gZm` prompt-builder, and
+/// `a(loopFile,true)` for the no-prompt autonomous default) over the cron variants.
+// PARITY: `tengu_kairos_loop_dynamic` has no port backend → it DEFAULTS to the
+// binary's shipped `false`. As with [`is_loop_default_prompt_enabled`] the env
+// var `CLAUDE_CODE_LOOP_DYNAMIC` stands in for the server flag flip (mirroring
+// the `CLAUDE_CODE_LOOP_PROMPT` / `CLAUDE_CODE_LOOP_PERSISTENT` overrides); unset
+// it and the port matches the shipped binary (cron variants only).
+// PARITY-TODO: replace the env override with the real `tengu_kairos_loop_dynamic`
+// flag once the `features` crate exposes it.
+#[must_use]
+pub fn is_loop_dynamic_enabled() -> bool {
+    env_truthy("CLAUDE_CODE_LOOP_DYNAMIC")
+}
+
 /// `Yke` (cc_all.txt:504927): `Rle() && agentPushNotifEnabled`. Gates the
 /// `PushNotification` addendum appended to tick prompts.
 // PARITY: both `tengu_kairos_push_notifications` and the `agentPushNotifEnabled`
@@ -163,12 +178,22 @@ pub const AUTONOMOUS_LOOP_PREAMBLE: &str = PREAMBLE_DEFAULT;
 /// `dJr` / `getAutonomousLoopPreamble` (cc_all.txt:504950):
 /// `isLoopPersistentPreambleEnabled() ? VVi : aJr`.
 #[must_use]
-fn get_autonomous_loop_preamble() -> &'static str {
+pub fn get_autonomous_loop_preamble() -> &'static str {
     if is_loop_persistent_preamble_enabled() {
         PREAMBLE_PERSISTENT
     } else {
         PREAMBLE_DEFAULT
     }
+}
+
+/// `pJr` / `logAutonomousLoopActivation` (cc_all.txt:504950):
+/// `W("tengu_kairos_loop_persistent_activated",{variant:YIn()})`. Emitted when
+/// the autonomous-loop default is activated — by the `/loop` command's no-prompt
+/// builder (binary `a(c,u)` when loop.md is absent) and by the fire-time
+/// resolvers `nKi` (every autonomous fire) / `sKi` (loop.md-absent fire).
+// PARITY: binary pJr (cc_all.txt:504950).
+pub fn log_autonomous_loop_activation() {
+    telemetry::emit_loop_persistent_activated(is_loop_persistent_preamble_enabled());
 }
 
 // ── PushNotification addendum (binary `aFt`) ─────────────────────────────────
@@ -399,6 +424,9 @@ pub fn resolve_autonomous_loop_fire(sentinel: &str) -> Option<String> {
     if !is_loop_default_prompt_enabled() {
         return None;
     }
+    // PARITY: `nKi` calls `pJr()` on EVERY autonomous fire, right after the two
+    // gate returns and before computing the tick (cc_all.txt:504952).
+    log_autonomous_loop_activation();
     let tick = if sentinel == AUTONOMOUS_LOOP_DYNAMIC_SENTINEL {
         tick_autonomous_dynamic()
     } else {
@@ -447,8 +475,11 @@ pub fn resolve_loop_file_fire(sentinel: &str, cwd: &Path) -> Option<String> {
             content = file.content,
         ));
     }
-    // PARITY: loop.md ABSENT — `let r=t?K4d():tKi();if(Gst===ZVi||iFt)return r;
-    // return Gst=ZVi,iFt=!0,`${dJr()}\n${r}``.
+    // PARITY: loop.md ABSENT — `sKi` calls `pJr()` here (only on the absent path,
+    // after the `if(n){…}` present-block), then `let r=t?K4d():tKi();
+    // if(Gst===ZVi||iFt)return r;return Gst=ZVi,iFt=!0,`${dJr()}\n${r}``
+    // (cc_all.txt:504966).
+    log_autonomous_loop_activation();
     let tick = if dynamic {
         tick_loopfile_absent_dynamic()
     } else {

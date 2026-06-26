@@ -1,0 +1,15 @@
+# /loop — loop.md tasks with dynamic pacing
+The user invoked `/loop` with no prompt and no interval and has a loop-tasks file at `/tmp/proj/loop.md`. Run those tasks now, then self-pace the next iteration via ScheduleWakeup — no cron.
+## Action
+1. **Run the loop.md tasks now**, following the instructions inlined below.
+2. **If the next tick is gated on an event** (CI finishing, a PR comment, a log line) and no Monitor is already running for it: arm one now with `persistent: true`. Its events wake this loop immediately — you do not wait for the ScheduleWakeup deadline. Arm once; on later ticks call TaskList first and skip if a monitor is already running.
+3. **Briefly confirm**: that you're running tasks from `/tmp/proj/loop.md` in dynamic-pacing mode, that you ran the first tick now, whether a Monitor is the primary wake signal, and what fallback delay you're about to pick. Write this as text *before* calling ScheduleWakeup — the turn ends as soon as that tool returns.
+4. **Then, as the last action of this turn, call ScheduleWakeup** with:
+   - `delaySeconds`: with a Monitor armed this is the fallback heartbeat (lean 1200–1800s). Without one, pick based on what you observed this turn — quiet branch? wait longer. Lots in flight? wait shorter. Read the tool's own description for cache-aware delay guidance.
+   - `reason`: one short sentence on why you picked that delay.
+   - `prompt`: the literal string `<<loop.md-dynamic>>` — the dynamic-mode sentinel expands at fire time to the full instructions (first fire / first fire post-compact / loop.md edited) or a dynamic-pacing-specific short reminder (subsequent fires). Do not pass the full instructions; that is handled automatically.
+5. **If woken by a `<task-notification>`** rather than this prompt: handle the event, then call ScheduleWakeup again with `<<loop.md-dynamic>>` and the same 1200–1800s `delaySeconds` — the Monitor remains the wake signal; this only resets the safety net.
+6. **To stop the loop**, omit the ScheduleWakeup call and TaskStop any Monitor you armed (use TaskList to find the task ID if it is no longer in context).
+## Loop tasks (from /tmp/proj/loop.md)
+- task A
+- task B

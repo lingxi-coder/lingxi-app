@@ -83,6 +83,20 @@ pub fn emit_command_failed(event: &'static str, error: &str) {
     tracing::error!(event = event, error = %error);
 }
 
+// -- Kairos (`/loop`) autonomous-loop emit helper ----------------------------
+
+/// Emit `tengu_kairos_loop_persistent_activated` with the `variant` field.
+///
+/// PARITY: binary `pJr()` / `logAutonomousLoopActivation` (cc_all.txt:504950) —
+/// `W("tengu_kairos_loop_persistent_activated",{variant:YIn()})`, where `variant`
+/// is `isLoopPersistentPreambleEnabled()`. See [`crate::tengu::kairos`].
+pub fn emit_loop_persistent_activated(variant: bool) {
+    tracing::info!(
+        event = crate::tengu::kairos::LOOP_PERSISTENT_ACTIVATED,
+        variant = variant,
+    );
+}
+
 // -- M5-14 Task 10: release-marker emit-once helpers -------------------------
 
 /// Emit the release markers exactly once per process lifetime.

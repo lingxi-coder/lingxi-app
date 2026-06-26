@@ -13,6 +13,10 @@ license.workspace = true
 command-api = { path = "../../command-api" }
 protocol = { path = "../../protocol" }
 skill-api = { path = "../../skill-api" }
+# The bundled `/loop` skill's flag-on (autonomous-default) builder imports the
+# autonomous-loop module (binary `Xpc` imports `QVe = io(T3e)`): loop.md detection,
+# the preamble, the sentinels, and `logAutonomousLoopActivation`.
+tool-cron = { path = "../../tools/cron" }
 traits = { path = "../../traits" }
 telemetry = { path = "../../telemetry" }
 serde.workspace = true

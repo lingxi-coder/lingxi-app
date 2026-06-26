@@ -13,6 +13,10 @@ pub mod api;
 pub mod command;
 pub mod coordinator;
 pub mod cost;
+/// `/loop` (Kairos) autonomous-loop telemetry event names (NOT in
+/// `ALL_EVENT_NAMES` — separate from the count-locked event set; kept here for
+/// string-lock testing only, mirroring `workflow`).
+pub mod kairos;
 pub mod memory;
 pub mod migration;
 pub mod oauth;

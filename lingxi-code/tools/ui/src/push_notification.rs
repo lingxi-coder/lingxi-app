@@ -362,6 +362,7 @@ fn result(
         model_content: Some(render(disabled_reason, local_sent, has_focus, idle_sec)),
         new_messages: vec![],
         context_modifier: None,
+        is_error: false,
         mcp_meta: None,
     }
 }

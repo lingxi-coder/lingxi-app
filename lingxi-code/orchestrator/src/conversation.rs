@@ -433,6 +433,13 @@ enum StopHookFlow {
     /// Terminate the turn loop, returning this outcome (`emit_end_turn` already
     /// fired inside the helper).
     Terminate(ConversationOutcome),
+    /// A Stop hook blocked the turn from ending, but the next turn would exceed
+    /// `max_turns`, so end NOW on the max-turns terminal instead of looping
+    /// (binary blocking-branch `if(c&&dt>c) … {reason:"max_turns",turnCount:dt}`).
+    /// The caller converts this to `OrchestratorError::MaxTurnsReached`
+    /// (→ `TurnOutcome::MaxTurns`); the `tengu_stop_hook_block_count`
+    /// `{hit_max_turns:true}` event is fired inside the helper before returning.
+    TerminateMaxTurns,
     /// A Stop hook asked the agent to keep working — loop one more turn step.
     LoopAgain,
     /// No Stop hook intervened — fall through to the driver's normal end
@@ -3587,6 +3594,24 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 // …return {reason:"completed"}`). `Z` is the carried
                 // `stopHookBlockingCount`; `ar` the would-be next count.
                 let next_count = stop_hook_blocking_count.saturating_add(1);
+                // Binary blocking-branch max-turns check, evaluated BEFORE the
+                // block cap (`let dt=ie+1,nn=te+1; if(c&&dt>c) return
+                // G("tengu_stop_hook_block_count",{count:nn,hit_max_turns:!0,
+                // hit_cap:!1}), yield ei({type:"max_turns_reached",maxTurns:c,
+                // turnCount:dt},…), {reason:"max_turns",turnCount:dt}`). `c` is
+                // `maxTurns`; `ie` is this turn's count = our (already-incremented)
+                // `turn_count`, so the binary's `ie+1>c` is exactly
+                // `turn_count >= max_turns`. The port represents the max-turns
+                // terminal as `OrchestratorError::MaxTurnsReached`
+                // (→ `TurnOutcome::MaxTurns`) rather than a discrete stream event,
+                // so we route there via `TerminateMaxTurns` — but we still fire the
+                // `hit_max_turns:true` block-count event the binary emits here, and
+                // (like the binary, which returns before appending) we end WITHOUT
+                // adding the stop-hook feedback message the `LoopAgain` path would.
+                if self.config.max_turns != 0 && turn_count >= self.config.max_turns {
+                    self.fire_stop_hook_block_count(next_count, true, false).await;
+                    return StopHookFlow::TerminateMaxTurns;
+                }
                 // `parseInt(process.env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP??"",10)`
                 // with `Number.isNaN(jr)?8:jr` ⇒ unset / non-numeric → 8. A
                 // `cap <= 0` disables the cap (binary `if(bo>0&&…)`), letting a
@@ -4121,6 +4146,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         .await
                     {
                         StopHookFlow::Terminate(outcome) => return Ok(outcome),
+                        StopHookFlow::TerminateMaxTurns => {
+                            return Err(OrchestratorError::MaxTurnsReached {
+                                max_turns: self.config.max_turns,
+                            });
+                        }
                         StopHookFlow::LoopAgain => {
                             // RECOV.4: a Stop hook forced the loop to continue —
                             // reset the max_output_tokens recovery bookkeeping so the
@@ -5248,6 +5278,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         .await
                     {
                         StopHookFlow::Terminate(outcome) => return Ok(outcome),
+                        StopHookFlow::TerminateMaxTurns => {
+                            return Err(OrchestratorError::MaxTurnsReached {
+                                max_turns: self.config.max_turns,
+                            });
+                        }
                         StopHookFlow::LoopAgain => {
                             // RECOV.4: a Stop hook forced the loop to continue —
                             // reset the max_output_tokens recovery bookkeeping so the
@@ -5447,6 +5482,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             recovery.reset_max_output_tokens_recovery();
                             continue;
                         }
+                        StopHookFlow::TerminateMaxTurns => {
+                            return Err(OrchestratorError::MaxTurnsReached {
+                                max_turns: self.config.max_turns,
+                            });
+                        }
                         StopHookFlow::FallThrough => {}
                     }
                     if self
@@ -5622,6 +5662,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         .await
                     {
                         StopHookFlow::Terminate(_) => return Ok(TurnOutcome::EndTurn),
+                        // Binary blocking-branch max-turns end — mirror this fn's
+                        // own top-of-loop guard, which returns `TurnOutcome::MaxTurns`.
+                        StopHookFlow::TerminateMaxTurns => return Ok(TurnOutcome::MaxTurns),
                         StopHookFlow::LoopAgain => {
                             // RECOV.4: a Stop hook forced the loop to continue —
                             // reset the max_output_tokens recovery bookkeeping so

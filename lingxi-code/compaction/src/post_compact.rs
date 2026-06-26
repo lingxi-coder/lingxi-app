@@ -267,6 +267,15 @@ pub fn run_post_compact_cleanup(query_source: Option<&str>) {
         //   equivalent in this crate (orchestrator-owned).
         // TS postCompactCleanup.ts: resetGetMemoryFilesCache('compact') — no
         //   Rust equivalent in this crate (orchestrator/session-owned).
+
+        // PARITY: binary `Zne` post-compact cleanup ends with
+        // `if(o)knm.resetAutonomousLoopDelivered()` where `o` = main-thread
+        // compact (cc_all.txt). Reset the autonomous-loop first-delivery state
+        // (`iFt`/`Gst`) so the next loop fire re-emits the full preamble. Inert
+        // by default (the resolver gate `tengu_kairos_loop_prompt` is off, so the
+        // DELIVERY state is never mutated) — wired here for structural 1:1 so it
+        // is correct the moment the flag flips.
+        tool_cron::reset_autonomous_loop_delivered();
     }
 
     // clearCompactWarningSuppression is NOT called here in TS post-compact
@@ -572,5 +581,43 @@ mod tests {
         assert_eq!(msgs.skills.len(), 1);
         // compactedMessageCount = summary(1) + files(1) + skills(1) = 3.
         assert_eq!(msgs.compacted_message_count(), 3);
+    }
+
+    /// PARITY: binary `Zne` ends with `if(o)resetAutonomousLoopDelivered()` on a
+    /// main-thread compact. A main-thread cleanup must reset the autonomous-loop
+    /// first-delivery state (so the next fire re-emits the preamble); a subagent
+    /// compact must NOT.
+    #[test]
+    fn post_compact_resets_autonomous_loop_delivered_on_main_thread() {
+        use tool_cron::{resolve_autonomous_loop_fire, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL};
+        // Enable the resolver gate (flag-only) via the test override.
+        telemetry::test_set_flag("tengu_kairos_loop_prompt", true);
+        tool_cron::reset_autonomous_loop_delivered();
+
+        let preamble_head = "# Autonomous loop check\n";
+        // First fire delivers the full preamble; second drops it.
+        let first = resolve_autonomous_loop_fire(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL).unwrap();
+        assert!(first.starts_with(preamble_head));
+        let second = resolve_autonomous_loop_fire(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL).unwrap();
+        assert!(!second.starts_with(preamble_head));
+
+        // Subagent compact must NOT reset (state stays "delivered").
+        run_post_compact_cleanup(Some("agent:child"));
+        let after_subagent = resolve_autonomous_loop_fire(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL).unwrap();
+        assert!(
+            !after_subagent.starts_with(preamble_head),
+            "subagent compact must NOT reset delivery state"
+        );
+
+        // Main-thread compact (query_source None) resets → preamble re-emitted.
+        run_post_compact_cleanup(None);
+        let after_main = resolve_autonomous_loop_fire(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL).unwrap();
+        assert!(
+            after_main.starts_with(preamble_head),
+            "main-thread compact must reset → preamble re-delivered"
+        );
+
+        telemetry::test_clear_flag("tengu_kairos_loop_prompt");
+        tool_cron::reset_autonomous_loop_delivered();
     }
 }

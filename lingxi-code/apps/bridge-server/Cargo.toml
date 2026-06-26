@@ -76,6 +76,9 @@ tool-api = { path = "../../tool-api" }
 # composition root seeds, so `RunSlashCommand` routes through the production
 # registry (not a test-only stub).
 command-core = { path = "../../commands/core" }
+# Wakeup-scheduler resolution test flips the loop-prompt flag via the test-only
+# flag override (binary `ROt`/`Uvi`).
+telemetry = { path = "../../telemetry" }
 tokio-tungstenite = "0.21"
 futures-util.workspace = true
 http = "1"

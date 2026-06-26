@@ -289,6 +289,34 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
     bus.log_event(FAILED, md).await;
 }
 
+async fn emit_completed(bus: &Arc<AnalyticsBus>, duration_ms: u64, scheduled: bool) {
+    let mut md: LogEventMetadata = HashMap::new();
+    md.insert("tool_name".into(), verified_str(SCHEDULE_WAKEUP_TOOL_NAME));
+    md.insert("duration_ms".into(), AnalyticsValue::Int(duration_ms as i64));
+    md.insert("scheduled".into(), AnalyticsValue::Bool(scheduled));
+    bus.log_event(COMPLETED, md).await;
+}
+
+/// PARITY: binary gate-off / `aKi`-null return — `{scheduledFor:0,
+/// clampedDelaySeconds:0, wasClamped:false}` with the `e===0` model text
+/// (cc_all.txt:507964). Used for BOTH the `!q_e()` gate-off branch and the
+/// no-scheduler (aKi-null stand-in) branch.
+fn zero_triple_result(reason: &str) -> ToolCallResult {
+    ToolCallResult {
+        data: json!({
+            "scheduledFor": 0,
+            "clampedDelaySeconds": 0,
+            "wasClamped": false,
+            "model_content": "Wakeup not scheduled. Either the /loop dynamic runtime gate is off or the loop reached its maximum duration — the loop has ended; do not re-issue.",
+            "reason": reason,
+        }),
+        model_content: None,
+        new_messages: vec![],
+        context_modifier: None,
+        mcp_meta: None,
+    }
+}
+
 #[async_trait]
 impl Tool for ScheduleWakeupTool {
     fn name(&self) -> &str {
@@ -430,76 +458,77 @@ impl Tool for ScheduleWakeupTool {
         md.insert("_PROTO_reason".into(), pii_str(&reason));
         bus.log_event(STARTED, md).await;
 
-        // Fire the one-shot wakeup if a scheduler is wired; otherwise the tool is
-        // a strict no-op + reports the gap (documented Phase-2 boundary).
-        let scheduled = if let Some(wakeup) = self.wakeup.get() {
-            wakeup
-                .schedule(
-                    Duration::from_secs(delay_secs as u64),
-                    prompt.clone(),
-                    reason.clone(),
-                )
-                .await;
-            true
-        } else {
-            // No scheduler wired on this host (mobile / offline / CLI own no
-            // per-connection queue). The desktop bridge fills the cell at
-            // `boot::assemble`; here the tool is a strict, honest no-op.
-            false
-        };
+        // PARITY: binary `call()` gates on `q_e()` (isLoopDynamic) FIRST —
+        // `if(!q_e())return Vst("gate_off"),{data:{scheduledFor:0,
+        // clampedDelaySeconds:0,wasClamped:!1}}` (cc_all.txt:507964). With
+        // `tengu_kairos_loop_dynamic` off (the shipped default) ScheduleWakeup is
+        // a no-op that ends the loop. The clamp is computed only on the success
+        // path (inside `aKi`/`cKi`), so the gate-off return is a literal zero
+        // triple.
+        if !crate::autonomous_loop::is_loop_dynamic_enabled() {
+            telemetry::emit_loop_ended("gate_off");
+            emit_completed(&bus, started.elapsed().as_millis() as u64, false).await;
+            return Ok(zero_triple_result(&reason));
+        }
 
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert("tool_name".into(), verified_str(SCHEDULE_WAKEUP_TOOL_NAME));
-        md.insert(
-            "duration_ms".into(),
-            AnalyticsValue::Int(started.elapsed().as_millis() as i64),
-        );
-        md.insert("scheduled".into(), AnalyticsValue::Bool(scheduled));
-        bus.log_event(COMPLETED, md).await;
-
-        // PARITY: binary result is `{scheduledFor, clampedDelaySeconds,
-        // wasClamped}` (O7p). `wasClamped` is true iff the rounded request fell
-        // outside [60,3600] (binary `nqd`: `r=!Number.isFinite(e)||t!==n`).
+        // PARITY: `wasClamped` is true iff the rounded request fell outside
+        // [60,3600] (binary `nqd`: `r=!Number.isFinite(e)||t!==n`).
         let was_clamped = !raw_delay.is_finite() || raw_delay.round() as i64 != delay_secs;
 
-        // PARITY: binary `call()` returns `{scheduledFor:0,…}` when `!q_e()`
-        // (tengu_kairos_loop_dynamic off) or when scheduling returns null
-        // (gate_off / aged_out). The port has NO flag backend (the `features`
-        // crate lacks the `tengu_kairos_loop_*` keys), and q_e() defaults
-        // false in the binary; the port's only LIVE path is the wired-scheduler
-        // host, so the no-scheduler case stands in for the gate-off case —
-        // `scheduledFor:0` and the same model-visible "loop has ended" text.
+        // Fire the one-shot wakeup if a scheduler is wired. A host with no
+        // scheduler cell (mobile / offline / CLI own no per-connection queue) is
+        // the port's stand-in for the binary's `aKi(...)===null` branch — return
+        // the zero triple and emit NO loop telemetry (the binary emits the
+        // scheduled/aged-out events INSIDE `aKi`, not on the null return).
+        let Some(wakeup) = self.wakeup.get() else {
+            emit_completed(&bus, started.elapsed().as_millis() as u64, false).await;
+            return Ok(zero_triple_result(&reason));
+        };
+        wakeup
+            .schedule(
+                Duration::from_secs(delay_secs as u64),
+                prompt.clone(),
+                reason.clone(),
+            )
+            .await;
+
+        // PARITY: binary `cKi` success emit — `chosen_delay_seconds` is the RAW
+        // requested delay (`Number.isFinite(e)?e:0`, NOT rounded); `reason_length`
+        // is JS `String.length` = UTF-16 code units (`o?.length??0`);
+        // `superseded_count` 0 (the port's single-shot scheduler has no multi-loop
+        // cron registry to supersede).
+        let chosen = if raw_delay.is_finite() { raw_delay } else { 0.0 };
+        telemetry::emit_loop_dynamic_wakeup_scheduled(
+            chosen,
+            delay_secs as u64,
+            was_clamped,
+            reason.encode_utf16().count(),
+            0,
+        );
+        emit_completed(&bus, started.elapsed().as_millis() as u64, true).await;
+
+        // PARITY: success result `{scheduledFor:r.scheduledFor,
+        // clampedDelaySeconds:r.clampedDelaySeconds, wasClamped:r.wasClamped}` (O7p).
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        let scheduled_for: i64 = if scheduled {
-            now_ms + delay_secs * 1000
-        } else {
-            0
-        };
+        let scheduled_for: i64 = now_ms + delay_secs * 1000;
 
-        // PARITY: binary `mapToolResultToToolResultBlockParam` (cc_all.txt:507964).
-        // The model sees this rendered text, not the raw numbers.
-        let model_content = if scheduled_for == 0 {
-            // PARITY: cc_all.txt:507964 — `e===0` branch.
-            "Wakeup not scheduled. Either the /loop dynamic runtime gate is off or the loop reached its maximum duration — the loop has ended; do not re-issue.".to_string()
+        // PARITY: binary `mapToolResultToToolResultBlockParam` (cc_all.txt:507964)
+        // — string-table 487586-487588: `new Date(e).toTimeString().slice(0,8)` =
+        // local HH:MM:SS; `s=Math.max(0,Math.round((e-Date.now())/1000))`; clamp
+        // suffix ` (clamped to ${t}s from your requested value)`.
+        let hhmmss = local_hhmmss(scheduled_for);
+        let secs = ((scheduled_for - now_ms) as f64 / 1000.0).round().max(0.0) as i64;
+        let clamped_suffix = if was_clamped {
+            format!(" (clamped to {delay_secs}s from your requested value)")
         } else {
-            // PARITY: cc_all.txt:507964 / string-table 487586-487588 — `new
-            // Date(e).toTimeString().slice(0,8)` = local HH:MM:SS; `s=Math.max(0,
-            // Math.round((e-Date.now())/1000))`; clamp suffix ` (clamped to ${t}s
-            // from your requested value)`.
-            let hhmmss = local_hhmmss(scheduled_for);
-            let secs = ((scheduled_for - now_ms) as f64 / 1000.0).round().max(0.0) as i64;
-            let clamped_suffix = if was_clamped {
-                format!(" (clamped to {delay_secs}s from your requested value)")
-            } else {
-                String::new()
-            };
-            format!(
-                "Next wakeup scheduled for {hhmmss} (in {secs}s){clamped_suffix}. Nothing more to do this turn — the harness re-invokes you when the wakeup fires or a task-notification arrives."
-            )
+            String::new()
         };
+        let model_content = format!(
+            "Next wakeup scheduled for {hhmmss} (in {secs}s){clamped_suffix}. Nothing more to do this turn — the harness re-invokes you when the wakeup fires or a task-notification arrives."
+        );
 
         Ok(ToolCallResult {
             data: json!({
@@ -678,10 +707,10 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // The resolver gate (`is_loop_default_prompt_enabled`) defaults OFF
-        // (binary `tengu_kairos_loop_prompt=false`); enable it via the port's
-        // `CLAUDE_CODE_LOOP_PROMPT` override so this test exercises resolution.
+        // (binary `tengu_kairos_loop_prompt=false`, FLAG-ONLY); enable it via the
+        // test-only flag override so this test exercises resolution.
         // (See `autonomous_loop::gate_off_passthrough` for the default-off path.)
-        std::env::set_var("CLAUDE_CODE_LOOP_PROMPT", "1");
+        telemetry::test_set_flag("tengu_kairos_loop_prompt", true);
         // The DELIVERY global is shared; reset so first-delivery state is known.
         crate::autonomous_loop::reset_autonomous_loop_delivered();
         // The autonomous-dynamic sentinel expands to the REAL tick prompt
@@ -703,11 +732,20 @@ mod tests {
         // Any other prompt passes through verbatim (NOT trimmed).
         assert_eq!(resolve_wakeup_prompt("5m /babysit-prs"), "5m /babysit-prs");
         assert_eq!(resolve_wakeup_prompt("  spaced  "), "  spaced  ");
-        std::env::remove_var("CLAUDE_CODE_LOOP_PROMPT");
+        telemetry::test_clear_flag("tengu_kairos_loop_prompt");
     }
 
     #[tokio::test]
-    async fn call_with_no_scheduler_is_honest_noop() {
+    async fn call_gate_off_returns_zero_triple() {
+        // PARITY: with tengu_kairos_loop_dynamic OFF (shipped default), binary
+        // call() gates off FIRST → Vst("gate_off") + the literal zero triple
+        // {scheduledFor:0, clampedDelaySeconds:0, wasClamped:false}. The clamp is
+        // computed only on the success path, so clampedDelaySeconds is 0 here even
+        // though delaySeconds=10 would clamp to 60 on success.
+        let _serial = crate::autonomous_loop::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
         let tmp = tempfile::tempdir().unwrap();
         let tool = ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
@@ -718,12 +756,9 @@ mod tests {
             )
             .await
             .expect("ok");
-        // PARITY: no scheduler ⇒ scheduledFor:0 (binary gate-off equivalent),
-        // and the model-visible text is the "loop has ended" branch.
         assert_eq!(out.data["scheduledFor"], json!(0));
-        // delaySeconds=10 rounds to 10, clamped to 60 ⇒ wasClamped true.
-        assert_eq!(out.data["clampedDelaySeconds"], json!(60));
-        assert_eq!(out.data["wasClamped"], json!(true));
+        assert_eq!(out.data["clampedDelaySeconds"], json!(0));
+        assert_eq!(out.data["wasClamped"], json!(false));
         let mc = out.data["model_content"].as_str().unwrap();
         assert_eq!(
             mc,
@@ -732,8 +767,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_no_scheduler_in_range_delay_not_clamped() {
-        // delaySeconds inside [60,3600] ⇒ wasClamped false even with no scheduler.
+    async fn call_dynamic_on_no_scheduler_returns_zero_triple() {
+        // PARITY: dynamic flag ON but no scheduler wired = the binary's
+        // `aKi(...)===null` branch → {scheduledFor:0, clampedDelaySeconds:0,
+        // wasClamped:false}, and NO loop telemetry (the binary emits inside aKi).
+        let _serial = crate::autonomous_loop::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
         let tmp = tempfile::tempdir().unwrap();
         let tool = ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
@@ -745,16 +786,38 @@ mod tests {
             .await
             .expect("ok");
         assert_eq!(out.data["scheduledFor"], json!(0));
-        assert_eq!(out.data["clampedDelaySeconds"], json!(600));
+        assert_eq!(out.data["clampedDelaySeconds"], json!(0));
         assert_eq!(out.data["wasClamped"], json!(false));
+        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
     }
 
     #[tokio::test]
     async fn call_absent_delay_clamps_to_min() {
-        // PARITY: delaySeconds optional (binary `oU(A.number())`); absent ⇒ NaN
-        // ⇒ clamp to 60, wasClamped true.
+        // PARITY: delaySeconds optional (binary `oU(A.number())`); absent ⇒ NaN ⇒
+        // clamp to 60, wasClamped true. The clamp surfaces only on the SUCCESS
+        // path (dynamic flag on + scheduler wired).
+        use std::sync::Mutex;
+        struct Rec {
+            calls: Mutex<usize>,
+        }
+        #[async_trait]
+        impl WakeupScheduler for Rec {
+            async fn schedule(&self, _: Duration, _: String, _: String) {
+                *self.calls.lock().unwrap() += 1;
+            }
+        }
+        let _serial = crate::autonomous_loop::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
+        let rec = Arc::new(Rec {
+            calls: Mutex::new(0),
+        });
         let tmp = tempfile::tempdir().unwrap();
-        let tool = ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let tool = ScheduleWakeupTool::with_scheduler(
+            shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()),
+            rec.clone(),
+        );
         let out = tool
             .call(
                 json!({"reason": "idle", "prompt": "<<autonomous-loop-dynamic>>"}),
@@ -763,8 +826,10 @@ mod tests {
             )
             .await
             .expect("ok");
+        assert_ne!(out.data["scheduledFor"], json!(0));
         assert_eq!(out.data["clampedDelaySeconds"], json!(60));
         assert_eq!(out.data["wasClamped"], json!(true));
+        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
     }
 
     #[tokio::test]
@@ -781,6 +846,12 @@ mod tests {
             }
         }
 
+        // PARITY: call() gates on is_loop_dynamic_enabled() (q_e) first; turn the
+        // flag on so the success path runs.
+        let _serial = crate::autonomous_loop::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
         let rec = Arc::new(Recorder {
             calls: Mutex::new(Vec::new()),
         });
@@ -815,6 +886,7 @@ mod tests {
         // applies `resolve_wakeup_prompt` just before enqueue.
         assert_eq!(calls[0].1, "5m /x");
         assert_eq!(calls[0].2, "idle tick");
+        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
     }
 
     #[tokio::test]
@@ -834,11 +906,18 @@ mod tests {
             }
         }
 
+        // PARITY: call() gates on q_e first; keep the dynamic flag on so the
+        // FILLED-cell path actually schedules (the empty-cell path is the
+        // aKi-null stand-in → zero triple regardless).
+        let _serial = crate::autonomous_loop::TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
         let tmp = tempfile::tempdir().unwrap();
         let tool = ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let cell = tool.wakeup_cell();
 
-        // Before the cell is filled, the tool is an honest no-op.
+        // Before the cell is filled, the tool is an honest no-op (aKi-null).
         let before = tool
             .call(
                 json!({"delaySeconds": 120, "reason": "r", "prompt": "p"}),
@@ -868,6 +947,7 @@ mod tests {
             .expect("ok");
         assert_ne!(after.data["scheduledFor"], json!(0));
         assert_eq!(*rec.calls.lock().unwrap(), 1);
+        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
     }
 
     #[tokio::test]

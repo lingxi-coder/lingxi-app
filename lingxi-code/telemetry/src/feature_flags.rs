@@ -7,9 +7,70 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::RwLock as StdRwLock;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use traits::{RuntimeError, RuntimeSpawner};
+
+// ── Synchronous GrowthBook-style flag reader (binary `nt`) ───────────────────
+//
+// Binary `nt(key,default)` (cc_all.txt:504507) is a SYNC read of a cached flag
+// snapshot with default-on-miss: it checks an override layer `ROt()` (the static
+// `Uvi` map, normally null), then — if GrowthBook is enabled (`$4()`) — reads
+// `Dt().cachedGrowthBookFeatures?.[key]`, returning the passed `default` whenever
+// the flag is absent or GrowthBook is disabled. There is NO env layer inside `nt`
+// itself; env overrides (e.g. `CLAUDE_CODE_LOOP_PERSISTENT`) are applied by the
+// CALLER (`YIn`/`iKi`), not here.
+//
+// The port mirrors this with two process-global maps:
+//   - `FLAG_SNAPSHOT`  = `Dt().cachedGrowthBookFeatures` — populated by the async
+//     refresh loop if/when a real fetcher is wired; EMPTY by default (no fetcher
+//     in prod), so `flag_bool` returns its `default` — byte-identical to the
+//     shipped binary (GrowthBook-absent / flag-at-default).
+//   - `FLAG_TEST_OVERRIDE` = `ROt()`'s `Uvi` — a test-only override layer so
+//     tests can flip a flag without env vars; checked FIRST, exactly like `nt`.
+
+fn flag_snapshot() -> &'static StdRwLock<HashMap<String, FeatureValue>> {
+    static SNAP: OnceLock<StdRwLock<HashMap<String, FeatureValue>>> = OnceLock::new();
+    SNAP.get_or_init(|| StdRwLock::new(HashMap::new()))
+}
+
+fn flag_test_override() -> &'static StdRwLock<HashMap<String, bool>> {
+    static OVR: OnceLock<StdRwLock<HashMap<String, bool>>> = OnceLock::new();
+    OVR.get_or_init(|| StdRwLock::new(HashMap::new()))
+}
+
+/// `nt(key, default)` (cc_all.txt:504507) — synchronous boolean flag read with
+/// default-on-miss. Checks the test-override layer first (binary `ROt()`/`Uvi`),
+/// then the cached snapshot (binary `cachedGrowthBookFeatures`), else returns
+/// `default`. With no fetcher wired (the prod default) the snapshot is empty and
+/// every read returns `default` — matching the shipped binary's GrowthBook-absent
+/// behavior.
+#[must_use]
+pub fn flag_bool(key: &str, default: bool) -> bool {
+    if let Some(v) = flag_test_override().read().unwrap().get(key) {
+        return *v;
+    }
+    match flag_snapshot().read().unwrap().get(key) {
+        Some(FeatureValue::Bool(b)) => *b,
+        _ => default,
+    }
+}
+
+/// Test-only: set a flag in the override layer (binary `ROt()`/`Uvi`). Lets tests
+/// exercise flag-gated paths without process-wide env vars.
+pub fn test_set_flag(key: &str, value: bool) {
+    flag_test_override()
+        .write()
+        .unwrap()
+        .insert(key.to_string(), value);
+}
+
+/// Test-only: clear a flag from the override layer.
+pub fn test_clear_flag(key: &str) {
+    flag_test_override().write().unwrap().remove(key);
+}
 
 /// Polymorphic feature-flag value.
 ///
@@ -81,6 +142,11 @@ impl FeatureFlagsClient {
                 Box::pin(async move {
                     loop {
                         if let Ok(values) = me.fetcher.fetch().await {
+                            // Mirror into the sync snapshot so `flag_bool` (binary
+                            // `nt`) sees live values once a real fetcher is wired.
+                            if let Ok(mut snap) = flag_snapshot().write() {
+                                *snap = values.clone();
+                            }
                             *me.cache.write().await = values;
                         }
                         tokio::time::sleep(me.cache_ttl).await;

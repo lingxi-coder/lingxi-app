@@ -21,7 +21,10 @@ pub mod tengu;
 
 pub use bus::{AnalyticsBus, OverflowPolicy};
 pub use error::TelemetryError;
-pub use feature_flags::{FeatureFlagsClient, FeatureFlagsFetcher, FeatureValue};
+pub use feature_flags::{
+    flag_bool, test_clear_flag, test_set_flag, FeatureFlagsClient, FeatureFlagsFetcher,
+    FeatureValue,
+};
 pub use killswitch::Killswitch;
 pub use pii::{strip_proto_fields, PiiTagged, Verified};
 pub use sink::{AnalyticsSink, AnalyticsValue, LogEventMetadata};
@@ -94,6 +97,41 @@ pub fn emit_loop_persistent_activated(variant: bool) {
     tracing::info!(
         event = crate::tengu::kairos::LOOP_PERSISTENT_ACTIVATED,
         variant = variant,
+    );
+}
+
+/// Emit `tengu_loop_ended` with the raw `reason` literal.
+///
+/// PARITY: binary `Vst(e,t){W("tengu_loop_ended",{reason:Le(e),...t})}` where
+/// `Le()` is identity — so `reason` is the verbatim literal (`gate_off` |
+/// `model_stopped` | `aged_out` | `user_abort`). See [`crate::tengu::kairos`].
+pub fn emit_loop_ended(reason: &str) {
+    tracing::info!(event = crate::tengu::kairos::LOOP_ENDED, reason = %reason);
+}
+
+/// Emit `tengu_loop_dynamic_wakeup_scheduled`.
+///
+/// PARITY: binary `cKi` —
+/// `{chosen_delay_seconds:Number.isFinite(e)?e:0, clamped_delay_seconds:d,
+/// was_clamped:p, reason_length:o?.length??0, superseded_count:s}`.
+/// `chosen_delay_seconds` is the RAW (possibly fractional) requested delay (not
+/// rounded). `reason_length` is JS `String.length` = UTF-16 code units. The
+/// port's single-shot `WakeupScheduler` has no multi-loop registry, so
+/// `superseded_count` is always 0 (a floor, not faithful for reschedules).
+pub fn emit_loop_dynamic_wakeup_scheduled(
+    chosen_delay_seconds: f64,
+    clamped_delay_seconds: u64,
+    was_clamped: bool,
+    reason_length: usize,
+    superseded_count: u64,
+) {
+    tracing::info!(
+        event = crate::tengu::kairos::LOOP_DYNAMIC_WAKEUP_SCHEDULED,
+        chosen_delay_seconds = chosen_delay_seconds,
+        clamped_delay_seconds = clamped_delay_seconds,
+        was_clamped = was_clamped,
+        reason_length = reason_length,
+        superseded_count = superseded_count,
     );
 }
 

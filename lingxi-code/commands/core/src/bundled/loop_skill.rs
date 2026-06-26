@@ -13,11 +13,13 @@
 //!   3. default (BOTH flags off, the SHIPPED binary) → `dZm` usage (empty) /
 //!      `fZm(n)` cron prompt (cc_all.txt:521946)
 //!
-//! The two `tengu_kairos_loop_*` flags have no `features`-crate backend, so they
-//! default to the binary's shipped `false` — and stand-in env overrides
-//! (`CLAUDE_CODE_LOOP_PROMPT` / `CLAUDE_CODE_LOOP_DYNAMIC`, mirroring
-//! `CLAUDE_CODE_LOOP_PERSISTENT`) flip them on. With both UNSET only branch 3 is
-//! reachable, byte-identical to the shipped binary. The flag-on builders live in
+//! The two `tengu_kairos_loop_*` flags are read through the sync flag reader
+//! [`telemetry::flag_bool`] (the port's `nt`); with no live GrowthBook fetcher
+//! wired they sit at the binary's shipped `false`, so only branch 3 is reachable
+//! — byte-identical to the shipped binary. (Unlike PERSISTENT/KEEPALIVE, the
+//! PROMPT/DYNAMIC gates are FLAG-ONLY — the binary `fJr`/`q_e` have no env layer,
+//! so there is no `CLAUDE_CODE_LOOP_PROMPT`/`_DYNAMIC` env; tests flip the flags
+//! via `telemetry::test_set_flag`.) The flag-on builders live in
 //! [`tool_cron`]'s `autonomous_loop` module (loop.md detection, the preamble, the
 //! sentinels, `logAutonomousLoopActivation`), imported here exactly as the binary
 //! loop command imports `QVe = io(T3e)`. The cloud-offer / push-notification
@@ -51,8 +53,8 @@ Examples:
   /loop check the deploy every 20m";
 
 /// Binary `hZm` (cc_all.txt:521879) — the USAGE message for the DYNAMIC variant,
-/// returned by dispatch branch 2 when `q_e()` = `tengu_kairos_loop_dynamic` is on
-/// (port: `CLAUDE_CODE_LOOP_DYNAMIC`) and the input is empty.
+/// returned by dispatch branch 2 when `q_e()` = `tengu_kairos_loop_dynamic`
+/// (flag-only) is on and the input is empty.
 // PARITY: binary hZm (cc_all.txt:521879-521889).
 const USAGE_MESSAGE_DYNAMIC: &str = "Usage: /loop [interval] <prompt>
 Run a prompt or slash command on a recurring interval — or with no interval, let the model self-pace based on the task.
@@ -136,10 +138,11 @@ fn build_prompt(args: &str) -> String {
 // ── Flag-on (autonomous-default / dynamic-pacing) builders ───────────────────
 //
 // These implement the binary `getPromptForCommand` branches gated on
-// `isLoopDefaultPromptEnabled()` (`CLAUDE_CODE_LOOP_PROMPT`) and `q_e()`
-// (`CLAUDE_CODE_LOOP_DYNAMIC`). With both env overrides unset (the shipped-binary
-// default, both `tengu_kairos_loop_*` flags false), the dispatch falls through to
-// the cron variants (`dZm`/`fZm`) — byte-identical to the shipped binary.
+// `isLoopDefaultPromptEnabled()` (`tengu_kairos_loop_prompt`) and `q_e()`
+// (`tengu_kairos_loop_dynamic`) — both FLAG-ONLY (read via `telemetry::flag_bool`,
+// no env layer). With both flags at their shipped default `false` (no live
+// GrowthBook), the dispatch falls through to the cron variants (`dZm`/`fZm`) —
+// byte-identical to the shipped binary.
 
 use std::sync::OnceLock;
 
@@ -206,9 +209,17 @@ fn remote_confirm_line() -> &'static str {
 }
 
 /// Binary `Kpc()` (cc_all.txt:521844) — the `PushNotification` "send a one-line
-/// outcome before you stop" splice. Gated on `Yke()` (push-notif, default off) → "".
+/// outcome before you stop" splice: `return Yke()?" Before you stop, …":""`.
+/// Gated on the shared `Yke()` (`tool_cron::is_push_notif_enabled`), so it is
+/// structurally 1:1 — it renders "" only because the push-notif flag/setting
+/// default off (no live GrowthBook), matching the shipped binary. Note the
+/// leading space (the binary splices it inline after the step-6 sentence).
 fn push_outcome_line() -> &'static str {
-    ""
+    if tool_cron::is_push_notif_enabled() {
+        " Before you stop, send a one-line outcome via PushNotification — the user may be away and waiting to hear it's done. Skip this if you're stopping because the user just told you to; they're already here."
+    } else {
+        ""
+    }
 }
 
 /// Binary `pZm` (cc_all.txt:521920) — the interval→cron conversion table, used by
@@ -417,8 +428,9 @@ The user invoked `/loop` with no prompt (input was empty or just the interval `{
 /// 3. **default** (both flags off, the SHIPPED binary) → `dZm` usage (empty) /
 ///    `fZm(n)` cron prompt.
 ///
-/// With both `CLAUDE_CODE_LOOP_PROMPT` and `CLAUDE_CODE_LOOP_DYNAMIC` unset (the
-/// shipped default) only branch 3 is reachable — byte-identical to the binary.
+/// With both `tengu_kairos_loop_prompt` and `tengu_kairos_loop_dynamic` at their
+/// shipped default `false` (no live GrowthBook) only branch 3 is reachable —
+/// byte-identical to the binary.
 pub struct LoopPromptFn;
 
 impl BundledPromptFn for LoopPromptFn {
@@ -473,6 +485,8 @@ mod tests {
 
     #[test]
     fn usage_message_byte_exact() {
+        // Asserts branch-3 (flag-off) default; serialize + clear flags.
+        let _g = no_persistent_guard();
         // PARITY: binary dZm (cc_all.txt:521947) — empty/whitespace args → USAGE.
         let expected = "Usage: /loop [interval] <prompt>\nRun a prompt or slash command on a recurring interval.\nIntervals: Ns, Nm, Nh, Nd (e.g. 5m, 30m, 2h, 1d). Minimum granularity is 1 minute.\nIf no interval is specified, defaults to 10m.\nExamples:\n  /loop 5m /babysit-prs\n  /loop 30m check the deploy\n  /loop 1h /standup 1\n  /loop check the deploy          (defaults to 10m)\n  /loop check the deploy every 20m";
         assert_eq!(LoopPromptFn.build(""), expected);
@@ -498,6 +512,7 @@ mod tests {
 
     #[test]
     fn build_prompt_structure() {
+        let _g = no_persistent_guard();
         // PARITY: binary fZm = head + `\n## Input\n${e}` (cc_all.txt:521846).
         let out = LoopPromptFn.build("5m /babysit-prs");
         assert!(out.starts_with(&cron_prompt_head()));
@@ -510,6 +525,7 @@ mod tests {
 
     #[test]
     fn no_fabricated_dynamic_section() {
+        let _g = no_persistent_guard();
         // The previous SYNTHESIZED `## Self-pace (dynamic) mode` addendum (which
         // existed NOWHERE in the binary) is gone.
         let out = LoopPromptFn.build("keep working on the migration");
@@ -519,6 +535,7 @@ mod tests {
 
     #[test]
     fn build_prompt_trims_and_interpolates_args() {
+        let _g = no_persistent_guard();
         // Binary `n=e.trim()` then `fZm(n)` — trimmed text appears verbatim under
         // `## Input`.
         let out = LoopPromptFn.build("  check the deploy  ");
@@ -543,9 +560,13 @@ mod tests {
 
     fn no_persistent_guard() -> std::sync::MutexGuard<'static, ()> {
         let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        // The autonomous (None) builder selects the preamble via
-        // CLAUDE_CODE_LOOP_PERSISTENT; assert against the DEFAULT (aJr).
+        // Establish the shipped-binary default: persistent off (preamble = aJr),
+        // and the prompt/dynamic flags cleared. Gates now read the flag override
+        // layer (binary `nt`), so reset it rather than env vars.
         std::env::remove_var("CLAUDE_CODE_LOOP_PERSISTENT");
+        telemetry::test_clear_flag("tengu_kairos_loop_persistent");
+        telemetry::test_clear_flag("tengu_kairos_loop_prompt");
+        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
         g
     }
 
@@ -633,9 +654,8 @@ mod tests {
     #[test]
     fn dispatch_default_off_is_shipped_binary() {
         let _g = no_persistent_guard();
-        std::env::remove_var("CLAUDE_CODE_LOOP_PROMPT");
-        std::env::remove_var("CLAUDE_CODE_LOOP_DYNAMIC");
-        // Branch 3 only — empty → dZm usage, prompt → fZm cron.
+        // guard() clears the prompt/dynamic flags → branch 3 only.
+        // Empty → dZm usage, prompt → fZm cron.
         assert_eq!(LoopPromptFn.build(""), USAGE_MESSAGE);
         assert!(LoopPromptFn.build("5m /foo").starts_with("# /loop — schedule a recurring prompt"));
         // No autonomous/dynamic headers leak in.
@@ -645,35 +665,33 @@ mod tests {
     #[test]
     fn dispatch_flag_on_no_prompt_routes_to_autonomous() {
         let _g = no_persistent_guard();
-        std::env::set_var("CLAUDE_CODE_LOOP_PROMPT", "1");
-        std::env::remove_var("CLAUDE_CODE_LOOP_DYNAMIC");
+        telemetry::test_set_flag("tengu_kairos_loop_prompt", true);
         // Empty input + flag on → autonomous default. cwd has no loop.md in the
         // test sandbox → the autonomous (None) cron builder.
         let out = LoopPromptFn.build("");
         assert!(out.starts_with("# /loop — schedule the autonomous default"));
         // Interval-only stays cron even with the dynamic flag on (binary: dynamic
         // only when input is fully empty).
-        std::env::set_var("CLAUDE_CODE_LOOP_DYNAMIC", "1");
+        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
         let interval_only = LoopPromptFn.build("5m");
         assert!(interval_only.starts_with("# /loop — schedule the autonomous default"));
         // Fully empty + both flags → dynamic-pacing autonomous default.
         let empty_dyn = LoopPromptFn.build("");
         assert!(empty_dyn.starts_with("# /loop — autonomous default with dynamic pacing"));
-        std::env::remove_var("CLAUDE_CODE_LOOP_PROMPT");
-        std::env::remove_var("CLAUDE_CODE_LOOP_DYNAMIC");
+        telemetry::test_clear_flag("tengu_kairos_loop_prompt");
+        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
     }
 
     #[test]
     fn dispatch_dynamic_flag_with_prompt_uses_gzm() {
         let _g = no_persistent_guard();
-        std::env::remove_var("CLAUDE_CODE_LOOP_PROMPT");
-        std::env::set_var("CLAUDE_CODE_LOOP_DYNAMIC", "1");
+        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
         // q_e on, prompt present, default-prompt flag off → gZm.
         let out = LoopPromptFn.build("check the deploy");
         assert!(out.starts_with("# /loop — schedule a recurring or self-paced prompt"));
         assert!(out.ends_with("\n## Input\ncheck the deploy"));
         // Empty → hZm dynamic usage.
         assert_eq!(LoopPromptFn.build(""), USAGE_MESSAGE_DYNAMIC);
-        std::env::remove_var("CLAUDE_CODE_LOOP_DYNAMIC");
+        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
     }
 }

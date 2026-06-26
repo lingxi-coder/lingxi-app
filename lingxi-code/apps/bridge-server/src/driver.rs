@@ -732,12 +732,11 @@ mod tests {
         use tool_cron::WakeupScheduler;
 
         // PARITY: the sentinel resolver gate `is_loop_default_prompt_enabled`
-        // (binary `fJr`/`tengu_kairos_loop_prompt`) DEFAULTS OFF, so a sentinel
-        // passes through verbatim unless the port's `CLAUDE_CODE_LOOP_PROMPT`
-        // override (the stand-in for the server flag flip) is set. Enable it so
-        // this test exercises the resolution path, and clear the shared delivery
-        // state so the FIRST-delivery branch (full preamble) fires.
-        std::env::set_var("CLAUDE_CODE_LOOP_PROMPT", "1");
+        // (binary `fJr`/`tengu_kairos_loop_prompt`) DEFAULTS OFF (FLAG-ONLY), so a
+        // sentinel passes through verbatim unless the flag is on. Enable it via the
+        // test-only flag override so this test exercises the resolution path, and
+        // clear the shared delivery state so the FIRST-delivery branch fires.
+        telemetry::test_set_flag("tengu_kairos_loop_prompt", true);
         tool_cron::reset_autonomous_loop_delivered();
 
         let queue = Arc::new(MessageQueueManager::new());
@@ -773,7 +772,7 @@ mod tests {
         assert!(text.contains("autonomous"));
         assert!(text.contains("ScheduleWakeup"));
 
-        std::env::remove_var("CLAUDE_CODE_LOOP_PROMPT");
+        telemetry::test_clear_flag("tengu_kairos_loop_prompt");
     }
 
     #[tokio::test]

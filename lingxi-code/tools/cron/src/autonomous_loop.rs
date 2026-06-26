@@ -22,14 +22,23 @@
 //! by the bridge `MsgQueueWakeupScheduler`) reads/updates it so the second fire
 //! drops the long preamble exactly like the binary.
 //!
-//! FEATURE FLAGS: the binary gates the *resolution* on `isLoopDefaultPromptEnabled`
-//! = `tengu_kairos_loop_prompt` (default **false**), the *preamble variant* on
-//! `isLoopPersistentPreambleEnabled` = env `CLAUDE_CODE_LOOP_PERSISTENT` ||
-//! `tengu_kairos_loop_persistent` (default false), and the `PushNotification`
-//! addendum on `Yke()` = `tengu_kairos_push_notifications` && `agentPushNotifEnabled`
-//! (default false). The port's `features` crate has no `tengu_kairos_loop_*`
-//! keys, so each flag defaults to the binary's shipped default; the env var
-//! `CLAUDE_CODE_LOOP_PERSISTENT` IS honored (matching `rt(process.env.…)`).
+//! FEATURE FLAGS: every gate reads the binary's sync flag reader `nt(key,default)`
+//! — ported as [`telemetry::flag_bool`] (an empty cached snapshot by default →
+//! returns `default`, i.e. the shipped binary's GrowthBook-absent behavior) —
+//! with the binary's EXACT per-gate env-vs-flag split:
+//!   - resolution gate `isLoopDefaultPromptEnabled` = `nt("tengu_kairos_loop_prompt",false)` (FLAG-ONLY)
+//!   - dynamic gate `isLoopDynamic` = `nt("tengu_kairos_loop_dynamic",false)` (FLAG-ONLY)
+//!   - preamble variant `isLoopPersistentPreambleEnabled` = env `CLAUDE_CODE_LOOP_PERSISTENT` || `nt("tengu_kairos_loop_persistent",false)`
+//!   - keepalive gate `isLoopKeepaliveEnabled` = env `CLAUDE_CODE_LOOP_KEEPALIVE` || `nt("tengu_kairos_loop_keepalive",false)`
+//!   - `PushNotification` addendum `Yke()` = `nt("tengu_kairos_push_notifications",false)` && `agentPushNotifEnabled` setting
+//! With no live GrowthBook fetcher wired (the prod default) every flag is at its
+//! shipped `false`, so the whole subsystem is inert and byte-identical to the
+//! shipped binary. Tests flip a flag via [`telemetry::test_set_flag`] (binary's
+//! `ROt`/`Uvi` override layer) rather than env vars. NOTE: the earlier
+//! `CLAUDE_CODE_LOOP_PROMPT`/`CLAUDE_CODE_LOOP_DYNAMIC` env stand-ins were REMOVED
+//! — the binary's `fJr`/`q_e` are flag-only (no env layer), so those envs were a
+//! false-positive divergence. Only PERSISTENT/KEEPALIVE keep an env layer (the
+//! binary's `YIn`/`iKi` genuinely have one).
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -65,73 +74,91 @@ const TASK_STOP: &str = "TaskStop";
 /// `Z8` (cc_all.txt:504927) — the `PushNotification` tool name.
 const PUSH_NOTIFICATION: &str = "PushNotification";
 
-// ── Feature-flag gates (binary defaults; see module docs) ────────────────────
+// ── Feature-flag gates (binary `nt` flag reads + per-gate env overrides) ──────
+//
+// The binary's sync flag reader `nt(key,default)` is ported as
+// `telemetry::flag_bool` (an empty cached snapshot by default → returns the
+// passed default = the shipped binary's GrowthBook-absent behavior). Each gate
+// below matches the binary's EXACT env-vs-flag split: PERSISTENT/KEEPALIVE are
+// `env || flag` (the binary's `YIn`/`iKi` have a `CLAUDE_CODE_LOOP_*` env layer);
+// PROMPT/DYNAMIC are FLAG-ONLY (`fJr`/`q_e` have NO env layer in the binary).
 
 /// `YIn` / `isLoopPersistentPreambleEnabled` (cc_all.txt:504950):
 /// `rt(process.env.CLAUDE_CODE_LOOP_PERSISTENT) || nt("tengu_kairos_loop_persistent",false)`.
-// PARITY: env `CLAUDE_CODE_LOOP_PERSISTENT` is honored; the `tengu_kairos_loop_persistent`
-// flag has no port backend so it defaults to the binary's shipped `false`.
 #[must_use]
 pub fn is_loop_persistent_preamble_enabled() -> bool {
     env_truthy("CLAUDE_CODE_LOOP_PERSISTENT")
+        || telemetry::flag_bool("tengu_kairos_loop_persistent", false)
 }
 
 /// `fJr` / `isLoopDefaultPromptEnabled` (cc_all.txt:504952):
-/// `nt("tengu_kairos_loop_prompt",false)`. Gates whether the autonomous/loop.md
-/// sentinels resolve at all (else `J4d` passes them through verbatim).
-// PARITY: `tengu_kairos_loop_prompt` has no port backend → it DEFAULTS to the
-// binary's shipped `false`, so the sentinels pass through verbatim exactly like
-// the shipped binary (where `J4d(e)=nKi(e)??sKi(e)??e` returns `e` unchanged when
-// `fJr()` is false). This deliberately matches the binary default rather than the
-// prior synthesized always-expand behavior, which WAS anti-parity.
-//
-// PARITY (port extension): because the binary gates this on a SERVER-side feature
-// flag (which Anthropic flips on to ship the feature) and the port has no flag
-// backend, the env var `CLAUDE_CODE_LOOP_PROMPT` stands in for that server flip —
-// mirroring the established `CLAUDE_CODE_LOOP_PERSISTENT` env override. With it
-// unset the port is byte-identical to the shipped binary (sentinels inert); set
-// it (e.g. on a host that wants the live ScheduleWakeup self-pace round-trip) and
-// the resolver expands sentinels exactly as the flag-on binary would.
-// PARITY-TODO: replace the env override with the real `tengu_kairos_loop_prompt`
-// flag once the `features` crate exposes it.
+/// `nt("tengu_kairos_loop_prompt",false)` — FLAG ONLY (no env in the binary).
+/// Gates whether the autonomous/loop.md sentinels resolve at all (else `J4d`
+/// passes them through verbatim). With no live GrowthBook the flag is at its
+/// shipped default `false`, so the resolvers pass sentinels through unchanged —
+/// byte-identical to the shipped binary. Tests flip it via
+/// `telemetry::test_set_flag("tengu_kairos_loop_prompt", true)`.
 #[must_use]
 pub fn is_loop_default_prompt_enabled() -> bool {
-    env_truthy("CLAUDE_CODE_LOOP_PROMPT")
+    telemetry::flag_bool("tengu_kairos_loop_prompt", false)
 }
 
-/// `q_e` (cc_all.txt:521920 dispatch): `nt("tengu_kairos_loop_dynamic",false)`.
+/// `q_e` / `isLoopDynamic` (cc_all.txt:504966):
+/// `nt("tengu_kairos_loop_dynamic",false)` — FLAG ONLY (no env in the binary).
 /// Selects the DYNAMIC-pacing builders (`hZm` usage / `gZm` prompt-builder, and
 /// `a(loopFile,true)` for the no-prompt autonomous default) over the cron variants.
-// PARITY: `tengu_kairos_loop_dynamic` has no port backend → it DEFAULTS to the
-// binary's shipped `false`. As with [`is_loop_default_prompt_enabled`] the env
-// var `CLAUDE_CODE_LOOP_DYNAMIC` stands in for the server flag flip (mirroring
-// the `CLAUDE_CODE_LOOP_PROMPT` / `CLAUDE_CODE_LOOP_PERSISTENT` overrides); unset
-// it and the port matches the shipped binary (cron variants only).
-// PARITY-TODO: replace the env override with the real `tengu_kairos_loop_dynamic`
-// flag once the `features` crate exposes it.
 #[must_use]
 pub fn is_loop_dynamic_enabled() -> bool {
-    env_truthy("CLAUDE_CODE_LOOP_DYNAMIC")
+    telemetry::flag_bool("tengu_kairos_loop_dynamic", false)
 }
 
-/// `Yke` (cc_all.txt:504927): `Rle() && agentPushNotifEnabled`. Gates the
-/// `PushNotification` addendum appended to tick prompts.
-// PARITY: both `tengu_kairos_push_notifications` and the `agentPushNotifEnabled`
-// setting have no port backend → binary default `false` ⇒ `aFt()` returns "".
+/// `iKi` / `isLoopKeepaliveEnabled` (cc_all.txt:504966):
+/// `rt(process.env.CLAUDE_CODE_LOOP_KEEPALIVE) || nt("tengu_kairos_loop_keepalive",false)`.
+/// Gates the keepalive fallback heartbeat (the `lKi`/`cKi` re-arm when a dynamic
+/// loop tick completes without the model rescheduling).
+// PARITY: the keepalive *gate* is ported here; the keepalive *scheduling*
+// machinery (`lKi`/`cKi`, the in-flight-tick tagging, the consecutive-keepalive
+// budget, and the loading→idle trigger) is a separate larger subsystem still
+// pending — so this gate currently has no production consumer beyond the gate
+// being available for that follow-on work.
 #[must_use]
-fn is_push_notif_enabled() -> bool {
+pub fn is_loop_keepalive_enabled() -> bool {
+    env_truthy("CLAUDE_CODE_LOOP_KEEPALIVE")
+        || telemetry::flag_bool("tengu_kairos_loop_keepalive", false)
+}
+
+/// `Yke` (cc_all.txt:504927): `Rle() && mc("agentPushNotifEnabled",false).value`,
+/// where `Rle()` = `nt("tengu_kairos_push_notifications",false)`. Gates the
+/// `PushNotification` addendum appended to tick prompts.
+// PARITY: the flag `tengu_kairos_push_notifications` is read via `flag_bool`
+// (default false, no live GrowthBook) and the `agentPushNotifEnabled` setting is
+// not a supported port setting (binary `mc(...,false)` default → false), so
+// `Yke()` resolves to `false` and `aFt()`/`Kpc()` render "" — byte-identical to
+// the shipped binary's default config. The gate is now STRUCTURALLY 1:1 (it reads
+// the real flag) rather than a hardcoded `false`, so it flips correctly if the
+// flag/setting are ever enabled.
+#[must_use]
+pub fn is_push_notif_enabled() -> bool {
+    telemetry::flag_bool("tengu_kairos_push_notifications", false) && agent_push_notif_setting()
+}
+
+/// `mc("agentPushNotifEnabled", false).value` (cc_all.txt:504927). The port has
+/// no supported `agentPushNotifEnabled` setting (see `tools/meta` config — it is
+/// deliberately excluded), so this returns the binary default `false`.
+// PARITY-TODO: read the real `agentPushNotifEnabled` setting once the
+// notification-settings subsystem (Tier 2) is ported.
+#[must_use]
+fn agent_push_notif_setting() -> bool {
     false
 }
 
 fn env_truthy(key: &str) -> bool {
-    // PARITY: binary `rt(x)` truthiness — present & not one of the falsey strings.
-    match std::env::var(key) {
-        Ok(v) => {
-            let t = v.trim();
-            !(t.is_empty() || t == "0" || t.eq_ignore_ascii_case("false"))
-        }
-        Err(_) => false,
-    }
+    // PARITY: binary `rt(e)` (cc_all.txt) is an ALLOWLIST, not a denylist:
+    // `String(e).toLowerCase().trim()` must be exactly one of `1|true|yes|on`.
+    // The workspace-canonical `traits::env::is_env_truthy` implements precisely
+    // this (and is used by ~10 other gates), so delegate to it — an earlier
+    // denylist here wrongly treated `no`/`off`/`2`/`foo` as truthy.
+    traits::env::is_env_truthy(std::env::var(key).ok().as_deref())
 }
 
 // ── Preambles (binary `aJr` / `VVi`) ─────────────────────────────────────────
@@ -512,11 +539,13 @@ mod tests {
         let g = super::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_autonomous_loop_delivered();
         std::env::remove_var("CLAUDE_CODE_LOOP_PERSISTENT");
+        telemetry::test_clear_flag("tengu_kairos_loop_persistent");
         // The resolver gate (`fJr`/`is_loop_default_prompt_enabled`) DEFAULTS off
-        // (binary `tengu_kairos_loop_prompt=false`); turn it on for the resolution
-        // tests via the port's `CLAUDE_CODE_LOOP_PROMPT` env override. The
-        // dedicated `gate_off_passthrough` test removes it to assert the default.
-        std::env::set_var("CLAUDE_CODE_LOOP_PROMPT", "1");
+        // (binary `tengu_kairos_loop_prompt=false`, FLAG-ONLY — no env). Turn it on
+        // for the resolution tests via the test-only flag override (binary `ROt`/
+        // `Uvi`). The dedicated `gate_off_passthrough` test clears it to assert the
+        // default.
+        telemetry::test_set_flag("tengu_kairos_loop_prompt", true);
         g
     }
 
@@ -567,6 +596,65 @@ mod tests {
     }
 
     #[test]
+    fn gate_env_vs_flag_split_matches_binary() {
+        let _g = guard();
+        // guard() set the prompt flag on; clear all loop flags + envs for a clean
+        // baseline (shipped-binary default: every gate off).
+        telemetry::test_clear_flag("tengu_kairos_loop_prompt");
+        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
+        telemetry::test_clear_flag("tengu_kairos_loop_persistent");
+        telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
+        telemetry::test_clear_flag("tengu_kairos_push_notifications");
+        std::env::remove_var("CLAUDE_CODE_LOOP_PERSISTENT");
+        std::env::remove_var("CLAUDE_CODE_LOOP_KEEPALIVE");
+        assert!(!is_loop_default_prompt_enabled());
+        assert!(!is_loop_dynamic_enabled());
+        assert!(!is_loop_persistent_preamble_enabled());
+        assert!(!is_loop_keepalive_enabled());
+        assert!(!is_push_notif_enabled());
+
+        // PROMPT/DYNAMIC: FLAG-ONLY (binary fJr/q_e have NO env layer).
+        telemetry::test_set_flag("tengu_kairos_loop_prompt", true);
+        telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
+        assert!(is_loop_default_prompt_enabled());
+        assert!(is_loop_dynamic_enabled());
+        // The removed env vars must NOT influence the flag-only gates.
+        telemetry::test_clear_flag("tengu_kairos_loop_prompt");
+        std::env::set_var("CLAUDE_CODE_LOOP_PROMPT", "1");
+        assert!(
+            !is_loop_default_prompt_enabled(),
+            "CLAUDE_CODE_LOOP_PROMPT must NOT enable the flag-only gate (binary fJr is flag-only)"
+        );
+        std::env::remove_var("CLAUDE_CODE_LOOP_PROMPT");
+        telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
+
+        // PERSISTENT/KEEPALIVE: env || flag (binary YIn/iKi have both).
+        telemetry::test_set_flag("tengu_kairos_loop_persistent", true);
+        assert!(is_loop_persistent_preamble_enabled(), "flag arm");
+        telemetry::test_clear_flag("tengu_kairos_loop_persistent");
+        assert!(!is_loop_persistent_preamble_enabled());
+        std::env::set_var("CLAUDE_CODE_LOOP_PERSISTENT", "1");
+        assert!(is_loop_persistent_preamble_enabled(), "env arm");
+        std::env::remove_var("CLAUDE_CODE_LOOP_PERSISTENT");
+
+        telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
+        assert!(is_loop_keepalive_enabled(), "flag arm");
+        telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
+        std::env::set_var("CLAUDE_CODE_LOOP_KEEPALIVE", "1");
+        assert!(is_loop_keepalive_enabled(), "env arm");
+        std::env::remove_var("CLAUDE_CODE_LOOP_KEEPALIVE");
+
+        // Yke: push flag alone is not enough (agentPushNotifEnabled setting is
+        // unsupported → false), so Yke stays false — matching the binary default.
+        telemetry::test_set_flag("tengu_kairos_push_notifications", true);
+        assert!(
+            !is_push_notif_enabled(),
+            "Yke needs BOTH the flag and the agentPushNotifEnabled setting"
+        );
+        telemetry::test_clear_flag("tengu_kairos_push_notifications");
+    }
+
+    #[test]
     fn autonomous_dynamic_first_then_subsequent() {
         let _g = guard();
         // First fire: full preamble + dynamic tick.
@@ -606,9 +694,9 @@ mod tests {
         // default (`tengu_kairos_loop_prompt=false`), the resolver returns the
         // sentinel UNCHANGED — `J4d(e)=nKi(e)??sKi(e)??e` → `e`. This is the exact
         // shipped-binary behavior (the feature is gated off until the server flag
-        // flips). `guard()` sets the override; remove it to exercise the default.
+        // flips). `guard()` sets the override; clear it to exercise the default.
         let _g = guard();
-        std::env::remove_var("CLAUDE_CODE_LOOP_PROMPT");
+        telemetry::test_clear_flag("tengu_kairos_loop_prompt");
         assert!(!is_loop_default_prompt_enabled());
         let cwd = std::env::temp_dir();
         // All four sentinels pass through verbatim when the gate is off.

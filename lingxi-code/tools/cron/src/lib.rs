@@ -24,10 +24,11 @@ pub mod wakeup;
 pub use autonomous_loop::{
     get_autonomous_loop_preamble, is_autonomous_loop_sentinel, is_loop_default_prompt_enabled,
     is_loop_default_sentinel, is_loop_dynamic_enabled, is_loop_file_sentinel,
-    log_autonomous_loop_activation, read_loop_file, reset_autonomous_loop_delivered,
-    resolve_autonomous_loop_fire, resolve_loop_default_fire, resolve_loop_file_fire, LoopFile,
-    AUTONOMOUS_LOOP_DYNAMIC_SENTINEL, AUTONOMOUS_LOOP_PREAMBLE, AUTONOMOUS_LOOP_SENTINEL,
-    LOOP_FILE_DYNAMIC_SENTINEL, LOOP_FILE_SENTINEL,
+    is_loop_keepalive_enabled, is_push_notif_enabled, log_autonomous_loop_activation,
+    read_loop_file, reset_autonomous_loop_delivered, resolve_autonomous_loop_fire,
+    resolve_loop_default_fire, resolve_loop_file_fire, LoopFile, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
+    AUTONOMOUS_LOOP_PREAMBLE, AUTONOMOUS_LOOP_SENTINEL, LOOP_FILE_DYNAMIC_SENTINEL,
+    LOOP_FILE_SENTINEL,
 };
 pub use cron_delete::CronDeleteTool;
 pub use cron_list::CronListTool;

@@ -13,6 +13,9 @@ llm-client = { path = "../llm-client" }
 cost = { path = "../cost" }
 hooks = { path = "../hooks" }
 sidequery = { path = "../sidequery" }
+# PARITY: binary `Zne` post-compact cleanup resets the autonomous-loop
+# first-delivery state on a main-thread compact (resetAutonomousLoopDelivered).
+tool-cron = { path = "../tools/cron" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -25,6 +28,8 @@ regex = "1"
 # Only used by the autocompact unit test to construct a `CacheSafeParams`
 # (which carries a `tool_api::ToolUseOptions`).
 tool-api = { path = "../tool-api" }
+# Post-compact reset test flips the loop-prompt flag via the test-only override.
+telemetry = { path = "../telemetry" }
 
 [lints]
 workspace = true

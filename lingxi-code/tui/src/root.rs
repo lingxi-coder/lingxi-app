@@ -3152,6 +3152,7 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 // coalescer only batches printables before they reach it.
                 let now = std::time::Instant::now();
                 let overlay_active = st.pending_permission.is_some()
+                    || st.active_screen.is_some()
                     || st.history_search.is_some()
                     || st.palette.open
                     || st.completion.open;

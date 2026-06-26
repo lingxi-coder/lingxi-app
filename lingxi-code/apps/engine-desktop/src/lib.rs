@@ -2412,6 +2412,12 @@ pub async fn build(
     let provider_adapter = Arc::new(ProviderApiAdapter::new(Arc::new(service_built)));
     let provider_adapter_handle = provider_adapter.clone();
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
+    // The SAME `ProviderApiAdapter` drives the streaming turn path: it impls both
+    // `OrchestratorApiClient` (batched/non-stream) and `StreamingApiClient` (SSE),
+    // and conversation.rs documents `self.api == self.streaming_api` in production.
+    // Without this the orchestrator falls back to `NoStreamingApiClient` and every
+    // streaming turn fails with "no streaming client configured".
+    let streaming_api: Arc<dyn orchestrator::StreamingApiClient> = provider_adapter.clone();
     let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter;
 
     // (4) Orchestrator config from `cfg` (was `argv.model`).
@@ -4074,8 +4080,8 @@ pub async fn build(
     // expansion. The dispatcher pairs it with a context provider that reads the
     // orchestrator's live session id (`orch.expansion_hook_context()`).
     let expansion_hook_executor = hooks.clone();
-    let orch_builder = ConversationOrchestrator::new(
-        orch_cfg, api_client, tools, hooks, perms, output, memory, cwd,
+    let orch_builder = ConversationOrchestrator::new_with_streaming(
+        orch_cfg, api_client, streaming_api, tools, hooks, perms, output, memory, cwd,
     )
     // FIX A: hand the orchestrator the resolved claude-home so its hook payloads
     // carry a deterministically-computed `transcript_path`

@@ -483,6 +483,12 @@ pub async fn run_tui_session(
         )
     }
     .fullscreen()
+    // (claude-code parity) Don't let iocraft quit the render loop on a single
+    // Ctrl-C. With this, Ctrl-C is delivered as a key event so the app's
+    // double-press guard runs: a turn in flight is interrupted, a non-empty
+    // prompt is cleared, and an idle first press shows "Press Ctrl-C again to
+    // exit" — only a second press within the window exits.
+    .ignore_ctrl_c()
     .await;
 
     if let Err(e) = result {

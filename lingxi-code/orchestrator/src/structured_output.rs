@@ -65,9 +65,10 @@ impl Tool for StructuredOutputTool {
     }
 
     fn max_result_size_chars(&self) -> usize {
-        // The result is a trivial ack ("{\"ok\":true}"); the real payload is the
-        // captured INPUT, not the result, so a small cap is ample.
-        4096
+        // claude sets `maxResultSizeChars:1e5` on the StructuredOutput tool (the
+        // shared default). The result is a trivial ack ("{\"ok\":true}") so the
+        // cap is never approached, but match the binary value for parity.
+        100_000
     }
 
     fn is_concurrency_safe(&self, _input: &Value) -> bool {

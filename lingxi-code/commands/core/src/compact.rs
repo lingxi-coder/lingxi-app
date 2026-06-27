@@ -61,8 +61,12 @@ impl BuiltinCommandHandler for CompactHandler {
             Err(e) => {
                 let msg = e.to_string();
                 telemetry::emit_command_failed(cmd_evt::COMPACT_FAILED, &msg);
+                // claude surfaces a compaction failure with the fixed text
+                // "Error compacting conversation" (notification
+                // `error-compacting-conversation`); the error detail is recorded
+                // in telemetry above, not shown in the display.
                 CommandResult::Done {
-                    display: Some(format!("Could not compact: {msg}")),
+                    display: Some("Error compacting conversation".to_string()),
                 }
             }
         }
@@ -111,13 +115,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failure_prefixes_handle_error() {
+    async fn failure_shows_fixed_error_text() {
         let mock = Arc::new(MockOrchestratorHandle::new());
         mock.set_compact_error("model 429".to_string());
         let h = CompactHandler::new(mock);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Could not compact: handle action failed: model 429");
+                // claude shows the fixed "Error compacting conversation" — the
+                // underlying error goes to telemetry, not the display.
+                assert_eq!(s, "Error compacting conversation");
             }
             other => panic!("expected Done, got {other:?}"),
         }

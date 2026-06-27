@@ -30,10 +30,11 @@
 //! - `monitor_mcp` (`enqueueShellNotification`, `monitor` kind): summary
 //!   `Monitor "{desc}" stream ended` / `Monitor "{desc}" script failed (exit N)`
 //!   / `Monitor "{desc}" stopped`. Also `escapeXml`-escaped.
-//! - `local_agent` (`enqueueAgentNotification`, `LocalAgentTask.tsx`): summary
-//!   `Agent "{desc}" completed` / `Agent "{desc}" failed: {error or 'Unknown
-//!   error'}` / `Agent "{desc}" was stopped`. NOT escaped (claude-code
-//!   interpolates the agent summary raw).
+//! - `local_agent` (`enqueueAgentNotification`, `LocalAgentTask.tsx`, v2.1.193):
+//!   summary `Agent "{desc}" finished` / `Agent "{desc}" failed: {error or
+//!   'Unknown error'}` / `Agent "{desc}" was stopped` (claude additionally
+//!   splits the stopped form into "…by Claude"/"…by user" on the stop reason).
+//!   Escaped via `escape_xml` (`&<>`).
 //! - any other type: the generic `framework.ts` `enqueueTaskNotification` format
 //!   (the only one with a `<task-type>` tag): summary `Task "{desc}"
 //!   {statusText}` where `statusText` is `completed successfully` / `failed` /
@@ -87,22 +88,29 @@ fn render_one(n: &TaskNotification) -> String {
 
     match n.task_type.as_str() {
         "local_agent" => {
-            // `enqueueAgentNotification` (v2.1.185 binary @202650700): the
-            // "came to rest" summary, an always-present `<note>`, and optional
-            // `<result>` / `<usage>` sections. The summary is escaped via `Np`
-            // (== [`escape_xml`]: `&<>` only) — a change from the prior raw
-            // interpolation, matching the v2.1.185 renderer (`<summary>${Np(g)}`).
+            // `enqueueAgentNotification` (v2.1.193): summary verbs
+            // `finished` / `failed: {err}` / `was stopped[ by Claude|user]`, an
+            // always-present `<note>`, and optional `<result>` / `<usage>`
+            // sections. The summary is escaped via `Np` (== [`escape_xml`]:
+            // `&<>` only). v2.1.193 changed the verbs from v2.1.185's "came to
+            // rest" family (`completed`→`finished`, `failed`→`failed: {err}`,
+            // killed→`was stopped`).
             let summary = match n.status.as_str() {
-                "completed" => format!("Agent \"{}\" came to rest", n.description),
+                "completed" => format!("Agent \"{}\" finished", n.description),
                 "failed" => {
                     let err = n.error.as_deref().unwrap_or("Unknown error");
-                    format!("Agent \"{}\" came to rest with an error: {err}", n.description)
+                    format!("Agent \"{}\" failed: {err}", n.description)
                 }
-                // `killed` (and any other terminal) → "(stopped by user)".
-                _ => format!("Agent \"{}\" came to rest (stopped by user)", n.description),
+                // `killed` (and any other terminal). claude branches on the stop
+                // REASON (`r==="parent"` → "was stopped by Claude", `r==="user"`
+                // → "was stopped by user", else → "was stopped"); the port's
+                // `TaskNotification` carries no reason, so it renders the generic
+                // else form. (Adding a reason field for the by-Claude/by-user
+                // split is a future refinement.)
+                _ => format!("Agent \"{}\" was stopped", n.description),
             };
-            // Hardcoded, always-present `<note>` (binary @202651760).
-            const NOTE: &str = "A task-notification fires each time this agent comes to rest with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.";
+            // Hardcoded, always-present `<note>` (v2.1.193).
+            const NOTE: &str = "A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.";
             // Optional `<result>` (escaped) — claude-code `s ? \n<result>${Np(s)}</result> : ''`.
             let result_section = match &n.result {
                 Some(r) => format!("\n<result>{}</result>", escape_xml(r)),
@@ -273,9 +281,9 @@ mod tests {
 
     #[test]
     fn agent_completed_is_byte_faithful_with_note_and_escaped_summary() {
-        // v2.1.185 `enqueueAgentNotification`: "came to rest" summary, escaped
-        // via `Np` (`<` in the description → `&lt;`), always-present `<note>`,
-        // and NO `<result>`/`<usage>` when absent (the byte-faithful no-result case).
+        // v2.1.193 `enqueueAgentNotification`: "finished" summary, escaped via
+        // `Np` (`<` in the description → `&lt;`), always-present `<note>`, and NO
+        // `<result>`/`<usage>` when absent (the byte-faithful no-result case).
         let n = base("a12345678", "local_agent", "completed", "scan <repo>");
         let out = render_reminder(std::slice::from_ref(&n)).expect("reminder");
         assert_eq!(
@@ -285,36 +293,32 @@ mod tests {
 <task-id>a12345678</task-id>\n\
 <output-file>/tmp/tasks/a12345678.output</output-file>\n\
 <status>completed</status>\n\
-<summary>Agent \"scan &lt;repo&gt;\" came to rest</summary>\n\
-<note>A task-notification fires each time this agent comes to rest with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n\
+<summary>Agent \"scan &lt;repo&gt;\" finished</summary>\n\
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n\
 </task-notification>\n\
 </system-reminder>"
         );
     }
 
     #[test]
-    fn agent_failed_uses_came_to_rest_with_error_or_unknown() {
+    fn agent_failed_uses_failed_with_error_or_unknown() {
         let mut n = base("a12345678", "local_agent", "failed", "research");
         n.error = Some("rate limited".to_string());
         assert!(
-            render_one(&n).contains(
-                "<summary>Agent \"research\" came to rest with an error: rate limited</summary>"
-            ),
+            render_one(&n).contains("<summary>Agent \"research\" failed: rate limited</summary>"),
             "got: {}",
             render_one(&n)
         );
         n.error = None;
-        assert!(render_one(&n).contains(
-            "<summary>Agent \"research\" came to rest with an error: Unknown error</summary>"
-        ));
+        assert!(render_one(&n)
+            .contains("<summary>Agent \"research\" failed: Unknown error</summary>"));
     }
 
     #[test]
-    fn agent_killed_came_to_rest_stopped_by_user() {
+    fn agent_killed_is_was_stopped() {
         let n = base("a12345678", "local_agent", "killed", "long job");
         assert!(
-            render_one(&n)
-                .contains("<summary>Agent \"long job\" came to rest (stopped by user)</summary>"),
+            render_one(&n).contains("<summary>Agent \"long job\" was stopped</summary>"),
             "got: {}",
             render_one(&n)
         );
@@ -338,8 +342,8 @@ mod tests {
 <task-id>a12345678</task-id>\n\
 <output-file>/tmp/tasks/a12345678.output</output-file>\n\
 <status>completed</status>\n\
-<summary>Agent \"audit\" came to rest</summary>\n\
-<note>A task-notification fires each time this agent comes to rest with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n\
+<summary>Agent \"audit\" finished</summary>\n\
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n\
 <result>Found 2 bugs in &lt;auth&gt;</result>\n\
 <usage><subagent_tokens>1234</subagent_tokens><tool_uses>7</tool_uses><duration_ms>4200</duration_ms></usage>\n\
 </task-notification>"

@@ -273,9 +273,10 @@ pub fn format_compact_summary(summary: &str) -> String {
 /// (TS `UOt(e,t,n,r,o)`, `bin/claude.exe` offset 197355616).
 ///
 /// Byte-faithful order, each segment appended only when its flag/arg is set:
-/// 1. base: `This session is being continued… covers the earlier portion…\n\n{summary}`
-/// 2. `transcript_path` (`n`): `\n\nIf you need specific details…read the full transcript at: {path}`
-/// 3. `recent_messages_preserved` (`r`, #58): `\n\nRecent messages are preserved verbatim.`
+/// 1. base: `This session is being continued… covers the earlier portion…\n{summary}`
+/// 2. `transcript_path` (`n`): `\nIf you need specific details…read the full transcript at: {path}`
+/// 3. `recent_messages_preserved` (`r`, #58): `\nRecent messages are preserved verbatim.`
+///    (claude `PUt` joins every segment with a SINGLE `\n`, not `\n\n`.)
 /// 4. (`o` `replVmCleared` — the REPL VM-state addendum — is an intentional
 ///    deferral; the REPL VM reset is a separate finding.)
 /// 5. `suppress_follow_up_questions` (`t`): `\nContinue the conversation…`
@@ -293,19 +294,19 @@ pub fn get_compact_user_summary_message(
     let formatted_summary = format_compact_summary(summary);
 
     let mut base_summary = format!(
-        "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n{formatted_summary}"
+        "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n{formatted_summary}"
     );
 
     if let Some(path) = transcript_path {
         base_summary.push_str(&format!(
-            "\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: {path}"
+            "\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: {path}"
         ));
     }
 
     // #58: when a verbatim tail rides after the summary, tell the model so it
     // does not re-derive recent state from the summary (`UOt`'s `r` arg).
     if recent_messages_preserved {
-        base_summary.push_str("\n\nRecent messages are preserved verbatim.");
+        base_summary.push_str("\nRecent messages are preserved verbatim.");
     }
 
     if suppress_follow_up_questions {
@@ -501,8 +502,8 @@ mod tests {
         let msg =
             get_compact_user_summary_message("<summary>S</summary>", false, None, true);
         assert!(msg.contains("Summary:\nS"));
-        // Byte-exact preserved-tail sentence.
-        assert!(msg.contains("\n\nRecent messages are preserved verbatim."));
+        // Byte-exact preserved-tail sentence (claude PUt joins with a single \n).
+        assert!(msg.contains("\nRecent messages are preserved verbatim."));
     }
 
     #[test]
@@ -532,7 +533,7 @@ mod tests {
         assert!(!without.contains("Recent messages are preserved verbatim."));
         // The only delta between them is the inserted preserved-tail sentence.
         assert_eq!(
-            with_tail.replace("\n\nRecent messages are preserved verbatim.", ""),
+            with_tail.replace("\nRecent messages are preserved verbatim.", ""),
             without
         );
     }

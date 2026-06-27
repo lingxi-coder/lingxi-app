@@ -44,8 +44,6 @@ pub enum PopupLine {
     },
 }
 
-/// Peach highlight used for the selected row (opencode's accent).
-const HIGHLIGHT: Color = Color::Rgb { r: 0xF2, g: 0xA9, b: 0x7E };
 
 /// Render the popup. `title` is bold top-left, `esc` sits top-right; `search` is
 /// the live query (dim placeholder when empty); `lines` are the grouped rows;
@@ -138,9 +136,20 @@ pub fn render_picker_popup(
     .into_any()
 }
 
-/// Render one selectable row. Selected → full-width peach background + black
-/// text; otherwise marker(green/accent) + label(text) + detail(dim) + a
-/// right-aligned dim badge.
+/// Render one selectable row, 1:1 with claude-code's `ListItem`: the focused
+/// (selected) row carries a leading pointer `❯` and renders its label in the
+/// accent (`suggestion`) color; other rows reserve a 2-col blank so columns
+/// align. Connected rows keep a green `✓`; the active-model dot keeps `●`. A
+/// right-aligned `suggestion` badge trails when present.
+///
+/// We deliberately do NOT use a full-width `background_color` bar. A truecolor
+/// `Rgb` background (the old opencode-style peach highlight) is emitted as a
+/// 24-bit SGR unconditionally — on a non-truecolor terminal it quantizes to the
+/// nearest ANSI slot (often RED), and because iocraft only brackets the
+/// bg-reset on rows that *carry* a background, the still-active color bleeds via
+/// background-color-erase onto the unguarded rows below, painting multiple
+/// full-width red bars. A pointer + foreground color has none of that: nothing
+/// to quantize, nothing to leak.
 fn render_item(
     marker: PopupMarker,
     label: &str,
@@ -154,47 +163,40 @@ fn render_item(
         PopupMarker::Check => "\u{2713} ".to_string(),
         PopupMarker::Dot => "\u{25CF} ".to_string(),
     };
+    // claude-code `ListItem`: `figures.pointer` (❯) on the focused row, a 2-col
+    // blank otherwise so the columns stay aligned.
+    let pointer = if selected {
+        "\u{276F} ".to_string()
+    } else {
+        "  ".to_string()
+    };
+    // Connected/active markers keep their own color even when focused (focus and
+    // state stack independently, as in claude-code); the label takes the accent
+    // on the focused row.
+    let marker_color = match marker {
+        PopupMarker::Check => theme.success,
+        PopupMarker::Dot => theme.suggestion,
+        PopupMarker::None => theme.dim,
+    };
+    let label_color = if selected { theme.suggestion } else { theme.text };
+    let label_owned = label.to_string();
+    let detail_owned = if detail.is_empty() {
+        String::new()
+    } else {
+        format!("  {detail}")
+    };
     let badge_owned = badge.to_string();
     let has_badge = !badge.is_empty();
-
-    if selected {
-        // Whole row reads as one peach bar with black text (opencode highlight).
-        let mut left = String::new();
-        left.push_str(&glyph);
-        left.push_str(label);
-        if !detail.is_empty() {
-            left.push_str("  ");
-            left.push_str(detail);
-        }
-        element! {
-            View(width: 100pct, background_color: HIGHLIGHT, flex_direction: FlexDirection::Row, justify_content: JustifyContent::SpaceBetween) {
-                Text(content: left, color: Color::Black, weight: Weight::Bold)
-                #(has_badge.then(|| element! { Text(content: badge_owned.clone(), color: Color::Black) }))
+    element! {
+        View(width: 100pct, flex_direction: FlexDirection::Row, justify_content: JustifyContent::SpaceBetween) {
+            View(flex_direction: FlexDirection::Row) {
+                Text(content: pointer, color: theme.suggestion)
+                Text(content: glyph, color: marker_color)
+                Text(content: label_owned, color: label_color)
+                #((!detail_owned.is_empty()).then(|| element! { Text(content: detail_owned.clone(), color: theme.dim) }))
             }
+            #(has_badge.then(|| element! { Text(content: badge_owned.clone(), color: theme.suggestion) }))
         }
-        .into_any()
-    } else {
-        let marker_color = match marker {
-            PopupMarker::Check => theme.success,
-            PopupMarker::Dot => theme.suggestion,
-            PopupMarker::None => theme.dim,
-        };
-        let label_owned = label.to_string();
-        let detail_owned = if detail.is_empty() {
-            String::new()
-        } else {
-            format!("  {detail}")
-        };
-        element! {
-            View(width: 100pct, flex_direction: FlexDirection::Row, justify_content: JustifyContent::SpaceBetween) {
-                View(flex_direction: FlexDirection::Row) {
-                    Text(content: glyph, color: marker_color)
-                    Text(content: label_owned, color: theme.text)
-                    #((!detail_owned.is_empty()).then(|| element! { Text(content: detail_owned.clone(), color: theme.dim) }))
-                }
-                #(has_badge.then(|| element! { Text(content: badge_owned.clone(), color: theme.suggestion) }))
-            }
-        }
-        .into_any()
     }
+    .into_any()
 }

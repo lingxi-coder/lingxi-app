@@ -3293,22 +3293,55 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                         {
                             tick_for_copilot.set(tick_for_copilot.get().wrapping_add(1));
                         }
+                        // (#1 fix) The on-screen code is NOT mouse-selectable — the
+                        // TUI captures the mouse in fullscreen — and GitHub's device
+                        // page requires it typed in. Copy it to the clipboard so the
+                        // user can just paste (⌘V) it on the opened page.
+                        copy_to_clipboard_native(&step.user_code);
                         match driver.poll_to_completion(&step).await {
                             Ok(()) => {
-                                let mut st = state.lock().await;
-                                // The driver stored the token; reflect availability
-                                // so the picker badges ✓ and routing accepts it.
-                                st.provider_availability
-                                    .insert("github-copilot".to_string(), true);
-                                if let Some(crate::screens::Screen::Connect(cs)) =
-                                    st.active_screen.as_mut()
                                 {
-                                    if matches!(cs.flow, crate::screens::connect::ConnectFlow::Copilot)
+                                    let mut st = state.lock().await;
+                                    // The driver stored the token; reflect availability
+                                    // so the picker badges ✓ and routing accepts it.
+                                    st.provider_availability
+                                        .insert("github-copilot".to_string(), true);
+                                    if let Some(crate::screens::Screen::Connect(cs)) =
+                                        st.active_screen.as_mut()
                                     {
-                                        cs.set_done();
+                                        if matches!(
+                                            cs.flow,
+                                            crate::screens::connect::ConnectFlow::Copilot
+                                        ) {
+                                            cs.set_done();
+                                        }
                                     }
                                 }
-                                drop(st);
+                                tick_for_copilot.set(tick_for_copilot.get().wrapping_add(1));
+                                // (#2 fix) Let the user SEE "Authorized ✓" briefly,
+                                // then AUTO-RETURN to the REPL + drop a confirmation
+                                // into scrollback. Without this the screen sat on
+                                // "Authorized ✓" with no obvious way back. Guard the
+                                // close on the Done screen still being up (the user
+                                // may have already pressed a key to return).
+                                tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+                                {
+                                    let mut st = state.lock().await;
+                                    let on_done = matches!(
+                                        st.active_screen.as_ref(),
+                                        Some(crate::screens::Screen::Connect(cs))
+                                            if matches!(cs.flow, crate::screens::connect::ConnectFlow::Copilot)
+                                                && matches!(cs.copilot, crate::screens::connect::CopilotPhase::Done)
+                                    );
+                                    if on_done {
+                                        st.close_screen();
+                                        st.push_message(crate::state::RenderedMessage::SystemText {
+                                            body: "\u{2713} Connected to GitHub Copilot.".to_string(),
+                                            timestamp: chrono::Utc::now().timestamp(),
+                                            is_error: false,
+                                        });
+                                    }
+                                }
                                 tick_for_copilot.set(tick_for_copilot.get().wrapping_add(1));
                             }
                             Err(e) => {

@@ -451,7 +451,9 @@ impl AgentTool {
         // catalog pointer line, and (below) it SUPPRESSES the `## When to use`
         // section — both per the binary's `${d}` / `${d?"":…}` placements.
         let pro_block = if traits::subscription::is_pro_plan() {
-            "\n\n**Do not spawn agents unless the user asks.** Each spawn starts cold and re-derives context you already have — it's the expensive path on this plan. A task with \"multiple angles,\" \"thorough,\" or several parts is not a request to spawn; handle it inline with your own tools. Only use this tool when the user explicitly says to use a subagent, or names one of the available agent types."
+            // Binary `d=Pi()==="pro"?`\n**Do not spawn…`:""` — SINGLE leading `\n`
+            // (injected as `…conversation.${d}\n${subagent}`).
+            "\n**Do not spawn agents unless the user asks.** Each spawn starts cold and re-derives context you already have — it's the expensive path on this plan. A task with \"multiple angles,\" \"thorough,\" or several parts is not a request to spawn; handle it inline with your own tools. Only use this tool when the user explicitly says to use a subagent, or names one of the available agent types."
         } else {
             ""
         };
@@ -484,9 +486,11 @@ impl AgentTool {
         // Intro `p` (binary ~208233723): the catalog line sits between the two
         // intro sentences (with the `${d}` pro-block appended to it); the
         // subagent_type sentence closes it.
+        // Binary `p`: `…available to it.\nAvailable agent types…conversation.${d}\n${subagent}`
+        // — SINGLE `\n` separators around the catalog line and `${d}` pro-block.
         let intro = format!(
-            "Launch a new agent to handle complex, multi-step tasks. Each agent type has specific capabilities and tools available to it.\n\n\
-{agent_list_section}{pro_block}\n\n\
+            "Launch a new agent to handle complex, multi-step tasks. Each agent type has specific capabilities and tools available to it.\n\
+{agent_list_section}{pro_block}\n\
 {subagent_sentence}"
         );
 
@@ -507,7 +511,9 @@ impl AgentTool {
         // when the pro-block is present, the discouragement replaces the
         // when-to-use guidance. The four bullets are NOT gated and always render.
         let when_to_use = if pro_block.is_empty() {
-            "\n\n## When to use\n\n\
+            // Binary `${d?"":`\n## When to use\nReach…`}` — SINGLE `\n` before the
+            // heading AND before the paragraph.
+            "\n## When to use\n\
 Reach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps. For a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result."
         } else {
             ""
@@ -515,7 +521,8 @@ Reach for this when the task matches an available agent type, when you have inde
         // Fork addendum (binary `${o?…:""}`), after `## When to use`, before the
         // bullets.
         let fork_addendum = if is_fork {
-            "\n\nA fork runs in the background and keeps its tool output out of your context. If you are the fork, execute directly — don't re-delegate."
+            // Binary `${o?`\nA fork runs…`:""}` — SINGLE leading `\n`.
+            "\nA fork runs in the background and keeps its tool output out of your context. If you are the fork, execute directly — don't re-delegate."
         } else {
             ""
         };
@@ -529,8 +536,10 @@ Reach for this when the task matches an available agent type, when you have inde
                 "- Use SendMessage with the agent's ID or name to continue a previously spawned agent with its context intact; a new {AGENT_TOOL_NAME} call starts fresh."
             )
         };
+        // Binary: `…wait for the result.`}${fork}\n- The agent's final message…`
+        // — SINGLE `\n` before the first bullet (and between all bullets).
         format!(
-            "{intro}{when_to_use}{fork_addendum}\n\n\
+            "{intro}{when_to_use}{fork_addendum}\n\
 - The agent's final message is returned to you as the tool result; it is not shown to the user — relay what matters.\n\
 {send_message_bullet}\n\
 - `isolation: \"worktree\"` gives the agent its own git worktree (auto-cleaned if unchanged).\n\
@@ -2842,10 +2851,10 @@ mod tests {
             !p_pro.contains("## When to use"),
             "pro plan must suppress the `## When to use` section"
         );
-        // The block sits right after the catalog pointer line, before the
-        // subagent_type sentence.
+        // The block sits right after the catalog pointer line (SINGLE `\n`,
+        // binary `…conversation.${d}…`), before the subagent_type sentence.
         assert!(p_pro.contains(
-            "conversation.\n\n**Do not spawn agents unless the user asks.**"
+            "conversation.\n**Do not spawn agents unless the user asks.**"
         ));
         // The four bullets are NOT gated on the plan.
         assert!(p_pro.contains("- `run_in_background: true` runs the agent asynchronously"));

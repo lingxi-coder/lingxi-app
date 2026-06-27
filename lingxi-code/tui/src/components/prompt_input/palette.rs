@@ -41,6 +41,23 @@ pub struct PaletteRow {
     pub matched_alias: Option<&'static str>,
 }
 
+/// LingXi-only palette commands that are NOT in claude-code's byte-locked
+/// [`BUILTIN_COMMAND_NAMES`] (the parity list stays pure — we never mutate the
+/// `94` count). `/connect` is a LingXi addition (opencode-style provider
+/// sign-in / API-key entry) and is surfaced in the `/` palette like any builtin
+/// so it is discoverable. `(name, description)`.
+const LINGXI_EXTRA_COMMANDS: &[(&str, &str)] =
+    &[("connect", "Connect a provider \u{2014} sign in or add an API key")];
+
+/// Description for a palette row: LingXi extras first, else the byte-locked
+/// `core_description`.
+fn description_for(name: &str) -> &'static str {
+    LINGXI_EXTRA_COMMANDS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map_or_else(|| core_description(name), |(_, d)| *d)
+}
+
 /// Palette overlay state. `open == false` means the overlay is dismissed and
 /// owns no keys.
 #[derive(Debug, Clone, Default)]
@@ -90,6 +107,10 @@ impl PaletteState {
         let names: Vec<&'static str> = BUILTIN_COMMAND_NAMES
             .iter()
             .copied()
+            // LingXi extras (e.g. `/connect`) appended after the parity builtins
+            // so they rank alphabetically alongside them but never alter the
+            // byte-locked `BUILTIN_COMMAND_NAMES` list.
+            .chain(LINGXI_EXTRA_COMMANDS.iter().map(|(n, _)| *n))
             .filter(|n| visible(n))
             .collect();
 
@@ -102,7 +123,7 @@ impl PaletteState {
                 .filter_map(|m| names.iter().copied().find(|n| *n == m))
                 .map(|name| PaletteRow {
                     name,
-                    description: core_description(name),
+                    description: description_for(name),
                     matched_alias: None,
                 })
                 .collect();
@@ -116,7 +137,7 @@ impl PaletteState {
         // of which pass matched it, exactly as claude-code does.
         let row = |name: &'static str| PaletteRow {
             name,
-            description: core_description(name),
+            description: description_for(name),
             matched_alias: find_matched_alias(&self.filter, name),
         };
         let mut seen = std::collections::HashSet::new();
@@ -348,8 +369,13 @@ mod tests {
         let mut p = PaletteState::default();
         p.sync_from_prompt("/");
         let all = p.rows().len();
-        // 94 builtins minus the 26 hidden/disabled commands = 68 visible.
-        assert_eq!(all, 68, "bare slash lists every VISIBLE command");
+        // 94 builtins minus the 26 hidden/disabled commands = 68 visible, plus
+        // the 1 LingXi extra (`/connect`) = 69.
+        assert_eq!(all, 69, "bare slash lists every VISIBLE command + LingXi /connect");
+        assert!(
+            p.rows().iter().any(|r| r.name == "connect"),
+            "/connect must appear in the palette"
+        );
         p.sync_from_prompt("/comp");
         let narrowed = p.rows();
         assert!(narrowed.len() < all);

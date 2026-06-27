@@ -7,6 +7,7 @@ pub mod coordinator;
 pub mod message_selector;
 pub mod messages;
 pub mod permissions;
+pub mod picker_popup;
 pub mod prompt_input;
 pub mod scrollback;
 pub mod spinner;

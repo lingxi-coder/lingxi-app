@@ -254,6 +254,14 @@ struct HookEntry {
     /// runtime behavior is executor work (deferred).
     #[serde(default)]
     once: Option<bool>,
+    /// claude-code `async` (`schemas/hooks.ts`: `async:boolean().optional()
+    /// .describe("If true, hook runs in background without blocking")`). Maps to
+    /// [`HookDefinition::blocking`] = `!async` — `blocking == false` routes the
+    /// hook to the background async registry. The related `asyncRewake` /
+    /// `asyncTimeout` (15000) / `rewakeMessage` refinements need new
+    /// [`HookDefinition`] fields and are deferred (struct-field ripple).
+    #[serde(default, rename = "async")]
+    r#async: Option<bool>,
     /// claude-code `statusMessage` (`schemas/hooks.ts:47-50`): custom spinner
     /// text. Parsed and carried onto [`HookDefinition::status_message`]; the
     /// TUI spinner wiring is presentation work (deferred).
@@ -349,7 +357,10 @@ fn parse_into(
                     if_condition: condition,
                     executor,
                     source,
-                    blocking: true,
+                    // claude routes an `async: true` settings hook to the
+                    // background (non-blocking) path; `blocking == false` is that
+                    // path here. Defaults to blocking when the field is absent.
+                    blocking: !entry.r#async.unwrap_or(false),
                     timeout: entry.timeout.map(Duration::from_secs),
                     priority: 0,
                     once: entry.once.unwrap_or(false),

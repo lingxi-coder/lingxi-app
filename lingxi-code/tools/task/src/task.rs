@@ -809,6 +809,9 @@ impl Tool for TaskCreateTool {
     fn name(&self) -> &str {
         TASK_CREATE_TOOL_NAME
     }
+    fn search_hint(&self) -> Option<&str> {
+        Some("create a task in the task list")
+    }
     fn input_schema(&self) -> &Value {
         &TASK_CREATE_SCHEMA
     }
@@ -1038,6 +1041,9 @@ impl Tool for TaskGetTool {
     fn name(&self) -> &str {
         TASK_GET_TOOL_NAME
     }
+    fn search_hint(&self) -> Option<&str> {
+        Some("retrieve a task by ID")
+    }
     fn input_schema(&self) -> &Value {
         &TASK_GET_SCHEMA
     }
@@ -1171,6 +1177,9 @@ impl TaskListTool {
 impl Tool for TaskListTool {
     fn name(&self) -> &str {
         TASK_LIST_TOOL_NAME
+    }
+    fn search_hint(&self) -> Option<&str> {
+        Some("list all tasks")
     }
     fn input_schema(&self) -> &Value {
         &TASK_LIST_SCHEMA
@@ -1359,6 +1368,9 @@ impl TaskUpdateTool {
 impl Tool for TaskUpdateTool {
     fn name(&self) -> &str {
         TASK_UPDATE_TOOL_NAME
+    }
+    fn search_hint(&self) -> Option<&str> {
+        Some("update a task")
     }
     fn input_schema(&self) -> &Value {
         &TASK_UPDATE_SCHEMA
@@ -2082,8 +2094,10 @@ impl Tool for TaskStopTool {
 const TASK_OUTPUT_DESCRIPTION: &str = "[Deprecated] — for bash and remote_agent tasks, prefer Read on the output file path; for local_agent tasks, use the Agent tool result directly";
 
 /// `TaskOutputTool` prompt (`TaskOutputTool.tsx` `async prompt()`, verbatim).
-const TASK_OUTPUT_PROMPT: &str = "DEPRECATED: Prefer using the Read tool on the task's output file path instead. Background tasks return their output file path in the tool result, and you receive a <task-notification> with the same path when the task completes — Read that file directly.
-
+const TASK_OUTPUT_PROMPT: &str = "DEPRECATED: Background tasks return their output file path in the tool result, and you receive a <task-notification> with the same path when the task completes.
+- For bash tasks: prefer using the Read tool on that output file path — it contains stdout/stderr.
+- For local_agent tasks: use the Agent tool result directly. Do NOT Read the .output file — it is a symlink to the full subagent conversation transcript (JSONL) and will overflow your context window.
+- For remote_agent tasks: prefer using the Read tool on the output file path — it contains the streamed remote session output (same as bash).
 - Retrieves output from a running or completed task (background shell, agent, or remote session)
 - Takes a task_id parameter identifying the task
 - Returns the task output along with status information

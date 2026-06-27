@@ -168,6 +168,11 @@ pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement
     } else {
         String::new()
     };
+    // `PromptInput` already draws the `❯ ` prompt glyph + the live text, so the
+    // footer only needs its own glyph row to show a non-empty PLACEHOLDER (ghost
+    // hint). With no placeholder (the live default) that row is a second,
+    // redundant `❯` BELOW the input box — omit it.
+    let has_placeholder = !placeholder.is_empty();
     // (PIC-03) claude-code only ever renders `-- INSERT --` in the footer
     // (`showVim`); NORMAL/VISUAL modes show NO mode label (the hint takes the
     // slot instead). The `footer_mode_label_v2` helper is retained for callers
@@ -196,10 +201,12 @@ pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement
                     Text(content: label, color: TuiTheme::DIM)
                 }
             }))
-            View(flex_direction: FlexDirection::Row) {
-                Text(content: glyph, color: TuiTheme::DIM)
-                Text(content: placeholder, color: TuiTheme::DIM)
-            }
+            #(has_placeholder.then(|| element! {
+                View(flex_direction: FlexDirection::Row) {
+                    Text(content: glyph, color: TuiTheme::DIM)
+                    Text(content: placeholder, color: TuiTheme::DIM)
+                }
+            }))
             #(perm_part.map(|p| element! {
                 View(flex_direction: FlexDirection::Row) {
                     Text(content: p, color: TuiTheme::DIM)

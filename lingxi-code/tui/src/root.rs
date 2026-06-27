@@ -3422,10 +3422,11 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
 /// Fixed (non-prompt) chrome rows the REPL screen reserves around the
 /// scrollback: 1 status line + 1 spinner row (always reserved so the
 /// scrollback doesn't jitter on `TurnStart`) + 2 input-view border rows (the
-/// top + bottom rule lines that bracket the prompt) + 2 footer rows (the
-/// mode-indicator/placeholder row + the help/newline hint row from
-/// [`crate::components::prompt_input::PromptInputFooter`]).
-const FIXED_CHROME_ROWS: usize = 6;
+/// top + bottom rule lines that bracket the prompt) + 1 footer row (the
+/// always-reserved help/newline hint row from
+/// [`crate::components::prompt_input::PromptInputFooter`]; its prompt-glyph row
+/// only renders when a placeholder is set, which the live REPL never does).
+const FIXED_CHROME_ROWS: usize = 5;
 
 /// Compute the scrollback viewport height given the live terminal `rows` and
 /// the **current prompt height** (`prompt_visual_rows`, from
@@ -3607,10 +3608,10 @@ mod tests {
 
     #[test]
     fn viewport_height_reserves_fixed_chrome_plus_single_prompt_row() {
-        // Single-line prompt (1 visual row) → reserve FIXED_CHROME_ROWS(6) + 1
-        // = 7 rows. 24 rows → 17 visible; saturates to 0 below the floor.
-        assert_eq!(viewport_height(24, 1), 17);
-        assert_eq!(viewport_height(7, 1), 0);
+        // Single-line prompt (1 visual row) → reserve FIXED_CHROME_ROWS(5) + 1
+        // = 6 rows. 24 rows → 18 visible; saturates to 0 below the floor.
+        assert_eq!(viewport_height(24, 1), 18);
+        assert_eq!(viewport_height(6, 1), 0);
         assert_eq!(viewport_height(0, 1), 0);
     }
 
@@ -3636,10 +3637,10 @@ mod tests {
                 n - 1
             );
         }
-        // The 2-row footer + 2 input-border rows are baked into
+        // The 1-row footer + 2 input-border rows are baked into
         // FIXED_CHROME_ROWS: single-row prompt reserves
-        // status(1)+spinner(1)+border(2)+footer(2)+prompt(1) = 7.
-        assert_eq!(single, usize::from(rows) - 7);
+        // status(1)+spinner(1)+border(2)+footer(1)+prompt(1) = 6.
+        assert_eq!(single, usize::from(rows) - 6);
     }
 
     /// (M7-08) Build an iocraft `KeyEvent` for a printable char (Press).

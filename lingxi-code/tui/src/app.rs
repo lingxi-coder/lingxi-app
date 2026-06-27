@@ -271,9 +271,7 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
             // (Plan 3c §6.4) `/connect <provider>` opens the interactive
             // credential screen. Like `/model`, opening needs an async step (the
             // device-flow / keychain), so we RAISE `pending_connect`;
-            // `root::pump_open_connect` opens the screen on the next tick. A bare
-            // `/connect` (no arg) falls through to the engine `ConnectHandler`,
-            // which renders the usage line.
+            // `root::pump_open_connect` opens the screen on the next tick.
             {
                 let provider = st
                     .prompt_text
@@ -287,6 +285,20 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                     st.pending_connect = Some(provider);
                     return false;
                 }
+            }
+            // A bare `/connect` (no provider arg) opens the grouped provider
+            // PICKER (an opencode-style searchable list, modeled on `/model`).
+            // The catalog is STATIC (no async fetch), so we open the screen
+            // synchronously here; selecting a row raises `pending_connect` →
+            // `root::pump_open_connect` opens the key-entry `/connect` screen.
+            if st.prompt_text.trim() == "/connect" {
+                st.prompt_text.clear();
+                st.prompt_cursor = 0;
+                let picker = crate::screens::connect_picker::ConnectPickerState::from_availability(
+                    &st.provider_availability,
+                );
+                st.open_connect_picker(picker);
+                return false;
             }
             // `/vim` toggles the editor's vim keybindings (claude-code
             // `commands/vim/vim.ts`). An IMMEDIATE command (not a screen): flip
@@ -993,6 +1005,31 @@ pub fn render_screen(
                 // sub-header line — both are ALWAYS lines 0/1 of the oracle's
                 // fixed layout. LingXi's Theme has no "remember" (blue) token;
                 // `suggestion` is the closest existing accent color.
+                element! {
+                    View(flex_direction: FlexDirection::Column, padding: 1) {
+                        #(lines.into_iter().enumerate().map(|(i, line)| {
+                            let (color, weight) = match i {
+                                0 => (state.theme.suggestion, Weight::Bold),
+                                1 => (TuiTheme::DIM, Weight::Normal),
+                                _ => (Color::Reset, Weight::Normal),
+                            };
+                            element! {
+                                Text(content: line, color: color, weight: weight)
+                            }
+                        }))
+                    }
+                }
+                .into_any()
+            }
+            Screen::ConnectPicker(c) => {
+                // The bare-`/connect` provider picker renders the pure
+                // `render_connect_picker_to_string` body line-by-line in a
+                // column View, coloring line 0 (title) accent+bold, line 1
+                // (sub-header) dim, the rest default — mirroring the Model arm.
+                use crate::screens::connect_picker::render_connect_picker_to_string;
+                use crate::theme::TuiTheme;
+                let body = render_connect_picker_to_string(c);
+                let lines: Vec<String> = body.lines().map(str::to_string).collect();
                 element! {
                     View(flex_direction: FlexDirection::Column, padding: 1) {
                         #(lines.into_iter().enumerate().map(|(i, line)| {

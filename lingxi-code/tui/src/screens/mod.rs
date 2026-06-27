@@ -7,6 +7,7 @@
 pub mod agents;
 pub mod background_tasks;
 pub mod connect;
+pub mod connect_picker;
 pub mod doctor;
 pub mod help;
 pub mod hooks;
@@ -175,6 +176,16 @@ pub enum Screen {
     /// GitHub Copilot device-flow (the host drives `CopilotLogin`; this screen
     /// renders the code + spinner). Esc cancels either flow.
     Connect(connect::ConnectScreenState),
+    /// The bare-`/connect` provider PICKER — an opencode-style grouped,
+    /// searchable list of the connectable LLM providers (modeled on the
+    /// `/model` picker). Interactive: `root::handle_screen_key` runs the pure
+    /// `connect_picker::handle_connect_picker_key` (↑/↓ move, type-to-search,
+    /// Enter select, Esc cancel). Opened SYNCHRONOUSLY by a bare `/connect`
+    /// (no arg) in the app.rs dispatch intercept (the catalog is static — no
+    /// async fetch). On `Select { provider_id }` the runner raises
+    /// `AppState.pending_connect` + closes; `root::pump_open_connect` then
+    /// opens the EXISTING key-entry `Connect` screen for that provider.
+    ConnectPicker(connect_picker::ConnectPickerState),
     /// (RRS-06) The Ctrl+O transcript toggle — claude-code `app:toggleTranscript`.
     /// A read-only, scrollable verbose dump of the FULL message log (every
     /// message, not the live-REPL folded/capped view), captured at open time.

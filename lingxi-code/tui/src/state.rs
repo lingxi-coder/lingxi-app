@@ -1339,6 +1339,18 @@ impl AppState {
         crate::telemetry::screen_opened("connect");
     }
 
+    /// Open the grouped bare-`/connect` provider PICKER. Called synchronously by
+    /// the app.rs dispatch intercept for a bare `/connect` (no provider arg).
+    /// Selecting a row raises `pending_connect` → `root::pump_open_connect` opens
+    /// the key-entry [`Self::open_connect`] screen. Mirrors [`Self::open_model`].
+    pub fn open_connect_picker(
+        &mut self,
+        state: crate::screens::connect_picker::ConnectPickerState,
+    ) {
+        self.active_screen = Some(crate::screens::Screen::ConnectPicker(state));
+        crate::telemetry::screen_opened("connect_picker");
+    }
+
     /// Open the grouped `/model` picker with the merged rows + recent keys + the
     /// active model. Called by `root::pump_open_model` after the async
     /// `list_available_models` / `list_model_listings` fetch (rows are built by

@@ -537,6 +537,10 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
     let screen_contexts: &[&str] = match &st.active_screen {
         Some(Screen::Help(_)) => &["Help", "Scroll"],
         Some(Screen::Model(_)) => &["ModelPicker"],
+        // The bare-`/connect` provider picker shares the model picker's keymap
+        // context: nav/Enter/Esc resolve the same way, and printable keys fall
+        // through to the reducer so type-to-search works.
+        Some(Screen::ConnectPicker(_)) => &["ModelPicker"],
         // (GAP D fix) Settings is a TAB NAVIGATOR (Config/Settings/Status/Usage
         // tabs + an `e`/Enter $EDITOR handoff on the Config tab) — NOT a
         // settings-panel select-list. claude-code drives tab navigation through
@@ -873,6 +877,23 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                 }
                 ConnectAction::Cancel => st.close_screen(),
                 ConnectAction::None => {}
+            }
+        }
+        Some(Screen::ConnectPicker(state)) => {
+            // The bare-`/connect` provider picker. Highlight-only reducer
+            // (mirrors the Model picker). On Select it closes the picker and
+            // raises `pending_connect`; `pump_open_connect` then opens the
+            // key-entry `/connect` screen for the chosen provider next tick.
+            // Cancel just closes; Stay keeps the highlight / edited query.
+            use crate::screens::connect_picker::{handle_connect_picker_key, ConnectPickerOutcome};
+            let ct_key = iocraft_to_crossterm028_key(k);
+            match handle_connect_picker_key(state, ct_key.code) {
+                ConnectPickerOutcome::Select { provider_id } => {
+                    st.pending_connect = Some(provider_id);
+                    st.close_screen();
+                }
+                ConnectPickerOutcome::Cancel => st.close_screen(),
+                ConnectPickerOutcome::Stay => {}
             }
         }
         Some(Screen::Skills(state)) => {

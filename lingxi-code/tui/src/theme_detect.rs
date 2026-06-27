@@ -2,6 +2,7 @@
 //! One-shot OSC-11 pre-flight at startup; pure helpers below are I/O-free.
 
 use crate::theme::ThemeName;
+use std::io::{Read, Write};
 use std::sync::OnceLock;
 
 /// Process-global detected background (set once at startup). `Some(Light|Dark)`
@@ -49,6 +50,40 @@ pub(crate) fn luminance_is_light(r: f64, g: f64, b: f64) -> bool {
     0.2126 * r + 0.7152 * g + 0.0722 * b > 0.5
 }
 
+/// The OSC-11 background query.
+const OSC11_QUERY: &[u8] = b"\x1b]11;?\x07";
+
+/// I/O-injectable detection core: write the OSC-11 query to `writer`, then read
+/// the reply from `reader` until a terminator (BEL `\x07` or ST `\x1b\\`), EOF,
+/// or a 1 KiB cap, and classify it. The `reader` owns timing — a real terminal
+/// reader returns `Ok(0)` on timeout (see `detect_terminal_theme`), so this
+/// loop ends without a reply and returns `None`.
+pub(crate) fn detect_with_io<R: Read, W: Write>(mut reader: R, mut writer: W) -> Option<ThemeName> {
+    writer.write_all(OSC11_QUERY).ok()?;
+    writer.flush().ok()?;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 64];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                let terminated = buf.contains(&0x07)
+                    || buf.windows(2).any(|w| w == [0x1b, 0x5c]);
+                if terminated || buf.len() > 1024 {
+                    break;
+                }
+            }
+        }
+    }
+    let (r, g, b) = parse_osc11_rgb(&String::from_utf8_lossy(&buf))?;
+    Some(if luminance_is_light(r, g, b) {
+        ThemeName::Light
+    } else {
+        ThemeName::Dark
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +117,27 @@ mod tests {
         assert!(!luminance_is_light(0.0, 0.0, 0.0)); // black
         assert!(luminance_is_light(0.8, 0.8, 0.8)); // light grey
         assert!(!luminance_is_light(0.2, 0.2, 0.2)); // dark grey
+    }
+
+    #[test]
+    fn detect_with_io_light_reply_and_sends_query() {
+        let reply = b"\x1b]11;rgb:ffff/ffff/ffff\x07";
+        let mut sent = Vec::new();
+        let got = detect_with_io(std::io::Cursor::new(&reply[..]), &mut sent);
+        assert_eq!(got, Some(ThemeName::Light));
+        assert_eq!(sent, b"\x1b]11;?\x07"); // it sent the OSC-11 query
+    }
+
+    #[test]
+    fn detect_with_io_dark_reply() {
+        let reply = b"\x1b]11;rgb:0000/0000/0000\x07";
+        let got = detect_with_io(std::io::Cursor::new(&reply[..]), std::io::sink());
+        assert_eq!(got, Some(ThemeName::Dark));
+    }
+
+    #[test]
+    fn detect_with_io_no_reply_is_none() {
+        let got = detect_with_io(std::io::Cursor::new(&b""[..]), std::io::sink());
+        assert_eq!(got, None);
     }
 }

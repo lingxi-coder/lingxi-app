@@ -1917,7 +1917,19 @@ pub async fn pump_open_model(
     // `(provider_id, request_model)` keys. Empty on any error.
     let recent: Vec<(String, String)> = crate::recent_models::load_recent_models()
         .into_iter()
-        .map(|r| (r.provider_id, r.request_model))
+        .map(|r| {
+            // Migrate stale recents: before bare `claude-*` ids were keyed to the
+            // "anthropic" profile they were recorded under "builtin". Without this
+            // remap an existing Claude recent no longer matches its row's
+            // provider_id, so it would silently drop out of the Recent group.
+            let provider_id = if r.provider_id == "builtin" && r.request_model.starts_with("claude-")
+            {
+                "anthropic".to_string()
+            } else {
+                r.provider_id
+            };
+            (provider_id, r.request_model)
+        })
         .collect();
 
     let mut st = state.lock().await;

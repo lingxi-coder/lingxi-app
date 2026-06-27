@@ -704,6 +704,7 @@ pub fn anthropic_model_profiles() -> Vec<ModelProfile> {
         ),
         model("claude-opus-4-6", "claude-opus-4-6", &[], true),
         model("claude-opus-4-7", "claude-opus-4-7", &[], true),
+        model("claude-opus-4-8", "claude-opus-4-8", &[], true),
         model(
             "claude-haiku-4-20250307",
             "claude-haiku-4",
@@ -711,6 +712,10 @@ pub fn anthropic_model_profiles() -> Vec<ModelProfile> {
             true,
         ),
         model("claude-haiku-4-5", "claude-haiku-4-5", &[], true),
+        // Fable 5 — the latest fast Claude. Routable everywhere else already
+        // (service.rs token defaults, thinking.rs reasoning set); it was just
+        // missing from the profile list, so it never reached the /model picker.
+        model("claude-fable-5", "claude-fable-5", &[], true),
     ]
 }
 
@@ -1068,7 +1073,7 @@ mod tests {
         );
 
         assert_eq!(profile.profile_name, "anthropic");
-        assert_eq!(profile.models.len(), 10);
+        assert_eq!(profile.models.len(), 12);
         assert!(profile
             .models
             .iter()

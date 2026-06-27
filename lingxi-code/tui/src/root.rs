@@ -3395,7 +3395,18 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         system.exit();
     }
 
-    element
+    // Pin the whole frame to the full terminal size. iocraft's fullscreen root
+    // sizes to its CONTENT height, so a child `height: 100%` collapses and the
+    // scrollback's `flex_grow` has no slack to absorb — leaving the prompt +
+    // footer stuck at the TOP with blank rows below. A fixed-size parent gives
+    // the column a real height, so the flex-grow scrollback expands and the
+    // input view sits at the BOTTOM (claude-code layout).
+    element! {
+        View(width: cols.max(1), height: rows.max(1)) {
+            #(std::iter::once(element))
+        }
+    }
+    .into_any()
 }
 
 /// Fixed (non-prompt) chrome rows the REPL screen reserves around the

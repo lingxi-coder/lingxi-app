@@ -1394,9 +1394,19 @@ impl AppState {
         recent: Vec<(String, String)>,
         current: String,
     ) {
-        self.active_screen = Some(crate::screens::Screen::Model(
-            crate::screens::model::ModelScreenState::new(rows, recent, current),
-        ));
+        let mut state = crate::screens::model::ModelScreenState::new(rows, recent, current);
+        // (opencode-style curation) Curate the picker to the providers the user
+        // has ACTUALLY configured (explicit `true` in the availability map);
+        // providers absent from the map are the default-available catalog dump
+        // and are hidden. Empty map → no curation (show-all), unchanged.
+        let configured: std::collections::BTreeSet<String> = self
+            .provider_availability
+            .iter()
+            .filter(|(_, &ok)| ok)
+            .map(|(pid, _)| pid.clone())
+            .collect();
+        state.set_configured(configured);
+        self.active_screen = Some(crate::screens::Screen::Model(state));
         crate::telemetry::screen_opened("model");
     }
 

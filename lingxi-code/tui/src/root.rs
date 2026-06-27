@@ -1008,6 +1008,23 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
     // (priority 4) ever run — no key leaks to `PromptInput`. Reused by
     // M7-12/13/14 (they add `match`-on-`Screen` arms in `handle_screen_key`).
     if st.active_screen.is_some() {
+        // (opencode-style curation) Ctrl+A in the `/model` picker opens the
+        // provider CONNECT picker — opencode's "Connect provider" action. Since
+        // the curated model list no longer shows unconfigured providers inline,
+        // this is the discovery/connect path. Handled here (full `st` access)
+        // before delegating, to avoid the `active_screen` borrow in the arm.
+        if matches!(st.active_screen, Some(crate::screens::Screen::Model(_))) {
+            let ct = iocraft_to_crossterm028_key(k);
+            if ct.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                && ct.code == crossterm::event::KeyCode::Char('a')
+            {
+                let picker = crate::screens::connect_picker::ConnectPickerState::from_availability(
+                    &st.provider_availability,
+                );
+                st.open_connect_picker(picker);
+                return;
+            }
+        }
         handle_screen_key(st, k);
         return;
     }

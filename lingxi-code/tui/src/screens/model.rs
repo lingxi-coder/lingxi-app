@@ -190,6 +190,13 @@ pub struct ModelScreenState {
     pub query: String,
     /// Highlighted index into the flat list of selectable items (not headers).
     pub selected: usize,
+    /// (opencode-style curation) Provider ids the user has ACTUALLY configured
+    /// (an explicit usable credential in `provider_availability`). When NON-EMPTY,
+    /// [`Self::visible_lines`] curates the provider groups to ONLY these (the
+    /// `Recent` group always shows) — hiding the big unconfigured catalog dump.
+    /// EMPTY (the default; tests / headless) shows every group, i.e. the
+    /// historical claude-code show-all-with-`[Connect]`-badges behavior.
+    pub configured: std::collections::BTreeSet<String>,
 }
 
 /// Controller outcome after a key.
@@ -225,7 +232,15 @@ impl ModelScreenState {
             current,
             query: String::new(),
             selected: 0,
+            configured: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// (curation) Set the configured-provider set (the live `/model` open path
+    /// passes the providers with an explicit usable credential). See
+    /// [`Self::configured`]. Empty leaves the show-all behavior.
+    pub fn set_configured(&mut self, configured: std::collections::BTreeSet<String>) {
+        self.configured = configured;
     }
 
     /// Whether a row matches the query (case-insensitive substring over display
@@ -279,10 +294,22 @@ impl ModelScreenState {
                 .filter(|(_, r)| r.provider_label == label && self.matches(r))
                 .map(|(i, _)| i)
                 .collect();
-            if !items.is_empty() {
-                out.push(VisibleLine::Header(label));
-                out.extend(items.into_iter().map(VisibleLine::Item));
+            if items.is_empty() {
+                continue;
             }
+            // (opencode-style curation) When a configured-provider set is present,
+            // hide groups whose provider the user hasn't configured (the big
+            // unconfigured catalog dump). Recent already surfaced its rows above,
+            // so a recent model still shows there. Empty set = show every group.
+            if !self.configured.is_empty()
+                && !items
+                    .iter()
+                    .any(|&i| self.configured.contains(&self.rows[i].provider_id))
+            {
+                continue;
+            }
+            out.push(VisibleLine::Header(label));
+            out.extend(items.into_iter().map(VisibleLine::Item));
         }
         out
     }

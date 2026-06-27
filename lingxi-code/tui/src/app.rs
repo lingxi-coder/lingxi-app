@@ -1044,7 +1044,7 @@ pub fn render_screen(
                     "Select model",
                     &m.query,
                     &lines,
-                    None,
+                    Some("Connect provider  ctrl+a"),
                     viewport_width,
                     viewport_height,
                     &state.theme,

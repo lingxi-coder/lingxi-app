@@ -1550,8 +1550,16 @@ pub(crate) fn terminal_api_error_text(
                             "API Error: This model has added safeguards for weapons-related content, which blocked this request. Not weapons-related? This may be a false positive.\n{m}{tail}"
                         )
                     } else {
+                        // Binary final `else`: `${bT}: <brand> is unable to respond
+                        // … aup).${a} `+m` — `${a}` is the optional explanation
+                        // clause (`a=i?` ${i}${punct}`:""`). Empty ⇒ `). {m}`
+                        // (matches the prior port output); present ⇒
+                        // `). <explanation>[.] {m}`.
+                        let clause = refusal_explanation_clause(
+                            stop_details.and_then(|sd| sd.explanation.as_deref()),
+                        );
                         format!(
-                            "API Error: LingXi is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup). {m}"
+                            "API Error: LingXi is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup).{clause} {m}"
                         )
                     }
                 }
@@ -1566,6 +1574,36 @@ pub(crate) fn terminal_api_error_text(
         }
         _ => None,
     }
+}
+
+/// The binary `U2e` explanation clause `${a}`:
+///   `let s=400, i = o && o.length>s ? o.slice(0,s).trimEnd()+"…" : o,
+///    a = i ? ` ${i}${/[.!?…]$/.test(i)?"":"."}` : ""`
+/// where `o` is the refusal explanation. Returns `""` when absent/empty; else a
+/// LEADING-space clause ` <explanation>` plus a terminal `.` when it does not
+/// already end with `.`/`!`/`?`/`…`. The explanation is truncated (+ `…`) past
+/// 400 chars — only then is its tail trimmed (matching `o.length>s` gating the
+/// `trimEnd`). The cap is by `char` count (the port's truncation convention; JS
+/// uses UTF-16 units — identical for the typical ASCII refusal text).
+fn refusal_explanation_clause(explanation: Option<&str>) -> String {
+    let Some(o) = explanation.filter(|s| !s.is_empty()) else {
+        return String::new();
+    };
+    const CAP: usize = 400;
+    let i = if o.chars().count() > CAP {
+        let head: String = o.chars().take(CAP).collect();
+        format!("{}\u{2026}", head.trim_end())
+    } else {
+        o.to_string()
+    };
+    if i.is_empty() {
+        return String::new();
+    }
+    let ends_punct = i
+        .chars()
+        .last()
+        .is_some_and(|c| matches!(c, '.' | '!' | '?' | '\u{2026}'));
+    format!(" {i}{}", if ends_punct { "" } else { "." })
 }
 
 /// The binary's `oUi(explanation)`: extract a `https://claude.com/form/\S+`
@@ -3413,7 +3451,7 @@ fn tool_result_to_model_text(data: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod terminal_api_error_tests {
-    use super::{refusal_exemption_url, terminal_api_error_text};
+    use super::{refusal_exemption_url, refusal_explanation_clause, terminal_api_error_text};
     use llm_client::StopDetails;
 
     fn details(category: &str, explanation: Option<&str>) -> StopDetails {
@@ -3564,6 +3602,41 @@ mod terminal_api_error_tests {
             refusal_exemption_url(Some("no url here")),
             "https://claude.com/form/cyber-use-case"
         );
+    }
+
+    /// `U2e` explanation clause `${a}` — leading space + terminal-`.` when the
+    /// explanation lacks one; "" when absent; truncate (+ `…`) past 400 chars.
+    #[test]
+    fn refusal_explanation_clause_formats() {
+        assert_eq!(refusal_explanation_clause(None), "");
+        assert_eq!(refusal_explanation_clause(Some("")), "");
+        assert_eq!(refusal_explanation_clause(Some("see policy X")), " see policy X.");
+        assert_eq!(refusal_explanation_clause(Some("denied.")), " denied.");
+        assert_eq!(refusal_explanation_clause(Some("why?")), " why?");
+        assert_eq!(refusal_explanation_clause(Some("stop!")), " stop!");
+        // Over 400 chars → 400-char head + `…` (terminal punct ⇒ no extra `.`).
+        let clause = refusal_explanation_clause(Some(&"x".repeat(450)));
+        assert!(clause.starts_with(' ') && clause.ends_with('\u{2026}'));
+        assert_eq!(clause.chars().count(), 1 + 400 + 1);
+    }
+
+    /// NO-LABEL + non-cyber/non-weapons category + explanation → the generic
+    /// usage-policy message appends the explanation clause (binary `…aup).${a} `).
+    #[test]
+    fn refusal_nolabel_generic_appends_explanation() {
+        let sd = details("other", Some("This violates section 2"));
+        let t = terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd))
+            .expect("refusal");
+        assert!(
+            t.contains("violate our Usage Policy (https://www.anthropic.com/legal/aup). This violates section 2."),
+            "got: {t}"
+        );
+        // No explanation → no clause (period-space-{m}, the prior output).
+        let sd2 = details("other", None);
+        let t2 = terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd2))
+            .expect("refusal");
+        assert!(t2.contains("Usage Policy (https://www.anthropic.com/legal/aup). "), "got: {t2}");
+        assert!(!t2.contains("section 2"), "got: {t2}");
     }
 }
 

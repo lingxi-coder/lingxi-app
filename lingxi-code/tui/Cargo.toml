@@ -36,11 +36,11 @@ memory = { path = "../memory" }
 # `provider_availability` seam.
 secret = { path = "../secret" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-# (theme-detect) libc::poll + libc::read for the non-blocking TTY pre-flight in
-# `TimedStdin` — avoids a background reader thread so no keystroke is stolen.
-# Not in [workspace.dependencies]; listed as a direct pin here (unix-only usage
-# lives behind `#[cfg(unix)]` in `tui/src/theme_detect.rs`).
-libc = "0.2"
+# (theme-detect) rustix::event::poll + rustix::io::read for the non-blocking TTY
+# pre-flight in `TimedStdin` — safe wrappers around poll(2)/read(2) that require
+# no `unsafe`. Not in [workspace.dependencies]; pinned to the 0.38 series already
+# in the workspace lockfile (pulled transitively by crossterm).
+rustix = { version = "0.38", features = ["event"] }
 
 iocraft = "=0.8.3"
 pulldown-cmark = { version = "=0.13.4", default-features = false }

@@ -11,7 +11,7 @@
 //! See plan `docs/superpowers/plans/2026-05-29-m7-01-ansi-markdown.md`.
 //! See plan `docs/superpowers/plans/2026-05-28-m6-01-foundation.md`.
 
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 pub mod app;
 pub mod bash_runner;

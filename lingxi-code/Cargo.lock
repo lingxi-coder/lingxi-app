@@ -5684,6 +5684,7 @@ dependencies = [
  "predicates",
  "protocol",
  "pulldown-cmark",
+ "rustix 0.38.44",
  "secret",
  "serde",
  "serde_json",

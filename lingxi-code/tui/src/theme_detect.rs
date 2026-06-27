@@ -1,8 +1,6 @@
 //! Terminal background + color-depth detection feeding `ThemeSetting::Auto`.
 //! One-shot OSC-11 pre-flight at startup; pure helpers below are I/O-free.
-// `TimedStdin` calls `libc::poll` + `libc::read` via `unsafe` blocks.
-// Everything unsafe is isolated to that struct's `Read` impl (unix-only).
-#![allow(unsafe_code)]
+//! `TimedStdin` uses `rustix::event::poll` + `rustix::io::read` — fully safe.
 
 use crate::theme::ThemeName;
 use std::io::{Read, Write};
@@ -98,28 +96,20 @@ struct TimedStdin {
 #[cfg(unix)]
 impl Read for TimedStdin {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::os::fd::AsFd;
         let now = std::time::Instant::now();
         if now >= self.deadline {
             return Ok(0);
         }
         let ms = (self.deadline - now).as_millis().min(i32::MAX as u128) as i32;
-        let mut pfd = libc::pollfd {
-            fd: libc::STDIN_FILENO,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: single valid pollfd; standard poll() usage.
-        let ready = unsafe { libc::poll(&mut pfd, 1, ms) };
-        if ready <= 0 {
-            return Ok(0); // timeout or poll error → behave like EOF
+        let stdin = std::io::stdin();
+        let fd = stdin.as_fd();
+        let mut fds = [rustix::event::PollFd::new(&fd, rustix::event::PollFlags::IN)];
+        match rustix::event::poll(&mut fds, ms) {
+            Ok(0) | Err(_) => return Ok(0), // timeout or poll error → behave like EOF
+            Ok(_) => {}
         }
-        // SAFETY: reading into the caller's buffer up to its length.
-        let n = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len()) };
-        if n < 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(n as usize)
-        }
+        rustix::io::read(&fd, buf).map_err(std::io::Error::from)
     }
 }
 

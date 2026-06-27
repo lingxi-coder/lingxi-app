@@ -1731,6 +1731,7 @@ fn anthropic_models_for(
         structured_output: true,
     };
     let mut ids: Vec<String> = vec![
+        "claude-opus-4-8".to_string(),
         "claude-opus-4-6".to_string(),
         "claude-opus-4-5-20251101".to_string(),
         "claude-opus-4-1-20250805".to_string(),
@@ -1738,6 +1739,9 @@ fn anthropic_models_for(
         "claude-sonnet-4-6".to_string(),
         "claude-sonnet-4-5-20250929".to_string(),
         "claude-haiku-4-5".to_string(),
+        // Fable 5 — the latest fast Claude; surfaced in the curated `/model`
+        // picker's Anthropic group alongside Sonnet/Opus/Haiku.
+        "claude-fable-5".to_string(),
     ];
     ids.push(default_model.to_string());
     if let Some(fb) = fallback_model {

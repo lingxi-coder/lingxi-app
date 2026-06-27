@@ -273,13 +273,17 @@ impl OrchestratorHandle for ConversationOrchestrator {
         if !models.is_empty() {
             return models;
         }
+        // The latest first-party Claude line (what the curated `/model` picker
+        // surfaces under "Anthropic"). Used only when no routing client is wired
+        // and `available_models()` is empty; the live config supplies the real
+        // list (see `anthropic_model_profiles`). Catalog providers (OpenAI,
+        // Gemini, …) come through `list_model_listings`, so they're not duplicated
+        // here.
         vec![
-            "claude-opus-4-7".to_string(),
             "claude-sonnet-4-6".to_string(),
+            "claude-opus-4-8".to_string(),
             "claude-haiku-4-5".to_string(),
-            "openai/gpt-4o".to_string(),
-            "openai/gpt-4o-mini".to_string(),
-            "gemini/gemini-2.0-flash".to_string(),
+            "claude-fable-5".to_string(),
         ]
     }
 

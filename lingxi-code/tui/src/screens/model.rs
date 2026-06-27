@@ -133,6 +133,21 @@ pub fn build_model_entries(
                 available: avail(profile),
                 description,
             }
+        } else if id.starts_with("claude-") {
+            // Bare Claude ids (claude-sonnet-4-6, claude-opus-4-8, claude-fable-5…)
+            // belong to Anthropic. Key them to the "anthropic" profile so the
+            // group gates on the real Anthropic credential under the only-connected
+            // curation, instead of the unkeyed "builtin" bucket (which is never in
+            // `configured`, so once any provider was connected the whole Anthropic
+            // group vanished).
+            ModelRow {
+                display_model: id.clone(),
+                request_model: id.clone(),
+                provider_id: "anthropic".to_string(),
+                provider_label: "Anthropic".to_string(),
+                available: avail("anthropic"),
+                description,
+            }
         } else {
             // Genuinely unknown bare id (no mapping): default to Built-in/true.
             ModelRow {
@@ -222,6 +237,48 @@ pub enum ModelOutcome {
     Cancel,
 }
 
+/// The curated "latest few" models surfaced per provider in the `/model` picker.
+/// claude-code hand-picks a short list (`utils/model/modelOptions.ts`) instead of
+/// dumping every catalog model; we mirror that — the raw catalog is ~460 models
+/// (338 of them OpenRouter alone), which is unusable. Keyed by `(provider_id,
+/// request_model)`; note the wire ids differ per provider (Anthropic/native use
+/// `claude-opus-4-8` dashes, the GitHub Copilot proxy uses `claude-opus-4.8`
+/// dots). Any provider/model not listed here is hidden from the live picker (the
+/// user's current + recent models are exempted by [`ModelScreenState::is_shown_model`]).
+/// OpenRouter is intentionally absent — it is an aggregator passthrough, so a
+/// connected user should pick a first-class provider for a curated set.
+#[must_use]
+fn is_curated_model(provider_id: &str, request_model: &str) -> bool {
+    match provider_id {
+        "anthropic" | "builtin" => matches!(
+            request_model,
+            "claude-sonnet-4-6" | "claude-opus-4-8" | "claude-haiku-4-5" | "claude-fable-5"
+        ),
+        "openai" => matches!(request_model, "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini"),
+        "openai-chatgpt" => matches!(request_model, "gpt-5.3-codex" | "gpt-5-codex"),
+        "deepseek" => matches!(
+            request_model,
+            "deepseek-chat" | "deepseek-reasoner" | "deepseek-v4-pro"
+        ),
+        "gemini" => matches!(
+            request_model,
+            "gemini-3.5-flash" | "gemini-3.1-pro-preview" | "gemini-3-pro-preview"
+        ),
+        "github-copilot" => matches!(
+            request_model,
+            "claude-opus-4.8"
+                | "claude-sonnet-4.6"
+                | "claude-haiku-4.5"
+                | "claude-fable-5"
+                | "gpt-5.5"
+                | "gemini-3.1-pro-preview"
+        ),
+        "zai" => matches!(request_model, "glm-5.1" | "glm-5" | "glm-5-turbo"),
+        "zhipuai-coding-plan" => matches!(request_model, "glm-5.1" | "glm-5-turbo" | "glm-4.7"),
+        _ => false,
+    }
+}
+
 impl ModelScreenState {
     /// Build from merged rows + recent keys + the active model.
     #[must_use]
@@ -253,6 +310,27 @@ impl ModelScreenState {
         row.display_model.to_lowercase().contains(&q)
             || row.provider_label.to_lowercase().contains(&q)
             || row.request_model.to_lowercase().contains(&q)
+    }
+
+    /// Whether a provider-group row should be shown, given the "latest few"
+    /// curation. claude-code curates the picker to a hand-picked short list
+    /// (`modelOptions.ts`) rather than dumping the whole catalog (~460 models);
+    /// we mirror that with [`is_curated_model`]. Curation only kicks in on the
+    /// live path (when `configured` is non-empty); the headless/test path leaves
+    /// `configured` empty → show-all, preserving the `build_model_entries`
+    /// byte-parity tests. The user's CURRENT and RECENT models are always kept
+    /// so an off-list active model stays visible/selectable.
+    #[must_use]
+    fn is_shown_model(&self, r: &ModelRow) -> bool {
+        if self.configured.is_empty() {
+            return true;
+        }
+        is_curated_model(&r.provider_id, &r.request_model)
+            || r.request_model == self.current
+            || self
+                .recent
+                .iter()
+                .any(|(p, m)| p == &r.provider_id && m == &r.request_model)
     }
 
     /// Ordered visible lines: a `Recent` group (rows whose
@@ -291,7 +369,7 @@ impl ModelScreenState {
                 .rows
                 .iter()
                 .enumerate()
-                .filter(|(_, r)| r.provider_label == label && self.matches(r))
+                .filter(|(_, r)| r.provider_label == label && self.matches(r) && self.is_shown_model(r))
                 .map(|(i, _)| i)
                 .collect();
             if items.is_empty() {
@@ -590,15 +668,16 @@ mod render_tests {
     fn renders_groups_headers_and_current_badge() {
         let out = render_model_to_string(&st());
         assert!(out.starts_with(&format!("Select model\n{SUB_HEADER}\nSearch: \n")), "{out}");
-        assert!(out.contains("\nBuilt-in\n"));
+        // claude-* bare ids now group under Anthropic (gate on the anthropic credential).
+        assert!(out.contains("\nAnthropic\n"));
         assert!(out.contains("\nDeepSeek\n"));
-        assert!(out.contains("\u{276F} claude-opus-4-7  \u{00B7} Built-in (current)\n"));
+        assert!(out.contains("\u{276F} claude-opus-4-7  \u{00B7} Anthropic (current)\n"));
         assert!(out.contains("  DeepSeek Chat  \u{00B7} DeepSeek\n"));
         // (model-no-row-descriptions) The opus row carries a built-in blurb,
         // rendered as a 2-space-indented dimmed sub-line directly below its row.
         assert!(
             out.contains(
-                "\u{276F} claude-opus-4-7  \u{00B7} Built-in (current)\n  Most capable for complex work\n"
+                "\u{276F} claude-opus-4-7  \u{00B7} Anthropic (current)\n  Most capable for complex work\n"
             ),
             "{out}"
         );
@@ -705,7 +784,7 @@ mod render_tests {
     #[test]
     fn renders_connect_badge_on_unconfigured_provider() {
         let out = render_model_to_string(&st_with_unconfigured());
-        assert!(out.contains("\u{276F} claude-opus-4-7  \u{00B7} Built-in (current)\n"));
+        assert!(out.contains("\u{276F} claude-opus-4-7  \u{00B7} Anthropic (current)\n"));
         assert!(out.contains("GPT-5.4 nano  \u{00B7} GitHub Copilot [Connect]\n"));
         assert!(!out.contains("GPT-5.4 nano  \u{00B7} GitHub Copilot (current)"));
     }
@@ -738,7 +817,7 @@ mod entries_tests {
         );
 
         let opus = rows.iter().find(|r| r.request_model == "claude-opus-4-7").unwrap();
-        assert_eq!(opus.provider_label, "Built-in");
+        assert_eq!(opus.provider_label, "Anthropic");
         let gpt = rows.iter().find(|r| r.request_model == "openai/gpt-4o").unwrap();
         assert_eq!(gpt.display_model, "gpt-4o");
         assert_eq!(gpt.provider_label, "OpenAI");
@@ -825,7 +904,7 @@ mod entries_tests {
         // I1/I2 regression: a bare available-model id from a USER provider (no
         // catalog listing, no `/` in the id) must resolve to its own profile +
         // label and gate on availability — not silently fall into "Built-in"/true.
-        let existing = vec!["claude-opus-4-7".to_string(), "llama-3.3-70b".to_string()];
+        let existing = vec!["mystery-model-9".to_string(), "llama-3.3-70b".to_string()];
         let catalog: Vec<traits::orchestrator::ModelListing> = vec![];
         let mut model_providers: BTreeMap<String, (String, String)> = BTreeMap::new();
         model_providers
@@ -840,11 +919,11 @@ mod entries_tests {
         assert_eq!(llama.provider_id, "groq", "user provider id, not 'builtin'");
         assert_eq!(llama.provider_label, "Groq");
         assert!(!llama.available, "unconfigured groq → not available (badges + Connect)");
-        // The true built-in (no mapping) still groups under Built-in and stays available.
-        let opus = rows.iter().find(|r| r.request_model == "claude-opus-4-7").unwrap();
-        assert_eq!(opus.provider_id, "builtin");
-        assert_eq!(opus.provider_label, "Built-in");
-        assert!(opus.available);
+        // A genuinely-unmapped non-claude id still groups under Built-in and stays available.
+        let other = rows.iter().find(|r| r.request_model == "mystery-model-9").unwrap();
+        assert_eq!(other.provider_id, "builtin");
+        assert_eq!(other.provider_label, "Built-in");
+        assert!(other.available);
 
         // Configured: `groq:true` → available == true (routes directly).
         let mut avail_ok = BTreeMap::new();
@@ -858,17 +937,18 @@ mod entries_tests {
     #[test]
     fn unmapped_bare_id_still_falls_back_to_builtin() {
         use std::collections::BTreeMap;
-        // A bare id with no mapping is genuinely unknown → Built-in/true (no regression).
+        // A bare id with no mapping that is NOT a claude-* id is genuinely unknown
+        // → Built-in/true (no regression). (claude-* ids now key to Anthropic.)
         let rows = build_model_entries(
-            vec!["claude-opus-4-7".to_string()],
+            vec!["mystery-model-9".to_string()],
             vec![],
             &BTreeMap::new(),
             &BTreeMap::new(),
         );
-        let opus = rows.iter().find(|r| r.request_model == "claude-opus-4-7").unwrap();
-        assert_eq!(opus.provider_id, "builtin");
-        assert_eq!(opus.provider_label, "Built-in");
-        assert!(opus.available);
+        let m = rows.iter().find(|r| r.request_model == "mystery-model-9").unwrap();
+        assert_eq!(m.provider_id, "builtin");
+        assert_eq!(m.provider_label, "Built-in");
+        assert!(m.available);
     }
 
     #[test]

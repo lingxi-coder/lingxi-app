@@ -61,20 +61,29 @@ pub fn render_picker_popup(
     let box_w = viewport_width.saturating_sub(6).clamp(46, 88);
     let header_color = Color::Magenta;
 
-    // Title row: title (bold) <-----> esc (dim).
+    // Title row: title (bold, terminal default fg) <-----> esc (dim).
+    //
+    // We render the title and the typed search in the terminal's DEFAULT
+    // foreground (no explicit color) rather than `theme.text`. claude-code's
+    // `select.tsx`/`ListItem` paint ordinary text with `color={undefined}` —
+    // the terminal's own fg, which is contrast-safe on ANY background. Using
+    // `theme.text` (white in the dark palette) makes the text INVISIBLE on a
+    // light terminal whenever `Auto` resolves to Dark (no `$COLORFGBG`, no
+    // OSC-11) — the white-on-white bug. Dim/accent colors stay (they read on
+    // both); only the would-be-`theme.text` spots drop to the default fg.
     let title_owned = title.to_string();
     let title_row = element! {
         View(width: 100pct, flex_direction: FlexDirection::Row, justify_content: JustifyContent::SpaceBetween) {
-            Text(content: title_owned, color: theme.text, weight: Weight::Bold)
+            Text(content: title_owned, weight: Weight::Bold)
             Text(content: "esc".to_string(), color: theme.dim)
         }
     };
 
-    // Search row: dim "Search" placeholder, or the typed query.
-    let (search_text, search_color) = if search.is_empty() {
-        ("Search".to_string(), theme.dim)
+    // Search row: dim "Search" placeholder, or the typed query in the default fg.
+    let search_row: AnyElement<'static> = if search.is_empty() {
+        element! { Text(content: "Search".to_string(), color: theme.dim) }.into_any()
     } else {
-        (search.to_string(), theme.text)
+        element! { Text(content: search.to_string()) }.into_any()
     };
 
     // Body rows.
@@ -126,7 +135,7 @@ pub fn render_picker_popup(
             ) {
                 #(std::iter::once(title_row.into_any()))
                 View(flex_direction: FlexDirection::Column, padding_top: 1) {
-                    Text(content: search_text, color: search_color)
+                    #(std::iter::once(search_row))
                 }
                 #(body.into_iter())
                 #(footer_el.into_iter())
@@ -178,8 +187,15 @@ fn render_item(
         PopupMarker::Dot => theme.suggestion,
         PopupMarker::None => theme.dim,
     };
-    let label_color = if selected { theme.suggestion } else { theme.text };
     let label_owned = label.to_string();
+    // Focused row → accent (`suggestion`); other rows → terminal DEFAULT fg (no
+    // explicit color), so labels stay visible on light terminals (claude-code
+    // `ListItem` renders unfocused rows with `color={undefined}`).
+    let label_el: AnyElement<'static> = if selected {
+        element! { Text(content: label_owned, color: theme.suggestion) }.into_any()
+    } else {
+        element! { Text(content: label_owned) }.into_any()
+    };
     let detail_owned = if detail.is_empty() {
         String::new()
     } else {
@@ -192,7 +208,7 @@ fn render_item(
             View(flex_direction: FlexDirection::Row) {
                 Text(content: pointer, color: theme.suggestion)
                 Text(content: glyph, color: marker_color)
-                Text(content: label_owned, color: label_color)
+                #(std::iter::once(label_el))
                 #((!detail_owned.is_empty()).then(|| element! { Text(content: detail_owned.clone(), color: theme.dim) }))
             }
             #(has_badge.then(|| element! { Text(content: badge_owned.clone(), color: theme.suggestion) }))

@@ -222,6 +222,12 @@ struct HookEntry {
     /// `command` hook executable (`schemas/hooks.ts:33-34`).
     #[serde(default)]
     command: Option<String>,
+    /// `command` hook exec-form `args` (`schemas/hooks.ts`): when present,
+    /// `command` is resolved as an executable and spawned directly with these
+    /// arguments — no shell. Carried onto [`HookExecutor::Command`]'s `args`
+    /// (the executor already supports it; the loader previously dropped it).
+    #[serde(default)]
+    args: Option<Vec<String>>,
     /// `http` hook endpoint URL (`schemas/hooks.ts:99`). Always sent via POST.
     #[serde(default)]
     url: Option<String>,
@@ -403,7 +409,7 @@ fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)> {
             let command = entry.command.clone()?;
             let executor = HookExecutor::Command {
                 command: command.clone(),
-                args: vec![],
+                args: entry.args.clone().unwrap_or_default(),
                 env: HashMap::new(),
                 cwd: None,
             };

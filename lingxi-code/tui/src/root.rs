@@ -541,6 +541,9 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
         // context: nav/Enter/Esc resolve the same way, and printable keys fall
         // through to the reducer so type-to-search works.
         Some(Screen::ConnectPicker(_)) => &["ModelPicker"],
+        // The GitHub deployment-type sub-flow shares the picker keymap (nav/
+        // Enter/Esc + printable keys fall through to its reducer for the host input).
+        Some(Screen::GithubDeployment(_)) => &["ModelPicker"],
         // (GAP D fix) Settings is a TAB NAVIGATOR (Config/Settings/Status/Usage
         // tabs + an `e`/Enter $EDITOR handoff on the Config tab) — NOT a
         // settings-panel select-list. claude-code drives tab navigation through
@@ -894,6 +897,28 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                 }
                 ConnectPickerOutcome::Cancel => st.close_screen(),
                 ConnectPickerOutcome::Stay => {}
+            }
+        }
+        Some(Screen::GithubDeployment(state)) => {
+            // (GitHub Copilot Enterprise) The deployment-type sub-flow. On
+            // Public/Enterprise it opens the device-flow `Connect` screen with the
+            // chosen domain + raises `pending_copilot_login` (the ticker then
+            // fires the copilot-login task, which calls `begin(domain)`).
+            use crate::screens::github_deploy::{handle_github_deploy_key, DeployOutcome};
+            let ct_key = iocraft_to_crossterm028_key(k);
+            match handle_github_deploy_key(state, ct_key.code) {
+                DeployOutcome::Public => {
+                    st.copilot_login_domain = None;
+                    st.open_connect(crate::screens::connect::ConnectScreenState::copilot_pending());
+                    st.pending_copilot_login = true;
+                }
+                DeployOutcome::Enterprise { domain } => {
+                    st.copilot_login_domain = Some(domain);
+                    st.open_connect(crate::screens::connect::ConnectScreenState::copilot_pending());
+                    st.pending_copilot_login = true;
+                }
+                DeployOutcome::Cancel => st.close_screen(),
+                DeployOutcome::Stay => {}
             }
         }
         Some(Screen::Skills(state)) => {
@@ -1983,26 +2008,21 @@ pub async fn pump_open_connect(state: &Arc<Mutex<AppState>>) -> bool {
         }
     };
     let is_copilot = provider == "github-copilot";
-    let screen = if is_copilot {
-        crate::screens::connect::ConnectScreenState::copilot_pending()
-    } else {
-        // The picker carried the human label, but the flag only holds the id; the
-        // header reads "Connect <id>" (the engine `/connect` group resolves the
-        // canonical label on the registry path).
-        crate::screens::connect::ConnectScreenState::api_key(&provider, &provider)
-    };
     let mut st = state.lock().await;
     if st.pending_permission.is_some() || st.active_screen.is_some() {
         st.pending_connect = Some(provider);
         return false;
     }
-    st.open_connect(screen);
-    // (Copilot device-flow) The Copilot screen opens at `Starting`; raise the
-    // flag so the main loop fires the copilot-login task once. It runs the
-    // engine driver's `begin()` (browser open + user code → `Polling`) then
-    // `poll_to_completion()` (poll + token store → `Done`/`Failed`).
     if is_copilot {
-        st.pending_copilot_login = true;
+        // GitHub Copilot first picks the deployment type (Public vs Enterprise).
+        // The deploy screen (handle_screen_key) then opens the device-flow screen
+        // + raises `pending_copilot_login` with the resolved `copilot_login_domain`.
+        st.open_github_deployment();
+    } else {
+        // The picker carried the human label, but the flag only holds the id; the
+        // header reads "Connect <id>" (the engine `/connect` group resolves the
+        // canonical label on the registry path).
+        st.open_connect(crate::screens::connect::ConnectScreenState::api_key(&provider, &provider));
     }
     true
 }
@@ -3294,16 +3314,16 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         hooks.use_future(async move {
             loop {
                 notify.notified().await;
-                let driver = {
+                let (driver, domain) = {
                     let st = state.lock().await;
-                    st.copilot_connect_driver.clone()
+                    (st.copilot_connect_driver.clone(), st.copilot_login_domain.clone())
                 };
                 let Some(driver) = driver else {
                     // No driver wired (smoke gates / tests): the screen stays at
                     // "Requesting device code…" inertly — same as before the seam.
                     continue;
                 };
-                match driver.begin().await {
+                match driver.begin(domain.as_deref()).await {
                     Ok(step) => {
                         if set_copilot_device_code(&state, &step.user_code, &step.verification_uri)
                             .await

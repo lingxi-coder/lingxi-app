@@ -931,10 +931,15 @@ pub struct AppState {
     /// no-driver build (smoke gates / tests) — the Copilot `/connect` screen
     /// then just shows "Requesting device code…" inertly.
     pub copilot_connect_driver: Option<std::sync::Arc<dyn command_core::CopilotConnectDriver>>,
-    /// (`/connect` Copilot device-flow) Raised by `root::pump_open_connect` when
-    /// it opens the Copilot device-flow screen so the main loop fires the
+    /// (`/connect` Copilot device-flow) Raised when the Copilot device-flow
+    /// screen opens (Public or Enterprise) so the main loop fires the
     /// copilot-login task exactly once. Drained by [`Self::take_pending_copilot_login`].
     pub pending_copilot_login: bool,
+    /// (`/connect` Copilot Enterprise) GitHub host the next copilot login runs
+    /// against — `None` = `github.com` (Public), `Some("company.ghe.com")` =
+    /// GitHub Enterprise (set by the deployment-type popup). Read by the
+    /// copilot-login task when it calls `begin(domain)`.
+    pub copilot_login_domain: Option<String>,
     /// (`/color`) Session agent-color name set by the `/color <name>` command
     /// (claude-code `standaloneAgentContext.color`). `Some("cyan")` after
     /// `/color cyan`; `None` after `/color default` (reset). Maps to a render
@@ -1135,6 +1140,7 @@ impl AppState {
             provider_key_store: None,
             copilot_connect_driver: None,
             pending_copilot_login: false,
+            copilot_login_domain: None,
             session_agent_color: None,
             pending_save_color: None,
             pending_permission_delete: None,
@@ -1368,6 +1374,16 @@ impl AppState {
     pub fn open_connect(&mut self, state: crate::screens::connect::ConnectScreenState) {
         self.active_screen = Some(crate::screens::Screen::Connect(state));
         crate::telemetry::screen_opened("connect");
+    }
+
+    /// (GitHub Copilot Enterprise) Open the deployment-type sub-flow (Public vs
+    /// Enterprise) shown when connecting GitHub Copilot. Resolving it opens the
+    /// device-flow `Connect` screen with the chosen `copilot_login_domain`.
+    pub fn open_github_deployment(&mut self) {
+        self.active_screen = Some(crate::screens::Screen::GithubDeployment(
+            crate::screens::github_deploy::GithubDeploymentState::default(),
+        ));
+        crate::telemetry::screen_opened("github_deployment");
     }
 
     /// Open the grouped bare-`/connect` provider PICKER. Called synchronously by

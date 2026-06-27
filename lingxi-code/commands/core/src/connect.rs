@@ -65,8 +65,10 @@ pub struct CopilotConnectStep {
 /// token on success.
 #[async_trait]
 pub trait CopilotConnectDriver: Send + Sync {
-    /// Request a device code; the caller displays it then polls.
-    async fn begin(&self) -> Result<CopilotConnectStep, ConnectError>;
+    /// Request a device code against `domain` (`None` = `github.com` public;
+    /// `Some("company.ghe.com")` = a GitHub Enterprise host). The caller displays
+    /// the code then polls.
+    async fn begin(&self, domain: Option<&str>) -> Result<CopilotConnectStep, ConnectError>;
     /// Poll until authorized (or terminal), storing the token on success.
     async fn poll_to_completion(&self, step: &CopilotConnectStep) -> Result<(), ConnectError>;
 }
@@ -102,7 +104,9 @@ impl BuiltinCommandHandler for ConnectHandler {
             };
         }
         if provider == "github-copilot" {
-            let step = match self.copilot.begin().await {
+            // The text `/connect github-copilot` command path uses the public
+            // deployment; the TUI's deployment-type popup drives Enterprise.
+            let step = match self.copilot.begin(None).await {
                 Ok(s) => s,
                 Err(e) => return CommandResult::Done { display: Some(format!("Could not start Copilot sign-in: {e}")) },
             };
@@ -162,7 +166,7 @@ mod tests {
     struct PanicCopilot;
     #[async_trait]
     impl CopilotConnectDriver for PanicCopilot {
-        async fn begin(&self) -> Result<CopilotConnectStep, ConnectError> {
+        async fn begin(&self, _domain: Option<&str>) -> Result<CopilotConnectStep, ConnectError> {
             panic!("api-key path must not call the copilot driver");
         }
         async fn poll_to_completion(&self, _s: &CopilotConnectStep) -> Result<(), ConnectError> {

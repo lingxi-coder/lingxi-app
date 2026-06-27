@@ -509,6 +509,9 @@ impl PoolSubagentSpawner {
     async fn resolve_tools(
         &self,
         agent_def: &AgentDefinition,
+        // The resolved subagent's own recursion depth — gates its `Agent` tool
+        // at `depth < 5` (claude `e9t`). Threaded from `request.depth`.
+        depth: u32,
     ) -> (Vec<serde_json::Value>, Vec<String>) {
         let Some(registry) = self.tool_registry.get() else {
             return (Vec::new(), Vec::new());
@@ -524,6 +527,7 @@ impl PoolSubagentSpawner {
             agent_def,
             denied,
             self.default_model.as_deref(),
+            depth,
         )
         .await
     }
@@ -655,6 +659,8 @@ impl PoolSubagentSpawner {
             skill_loader: None,
             hook_session_id: protocol::SessionId::nil(),
             hook_cwd: std::path::PathBuf::new(),
+            // Default 0; `build_subagent_context` overwrites it with `request.depth`.
+            depth: 0,
         }
     }
 
@@ -805,7 +811,12 @@ impl PoolSubagentSpawner {
             ctx.transcript_subdir = subagents_dir.clone();
         }
         // Resolve THIS spawn's advertised tools + dispatch allow-list.
-        let (tool_schemas, allowed_tools) = self.resolve_tools(&ctx.agent_definition).await;
+        // This child's recursion depth (claude `spawnDepth`): the Agent tool
+        // stamped it as parent.depth + 1. Drives the resolver's `Agent` depth-gate
+        // and is threaded by the runner into the child's dispatched tools.
+        ctx.depth = request.depth;
+        let (tool_schemas, allowed_tools) =
+            self.resolve_tools(&ctx.agent_definition, request.depth).await;
         ctx.tool_schemas = tool_schemas;
         ctx.allowed_tools = allowed_tools;
         ctx.schema = request.schema.clone();
@@ -1394,9 +1405,12 @@ mod tests {
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
         let spawner = PoolSubagentSpawner::new(pool);
         let (schemas, allowed) = spawner
-            .resolve_tools(&agent_def(AgentToolPolicy::All {
-                use_exact_tools: true,
-            }))
+            .resolve_tools(
+                &agent_def(AgentToolPolicy::All {
+                    use_exact_tools: true,
+                }),
+                0,
+            )
             .await;
         assert!(schemas.is_empty());
         assert!(allowed.is_empty());
@@ -1410,9 +1424,12 @@ mod tests {
             .with_tool_registry(registry_with(&["Read", "Bash"]));
 
         let (schemas, allowed) = spawner
-            .resolve_tools(&agent_def(AgentToolPolicy::All {
-                use_exact_tools: true,
-            }))
+            .resolve_tools(
+                &agent_def(AgentToolPolicy::All {
+                    use_exact_tools: true,
+                }),
+                0,
+            )
             .await;
         // Full set, and allow-list = resolved names — both in the faithful
         // `assembleToolPool` order (builtins sorted by name).
@@ -1433,7 +1450,7 @@ mod tests {
         // Explicit allow-list: only "Read" survives — both the advertised set
         // AND the dispatch allow-list narrow together.
         let (schemas, allowed) = spawner
-            .resolve_tools(&agent_def(AgentToolPolicy::Explicit(vec!["Read".to_string()])))
+            .resolve_tools(&agent_def(AgentToolPolicy::Explicit(vec!["Read".to_string()])), 0)
             .await;
         let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, vec!["Read"]);
@@ -1452,9 +1469,12 @@ mod tests {
             .with_tool_wide_deny_names(vec!["WebFetch".to_string()]);
 
         let (schemas, allowed) = spawner
-            .resolve_tools(&agent_def(AgentToolPolicy::All {
-                use_exact_tools: true,
-            }))
+            .resolve_tools(
+                &agent_def(AgentToolPolicy::All {
+                    use_exact_tools: true,
+                }),
+                0,
+            )
             .await;
         let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, vec!["Bash", "Read"], "WebFetch denied → not advertised");
@@ -1479,9 +1499,12 @@ mod tests {
             .with_tool_wide_deny_names(vec!["mcp__github".to_string()]);
 
         let (schemas, _allowed) = spawner
-            .resolve_tools(&agent_def(AgentToolPolicy::All {
-                use_exact_tools: true,
-            }))
+            .resolve_tools(
+                &agent_def(AgentToolPolicy::All {
+                    use_exact_tools: true,
+                }),
+                0,
+            )
             .await;
         let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(
@@ -1503,17 +1526,23 @@ mod tests {
         let unfiltered = PoolSubagentSpawner::new(pool.clone())
             .with_tool_registry(registry_with(&["Read", "Bash"]));
         let (schemas_a, allowed_a) = unfiltered
-            .resolve_tools(&agent_def(AgentToolPolicy::All {
-                use_exact_tools: true,
-            }))
+            .resolve_tools(
+                &agent_def(AgentToolPolicy::All {
+                    use_exact_tools: true,
+                }),
+                0,
+            )
             .await;
         let empty_deny = PoolSubagentSpawner::new(pool)
             .with_tool_registry(registry_with(&["Read", "Bash"]))
             .with_tool_wide_deny_names(vec![]);
         let (schemas_b, allowed_b) = empty_deny
-            .resolve_tools(&agent_def(AgentToolPolicy::All {
-                use_exact_tools: true,
-            }))
+            .resolve_tools(
+                &agent_def(AgentToolPolicy::All {
+                    use_exact_tools: true,
+                }),
+                0,
+            )
             .await;
         assert_eq!(schemas_a, schemas_b, "empty deny → identical schemas");
         assert_eq!(allowed_a, allowed_b, "empty deny → identical allow-list");
@@ -1537,9 +1566,12 @@ mod tests {
         let spawner = PoolSubagentSpawner::new(pool).with_tool_registry(Arc::new(reg));
 
         let (schemas, allowed) = spawner
-            .resolve_tools(&agent_def(AgentToolPolicy::All {
-                use_exact_tools: true,
-            }))
+            .resolve_tools(
+                &agent_def(AgentToolPolicy::All {
+                    use_exact_tools: true,
+                }),
+                0,
+            )
             .await;
         // Advertised: canonical name only.
         let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -1549,11 +1581,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_tools_strips_agent_by_default() {
-        // The always-disallowed default drop (claude ALL_AGENT_DISALLOWED_TOOLS
-        // / filterToolsForAgent) removes the Agent tool from every subagent
-        // pool when USER_TYPE !== 'ant' — even under the All policy. With ONLY
-        // an Agent tool registered the resolved pool is empty.
+    async fn resolve_tools_gates_agent_by_depth() {
+        // `Agent` is depth-gated (claude `s < e9t`, e9t=5), not flat-denied: a
+        // depth-0 subagent keeps it; a depth-5 subagent has it stripped. With
+        // ONLY an Agent tool registered, the depth-5 pool is empty.
         let mut reg = ToolRegistry::new();
         reg.register_builtin(Arc::new(StubTool {
             name: "Agent",
@@ -1563,38 +1594,51 @@ mod tests {
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
         let spawner = PoolSubagentSpawner::new(pool).with_tool_registry(Arc::new(reg));
 
-        let (schemas, allowed) = spawner
-            .resolve_tools(&agent_def(AgentToolPolicy::All {
-                // use_exact_tools: false → the always-disallowed strip applies.
-                // (The `true` / fork path BYPASSES this strip — see the
+        let policy = || {
+            agent_def(AgentToolPolicy::All {
+                // use_exact_tools: false → the resolver (incl. the depth gate)
+                // applies. (The `true` / fork path BYPASSES it — see the
                 // tool_resolver `use_exact_tools_*` tests.)
                 use_exact_tools: false,
-            }))
-            .await;
-        assert!(schemas.is_empty(), "Agent must be stripped → no schemas");
-        assert!(allowed.is_empty(), "Agent (and alias Task) stripped → empty allow-list");
+            })
+        };
+        // depth 0: Agent kept (0 < 5).
+        let (schemas0, allowed0) = spawner.resolve_tools(&policy(), 0).await;
+        let names0: Vec<&str> = schemas0.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names0, vec!["Agent"], "Agent kept at depth 0");
+        assert!(allowed0.contains(&"Agent".to_string()));
+        assert!(allowed0.contains(&"Task".to_string()), "alias in allow-list");
+        // depth 5: Agent gated → empty pool.
+        let (schemas5, allowed5) = spawner.resolve_tools(&policy(), 5).await;
+        assert!(schemas5.is_empty(), "Agent gated at depth 5 → no schemas");
+        assert!(allowed5.is_empty(), "Agent (and alias Task) gated → empty allow-list");
     }
 
     #[tokio::test]
-    async fn resolve_tools_all_policy_drops_agent() {
-        // End-to-end: the always-disallowed strip flows through resolve_tools →
-        // tool_schemas + allowed_tools. Agent is dropped, Bash+Read survive in
-        // the assembleToolPool/localeCompare-sorted order.
+    async fn resolve_tools_all_policy_keeps_agent_at_depth_0() {
+        // End-to-end: resolve_tools → tool_schemas + allowed_tools. At depth 0
+        // Agent is KEPT (depth-gated, not flat-denied); Bash+Read survive too,
+        // in assembleToolPool/localeCompare-sorted order.
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
         let spawner = PoolSubagentSpawner::new(pool)
             .with_tool_registry(registry_with(&["Agent", "Bash", "Read"]));
 
         let (schemas, allowed) = spawner
-            .resolve_tools(&agent_def(AgentToolPolicy::All {
-                // use_exact_tools: false → the always-disallowed strip applies
-                // (the fork/`true` path keeps Agent — tool_resolver bypass test).
-                use_exact_tools: false,
-            }))
+            .resolve_tools(
+                &agent_def(AgentToolPolicy::All {
+                    // use_exact_tools: false → the always-disallowed strip applies
+                    // (the fork/`true` path keeps Agent — tool_resolver bypass test).
+                    use_exact_tools: false,
+                }),
+                0,
+            )
             .await;
         let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["Bash", "Read"]);
-        assert_eq!(allowed, vec!["Bash".to_string(), "Read".to_string()]);
+        assert_eq!(names, vec!["Agent", "Bash", "Read"]);
+        assert!(allowed.contains(&"Agent".to_string()));
+        assert!(allowed.contains(&"Bash".to_string()));
+        assert!(allowed.contains(&"Read".to_string()));
     }
 
     #[tokio::test]
@@ -1608,11 +1652,14 @@ mod tests {
         // (Read/Grep/Glob/WebSearch/WebFetch) at BOTH advertisement and the
         // dispatch allow-list — `Bash` is dropped from both.
         let (schemas, allowed) = spawner
-            .resolve_tools(&agent_def_plan(AgentToolPolicy::All {
-                // use_exact_tools: false → Plan-mode narrowing applies (the
-                // fork/`true` path bypasses it — tool_resolver bypass test).
-                use_exact_tools: false,
-            }))
+            .resolve_tools(
+                &agent_def_plan(AgentToolPolicy::All {
+                    // use_exact_tools: false → Plan-mode narrowing applies (the
+                    // fork/`true` path bypasses it — tool_resolver bypass test).
+                    use_exact_tools: false,
+                }),
+                0,
+            )
             .await;
         let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
         // available_tools() locale-sorts the builtin set (Grep < Read < WebFetch).
@@ -1639,7 +1686,7 @@ mod tests {
         // Except drops the named tools from BOTH the advertised set and the
         // allow-list.
         let (schemas, allowed) = spawner
-            .resolve_tools(&agent_def(AgentToolPolicy::Except(vec!["Bash".to_string()])))
+            .resolve_tools(&agent_def(AgentToolPolicy::Except(vec!["Bash".to_string()])), 0)
             .await;
         let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, vec!["Edit", "Read"]); // sorted by name
@@ -1897,7 +1944,7 @@ mod tests {
         let spawner = PoolSubagentSpawner::new(pool)
             .with_tool_registry(registry_with(&["Read", "Grep", "Edit", "Write"]));
         let def = spawner.resolve_definition("Explore").await;
-        let (schemas, allowed) = spawner.resolve_tools(&def).await;
+        let (schemas, allowed) = spawner.resolve_tools(&def, 0).await;
         let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, vec!["Grep", "Read"]); // sorted; Edit+Write dropped
         assert!(allowed.contains(&"Read".to_string()));
@@ -2021,6 +2068,7 @@ mod tests {
             system_prompt_override: None,
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
+            depth: 0,
         };
         // Drive resolve_definition + the override branch directly by replicating
         // the spawn-path logic (spawn() would require a live runner).
@@ -2123,6 +2171,7 @@ mod tests {
             system_prompt_override: None,
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
+            depth: 0,
         };
         let mk_inherit = || SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
@@ -2180,6 +2229,7 @@ mod tests {
             system_prompt_override: None,
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
+            depth: 0,
         };
 
         // Non-fork: env block appended after the body, joined by a blank line,
@@ -2314,6 +2364,7 @@ mod tests {
             system_prompt_override: None,
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
+            depth: 0,
         };
         let err = spawner
             .spawn_async(req, SubagentInheritance { tool_invoker: invoker, budget })

@@ -832,6 +832,10 @@ Reach for this when the task matches an available agent type, when you have inde
             system_prompt_override: None,
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
+            // Child depth = this agent's depth + 1 (claude `spawnDepth =
+            // z6(parentContext) + 1`). The spawner stamps it onto the child's
+            // SubagentContext; the resolver gates the child's `Agent` at depth<5.
+            depth: ctx.depth + 1,
         };
 
         match spawner.spawn_async(request, inherit).await {
@@ -1587,6 +1591,10 @@ Use /mcp to configure and authenticate the required MCP servers.",
             system_prompt_override: None,
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
+            // Child depth = this agent's depth + 1 (claude `spawnDepth =
+            // z6(parentContext) + 1`). The spawner stamps it onto the child's
+            // SubagentContext; the resolver gates the child's `Agent` at depth<5.
+            depth: ctx.depth + 1,
         };
 
         let outcome = spawner.spawn(request, inherit).await;
@@ -1874,6 +1882,7 @@ mod tests {
             cancel: None,
             fork_parent_system_prompt: None,
             cwd: None,
+            depth: 0,
         }
     }
 

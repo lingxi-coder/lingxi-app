@@ -116,6 +116,7 @@ pub fn fresh_ctx() -> ToolUseContext {
         cancel: None,
         fork_parent_system_prompt: None,
         cwd: None,
+        depth: 0,
     }
 }
 

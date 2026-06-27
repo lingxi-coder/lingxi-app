@@ -67,6 +67,12 @@ pub struct SubagentInvocationContext {
     /// site that has no originating block id (test fixtures / legacy callers),
     /// in which case the gate mints a fresh id exactly as before.
     pub tool_use_id: Option<String>,
+    /// The DISPATCHING agent's recursion depth (claude `agentContext.depth`).
+    /// The dispatch invoker maps it into `ToolUseContext.depth`, so a recursive
+    /// `Agent` call inside the dispatched tool computes the child's depth and the
+    /// subagent tool-resolver can gate `Agent` at `depth < 5`. `0` for the main
+    /// thread / a top-level dispatch (and every legacy/test call site).
+    pub depth: u32,
 }
 
 /// Failure modes for [`ToolInvoker::invoke`].

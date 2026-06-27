@@ -8,16 +8,20 @@
 //!
 //! ## Always-disallowed default drop (claude `ALL_AGENT_DISALLOWED_TOOLS`)
 //!
-//! Mirroring claude-code `constants/tools.ts:36-46` + `filterToolsForAgent`
-//! (`AgentTool/agentToolUtils.ts:70-116`), every subagent pool has the
-//! agent-management / plan-mode / recursion tools stripped by default:
-//! `Agent`, `TaskOutput`, `ExitPlanMode`, `EnterPlanMode`, `AskUserQuestion`,
-//! `TaskStop`. The `Agent` AND `Workflow` entries are OMITTED when `USER_TYPE
-//! === "ant"` so nested agents may spawn further agents / workflows (claude
-//! v2.1.186 `HDd`: `...(USER_TYPE !== 'ant' ? [WORKFLOW_TOOL_NAME] : [])`,
-//! mirroring the `Agent` gate). `Workflow` is now a registered LingXi tool, so
-//! it is dropped for non-ant subagents to preserve the explicit-opt-in contract
-//! and block recursive workflow fan-out.
+//! Mirroring claude-code `filterToolsForAgent` (`AgentTool/agentToolUtils.ts`),
+//! every subagent pool has the agent-management / plan-mode tools stripped by
+//! default: `TaskOutput`, `ExitPlanMode`, `EnterPlanMode`, `AskUserQuestion`,
+//! `ConnectGitHub`, `WaitForMcpServers`, `ScheduleWakeup` (claude `_qd`).
+//! `Workflow` is additionally dropped for non-ant subagents (claude
+//! `...(USER_TYPE !== 'ant' ? [WORKFLOW_TOOL_NAME] : [])`).
+//!
+//! `TaskStop` is NOT in that set — it is allowed to subagents. And `Agent` is
+//! NOT flat-denied either: it is DEPTH-GATED in [`AgentToolResolver::resolve`]
+//! per claude's `if(isAgentTool(a)) return s < e9t` (`e9t = 5`, verified vs
+//! 2.1.195). A subagent at recursion `depth` keeps `Agent` iff `depth < 5`, so
+//! the agent tree is bounded to depth 5 (main=0 → … → depth-4 spawns depth-5 →
+//! depth-5 cannot spawn). The fork `use_exact_tools` bypass is exempt (fork
+//! recursion is governed by `AgentTool`'s `is_in_fork_child` message guard).
 //!
 //! ## Per-definition `disallowedTools` subtraction (claude `resolveAgentTools`)
 //!
@@ -81,24 +85,16 @@ impl AgentToolResolver {
             "ConnectGitHub",
             "WaitForMcpServers",
             "ScheduleWakeup",
-            // PORT DIVERGENCE (pre-existing, intentionally retained): the 2.1.191
-            // `_qd` set does NOT contain `TaskStop` or `Agent`; the binary instead
-            // (a) allows `TaskStop` to subagents and (b) depth-GATES `Agent` via
-            // `if(Xl(a,is))return s<TFt` (TFt=5), cc_all.txt:19974083 — NOT a flat
-            // denial. The port has no per-spawn recursion-depth counter, so it
-            // keeps the conservative flat-deny of `Agent` (non-ant) below and
-            // `TaskStop` here to prevent unbounded subagent recursion / cross-
-            // thread task-stop. See PARITY-TODO.
-            // PARITY-TODO: port the binary's Agent recursion-depth gate (s<TFt=5)
-            // and allow `TaskStop` in subagents to match `_qd` exactly; until then
-            // these two entries are a safe superset of the binary's denials.
-            "TaskStop",
+            // NOTE: the binary's `_qd` set excludes `TaskStop` AND `Agent`.
+            // `TaskStop` is allowed to subagents (so it is NOT listed here), and
+            // `Agent` is NOT flat-denied — it is depth-GATED in `resolve()` per
+            // claude's `if(isAgentTool(a)) return s < e9t` (`e9t = 5`). See
+            // [`AGENT_MAX_SPAWN_DEPTH`] and the `resolve()` gate.
         ];
         // claude: `...(USER_TYPE !== 'ant' ? [WORKFLOW_TOOL_NAME] : [])` (`av`,
-        // non-ant only) — ant subagents keep `Workflow`. `Agent` is the port's
-        // conservative stand-in for the binary's depth gate (see above).
+        // non-ant only) — ant subagents keep `Workflow`. `Agent` is depth-gated
+        // (both ant + non-ant), NOT in this flat-deny set.
         if !is_ant {
-            names.push("Agent");
             names.push("Workflow");
         }
         names
@@ -148,6 +144,10 @@ impl AgentToolResolver {
         agent_def: &AgentDefinition,
         parent_tools: &[Arc<dyn Tool>],
         agent_mcp_tools: &[Arc<dyn Tool>],
+        // The resolved subagent's own recursion depth (claude `agentContext.depth`
+        // / `spawnDepth`): the main thread spawns depth-1 children, … . Gates the
+        // `Agent` tool at `depth < AGENT_MAX_SPAWN_DEPTH` below.
+        depth: u32,
         _coordinator_mode: bool,
     ) -> Vec<Arc<dyn Tool>> {
         // claude `runAgent.ts:500-502`: `useExactTools ? availableTools : …`.
@@ -180,6 +180,19 @@ impl AgentToolResolver {
         // `mcp__*` tools are never touched (they are appended after).
         let disallowed = Self::all_agent_disallowed_tools(Self::is_user_ant());
         tools.retain(|t| !disallowed.contains(&t.name()));
+
+        // (2b) Agent recursion depth-gate — claude `if(isAgentTool(a)) return
+        // s < e9t` (`e9t = 5`, confirmed vs 2.1.195): a subagent at `depth`
+        // keeps the `Agent` tool iff `depth < AGENT_MAX_SPAWN_DEPTH`, so a
+        // depth-5 agent cannot spawn further and the agent tree is bounded to
+        // depth 5 (main=0 → … → depth-4 spawns depth-5 → depth-5 cannot spawn).
+        // Applies to ALL subagents (ant + non-ant). The `use_exact_tools` fork
+        // bypass (returned above) is exempt — fork recursion is governed by the
+        // `is_in_fork_child` message guard in `AgentTool`.
+        const AGENT_MAX_SPAWN_DEPTH: u32 = 5;
+        if depth >= AGENT_MAX_SPAWN_DEPTH {
+            tools.retain(|t| t.name() != "Agent");
+        }
 
         // (3) Per-definition `disallowedTools` subtraction (claude
         // resolveAgentTools disallowedToolSet, agentToolUtils.ts:149-160). Each
@@ -242,11 +255,14 @@ pub async fn resolve_subagent_tools(
     agent_def: &AgentDefinition,
     tool_wide_deny: &[String],
     default_model: Option<&str>,
+    // The resolved subagent's own recursion depth — gates its `Agent` tool at
+    // `depth < 5` (claude `e9t`). Threaded from `SubagentSpawnRequest::depth`.
+    depth: u32,
 ) -> (Vec<serde_json::Value>, Vec<String>) {
     use tool_api::tool_trait::{PromptOptions, ToolStaticContext};
 
     let parent_tools = registry.available_tools(&ToolStaticContext::default());
-    let mut resolved = AgentToolResolver::resolve(agent_def, &parent_tools, &[], false);
+    let mut resolved = AgentToolResolver::resolve(agent_def, &parent_tools, &[], depth, false);
     if !tool_wide_deny.is_empty() {
         resolved.retain(|t| {
             !tool_wide_deny
@@ -397,14 +413,17 @@ mod tests {
     // Tested directly (no env) to avoid the process-global USER_TYPE race.
 
     #[test]
-    fn core_non_ant_includes_agent() {
+    fn core_non_ant_set_excludes_agent_and_task_stop() {
+        // `Agent` is depth-gated (not flat-denied) and `TaskStop` is allowed to
+        // subagents — neither is in the disallowed set (claude `_qd`). The
+        // plan-mode / agent-management tools + non-ant `Workflow` ARE.
         let set = AgentToolResolver::all_agent_disallowed_tools(false);
-        assert!(set.contains(&"Agent"));
+        assert!(!set.contains(&"Agent"), "Agent is depth-gated, not flat-denied");
+        assert!(!set.contains(&"TaskStop"), "TaskStop is allowed to subagents");
         assert!(set.contains(&"TaskOutput"));
         assert!(set.contains(&"ExitPlanMode"));
         assert!(set.contains(&"EnterPlanMode"));
         assert!(set.contains(&"AskUserQuestion"));
-        assert!(set.contains(&"TaskStop"));
         // non-ant: Workflow is dropped from subagent pools (binary HDd ant-gate).
         assert!(set.contains(&"Workflow"));
     }
@@ -427,13 +446,13 @@ mod tests {
     }
 
     #[test]
-    fn core_ant_omits_agent_keeps_rest() {
+    fn core_ant_omits_agent_and_workflow_keeps_rest() {
         let set = AgentToolResolver::all_agent_disallowed_tools(true);
-        assert!(!set.contains(&"Agent"));
+        assert!(!set.contains(&"Agent"), "Agent is depth-gated, never flat-denied");
         // ant: Workflow is kept (allowed for ant subagents), like Agent.
         assert!(!set.contains(&"Workflow"));
+        assert!(!set.contains(&"TaskStop"), "TaskStop is allowed to subagents");
         assert!(set.contains(&"TaskOutput"));
-        assert!(set.contains(&"TaskStop"));
     }
 
     // ── resolve(): always-disallowed drop ──
@@ -442,11 +461,13 @@ mod tests {
     // therefore test the ant branch via the pure core above, never via env.
 
     #[test]
-    fn all_policy_strips_agent_by_default() {
+    fn all_policy_keeps_agent_at_depth_0() {
+        // `Agent` is no longer flat-denied: a depth-0 subagent keeps it (gated at
+        // depth < 5). See the depth-gate tests for the >= 5 drop.
         let parent = pool(&["Read", "Bash", "Agent"]);
-        let resolved = AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], false);
+        let resolved = AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], 0, false);
         let got = names(&resolved);
-        assert!(!got.contains(&"Agent".to_string()), "Agent must be stripped");
+        assert!(got.contains(&"Agent".to_string()), "Agent kept at depth 0 (< 5)");
         assert!(got.contains(&"Read".to_string()));
         assert!(got.contains(&"Bash".to_string()));
     }
@@ -456,7 +477,7 @@ mod tests {
         // The registered Workflow tool must not leak into subagent pools (binary
         // HDd: Workflow disallowed for USER_TYPE !== "ant").
         let parent = pool(&["Read", "Workflow", "Bash"]);
-        let resolved = AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], false);
+        let resolved = AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], 0, false);
         let got = names(&resolved);
         assert!(
             !got.contains(&"Workflow".to_string()),
@@ -476,35 +497,38 @@ mod tests {
             "TaskStop",
             "TaskOutput",
         ]);
-        let resolved = AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], false);
-        assert_eq!(names(&resolved), vec!["Read".to_string()]);
+        let resolved = AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], 0, false);
+        // The plan-mode / agent-management tools are stripped; `TaskStop` is NOT
+        // in the disallowed set (allowed to subagents), so it survives.
+        assert_eq!(names(&resolved), vec!["Read".to_string(), "TaskStop".to_string()]);
     }
 
     #[test]
     fn mcp_tools_always_survive() {
-        // An mcp__ tool is appended AFTER the drop and is never filtered; the
-        // parent-pool Agent tool is still dropped.
+        // An mcp__ tool is appended AFTER the drop and is never filtered. The
+        // parent-pool Agent tool is kept at depth 0 (depth-gated, not flat-denied).
         let parent = pool(&["Read", "Agent"]);
         let mcp = pool(&["mcp__x__y"]);
-        let resolved = AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &mcp, false);
+        let resolved = AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &mcp, 0, false);
         let got = names(&resolved);
         assert!(got.contains(&"mcp__x__y".to_string()));
-        assert!(!got.contains(&"Agent".to_string()));
+        assert!(got.contains(&"Agent".to_string()), "Agent kept at depth 0");
         assert!(got.contains(&"Read".to_string()));
     }
 
     #[test]
-    fn explicit_policy_still_strips_agent() {
-        // Even when the agent explicitly lists Agent, the always-disallowed
-        // drop removes it (claude filterToolsForAgent runs regardless of the
-        // `tools` policy).
+    fn explicit_policy_keeps_agent_when_below_depth() {
+        // An agent that explicitly lists `Agent` keeps it at depth 0 (no longer
+        // flat-denied; depth-gated at < 5). At depth >= 5 the gate drops it.
         let parent = pool(&["Read", "Agent"]);
         let def = agent_def(AgentToolPolicy::Explicit(vec![
             "Read".to_string(),
             "Agent".to_string(),
         ]));
-        let resolved = AgentToolResolver::resolve(&def, &parent, &[], false);
-        assert_eq!(names(&resolved), vec!["Read".to_string()]);
+        let kept = AgentToolResolver::resolve(&def, &parent, &[], 0, false);
+        assert_eq!(names(&kept), vec!["Read".to_string(), "Agent".to_string()]);
+        let gated = AgentToolResolver::resolve(&def, &parent, &[], 5, false);
+        assert_eq!(names(&gated), vec!["Read".to_string()], "Agent gated at depth 5");
     }
 
     // ── resolve(): per-definition disallowed_tools subtraction ──
@@ -514,7 +538,7 @@ mod tests {
         let parent = pool(&["Read", "Bash"]);
         let mut def = agent_def(all_policy());
         def.disallowed_tools = vec!["Bash".to_string()];
-        let resolved = AgentToolResolver::resolve(&def, &parent, &[], false);
+        let resolved = AgentToolResolver::resolve(&def, &parent, &[], 0, false);
         assert_eq!(names(&resolved), vec!["Read".to_string()]);
     }
 
@@ -525,7 +549,7 @@ mod tests {
         let parent = pool(&["Read", "Bash"]);
         let mut def = agent_def(all_policy());
         def.disallowed_tools = vec!["Bash(rm -rf)".to_string()];
-        let resolved = AgentToolResolver::resolve(&def, &parent, &[], false);
+        let resolved = AgentToolResolver::resolve(&def, &parent, &[], 0, false);
         assert_eq!(names(&resolved), vec!["Read".to_string()]);
     }
 
@@ -538,7 +562,7 @@ mod tests {
             permission_mode: AgentPermissionMode::Plan,
             ..agent_def(all_policy())
         };
-        let resolved = AgentToolResolver::resolve(&def, &parent, &[], false);
+        let resolved = AgentToolResolver::resolve(&def, &parent, &[], 0, false);
         let got = names(&resolved);
         // Agent dropped by the always-disallowed set; Bash dropped by the
         // Plan-mode read-only narrowing; only Read+Grep survive.
@@ -581,7 +605,7 @@ mod tests {
             "AskUserQuestion",
             "TaskStop",
         ]);
-        let resolved = AgentToolResolver::resolve(&agent_def(exact_policy()), &parent, &[], false);
+        let resolved = AgentToolResolver::resolve(&agent_def(exact_policy()), &parent, &[], 0, false);
         // Child pool == parent pool, byte-for-byte (same order, same set).
         assert_eq!(names(&resolved), names(&parent));
     }
@@ -593,7 +617,7 @@ mod tests {
         let parent = pool(&["Read", "Bash", "Agent"]);
         let mut def = agent_def(exact_policy());
         def.disallowed_tools = vec!["Bash".to_string()];
-        let resolved = AgentToolResolver::resolve(&def, &parent, &[], false);
+        let resolved = AgentToolResolver::resolve(&def, &parent, &[], 0, false);
         assert_eq!(names(&resolved), names(&parent));
     }
 
@@ -608,17 +632,75 @@ mod tests {
             permission_mode: AgentPermissionMode::Plan,
             ..agent_def(exact_policy())
         };
-        let resolved = AgentToolResolver::resolve(&def, &parent, &mcp, false);
+        let resolved = AgentToolResolver::resolve(&def, &parent, &mcp, 0, false);
         assert_eq!(names(&resolved), names(&parent));
         assert!(!names(&resolved).contains(&"mcp__x__y".to_string()));
     }
 
     #[test]
     fn use_exact_tools_false_still_filters() {
-        // Sanity: the bypass is gated on use_exact_tools==true; the false
-        // branch keeps the always-disallowed strip.
-        let parent = pool(&["Read", "Agent"]);
-        let resolved = AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], false);
-        assert!(!names(&resolved).contains(&"Agent".to_string()));
+        // Sanity: the bypass is gated on use_exact_tools==true; the false branch
+        // keeps the always-disallowed strip. `ScheduleWakeup` is flat-denied (so
+        // still stripped); `Agent` is NOT flat-denied — it is depth-gated, so it
+        // is KEPT here at depth 0 (0 < 5) and only dropped at depth >= 5.
+        let parent = pool(&["Read", "Agent", "ScheduleWakeup"]);
+        let resolved = AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], 0, false);
+        assert!(
+            !names(&resolved).contains(&"ScheduleWakeup".to_string()),
+            "flat-deny still applies on the non-exact branch"
+        );
+        assert!(
+            names(&resolved).contains(&"Agent".to_string()),
+            "Agent is kept at depth 0 (depth-gated, not flat-denied)"
+        );
+    }
+
+    // ── Agent recursion depth-gate (claude `if(isAgentTool(a)) return s<e9t`, e9t=5) ──
+
+    #[test]
+    fn agent_tool_kept_below_depth_5() {
+        // A subagent below depth 5 keeps `Agent` so it can spawn further
+        // subagents (main=0 → … → depth-4 can still spawn depth-5).
+        let parent = pool(&["Read", "Agent", "Bash"]);
+        for depth in [0u32, 1, 4] {
+            let resolved =
+                AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], depth, false);
+            assert!(
+                names(&resolved).contains(&"Agent".to_string()),
+                "Agent must be present at depth {depth} (< 5)"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_tool_dropped_at_depth_5_and_beyond() {
+        // depth-5 (and deeper) agents cannot spawn further — bounds the agent
+        // tree to depth 5 (the gate `depth < 5` is false).
+        let parent = pool(&["Read", "Agent", "Bash"]);
+        for depth in [5u32, 6, 12] {
+            let resolved =
+                AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], depth, false);
+            assert!(
+                !names(&resolved).contains(&"Agent".to_string()),
+                "Agent must be dropped at depth {depth} (>= 5)"
+            );
+            // Non-Agent tools are unaffected by the depth-gate.
+            assert!(names(&resolved).contains(&"Read".to_string()));
+        }
+    }
+
+    #[test]
+    fn task_stop_allowed_to_subagents_at_all_depths() {
+        // `TaskStop` is NOT in the disallowed set (claude `_qd` excludes it), so
+        // it is available to subagents regardless of recursion depth.
+        let parent = pool(&["Read", "TaskStop", "Agent"]);
+        for depth in [0u32, 5, 9] {
+            let resolved =
+                AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], depth, false);
+            assert!(
+                names(&resolved).contains(&"TaskStop".to_string()),
+                "TaskStop must be available at depth {depth}"
+            );
+        }
     }
 }

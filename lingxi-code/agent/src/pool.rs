@@ -213,6 +213,7 @@ mod tests {
             skill_loader: None,
             hook_session_id: protocol::SessionId::nil(),
             hook_cwd: std::path::PathBuf::new(),
+            depth: 0,
         }
     }
 

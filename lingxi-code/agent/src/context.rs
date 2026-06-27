@@ -175,4 +175,13 @@ pub struct SubagentContext {
     /// Engine cwd stamped on that `HookContext`. Only consulted when
     /// [`Self::hook_executor`] is `Some`.
     pub hook_cwd: PathBuf,
+    /// This agent's recursion depth (claude `agentContext.depth`): the main
+    /// thread is 0, a subagent is its spawning parent's depth + 1 (set by the
+    /// spawner from [`traits::subagent_spawn::SubagentSpawnRequest::depth`]). The
+    /// runner threads it into every dispatched tool's
+    /// [`traits::tool_invoker::SubagentInvocationContext::depth`] →
+    /// `ToolUseContext.depth`, and the spawner passes it to
+    /// [`crate::tool_resolver::AgentToolResolver`] to gate the `Agent` tool at
+    /// `depth < 5` (claude `e9t = 5`).
+    pub depth: u32,
 }

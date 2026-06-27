@@ -101,6 +101,8 @@ impl AgentExecutor {
         };
 
         let req = SubagentSpawnRequest {
+            // Hook-spawned verifier is a top-level spawn (no parent agent) ⇒ depth 0.
+            depth: 0,
             subagent_type: agent_type.to_string(),
             prompt: format!("{prompt_template}\n\n{payload_json}"),
             context_paths: Vec::new(),

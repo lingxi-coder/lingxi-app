@@ -145,6 +145,14 @@ pub struct SubagentSpawnRequest {
     /// user-specified agentType spawns (claude-code's disallow union, §6). Empty ⇒ no extra tools denied.
     #[serde(default)]
     pub additional_disallowed_tools: Vec<String>,
+    /// The CHILD's recursion depth = the spawning agent's depth + 1 (claude
+    /// `spawnDepth = z6(parentContext) + 1`). The spawner stamps it onto the
+    /// child's `SubagentContext.depth`, which the tool-resolver consults to gate
+    /// the `Agent` tool at `depth < 5` (claude `e9t = 5`). `#[serde(default)]` ⇒
+    /// `0` for legacy/serialized payloads, so a child that deserializes without
+    /// it behaves like a top-level spawn (the conservative direction).
+    #[serde(default)]
+    pub depth: u32,
 }
 
 /// Token-usage rollup returned at the end of a successful spawn.

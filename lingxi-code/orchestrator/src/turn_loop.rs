@@ -2155,6 +2155,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // Main turn loop uses the shared session workspace (no per-agent
             // cwd override); only an isolated subagent sets this.
             cwd: None,
+            depth: 0,
         };
 
         // validate_input gate (claude-code `toolExecution.ts:683-723`): a

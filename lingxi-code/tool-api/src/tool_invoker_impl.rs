@@ -153,6 +153,10 @@ impl ToolInvoker for RegistryToolInvoker {
             // Per-agent cwd (worktree isolation / explicit cwd): the dispatched
             // tools operate here instead of the shared session workspace.
             cwd: ctx.cwd,
+            // Recursion depth of the DISPATCHING agent (claude `agentContext.depth`)
+            // → so a recursive `Agent` call inside this tool computes the child's
+            // depth and the resolver can gate `Agent` at `depth < 5`.
+            depth: ctx.depth,
         };
 
         // Drop the progress receiver immediately — production tools tolerate
@@ -512,6 +516,7 @@ mod tests {
                     can_show_permission_prompts: true,
                     cwd: None,
                     tool_use_id: None,
+                    depth: 0,
                 },
             )
             .await
@@ -556,6 +561,7 @@ mod tests {
             can_show_permission_prompts: false,
             cwd: None,
             tool_use_id: None,
+            depth: 0,
         }
     }
 
@@ -642,6 +648,7 @@ mod tests {
             can_show_permission_prompts: can_show,
             cwd: None,
             tool_use_id: None,
+            depth: 0,
         }
     }
 
@@ -721,6 +728,7 @@ mod tests {
             can_show_permission_prompts: true,
             cwd: None,
             tool_use_id: Some(id.to_string()),
+            depth: 0,
         }
     }
 

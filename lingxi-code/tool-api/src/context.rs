@@ -74,6 +74,14 @@ pub struct ToolUseContext {
     /// the shared session [`crate::BuiltinToolContext::workspace`]. `None` for the
     /// main thread and every non-isolated call (byte-identical to before).
     pub cwd: Option<std::path::PathBuf>,
+    /// This agent's recursion depth — claude's `agentContext.depth` (`z6`:
+    /// `"main"` ⇒ 0, else this value). The `Agent` tool reads it to set a
+    /// spawned child's depth (`child = depth + 1`), and the subagent
+    /// tool-resolver gates the `Agent` tool at `depth < 5` (claude `e9t = 5`).
+    /// `0` for the main thread and every non-subagent call; the dispatch invoker
+    /// overwrites it from [`crate::SubagentInvocationContext::depth`] for a
+    /// subagent's own tool calls.
+    pub depth: u32,
     // File state cache wired in Plan 10.
 }
 
@@ -110,6 +118,8 @@ impl ToolUseContext {
             cancel: None,
             fork_parent_system_prompt: None,
             cwd: None,
+            // Inert seed; model-only context is never handed to a tool.
+            depth: 0,
         }
     }
 }

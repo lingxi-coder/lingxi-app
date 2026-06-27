@@ -1048,6 +1048,11 @@ async fn run_subagent_loop(
                     // `can_use_tool` prompt carries the byte-faithful id instead
                     // of a freshly minted one — matching the main loop's path.
                     tool_use_id: Some(tool_use_id.as_str().to_string()),
+                    // This subagent's own recursion depth (claude `agentContext.depth`)
+                    // → mapped into the dispatched tool's `ToolUseContext.depth`, so a
+                    // nested `Agent` call computes the grandchild's depth (`depth+1`)
+                    // and the resolver gates `Agent` at `depth < 5`.
+                    depth: ctx.depth,
                 };
                 match invoker.invoke(name, input.clone(), inv_ctx).await {
                     Ok(value) => {
@@ -1771,6 +1776,7 @@ mod tests {
             skill_loader: None,
             hook_session_id: protocol::SessionId::nil(),
             hook_cwd: std::path::PathBuf::new(),
+            depth: 0,
         }
     }
 

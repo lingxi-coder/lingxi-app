@@ -183,6 +183,7 @@ fn parked_teammate_ctx() -> SubagentContext {
         skill_loader: None,
         hook_session_id: protocol::SessionId::nil(),
         hook_cwd: std::path::PathBuf::new(),
+        depth: 0,
     }
 }
 
@@ -225,6 +226,7 @@ fn agent_tool_request() -> SubagentSpawnRequest {
         system_prompt_override: None,
         system_prompt_addendum: None,
         additional_disallowed_tools: Vec::new(),
+        depth: 0,
     }
 }
 

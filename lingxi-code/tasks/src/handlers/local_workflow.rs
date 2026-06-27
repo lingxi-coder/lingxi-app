@@ -428,6 +428,7 @@ fn make_request(default_subagent_type: &str, prompt: &str, opts_json: &str) -> S
         system_prompt_override,
         system_prompt_addendum,
         additional_disallowed_tools,
+        depth: 0,
     }
 }
 

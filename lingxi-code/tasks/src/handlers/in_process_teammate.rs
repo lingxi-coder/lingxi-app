@@ -417,6 +417,7 @@ impl InProcessTeammateHandler {
                     &definition,
                     denied,
                     self.default_model.as_deref(),
+                    0,
                 )
                 .await
             }
@@ -488,6 +489,7 @@ impl InProcessTeammateHandler {
             skill_loader: self.skill_loader.get().cloned(),
             hook_session_id: self.hook_session_id,
             hook_cwd: self.hook_cwd.clone(),
+            depth: 0,
         }
     }
 }

@@ -113,6 +113,12 @@ pub struct Runtime {
     /// `/connect` screen's `pump_store_provider_key` persists a collected key.
     /// `None` (the default) leaves the pump a no-op (smoke gates / resume picker).
     provider_key_store: Option<Arc<secret::CredentialManager>>,
+    /// (`/connect` Copilot device-flow) Engine GitHub-Copilot OAuth device-flow
+    /// driver (`DesktopRuntime.connect_copilot`), threaded into the App
+    /// (`AppState::set_copilot_connect_driver`) at mount so `root`'s copilot-login
+    /// task can run `begin()` + `poll_to_completion()`. `None` (the default)
+    /// leaves the Copilot `/connect` screen inert (smoke gates / resume picker).
+    copilot_connect_driver: Option<Arc<dyn command_core::CopilotConnectDriver>>,
     /// (TUI-PERM) Receiver for `TuiPermissionGate` exchanges, handed in by the
     /// CLI (`build_runtime_for_tui`). `None` (smoke gates / resume picker) keeps
     /// the permission pump inert. Moved into a take-once slot at mount.
@@ -140,6 +146,7 @@ impl Runtime {
             provider_availability: std::collections::BTreeMap::new(),
             model_providers: std::collections::BTreeMap::new(),
             provider_key_store: None,
+            copilot_connect_driver: None,
             permission_rx: None,
         }
     }
@@ -167,6 +174,7 @@ impl Runtime {
             provider_availability: std::collections::BTreeMap::new(),
             model_providers: std::collections::BTreeMap::new(),
             provider_key_store: None,
+            copilot_connect_driver: None,
             permission_rx: None,
         }
     }
@@ -321,6 +329,21 @@ impl Runtime {
         self
     }
 
+    /// (`/connect` Copilot device-flow) Attach the engine GitHub-Copilot OAuth
+    /// device-flow driver (`DesktopRuntime.connect_copilot`). Threaded onto the
+    /// App at init (`AppState::set_copilot_connect_driver`) so `root`'s
+    /// copilot-login task runs `begin()` (browser open + user code) and
+    /// `poll_to_completion()` (poll + token store). Without it the Copilot
+    /// `/connect` screen is inert (smoke gates / resume picker).
+    #[must_use]
+    pub fn with_copilot_connect_driver(
+        mut self,
+        driver: Arc<dyn command_core::CopilotConnectDriver>,
+    ) -> Self {
+        self.copilot_connect_driver = Some(driver);
+        self
+    }
+
     /// Seed the prior conversation a RESUMED session should replay into the
     /// TUI scrollback before the first frame. The CLI's resume branch loads the
     /// persisted transcript (`session::SessionStorage::load` /
@@ -395,6 +418,11 @@ pub async fn run_tui_session(
     // key via `CredentialManager::set_provider_key`. `None` (smoke gates / resume
     // picker) leaves the pump a no-op — byte-identical to the pre-seam behavior.
     initial_state.set_provider_key_store(runtime.provider_key_store.take());
+    // (`/connect` Copilot device-flow) Thread the engine GitHub-Copilot OAuth
+    // device-flow driver onto the state so `root`'s copilot-login task can run
+    // `begin()` + `poll_to_completion()` when the user picks GitHub Copilot in
+    // `/connect`. `None` (smoke gates / resume picker) leaves the flow inert.
+    initial_state.set_copilot_connect_driver(runtime.copilot_connect_driver.take());
     // (M7-15) Apply the stored theme preference from ~/.lingxi/settings.json
     // (best-effort; absent/unreadable → session-default `auto`). Read once at
     // startup, before the first render, so the very first frame uses the saved

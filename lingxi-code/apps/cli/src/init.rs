@@ -93,6 +93,13 @@ pub struct Runtime {
     /// clone into `tui::session::Runtime::with_bash_runner` so a typed `!command`
     /// runs sandboxed and renders inline with no LLM turn.
     pub bash_runner: std::sync::Arc<dyn tui::bash_runner::BashRunner>,
+    /// (`/connect` Copilot device-flow) GitHub-Copilot OAuth device-flow driver,
+    /// projected straight from [`engine_desktop::DesktopRuntime::connect_copilot`].
+    /// The TUI mount threads a clone into
+    /// `tui::session::Runtime::with_copilot_connect_driver` so picking GitHub
+    /// Copilot in `/connect` runs the real web sign-in (browser open + device
+    /// poll + token store) instead of an inert key field.
+    pub connect_copilot: std::sync::Arc<dyn command_core::CopilotConnectDriver>,
 }
 
 /// Build-result for the TUI startup path. (M6-03)
@@ -563,6 +570,7 @@ pub async fn build_runtime_from_config(
         provider_key_store: rt.credentials,
         structured_output_slot: rt.structured_output_slot,
         bash_runner: rt.bash_runner,
+        connect_copilot: rt.connect_copilot,
     })
 }
 

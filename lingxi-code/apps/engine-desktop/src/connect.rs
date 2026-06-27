@@ -171,6 +171,38 @@ impl PollSleeper for TokioSleeper {
     }
 }
 
+/// Native best-effort browser opener for the Copilot device flow: shells the
+/// platform "open" command (`open` on macOS, `xdg-open` on Linux, `cmd /c start`
+/// on Windows), detached, ignoring any failure. Mirrors `mcp_on_authorization_url`'s
+/// opener — there is no browser-open util in this workspace.
+#[must_use]
+pub fn native_browser_opener() -> Arc<dyn Fn(&str) + Send + Sync> {
+    Arc::new(|url: &str| {
+        tracing::info!(
+            target: "lingxi::connect::copilot",
+            verification_url = %url,
+            "GitHub Copilot: opening the device sign-in page (or visit it manually):\n  {url}",
+        );
+        #[cfg(target_os = "macos")]
+        let cmd: Option<(&str, &[&str])> = Some(("open", &[]));
+        #[cfg(target_os = "linux")]
+        let cmd: Option<(&str, &[&str])> = Some(("xdg-open", &[]));
+        #[cfg(target_os = "windows")]
+        let cmd: Option<(&str, &[&str])> = Some(("cmd", &["/c", "start", ""]));
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        let cmd: Option<(&str, &[&str])> = None;
+        if let Some((program, prefix)) = cmd {
+            let _ = std::process::Command::new(program)
+                .args(prefix)
+                .arg(url)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+    })
+}
+
 /// Engine Copilot device-flow driver: owns the pure `CopilotLogin` state machine,
 /// the sleep port, and the keychain. `begin` returns the displayable step (and
 /// caches the `DeviceCodeResponse`); `poll_to_completion` runs the SlowDown/Pending
@@ -180,25 +212,48 @@ pub struct EngineCopilotConnect<H: CopilotHttp> {
     login: CopilotLogin<H>,
     sleeper: Arc<dyn PollSleeper>,
     cached: StdMutex<Option<DeviceCodeResponse>>,
+    /// Best-effort browser opener invoked by [`Self::begin`] with the GitHub
+    /// device-verification URL, so selecting Copilot in `/connect` sends the
+    /// user straight to the web sign-in. No-op default (tests / headless); the
+    /// production `new()` wires [`native_browser_opener`].
+    browser: Arc<dyn Fn(&str) + Send + Sync>,
 }
 
 impl EngineCopilotConnect<PosixCopilotHttp> {
-    /// Production constructor: device-flow over `PosixHttp`, real `tokio` sleeps.
+    /// Production constructor: device-flow over `PosixHttp`, real `tokio` sleeps,
+    /// and a native browser opener so `begin()` launches the GitHub sign-in page.
     #[must_use]
     pub fn new(credentials: Arc<CredentialManager>) -> Self {
         Self::with_parts(credentials, CopilotLogin::new(PosixCopilotHttp::new()), Arc::new(TokioSleeper))
+            .with_browser(native_browser_opener())
     }
 }
 
 impl<H: CopilotHttp> EngineCopilotConnect<H> {
-    /// Construct over an injected `CopilotLogin` + sleeper (test seam).
+    /// Construct over an injected `CopilotLogin` + sleeper (test seam). The
+    /// browser opener defaults to a no-op; production wires one via
+    /// [`Self::with_browser`].
     #[must_use]
     pub fn with_parts(
         credentials: Arc<CredentialManager>,
         login: CopilotLogin<H>,
         sleeper: Arc<dyn PollSleeper>,
     ) -> Self {
-        Self { credentials, login, sleeper, cached: StdMutex::new(None) }
+        Self {
+            credentials,
+            login,
+            sleeper,
+            cached: StdMutex::new(None),
+            browser: Arc::new(|_| {}),
+        }
+    }
+
+    /// Attach a browser opener invoked by `begin()` with the device-verification
+    /// URL (best-effort; the screen still shows the URL as the manual fallback).
+    #[must_use]
+    pub fn with_browser(mut self, browser: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
+        self.browser = browser;
+        self
     }
 }
 
@@ -211,6 +266,10 @@ impl<H: CopilotHttp> CopilotConnectDriver for EngineCopilotConnect<H> {
             verification_uri: dc.verification_uri.clone(),
         };
         *self.cached.lock().unwrap() = Some(dc);
+        // Best-effort: launch the GitHub device-verification page so the user
+        // signs in on the web. The `/connect` screen still shows the code + URL
+        // as the copy-by-hand fallback if the browser fails to open.
+        (self.browser)(&step.verification_uri);
         Ok(step)
     }
 

@@ -1965,7 +1965,8 @@ pub async fn pump_open_connect(state: &Arc<Mutex<AppState>>) -> bool {
             None => return false,
         }
     };
-    let screen = if provider == "github-copilot" {
+    let is_copilot = provider == "github-copilot";
+    let screen = if is_copilot {
         crate::screens::connect::ConnectScreenState::copilot_pending()
     } else {
         // The picker carried the human label, but the flag only holds the id; the
@@ -1979,7 +1980,46 @@ pub async fn pump_open_connect(state: &Arc<Mutex<AppState>>) -> bool {
         return false;
     }
     st.open_connect(screen);
+    // (Copilot device-flow) The Copilot screen opens at `Starting`; raise the
+    // flag so the main loop fires the copilot-login task once. It runs the
+    // engine driver's `begin()` (browser open + user code → `Polling`) then
+    // `poll_to_completion()` (poll + token store → `Done`/`Failed`).
+    if is_copilot {
+        st.pending_copilot_login = true;
+    }
     true
+}
+
+/// (Copilot device-flow) If the active screen is STILL the Copilot `/connect`
+/// screen, set its device code (`Starting → Polling`, showing `user_code` +
+/// `verification_uri`) and return `true`. Returns `false` (no-op) if the user
+/// already closed it — the copilot-login task then skips the redraw bump.
+async fn set_copilot_device_code(
+    state: &Arc<Mutex<AppState>>,
+    user_code: &str,
+    verification_uri: &str,
+) -> bool {
+    let mut st = state.lock().await;
+    if let Some(crate::screens::Screen::Connect(cs)) = st.active_screen.as_mut() {
+        if matches!(cs.flow, crate::screens::connect::ConnectFlow::Copilot) {
+            cs.set_device_code(user_code, verification_uri);
+            return true;
+        }
+    }
+    false
+}
+
+/// (Copilot device-flow) If the active screen is STILL the Copilot `/connect`
+/// screen, mark it `Failed(error)` and return `true`; else a no-op (`false`).
+async fn set_copilot_failed(state: &Arc<Mutex<AppState>>, error: &str) -> bool {
+    let mut st = state.lock().await;
+    if let Some(crate::screens::Screen::Connect(cs)) = st.active_screen.as_mut() {
+        if matches!(cs.flow, crate::screens::connect::ConnectFlow::Copilot) {
+            cs.set_failed(error);
+            return true;
+        }
+    }
+    false
 }
 
 /// (Plan 3c C1) Async provider-key persistence pump. Drains
@@ -2983,11 +3023,18 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         });
     }
 
+    // (Copilot device-flow) Shared signal: the ticker fires this once
+    // `pump_open_connect` opens the Copilot `/connect` screen; the copilot-login
+    // task (below) waits on it and drives the engine device-flow driver.
+    let copilot_login_notify = std::sync::Arc::new(tokio::sync::Notify::new());
     // ---- Ticker: 100ms spinner refresh + paste idle-flush + Settings open pump
     {
         let state = state.clone();
         let mut tick_for_ticker = tick;
         let mut coalescer = paste_coalescer;
+        // (Copilot device-flow) Clone of the start signal: the ticker calls
+        // `notify_one()` right after `pump_open_connect` opens the Copilot screen.
+        let copilot_login_notify = copilot_login_notify.clone();
         // (M7-13 review) The orchestrator handle drives the async Settings open
         // pump below. `None` (resume picker / smoke gates) leaves Settings
         // unreachable, which is correct for those bridge-less mounts.
@@ -3134,6 +3181,13 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 if pump_open_connect(&state).await {
                     needs_redraw = true;
                 }
+                // (Copilot device-flow) If `pump_open_connect` just opened the
+                // Copilot screen, signal the copilot-login task to run the
+                // device flow (browser open + poll + token store). One-shot:
+                // `take_pending_copilot_login` drains the flag.
+                if state.lock().await.take_pending_copilot_login() {
+                    copilot_login_notify.notify_one();
+                }
                 // (Plan 3c C1) `/connect` provider-key persistence pump — drains
                 // `pending_store_key` and writes the key through the bound
                 // `CredentialManager::set_provider_key`. Handle-free; no-op when
@@ -3195,6 +3249,80 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 let streaming = state.lock().await.streaming.is_some();
                 if streaming || needs_redraw {
                     tick_for_ticker.set(tick_for_ticker.get().wrapping_add(1));
+                }
+            }
+        });
+    }
+
+    // ---- Copilot device-flow login task (`/connect` GitHub Copilot) --------
+    // Mirrors the bridge/permission pumps: ONE use_future that waits on the
+    // start signal (fired by the ticker after `pump_open_connect` opens the
+    // Copilot screen), then drives the engine `CopilotConnectDriver`:
+    //   1. `begin()` — request the device code, display `user_code` +
+    //      `verification_uri`, and open the browser (the driver opens it). The
+    //      screen advances `Starting → Polling`.
+    //   2. `poll_to_completion()` — poll GitHub until authorized; the driver
+    //      stores the OAuth token via the shared `CredentialManager`. On success
+    //      the screen shows `Done` and `provider_availability` is updated so the
+    //      `/connect` picker shows `✓` and the model becomes usable. Any error
+    //      shows `Failed`.
+    // Every state mutation bumps the redraw tick. Screen mutations are guarded on
+    // the Copilot screen still being open (the user may have pressed Esc), so a
+    // late completion never corrupts an unrelated screen. The token store on the
+    // engine side still completes regardless (the user authorized) — harmless.
+    {
+        let state = state.clone();
+        let notify = copilot_login_notify.clone();
+        let mut tick_for_copilot = tick;
+        hooks.use_future(async move {
+            loop {
+                notify.notified().await;
+                let driver = {
+                    let st = state.lock().await;
+                    st.copilot_connect_driver.clone()
+                };
+                let Some(driver) = driver else {
+                    // No driver wired (smoke gates / tests): the screen stays at
+                    // "Requesting device code…" inertly — same as before the seam.
+                    continue;
+                };
+                match driver.begin().await {
+                    Ok(step) => {
+                        if set_copilot_device_code(&state, &step.user_code, &step.verification_uri)
+                            .await
+                        {
+                            tick_for_copilot.set(tick_for_copilot.get().wrapping_add(1));
+                        }
+                        match driver.poll_to_completion(&step).await {
+                            Ok(()) => {
+                                let mut st = state.lock().await;
+                                // The driver stored the token; reflect availability
+                                // so the picker badges ✓ and routing accepts it.
+                                st.provider_availability
+                                    .insert("github-copilot".to_string(), true);
+                                if let Some(crate::screens::Screen::Connect(cs)) =
+                                    st.active_screen.as_mut()
+                                {
+                                    if matches!(cs.flow, crate::screens::connect::ConnectFlow::Copilot)
+                                    {
+                                        cs.set_done();
+                                    }
+                                }
+                                drop(st);
+                                tick_for_copilot.set(tick_for_copilot.get().wrapping_add(1));
+                            }
+                            Err(e) => {
+                                if set_copilot_failed(&state, &e.to_string()).await {
+                                    tick_for_copilot.set(tick_for_copilot.get().wrapping_add(1));
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if set_copilot_failed(&state, &e.to_string()).await {
+                            tick_for_copilot.set(tick_for_copilot.get().wrapping_add(1));
+                        }
+                    }
                 }
             }
         });

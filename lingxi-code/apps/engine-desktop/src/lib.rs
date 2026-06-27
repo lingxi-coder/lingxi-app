@@ -1555,6 +1555,13 @@ pub struct DesktopRuntime {
     /// (`Runtime::with_bash_runner`) so a typed `!ls` runs sandboxed and renders
     /// inline with no LLM turn — never a raw process.
     pub bash_runner: Arc<dyn tui::bash_runner::BashRunner>,
+    /// (`/connect` Copilot device-flow) The GitHub-Copilot OAuth device-flow
+    /// driver (`EngineCopilotConnect` over `PosixHttp`). The CLI threads a clone
+    /// into `tui::session::Runtime::with_copilot_connect_driver` so picking
+    /// GitHub Copilot in `/connect` runs the real web sign-in (browser open +
+    /// device-code poll + token store) instead of an inert key field. Also
+    /// registered in the engine `/connect` command group (same Arc).
+    pub connect_copilot: Arc<dyn command_core::CopilotConnectDriver>,
 }
 
 /// Errors surfaced while building a [`DesktopRuntime`].
@@ -4320,7 +4327,7 @@ pub async fn build(
         &cfg.cwd,
         &cfg.lingxi_home,
         connect_writer,
-        connect_copilot,
+        connect_copilot.clone(),
         connect_chatgpt,
     )
     .await;
@@ -4638,6 +4645,7 @@ pub async fn build(
         wakeup_scheduler_cell,
         runtime_spawner: Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
         bash_runner,
+        connect_copilot,
     })
 }
 

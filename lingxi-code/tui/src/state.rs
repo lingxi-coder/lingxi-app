@@ -923,6 +923,18 @@ pub struct AppState {
     /// no-store build (smoke gates / tests) — the pump then keeps its no-op log
     /// and stores nothing, byte-identical to before the seam was wired.
     pub provider_key_store: Option<std::sync::Arc<secret::CredentialManager>>,
+    /// (`/connect` Copilot device-flow) The engine GitHub-Copilot OAuth
+    /// device-flow driver, threaded from `DesktopRuntime.connect_copilot`. The
+    /// copilot-login task in `root` calls `begin()` (gets the user code +
+    /// verification URL and opens the browser) then `poll_to_completion()`
+    /// (polls GitHub and stores the OAuth token). `None` on a headless /
+    /// no-driver build (smoke gates / tests) — the Copilot `/connect` screen
+    /// then just shows "Requesting device code…" inertly.
+    pub copilot_connect_driver: Option<std::sync::Arc<dyn command_core::CopilotConnectDriver>>,
+    /// (`/connect` Copilot device-flow) Raised by `root::pump_open_connect` when
+    /// it opens the Copilot device-flow screen so the main loop fires the
+    /// copilot-login task exactly once. Drained by [`Self::take_pending_copilot_login`].
+    pub pending_copilot_login: bool,
     /// (`/color`) Session agent-color name set by the `/color <name>` command
     /// (claude-code `standaloneAgentContext.color`). `Some("cyan")` after
     /// `/color cyan`; `None` after `/color default` (reset). Maps to a render
@@ -1121,6 +1133,8 @@ impl AppState {
             pending_connect: None,
             pending_store_key: None,
             provider_key_store: None,
+            copilot_connect_driver: None,
+            pending_copilot_login: false,
             session_agent_color: None,
             pending_save_color: None,
             pending_permission_delete: None,
@@ -1329,6 +1343,23 @@ impl AppState {
         store: Option<std::sync::Arc<secret::CredentialManager>>,
     ) {
         self.provider_key_store = store;
+    }
+
+    /// (`/connect` Copilot device-flow) Thread the engine GitHub-Copilot OAuth
+    /// device-flow driver at TUI init (mirrors [`Self::set_provider_key_store`]).
+    /// `None` (smoke gates / tests) leaves the copilot-login task inert.
+    pub fn set_copilot_connect_driver(
+        &mut self,
+        driver: Option<std::sync::Arc<dyn command_core::CopilotConnectDriver>>,
+    ) {
+        self.copilot_connect_driver = driver;
+    }
+
+    /// (`/connect` Copilot device-flow) Take + clear [`Self::pending_copilot_login`].
+    /// The main loop calls this right after `pump_open_connect` and, when `true`,
+    /// signals the copilot-login task to run the device flow exactly once.
+    pub fn take_pending_copilot_login(&mut self) -> bool {
+        std::mem::take(&mut self.pending_copilot_login)
     }
 
     /// (Plan 3c §6.3) Open the `/connect` credential screen with the given flow

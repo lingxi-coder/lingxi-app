@@ -2,18 +2,22 @@
 //! turns the per-turn memory-selector/prefetch result into the body of a
 //! `<system-reminder>` meta user message appended to the OUTGOING snapshot.
 //!
-//! 1:1 with claude-code v2.1.181's `relevant_memories` attachment renderer
+//! 1:1 with claude-code v2.1.193+'s `relevant_memories` attachment renderer
 //! (`normalizeAttachmentForAPI` case `"relevant_memories"`, messages.ts):
 //!
 //! ```js
 //! case "relevant_memories": return om(e.memories.map((r, o) => {
-//!   let s = r.header ?? h6n(r.path, r.mtimeMs),
-//!       i = r.path.startsWith("<synthesis:");
-//!   return Ln({ content: `${o===0 && !i
+//!   let s = r.header ?? h6n(r.path, r.mtimeMs);
+//!   return Ln({ content: `${o===0
 //!       ? `Retrieved for possible relevance — use only if it actually applies to what the user asked.\n\n`
 //!       : ""}${s}\n\n${r.content}`, isMeta: true })
 //! }));
 //! ```
+//!
+//! (v2.1.181 additionally gated the preamble on `&& !i`, where
+//! `i = r.path.startsWith("<synthesis:")`; v2.1.193 dropped that synthesis-path
+//! exception so the first memory ALWAYS gets the preamble. This port now matches
+//! v2.1.193+ — see [`render_surfacing_block`].)
 //!
 //! where the per-memory header `h6n(path, mtimeMs)` is:
 //!
@@ -30,8 +34,7 @@
 //! ## Render shape (this module)
 //!
 //! Each memory becomes `{idx0_preamble}{header}\n\n{content}`:
-//! - `idx0_preamble` (em-dash) is prepended to the FIRST memory ONLY (`o === 0`),
-//!   and skipped for `<synthesis:` pseudo-paths — see [`SurfacedMemory::path`].
+//! - `idx0_preamble` (em-dash) is prepended to the FIRST memory ONLY (`o === 0`).
 //! - `header` is `Memory: {path}:`, prefixed with `{staleness}\n\n` when the
 //!   memory is strictly older than one day (`age_days > 1`).
 //!
@@ -61,8 +64,8 @@ use std::time::SystemTime;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfacedMemory {
     /// On-disk path the memory was loaded from (the `Memory: {path}:` header).
-    /// A `<synthesis:...>` pseudo-path suppresses the idx-0 preamble, mirroring
-    /// the `r.path.startsWith("<synthesis:")` guard.
+    /// May be a `<synthesis:...>` pseudo-path (synthesis sentinel); as of
+    /// v2.1.193 that no longer suppresses the idx-0 preamble.
     pub path: PathBuf,
     /// Markdown body rendered after the header.
     pub content: String,
@@ -75,9 +78,9 @@ pub struct SurfacedMemory {
     pub mtime: SystemTime,
 }
 
-/// The em-dash idx-0 preamble (FIRST non-synthesis memory only), 1:1 with the
-/// v2.1.181 `o === 0 && !i` branch. Note the U+2014 EM DASH and the trailing
-/// blank line (`\n\n`).
+/// The em-dash idx-0 preamble (FIRST memory only), 1:1 with the v2.1.193+
+/// `o === 0` branch. Note the U+2014 EM DASH and the trailing blank line
+/// (`\n\n`).
 const IDX0_PREAMBLE: &str =
     "Retrieved for possible relevance \u{2014} use only if it actually applies to what the user asked.\n\n";
 
@@ -116,13 +119,10 @@ pub fn render_surfacing_block(memories: &[SurfacedMemory]) -> String {
         .iter()
         .enumerate()
         .map(|(idx, m)| {
-            // idx-0 preamble: only for the first memory, and only when the path
-            // is NOT a `<synthesis:...>` pseudo-path (`!i` in the TS).
-            let preamble = if idx == 0 && !m.path.to_string_lossy().starts_with("<synthesis:") {
-                IDX0_PREAMBLE
-            } else {
-                ""
-            };
+            // idx-0 preamble: the FIRST memory only (claude `o === 0`). v2.1.193
+            // dropped the v2.1.181 `&& !i` synthesis-path exception, so a
+            // `<synthesis:...>` first memory now gets the preamble too.
+            let preamble = if idx == 0 { IDX0_PREAMBLE } else { "" };
             let header = header_for(m);
             format!("{preamble}{header}\n\n{content}", content = m.content)
         })
@@ -199,10 +199,12 @@ mod tests {
     }
 
     #[test]
-    fn synthesis_pseudopath_suppresses_idx0_preamble() {
-        // `<synthesis:...>` first memory => no em-dash preamble (TS `!i`).
+    fn synthesis_pseudopath_still_gets_idx0_preamble() {
+        // v2.1.193 dropped the v2.1.181 `!i` synthesis exception: a
+        // `<synthesis:...>` first memory now DOES get the em-dash preamble
+        // (claude `o === 0` only).
         let out = render_surfacing_block(&[mem("<synthesis:summary>", "SYNTH", 0)]);
-        assert!(!out.contains("Retrieved for possible relevance"), "got: {out}");
+        assert!(out.contains("Retrieved for possible relevance"), "got: {out}");
         assert!(out.contains("Memory: <synthesis:summary>:\n\nSYNTH"));
     }
 

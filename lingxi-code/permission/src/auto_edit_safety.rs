@@ -58,8 +58,9 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 /// Dangerous files that should be protected from auto-editing. These files can
-/// be used for code execution or data exfiltration. Verbatim from
-/// `filesystem.ts:57-68` (`DANGEROUS_FILES`).
+/// be used for code execution or data exfiltration. 1:1 with the 2.1.195 binary
+/// `Sjo` (the leaked `filesystem.ts:57-68` list was stale and much shorter).
+/// The binary's `.claude.json` maps to this build's [`branding::GLOBAL_CONFIG_FILE`].
 pub const DANGEROUS_FILES: &[&str] = &[
     ".gitconfig",
     ".gitmodules",
@@ -68,15 +69,57 @@ pub const DANGEROUS_FILES: &[&str] = &[
     ".zshrc",
     ".zprofile",
     ".profile",
+    ".zshenv",
+    ".zlogin",
+    ".zlogout",
+    ".bash_login",
+    ".bash_aliases",
+    ".bash_logout",
+    ".envrc",
     ".ripgreprc",
     ".mcp.json",
     branding::GLOBAL_CONFIG_FILE,
+    ".npmrc",
+    ".yarnrc",
+    ".yarnrc.yml",
+    ".pnp.cjs",
+    ".pnp.loader.mjs",
+    ".pnpmfile.cjs",
+    "bunfig.toml",
+    ".bunfig.toml",
+    ".bazelrc",
+    ".bazelversion",
+    ".bazeliskrc",
+    ".pre-commit-config.yaml",
+    "lefthook.yml",
+    ".lefthook.yml",
+    "lefthook.yaml",
+    ".lefthook.yaml",
+    "gradle-wrapper.properties",
+    "maven-wrapper.properties",
+    ".devcontainer.json",
+    "pyrightconfig.json",
 ];
 
 /// Dangerous directories that should be protected from auto-editing. These
-/// directories contain sensitive configuration or executable files. Verbatim
-/// from `filesystem.ts:74-79` (`DANGEROUS_DIRECTORIES`).
-pub const DANGEROUS_DIRECTORIES: &[&str] = &[".git", ".vscode", ".idea", branding::DOT_DIR];
+/// directories contain sensitive configuration or executable files. 1:1 with the
+/// 2.1.195 binary `Xsc`. The binary's `.claude` maps to [`branding::DOT_DIR`].
+pub const DANGEROUS_DIRECTORIES: &[&str] = &[
+    ".git",
+    ".vscode",
+    ".idea",
+    branding::DOT_DIR,
+    ".husky",
+    ".cargo",
+    ".devcontainer",
+    ".yarn",
+    ".mvn",
+];
+
+/// Dangerous `/`-joined directory PATHS — matched as a run of consecutive path
+/// segments anywhere in the path. 1:1 with the 2.1.195 binary `Qsc`
+/// (`DANGEROUS_DIRECTORY_PATHS`).
+pub const DANGEROUS_DIRECTORY_PATHS: &[&str] = &[".config/git"];
 
 /// Result of [`check_path_safety_for_auto_edit`]. `Safe` ⇒ the path may be
 /// auto-allowed by the (future) `acceptEdits` working-dir branch; `Unsafe` ⇒
@@ -163,6 +206,21 @@ pub fn is_dangerous_file_path_to_auto_edit(path: &Path, raw: &str) -> bool {
             }
 
             return true;
+        }
+    }
+
+    // 2b. Dangerous directory PATHS (`Qsc` / `DANGEROUS_DIRECTORY_PATHS`): a run
+    //     of consecutive segments (case-folded) matching a `/`-joined entry, e.g.
+    //     `.config/git`. Binary `Hef`:
+    //       for(l of Qsc){c=l.split("/"); for(u…) if(c.every((d,p)=>fold(o[u+p])===fold(d)))return!0}
+    for path_entry in DANGEROUS_DIRECTORY_PATHS {
+        let parts: Vec<&str> = path_entry.split('/').collect();
+        for window in segments.windows(parts.len()) {
+            if window.iter().zip(parts.iter()).all(|(seg, part)| {
+                normalize_case_for_comparison(seg) == normalize_case_for_comparison(part)
+            }) {
+                return true;
+            }
         }
     }
 
@@ -603,7 +661,8 @@ mod tests {
 
     #[test]
     fn dangerous_files_list_is_verbatim() {
-        // Guard against accidental edits to the ported list.
+        // Guard against accidental edits — 1:1 with the 2.1.195 binary `Sjo`
+        // (`.claude.json`→`.lingxi.json`), `Xsc` (`.claude`→`.lingxi`), `Qsc`.
         assert_eq!(
             DANGEROUS_FILES,
             &[
@@ -614,15 +673,67 @@ mod tests {
                 ".zshrc",
                 ".zprofile",
                 ".profile",
+                ".zshenv",
+                ".zlogin",
+                ".zlogout",
+                ".bash_login",
+                ".bash_aliases",
+                ".bash_logout",
+                ".envrc",
                 ".ripgreprc",
                 ".mcp.json",
                 ".lingxi.json",
+                ".npmrc",
+                ".yarnrc",
+                ".yarnrc.yml",
+                ".pnp.cjs",
+                ".pnp.loader.mjs",
+                ".pnpmfile.cjs",
+                "bunfig.toml",
+                ".bunfig.toml",
+                ".bazelrc",
+                ".bazelversion",
+                ".bazeliskrc",
+                ".pre-commit-config.yaml",
+                "lefthook.yml",
+                ".lefthook.yml",
+                "lefthook.yaml",
+                ".lefthook.yaml",
+                "gradle-wrapper.properties",
+                "maven-wrapper.properties",
+                ".devcontainer.json",
+                "pyrightconfig.json",
             ]
         );
         assert_eq!(
             DANGEROUS_DIRECTORIES,
-            &[".git", ".vscode", ".idea", ".lingxi"]
+            &[
+                ".git",
+                ".vscode",
+                ".idea",
+                ".lingxi",
+                ".husky",
+                ".cargo",
+                ".devcontainer",
+                ".yarn",
+                ".mvn",
+            ]
         );
+        assert_eq!(DANGEROUS_DIRECTORY_PATHS, &[".config/git"]);
+    }
+
+    #[test]
+    fn newly_added_dangerous_paths_are_blocked() {
+        // Sjo additions (basename) + Xsc additions (segment) + Qsc (path run).
+        assert!(is_dangerous("/proj/.npmrc"));
+        assert!(is_dangerous("/proj/sub/pyrightconfig.json"));
+        assert!(is_dangerous("/home/u/.cargo/config.toml"));
+        assert!(is_dangerous("/proj/.yarn/releases/x.cjs"));
+        // Qsc: `.config/git` as consecutive segments anywhere in the path.
+        assert!(is_dangerous("/home/u/.config/git/config"));
+        assert!(is_dangerous("/home/u/.config/git/ignore"));
+        // `.config` alone (without a following `git`) is NOT a Qsc match.
+        assert!(!is_dangerous("/home/u/.config/other/file"));
     }
 
     // --- has_suspicious_windows_path_pattern (spec table) ---

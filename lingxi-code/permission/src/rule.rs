@@ -86,16 +86,22 @@ impl PermissionRuleValue {
     }
 }
 
-/// Map a legacy tool name to its canonical name (claude-code
-/// `LEGACY_TOOL_NAME_ALIASES`, external/non-ant build — the KAIROS-gated
-/// `Brief` alias is omitted). Applied on parse so rules/hooks resolve to the
-/// current name.
+/// Map a legacy tool name to its canonical name — 1:1 with the 2.1.195 binary
+/// `LEGACY_TOOL_NAME_ALIASES` (`aDr`), a static literal with all 12 entries
+/// (`Brief` is present unconditionally in the binary; the prior "KAIROS-gated,
+/// omitted" note was based on stale TS). Applied on parse so rules/hooks resolve
+/// to the current name.
 #[must_use]
 pub fn normalize_legacy_tool_name(name: &str) -> String {
     match name {
         "Task" => "Agent",
-        "KillShell" => "TaskStop",
-        "AgentOutputTool" | "BashOutputTool" => "TaskOutput",
+        "KillShell" | "KillBash" => "TaskStop",
+        "AgentOutputTool" | "BashOutputTool" | "AgentOutput" | "BashOutput" => "TaskOutput",
+        "ListPeers" => "ListAgents",
+        "Brief" => "SendUserMessage",
+        "ListMcpResources" => "ListMcpResourcesTool",
+        "ReadMcpResource" => "ReadMcpResourceTool",
+        "ReadMcpResourceDir" => "ReadMcpResourceDirTool",
         other => other,
     }
     .to_string()
@@ -253,6 +259,30 @@ impl PermissionRule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 1:1 with the binary `aDr` (LEGACY_TOOL_NAME_ALIASES) — all 12 entries.
+    #[test]
+    fn legacy_tool_name_aliases_match_binary() {
+        for (legacy, canonical) in [
+            ("Task", "Agent"),
+            ("KillShell", "TaskStop"),
+            ("KillBash", "TaskStop"),
+            ("AgentOutputTool", "TaskOutput"),
+            ("BashOutputTool", "TaskOutput"),
+            ("AgentOutput", "TaskOutput"),
+            ("BashOutput", "TaskOutput"),
+            ("ListPeers", "ListAgents"),
+            ("Brief", "SendUserMessage"),
+            ("ListMcpResources", "ListMcpResourcesTool"),
+            ("ReadMcpResource", "ReadMcpResourceTool"),
+            ("ReadMcpResourceDir", "ReadMcpResourceDirTool"),
+        ] {
+            assert_eq!(normalize_legacy_tool_name(legacy), canonical, "alias {legacy}");
+        }
+        // Non-legacy names pass through unchanged.
+        assert_eq!(normalize_legacy_tool_name("Bash"), "Bash");
+        assert_eq!(normalize_legacy_tool_name("Agent"), "Agent");
+    }
 
     #[test]
     fn user_settings_outrank_session() {

@@ -65,7 +65,7 @@ pub const BUILTIN_AGENT_MAX_TURNS: u32 = 100;
 /// Tools the read-only built-ins (Explore, Plan, verification) must NOT have,
 /// mirroring claude-code's `disallowedTools` for those agents.
 fn read_only_disallowed() -> Vec<String> {
-    ["Agent", "ExitPlanMode", "Edit", "Write", "NotebookEdit"]
+    ["Agent", "Artifact", "ExitPlanMode", "Edit", "Write", "NotebookEdit"]
         .iter()
         .map(|s| (*s).to_string())
         .collect()
@@ -461,13 +461,21 @@ pub fn builtin_agent_definitions() -> Vec<AgentDefinition> {
             AgentModel::Inherit,
             GENERAL_PURPOSE_PROMPT,
         ),
-        def(
-            "statusline-setup",
-            "Use this agent to configure the user's Claude Code status line setting.",
-            AgentToolPolicy::Explicit(vec!["Read".to_string(), "Edit".to_string()]),
-            AgentModel::Alias("sonnet".to_string()),
-            STATUSLINE_SETUP_PLACEHOLDER,
-        ),
+        {
+            // claude statusline-setup is the only built-in declaring a `color`
+            // (`color:"orange"`), surfaced in `tengu_agent_tool_selected` and the
+            // user-facing-name background color. The `def` helper sets `color: None`,
+            // so set it explicitly here.
+            let mut d = def(
+                "statusline-setup",
+                "Use this agent to configure the user's Claude Code status line setting.",
+                AgentToolPolicy::Explicit(vec!["Read".to_string(), "Edit".to_string()]),
+                AgentModel::Alias("sonnet".to_string()),
+                STATUSLINE_SETUP_PLACEHOLDER,
+            );
+            d.color = Some("orange".to_string());
+            d
+        },
         def(
             "Explore",
             "Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. \"src/components/**/*.tsx\"), search code for keywords (eg. \"API endpoints\"), or answer questions about the codebase (eg. \"how do API endpoints work?\"). When calling this agent, specify the desired thoroughness level: \"quick\" for basic searches, \"medium\" for moderate exploration, or \"very thorough\" for comprehensive analysis across multiple locations and naming conventions.",

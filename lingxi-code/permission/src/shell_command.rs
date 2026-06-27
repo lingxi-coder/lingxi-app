@@ -233,6 +233,14 @@ const SAFE_ENV_VARS: &[&str] = &[
     "TIME_STYLE",
     "BLOCK_SIZE",
     "BLOCKSIZE",
+    // Terminal geometry / CI / non-interactive
+    "COLUMNS",
+    "LINES",
+    "CLICOLOR",
+    "CLICOLOR_FORCE",
+    "CI",
+    "DEBIAN_FRONTEND",
+    "GIT_TERMINAL_PROMPT",
 ];
 
 /// claude-code `stripSafeWrappers` (bashPermissions.ts:524-615). Two-phase

@@ -821,8 +821,10 @@ impl Tool for TaskCreateTool {
     fn max_result_size_chars(&self) -> usize {
         100_000
     }
+    // claude TaskCreate `isConcurrencySafe(){return!1}` — TaskCreate mutates the
+    // shared task list, so it must NOT be batched concurrently with other tools.
     fn is_concurrency_safe(&self, _: &Value) -> bool {
-        true
+        false
     }
     fn is_read_only(&self, _: &Value) -> bool {
         false
@@ -1867,7 +1869,7 @@ impl Tool for TaskStopTool {
     /// `KillShell` is the deprecated name kept as an alias for backward
     /// compatibility (`TaskStopTool.ts:44`). `find_by_name` honours aliases.
     fn aliases(&self) -> &[&str] {
-        const ALIASES: &[&str] = &["KillShell"];
+        const ALIASES: &[&str] = &["KillShell", "KillBash"];
         ALIASES
     }
     /// `searchHint: 'kill a running background task'` (`TaskStopTool.ts:41`).
@@ -2077,7 +2079,7 @@ impl Tool for TaskStopTool {
 // ==== TaskOutputTool =========================================================
 
 /// `TaskOutputTool` description (`TaskOutputTool.tsx` `async description()`).
-const TASK_OUTPUT_DESCRIPTION: &str = "[Deprecated] — prefer Read on the task output file path";
+const TASK_OUTPUT_DESCRIPTION: &str = "[Deprecated] — for bash and remote_agent tasks, prefer Read on the output file path; for local_agent tasks, use the Agent tool result directly";
 
 /// `TaskOutputTool` prompt (`TaskOutputTool.tsx` `async prompt()`, verbatim).
 const TASK_OUTPUT_PROMPT: &str = "DEPRECATED: Prefer using the Read tool on the task's output file path instead. Background tasks return their output file path in the tool result, and you receive a <task-notification> with the same path when the task completes — Read that file directly.
@@ -2350,7 +2352,7 @@ impl Tool for TaskOutputTool {
     /// Backwards-compatible aliases for the renamed tools
     /// (`TaskOutputTool.tsx:150`).
     fn aliases(&self) -> &[&str] {
-        const ALIASES: &[&str] = &["AgentOutputTool", "BashOutputTool"];
+        const ALIASES: &[&str] = &["AgentOutputTool", "BashOutputTool", "AgentOutput", "BashOutput"];
         ALIASES
     }
     /// `searchHint: 'read output/logs from a background task'`
@@ -4521,9 +4523,12 @@ mod tests {
         #[test]
         fn aliases_match_ts() {
             let stop = TaskStopTool::new(bctx(MockRegistry::with_record(None)));
-            assert_eq!(stop.aliases(), &["KillShell"]);
+            assert_eq!(stop.aliases(), &["KillShell", "KillBash"]);
             let out = TaskOutputTool::new(bctx(MockRegistry::with_record(None)));
-            assert_eq!(out.aliases(), &["AgentOutputTool", "BashOutputTool"]);
+            assert_eq!(
+                out.aliases(),
+                &["AgentOutputTool", "BashOutputTool", "AgentOutput", "BashOutput"]
+            );
         }
 
         // ── TaskStop ─────────────────────────────────────────────────────

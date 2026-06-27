@@ -101,9 +101,11 @@ fn no_footer_on_main_prompt() {
 
 #[test]
 fn footer_literal_still_exported_for_subagent() {
-    // FOOTER itself is unchanged + still exported (the subagent path uses it).
-    // Length locked at 816 bytes (5-bullet footer, two em-dashes + trailing LF).
-    assert_eq!(orchestrator::prompt::locked_templates::FOOTER.len(), 816);
+    // FOOTER is still exported (the subagent path uses it). Bullet 5 now carries
+    // the 84-byte "(Files written as input to another tool…)" parenthetical to
+    // match the live subagent trailer in `agent::handle` and the 2.1.193 binary.
+    // Length locked at 900 bytes (5-bullet footer, two em-dashes + trailing LF).
+    assert_eq!(orchestrator::prompt::locked_templates::FOOTER.len(), 900);
 }
 
 #[test]

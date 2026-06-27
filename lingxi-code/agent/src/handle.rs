@@ -566,7 +566,7 @@ impl PoolSubagentSpawner {
 - In your final response, share file paths (always absolute, never relative) that are relevant to the task. Include code snippets only when the exact text is load-bearing (e.g., a bug you found, a function signature the caller asked for) — do not recap code you merely read.\n\
 - For clear communication with the user the assistant MUST avoid using emojis.\n\
 - Do not use a colon before tool calls. Text like \"Let me read the file:\" followed by a read tool call should just be \"Let me read the file.\" with a period.\n\
-- Do NOT Write report/summary/findings/analysis .md files. Return findings directly as your final assistant message — the parent agent reads your text output, not files you create.";
+- Do NOT Write report/summary/findings/analysis .md files. Return findings directly as your final assistant message — the parent agent reads your text output, not files you create. (Files written as input to another tool are fine; this note is about report files.)";
 
     /// Build the child context from a RESOLVED [`AgentDefinition`] + the
     /// caller's task prompt, plus the optional fork carriers.
@@ -1793,12 +1793,12 @@ mod tests {
         // has no parent): never write report/summary .md files; return findings
         // in the final assistant message.
         assert!(sys.contains(
-            "- Do NOT Write report/summary/findings/analysis .md files. Return findings directly as your final assistant message — the parent agent reads your text output, not files you create."
+            "- Do NOT Write report/summary/findings/analysis .md files. Return findings directly as your final assistant message — the parent agent reads your text output, not files you create. (Files written as input to another tool are fine; this note is about report files.)"
         ));
         // No trailing newline — the `notes` element is newline-free in TS
         // (the next block, `<env>`, is joined with a blank line, not appended
         // to the notes literal).
-        assert!(sys.ends_with("not files you create."));
+        assert!(sys.ends_with("this note is about report files.)"));
     }
 
     #[test]
@@ -1920,10 +1920,10 @@ mod tests {
             entries.iter().map(|e| (e.agent_type.as_str(), e)).collect();
         // general-purpose: All { .. } → "All tools".
         assert_eq!(by["general-purpose"].tools_description, "All tools");
-        // Explore: Except([Agent, ExitPlanMode, Edit, Write, NotebookEdit]).
+        // Explore: Except([Agent, Artifact, ExitPlanMode, Edit, Write, NotebookEdit]).
         assert_eq!(
             by["Explore"].tools_description,
-            "All tools except Agent, ExitPlanMode, Edit, Write, NotebookEdit"
+            "All tools except Agent, Artifact, ExitPlanMode, Edit, Write, NotebookEdit"
         );
         // statusline-setup: Explicit([Read, Edit]).
         assert_eq!(by["statusline-setup"].tools_description, "Read, Edit");
@@ -2191,7 +2191,7 @@ mod tests {
             "env block must be appended with the resolved model + no cwd override; got:\n{sys}"
         );
         // The Notes trailer still precedes it.
-        assert!(sys.contains("not files you create.\n\n<env>"));
+        assert!(sys.contains("this note is about report files.)\n\n<env>"));
 
         // A worktree-isolated spawn (request.cwd Some) threads the cwd into the
         // env renderer so the agent's env block reflects the worktree.

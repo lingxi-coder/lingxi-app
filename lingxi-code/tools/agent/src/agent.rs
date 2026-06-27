@@ -160,7 +160,7 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "model": {
                 "type": "string",
                 "enum": ["sonnet", "opus", "haiku", "fable"],
-                "description": "Optional model override for this agent. Takes precedence over the agent definition's model frontmatter. If omitted, uses the agent definition's model, or inherits from the parent."
+                "description": "Optional model override for this agent. Takes precedence over the agent definition's model frontmatter. If omitted, uses the agent definition's model, or inherits from the parent. Ignored for subagent_type: \"fork\" — forks always inherit the parent model."
             },
             "run_in_background": {
                 "type": "boolean",
@@ -172,7 +172,7 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             },
             "team_name": {
                 "type": "string",
-                "description": "Team name for spawning. Uses current team context if omitted."
+                "description": "Deprecated; ignored. The session has a single implicit team."
             },
             "mode": {
                 "type": "string",
@@ -280,7 +280,7 @@ fn render_completed_model_content(
     // confirmed live in subagent result trailers); the leaked TS still shows the
     // old `total_tokens`, so the binary is canonical here.
     let trailer = format!(
-        "agentId: {agent_id} (use SendMessage with to: '{agent_id}' to continue this agent){worktree_info_text}\n<usage>subagent_tokens: {total_tokens}\ntool_uses: {total_tool_use_count}\nduration_ms: {total_duration_ms}</usage>"
+        "agentId: {agent_id} (use SendMessage with to: '{agent_id}', summary: '<5-10 word recap>' to continue this agent){worktree_info_text}\n<usage>subagent_tokens: {total_tokens}\ntool_uses: {total_tool_use_count}\nduration_ms: {total_duration_ms}</usage>"
     );
     let mut blocks = content_or_marker;
     blocks.push(trailer);
@@ -795,7 +795,7 @@ Reach for this when the task matches an available agent type, when you have inde
                 // `canReadOutputFile`-branched instruction tail, joined by `\n`.
                 let output_file = &launch.output_file;
                 let prefix = format!(
-                    "Async agent launched successfully.\nagentId: {agent_id_str} (internal ID - do not mention to user. Use SendMessage with to: '{agent_id_str}' to continue this agent.)\nThe agent is working in the background. You will be notified automatically when it completes."
+                    "Async agent launched successfully.\nagentId: {agent_id_str} (internal ID - do not mention to user. Use SendMessage with to: '{agent_id_str}', summary: '<5-10 word recap>' to continue this agent.)\nThe agent is working in the background. You will be notified automatically when it completes."
                 );
                 let instructions = if can_read_output_file {
                     // claude uses FILE_READ_TOOL_NAME / BASH_TOOL_NAME — the
@@ -2968,7 +2968,7 @@ mod tests {
         assert_eq!(
             mc,
             format!(
-                "the answer\nagentId: {child_id} (use SendMessage with to: '{child_id}' to continue this agent)\n<usage>subagent_tokens: 42\ntool_uses: 3\nduration_ms: 1234</usage>"
+                "the answer\nagentId: {child_id} (use SendMessage with to: '{child_id}', summary: '<5-10 word recap>' to continue this agent)\n<usage>subagent_tokens: 42\ntool_uses: 3\nduration_ms: 1234</usage>"
             )
         );
     }

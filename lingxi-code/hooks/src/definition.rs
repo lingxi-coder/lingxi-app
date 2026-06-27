@@ -168,6 +168,12 @@ pub enum HookExecutor {
         /// (`getSmallFastModel()`; `execPromptHook.ts:79`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// `continueOnBlock` (`schemas/hooks.ts`): when the hook blocks
+        /// (`ok:false`), whether the turn may still continue. Drives the prompt
+        /// executor's `prevent_continuation = !continue_on_block`. Default false
+        /// (a block ends the turn).
+        #[serde(default)]
+        continue_on_block: bool,
     },
     /// Dispatch to an in-process Rust handler registered via
     /// [`crate::HookExecutorImpl::register_builtin`].

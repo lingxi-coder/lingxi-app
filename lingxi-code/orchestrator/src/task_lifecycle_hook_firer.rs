@@ -259,6 +259,7 @@ mod tests {
             executor: DefHookExecutor::Prompt {
                 prompt: "block? $ARGUMENTS".into(),
                 model: None,
+                continue_on_block: false,
             },
             source: HookSource::User,
             blocking: true,

@@ -1075,7 +1075,11 @@ impl Dispatcher {
                 emit_agent_signal(hook, &outcome.signal, effective_timeout);
                 outcome.result
             }
-            HookExecutor::Prompt { prompt, model } => {
+            HookExecutor::Prompt {
+                prompt,
+                model,
+                continue_on_block,
+            } => {
                 let Some((_expected_event, body)) = build_envelope_body(event, ctx) else {
                     return HookResult {
                         outcome: HookOutcome::Error,
@@ -1099,7 +1103,9 @@ impl Dispatcher {
                     runner: self.prompt_runner.clone(),
                     timeout: effective_timeout,
                 };
-                let outcome = exec.execute(hook, prompt, model.as_deref(), &body).await;
+                let outcome = exec
+                    .execute(hook, prompt, model.as_deref(), *continue_on_block, &body)
+                    .await;
                 emit_prompt_signal(hook, &outcome.signal, effective_timeout);
                 outcome.result
             }
@@ -5296,6 +5302,7 @@ mod prompt_dispatch_tests {
             executor: DefHookExecutor::Prompt {
                 prompt: "Is this safe? $ARGUMENTS".into(),
                 model: Some("claude-sonnet-4-6".into()),
+                continue_on_block: false,
             },
             source: HookSource::Project,
             blocking: true,

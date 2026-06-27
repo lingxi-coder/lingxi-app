@@ -251,6 +251,12 @@ struct HookEntry {
     /// its [`HookExecutor::Agent`] variant, so it is dropped there.
     #[serde(default)]
     model: Option<String>,
+    /// `prompt` hook `continueOnBlock` (`schemas/hooks.ts`): when the hook blocks
+    /// (`ok:false`), sets the `decision:"block"` `continue` value. Default false
+    /// (turn ends). Carried onto [`HookExecutor::Prompt`]'s `continue_on_block`;
+    /// the prompt executor sets `prevent_continuation = !continue_on_block`.
+    #[serde(default, rename = "continueOnBlock")]
+    continue_on_block: Option<bool>,
     /// `timeout` in seconds, shared by all hook types
     /// (`schemas/hooks.ts:42-46` / `75-79` / `101-105` / `144-148`).
     #[serde(default)]
@@ -454,6 +460,7 @@ fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)> {
             let executor = HookExecutor::Prompt {
                 prompt,
                 model: entry.model.clone(),
+                continue_on_block: entry.continue_on_block.unwrap_or(false),
             };
             // The hook name mirrors the command/http/agent convention; the
             // prompt's primary user-supplied field is the prompt itself, so
@@ -910,7 +917,7 @@ mod tests {
         assert_eq!(hooks[0].events, vec![HookEventType::PreToolUse]);
         assert_eq!(hooks[0].source, HookSource::Project);
         assert_eq!(hooks[0].timeout, Some(Duration::from_secs(15)));
-        let HookExecutor::Prompt { prompt, model } = &hooks[0].executor else {
+        let HookExecutor::Prompt { prompt, model, .. } = &hooks[0].executor else {
             panic!("expected Prompt executor, got {:?}", hooks[0].executor);
         };
         assert_eq!(prompt, "Is $ARGUMENTS a safe command?");
@@ -929,7 +936,7 @@ mod tests {
         ]}]}}"#;
         let hooks = parse_hooks_from_settings_json(raw, HookSource::User).unwrap();
         assert_eq!(hooks.len(), 1);
-        let HookExecutor::Prompt { prompt, model } = &hooks[0].executor else {
+        let HookExecutor::Prompt { prompt, model, .. } = &hooks[0].executor else {
             panic!("expected Prompt executor");
         };
         assert_eq!(prompt, "evaluate this");

@@ -163,6 +163,7 @@ impl PromptExecutor {
         hook: &HookDefinition,
         prompt_template: &str,
         model: Option<&str>,
+        continue_on_block: bool,
         payload_json: &str,
     ) -> PromptExecutionOutcome {
         let Some(runner) = self.runner.clone() else {
@@ -306,7 +307,9 @@ impl PromptExecutor {
                         reason: Some(format!(
                             "Prompt hook condition was not met: {reason}"
                         )),
-                        prevent_continuation: true,
+                        // `continueOnBlock` (schemas/hooks.ts): default false →
+                        // a block prevents continuation; true lets the turn proceed.
+                        prevent_continuation: !continue_on_block,
                         ..Default::default()
                     }),
                 },
@@ -390,6 +393,7 @@ mod tests {
             executor: DefHookExecutor::Prompt {
                 prompt: "Is $ARGUMENTS safe?".into(),
                 model: None,
+                continue_on_block: false,
             },
             source: HookSource::User,
             blocking: true,
@@ -407,7 +411,7 @@ mod tests {
         let hook = make_prompt_hook();
 
         let outcome = exec
-            .execute(&hook, "Is $ARGUMENTS safe?", None, r#"{"tool":"Bash"}"#)
+            .execute(&hook, "Is $ARGUMENTS safe?", None, false, r#"{"tool":"Bash"}"#)
             .await;
 
         assert_eq!(outcome.signal, PromptExecutionSignal::Ok);
@@ -430,7 +434,7 @@ mod tests {
         let exec = PromptExecutor::new(Some(runner.clone()), Duration::from_secs(5));
         let hook = make_prompt_hook();
 
-        let outcome = exec.execute(&hook, "vet it", None, "{}").await;
+        let outcome = exec.execute(&hook, "vet it", None, false, "{}").await;
 
         assert_eq!(outcome.signal, PromptExecutionSignal::Ok);
         // The transport call succeeded; the block is carried on the response.
@@ -445,12 +449,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ok_false_with_continue_on_block_allows_continuation() {
+        // `continueOnBlock: true` keeps decision:Block + reason but lets the turn
+        // proceed (prevent_continuation = !continue_on_block = false).
+        let runner = MockRunner::ok(r#"{"ok": false, "reason": "advisory only"}"#);
+        let exec = PromptExecutor::new(Some(runner), Duration::from_secs(5));
+        let hook = make_prompt_hook();
+
+        let outcome = exec.execute(&hook, "vet it", None, true, "{}").await;
+
+        let resp = outcome.result.response.expect("block response present");
+        assert_eq!(resp.decision, Some(HookDecision::Block));
+        assert!(!resp.prevent_continuation, "continueOnBlock=true → may continue");
+    }
+
+    #[tokio::test]
     async fn ok_false_without_reason_blocks_with_empty_reason() {
         let runner = MockRunner::ok(r#"{"ok": false}"#);
         let exec = PromptExecutor::new(Some(runner.clone()), Duration::from_secs(5));
         let hook = make_prompt_hook();
 
-        let outcome = exec.execute(&hook, "vet it", None, "{}").await;
+        let outcome = exec.execute(&hook, "vet it", None, false, "{}").await;
 
         let resp = outcome.result.response.expect("block response present");
         assert_eq!(resp.decision, Some(HookDecision::Block));
@@ -467,7 +486,7 @@ mod tests {
         let exec = PromptExecutor::new(Some(runner.clone()), Duration::from_secs(5));
         let hook = make_prompt_hook();
 
-        let outcome = exec.execute(&hook, "vet it", None, "{}").await;
+        let outcome = exec.execute(&hook, "vet it", None, false, "{}").await;
 
         assert_eq!(outcome.signal, PromptExecutionSignal::Ok);
         assert!(matches!(outcome.result.outcome, HookOutcome::Error));
@@ -482,7 +501,7 @@ mod tests {
         let exec = PromptExecutor::new(Some(runner.clone()), Duration::from_secs(5));
         let hook = make_prompt_hook();
 
-        let outcome = exec.execute(&hook, "vet it", None, "{}").await;
+        let outcome = exec.execute(&hook, "vet it", None, false, "{}").await;
 
         assert!(matches!(outcome.result.outcome, HookOutcome::Error));
         assert!(
@@ -498,7 +517,7 @@ mod tests {
         let exec = PromptExecutor::new(None, Duration::from_secs(5));
         let hook = make_prompt_hook();
 
-        let outcome = exec.execute(&hook, "vet it", None, "{}").await;
+        let outcome = exec.execute(&hook, "vet it", None, false, "{}").await;
 
         assert_eq!(outcome.signal, PromptExecutionSignal::NotWired);
         assert!(matches!(outcome.result.outcome, HookOutcome::Error));
@@ -513,7 +532,7 @@ mod tests {
         let exec = PromptExecutor::new(Some(runner.clone()), Duration::from_secs(5));
         let hook = make_prompt_hook();
 
-        let outcome = exec.execute(&hook, "vet it", None, "{}").await;
+        let outcome = exec.execute(&hook, "vet it", None, false, "{}").await;
 
         assert_eq!(outcome.signal, PromptExecutionSignal::Ok);
         assert!(matches!(outcome.result.outcome, HookOutcome::Cancelled));
@@ -526,7 +545,7 @@ mod tests {
         let exec = PromptExecutor::new(Some(runner.clone()), Duration::from_secs(30));
         let hook = make_prompt_hook();
 
-        let outcome = exec.execute(&hook, "vet it", None, "{}").await;
+        let outcome = exec.execute(&hook, "vet it", None, false, "{}").await;
 
         assert_eq!(outcome.signal, PromptExecutionSignal::TimedOut);
         assert!(matches!(outcome.result.outcome, HookOutcome::Timeout));
@@ -538,7 +557,7 @@ mod tests {
         let exec = PromptExecutor::new(Some(runner.clone()), Duration::from_secs(5));
         let hook = make_prompt_hook();
 
-        let outcome = exec.execute(&hook, "vet it", None, "{}").await;
+        let outcome = exec.execute(&hook, "vet it", None, false, "{}").await;
 
         assert!(matches!(outcome.result.outcome, HookOutcome::Error));
         assert!(
@@ -556,7 +575,7 @@ mod tests {
         let hook = make_prompt_hook();
 
         let _ = exec
-            .execute(&hook, "vet it", Some("claude-sonnet-4-6"), "{}")
+            .execute(&hook, "vet it", Some("claude-sonnet-4-6"), false, "{}")
             .await;
 
         let recorded = runner.recorded.lock().unwrap();

@@ -383,6 +383,12 @@ pub async fn run_tui_session(
         rows = rows,
     );
 
+    // Arm terminal-safety hooks before iocraft takes the screen: a panic hook +
+    // SIGTERM/SIGHUP handlers that restore the terminal (incl. disabling mouse
+    // capture, which iocraft's Drop misses) so a crash or `kill` doesn't leave
+    // the shell in raw/alt/mouse-reporting mode spewing `<b>;<x>;<y>M` garbage.
+    crate::terminal::install_terminal_safety_hooks();
+
     // Shared AppState — the bridge pump task + key handlers mutate it,
     // the render path reads it. Wrapped in a tokio Mutex so the pump
     // can await locks across .await points.
@@ -519,6 +525,11 @@ pub async fn run_tui_session(
     .ignore_ctrl_c()
     .await;
 
+    // Normal exit: iocraft's Drop has left the alt screen + shown the cursor +
+    // disabled raw mode, but it never disables mouse capture — do it here so the
+    // returned-to shell isn't left reporting mouse moves as text.
+    crate::terminal::restore_terminal_modes();
+
     if let Err(e) = result {
         return Err(TuiError::Terminal(e));
     }
@@ -555,6 +566,7 @@ pub async fn run_resume_picker(
     // `open_*` helper), so emit the screen-opened event here to keep the
     // `None → Some(_)` transition instrumented like every other screen.
     crate::telemetry::screen_opened("resume");
+    crate::terminal::install_terminal_safety_hooks();
     let state = Arc::new(Mutex::new(app));
 
     let result = element! {
@@ -571,6 +583,8 @@ pub async fn run_resume_picker(
     }
     .fullscreen()
     .await;
+
+    crate::terminal::restore_terminal_modes();
 
     if let Err(e) = result {
         return Err(TuiError::Terminal(e));

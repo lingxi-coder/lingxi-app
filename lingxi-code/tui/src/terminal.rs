@@ -17,6 +17,8 @@
 #![allow(dead_code)]
 
 use crossterm::{
+    cursor::Show,
+    event::DisableMouseCapture,
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -24,6 +26,50 @@ use std::io::{self, stdout, Stdout};
 use std::sync::Once;
 
 static INSTALL_PANIC_HOOK: Once = Once::new();
+static INSTALL_SAFETY: Once = Once::new();
+
+/// Best-effort full terminal restore: disable mouse capture, leave the alt
+/// screen, show the cursor, disable raw mode. Idempotent (the sequences are
+/// no-ops if already off), so it is safe to call from several exit paths.
+///
+/// **Why mouse capture is explicit here:** iocraft 0.8.3's fullscreen renderer
+/// ENABLES mouse capture but its `Drop` only leaves the alt screen + shows the
+/// cursor + disables raw mode — it never emits `DisableMouseCapture`. So even a
+/// clean exit leaves the terminal in mouse-reporting mode, and every subsequent
+/// mouse move prints garbage `<btn>;<x>;<y>M` SGR reports as literal text. And on
+/// a SIGNAL (SIGTERM/SIGHUP — e.g. `kill`, closing the tab) no `Drop` runs at
+/// all, leaving raw + alt + mouse all on. This restore closes both gaps.
+pub fn restore_terminal_modes() {
+    let mut out: Stdout = stdout();
+    let _ = execute!(out, DisableMouseCapture, LeaveAlternateScreen, Show);
+    let _ = disable_raw_mode();
+}
+
+/// Install process-wide terminal-safety hooks for the fullscreen TUI, once:
+/// - a panic hook that restores the terminal before propagating the panic;
+/// - SIGTERM / SIGHUP handlers that restore the terminal, then exit.
+///
+/// SIGINT (Ctrl-C) is deliberately NOT caught here — the live mount uses
+/// iocraft's `.ignore_ctrl_c()` so Ctrl-C routes to the app's double-press exit
+/// guard. Must be called from within a Tokio runtime (it spawns signal tasks).
+pub fn install_terminal_safety_hooks() {
+    INSTALL_SAFETY.call_once(|| {
+        INSTALL_PANIC_HOOK.call_once(install_panic_hook);
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            for kind in [SignalKind::terminate(), SignalKind::hangup()] {
+                if let Ok(mut sig) = signal(kind) {
+                    tokio::spawn(async move {
+                        sig.recv().await;
+                        restore_terminal_modes();
+                        std::process::exit(143);
+                    });
+                }
+            }
+        }
+    });
+}
 
 /// RAII guard: enables raw mode + alt screen on `new`; restores on `drop`.
 ///
@@ -75,9 +121,7 @@ impl Drop for RawGuard {
 fn install_panic_hook() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let mut out: Stdout = stdout();
-        let _ = execute!(out, LeaveAlternateScreen);
-        let _ = disable_raw_mode();
+        restore_terminal_modes();
         prev(info);
     }));
 }

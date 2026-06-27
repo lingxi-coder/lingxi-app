@@ -32,8 +32,8 @@ fn single_entry_shape() {
         LingxiMdTier::User,
     )]);
     let expected = format!(
-        "{PREAMBLE}\n\n\
-Contents of /home/u/.lingxi/LINGXI.md (user's private global instructions for all projects):\n\n\
+        "{PREAMBLE}\n\
+Contents of /home/u/.lingxi/LINGXI.md (user's private global instructions for all projects):\n\
 global notes"
     );
     assert_eq!(out, expected);
@@ -43,19 +43,19 @@ global notes"
 fn multi_entry_splice_order_locked() {
     // Caller is responsible for ordering — formatter just emits.
     // Order verified here: User, then Project, then Local. Each tier gets its
-    // own description; blocks are joined by a blank line; no trailing newline.
+    // own description; blocks are joined by a single newline; no trailing newline.
     let out = memory_block::format(&[
         mf("/home/u/.lingxi/LINGXI.md", "home", LingxiMdTier::User),
         mf("/proj/LINGXI.md", "repo", LingxiMdTier::Project),
         mf("/proj/LINGXI.local.md", "local", LingxiMdTier::Local),
     ]);
     let expected = format!(
-        "{PREAMBLE}\n\n\
-Contents of /home/u/.lingxi/LINGXI.md (user's private global instructions for all projects):\n\n\
-home\n\n\
-Contents of /proj/LINGXI.md (project instructions, checked into the codebase):\n\n\
-repo\n\n\
-Contents of /proj/LINGXI.local.md (user's private project instructions, not checked in):\n\n\
+        "{PREAMBLE}\n\
+Contents of /home/u/.lingxi/LINGXI.md (user's private global instructions for all projects):\n\
+home\n\
+Contents of /proj/LINGXI.md (project instructions, checked into the codebase):\n\
+repo\n\
+Contents of /proj/LINGXI.local.md (user's private project instructions, not checked in):\n\
 local"
     );
     assert_eq!(out, expected);
@@ -73,8 +73,8 @@ fn managed_tier_uses_organization_managed_description() {
         LingxiMdTier::Managed,
     )]);
     let expected = format!(
-        "{PREAMBLE}\n\n\
-Contents of /Library/Application Support/LingXi/LINGXI.md (organization-managed policy instructions):\n\n\
+        "{PREAMBLE}\n\
+Contents of /Library/Application Support/LingXi/LINGXI.md (organization-managed policy instructions):\n\
 policy"
     );
     assert_eq!(out, expected);

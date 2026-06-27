@@ -376,20 +376,17 @@ fn tier_description(tier: memory::lingxi_md::LingxiMdTier) -> &'static str {
 /// Format the memory section from a slice of loaded files, 1:1 with claude-code
 /// `getLingxiMds` (claudemd.ts:1153-1195).
 ///
-/// Shape (NO enclosing tag, NO trailing newline):
+/// Shape (NO enclosing tag, NO trailing newline; SINGLE-newline separators):
 /// ```text
 /// {MEMORY_INSTRUCTION_PROMPT}
-///
 /// Contents of {p1}{desc1}:
-///
 /// {body1}
-///
 /// Contents of {p2}{desc2}:
-///
 /// {body2}
 /// ```
 /// where `{descN}` is the tier description (project / local / global) and each
-/// body is `.trim()`med. Blocks are joined by `"\n\n"`. When `files` is empty,
+/// body is `.trim()`med. Blocks are joined by `"\n"` (single newline — binary
+/// `_9t` tail `${$ip}\n${n.join(`\n`)}`). When `files` is empty,
 /// returns the EMPTY STRING and the caller MUST elide the section.
 ///
 /// §F: CONDITIONAL rules (`globs.is_some()`) are filtered OUT here — only
@@ -405,8 +402,10 @@ pub fn format(files: &[MemoryFile]) -> String {
         // §F: eager block = unconditional files only.
         .filter(|f| f.globs.is_none())
         .map(|f| {
+            // Binary `_9t` (getLingxiMds): `Contents of ${o.path}${s}:\n${i}`
+            // — SINGLE `\n` between the header and the trimmed body.
             format!(
-                "Contents of {}{}:\n\n{}",
+                "Contents of {}{}:\n{}",
                 f.path.display(),
                 tier_description(f.tier),
                 f.body.trim()
@@ -416,5 +415,7 @@ pub fn format(files: &[MemoryFile]) -> String {
     if blocks.is_empty() {
         return String::new();
     }
-    format!("{MEMORY_INSTRUCTION_PROMPT}\n\n{}", blocks.join("\n\n"))
+    // Binary `_9t` tail: `${$ip}\n${n.join(`\n`)}` — SINGLE `\n` both for the
+    // preamble→blocks separator and the block join.
+    format!("{MEMORY_INSTRUCTION_PROMPT}\n{}", blocks.join("\n"))
 }

@@ -160,7 +160,10 @@ pub fn get_compact_prompt(custom_instructions: Option<&str>) -> String {
 
     if let Some(custom) = custom_instructions {
         if !custom.trim().is_empty() {
-            prompt.push_str("\n\nAdditional Instructions:\n");
+            // Binary: `t += `\nAdditional Instructions:\n${e}`` — a SINGLE leading
+            // `\n`. BASE_COMPACT_PROMPT already ends with `</example>\n`, so the
+            // boundary nets exactly `\n\n` (one blank line), not `\n\n\n`.
+            prompt.push_str("\nAdditional Instructions:\n");
             prompt.push_str(custom);
         }
     }
@@ -184,8 +187,8 @@ fn first_tag_span(haystack: &str, open: &str, close: &str) -> Option<(usize, usi
     Some((open_at, end))
 }
 
-/// Collapse runs of two-or-more newlines down to exactly `\n\n` — mirrors
-/// the JS `replace(/\n\n+/g, '\n\n')`.
+/// Collapse runs of two-or-more newlines down to a single `\n` — mirrors the
+/// binary `aup` (`formatCompactSummary`) trailing `replace(/\n\n+/g, '\n')`.
 fn collapse_blank_lines(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let bytes = input.as_bytes();
@@ -197,11 +200,9 @@ fn collapse_blank_lines(input: &str) -> String {
             while i + run < bytes.len() && bytes[i + run] == b'\n' {
                 run += 1;
             }
-            if run >= 2 {
-                out.push_str("\n\n");
-            } else {
-                out.push('\n');
-            }
+            // Any run of newlines (1 or 2+) collapses to a single `\n`:
+            // `/\n\n+/g` → `\n` rewrites 2+; a lone `\n` is already single.
+            out.push('\n');
             i += run;
         } else {
             // Copy this (possibly multibyte) UTF-8 scalar verbatim.
@@ -230,7 +231,7 @@ fn utf8_char_len(first_byte: u8) -> usize {
 /// 1. Strip the first `<analysis>…</analysis>` block (drafting scratchpad).
 /// 2. Extract the first `<summary>…</summary>` block's inner content and
 ///    rewrite it in place as `Summary:\n{content.trim()}`.
-/// 3. Collapse `\n\n+` runs to `\n\n`.
+/// 3. Collapse `\n\n+` runs to a single `\n`.
 /// 4. `trim()` the whole result.
 #[must_use]
 pub fn format_compact_summary(summary: &str) -> String {
@@ -369,7 +370,14 @@ mod tests {
     #[test]
     fn get_compact_prompt_appends_custom_instructions_when_non_blank() {
         let p = get_compact_prompt(Some("focus on rust"));
-        assert!(p.contains("\n\nAdditional Instructions:\nfocus on rust"));
+        // Base ends `</example>\n`; the custom block adds a SINGLE leading `\n`
+        // (binary `t += `\nAdditional Instructions:\n${e}``), netting exactly one
+        // blank line at the boundary — NOT a triple newline.
+        assert!(p.contains("\nAdditional Instructions:\nfocus on rust"));
+        assert!(
+            !p.contains("\n\n\nAdditional Instructions:"),
+            "exactly one blank line before the header; got a triple newline"
+        );
         // Trailer still last.
         assert!(p.ends_with(NO_TOOLS_TRAILER));
         // And the additional-instructions block sits before the trailer.
@@ -407,7 +415,8 @@ mod tests {
     fn format_collapses_blank_lines() {
         let raw = "<summary>line1\n\n\n\nline2</summary>";
         let out = format_compact_summary(raw);
-        assert_eq!(out, "Summary:\nline1\n\nline2");
+        // Binary `aup` collapses any run of 2+ newlines to a SINGLE `\n`.
+        assert_eq!(out, "Summary:\nline1\nline2");
     }
 
     #[test]
@@ -421,8 +430,8 @@ mod tests {
     fn format_passthrough_collapses_and_trims_plain_text() {
         let raw = "\n\n  alpha\n\n\nbeta  \n\n";
         let out = format_compact_summary(raw);
-        // Leading/trailing whitespace trimmed, internal run collapsed.
-        assert_eq!(out, "alpha\n\nbeta");
+        // Leading/trailing whitespace trimmed, internal run collapsed to ONE `\n`.
+        assert_eq!(out, "alpha\nbeta");
     }
 
     #[test]
@@ -431,8 +440,9 @@ mod tests {
         let out = format_compact_summary(raw);
         assert!(!out.contains("thinking..."));
         assert!(out.contains("Summary:\n1. Primary Request"));
-        // The triple-newline inside the summary collapsed to a blank line.
-        assert!(out.contains("1. Primary Request\n\n2. Concepts"));
+        // The triple-newline inside the summary collapsed to a SINGLE `\n`.
+        assert!(out.contains("1. Primary Request\n2. Concepts"));
+        assert!(!out.contains("1. Primary Request\n\n2. Concepts"));
         // Preface and trailer survive (only analysis stripped, summary
         // rewritten in place).
         assert!(out.starts_with("preface"));
@@ -452,7 +462,7 @@ mod tests {
     fn format_handles_multibyte_content() {
         let raw = "<summary>café — naïve\n\n\nrésumé</summary>";
         let out = format_compact_summary(raw);
-        assert_eq!(out, "Summary:\ncafé — naïve\n\nrésumé");
+        assert_eq!(out, "Summary:\ncafé — naïve\nrésumé");
     }
 
     #[test]

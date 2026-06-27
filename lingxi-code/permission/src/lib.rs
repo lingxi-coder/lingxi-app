@@ -9,6 +9,8 @@ pub mod allow_suggestion;
 pub mod auto_edit_safety;
 pub mod bash_security;
 #[cfg(feature = "bash-ast")]
+pub mod bash_ast_security;
+#[cfg(feature = "bash-ast")]
 pub mod bash_tree_sitter;
 pub mod bypass_guard;
 pub mod classifier;

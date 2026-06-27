@@ -110,6 +110,15 @@ pub fn handle_connect_key(st: &mut ConnectScreenState, key: KeyCode) -> ConnectA
     if key == KeyCode::Esc {
         return ConnectAction::Cancel;
     }
+    // Copilot TERMINAL phases (Done/Failed): the flow is over, so ANY key returns
+    // to the REPL (not just Esc). Without this the screen sat on "Authorized ✓"
+    // and the only labelled action was "Esc to cancel" — which read like it would
+    // UNDO the successful login.
+    if matches!(st.flow, ConnectFlow::Copilot)
+        && matches!(st.copilot, CopilotPhase::Done | CopilotPhase::Failed { .. })
+    {
+        return ConnectAction::Cancel;
+    }
     match &st.flow {
         ConnectFlow::ApiKey { provider_id, .. } => match key {
             KeyCode::Char(c) => {
@@ -149,14 +158,24 @@ pub fn render_connect_to_string(st: &ConnectScreenState) -> String {
             match &st.copilot {
                 CopilotPhase::Starting => out.push_str("Requesting device code\u{2026}\n"),
                 CopilotPhase::Polling { user_code, verification_uri } => {
-                    out.push_str(&format!("Enter code: {user_code}\n"));
+                    // The host has already opened the browser + copied the code to
+                    // the clipboard (the screen text is not mouse-selectable — the
+                    // TUI captures the mouse — so we copy it FOR the user).
+                    out.push_str(&format!("Enter code: {user_code}   (copied to clipboard)\n"));
                     out.push_str(&format!("at {verification_uri}\n"));
+                    out.push_str("A browser was opened \u{2014} paste the code (\u{2318}V) to authorize.\n");
                     out.push_str("Waiting for authorization\u{2026}\n");
                 }
                 CopilotPhase::Done => out.push_str("Authorized \u{2713}\n"),
                 CopilotPhase::Failed { error } => out.push_str(&format!("Authorization failed: {error}\n")),
             }
-            out.push_str("Esc to cancel");
+            // Footer: terminal phases return to the REPL on ANY key; otherwise Esc
+            // cancels the in-flight flow.
+            match &st.copilot {
+                CopilotPhase::Done => out.push_str("Connected \u{2014} returning to the prompt\u{2026}"),
+                CopilotPhase::Failed { .. } => out.push_str("Press any key to return"),
+                _ => out.push_str("Esc to cancel"),
+            }
         }
     }
     out
@@ -217,5 +236,29 @@ mod tests {
         st.set_failed("access_denied");
         let out = render_connect_to_string(&st);
         assert!(out.contains("Authorization failed: access_denied"));
+    }
+
+    #[test]
+    fn copilot_terminal_phases_close_on_any_key() {
+        // Done: any key (not just Esc) returns to the REPL.
+        let mut done = ConnectScreenState::copilot_pending();
+        done.set_done();
+        assert_eq!(handle_connect_key(&mut done, KeyCode::Enter), ConnectAction::Cancel);
+        assert_eq!(handle_connect_key(&mut done, KeyCode::Char('x')), ConnectAction::Cancel);
+        let out = render_connect_to_string(&done);
+        assert!(out.contains("Authorized \u{2713}"));
+        assert!(out.contains("returning to the prompt"), "{out}");
+
+        // Failed: likewise closes on any key, with a "press any key" footer.
+        let mut failed = ConnectScreenState::copilot_pending();
+        failed.set_failed("access_denied");
+        assert_eq!(handle_connect_key(&mut failed, KeyCode::Enter), ConnectAction::Cancel);
+        assert!(render_connect_to_string(&failed).contains("Press any key to return"));
+
+        // Polling (non-terminal): typing stays inert; only Esc cancels.
+        let mut polling = ConnectScreenState::copilot_pending();
+        polling.set_device_code("WDJB-MJHT", "https://github.com/login/device");
+        assert_eq!(handle_connect_key(&mut polling, KeyCode::Char('x')), ConnectAction::None);
+        assert!(render_connect_to_string(&polling).contains("copied to clipboard"));
     }
 }

@@ -10,8 +10,30 @@ use crate::copilot::auth::CopilotSecret;
 use crate::transport::BoxFuture;
 use crate::LlmError;
 
-/// GitHub OAuth App client id (opencode's public Copilot app).
+/// GitHub OAuth App client id (opencode's public Copilot app). This is the
+/// DEFAULT; the GitHub consent page shows the NAME of whichever app owns the
+/// client id (so the default reads "opencode"). Override via
+/// [`copilot_client_id`] / `LINGXI_COPILOT_CLIENT_ID`.
+///
+/// Note: GitHub Copilot's token-exchange endpoint only accepts tokens minted by
+/// OAuth apps that are *authorized for Copilot*. A brand-new app is not
+/// automatically authorized, so this default cannot simply be swapped for an
+/// arbitrary LingXi app — a LingXi-branded app must be registered AND granted
+/// Copilot access first.
 pub const COPILOT_CLIENT_ID: &str = "Ov23li8tweQw6odWQebz";
+
+/// Resolve the GitHub OAuth App client id for the Copilot device flow. Defaults
+/// to [`COPILOT_CLIENT_ID`]; override with the `LINGXI_COPILOT_CLIENT_ID` env var
+/// once a LingXi-branded, Copilot-authorized GitHub OAuth App exists (so the
+/// consent page reads "LingXi" instead of "opencode").
+#[must_use]
+pub fn copilot_client_id() -> String {
+    std::env::var("LINGXI_COPILOT_CLIENT_ID")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| COPILOT_CLIENT_ID.to_string())
+}
 
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
@@ -104,7 +126,7 @@ impl<H: CopilotHttp> CopilotLogin<H> {
     pub fn new(http: H) -> Self {
         Self {
             http,
-            client_id: COPILOT_CLIENT_ID.to_string(),
+            client_id: copilot_client_id(),
         }
     }
 

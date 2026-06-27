@@ -1422,7 +1422,9 @@ fn build_lifecycle_envelope_body(
             };
             Some(("Stop", serde_json::to_string(&payload).ok()?))
         }
-        HookEvent::SubagentStop { agent_id, .. } => {
+        HookEvent::SubagentStop {
+            agent_id, agent_type, ..
+        } => {
             let payload = SubagentStopPayload {
                 hook_event_name: HookEventNameSubagentStop,
                 session_id: b.session_id,
@@ -1432,7 +1434,14 @@ fn build_lifecycle_envelope_body(
                 stop_hook_active: false,
                 agent_id: agent_id.to_string(),
                 agent_transcript_path: String::new(),
-                agent_type: b.agent_type.unwrap_or_default(),
+                // claude `agent_type: a ?? ""` — now carried on the event
+                // (mirrors SubagentStart); fall back to the context for older
+                // call paths that left the event's `agent_type` empty.
+                agent_type: if agent_type.is_empty() {
+                    b.agent_type.unwrap_or_default()
+                } else {
+                    agent_type.clone()
+                },
                 effort: b.effort,
                 last_assistant_message: None,
             };
@@ -3203,6 +3212,7 @@ mod command_arm_tests {
             HookEvent::SubagentStop {
                 agent_id,
                 status: "completed".into(),
+                agent_type: String::new(),
             },
         )
         .await;
@@ -3625,6 +3635,7 @@ mod command_arm_tests {
                 HookEvent::SubagentStop {
                     agent_id: protocol::AgentId::new(),
                     status: "completed".into(),
+                    agent_type: String::new(),
                 },
                 "SubagentStop",
             ),
@@ -4662,6 +4673,7 @@ mod once_and_status_message_tests {
         let ev = HookEvent::SubagentStop {
             agent_id: agent,
             status: "completed".into(),
+            agent_type: String::new(),
         };
         exec.execute_agent_scoped(ev, HookContext::default(), agent)
             .await;

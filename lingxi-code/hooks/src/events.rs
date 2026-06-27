@@ -261,6 +261,11 @@ pub enum HookEvent {
         agent_id: AgentId,
         /// Stringified status (e.g. `"completed"`, `"cancelled"`).
         status: String,
+        /// Agent type discriminator (e.g. `"general-purpose"`), `""` when
+        /// unknown. claude-code carries this on the SubagentStop hook input
+        /// (`agent_type: a ?? ""`) and keys SubagentStop matchers on it
+        /// (`getMatchingHooks` `i = r.agent_type`). Mirrors [`Self::SubagentStart`].
+        agent_type: String,
     },
     /// About to compact a long context window.
     PreCompact {

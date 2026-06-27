@@ -474,12 +474,11 @@ impl HookRegistry {
     ///   → `source`; `InstructionsLoaded` → `load_reason`; `FileChanged` →
     ///   `basename(file_path)`.
     ///
-    /// Three of those map onto a port variant that carries no equivalent field
+    /// Two of those map onto a port variant that carries no equivalent field
     /// (an event-*payload*-schema gap, distinct from this matcher wiring):
-    /// `Setup` (no fields), `PostCompact` (carries `summary`/`tokens_freed`, no
-    /// `trigger`), and `SubagentStop` (carries `agent_id`/`status`, no
-    /// `agent_type`). Those return `None` here (matcher skipped) until the
-    /// variants gain the field; see the `match` arm comments.
+    /// `Setup` (no fields) and `PostCompact` (carries `summary`/`tokens_freed`,
+    /// no `trigger`). Those return `None` here (matcher skipped) until the
+    /// variants gain the field; see the `_ =>` arm comment.
     fn match_query_for(event: &HookEvent) -> Option<String> {
         match event {
             HookEvent::PreToolUse { tool_name, .. }
@@ -495,8 +494,9 @@ impl HookRegistry {
             HookEvent::SessionEnd { reason, .. } => Some(reason.clone()),
             // claude `i = r.error`.
             HookEvent::StopFailure { error, .. } => Some(error.clone()),
-            // claude `i = r.agent_type` — the spawned subagent's type.
-            HookEvent::SubagentStart { agent_type, .. } => Some(agent_type.clone()),
+            // claude `i = r.agent_type` — the subagent's type (both events).
+            HookEvent::SubagentStart { agent_type, .. }
+            | HookEvent::SubagentStop { agent_type, .. } => Some(agent_type.clone()),
             // claude `i = r.notification_type`; the port carries it as `kind`.
             HookEvent::Notification { kind, .. } => Some(kind.clone()),
             // claude `i = r.trigger`; the port's PreCompact carries it as
@@ -520,11 +520,11 @@ impl HookRegistry {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned()),
             // Remaining query-deriving events whose port variant lacks the
-            // field claude reads (event-schema gap): `Setup`→`trigger`,
-            // `PostCompact`→`trigger`, `SubagentStop`→`agent_type`. They fall
-            // here and skip the matcher filter until the variants carry the
-            // field. Everything else (TeammateIdle/TaskCreated/TaskCompleted,
-            // WorktreeCreate/Remove, CwdChanged, …) has no claude query either.
+            // field claude reads (event-schema gap): `Setup`→`trigger` and
+            // `PostCompact`→`trigger`. They fall here and skip the matcher
+            // filter until the variants carry the field. Everything else
+            // (TeammateIdle/TaskCreated/TaskCompleted, WorktreeCreate/Remove,
+            // CwdChanged, …) has no claude query either.
             _ => None,
         }
     }
@@ -766,6 +766,7 @@ mod all_hooks_tests {
             &HookEvent::SubagentStop {
                 agent_id: agent,
                 status: "completed".into(),
+                agent_type: String::new(),
             },
             &HookContext::default(),
         );
@@ -873,6 +874,7 @@ mod all_hooks_tests {
         let ev = HookEvent::SubagentStop {
             agent_id: a,
             status: "completed".into(),
+            agent_type: String::new(),
         };
         let scoped = r.match_event_agent_scoped(&ev, a);
         let names: Vec<&str> = scoped.iter().map(|h| h.name.as_str()).collect();
@@ -922,6 +924,7 @@ mod all_hooks_tests {
         let ev = HookEvent::SubagentStop {
             agent_id: a,
             status: "completed".into(),
+            agent_type: String::new(),
         };
         let mut names: Vec<&str> = r
             .match_event_excluding_agent(&ev, a)
@@ -954,6 +957,7 @@ mod all_hooks_tests {
         let ev = HookEvent::SubagentStop {
             agent_id: unknown,
             status: "completed".into(),
+            agent_type: String::new(),
         };
         let excluded: Vec<&str> = r
             .match_event_excluding_agent(&ev, unknown)
@@ -976,6 +980,7 @@ mod all_hooks_tests {
             &HookEvent::SubagentStop {
                 agent_id: AgentId::new(),
                 status: "completed".into(),
+                agent_type: String::new(),
             },
             AgentId::new(),
         );
@@ -1392,26 +1397,28 @@ mod match_event_matcher_tests {
     }
 
     #[test]
-    fn subagent_stop_fires_unfiltered_pending_agent_type_field() {
-        // Documents the event-schema gap: claude keys SubagentStop matchers on
-        // `agent_type`, but the port's SubagentStop variant carries no
-        // `agent_type` field yet, so `match_query_for` returns `None` and the
-        // declared matcher is skipped (the hook fires for ANY subagent). When
-        // the variant gains `agent_type` this should filter like SubagentStart.
+    fn subagent_stop_event_filters_by_agent_type() {
+        // SubagentStop now carries `agent_type` and filters by it, like
+        // SubagentStart (claude `i = r.agent_type`).
         let mut reg = HookRegistry::new();
         reg.register(hook_with(
-            "any-stop",
+            "review-stop",
             HookEventType::SubagentStop,
             Some("code-reviewer"),
         ));
-        let stop = HookEvent::SubagentStop {
+        let stop = |ty: &str| HookEvent::SubagentStop {
             agent_id: AgentId::new(),
             status: "completed".into(),
+            agent_type: ty.into(),
         };
         assert_eq!(
-            matched_names(&reg, &stop),
-            vec!["any-stop"],
-            "matcher currently skipped (no agent_type query) → fires"
+            matched_names(&reg, &stop("code-reviewer")),
+            vec!["review-stop"],
+            "matching agent_type fires"
+        );
+        assert!(
+            matched_names(&reg, &stop("general-purpose")).is_empty(),
+            "non-matching agent_type is filtered out"
         );
     }
 }

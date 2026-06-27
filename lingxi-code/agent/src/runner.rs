@@ -218,7 +218,7 @@ pub async fn run_subagent(
             session_id,
             agent_id: Some(agent_id),
             cwd,
-            agent_type: Some(agent_type),
+            agent_type: Some(agent_type.clone()),
             // FIX 2: SubagentStop carries the agent's own transcript path
             // (claude-code `agent_transcript_path`). See the tuple build above.
             agent_transcript_path: Some(agent_transcript_path),
@@ -228,6 +228,8 @@ pub async fn run_subagent(
             hooks::events::HookEvent::SubagentStop {
                 agent_id,
                 status: status.to_string(),
+                // claude keys SubagentStop matchers on the subagent's type.
+                agent_type,
             },
             stop_ctx,
             agent_id,

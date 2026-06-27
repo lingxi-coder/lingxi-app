@@ -255,7 +255,7 @@ impl BuiltinHookHandler for RecordingHandler {
         "record-subagent-stop"
     }
     async fn handle(&self, event: &HookEvent, ctx: &HookContext) -> HookResult {
-        if let HookEvent::SubagentStop { agent_id, status } = event {
+        if let HookEvent::SubagentStop { agent_id, status, .. } = event {
             self.log.lock().unwrap().push(SeenStop {
                 agent_id: agent_id.to_string(),
                 status: status.clone(),

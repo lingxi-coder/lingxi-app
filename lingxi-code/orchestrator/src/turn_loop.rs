@@ -3187,6 +3187,10 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             let sa_event = HookEvent::SubagentStop {
                 agent_id: child_id,
                 status: status.to_string(),
+                // Same subagent type as the SubagentStart above — claude keys
+                // SubagentStop matchers on it. `subagent_type` was moved into the
+                // SubagentStart event, so source it from the cloned `sa_ctx`.
+                agent_type: sa_ctx.agent_type.clone().unwrap_or_default(),
             };
             let sa_started = std::time::Instant::now();
             // EXCLUDE the child's own frontmatter bucket — the runner fired those

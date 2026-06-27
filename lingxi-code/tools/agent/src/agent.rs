@@ -357,6 +357,14 @@ pub struct AgentTool {
     ctx: BuiltinToolContext,
 }
 
+/// Normalize a subagent `description` the way the binary does — `replace(/\s+/g,
+/// " ").trim()`: collapse every run of whitespace to a single space and trim the
+/// ends. (`split_whitespace` does both; it tracks Unicode White_Space, matching
+/// JS `\s` for the typical ASCII description.)
+fn normalize_description_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 impl AgentTool {
     /// Construct.
     #[must_use]
@@ -937,15 +945,17 @@ impl Tool for AgentTool {
         Some("delegate work to a subagent")
     }
     fn get_activity_description(&self, input: &Value) -> Option<String> {
-        // claude `getActivityDescription(input) { return input?.description ??
-        // 'Running task' }` (AgentTool.tsx:1278-1280).
-        Some(
-            input
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or("Running task")
-                .to_string(),
-        )
+        // Binary `getActivityDescription(e){return e?.description?.replace(/\s+/g,
+        // " ").trim()||"Running task"}` — collapse internal whitespace runs to a
+        // single space and trim; fall back to "Running task" when absent OR when
+        // the normalized value is empty (JS `||`, empty string is falsy). (The
+        // leaked TS `?? 'Running task'` was stale — the 2.1.195 binary normalizes.)
+        let desc = input
+            .get("description")
+            .and_then(Value::as_str)
+            .map(normalize_description_ws)
+            .filter(|s| !s.is_empty());
+        Some(desc.unwrap_or_else(|| "Running task".to_string()))
     }
     fn user_facing_name_for_input(&self, input: &Value) -> Option<String> {
         // claude `userFacingName(input)` (UI.tsx:760-775): show the subagent type
@@ -1076,7 +1086,7 @@ impl Tool for AgentTool {
         let bus = self.ctx.bus.clone();
 
         // 1. Parse input.
-        let parsed: AgentToolInput = match serde_json::from_value(input) {
+        let mut parsed: AgentToolInput = match serde_json::from_value(input) {
             Ok(v) => v,
             Err(e) => {
                 Self::emit_failed(
@@ -1091,6 +1101,11 @@ impl Tool for AgentTool {
                 )));
             }
         };
+        // Binary `AgentTool.call`: `n=n.replace(/\s+/g," ").trim()` — normalize the
+        // `description` ONCE at entry so every downstream use (the spawn request,
+        // the async-launch payload, the completed `data.description`) carries the
+        // collapsed/trimmed value.
+        parsed.description = normalize_description_ws(&parsed.description);
 
         // (G7) NO empty-prompt validation: claude-code has no such guard — a
         // `prompt: ""` spawn must succeed (AgentTool.call accepts any prompt).
@@ -1803,6 +1818,38 @@ mod tests {
         assert_eq!(normalize_agent_type("General Purpose"), "generalpurpose");
         // em-dash (U+2014) is Unicode Pd and is stripped too.
         assert_eq!(normalize_agent_type("a—b"), "ab");
+    }
+
+    // Binary description normalization `replace(/\s+/g," ").trim()`.
+    #[test]
+    fn normalize_description_ws_collapses_and_trims() {
+        assert_eq!(normalize_description_ws("  hi   there \n you "), "hi there you");
+        assert_eq!(normalize_description_ws("plain"), "plain");
+        assert_eq!(normalize_description_ws("   "), "");
+        assert_eq!(normalize_description_ws(""), "");
+    }
+
+    // getActivityDescription: normalize + `||"Running task"` fallback when absent
+    // OR empty-after-normalize (binary `e?.description?.replace(...).trim()||…`).
+    #[test]
+    fn get_activity_description_normalizes_and_falls_back() {
+        let tool = AgentTool::new(ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![PathBuf::from("/tmp")],
+        ));
+        assert_eq!(
+            tool.get_activity_description(&serde_json::json!({"description": "  do   stuff "})),
+            Some("do stuff".to_string())
+        );
+        assert_eq!(
+            tool.get_activity_description(&serde_json::json!({"description": "   "})),
+            Some("Running task".to_string())
+        );
+        assert_eq!(
+            tool.get_activity_description(&serde_json::json!({})),
+            Some("Running task".to_string())
+        );
     }
 
     // A KEPT worktree appends byte-exact `worktreePath:`/`worktreeBranch:` lines

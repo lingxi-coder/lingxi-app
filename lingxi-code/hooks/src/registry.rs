@@ -650,10 +650,12 @@ fn comma_mode_for(event_type: &HookEventType) -> bool {
 fn warn_if_bare_mcp_matcher(hook: &HookDefinition) {
     if let Some(matcher) = hook.matcher() {
         if is_bare_mcp_server_matcher(matcher) {
+            // Byte-exact wording from the binary `utf` warning (`{level:"warn"}`).
             tracing::warn!(
                 matcher = %matcher,
-                "Hook matcher `{matcher}` targets a bare MCP server; use \
-                 `{matcher}__.*` to match its tools. See CHANGELOG v2.1.195."
+                "Hook matcher `{matcher}` matches no tool (it is compared as an \
+                 exact string). To match all tools from this server, use \
+                 `{matcher}__.*`. See CHANGELOG v2.1.195."
             );
         }
     }

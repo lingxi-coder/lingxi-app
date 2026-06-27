@@ -2097,14 +2097,32 @@ fn map_command_output(
                     false,
                 ),
                 2 => {
-                    // exit 2 ⇒ BLOCK; stderr is the reason
-                    // (`hooks.ts:2648-2666`). Empty stderr ⇒ placeholder.
-                    let stderr_trim = o.stderr.trim();
-                    let reason = if stderr_trim.is_empty() {
-                        "No stderr output".to_string()
-                    } else {
-                        stderr_trim.to_string()
+                    // exit 2 ⇒ BLOCK. Binary `hooks.ts`:
+                    //   blockingError = `[${getHookDisplayText(hook)}]: ${stderr||"No stderr output"}`
+                    // — the hook display text in brackets, then the RAW stderr
+                    // (NOT trimmed); the "No stderr output" placeholder applies
+                    // only when stderr is empty (JS `||`, an empty string is
+                    // falsy; a whitespace-only stderr is used verbatim).
+                    // `getHookDisplayText` (binary `rCe`) for a command hook is
+                    // `args ? [command, ...args].join(" ") : command`.
+                    let display = match &hook.executor {
+                        HookExecutor::Command { command, args, .. } if !args.is_empty() => {
+                            std::iter::once(command.as_str())
+                                .chain(args.iter().map(String::as_str))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        }
+                        HookExecutor::Command { command, .. } => command.clone(),
+                        // Non-command executors do not reach this process path;
+                        // fall back to the human-readable name defensively.
+                        _ => hook.name.clone(),
                     };
+                    let body = if o.stderr.is_empty() {
+                        "No stderr output"
+                    } else {
+                        o.stderr.as_str()
+                    };
+                    let reason = format!("[{display}]: {body}");
                     (
                         HookResult {
                             outcome: HookOutcome::Error,
@@ -2778,7 +2796,9 @@ mod command_arm_tests {
         let agg = exec.execute(pre_event(), HookContext::default()).await;
 
         assert_eq!(agg.decision, Some(HookDecision::Block));
-        assert_eq!(agg.reason.as_deref(), Some("policy violation"));
+        // Binary: `[${getHookDisplayText(hook)}]: ${stderr||"No stderr output"}`.
+        // The test hook is `hook.sh --check` ⇒ display = command + args joined.
+        assert_eq!(agg.reason.as_deref(), Some("[hook.sh --check]: policy violation"));
         let (_, r) = &agg.all_results[0];
         assert!(matches!(r.outcome, HookOutcome::Error));
         assert_eq!(r.exit_code, Some(2));
@@ -2786,13 +2806,27 @@ mod command_arm_tests {
 
     #[tokio::test]
     async fn exit_two_empty_stderr_falls_back_to_placeholder() {
+        // Only a TRULY empty stderr falls back (`||`, empty string is falsy).
+        let runner = MockRunner::ok(output("", "", 2));
+        let exec = executor_with(runner);
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+
+        assert_eq!(agg.decision, Some(HookDecision::Block));
+        assert_eq!(agg.reason.as_deref(), Some("[hook.sh --check]: No stderr output"));
+    }
+
+    #[tokio::test]
+    async fn exit_two_whitespace_stderr_is_preserved_verbatim() {
+        // A whitespace-only stderr is TRUTHY in JS `||`, so the binary uses it
+        // verbatim (NOT trimmed, NOT the placeholder).
         let runner = MockRunner::ok(output("", "   ", 2));
         let exec = executor_with(runner);
 
         let agg = exec.execute(pre_event(), HookContext::default()).await;
 
         assert_eq!(agg.decision, Some(HookDecision::Block));
-        assert_eq!(agg.reason.as_deref(), Some("No stderr output"));
+        assert_eq!(agg.reason.as_deref(), Some("[hook.sh --check]:    "));
     }
 
     #[tokio::test]
@@ -4215,7 +4249,7 @@ mod async_path_tests {
         let agg = exec.execute(pre_event(), HookContext::default()).await;
         // Synchronous: exit 2 ⇒ Block surfaces in the aggregate, result recorded.
         assert_eq!(agg.decision, Some(HookDecision::Block));
-        assert_eq!(agg.reason.as_deref(), Some("policy violation"));
+        assert_eq!(agg.reason.as_deref(), Some("[hook.sh]: policy violation"));
         assert_eq!(
             agg.all_results.len(),
             1,
@@ -4270,7 +4304,7 @@ mod async_path_tests {
         assert_eq!(agg.decision, Some(HookDecision::Block));
         assert_eq!(
             agg.reason.as_deref(),
-            Some("blocking-reason"),
+            Some("[hook.sh]: blocking-reason"),
             "the Block reason must be the blocking hook's, not the backgrounded one's",
         );
         assert_eq!(
@@ -4364,7 +4398,7 @@ mod async_path_tests {
         assert_eq!(runner.runs.load(Ordering::SeqCst), 2, "both hooks must run");
         assert_eq!(agg.all_results.len(), 2, "both results folded");
         assert_eq!(agg.decision, Some(HookDecision::Block));
-        assert_eq!(agg.reason.as_deref(), Some("first blocker"));
+        assert_eq!(agg.reason.as_deref(), Some("[hook.sh]: first blocker"));
         assert!(
             agg.system_messages.iter().any(|m| m == "second ran"),
             "the later hook's systemMessage must survive the earlier Block: {:?}",

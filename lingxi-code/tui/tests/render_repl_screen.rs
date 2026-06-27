@@ -89,9 +89,12 @@ fn repl_screen_session_color_banner_present_when_set() {
         )
     };
     let out = element.to_string();
-    assert!(
-        out.contains('\u{2500}'),
-        "expected a `─` rule row above the prompt when a session color is set; got:\n{out}"
+    // The input view is ALWAYS bracketed by 2 `─` border rows; a session color
+    // adds a THIRD `─` rule (the banner) above the prompt → 3 rule rows total.
+    let rule_rows = out.lines().filter(|l| l.contains('\u{2500}')).count();
+    assert_eq!(
+        rule_rows, 3,
+        "expected a session-color banner rule above the 2 input borders (3 total); got {rule_rows}:\n{out}"
     );
 }
 
@@ -111,9 +114,11 @@ fn repl_screen_no_session_color_banner_when_none() {
         )
     };
     let out = element.to_string();
-    assert!(
-        !out.contains('\u{2500}'),
-        "expected NO `─` rule row when no session color is set; got:\n{out}"
+    // No session color → only the 2 `─` input-border rows (no banner rule).
+    let rule_rows = out.lines().filter(|l| l.contains('\u{2500}')).count();
+    assert_eq!(
+        rule_rows, 2,
+        "expected only the 2 input-border rules (no banner) when no session color is set; got {rule_rows}:\n{out}"
     );
 }
 

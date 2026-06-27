@@ -224,6 +224,8 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let viewing_teammate = props.viewing_teammate.clone();
     let session_agent_color = props.session_agent_color.clone();
     let dim = theme.dim;
+    // Horizontal rule bracketing the input view (top + bottom border lines).
+    let prompt_rule = "─".repeat(prompt_width.max(1));
     element! {
         View(flex_direction: FlexDirection::Column, width: 100pct, height: 100pct) {
             StatusLine(
@@ -325,6 +327,10 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                     SessionColorBanner(color_name: name, width: prompt_width)
                 }
             }))
+            // Top border line of the input view.
+            View(flex_direction: FlexDirection::Row) {
+                Text(content: prompt_rule.clone(), color: dim)
+            }
             PromptInput(
                 text: prompt_text,
                 cursor: prompt_cursor,
@@ -332,6 +338,10 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 show_cursor: true,
                 argument_hint: prompt_argument_hint,
             )
+            // Bottom border line of the input view.
+            View(flex_direction: FlexDirection::Row) {
+                Text(content: prompt_rule.clone(), color: dim)
+            }
             PromptInputFooter(
                 mode: crate::components::prompt_input::FooterMode::Prompt,
                 placeholder: None,

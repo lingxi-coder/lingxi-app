@@ -1,8 +1,9 @@
 ---
 source: tui/tests/render_repl_screen.rs
-assertion_line: 69
 expression: element.to_string()
 ---
 ⏺ Hello!
+─
 ❯ next 
+─
 ❯

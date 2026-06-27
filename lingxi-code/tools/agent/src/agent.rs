@@ -862,13 +862,15 @@ Reach for this when the task matches an available agent type, when you have inde
                     "Async agent launched successfully.\nagentId: {agent_id_str} (internal ID - do not mention to user. Use SendMessage with to: '{agent_id_str}', summary: '<5-10 word recap>' to continue this agent.)\nThe agent is working in the background. You will be notified automatically when it completes."
                 );
                 let instructions = if can_read_output_file {
-                    // claude uses FILE_READ_TOOL_NAME / BASH_TOOL_NAME — the
-                    // canonical tool names (`Read` / `Bash`).
+                    // claude `canReadOutputFile` branch (AgentTool.tsx, v2.1.193):
+                    // warn the model NOT to read the `.output` file — it is the
+                    // full subagent JSONL transcript and would overflow context.
+                    // (`${Ds}` resolves to `Read`.)
                     format!(
-                        "Do not duplicate this agent's work — avoid working with the same files or topics it is using. Work on non-overlapping tasks, or briefly tell the user what you launched and end your response.\noutput_file: {output_file}\nIf asked, you can check progress before completion by using Read or Bash tail on the output file."
+                        "Do not duplicate this agent's work — avoid working with the same files or topics it is using.\noutput_file: {output_file}\nDo NOT Read or tail this file via the shell tool — it is the full subagent JSONL transcript and reading it will overflow your context. If the user asks for progress, say the agent is still running; you'll get a completion notification."
                     )
                 } else {
-                    "Briefly tell the user what you launched and end your response. Do not generate any other text — agent results will arrive in a subsequent message.".to_string()
+                    "Briefly tell the user what you launched. Agent results will arrive in a subsequent message.".to_string()
                 };
                 let model_content = format!("{prefix}\n{instructions}");
                 Ok(ToolCallResult {

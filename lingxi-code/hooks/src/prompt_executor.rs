@@ -43,13 +43,14 @@ use serde::Deserialize;
 use crate::definition::HookDefinition;
 use crate::response::{HookDecision, HookOutcome, HookResponse, HookResult};
 
-/// Fixed system prompt the prompt hook evaluates against
-/// (`execPromptHook.ts:65-69`, verbatim).
-pub(crate) const PROMPT_HOOK_SYSTEM_PROMPT: &str = "You are evaluating a hook in LingXi.
-
-Your response must be a JSON object matching one of the following schemas:
-1. If the condition is met, return: {\"ok\": true}
-2. If the condition is not met, return: {\"ok\": false, \"reason\": \"Reason for why it is not met\"}";
+/// Fixed system prompt the prompt hook evaluates against (`execPromptHook.ts`,
+/// v2.1.193). Oracle product name "Claude Code" is rebranded to "LingXi"; the
+/// segments are joined with single newlines.
+pub(crate) const PROMPT_HOOK_SYSTEM_PROMPT: &str = "You are evaluating a hook condition in LingXi. Judge whether the user-provided condition is met.
+Your response must be a JSON object with one of these shapes:
+- {\"ok\": true, \"reason\": \"<reason the condition is met>\"}
+- {\"ok\": false, \"reason\": \"<reason the condition is not met>\"}
+Always include a \"reason\" field.";
 
 /// Default prompt-hook timeout (30 s — `execPromptHook.ts:55`
 /// `hook.timeout ? hook.timeout * 1000 : 30000`).

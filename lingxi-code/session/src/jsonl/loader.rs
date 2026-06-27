@@ -392,9 +392,19 @@ async fn collect_dir(
         // `extract_title` transforms. `extract_title`'s `'(session)'` empty
         // fallback still applies when none of the four yields text.
         let sid = stem;
+        // claude `getLogDisplayTitle` (`gBe`) leads with the session's `agentName`
+        // — for an agent-owned session the picker row shows the agent's name above
+        // any custom/ai title (`agentName || customTitle || aiTitle || summary ||
+        // …`). `agent_names` is keyed by `sessionId` (reader.rs), = the stem `sid`.
+        // (The remaining `gBe` tail — `<tick>` → "Autonomous session", the
+        // `sessionId.slice(0,8)` empty fallback, and the `dln` wrapped-tag-pair
+        // strip — is deferred; it is niche to the picker and the firstPrompt
+        // sub-logic is intricate. The port keeps `extract_title`'s first-message
+        // path + `(session)` empty marker for those.)
         let title = loaded
-            .custom_titles
+            .agent_names
             .get(sid)
+            .or_else(|| loaded.custom_titles.get(sid))
             .or_else(|| loaded.ai_titles.get(sid))
             .or_else(|| find_tip(&loaded, sid).and_then(|tip| loaded.summaries.get(&tip.uuid)))
             .map_or_else(

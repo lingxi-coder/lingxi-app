@@ -10,4 +10,5 @@ pub use auth::{
 pub use login::{
     exchange_copilot_token, CopilotHttp, CopilotLogin, DeviceCodeResponse, ExchangedToken,
     PollOutcome, COPILOT_CLIENT_ID, COPILOT_TOKEN_EXCHANGE_URL, COPILOT_TOKEN_REFRESH_SKEW_SECS,
+    DEFAULT_GITHUB_DOMAIN,
 };

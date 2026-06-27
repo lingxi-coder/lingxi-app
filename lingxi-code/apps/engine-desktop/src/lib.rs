@@ -4693,7 +4693,7 @@ mod tests {
         struct C;
         #[async_trait]
         impl CopilotConnectDriver for C {
-            async fn begin(&self) -> Result<CopilotConnectStep, ConnectError> {
+            async fn begin(&self, _domain: Option<&str>) -> Result<CopilotConnectStep, ConnectError> {
                 Ok(CopilotConnectStep {
                     user_code: "X".into(),
                     verification_uri: "u".into(),

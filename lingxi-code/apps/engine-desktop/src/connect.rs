@@ -259,8 +259,12 @@ impl<H: CopilotHttp> EngineCopilotConnect<H> {
 
 #[async_trait]
 impl<H: CopilotHttp> CopilotConnectDriver for EngineCopilotConnect<H> {
-    async fn begin(&self) -> Result<CopilotConnectStep, ConnectError> {
-        let dc = self.login.begin().await.map_err(|e| ConnectError::Network(e.to_string()))?;
+    async fn begin(&self, domain: Option<&str>) -> Result<CopilotConnectStep, ConnectError> {
+        let dc = self
+            .login
+            .begin(domain.unwrap_or(llm_client::copilot::DEFAULT_GITHUB_DOMAIN))
+            .await
+            .map_err(|e| ConnectError::Network(e.to_string()))?;
         let step = CopilotConnectStep {
             user_code: dc.user_code.clone(),
             verification_uri: dc.verification_uri.clone(),
@@ -490,7 +494,7 @@ mod tests {
             json!({ "user_code": "WDJB-MJHT", "verification_uri": "https://github.com/login/device", "device_code": "dev-1", "interval": 1 }),
             vec![],
         );
-        let step = driver.begin().await.expect("begin ok");
+        let step = driver.begin(None).await.expect("begin ok");
         assert_eq!(step.user_code, "WDJB-MJHT");
         assert_eq!(step.verification_uri, "https://github.com/login/device");
     }
@@ -507,7 +511,7 @@ mod tests {
                 json!({ "access_token": "ght_live_token" }),
             ],
         );
-        let step = driver.begin().await.expect("begin");
+        let step = driver.begin(None).await.expect("begin");
         driver.poll_to_completion(&step).await.expect("poll ok");
         let got = cm.get_provider_key("github-copilot").await.expect("read").expect("present");
         assert_eq!(got.expose_secret(), "ght_live_token");
@@ -521,7 +525,7 @@ mod tests {
             json!({ "user_code": "CCCC-DDDD", "verification_uri": "https://github.com/login/device", "device_code": "dev-3", "interval": 1 }),
             vec![json!({ "error": "access_denied" })],
         );
-        let step = driver.begin().await.expect("begin");
+        let step = driver.begin(None).await.expect("begin");
         match driver.poll_to_completion(&step).await {
             Err(ConnectError::DeviceFailed(e)) => assert_eq!(e, "access_denied"),
             other => panic!("expected DeviceFailed, got {other:?}"),

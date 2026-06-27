@@ -936,7 +936,7 @@ mod connect_tests {
     struct NoopCopilot;
     #[async_trait]
     impl CopilotConnectDriver for NoopCopilot {
-        async fn begin(&self) -> Result<CopilotConnectStep, ConnectError> {
+        async fn begin(&self, _domain: Option<&str>) -> Result<CopilotConnectStep, ConnectError> {
             Ok(CopilotConnectStep {
                 user_code: "X".into(),
                 verification_uri: "https://github.com/login/device".into(),

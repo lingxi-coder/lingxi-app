@@ -1091,6 +1091,51 @@ pub fn render_screen(
                     &state.theme,
                 )
             }
+            Screen::GithubDeployment(g) => {
+                // (GitHub Copilot Enterprise) The deployment-type sub-flow, in the
+                // same popup: Choose phase = a 2-row menu (Public / Enterprise);
+                // Host phase = the Enterprise host typed into the search slot.
+                use crate::components::picker_popup::{render_picker_popup, PopupLine, PopupMarker};
+                use crate::screens::github_deploy::DeployPhase;
+                match &g.phase {
+                    DeployPhase::Choose { selected } => {
+                        let lines = vec![
+                            PopupLine::Item {
+                                marker: PopupMarker::None,
+                                label: "GitHub.com Public".to_string(),
+                                detail: String::new(),
+                                badge: String::new(),
+                                selected: *selected == 0,
+                            },
+                            PopupLine::Item {
+                                marker: PopupMarker::None,
+                                label: "GitHub Enterprise".to_string(),
+                                detail: "Data residency or self-hosted".to_string(),
+                                badge: String::new(),
+                                selected: *selected == 1,
+                            },
+                        ];
+                        render_picker_popup(
+                            "Select GitHub deployment type",
+                            "",
+                            &lines,
+                            None,
+                            viewport_width,
+                            viewport_height,
+                            &state.theme,
+                        )
+                    }
+                    DeployPhase::Host { buffer } => render_picker_popup(
+                        "GitHub Enterprise host",
+                        buffer,
+                        &[],
+                        Some("e.g. company.ghe.com  \u{00B7}  Enter to continue  \u{00B7}  Esc to go back"),
+                        viewport_width,
+                        viewport_height,
+                        &state.theme,
+                    ),
+                }
+            }
             Screen::Permissions(p) => {
                 // The read-only permissions viewer renders the pure
                 // `render_permissions_to_string` body (list↔detail, snapshot-

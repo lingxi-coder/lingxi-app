@@ -35,8 +35,20 @@ pub fn copilot_client_id() -> String {
         .unwrap_or_else(|| COPILOT_CLIENT_ID.to_string())
 }
 
-const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
-const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
+/// Default GitHub host (the `github.com` public deployment). GitHub Enterprise
+/// logins pass their own domain (e.g. `company.ghe.com`) so the device-flow URLs
+/// become `https://<domain>/login/...` (opencode's `getUrls(domain)`).
+pub const DEFAULT_GITHUB_DOMAIN: &str = "github.com";
+
+/// Device-code endpoint for a given GitHub host.
+fn device_code_url(domain: &str) -> String {
+    format!("https://{domain}/login/device/code")
+}
+
+/// Access-token (poll) endpoint for a given GitHub host.
+fn access_token_url(domain: &str) -> String {
+    format!("https://{domain}/login/oauth/access_token")
+}
 /// GitHub endpoint that exchanges a GitHub OAuth token for a short-lived
 /// Copilot bearer token used against `api.githubcopilot.com`.
 pub const COPILOT_TOKEN_EXCHANGE_URL: &str = "https://api.github.com/copilot_internal/v2/token";
@@ -90,6 +102,9 @@ pub struct DeviceCodeResponse {
     pub device_code: String,
     /// Server-recommended polling interval (seconds).
     pub interval_secs: u64,
+    /// GitHub host the flow runs against (`github.com` or an Enterprise domain).
+    /// Carried so [`CopilotLogin::poll_once`] hits the SAME host's token URL.
+    pub domain: String,
 }
 
 /// Classified result of one [`CopilotLogin::poll_once`].
@@ -130,16 +145,18 @@ impl<H: CopilotHttp> CopilotLogin<H> {
         }
     }
 
-    /// Step 1 — request a device code. The caller displays `user_code` +
-    /// `verification_uri`, then polls.
-    pub async fn begin(&self) -> Result<DeviceCodeResponse, LlmError> {
+    /// Step 1 — request a device code against `domain` (`github.com` for the
+    /// public deployment, or an Enterprise host like `company.ghe.com`). The
+    /// caller displays `user_code` + `verification_uri`, then polls.
+    pub async fn begin(&self, domain: &str) -> Result<DeviceCodeResponse, LlmError> {
         let body = json!({ "client_id": self.client_id, "scope": "read:user" });
-        let v = self.http.post_json(DEVICE_CODE_URL, &body).await?;
+        let v = self.http.post_json(&device_code_url(domain), &body).await?;
         Ok(DeviceCodeResponse {
             user_code: str_field(&v, "user_code")?,
             verification_uri: str_field(&v, "verification_uri")?,
             device_code: str_field(&v, "device_code")?,
             interval_secs: v.get("interval").and_then(Value::as_u64).unwrap_or(5),
+            domain: domain.to_string(),
         })
     }
 
@@ -152,7 +169,7 @@ impl<H: CopilotHttp> CopilotLogin<H> {
             "device_code": dc.device_code,
             "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
         });
-        let v = self.http.post_json(ACCESS_TOKEN_URL, &body).await?;
+        let v = self.http.post_json(&access_token_url(&dc.domain), &body).await?;
 
         if let Some(token) = v.get("access_token").and_then(Value::as_str) {
             return Ok(PollOutcome::Success(CopilotSecret::new(token)));
@@ -304,6 +321,7 @@ mod tests {
             verification_uri: "https://github.com/login/device".to_string(),
             device_code: "dev-code".to_string(),
             interval_secs: 5,
+            domain: "github.com".to_string(),
         }
     }
 
@@ -315,10 +333,11 @@ mod tests {
             "device_code": "dev-code",
             "interval": 7
         })));
-        let parsed = login.begin().await.expect("begin ok");
+        let parsed = login.begin("github.com").await.expect("begin ok");
         assert_eq!(parsed.user_code, "WDJB-MJHT");
         assert_eq!(parsed.device_code, "dev-code");
         assert_eq!(parsed.interval_secs, 7);
+        assert_eq!(parsed.domain, "github.com");
     }
 
     #[tokio::test]

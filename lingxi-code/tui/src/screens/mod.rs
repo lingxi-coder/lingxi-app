@@ -9,6 +9,7 @@ pub mod background_tasks;
 pub mod connect;
 pub mod connect_picker;
 pub mod doctor;
+pub mod github_deploy;
 pub mod help;
 pub mod hooks;
 pub mod mcp;
@@ -186,6 +187,11 @@ pub enum Screen {
     /// `AppState.pending_connect` + closes; `root::pump_open_connect` then
     /// opens the EXISTING key-entry `Connect` screen for that provider.
     ConnectPicker(connect_picker::ConnectPickerState),
+    /// (GitHub Copilot Enterprise) The deployment-type sub-flow shown when
+    /// connecting GitHub Copilot: pick GitHub.com Public vs GitHub Enterprise
+    /// (then enter the host). Resolving opens the device-flow `Connect` screen
+    /// with the chosen domain (`AppState.copilot_login_domain`).
+    GithubDeployment(github_deploy::GithubDeploymentState),
     /// (RRS-06) The Ctrl+O transcript toggle — claude-code `app:toggleTranscript`.
     /// A read-only, scrollable verbose dump of the FULL message log (every
     /// message, not the live-REPL folded/capped view), captured at open time.

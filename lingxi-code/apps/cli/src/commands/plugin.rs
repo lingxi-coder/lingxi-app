@@ -430,7 +430,7 @@ fn notice(action: &str) -> i32 {
 
 /// The user-tier plugins directory: `$LINGXI_CONFIG_DIR`/`~/.claude` + `plugins`.
 fn plugins_dir() -> std::path::PathBuf {
-    crate::run::claude_home_dir().join("plugins")
+    crate::run::lingxi_home_dir().join("plugins")
 }
 
 /// `plugin list` — enumerate installed plugins from the durable on-disk install

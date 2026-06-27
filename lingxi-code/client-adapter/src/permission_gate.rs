@@ -508,7 +508,7 @@ mod tests {
         let sink = MockRequestSink::arc();
         let gate = Arc::new(AdapterPermissionGate::new(sink.clone()).with_persist(
             permission::PermissionPaths {
-                claude_home: tmp.join("home/.lingxi"),
+                lingxi_home: tmp.join("home/.lingxi"),
                 cwd: tmp.join("proj"),
             },
         ));

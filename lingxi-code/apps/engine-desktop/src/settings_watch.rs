@@ -7,7 +7,7 @@
 //! session (`changeDetector.ts:285-297` → `executeConfigChangeHooks`,
 //! `utils/hooks.ts:4214`). The Rust port had no such watcher; this module adds
 //! it at the desktop composition root, where the orchestrator (`orch.hooks`),
-//! the `cwd`, the `claude_home`, and a `FileSystem` are all in scope.
+//! the `cwd`, the `lingxi_home`, and a `FileSystem` are all in scope.
 //!
 //! ## What this does (and does NOT do)
 //! SCOPE is firing the hook only. The live settings RELOAD / re-apply is a
@@ -29,7 +29,7 @@
 //! Mirrors `getSourceForPath` (`changeDetector.ts:361-375`) +
 //! `getSettingsFilePathForSource` (`settings.ts:274-294`) +
 //! `getManagedFilePath` (`managedPath.ts`):
-//! - `<claude_home>/settings.json`            → `UserSettings`
+//! - `<lingxi_home>/settings.json`            → `UserSettings`
 //! - `<cwd>/.lingxi/settings.json`            → `ProjectSettings`
 //! - `<cwd>/.lingxi/settings.local.json`      → `LocalSettings`
 //! - `<managed_dir>/managed-settings.json`    → `PolicySettings`
@@ -138,11 +138,11 @@ pub async fn managed_settings_raw_tiers() -> Vec<String> {
 }
 
 /// The set of settings paths the watcher cares about, resolved from the
-/// composition root's `claude_home` + `cwd`. Carries both the absolute file
+/// composition root's `lingxi_home` + `cwd`. Carries both the absolute file
 /// paths and the parent directories to watch.
 #[derive(Debug, Clone)]
 pub struct SettingsPaths {
-    /// `<claude_home>/settings.json`.
+    /// `<lingxi_home>/settings.json`.
     pub user_settings: PathBuf,
     /// `<cwd>/.lingxi/settings.json`.
     pub project_settings: PathBuf,
@@ -157,13 +157,13 @@ pub struct SettingsPaths {
 
 impl SettingsPaths {
     /// Resolve the watched settings paths from the composition root inputs.
-    /// `claude_home` is the user-global config root (`~/.claude`); `cwd` is the
+    /// `lingxi_home` is the user-global config root (`~/.claude`); `cwd` is the
     /// project root. The managed/policy paths come from [`managed_settings_dir`].
     #[must_use]
-    pub fn resolve(claude_home: &Path, cwd: &Path) -> Self {
+    pub fn resolve(lingxi_home: &Path, cwd: &Path) -> Self {
         let managed = managed_settings_dir();
         Self {
-            user_settings: claude_home.join("settings.json"),
+            user_settings: lingxi_home.join("settings.json"),
             project_settings: cwd.join(branding::DOT_DIR).join("settings.json"),
             local_settings: cwd.join(branding::DOT_DIR).join("settings.local.json"),
             policy_settings: managed.join("managed-settings.json"),
@@ -271,12 +271,12 @@ pub struct SettingsWatcher {
 }
 
 impl SettingsWatcher {
-    /// Construct a watcher for the given `claude_home` / `cwd`, firing through
+    /// Construct a watcher for the given `lingxi_home` / `cwd`, firing through
     /// `firer` (the live orchestrator in production).
     #[must_use]
-    pub fn new(claude_home: &Path, cwd: &Path, firer: Arc<dyn ConfigChangeFirer>) -> Self {
+    pub fn new(lingxi_home: &Path, cwd: &Path, firer: Arc<dyn ConfigChangeFirer>) -> Self {
         Self {
-            paths: SettingsPaths::resolve(claude_home, cwd),
+            paths: SettingsPaths::resolve(lingxi_home, cwd),
             firer,
         }
     }

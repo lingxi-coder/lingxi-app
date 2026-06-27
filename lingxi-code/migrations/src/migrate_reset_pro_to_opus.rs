@@ -47,7 +47,7 @@ pub async fn run(env: &MigrationEnv) {
     // DORMANT until tier persistence lands. TS reads getSettings_DEPRECATED
     // (merged settings); the user-settings model is the in-port stand-in
     // (doc'd: the merged read has no substrate at this pre-boot point).
-    let sp = settings_path(SettingsSource::User, &env.claude_config_home, &env.project_dir);
+    let sp = settings_path(SettingsSource::User, &env.lingxi_config_home, &env.project_dir);
     let has_custom_model = read_settings_map(&sp)
         .ok()
         .is_some_and(|m| m.get("model").is_some());
@@ -82,7 +82,7 @@ mod tests {
     fn test_env(t: &crate::test_support::TempConfig) -> crate::context::MigrationEnv {
         crate::context::MigrationEnv {
             global_config_path: t.global.clone(),
-            claude_config_home: t.home.clone(),
+            lingxi_config_home: t.home.clone(),
             project_dir: t.project.clone(),
             ctx: crate::context::MigrationContext { first_party: true, subscription_type: None },
             bus: None,

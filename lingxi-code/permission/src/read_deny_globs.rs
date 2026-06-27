@@ -58,7 +58,7 @@ pub fn read_deny_exclude_globs(policy: &PermissionPolicy, cwd: &Path) -> Vec<Str
             roots_owned = FsRoots {
                 cwd: cwd.to_path_buf(),
                 home: None,
-                claude_home: cwd.to_path_buf(),
+                lingxi_home: cwd.to_path_buf(),
             };
             &roots_owned
         }
@@ -275,7 +275,7 @@ mod tests {
         FsRoots {
             cwd: PathBuf::from(cwd),
             home: Some(PathBuf::from("/home/u")),
-            claude_home: PathBuf::from("/home/u/.lingxi"),
+            lingxi_home: PathBuf::from("/home/u/.lingxi"),
         }
     }
 
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn user_settings_rule_under_cwd_is_rebased() {
-        // A UserSettings rule resolves against claude_home (/home/u/.claude).
+        // A UserSettings rule resolves against lingxi_home (/home/u/.claude).
         // If cwd is /home/u/.claude, `/x` rebases to `/x`.
         let p = policy_with(
             vec![read_deny("/x/**", PermissionRuleSource::UserSettings)],

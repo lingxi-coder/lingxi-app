@@ -40,7 +40,7 @@
 //! v2.1.181 emits each memory as its OWN `Ln({isMeta})` message with NO
 //! `<system-reminder>` wrapper. LingXi instead wraps the JOINED per-memory
 //! blocks in ONE `<system-reminder>` envelope here — mirroring how
-//! [`crate::claude_md`]'s sibling reminder renderers (skill_listing /
+//! [`crate::lingxi_md`]'s sibling reminder renderers (skill_listing /
 //! conditional_rules `render_reminder`) each own their wrapper, so the
 //! orchestrator seam stays identical to every other per-turn reminder
 //! ([`relevant_memory_reminder_message`] returns ONE meta `ConversationMessage`).

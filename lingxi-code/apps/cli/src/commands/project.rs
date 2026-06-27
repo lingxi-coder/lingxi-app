@@ -104,7 +104,7 @@ fn run_purge(args: &PurgeArgs) -> i32 {
         return RUNTIME_ERROR;
     }
 
-    let Some(config_home) = migrations::global_config::claude_config_home() else {
+    let Some(config_home) = migrations::global_config::lingxi_config_home() else {
         eprintln!("lingxi-cli project purge: cannot resolve Claude config home (no $HOME / $LINGXI_CONFIG_DIR)");
         return RUNTIME_ERROR;
     };

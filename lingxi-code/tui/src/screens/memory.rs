@@ -1,9 +1,9 @@
 //! Memory file editor screen (M7-14).
 //!
 //! A `MemoryFileSelector` lists the project/user LINGXI.md tiers (resolved
-//! via [`memory::claude_md::hierarchy::walk`]); selecting a tier
+//! via [`memory::lingxi_md::hierarchy::walk`]); selecting a tier
 //! opens an inline edit view. Reads go through the M3 loader
-//! ([`memory::claude_md::loader::load_file`]); writes go back to the
+//! ([`memory::lingxi_md::loader::load_file`]); writes go back to the
 //! same on-disk path (the M3 store — §4 R7, no new persistence).
 
 use std::io;
@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use iocraft::prelude::*;
 
-use memory::claude_md::hierarchy::{walk, FILE_NAME};
-use memory::claude_md::loader::{load_file, LoaderError};
+use memory::lingxi_md::hierarchy::{walk, FILE_NAME};
+use memory::lingxi_md::loader::{load_file, LoaderError};
 
 /// One resolved memory tier the selector lists. The project/user tiers are
 /// always offered (even when the file does not exist yet — marked `(new)`);
@@ -53,7 +53,7 @@ pub fn memory_tiers(cwd: &Path, home: &Path) -> Vec<MemoryTierEntry> {
     // — the SAME env-aware resolver the prompt loader (`hierarchy::walk`) uses, so
     // the /memory editor writes exactly the file the system prompt loads (no
     // split-brain when `$LINGXI_CONFIG_DIR` is set).
-    let user_path = memory::claude_md::user_config_dir(home).join(FILE_NAME);
+    let user_path = memory::lingxi_md::user_config_dir(home).join(FILE_NAME);
 
     let mut tiers = vec![
         MemoryTierEntry {
@@ -355,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn discovered_parent_claude_md_says_dynamically_loaded_not_imported() {
+    fn discovered_parent_lingxi_md_says_dynamically_loaded_not_imported() {
         // (MEM-2) An ancestor-directory LINGXI.md (not cwd's own, not an
         // `@import`) gets claude-code's "dynamically loaded" description —
         // "@-imported" is reserved for `@import`-following (file.parent set).

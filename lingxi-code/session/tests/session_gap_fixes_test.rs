@@ -26,15 +26,15 @@ fn make_fs(root: &std::path::Path) -> Arc<dyn FileSystem> {
     Arc::new(PosixFileSystem::new(root.to_path_buf()))
 }
 
-/// Set up `<claude_home>/projects/<sanitize(cwd)>/` and return
-/// `(tempdir, claude_home, cwd, project_subdir)`.
+/// Set up `<lingxi_home>/projects/<sanitize(cwd)>/` and return
+/// `(tempdir, lingxi_home, cwd, project_subdir)`.
 fn setup() -> (TempDir, std::path::PathBuf, String, std::path::PathBuf) {
     let temp = TempDir::new().expect("tempdir");
     let cwd = temp.path().join("proj").to_string_lossy().into_owned();
-    let claude_home = temp.path().join("home");
-    let project_subdir = claude_home.join("projects").join(project_dir_name(&cwd));
+    let lingxi_home = temp.path().join("home");
+    let project_subdir = lingxi_home.join("projects").join(project_dir_name(&cwd));
     std::fs::create_dir_all(&project_subdir).expect("mkdir");
-    (temp, claude_home, cwd, project_subdir)
+    (temp, lingxi_home, cwd, project_subdir)
 }
 
 /// Write a minimal JSONL session file to `dir/<uuid>.jsonl` with `extra_fields`
@@ -80,7 +80,7 @@ fn write_plain_session(dir: &std::path::Path, cwd: &str, mtime: SystemTime) -> U
 
 #[tokio::test]
 async fn daemon_session_is_filtered_from_resume_picker() {
-    let (temp, claude_home, cwd, dir) = setup();
+    let (temp, lingxi_home, cwd, dir) = setup();
     let base = SystemTime::now();
 
     // One normal session and one daemon session (newer mtime).
@@ -93,7 +93,7 @@ async fn daemon_session_is_filtered_from_resume_picker() {
     );
 
     let fs = make_fs(temp.path());
-    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
         .await
         .expect("list");
 
@@ -103,7 +103,7 @@ async fn daemon_session_is_filtered_from_resume_picker() {
 
 #[tokio::test]
 async fn daemon_worker_session_is_filtered_from_resume_picker() {
-    let (temp, claude_home, cwd, dir) = setup();
+    let (temp, lingxi_home, cwd, dir) = setup();
     let base = SystemTime::now();
 
     let normal = write_plain_session(&dir, &cwd, base);
@@ -115,7 +115,7 @@ async fn daemon_worker_session_is_filtered_from_resume_picker() {
     );
 
     let fs = make_fs(temp.path());
-    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
         .await
         .expect("list");
 
@@ -126,7 +126,7 @@ async fn daemon_worker_session_is_filtered_from_resume_picker() {
 #[tokio::test]
 async fn non_daemon_session_kind_is_not_filtered() {
     // sessionKind = "interactive" (or any non-daemon value) must NOT be filtered.
-    let (temp, claude_home, cwd, dir) = setup();
+    let (temp, lingxi_home, cwd, dir) = setup();
     let base = SystemTime::now();
 
     let keep = write_session_with_extras(
@@ -137,7 +137,7 @@ async fn non_daemon_session_kind_is_not_filtered() {
     );
 
     let fs = make_fs(temp.path());
-    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
         .await
         .expect("list");
 
@@ -149,7 +149,7 @@ async fn non_daemon_session_kind_is_not_filtered() {
 
 #[tokio::test]
 async fn sdk_cli_session_is_filtered_from_resume_picker() {
-    let (temp, claude_home, cwd, dir) = setup();
+    let (temp, lingxi_home, cwd, dir) = setup();
     let base = SystemTime::now();
 
     let normal = write_plain_session(&dir, &cwd, base);
@@ -161,7 +161,7 @@ async fn sdk_cli_session_is_filtered_from_resume_picker() {
     );
 
     let fs = make_fs(temp.path());
-    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
         .await
         .expect("list");
 
@@ -171,7 +171,7 @@ async fn sdk_cli_session_is_filtered_from_resume_picker() {
 
 #[tokio::test]
 async fn sdk_ts_session_is_filtered_from_resume_picker() {
-    let (temp, claude_home, cwd, dir) = setup();
+    let (temp, lingxi_home, cwd, dir) = setup();
     let base = SystemTime::now();
 
     let normal = write_plain_session(&dir, &cwd, base);
@@ -183,7 +183,7 @@ async fn sdk_ts_session_is_filtered_from_resume_picker() {
     );
 
     let fs = make_fs(temp.path());
-    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
         .await
         .expect("list");
 
@@ -193,7 +193,7 @@ async fn sdk_ts_session_is_filtered_from_resume_picker() {
 
 #[tokio::test]
 async fn sdk_py_session_is_filtered_from_resume_picker() {
-    let (temp, claude_home, cwd, dir) = setup();
+    let (temp, lingxi_home, cwd, dir) = setup();
     let base = SystemTime::now();
 
     let normal = write_plain_session(&dir, &cwd, base);
@@ -205,7 +205,7 @@ async fn sdk_py_session_is_filtered_from_resume_picker() {
     );
 
     let fs = make_fs(temp.path());
-    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
         .await
         .expect("list");
 
@@ -216,7 +216,7 @@ async fn sdk_py_session_is_filtered_from_resume_picker() {
 #[tokio::test]
 async fn cli_entrypoint_session_is_not_filtered() {
     // entrypoint = "cli" is the normal interactive session; must NOT be filtered.
-    let (temp, claude_home, cwd, dir) = setup();
+    let (temp, lingxi_home, cwd, dir) = setup();
     let base = SystemTime::now();
 
     let keep = write_session_with_extras(
@@ -227,7 +227,7 @@ async fn cli_entrypoint_session_is_not_filtered() {
     );
 
     let fs = make_fs(temp.path());
-    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
         .await
         .expect("list");
 
@@ -242,7 +242,7 @@ async fn loop_session_is_filtered_from_resume_picker() {
     // The /loop tag in the message content triggers the filter.
     // Binary detection: first line raw string contains
     // "<command-name>/loop</command-name>".
-    let (temp, claude_home, cwd, dir) = setup();
+    let (temp, lingxi_home, cwd, dir) = setup();
     let base = SystemTime::now();
 
     let normal = write_plain_session(&dir, &cwd, base);
@@ -277,7 +277,7 @@ async fn loop_session_is_filtered_from_resume_picker() {
     .unwrap();
 
     let fs = make_fs(temp.path());
-    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
         .await
         .expect("list");
 
@@ -289,7 +289,7 @@ async fn loop_session_is_filtered_from_resume_picker() {
 async fn session_with_loop_text_in_non_content_context_is_not_filtered() {
     // A session whose user message is a plain string that happens to contain
     // the word "loop" but NOT the full XML tag must NOT be filtered.
-    let (temp, claude_home, cwd, dir) = setup();
+    let (temp, lingxi_home, cwd, dir) = setup();
     let base = SystemTime::now();
 
     let keep_uuid = Uuid::new_v4();
@@ -310,7 +310,7 @@ async fn session_with_loop_text_in_non_content_context_is_not_filtered() {
     filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(base)).unwrap();
 
     let fs = make_fs(temp.path());
-    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
         .await
         .expect("list");
 
@@ -644,7 +644,7 @@ fn route_lines_all_side_maps_empty_by_default() {
 async fn all_sessions_filtered_returns_empty_directory() {
     // When all sessions are filtered out (daemon + sdk-cli + sdk-ts + sdk-py +
     // loop), the result is EmptyDirectory (same surface as a dir with no .jsonl).
-    let (temp, claude_home, cwd, dir) = setup();
+    let (temp, lingxi_home, cwd, dir) = setup();
     let base = SystemTime::now();
 
     write_session_with_extras(
@@ -661,7 +661,7 @@ async fn all_sessions_filtered_returns_empty_directory() {
     );
 
     let fs = make_fs(temp.path());
-    match list_recent_sessions(&claude_home, &cwd, 5, fs).await {
+    match list_recent_sessions(&lingxi_home, &cwd, 5, fs).await {
         Err(LoaderError::EmptyDirectory) => {}
         other => panic!("expected EmptyDirectory when all sessions filtered, got {other:?}"),
     }

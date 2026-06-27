@@ -33,7 +33,7 @@ pub struct MemdirRoots {
 /// auto-detection from filesystem presence is intentionally NOT used).
 #[must_use]
 pub fn memdir_path(home: &Path, team_enabled: bool) -> MemdirRoots {
-    memdir_roots_at(&crate::claude_md::user_config_dir(home), team_enabled)
+    memdir_roots_at(&crate::lingxi_md::user_config_dir(home), team_enabled)
 }
 
 /// Pure roots resolver from an already-resolved `config_home` (the `.claude`

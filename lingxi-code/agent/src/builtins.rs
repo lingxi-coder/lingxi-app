@@ -33,7 +33,7 @@
 //!   `Glob`/`Grep`/`Read`/`Bash`).
 //! - **`color` / `background`**: now exist as `AgentDefinition` fields (parsed
 //!   from frontmatter / JSON by [`crate::catalog`]); built-ins leave them at
-//!   their defaults here (`color` is assigned at display time). `omitClaudeMd`
+//!   their defaults here (`color` is assigned at display time). `omitLingxiMd`
 //!   / `criticalSystemReminder` remain context-trimming flags with no field /
 //!   runner consumer today — not ported.
 //! - **`model` resolution (wired for the spawn path)**: the spawner resolves

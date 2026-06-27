@@ -20,8 +20,8 @@
 //! ## Root resolution needs no per-rule plumbing
 //! claude-code's `rootPathForSource` + `getSettingsRootPathForSource` switch
 //! ONLY on the `source` enum (not the concrete settings-file path), so a single
-//! [`FsRoots`] (`cwd` / `home` / `claude_home`) threaded in at policy
-//! construction reproduces them exactly: `UserSettings`→`claude_home`,
+//! [`FsRoots`] (`cwd` / `home` / `lingxi_home`) threaded in at policy
+//! construction reproduces them exactly: `UserSettings`→`lingxi_home`,
 //! `Project`/`Local`/`Policy`/`Flag`→`cwd`, `CliArg`/`Command`/`Session`→`cwd`.
 //!
 //! ## Documented divergences from `filesystem.ts` (forced / bounded, not gaps)
@@ -83,7 +83,7 @@ pub struct FsRoots {
     pub home: Option<PathBuf>,
     /// Claude config home (`~/.claude`), the root for `UserSettings` rules
     /// (`getSettingsRootPathForSource('userSettings')` = `resolve(configHome)`).
-    pub claude_home: PathBuf,
+    pub lingxi_home: PathBuf,
 }
 
 /// Which file-permission group a running tool belongs to (claude-code routes
@@ -160,7 +160,7 @@ pub fn input_path_for_tool<'a>(
 /// not plumbed into the port — documented).
 fn root_path_for_source(source: PermissionRuleSource, roots: &FsRoots) -> PathBuf {
     match source {
-        PermissionRuleSource::UserSettings => roots.claude_home.clone(),
+        PermissionRuleSource::UserSettings => roots.lingxi_home.clone(),
         PermissionRuleSource::ProjectSettings
         | PermissionRuleSource::LocalSettings
         | PermissionRuleSource::PolicySettings
@@ -469,7 +469,7 @@ mod tests {
         FsRoots {
             cwd: PathBuf::from("/proj"),
             home: Some(PathBuf::from("/home/u")),
-            claude_home: PathBuf::from("/home/u/.lingxi"),
+            lingxi_home: PathBuf::from("/home/u/.lingxi"),
         }
     }
 
@@ -551,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn user_settings_root_is_claude_home() {
+    fn user_settings_root_is_lingxi_home() {
         // `/sub/**` in USER settings resolves against ~/.claude, not cwd.
         assert!(matches(
             "/home/u/.lingxi/sub/x",

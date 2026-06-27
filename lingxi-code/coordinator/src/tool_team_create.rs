@@ -100,7 +100,7 @@ pub struct TeamCreateTool {
     /// existing call sites that don't carry a bus keep compiling.
     bus: Option<Arc<AnalyticsBus>>,
     /// Optional `~/.claude` root override. `None` (production) ⇒ resolve from
-    /// `$HOME` via [`team_file::claude_home`]. Tests inject a tempdir so the
+    /// `$HOME` via [`team_file::lingxi_home`]. Tests inject a tempdir so the
     /// on-disk team file is written under a scratch path (hermetic, no real
     /// `~/.lingxi/teams/` pollution, no cross-test interference).
     home_override: Option<std::path::PathBuf>,
@@ -388,7 +388,7 @@ impl Tool for TeamCreateTool {
         //     exists on disk, AUTO-RENAME (NOT an error) by appending a short
         //     unique suffix until a free name is found. When `$HOME` is unset we
         //     cannot probe disk — fall through with the requested name.
-        let home = self.home_override.clone().or_else(team_file::claude_home);
+        let home = self.home_override.clone().or_else(team_file::lingxi_home);
         let team_name = match &home {
             Some(h) => generate_unique_team_name(h, &requested_name),
             None => requested_name.clone(),

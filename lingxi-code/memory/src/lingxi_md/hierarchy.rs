@@ -29,7 +29,7 @@ fn resolve_user_config_dir(home: &Path, config_dir_env: Option<std::ffi::OsStrin
         // `??`: a SET value wins verbatim, even when empty (claude-code resolves
         // it cwd-relative); only an UNSET var falls back to `<home>/.claude`.
         Some(dir) => PathBuf::from(dir),
-        None => home.join(DOT_CLAUDE),
+        None => home.join(DOT_LINGXI),
     }
 }
 
@@ -80,10 +80,10 @@ pub struct HierarchyEntry {
     /// (false on case-insensitive filesystems that lowercased it).
     pub exact_case: bool,
     /// Which LINGXI.md tier this file was discovered in. Drives the injection
-    /// description (`getClaudeMds`, claudemd.ts:1168-1186) and the `@import`
-    /// external-include policy (only [`super::ClaudeMdTier::User`] gets
+    /// description (`getLingxiMds`, claudemd.ts:1168-1186) and the `@import`
+    /// external-include policy (only [`super::LingxiMdTier::User`] gets
     /// unconditional external includes).
-    pub tier: super::ClaudeMdTier,
+    pub tier: super::LingxiMdTier,
 }
 
 /// Snapshot of discovered memory-file locations, innermost-first
@@ -96,7 +96,7 @@ pub struct Hierarchy {
 }
 
 /// Directory name used for nested config (`.lingxi/` → `.lingxi/`).
-const DOT_CLAUDE: &str = branding::DOT_DIR;
+const DOT_LINGXI: &str = branding::DOT_DIR;
 /// Subdirectory under `.lingxi/` holding `*.md` rule files.
 const RULES_DIR: &str = "rules";
 
@@ -124,7 +124,7 @@ const RULES_DIR: &str = "rules";
 /// `processedPaths` set. Missing dirs/files are silently skipped (NOT an error).
 #[must_use]
 pub fn walk(cwd: &Path, home: &Path, managed_dir: Option<&Path>) -> Hierarchy {
-    use super::ClaudeMdTier;
+    use super::LingxiMdTier;
     let mut out = Vec::new();
     let mut processed = std::collections::HashSet::new();
 
@@ -136,13 +136,13 @@ pub fn walk(cwd: &Path, home: &Path, managed_dir: Option<&Path>) -> Hierarchy {
             managed,
             FILE_NAME,
             false,
-            ClaudeMdTier::Managed,
+            LingxiMdTier::Managed,
             &mut out,
             &mut processed,
         );
         collect_rules(
-            &managed.join(DOT_CLAUDE).join(RULES_DIR),
-            ClaudeMdTier::Managed,
+            &managed.join(DOT_LINGXI).join(RULES_DIR),
+            LingxiMdTier::Managed,
             &mut out,
             &mut processed,
         );
@@ -156,13 +156,13 @@ pub fn walk(cwd: &Path, home: &Path, managed_dir: Option<&Path>) -> Hierarchy {
         &user_dir,
         FILE_NAME,
         false,
-        ClaudeMdTier::User,
+        LingxiMdTier::User,
         &mut out,
         &mut processed,
     );
     collect_rules(
         &user_dir.join(RULES_DIR),
-        ClaudeMdTier::User,
+        LingxiMdTier::User,
         &mut out,
         &mut processed,
     );
@@ -181,21 +181,21 @@ pub fn walk(cwd: &Path, home: &Path, managed_dir: Option<&Path>) -> Hierarchy {
             dir,
             FILE_NAME,
             false,
-            ClaudeMdTier::Project,
+            LingxiMdTier::Project,
             &mut out,
             &mut processed,
         );
         emit_probe(
-            &dir.join(DOT_CLAUDE),
+            &dir.join(DOT_LINGXI),
             FILE_NAME,
             false,
-            ClaudeMdTier::Project,
+            LingxiMdTier::Project,
             &mut out,
             &mut processed,
         );
         collect_rules(
-            &dir.join(DOT_CLAUDE).join(RULES_DIR),
-            ClaudeMdTier::Project,
+            &dir.join(DOT_LINGXI).join(RULES_DIR),
+            LingxiMdTier::Project,
             &mut out,
             &mut processed,
         );
@@ -205,7 +205,7 @@ pub fn walk(cwd: &Path, home: &Path, managed_dir: Option<&Path>) -> Hierarchy {
             dir,
             LOCAL_OVERRIDE_NAME,
             true,
-            ClaudeMdTier::Local,
+            LingxiMdTier::Local,
             &mut out,
             &mut processed,
         );
@@ -225,7 +225,7 @@ fn emit_probe(
     dir: &Path,
     want: &str,
     is_local: bool,
-    tier: super::ClaudeMdTier,
+    tier: super::LingxiMdTier,
     out: &mut Vec<HierarchyEntry>,
     processed: &mut std::collections::HashSet<PathBuf>,
 ) {
@@ -248,7 +248,7 @@ fn emit_probe(
 /// via the shared `processed` set.
 fn collect_rules(
     rules_dir: &Path,
-    tier: super::ClaudeMdTier,
+    tier: super::LingxiMdTier,
     out: &mut Vec<HierarchyEntry>,
     processed: &mut std::collections::HashSet<PathBuf>,
 ) {
@@ -258,7 +258,7 @@ fn collect_rules(
 
 fn collect_rules_inner(
     rules_dir: &Path,
-    tier: super::ClaudeMdTier,
+    tier: super::LingxiMdTier,
     out: &mut Vec<HierarchyEntry>,
     processed: &mut std::collections::HashSet<PathBuf>,
     visited: &mut std::collections::HashSet<PathBuf>,
@@ -314,7 +314,7 @@ fn probe(
     dir: &Path,
     want: &str,
     is_local: bool,
-    tier: super::ClaudeMdTier,
+    tier: super::LingxiMdTier,
 ) -> Option<HierarchyEntry> {
     // Scan the directory and compare names case-insensitively. We rely on
     // the dirent listing (NOT `Path::is_file`) so that case-insensitive
@@ -486,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn discovers_dot_claude_claude_md() {
+    fn discovers_dot_claude_lingxi_md() {
         // `.lingxi/LINGXI.md` (Project) must be found right after `LINGXI.md`.
         let tmp = TempDir::new().unwrap();
         let home = tmp.path().join("home");
@@ -566,8 +566,8 @@ mod tests {
         // The managed dir is injected explicitly (hermetic — no real system
         // path, no env-var races). Assert Managed → User → Project → Local with
         // `.lingxi/LINGXI.md`, rules, and the local override, AND that each
-        // entry carries the right `ClaudeMdTier`.
-        use super::super::ClaudeMdTier;
+        // entry carries the right `LingxiMdTier`.
+        use super::super::LingxiMdTier;
         let tmp = TempDir::new().unwrap();
 
         let managed = tmp.path().join("managed");
@@ -608,20 +608,20 @@ mod tests {
         );
 
         // Tier tagging: build a path→tier map and spot-check each tier.
-        let tier_of = |suffix: &str| -> ClaudeMdTier {
+        let tier_of = |suffix: &str| -> LingxiMdTier {
             h.entries
                 .iter()
                 .find(|e| e.path.to_string_lossy().ends_with(suffix))
                 .unwrap_or_else(|| panic!("entry ending {suffix} not found"))
                 .tier
         };
-        assert_eq!(tier_of("managed/LINGXI.md"), ClaudeMdTier::Managed);
-        assert_eq!(tier_of("managed/.lingxi/rules/mr.md"), ClaudeMdTier::Managed);
-        assert_eq!(tier_of("home/.lingxi/LINGXI.md"), ClaudeMdTier::User);
-        assert_eq!(tier_of("home/.lingxi/rules/ur.md"), ClaudeMdTier::User);
-        assert_eq!(tier_of("repo/LINGXI.md"), ClaudeMdTier::Project);
-        assert_eq!(tier_of("pkg/.lingxi/rules/pr.md"), ClaudeMdTier::Project);
-        assert_eq!(tier_of("LINGXI.local.md"), ClaudeMdTier::Local);
+        assert_eq!(tier_of("managed/LINGXI.md"), LingxiMdTier::Managed);
+        assert_eq!(tier_of("managed/.lingxi/rules/mr.md"), LingxiMdTier::Managed);
+        assert_eq!(tier_of("home/.lingxi/LINGXI.md"), LingxiMdTier::User);
+        assert_eq!(tier_of("home/.lingxi/rules/ur.md"), LingxiMdTier::User);
+        assert_eq!(tier_of("repo/LINGXI.md"), LingxiMdTier::Project);
+        assert_eq!(tier_of("pkg/.lingxi/rules/pr.md"), LingxiMdTier::Project);
+        assert_eq!(tier_of("LINGXI.local.md"), LingxiMdTier::Local);
     }
 
     #[test]

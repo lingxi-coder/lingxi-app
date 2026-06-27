@@ -429,7 +429,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             let gate = Arc::new(
                 control_plane::StdioControlPermissionGate::new(plane.clone()).with_persist(
                     permission::PermissionPaths {
-                        claude_home: cfg.claude_home.clone(),
+                        lingxi_home: cfg.lingxi_home.clone(),
                         cwd: cfg.cwd.clone(),
                     },
                 ),
@@ -577,15 +577,15 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // keeps no pre-chdir "original cwd"; the post-chdir dir is the project
     // dir the migrations should target (matches TS, where migrations run
     // against the resolved working directory).
-    if let (Some(global_config_path), Some(claude_home)) = (
+    if let (Some(global_config_path), Some(lingxi_home)) = (
         migrations::global_config::global_config_path(),
-        migrations::global_config::claude_config_home(),
+        migrations::global_config::lingxi_config_home(),
     ) {
         let project_dir =
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let env = migrations::MigrationEnv {
             global_config_path,
-            claude_config_home: claude_home,
+            lingxi_config_home: lingxi_home,
             project_dir,
             ctx: migrations::MigrationContext::from_env(),
             bus: None,
@@ -664,7 +664,7 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut default_mode = None;
     let mut bypass_disabled = false;
-    let home = incl_user.then(|| crate::run::claude_home_dir().join("settings.json"));
+    let home = incl_user.then(|| crate::run::lingxi_home_dir().join("settings.json"));
     let proj = incl_project.then(|| project_dir.join(branding::DOT_DIR).join("settings.json"));
     // User first, then project (ascending priority): project read last wins on
     // `defaultMode`; `bypass_disabled` is sticky across tiers.
@@ -837,10 +837,10 @@ mod cli_mode_settings_tests {
 
         let home = tempfile::tempdir().expect("home tempdir");
         let proj = tempfile::tempdir().expect("proj tempdir");
-        let proj_claude = proj.path().join(".lingxi");
-        std::fs::create_dir_all(&proj_claude).expect("mkdir .lingxi");
+        let proj_lingxi = proj.path().join(".lingxi");
+        std::fs::create_dir_all(&proj_lingxi).expect("mkdir .lingxi");
         std::fs::write(
-            proj_claude.join("settings.json"),
+            proj_lingxi.join("settings.json"),
             r#"{"permissions":{"defaultMode":"acceptEdits","disableBypassPermissionsMode":"disable"}}"#,
         )
         .expect("write settings");

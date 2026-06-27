@@ -32,11 +32,11 @@ async fn setup_cwd() -> (
     let cwd_path = temp.path().join("proj");
     tokio::fs::create_dir(&cwd_path).await.unwrap();
     let cwd = cwd_path.to_string_lossy().into_owned();
-    let claude_home = temp.path().join("home");
-    let subdir = claude_home.join("projects").join(project_dir_name(&cwd));
+    let lingxi_home = temp.path().join("home");
+    let subdir = lingxi_home.join("projects").join(project_dir_name(&cwd));
     tokio::fs::create_dir_all(&subdir).await.unwrap();
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(temp.path().to_path_buf()));
-    (temp, claude_home, cwd, subdir, fs)
+    (temp, lingxi_home, cwd, subdir, fs)
 }
 
 /// A `user`/`assistant` chain-participant line with an explicit timestamp (the
@@ -67,7 +67,7 @@ fn json_line(uuid: &str, parent: Option<&str>, session: &str) -> String {
 
 #[tokio::test]
 async fn loads_valid_two_message_session() {
-    let (_temp, claude_home, cwd, subdir, fs) = setup_cwd().await;
+    let (_temp, lingxi_home, cwd, subdir, fs) = setup_cwd().await;
     let sid = Uuid::new_v4();
     let m1 = Uuid::new_v4();
     let m2 = Uuid::new_v4();
@@ -89,7 +89,7 @@ async fn loads_valid_two_message_session() {
         .await
         .unwrap();
 
-    let messages = load_session(&claude_home, &cwd, sid, fs).await.expect("ok");
+    let messages = load_session(&lingxi_home, &cwd, sid, fs).await.expect("ok");
     assert_eq!(messages.len(), 2);
     // Returned root → tip in walk order.
     assert_eq!(messages[0].uuid, m1.to_string());
@@ -98,9 +98,9 @@ async fn loads_valid_two_message_session() {
 
 #[tokio::test]
 async fn missing_file_returns_session_not_found() {
-    let (_temp, claude_home, cwd, _subdir, fs) = setup_cwd().await;
+    let (_temp, lingxi_home, cwd, _subdir, fs) = setup_cwd().await;
     let sid = Uuid::new_v4();
-    let err = load_session(&claude_home, &cwd, sid, fs)
+    let err = load_session(&lingxi_home, &cwd, sid, fs)
         .await
         .expect_err("err");
     match err {
@@ -117,7 +117,7 @@ async fn dangling_parent_link_no_longer_errors_and_returns_newest_branch() {
     // rule 2 → `ChainBroken`. NEW behavior: the dangling parent makes m2 its own
     // root; both m1 and m2 are non-sidechain user leaves, and the NEWER one (m2)
     // anchors the resumed thread. No error.
-    let (_temp, claude_home, cwd, subdir, fs) = setup_cwd().await;
+    let (_temp, lingxi_home, cwd, subdir, fs) = setup_cwd().await;
     let sid = Uuid::new_v4();
     let m1 = Uuid::new_v4();
     let m2 = Uuid::new_v4();
@@ -140,7 +140,7 @@ async fn dangling_parent_link_no_longer_errors_and_returns_newest_branch() {
         .await
         .unwrap();
 
-    let messages = load_session(&claude_home, &cwd, sid, fs)
+    let messages = load_session(&lingxi_home, &cwd, sid, fs)
         .await
         .expect("tolerant load must succeed (no ChainBroken)");
     // Walk from m2 stops immediately (its parent `dangling` is absent) → just m2.
@@ -153,7 +153,7 @@ async fn first_message_with_parent_uuid_no_longer_errors() {
     // OLD: a sole first message carrying a parentUuid failed rule 1 →
     // `ChainBroken`. NEW: it is a single user leaf; the walk stops at the
     // missing parent and returns just that message.
-    let (_temp, claude_home, cwd, subdir, fs) = setup_cwd().await;
+    let (_temp, lingxi_home, cwd, subdir, fs) = setup_cwd().await;
     let sid = Uuid::new_v4();
     let m1 = Uuid::new_v4();
     let bogus_parent = Uuid::new_v4();
@@ -168,7 +168,7 @@ async fn first_message_with_parent_uuid_no_longer_errors() {
         .await
         .unwrap();
 
-    let messages = load_session(&claude_home, &cwd, sid, fs)
+    let messages = load_session(&lingxi_home, &cwd, sid, fs)
         .await
         .expect("tolerant load must succeed");
     assert_eq!(messages.len(), 1);
@@ -182,7 +182,7 @@ async fn differing_session_ids_no_longer_error() {
     // `SessionIdMismatch`. NEW: forked-session shapes are legitimate — the load
     // succeeds and the leaf supplies the session id (covered in detail by the
     // forked-session test below). Here we just prove no error is raised.
-    let (_temp, claude_home, cwd, subdir, fs) = setup_cwd().await;
+    let (_temp, lingxi_home, cwd, subdir, fs) = setup_cwd().await;
     let sid = Uuid::new_v4();
     let other_sid = Uuid::new_v4();
     let m1 = Uuid::new_v4();
@@ -207,7 +207,7 @@ async fn differing_session_ids_no_longer_error() {
         .await
         .unwrap();
 
-    let messages = load_session(&claude_home, &cwd, sid, fs)
+    let messages = load_session(&lingxi_home, &cwd, sid, fs)
         .await
         .expect("tolerant load must succeed (no SessionIdMismatch)");
     assert_eq!(messages.len(), 2);
@@ -225,7 +225,7 @@ async fn real_transcript_returns_only_newest_main_thread() {
     //   - has a SECOND, sidechain branch (`isSidechain:true`) with its own leaf.
     // The walk must return ONLY the main thread, anchored at the newest
     // non-sidechain user/assistant leaf, ignoring metadata + the sidechain.
-    let (_temp, claude_home, cwd, subdir, fs) = setup_cwd().await;
+    let (_temp, lingxi_home, cwd, subdir, fs) = setup_cwd().await;
     // Fixture is written with this exact session uuid as its filename stem.
     let sid: Uuid = "11111111-1111-4111-8111-111111111111".parse().unwrap();
     let fixture = include_str!("fixtures/real_transcript_branched.jsonl");
@@ -233,7 +233,7 @@ async fn real_transcript_returns_only_newest_main_thread() {
         .await
         .unwrap();
 
-    let messages = load_session(&claude_home, &cwd, sid, fs).await.expect("ok");
+    let messages = load_session(&lingxi_home, &cwd, sid, fs).await.expect("ok");
 
     // Main thread (root → tip): u1 → a1 → u2 → a2. The sidechain (s_user,
     // s_asst) and ALL metadata/attachment/system lines are excluded from the
@@ -269,7 +269,7 @@ async fn forked_session_loads_and_uses_leaf_session_id() {
     // The old strict loader rejected this with `SessionIdMismatch`; the new
     // loader must succeed and (per `loadMessagesFromJsonlPath`) the leaf — not
     // the root — supplies the session id.
-    let (_temp, claude_home, cwd, subdir, fs) = setup_cwd().await;
+    let (_temp, lingxi_home, cwd, subdir, fs) = setup_cwd().await;
     let file_sid = Uuid::new_v4(); // this file's own session id (filename stem)
     let source_sid = Uuid::new_v4(); // the session the fork was branched FROM
     let m_root = Uuid::new_v4();
@@ -295,7 +295,7 @@ async fn forked_session_loads_and_uses_leaf_session_id() {
         .await
         .unwrap();
 
-    let messages = load_session(&claude_home, &cwd, file_sid, fs)
+    let messages = load_session(&lingxi_home, &cwd, file_sid, fs)
         .await
         .expect("forked session must load (no SessionIdMismatch)");
     assert_eq!(messages.len(), 2, "the full forked chain is returned");
@@ -400,7 +400,7 @@ fn tool_result_line(
 
 #[tokio::test]
 async fn recovers_orphaned_parallel_tool_result_from_sibling_branch() {
-    let (_temp, claude_home, cwd, subdir, fs) = setup_cwd().await;
+    let (_temp, lingxi_home, cwd, subdir, fs) = setup_cwd().await;
     let sid = Uuid::new_v4().to_string();
 
     // u0 → a1(tool_use#1, id=msg_par) → tr1(parent=a1)  [walk's branch]
@@ -441,7 +441,7 @@ async fn recovers_orphaned_parallel_tool_result_from_sibling_branch() {
         .await
         .unwrap();
 
-    let chain = load_session(&claude_home, &cwd, sid_uuid, fs)
+    let chain = load_session(&lingxi_home, &cwd, sid_uuid, fs)
         .await
         .expect("loads");
 
@@ -464,7 +464,7 @@ async fn recovers_orphaned_parallel_tool_result_from_sibling_branch() {
 async fn no_parallel_calls_chain_is_unchanged_by_recovery() {
     // A linear transcript (no shared message.id, no sibling branches) must be
     // returned byte-identical — the recovery pass is a strict no-op.
-    let (_temp, claude_home, cwd, subdir, fs) = setup_cwd().await;
+    let (_temp, lingxi_home, cwd, subdir, fs) = setup_cwd().await;
     let sid = Uuid::new_v4().to_string();
     let u0 = "00000000-0000-4000-8000-0000000000a0";
     let a1 = "a1000000-0000-4000-8000-0000000000a1";
@@ -488,7 +488,7 @@ async fn no_parallel_calls_chain_is_unchanged_by_recovery() {
         .await
         .unwrap();
 
-    let chain = load_session(&claude_home, &cwd, sid_uuid, fs)
+    let chain = load_session(&lingxi_home, &cwd, sid_uuid, fs)
         .await
         .expect("loads");
     let uuids: Vec<&str> = chain.iter().map(|m| m.uuid.as_str()).collect();
@@ -499,7 +499,7 @@ async fn no_parallel_calls_chain_is_unchanged_by_recovery() {
 // `json_line` default-timestamp shape used elsewhere in the suite).
 #[tokio::test]
 async fn loads_single_user_message() {
-    let (_temp, claude_home, cwd, subdir, fs) = setup_cwd().await;
+    let (_temp, lingxi_home, cwd, subdir, fs) = setup_cwd().await;
     let sid = Uuid::new_v4();
     let m1 = Uuid::new_v4();
     let body = json_line(&m1.to_string(), None, &sid.to_string());
@@ -507,7 +507,7 @@ async fn loads_single_user_message() {
         .await
         .unwrap();
 
-    let messages = load_session(&claude_home, &cwd, sid, fs).await.expect("ok");
+    let messages = load_session(&lingxi_home, &cwd, sid, fs).await.expect("ok");
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].uuid, m1.to_string());
 }

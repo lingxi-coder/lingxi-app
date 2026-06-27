@@ -337,7 +337,7 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
             // seam can't `.await`: a multi-project `*.jsonl` fs walk +
             // aggregation (slow over many files). So we RAISE
             // `pending_open_stats`; the async open pump in `root.rs`
-            // (`pump_open_stats`) walks `<claude_home>/projects/` OUTSIDE the
+            // (`pump_open_stats`) walks `<lingxi_home>/projects/` OUTSIDE the
             // `AppState` lock, aggregates, and opens the screen. No echo, no
             // turn. The `crates/commands` stats handler stays the `--no-tui`
             // path, untouched.

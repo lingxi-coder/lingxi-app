@@ -956,7 +956,7 @@ impl Dispatcher {
                 // (BIN off 205727901) where `o=u9e(hookInput)={sessionId:session_id,
                 // effortLevel:effort?.level, source:"harness"}` (BIN off 199137330).
                 // `Uot` emits, in order:
-                //   CLAUDECODE="1"                       (always)
+                //   LINGXI="1"                       (always)
                 //   LINGXI_SESSION_ID=sessionId     (always)
                 //   LINGXI_CHILD_SESSION="1"        (always)
                 //   AI_AGENT=Mer("agent")                ONLY when source==="agent"
@@ -964,7 +964,7 @@ impl Dispatcher {
                 //   TRACEPARENT=<otel>                   ONLY when Evt() (OTel on)
                 // For hooks `source==="harness"`, so `AI_AGENT` is NEVER emitted on a
                 // hook child — distinct from the Bash spawn (`source:"agent"`, which
-                // DOES set AI_AGENT). We mirror exactly: set CLAUDECODE /
+                // DOES set AI_AGENT). We mirror exactly: set LINGXI /
                 // LINGXI_SESSION_ID / LINGXI_CHILD_SESSION unconditionally,
                 // LINGXI_EFFORT only when `ctx.effort` carries a level, and we do NOT
                 // set AI_AGENT. Spread BEFORE LINGXI_PROJECT_DIR so the engine project
@@ -974,7 +974,7 @@ impl Dispatcher {
                 // Residual: TRACEPARENT (OTel) — LingXi has no per-turn OTel span, so
                 // `Evt()` is effectively false and the binary would omit it too; the
                 // same documented residual as the Bash spawn path.
-                child_env.insert("CLAUDECODE".to_string(), "1".to_string());
+                child_env.insert("LINGXI".to_string(), "1".to_string());
                 child_env.insert(
                     "LINGXI_SESSION_ID".to_string(),
                     ctx.session_id.to_string(),
@@ -3079,7 +3079,7 @@ mod command_arm_tests {
     #[tokio::test]
     async fn command_env_sets_uot_harness_vars() {
         // #43: the hook command env spreads `...Uot(o)` with `source:"harness"`
-        // (BIN off 205727901 / 199137330): CLAUDECODE=1, LINGXI_SESSION_ID,
+        // (BIN off 205727901 / 199137330): LINGXI=1, LINGXI_SESSION_ID,
         // LINGXI_CHILD_SESSION=1 are always present. `AI_AGENT` is gated on
         // `source==="agent"`, so a hook child must NOT carry it.
         let runner = MockRunner::ok(output("", "", 0));
@@ -3090,7 +3090,7 @@ mod command_arm_tests {
         let _ = exec.execute(pre_event(), ctx).await;
 
         let env = runner.recorded_env.lock().unwrap().clone().unwrap();
-        assert_eq!(env.get("CLAUDECODE").map(String::as_str), Some("1"));
+        assert_eq!(env.get("LINGXI").map(String::as_str), Some("1"));
         assert_eq!(
             env.get("LINGXI_CHILD_SESSION").map(String::as_str),
             Some("1"),

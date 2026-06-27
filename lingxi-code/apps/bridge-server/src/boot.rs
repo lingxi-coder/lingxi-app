@@ -174,7 +174,7 @@ fn load_settings_blocks() -> (Option<BTreeMap<String, serde_json::Value>>, Optio
 /// empty value is honored verbatim → cwd-relative), else `~/.claude`. Shared by
 /// the bridge's desktop-config + lockfile resolution.
 #[must_use]
-pub fn claude_config_home() -> Option<PathBuf> {
+pub fn lingxi_config_home() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
         return Some(PathBuf::from(dir));
     }
@@ -184,7 +184,7 @@ pub fn claude_config_home() -> Option<PathBuf> {
 #[must_use]
 pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let claude_home = claude_config_home().unwrap_or_else(|| PathBuf::from("/dev/null"));
+    let lingxi_home = lingxi_config_home().unwrap_or_else(|| PathBuf::from("/dev/null"));
     let project_mcp_path = cwd.join(".mcp.json");
     // User/global-scope MCP servers live INSIDE `~/.lingxi.json` (top-level
     // `mcpServers`), exactly like claude-code — NOT a standalone file under the
@@ -204,7 +204,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         api_base: resolve_api_base(),
         api_key: std::env::var(API_KEY_ENV).unwrap_or_default(),
         cwd,
-        claude_home,
+        lingxi_home,
         default_model,
         // The Electron bridge does not expose --fallback-model (CLI --print
         // only); the Opus consecutive-529 fallback stays disabled here.
@@ -562,7 +562,7 @@ mod tests {
             api_base: DEFAULT_API_BASE.to_string(),
             api_key: String::new(),
             cwd: cwd.clone(),
-            claude_home: cwd.join(".lingxi"),
+            lingxi_home: cwd.join(".lingxi"),
             default_model: "claude-sonnet-4-20250514".to_string(),
             fallback_model: None,
             provider_profiles: None,

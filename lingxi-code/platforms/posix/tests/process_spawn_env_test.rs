@@ -1,5 +1,5 @@
 //! Foreground `run` injects the claude-code spawn-env contract into the child:
-//! `CLAUDECODE`/`LINGXI_CHILD_SESSION`/`GIT_EDITOR`/`AI_AGENT` always, plus
+//! `LINGXI`/`LINGXI_CHILD_SESSION`/`GIT_EDITOR`/`AI_AGENT` always, plus
 //! `SHELL` for the bash provider only (claude-code `SHELL: n==="bash"?S:void 0`).
 
 #![cfg(unix)]
@@ -45,7 +45,7 @@ async fn run_injects_spawn_env_contract_for_bash_provider() {
             shell,
             vec![
                 "-c",
-                "echo CC=$CLAUDECODE CS=$LINGXI_CHILD_SESSION GE=$GIT_EDITOR \
+                "echo CC=$LINGXI CS=$LINGXI_CHILD_SESSION GE=$GIT_EDITOR \
                  AA=$AI_AGENT SH=$SHELL SESS=$LINGXI_SESSION_ID",
             ],
             HashMap::from([(
@@ -55,7 +55,7 @@ async fn run_injects_spawn_env_contract_for_bash_provider() {
         ))
         .await
         .expect("run");
-    assert!(out.stdout.contains("CC=1"), "missing CLAUDECODE=1: {out:?}");
+    assert!(out.stdout.contains("CC=1"), "missing LINGXI=1: {out:?}");
     assert!(
         out.stdout.contains("CS=1"),
         "missing LINGXI_CHILD_SESSION=1: {out:?}"
@@ -262,8 +262,8 @@ async fn run_omits_shell_for_non_bash_provider() {
     );
     // The unconditional contract vars are still present.
     assert!(
-        out.stdout.lines().any(|l| l == "CLAUDECODE=1"),
-        "missing CLAUDECODE=1: {out:?}"
+        out.stdout.lines().any(|l| l == "LINGXI=1"),
+        "missing LINGXI=1: {out:?}"
     );
     assert!(
         out.stdout

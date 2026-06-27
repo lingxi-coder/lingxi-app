@@ -1,7 +1,7 @@
-//! Memory-section formatter (claude-code `getClaudeMds`) +
+//! Memory-section formatter (claude-code `getLingxiMds`) +
 //! `MemoryHierarchyProvider` trait.
 //!
-//! The trait abstracts the M3-02 `claude_md::walk` + `load_file` pair
+//! The trait abstracts the M3-02 `lingxi_md::walk` + `load_file` pair
 //! so the orchestrator can take a `Arc<dyn MemoryHierarchyProvider>`
 //! field and tests can substitute a static fixture without touching
 //! the filesystem. Production impl: [`RealMemoryHierarchyProvider`].
@@ -38,12 +38,12 @@ pub trait MemoryHierarchyProvider: Send + Sync {
     async fn load(&self, cwd: &Path) -> Vec<MemoryFile>;
 }
 
-/// Production implementation — wraps `memory::claude_md::walk` +
+/// Production implementation — wraps `memory::lingxi_md::walk` +
 /// `expand_memory_file`. Reverses the walk order so the returned vec is in
 /// claude-code splice order (managed → home → repo → local-override),
 /// recursively splices each file's `@import` references directly after it
 /// (parity with claude-code `processMemoryFile`), and tags each file with its
-/// [`memory::claude_md::ClaudeMdTier`]. Conditional (`paths:`-gated) rules are
+/// [`memory::lingxi_md::LingxiMdTier`]. Conditional (`paths:`-gated) rules are
 /// returned WITH their globs intact (§F) — the eager-vs-lazy split is the
 /// caller's responsibility (see [`format`] / the orchestrator's
 /// `conditional_rules_reminder_message`).
@@ -66,8 +66,8 @@ impl MemoryHierarchyProvider for RealMemoryHierarchyProvider {
         // is always probed (never settings-gated). `managed_path()` consults
         // the `LINGXI_MANAGED_DIR` override and falls back to the platform
         // default.
-        let managed = memory::claude_md::hierarchy::managed_path();
-        let h = memory::claude_md::hierarchy::walk(cwd, &home, Some(&managed));
+        let managed = memory::lingxi_md::hierarchy::managed_path();
+        let h = memory::lingxi_md::hierarchy::walk(cwd, &home, Some(&managed));
         // walk() returns innermost-first; reverse to managed → home → outer →
         // cwd. Within the same dir, the walk emits `LINGXI.local.md` BEFORE
         // `LINGXI.md` (so local-override shadows canonical). After reverse()
@@ -85,19 +85,19 @@ impl MemoryHierarchyProvider for RealMemoryHierarchyProvider {
             std::collections::HashSet::new();
         // External-include approval (claudemd.ts:826-846): the User tier always
         // resolves external `@import`s; Managed/Project/Local do so ONLY when the
-        // per-project `hasClaudeMdExternalIncludesApproved` flag is set in
+        // per-project `hasLingxiMdExternalIncludesApproved` flag is set in
         // `~/.lingxi.json` (read once per load). The interactive approval PROMPT
         // that sets the flag is a deferred follow-up; honoring an already-set
         // flag is the value-plumbing parity.
         let external_includes_approved = migrations::global_config::global_config_path()
             .map(|p| {
-                migrations::global_config::check_has_claude_md_external_includes_approved(&p, cwd)
+                migrations::global_config::check_has_lingxi_md_external_includes_approved(&p, cwd)
             })
             .unwrap_or(false);
         let mut out = Vec::new();
         for e in entries {
             let include_external = include_external_for(e.tier, external_includes_approved);
-            let expanded = memory::claude_md::loader::expand_memory_file(
+            let expanded = memory::lingxi_md::loader::expand_memory_file(
                 &e.path,
                 &mut processed,
                 include_external,
@@ -145,13 +145,13 @@ pub fn real_provider() -> Arc<dyn MemoryHierarchyProvider> {
 }
 
 /// Like [`real_provider`] but DROPS the `LINGXI.md` files whose path matches the
-/// `claudeMdExcludes` settings patterns (claude-code `isClaudeMdExcluded` runs
+/// `claudeMdExcludes` settings patterns (claude-code `isLingxiMdExcluded` runs
 /// inside `processMemoryFile`, so excluded User/Project/Local files never reach
 /// the system prompt; Managed is never excludable). Returns the unfiltered
 /// [`real_provider`] when no patterns are configured (byte-identical to before).
 #[must_use]
 pub fn real_provider_with_excludes(excludes: Vec<String>) -> Arc<dyn MemoryHierarchyProvider> {
-    let excluder = memory::claude_md::ClaudeMdExcluder::new(&excludes);
+    let excluder = memory::lingxi_md::LingxiMdExcluder::new(&excludes);
     if excluder.is_empty() {
         return real_provider();
     }
@@ -165,7 +165,7 @@ pub fn real_provider_with_excludes(excludes: Vec<String>) -> Arc<dyn MemoryHiera
 /// `claudeMdExcludes` gate (see [`real_provider_with_excludes`]).
 struct ExcludeFilterProvider {
     inner: Arc<dyn MemoryHierarchyProvider>,
-    excluder: memory::claude_md::ClaudeMdExcluder,
+    excluder: memory::lingxi_md::LingxiMdExcluder,
 }
 
 #[async_trait]
@@ -179,18 +179,18 @@ impl MemoryHierarchyProvider for ExcludeFilterProvider {
 
 /// claude-code external-`@import` gate (claudemd.ts:826-846): the User tier
 /// always resolves external includes; every other tier (Managed/Project/Local)
-/// does so ONLY when `hasClaudeMdExternalIncludesApproved` is set for the
+/// does so ONLY when `hasLingxiMdExternalIncludesApproved` is set for the
 /// project. (claude-code also has an internal `forceIncludeExternal`; LingXi has
 /// no caller that sets it, so it is omitted.)
 #[must_use]
-fn include_external_for(tier: memory::claude_md::ClaudeMdTier, approved: bool) -> bool {
-    matches!(tier, memory::claude_md::ClaudeMdTier::User) || approved
+fn include_external_for(tier: memory::lingxi_md::LingxiMdTier, approved: bool) -> bool {
+    matches!(tier, memory::lingxi_md::LingxiMdTier::User) || approved
 }
 
 #[cfg(test)]
 mod external_include_tests {
     use super::include_external_for;
-    use memory::claude_md::ClaudeMdTier::{Local, Managed, Project, User};
+    use memory::lingxi_md::LingxiMdTier::{Local, Managed, Project, User};
 
     #[test]
     fn user_tier_always_allows_external_others_only_when_approved() {
@@ -208,7 +208,7 @@ mod external_include_tests {
 #[cfg(test)]
 mod exclude_filter_tests {
     use super::*;
-    use memory::claude_md::ClaudeMdTier;
+    use memory::lingxi_md::LingxiMdTier;
     use std::path::PathBuf;
 
     struct StaticInner(Vec<MemoryFile>);
@@ -219,11 +219,11 @@ mod exclude_filter_tests {
         }
     }
 
-    fn mf(path: &str, tier: ClaudeMdTier) -> MemoryFile {
+    fn mf(path: &str, tier: LingxiMdTier) -> MemoryFile {
         MemoryFile {
             path: PathBuf::from(path),
             body: "x".into(),
-            is_local_override: matches!(tier, ClaudeMdTier::Local),
+            is_local_override: matches!(tier, LingxiMdTier::Local),
             tier,
             globs: None,
         }
@@ -232,13 +232,13 @@ mod exclude_filter_tests {
     #[tokio::test]
     async fn filter_drops_matching_user_project_local_keeps_managed() {
         let inner = Arc::new(StaticInner(vec![
-            mf("/mgr/LINGXI.md", ClaudeMdTier::Managed), // matches `**/LINGXI.md` but Managed → kept
-            mf("/a/secret/LINGXI.md", ClaudeMdTier::Project), // excluded
-            mf("/a/public/LINGXI.md", ClaudeMdTier::User), // excluded by `**/LINGXI.md`
+            mf("/mgr/LINGXI.md", LingxiMdTier::Managed), // matches `**/LINGXI.md` but Managed → kept
+            mf("/a/secret/LINGXI.md", LingxiMdTier::Project), // excluded
+            mf("/a/public/LINGXI.md", LingxiMdTier::User), // excluded by `**/LINGXI.md`
         ]));
         let provider = ExcludeFilterProvider {
             inner,
-            excluder: memory::claude_md::ClaudeMdExcluder::new(&["**/LINGXI.md".to_string()]),
+            excluder: memory::lingxi_md::LingxiMdExcluder::new(&["**/LINGXI.md".to_string()]),
         };
         let paths: Vec<String> = provider
             .load(Path::new("/a"))
@@ -292,7 +292,7 @@ pub fn build_memdir_prefetch(
 /// runner. Hand to [`ConversationOrchestrator::with_session_memory`](crate::ConversationOrchestrator);
 /// the composition root gates the call (default OFF). `config_home` is the
 /// resolved `$LINGXI_CONFIG_DIR ?? ~/.claude` dir (the write base — pass
-/// [`user_config_dir`](memory::claude_md::user_config_dir)`(dirs::home_dir())`).
+/// [`user_config_dir`](memory::lingxi_md::user_config_dir)`(dirs::home_dir())`).
 #[must_use]
 pub fn build_session_memory_handle(
     side_query_client: Arc<dyn sidequery::SideQueryClient>,
@@ -311,7 +311,7 @@ pub fn build_session_memory_handle(
         update_threshold,
         extraction_model,
     };
-    let config_home = memory::claude_md::user_config_dir(home);
+    let config_home = memory::lingxi_md::user_config_dir(home);
     let runner = Arc::new(
         sidequery::ForkedAgentRunner::new()
             .with_side_query_client(side_query_client, config.extraction_model.clone()),
@@ -359,22 +359,22 @@ const MEMORY_INSTRUCTION_PROMPT: &str = "Codebase and user instructions are show
 
 /// The per-file injection description for a given tier (claudemd.ts:1168-1186).
 /// Includes the leading space, exactly as TS concatenates `${file.path}${description}`.
-fn tier_description(tier: memory::claude_md::ClaudeMdTier) -> &'static str {
-    use memory::claude_md::ClaudeMdTier;
+fn tier_description(tier: memory::lingxi_md::LingxiMdTier) -> &'static str {
+    use memory::lingxi_md::LingxiMdTier;
     match tier {
-        ClaudeMdTier::Project => " (project instructions, checked into the codebase)",
-        ClaudeMdTier::Local => " (user's private project instructions, not checked in)",
-        // Binary `getClaudeMds` (`nUt`) 5-way switch on `o.type`: Managed has its
+        LingxiMdTier::Project => " (project instructions, checked into the codebase)",
+        LingxiMdTier::Local => " (user's private project instructions, not checked in)",
+        // Binary `getLingxiMds` (`nUt`) 5-way switch on `o.type`: Managed has its
         // OWN description; only the default (User) gets the global-instructions
         // wording. (Previously Managed was folded into the User arm — a
         // divergence whenever an org-managed LINGXI.md is loaded.)
-        ClaudeMdTier::Managed => " (organization-managed policy instructions)",
-        ClaudeMdTier::User => " (user's private global instructions for all projects)",
+        LingxiMdTier::Managed => " (organization-managed policy instructions)",
+        LingxiMdTier::User => " (user's private global instructions for all projects)",
     }
 }
 
 /// Format the memory section from a slice of loaded files, 1:1 with claude-code
-/// `getClaudeMds` (claudemd.ts:1153-1195).
+/// `getLingxiMds` (claudemd.ts:1153-1195).
 ///
 /// Shape (NO enclosing tag, NO trailing newline):
 /// ```text

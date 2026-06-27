@@ -166,7 +166,7 @@ pub struct MobileConfig {
     pub cwd: std::path::PathBuf,
     /// The `~/.claude`-equivalent root the settings / agents loaders walk. On a
     /// device this is inside the app sandbox.
-    pub claude_home: std::path::PathBuf,
+    pub lingxi_home: std::path::PathBuf,
     /// Model id the build defaults to (`OrchestratorConfig.model`).
     pub default_model: String,
     /// Settings-declared `providers` block as raw JSON, fed verbatim to
@@ -196,7 +196,7 @@ pub struct MobileConfig {
     /// orchestrator loads its instruction files from. The production FFI entry
     /// points (`ios-framework` / `android-aar`) inject
     /// `Some(orchestrator::prompt::real_provider())` so the orchestrator loads
-    /// the real `<cwd>/LINGXI.md` + `<claude_home>/LINGXI.md` hierarchy into the
+    /// the real `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md` hierarchy into the
     /// system prompt (claude-code parity) and the session-start
     /// `fire_instructions_loaded()` fires over those files. `None` (the default +
     /// every off-device host test) falls back to the empty
@@ -217,7 +217,7 @@ impl std::fmt::Debug for MobileConfig {
             .field("api_base", &self.api_base)
             .field("api_key", &self.api_key)
             .field("cwd", &self.cwd)
-            .field("claude_home", &self.claude_home)
+            .field("lingxi_home", &self.lingxi_home)
             .field("default_model", &self.default_model)
             .field("provider_profiles", &self.provider_profiles)
             .field("routing", &self.routing)
@@ -242,7 +242,7 @@ impl Default for MobileConfig {
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             cwd: std::path::PathBuf::from("."),
-            claude_home: std::path::PathBuf::new(),
+            lingxi_home: std::path::PathBuf::new(),
             default_model: crate::MobileEngineConfig::default().default_model,
             provider_profiles: None,
             routing: None,
@@ -692,7 +692,7 @@ pub async fn build_mobile_inner(
     // unresolved mutating Ask still forwards to the remote client, but local deny/
     // allow rules + defaultMode are honored regardless of what the client
     // replicates. Rules are loaded from the SAME project + user settings.json the
-    // hook loader reads below (dedup-aware: on mobile `claude_home` can equal
+    // hook loader reads below (dedup-aware: on mobile `lingxi_home` can equal
     // `<cwd>/.claude`, so a colliding path is read once to avoid doubling rules).
     // Read(deny) → Grep/Glob search-exclude globs, resolved from the policy below
     // (empty when no Read-deny rule ⇒ unchanged default).
@@ -711,7 +711,7 @@ pub async fn build_mobile_inner(
         // auto-allows (mirrors desktop's `.with_working_dirs`); empty ⇒ unchanged.
         let mut additional_working_dirs: Vec<std::path::PathBuf> = Vec::new();
         let proj = cwd.join(branding::DOT_DIR).join("settings.json");
-        let user = cfg.claude_home.join("settings.json");
+        let user = cfg.lingxi_home.join("settings.json");
         // Audit fix (#6): also read the LocalSettings tier (`settings.local.json`),
         // LAST so its rules/defaultMode win — mirrors desktop. Mobile does not
         // PERSIST to it (no `.with_persist`), but a synced/checked-in
@@ -751,7 +751,7 @@ pub async fn build_mobile_inner(
         let roots = permission::FsRoots {
             cwd: cwd.clone(),
             home: std::env::var_os("HOME").map(std::path::PathBuf::from),
-            claude_home: cfg.claude_home.clone(),
+            lingxi_home: cfg.lingxi_home.clone(),
         };
         let mut policy = permission::PermissionPolicy::from_rules(mode, rules)
             .with_roots(roots)
@@ -779,18 +779,18 @@ pub async fn build_mobile_inner(
     //
     // (6a) HookRegistry — read settings.json hooks from project
     //      (`<cwd>/.lingxi/settings.json`) then user
-    //      (`<claude_home>/settings.json`), project last so it wins on identical
+    //      (`<lingxi_home>/settings.json`), project last so it wins on identical
     //      command registration (same precedence as desktop). The files are read
     //      via `tokio::fs` (NOT the workspace-constrained `FileSystem::read_file`)
-    //      because `claude_home` may sit outside the orchestrator's cwd, exactly
+    //      because `lingxi_home` may sit outside the orchestrator's cwd, exactly
     //      as desktop reads them. A missing or malformed file is skipped, never an
     //      error — the common (no-hooks) case registers nothing and stays a no-op.
     let mut hook_registry = hooks::HookRegistry::new();
     let project_settings_path = cwd.join(branding::DOT_DIR).join("settings.json");
-    let user_settings_path = cfg.claude_home.join("settings.json");
-    // On mobile `claude_home` is commonly `<cwd>/.claude`, so the user- and
+    let user_settings_path = cfg.lingxi_home.join("settings.json");
+    // On mobile `lingxi_home` is commonly `<cwd>/.claude`, so the user- and
     // project-settings paths can resolve to the SAME file. Desktop never
-    // collides (claude_home = `~/.claude` ≠ cwd) and so has no dedup. Reading a
+    // collides (lingxi_home = `~/.claude` ≠ cwd) and so has no dedup. Reading a
     // colliding path twice would `register()` every declared hook twice, so it
     // would fire twice per event — a parity divergence. De-dup to read each
     // distinct path ONCE; when they collide keep the Project tag (project is
@@ -852,7 +852,7 @@ pub async fn build_mobile_inner(
 
     // P0.2: the production FFI entry points inject
     // `cfg.memory_provider = Some(orchestrator::prompt::real_provider())` so the
-    // orchestrator loads the real `<cwd>/LINGXI.md` + `<claude_home>/LINGXI.md`
+    // orchestrator loads the real `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md`
     // hierarchy into its system prompt (claude-code parity) and step (9)'s
     // `fire_instructions_loaded()` fires over those files. `None` (the default +
     // every host test) falls back to the empty `StaticMemoryProvider`, so a
@@ -951,8 +951,8 @@ pub async fn build_mobile_inner(
     );
     // Audit fix (#14): build a disk-backed Skill loader so the mobile Skill tool
     // resolves on-disk `.lingxi/commands` / `.lingxi/skills` under the device's
-    // app-private root (`claude_home` = `<app_files_root>/.claude`). `home` = cwd
-    // so `home/.claude` resolves to the same app-private `.claude` as claude_home
+    // app-private root (`lingxi_home` = `<app_files_root>/.claude`). `home` = cwd
+    // so `home/.claude` resolves to the same app-private `.claude` as lingxi_home
     // (the loaders dedup by name across project/user/managed layers). No
     // session id at build time on mobile (the session is per-connection), so
     // `${CLAUDE_SESSION_ID}` is left un-substituted — matching the loader's None
@@ -961,7 +961,7 @@ pub async fn build_mobile_inner(
     let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> = Arc::new(
         crate::skill_loader::MobileDiskSkillLoader::load_from_disk(
             &cwd,
-            &cfg.claude_home,
+            &cfg.lingxi_home,
             &cwd,
             None,
         )
@@ -971,7 +971,7 @@ pub async fn build_mobile_inner(
 
     // P0.1 ACTIVATION on mobile (gated, default OFF) — the same gate as desktop,
     // `LINGXI_MEMDIR_PREFETCH`. When truthy, wire the memdir-backed memory
-    // selector so relevant `<claude_home>/memdir` entries surface each turn via a
+    // selector so relevant `<lingxi_home>/memdir` entries surface each turn via a
     // Haiku-class side query (a `ProviderSideQueryClient` over the device HTTP
     // transport + `cfg.api_key`, independent of the multi-provider turn client).
     // Unset/false ⇒ no prefetch ⇒ surfacing inert ⇒ the locked mobile fixtures
@@ -981,10 +981,10 @@ pub async fn build_mobile_inner(
     let memdir_prefetch =
         if traits::env::is_env_truthy(std::env::var("LINGXI_MEMDIR_PREFETCH").ok().as_deref())
         {
-            // `cfg.claude_home` is the device `.claude` dir; the helper re-appends
-            // `.lingxi/memdir`, so pass its PARENT as `home` ⇒ `<claude_home>/memdir`.
+            // `cfg.lingxi_home` is the device `.claude` dir; the helper re-appends
+            // `.lingxi/memdir`, so pass its PARENT as `home` ⇒ `<lingxi_home>/memdir`.
             let home = cfg
-                .claude_home
+                .lingxi_home
                 .parent()
                 .map(std::path::Path::to_path_buf)
                 .unwrap_or_else(|| cwd.clone());
@@ -1047,8 +1047,8 @@ pub async fn build_mobile_inner(
     // FIX A: hand the orchestrator the resolved claude-home so its hook payloads
     // carry a deterministically-computed `transcript_path` (claude-code
     // `getTranscriptPathForSession`) even though no `JsonlWriter` is wired —
-    // mobile sibling of desktop's `.with_config_home(cfg.claude_home.clone())`.
-    .with_config_home(cfg.claude_home.clone())
+    // mobile sibling of desktop's `.with_config_home(cfg.lingxi_home.clone())`.
+    .with_config_home(cfg.lingxi_home.clone())
     // Audit fix (#15): the orchestrator shares the ONE AnalyticsBus (so its
     // events ride the same sink as the ApiService + tools) + the session
     // CostTracker (desktop parity; accumulates the running session cost total).
@@ -1196,12 +1196,12 @@ pub struct MobileEngineHandle {
     /// so the existing Swift/Kotlin smoke test keeps working).
     skill_count: usize,
     /// The `~/.claude`-equivalent root the session enumerator walks
-    /// (`<claude_home>/projects/<sanitized cwd>/*.jsonl`). Captured from the
+    /// (`<lingxi_home>/projects/<sanitized cwd>/*.jsonl`). Captured from the
     /// `MobileConfig` so `submit(ListSessions)` can read the on-disk catalog
     /// without re-deriving it (SESSIONS/HISTORY).
-    claude_home: std::path::PathBuf,
+    lingxi_home: std::path::PathBuf,
     /// The session enumerator's `cwd` key (its sanitized form selects the project
-    /// subdir under `claude_home/projects/`). Captured from the `MobileConfig`.
+    /// subdir under `lingxi_home/projects/`). Captured from the `MobileConfig`.
     session_cwd: String,
     /// The platform filesystem handle the JSONL reader reads each session file
     /// through (`list_recent_sessions`' `Arc<dyn FileSystem>` argument). The SAME
@@ -1619,7 +1619,7 @@ impl MobileEngineHandle {
             // ── Sessions / history (SESSIONS/HISTORY) ────────────────────────
             //
             // `ListSessions` enumerates the on-disk JSONL catalog
-            // (`<claude_home>/projects/<sanitized cwd>/*.jsonl`) via the shared
+            // (`<lingxi_home>/projects/<sanitized cwd>/*.jsonl`) via the shared
             // `session::jsonl::list_recent_sessions`, lowers each row through the
             // shared `client_adapter::lower_session_metadata`, and replies with a
             // `SessionList` event — the same listing surface the bridge-server
@@ -1726,7 +1726,7 @@ impl MobileEngineHandle {
                 // (HONEST: we never emit a false SessionResumed for a missing /
                 // corrupt session).
                 let replayed = match orchestrator::replay_session_state(
-                    &self.claude_home,
+                    &self.lingxi_home,
                     &cwd,
                     uuid,
                     self.fs.clone(),
@@ -1831,7 +1831,7 @@ impl MobileEngineHandle {
     /// Enumerate the on-disk resumable-session catalog and emit a `SessionList`
     /// event (SESSIONS/HISTORY).
     ///
-    /// Reads `<claude_home>/projects/<sanitized cwd>/*.jsonl` via the shared
+    /// Reads `<lingxi_home>/projects/<sanitized cwd>/*.jsonl` via the shared
     /// `session::jsonl::list_recent_sessions` (the SAME enumerator the CLI
     /// `/resume` picker uses), capped at `limit`, then lowers each
     /// `SessionMetadata` row through the shared
@@ -1843,7 +1843,7 @@ impl MobileEngineHandle {
     async fn emit_session_list(&self, limit: usize) {
         use session::jsonl::list_recent_sessions;
         let sessions = match list_recent_sessions(
-            &self.claude_home,
+            &self.lingxi_home,
             &self.session_cwd,
             limit,
             self.fs.clone(),
@@ -2339,12 +2339,12 @@ pub fn build_mobile_engine_inner(
     // SESSIONS/HISTORY: capture the session-enumerator inputs BEFORE `cfg` /
     // `platform` are moved into `build_mobile_inner`. `submit(ListSessions)`
     // reads the on-disk catalog with these (the SAME `fs` the tools use).
-    let claude_home = cfg.claude_home.clone();
+    let lingxi_home = cfg.lingxi_home.clone();
     let session_cwd = cfg.cwd.to_string_lossy().into_owned();
     let fs = platform.filesystem();
     // Capture the build recipe + platform BEFORE they move into
     // `build_mobile_inner`, so the cron firing path can rebuild a fresh throwaway
-    // runtime per fired job (the same pattern as `claude_home`/`session_cwd`/`fs`).
+    // runtime per fired job (the same pattern as `lingxi_home`/`session_cwd`/`fs`).
     let firer_cfg = cfg.clone();
     let firer_platform = platform.clone();
 
@@ -2370,7 +2370,7 @@ pub fn build_mobile_engine_inner(
         active_cancel: Arc::new(Mutex::new(None)),
         tool_names,
         skill_count,
-        claude_home,
+        lingxi_home,
         session_cwd,
         fs,
         firer_cfg,
@@ -2667,7 +2667,7 @@ mod tests {
     // ── P0.2: mobile hook lifecycle (real HookExecutorImpl + lifecycle fires) ─
     //
     // The mobile composition root now builds the REAL `HookExecutorImpl` (loaded
-    // from `cwd/.lingxi/settings.json` + `claude_home/settings.json`) in place of
+    // from `cwd/.lingxi/settings.json` + `lingxi_home/settings.json`) in place of
     // the `noop_hook_executor()` stub, and fires `SessionStart` (source=startup)
     // + `InstructionsLoaded` (once per loaded LINGXI.md) at boot — exactly the
     // desktop `build()` lifecycle (engine-desktop §7 / §7.1). These mirror the
@@ -2681,10 +2681,10 @@ mod tests {
     /// is best-effort), so this asserts hook *registration*, not the command's
     /// effect.
     fn write_project_hook(cwd: &std::path::Path, event: &str) {
-        let claude_dir = cwd.join(".lingxi");
-        std::fs::create_dir_all(&claude_dir).expect("mk .lingxi");
+        let lingxi_dir = cwd.join(".lingxi");
+        std::fs::create_dir_all(&lingxi_dir).expect("mk .lingxi");
         std::fs::write(
-            claude_dir.join("settings.json"),
+            lingxi_dir.join("settings.json"),
             format!(
                 r#"{{ "hooks": {{ "{event}": [ {{ "hooks": [
                 {{ "type": "command", "command": "true" }}
@@ -2719,7 +2719,7 @@ mod tests {
             .expect("build_mobile must succeed even with a (no-op) SessionStart hook registered");
 
         let hooks = rt.orchestrator.list_hooks().await;
-        // Exactly ONE registration. On mobile `claude_home` == `<cwd>/.claude`, so
+        // Exactly ONE registration. On mobile `lingxi_home` == `<cwd>/.claude`, so
         // the user- and project-settings paths resolve to the SAME file; before the
         // settings-path de-dup this hook registered (and therefore fired) TWICE. A
         // plain `.any()` masked that — assert count == 1 to catch the regression.
@@ -2779,7 +2779,7 @@ mod tests {
             path: memory_path.clone(),
             body: memory_body.to_string(),
             is_local_override: false,
-            tier: orchestrator::prompt::ClaudeMdTier::Project,
+            tier: orchestrator::prompt::LingxiMdTier::Project,
             globs: None,
         };
         cfg.memory_provider = Some(Arc::new(
@@ -3051,7 +3051,7 @@ mod tests {
 
     // ── SESSIONS/HISTORY: ListSessions / NewSession / ResumeSession ──────────
 
-    /// Seed one valid session JSONL under `<claude_home>/projects/<sanitize(cwd)>/`
+    /// Seed one valid session JSONL under `<lingxi_home>/projects/<sanitize(cwd)>/`
     /// so `submit(ListSessions)` has a real on-disk catalog to enumerate. Mirrors
     /// the `session` crate's own `list_recent_test` fixture (the enumerator reads
     /// the dir via `tokio::fs` and each file via the injected `fs`). Returns the
@@ -3060,7 +3060,7 @@ mod tests {
         let cfg = test_config(root);
         let cwd = cfg.cwd.to_string_lossy().into_owned();
         let project_dir = cfg
-            .claude_home
+            .lingxi_home
             .join("projects")
             .join(session::jsonl::project_dir_name(&cwd));
         std::fs::create_dir_all(&project_dir).expect("create project dir");
@@ -3194,7 +3194,7 @@ mod tests {
     }
 
     /// Seed a REPLAY-VALID session JSONL under
-    /// `<claude_home>/projects/<sanitize(cwd)>/<uuid>.jsonl` — a user+assistant
+    /// `<lingxi_home>/projects/<sanitize(cwd)>/<uuid>.jsonl` — a user+assistant
     /// pair with a proper `parentUuid` chain (first msg parent=null, the second's
     /// parent = the first's uuid, both `sessionId == <file uuid>`) so it PASSES
     /// the loader's `validate_chain`. Returns `(file_uuid, user_assistant_count)`.
@@ -3202,7 +3202,7 @@ mod tests {
         let cfg = test_config(root);
         let cwd = cfg.cwd.to_string_lossy().into_owned();
         let project_dir = cfg
-            .claude_home
+            .lingxi_home
             .join("projects")
             .join(session::jsonl::project_dir_name(&cwd));
         std::fs::create_dir_all(&project_dir).expect("create project dir");

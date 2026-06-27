@@ -28,14 +28,14 @@ pub async fn run(env: &MigrationEnv) {
     }
 
     let has_skip = [SettingsSource::User, SettingsSource::Local].iter().any(|s| {
-        let p = settings_path(*s, &env.claude_config_home, &env.project_dir);
+        let p = settings_path(*s, &env.lingxi_config_home, &env.project_dir);
         read_settings_map(&p)
             .ok()
             .and_then(|m| m.get("skipDangerousModePermissionPrompt").map(js_truthy))
             .unwrap_or(false)
     });
     if !has_skip {
-        let sp = settings_path(SettingsSource::User, &env.claude_config_home, &env.project_dir);
+        let sp = settings_path(SettingsSource::User, &env.lingxi_config_home, &env.project_dir);
         if let Err(e) = update_settings(
             &sp,
             vec![("skipDangerousModePermissionPrompt".into(), Some(json!(true)))],
@@ -72,7 +72,7 @@ mod tests {
     fn test_env(t: &crate::test_support::TempConfig) -> crate::context::MigrationEnv {
         crate::context::MigrationEnv {
             global_config_path: t.global.clone(),
-            claude_config_home: t.home.clone(),
+            lingxi_config_home: t.home.clone(),
             project_dir: t.project.clone(),
             ctx: crate::context::MigrationContext { first_party: true, subscription_type: None },
             bus: None,

@@ -54,7 +54,7 @@ mod tests {
     }
 
     #[test]
-    fn old_init_prompt_contains_claude_md_prefix_block() {
+    fn old_init_prompt_contains_lingxi_md_prefix_block() {
         assert!(OLD_INIT_PROMPT.contains("# LINGXI.md"));
         assert!(OLD_INIT_PROMPT.contains(
             "This file provides guidance to LingXi (claude.ai/code) \

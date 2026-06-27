@@ -1,6 +1,6 @@
 //! `tokio::process`-backed [`ProcessRunner`] for Windows hosts.
 //!
-//! Mirrors the POSIX runner's spawn-env contract (`CLAUDECODE=1`,
+//! Mirrors the POSIX runner's spawn-env contract (`LINGXI=1`,
 //! `GIT_EDITOR=true`, `SHELL=<inner.command>`) and the 30-minute default
 //! timeout. `spawn_background` writes per-task file-mode stdio to
 //! `<temp>/lingxi-task-output/<task_id>.out` and `kill` delegates to
@@ -18,10 +18,10 @@ use traits::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, Sandboxe
 /// `DEFAULT_TIMEOUT` (`Shell.ts:44`).
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-const ENV_CLAUDECODE: (&str, &str) = ("CLAUDECODE", "1");
+const ENV_LINGXI_MARKER: (&str, &str) = ("LINGXI", "1");
 const ENV_GIT_EDITOR: (&str, &str) = ("GIT_EDITOR", "true");
 const ENV_SHELL: &str = "SHELL";
-const ENV_CLAUDE_CODE_SESSION_ID: &str = "LINGXI_SESSION_ID";
+const ENV_LINGXI_SESSION_ID: &str = "LINGXI_SESSION_ID";
 
 /// Production [`ProcessRunner`] using `tokio::process`.
 #[derive(Default)]
@@ -45,11 +45,11 @@ impl WindowsProcess {
             tcmd.env(k, v);
         }
         // Spawn-env contract (overrides caller env to mirror posix).
-        tcmd.env(ENV_CLAUDECODE.0, ENV_CLAUDECODE.1);
+        tcmd.env(ENV_LINGXI_MARKER.0, ENV_LINGXI_MARKER.1);
         tcmd.env(ENV_GIT_EDITOR.0, ENV_GIT_EDITOR.1);
         tcmd.env(ENV_SHELL, &inner.command);
-        if let Some(sess) = inner.env.get(ENV_CLAUDE_CODE_SESSION_ID) {
-            tcmd.env(ENV_CLAUDE_CODE_SESSION_ID, sess);
+        if let Some(sess) = inner.env.get(ENV_LINGXI_SESSION_ID) {
+            tcmd.env(ENV_LINGXI_SESSION_ID, sess);
         }
         tcmd
     }

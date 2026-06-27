@@ -18,7 +18,7 @@
 #![forbid(unsafe_code)]
 
 use crate::prompt::MemoryFile;
-use memory::claude_md::ClaudeMdTier;
+use memory::lingxi_md::LingxiMdTier;
 use std::path::{Path, PathBuf};
 
 /// Derive the directory a conditional rule's globs are resolved against, 1:1
@@ -34,9 +34,9 @@ use std::path::{Path, PathBuf};
 /// Returns `None` for a Project rule whose path has fewer than three ancestors
 /// (a malformed/non-`.lingxi/rules/` location) — such a rule can match nothing.
 #[must_use]
-pub fn base_dir(rule_path: &Path, tier: ClaudeMdTier, cwd: &Path) -> Option<PathBuf> {
+pub fn base_dir(rule_path: &Path, tier: LingxiMdTier, cwd: &Path) -> Option<PathBuf> {
     match tier {
-        ClaudeMdTier::Project => {
+        LingxiMdTier::Project => {
             // path = <base>/.lingxi/rules/x.md
             //   parent()        -> <base>/.lingxi/rules
             //   .parent()       -> <base>/.claude
@@ -47,7 +47,7 @@ pub fn base_dir(rule_path: &Path, tier: ClaudeMdTier, cwd: &Path) -> Option<Path
                 .and_then(Path::parent)
                 .map(Path::to_path_buf)
         }
-        ClaudeMdTier::Managed | ClaudeMdTier::User | ClaudeMdTier::Local => {
+        LingxiMdTier::Managed | LingxiMdTier::User | LingxiMdTier::Local => {
             Some(cwd.to_path_buf())
         }
     }
@@ -159,11 +159,11 @@ pub fn render_reminder(rule: &MemoryFile) -> String {
 mod tests {
     use super::*;
 
-    fn rule(path: &str, tier: ClaudeMdTier, globs: Option<Vec<&str>>) -> MemoryFile {
+    fn rule(path: &str, tier: LingxiMdTier, globs: Option<Vec<&str>>) -> MemoryFile {
         MemoryFile {
             path: PathBuf::from(path),
             body: "RULE BODY".into(),
-            is_local_override: tier == ClaudeMdTier::Local,
+            is_local_override: tier == LingxiMdTier::Local,
             tier,
             globs: globs.map(|v| v.into_iter().map(String::from).collect()),
         }
@@ -174,7 +174,7 @@ mod tests {
         // <base>/.lingxi/rules/x.md -> <base>
         let b = base_dir(
             Path::new("/proj/.lingxi/rules/x.md"),
-            ClaudeMdTier::Project,
+            LingxiMdTier::Project,
             Path::new("/some/cwd"),
         );
         assert_eq!(b, Some(PathBuf::from("/proj")));
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn base_dir_user_managed_local_is_cwd() {
         let cwd = Path::new("/work/repo");
-        for tier in [ClaudeMdTier::User, ClaudeMdTier::Managed, ClaudeMdTier::Local] {
+        for tier in [LingxiMdTier::User, LingxiMdTier::Managed, LingxiMdTier::Local] {
             let b = base_dir(Path::new("/home/u/.lingxi/rules/y.md"), tier, cwd);
             assert_eq!(b, Some(cwd.to_path_buf()), "tier {tier:?}");
         }
@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn matches_project_rule_against_relative_touched_file() {
         // paths: src/** -> globs ["src"]; touched "src/x.rs" matches via parent.
-        let r = rule("/proj/.lingxi/rules/r.md", ClaudeMdTier::Project, Some(vec!["src"]));
+        let r = rule("/proj/.lingxi/rules/r.md", LingxiMdTier::Project, Some(vec!["src"]));
         assert!(rule_matches_touched_file(&r, Path::new("src/x.rs"), Path::new("/proj")));
         assert!(!rule_matches_touched_file(&r, Path::new("docs/y.md"), Path::new("/proj")));
     }
@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn matches_project_rule_against_absolute_touched_file() {
         // An absolute touched path is relativized against the rule's base dir.
-        let r = rule("/proj/.lingxi/rules/r.md", ClaudeMdTier::Project, Some(vec!["src"]));
+        let r = rule("/proj/.lingxi/rules/r.md", LingxiMdTier::Project, Some(vec!["src"]));
         assert!(rule_matches_touched_file(
             &r,
             Path::new("/proj/src/deep/x.rs"),
@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     fn user_rule_resolves_globs_against_cwd() {
-        let r = rule("/home/u/.lingxi/rules/r.md", ClaudeMdTier::User, Some(vec!["lib"]));
+        let r = rule("/home/u/.lingxi/rules/r.md", LingxiMdTier::User, Some(vec!["lib"]));
         let cwd = Path::new("/work/repo");
         assert!(rule_matches_touched_file(&r, Path::new("/work/repo/lib/a.rs"), cwd));
         assert!(rule_matches_touched_file(&r, Path::new("lib/a.rs"), cwd));
@@ -228,7 +228,7 @@ mod tests {
         // paths: **/*.rs -> globs ["**/*.rs"]; matches any .rs at any depth.
         let r = rule(
             "/proj/.lingxi/rules/r.md",
-            ClaudeMdTier::Project,
+            LingxiMdTier::Project,
             Some(vec!["**/*.rs"]),
         );
         assert!(rule_matches_touched_file(&r, Path::new("a/b/c.rs"), Path::new("/proj")));
@@ -237,13 +237,13 @@ mod tests {
 
     #[test]
     fn unconditional_rule_never_matches() {
-        let r = rule("/proj/LINGXI.md", ClaudeMdTier::Project, None);
+        let r = rule("/proj/LINGXI.md", LingxiMdTier::Project, None);
         assert!(!rule_matches_touched_file(&r, Path::new("src/x.rs"), Path::new("/proj")));
     }
 
     #[test]
     fn render_reminder_is_bare_contents_in_system_reminder() {
-        let r = rule("/proj/.lingxi/rules/r.md", ClaudeMdTier::Project, Some(vec!["src"]));
+        let r = rule("/proj/.lingxi/rules/r.md", LingxiMdTier::Project, Some(vec!["src"]));
         let out = render_reminder(&r);
         assert_eq!(
             out,

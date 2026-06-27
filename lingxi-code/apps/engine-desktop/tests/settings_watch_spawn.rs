@@ -107,12 +107,12 @@ async fn spawn_fires_config_change_for_observed_settings_paths() {
     // supplies the events, so no real watcher runs.
     let home = tempfile::tempdir().unwrap();
     let proj = tempfile::tempdir().unwrap();
-    let claude_home = home.path().to_path_buf();
+    let lingxi_home = home.path().to_path_buf();
     let cwd = proj.path().to_path_buf();
     // The watcher only watches dirs that exist; create the project `.claude`.
     std::fs::create_dir_all(cwd.join(".lingxi")).unwrap();
 
-    let user_settings = claude_home.join("settings.json");
+    let user_settings = lingxi_home.join("settings.json");
     let project_settings = cwd.join(".lingxi").join("settings.json");
     let local_settings = cwd.join(".lingxi").join("settings.local.json");
     let ignored = cwd.join(".lingxi").join("agents.json");
@@ -130,7 +130,7 @@ async fn spawn_fires_config_change_for_observed_settings_paths() {
         ev(ignored.clone()),
     ])) as Arc<dyn FileSystem>;
 
-    let watcher = SettingsWatcher::new(&claude_home, &cwd, firer.clone());
+    let watcher = SettingsWatcher::new(&lingxi_home, &cwd, firer.clone());
     let handle = watcher.spawn(fs).await;
     assert!(handle.task_count() >= 1, "at least one dir is watched");
 

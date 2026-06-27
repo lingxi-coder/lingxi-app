@@ -2007,7 +2007,7 @@ pub async fn pump_compact(
 /// (M9-10) Async usage-stats open pump.
 ///
 /// Mirrors `pump_open_agents`, but needs NO `OrchestratorHandle`: the data is a
-/// multi-project `*.jsonl` fs walk over `<claude_home>/projects/`, aggregated
+/// multi-project `*.jsonl` fs walk over `<lingxi_home>/projects/`, aggregated
 /// by the pure `stats::{parse_session, aggregate}`. The sync `/stats` submit
 /// path raises `AppState.pending_open_stats = true` (it can't `.await` the
 /// walk); this pump — driven by the same 100ms ticker `use_future` — observes
@@ -2091,9 +2091,9 @@ pub async fn pump_open_skills(state: &Arc<Mutex<AppState>>) -> bool {
     };
 
     // 2) Walk + parse on the blocking pool (fs reads off the UI executor).
-    let claude_home = claude_home_dir();
+    let lingxi_home = lingxi_home_dir();
     let sections = tokio::task::spawn_blocking(move || {
-        crate::screens::skills::load_skill_sections(&cwd, &claude_home)
+        crate::screens::skills::load_skill_sections(&cwd, &lingxi_home)
     })
     .await
     .unwrap_or_default();
@@ -2132,9 +2132,9 @@ pub async fn pump_open_permissions(state: &Arc<Mutex<AppState>>) -> bool {
     };
 
     // 2) Read + parse the settings tiers on the blocking pool.
-    let claude_home = claude_home_dir();
+    let lingxi_home = lingxi_home_dir();
     let screen_state = tokio::task::spawn_blocking(move || {
-        crate::screens::permissions::load_permission_sections(&cwd, &claude_home)
+        crate::screens::permissions::load_permission_sections(&cwd, &lingxi_home)
     })
     .await
     .unwrap_or_default();
@@ -2152,9 +2152,9 @@ pub async fn pump_open_permissions(state: &Arc<Mutex<AppState>>) -> bool {
 
 /// (M9-10) Resolve the claude config home — the same resolution the rest of the
 /// workspace uses (`$LINGXI_CONFIG_DIR` → `~/.claude`). Mirrors
-/// `screens::doctor::claude_home_dir`. Falls back to `.` when the home dir is
+/// `screens::doctor::lingxi_home_dir`. Falls back to `.` when the home dir is
 /// unknown so the walk simply finds nothing.
-fn claude_home_dir() -> std::path::PathBuf {
+fn lingxi_home_dir() -> std::path::PathBuf {
     // claude-code `tr()` `??`: a SET `$LINGXI_CONFIG_DIR` wins verbatim (incl.
     // empty → cwd-relative); only UNSET falls back to `<home>/.claude`.
     if let Ok(explicit) = std::env::var(branding::CONFIG_DIR_ENV) {
@@ -2163,7 +2163,7 @@ fn claude_home_dir() -> std::path::PathBuf {
     dirs::home_dir().map_or_else(|| std::path::PathBuf::from("."), |h| h.join(branding::DOT_DIR))
 }
 
-/// (M9-10) Walk every `*.jsonl` transcript under `<claude_home>/projects/`
+/// (M9-10) Walk every `*.jsonl` transcript under `<lingxi_home>/projects/`
 /// (claude-code `getAllSessionFiles`: main session files directly in each
 /// project dir + `subagents/agent-*.jsonl`), parse each into a
 /// `stats::SessionContribution`, and aggregate. Returns the empty
@@ -2172,7 +2172,7 @@ fn claude_home_dir() -> std::path::PathBuf {
 /// `pump_open_stats`, which holds no lock across the call).
 async fn aggregate_stats_from_disk() -> crate::screens::stats::StatsData {
     // Run the whole walk on the blocking pool: it reads + JSON-parses the entire
-    // `<claude_home>/projects/` history (can be many GB across thousands of
+    // `<lingxi_home>/projects/` history (can be many GB across thousands of
     // files), which is CPU-bound and would starve the async UI executor (frozen
     // cursor) if run inline. `spawn_blocking` keeps the executor free to render.
     tokio::task::spawn_blocking(aggregate_stats_blocking)
@@ -2181,10 +2181,10 @@ async fn aggregate_stats_from_disk() -> crate::screens::stats::StatsData {
 }
 
 /// (`/stats` result cache) The on-disk cache file path
-/// (`<claude_home>/stats-cache.json`). The filename intentionally matches
+/// (`<lingxi_home>/stats-cache.json`). The filename intentionally matches
 /// claude-code's `STATS_CACHE_FILENAME` (`getStatsCachePath`).
 fn stats_cache_path() -> std::path::PathBuf {
-    claude_home_dir().join("stats-cache.json")
+    lingxi_home_dir().join("stats-cache.json")
 }
 
 /// (`/stats` result cache) In-process result cache: the last computed
@@ -2281,12 +2281,12 @@ fn fingerprint_paths(paths: &[(std::path::PathBuf, bool)]) -> crate::screens::st
 /// locked empty state).
 ///
 /// (`/stats` result cache, claude-code `aggregateLingXiStats`) Resolves the
-/// `<claude_home>/projects/` walk root + the [`stats_cache_path`], checks the
+/// `<lingxi_home>/projects/` walk root + the [`stats_cache_path`], checks the
 /// in-process [`STATS_MEM_CACHE`] first (a 2nd open within one process returns
 /// instantly), then delegates to the path-parameterized [`aggregate_stats_at`]
 /// for the disk-cache + walk, finally updating the mem cache on the way out.
 fn aggregate_stats_blocking() -> crate::screens::stats::StatsData {
-    let projects_dir = claude_home_dir().join("projects");
+    let projects_dir = lingxi_home_dir().join("projects");
     let cache_path = stats_cache_path();
 
     // (i) Collect the transcript paths + (ii) fingerprint them. Both are cheap
@@ -2384,7 +2384,7 @@ fn update_stats_mem_cache(
 /// `.await` the disk append); this pump — driven by the same 100ms ticker
 /// `use_future` — takes the string, resolves the session transcript path the
 /// same way the resume loader + stats walk do
-/// (`<claude_home>/projects/<sanitize(cwd)>/<session>.jsonl`), and appends the
+/// (`<lingxi_home>/projects/<sanitize(cwd)>/<session>.jsonl`), and appends the
 /// byte-locked `agent-color` entry OUTSIDE the `AppState` lock. No-op (returns
 /// `false`) when no `/color` write is pending or no session id is wired (the
 /// resume picker / smoke gates pass `None` — there is no transcript to write).
@@ -2414,7 +2414,7 @@ pub async fn pump_save_color(
     //    style as `aggregate_stats_from_disk`'s reads (no `FileSystem` dep).
     let cwd_str = cwd.to_string_lossy();
     let uuid = sid.as_uuid().to_string();
-    let path = session::session_path(&claude_home_dir(), &cwd_str, &uuid);
+    let path = session::session_path(&lingxi_home_dir(), &cwd_str, &uuid);
     let entry = session::agent_color_entry(&uuid, &color);
     let Ok(line) = serde_json::to_string(&entry) else {
         return false;
@@ -2454,9 +2454,9 @@ pub async fn pump_permission_delete(state: &Arc<Mutex<AppState>>) -> bool {
     let Some(update) = crate::screens::permissions::row_to_permission_update(&row) else {
         return false;
     };
-    let claude_home = claude_home_dir();
+    let lingxi_home = lingxi_home_dir();
     let paths = permission::PermissionPaths {
-        claude_home: claude_home.clone(),
+        lingxi_home: lingxi_home.clone(),
         cwd: cwd.clone(),
     };
     // 3) Remove from settings.json OUTSIDE the lock (best-effort — a broken file
@@ -2469,7 +2469,7 @@ pub async fn pump_permission_delete(state: &Arc<Mutex<AppState>>) -> bool {
     }
     // 4) Reload the rules + refresh the still-open screen (preserve the tab,
     //    clamp the selection to the new row count).
-    let reloaded = crate::screens::permissions::load_permission_sections(&cwd, &claude_home);
+    let reloaded = crate::screens::permissions::load_permission_sections(&cwd, &lingxi_home);
     let mut st = state.lock().await;
     if let Some(crate::screens::Screen::Permissions(scr)) = st.active_screen.as_mut() {
         let tab = scr.tab;
@@ -2497,9 +2497,9 @@ pub async fn pump_permission_add(state: &Arc<Mutex<AppState>>) -> bool {
     let Some(update) = crate::screens::permissions::row_to_permission_update(&row) else {
         return false;
     };
-    let claude_home = claude_home_dir();
+    let lingxi_home = lingxi_home_dir();
     let paths = permission::PermissionPaths {
-        claude_home: claude_home.clone(),
+        lingxi_home: lingxi_home.clone(),
         cwd: cwd.clone(),
     };
     if !permission::persist_permission_update(&update, &paths)
@@ -2508,7 +2508,7 @@ pub async fn pump_permission_add(state: &Arc<Mutex<AppState>>) -> bool {
     {
         return false; // already present / not persistable / broken file.
     }
-    let reloaded = crate::screens::permissions::load_permission_sections(&cwd, &claude_home);
+    let reloaded = crate::screens::permissions::load_permission_sections(&cwd, &lingxi_home);
     let mut st = state.lock().await;
     if let Some(crate::screens::Screen::Permissions(scr)) = st.active_screen.as_mut() {
         let tab = scr.tab;
@@ -2535,9 +2535,9 @@ pub async fn pump_workspace_dir(state: &Arc<Mutex<AppState>>) -> bool {
         };
         (pending, st.status.cwd.clone())
     };
-    let claude_home = claude_home_dir();
+    let lingxi_home = lingxi_home_dir();
     let paths = permission::PermissionPaths {
-        claude_home: claude_home.clone(),
+        lingxi_home: lingxi_home.clone(),
         cwd: cwd.clone(),
     };
     // Workspace dirs are added to Local settings (same destination the
@@ -2553,7 +2553,7 @@ pub async fn pump_workspace_dir(state: &Arc<Mutex<AppState>>) -> bool {
     {
         return false; // already present / absent / broken file.
     }
-    let reloaded = crate::screens::permissions::load_permission_sections(&cwd, &claude_home);
+    let reloaded = crate::screens::permissions::load_permission_sections(&cwd, &lingxi_home);
     let mut st = state.lock().await;
     if let Some(crate::screens::Screen::Permissions(scr)) = st.active_screen.as_mut() {
         let tab = scr.tab;

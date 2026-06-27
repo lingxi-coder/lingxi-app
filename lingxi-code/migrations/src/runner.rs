@@ -72,7 +72,7 @@ mod tests {
     fn test_env(t: &crate::test_support::TempConfig) -> crate::context::MigrationEnv {
         crate::context::MigrationEnv {
             global_config_path: t.global.clone(),
-            claude_config_home: t.home.clone(),
+            lingxi_config_home: t.home.clone(),
             project_dir: t.project.clone(),
             ctx: crate::context::MigrationContext { first_party: true, subscription_type: None },
             bus: None,

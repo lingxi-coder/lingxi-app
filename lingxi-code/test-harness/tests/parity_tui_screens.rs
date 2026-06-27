@@ -126,7 +126,7 @@ fn doctor_open_rows_close() {
     };
     let row_text = format!(
         "{} {} {} {}",
-        diag.cli_version, diag.rust_toolchain, diag.auth_state, diag.claude_home
+        diag.cli_version, diag.rust_toolchain, diag.auth_state, diag.lingxi_home
     );
     for needle in s["expected_row_substrings"].as_array().unwrap() {
         let n = needle.as_str().unwrap();

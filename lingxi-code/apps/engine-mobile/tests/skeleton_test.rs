@@ -64,7 +64,7 @@ fn submit_send_prompt_drives_listener_text_then_turn_ended() {
     let perm_sink = Arc::new(CollectingPermissionSink::default());
     let cfg = MobileConfig {
         cwd: tmp.path().to_path_buf(),
-        claude_home: tmp.path().join(".lingxi"),
+        lingxi_home: tmp.path().join(".lingxi"),
         ..MobileConfig::default()
     };
     let handle =

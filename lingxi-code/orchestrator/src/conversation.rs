@@ -3911,7 +3911,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// top-level (parent-less) file (`eagerLoadReason`). The orchestrator's
     /// [`crate::prompt::MemoryHierarchyProvider`] loads the full Managed/User/
     /// Project/Local hierarchy and tags each file with its
-    /// [`memory::claude_md::ClaudeMdTier`]; `memory_type` is taken directly from
+    /// [`memory::lingxi_md::LingxiMdTier`]; `memory_type` is taken directly from
     /// that tier (so an enterprise-`Managed` file is reported as `Managed`).
     ///
     /// Conditional (`paths:`-gated) rules are filtered out of the eager set by
@@ -3951,16 +3951,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // fires `file.type`, claudemd.ts:1058-1062), so the Managed tier is
             // reported faithfully rather than misclassified as Project.
             let memory_type = match file.tier {
-                memory::claude_md::ClaudeMdTier::Managed => {
+                memory::lingxi_md::LingxiMdTier::Managed => {
                     hooks::events::InstructionsMemoryType::Managed
                 }
-                memory::claude_md::ClaudeMdTier::User => {
+                memory::lingxi_md::LingxiMdTier::User => {
                     hooks::events::InstructionsMemoryType::User
                 }
-                memory::claude_md::ClaudeMdTier::Project => {
+                memory::lingxi_md::LingxiMdTier::Project => {
                     hooks::events::InstructionsMemoryType::Project
                 }
-                memory::claude_md::ClaudeMdTier::Local => {
+                memory::lingxi_md::LingxiMdTier::Local => {
                     hooks::events::InstructionsMemoryType::Local
                 }
             };
@@ -6169,7 +6169,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // `claudeMd` value = the assembled memory block (preamble + `Contents
         // of …:` blocks). Empty when no LINGXI.md files are loaded.
         let memory_files = self.memory.load(&self.cwd).await;
-        let claude_md = crate::prompt::memory_block::format(&memory_files);
+        let lingxi_md = crate::prompt::memory_block::format(&memory_files);
 
         // Build the entries in claude-code insertion order; each is `# key\nvalue`.
         let mut entries: Vec<String> = Vec::with_capacity(4);
@@ -6206,8 +6206,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 entries.push(format!("# Environment\n{body}"));
             }
         }
-        if !claude_md.is_empty() {
-            entries.push(format!("# claudeMd\n{claude_md}"));
+        if !lingxi_md.is_empty() {
+            entries.push(format!("# claudeMd\n{lingxi_md}"));
         }
         if let Some(email) = self
             .config
@@ -8289,7 +8289,7 @@ mod additional_context_tests {
             path: std::path::PathBuf::from("/proj/LINGXI.md"),
             body: "MD BODY".into(),
             is_local_override: false,
-            tier: memory::claude_md::ClaudeMdTier::Project,
+            tier: memory::lingxi_md::LingxiMdTier::Project,
             globs: None,
         }]));
         let orch = orch_with(mem, Some("u@example.com"));
@@ -8329,7 +8329,7 @@ You should not respond to this context unless it is highly relevant to your task
     }
 
     #[tokio::test]
-    async fn omits_claude_md_and_email_when_absent_keeps_date() {
+    async fn omits_lingxi_md_and_email_when_absent_keeps_date() {
         // Empty memory + no email → only `# currentDate` remains.
         let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
         let msg = orch
@@ -9891,7 +9891,7 @@ mod conditional_rules_reminder_tests {
         StaticMemoryProvider,
     };
     use crate::OrchestratorConfig;
-    use memory::claude_md::ClaudeMdTier;
+    use memory::lingxi_md::LingxiMdTier;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tool_api::registry::ToolRegistry;
@@ -9903,7 +9903,7 @@ mod conditional_rules_reminder_tests {
             path: cwd.join(".lingxi").join("rules").join(format!("{name}.md")),
             body: format!("BODY OF {name}"),
             is_local_override: false,
-            tier: ClaudeMdTier::Project,
+            tier: LingxiMdTier::Project,
             globs: Some(globs.iter().map(|s| (*s).to_string()).collect()),
         }
     }
@@ -9998,7 +9998,7 @@ mod conditional_rules_reminder_tests {
             path: cwd.join("LINGXI.md"),
             body: "always".into(),
             is_local_override: false,
-            tier: ClaudeMdTier::Project,
+            tier: LingxiMdTier::Project,
             globs: None,
         };
         let orch = orch_with_rules(cwd.clone(), vec![unconditional]);

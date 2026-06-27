@@ -49,7 +49,7 @@ pub fn get_session_trust_accepted() -> bool {
 }
 
 /// `homedir()` (Node `os.homedir()`): `$HOME` resolved the SAME way the rest of
-/// this crate sources it ([`claude_config_home`] uses `std::env::var_os("HOME")`,
+/// this crate sources it ([`lingxi_config_home`] uses `std::env::var_os("HOME")`,
 /// NOT `dirs::home_dir`). Used by the `TrustDialog` accept branch to detect the
 /// `cwd === homedir()` session-only case (`TrustDialog.tsx:162,174`). `None`
 /// when `$HOME` is unset.
@@ -68,18 +68,18 @@ pub type JsonMap = Map<String, Value>;
 /// `LINGXI_CONFIG_DIR=""` TS resolves config-home to `""` — a cwd-RELATIVE
 /// path, not `~/.claude`. That is pathological, not a behavior worth porting;
 /// this port treats `""` as unset everywhere.
-fn claude_config_dir_env() -> Option<PathBuf> {
+fn lingxi_config_dir_env() -> Option<PathBuf> {
     std::env::var_os(branding::CONFIG_DIR_ENV)
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
 }
 
 /// `getClaudeConfigHomeDir` (`envUtils.ts:7-14`): `$LINGXI_CONFIG_DIR` if
-/// set (non-empty — see [`claude_config_dir_env`] for the empty-string
+/// set (non-empty — see [`lingxi_config_dir_env`] for the empty-string
 /// divergence), else `$HOME/.claude`. `None` when neither env var exists.
 #[must_use]
-pub fn claude_config_home() -> Option<PathBuf> {
-    if let Some(dir) = claude_config_dir_env() {
+pub fn lingxi_config_home() -> Option<PathBuf> {
+    if let Some(dir) = lingxi_config_dir_env() {
         return Some(dir);
     }
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(branding::DOT_DIR))
@@ -95,13 +95,13 @@ pub fn claude_config_home() -> Option<PathBuf> {
 /// so `.lingxi.json` is hardcoded here.
 #[must_use]
 pub fn global_config_path() -> Option<PathBuf> {
-    let home = claude_config_home()?;
+    let home = lingxi_config_home()?;
     let legacy = home.join(branding::LEGACY_GLOBAL_CONFIG_FILE);
     if legacy.exists() {
         return Some(legacy);
     }
     let base =
-        claude_config_dir_env().or_else(|| std::env::var_os("HOME").map(PathBuf::from))?;
+        lingxi_config_dir_env().or_else(|| std::env::var_os("HOME").map(PathBuf::from))?;
     Some(base.join(branding::GLOBAL_CONFIG_FILE))
 }
 
@@ -500,17 +500,17 @@ fn project_has_trust(config_path: &Path, key: &str) -> bool {
     )
 }
 
-/// `config.projects?.[getProjectPathForConfig(cwd)]?.hasClaudeMdExternalIncludesApproved`
+/// `config.projects?.[getProjectPathForConfig(cwd)]?.hasLingxiMdExternalIncludesApproved`
 /// truthiness — whether the user has approved Managed/Project/Local LINGXI.md
 /// files to `@import` paths OUTSIDE the working dir (claude-code
-/// `hasClaudeMdExternalIncludesApproved`, claudemd.ts:826-846). Fail-safe to
+/// `hasLingxiMdExternalIncludesApproved`, claudemd.ts:826-846). Fail-safe to
 /// `false` on any read/parse error; the writer only ever stores boolean `true`.
 /// No ancestor walk (unlike trust): this is the EXACT project's approval.
 #[must_use]
-pub fn check_has_claude_md_external_includes_approved(config_path: &Path, cwd: &Path) -> bool {
+pub fn check_has_lingxi_md_external_includes_approved(config_path: &Path, cwd: &Path) -> bool {
     matches!(
         get_project_config(config_path, &project_path_for_config(cwd)),
-        Ok(p) if p.get("hasClaudeMdExternalIncludesApproved") == Some(&Value::Bool(true))
+        Ok(p) if p.get("hasLingxiMdExternalIncludesApproved") == Some(&Value::Bool(true))
     )
 }
 
@@ -591,7 +591,7 @@ mod tests {
         let _g = env_lock();
         std::env::set_var("LINGXI_CONFIG_DIR", "/tmp/cc-test-home");
         assert_eq!(
-            claude_config_home(),
+            lingxi_config_home(),
             Some(std::path::PathBuf::from("/tmp/cc-test-home"))
         );
         std::env::remove_var("LINGXI_CONFIG_DIR");
@@ -603,7 +603,7 @@ mod tests {
         std::env::remove_var("LINGXI_CONFIG_DIR");
         std::env::set_var("HOME", "/tmp/cc-test-h2");
         assert_eq!(
-            claude_config_home(),
+            lingxi_config_home(),
             Some(std::path::PathBuf::from("/tmp/cc-test-h2/.lingxi"))
         );
     }
@@ -611,13 +611,13 @@ mod tests {
     #[test]
     fn config_home_treats_empty_claude_config_dir_as_unset() {
         let _g = env_lock();
-        // Deliberate divergence (see `claude_config_dir_env`): TS's
+        // Deliberate divergence (see `lingxi_config_dir_env`): TS's
         // `??`-shaped getClaudeConfigHomeDir would use "" (cwd-relative);
         // this port treats "" as unset and falls back to ~/.claude.
         std::env::set_var("LINGXI_CONFIG_DIR", "");
         std::env::set_var("HOME", "/tmp/cc-test-h4");
         assert_eq!(
-            claude_config_home(),
+            lingxi_config_home(),
             Some(std::path::PathBuf::from("/tmp/cc-test-h4/.lingxi"))
         );
         assert_eq!(
@@ -1063,14 +1063,14 @@ mod tests {
         assert!(!check_has_trust_dialog_accepted(&t.global, &t.project));
     }
 
-    // ---- hasClaudeMdExternalIncludesApproved (claudemd.ts:826-846) ----
+    // ---- hasLingxiMdExternalIncludesApproved (claudemd.ts:826-846) ----
 
-    /// Seed `projects[<key>] = { "hasClaudeMdExternalIncludesApproved": <v> }`.
+    /// Seed `projects[<key>] = { "hasLingxiMdExternalIncludesApproved": <v> }`.
     fn seed_external_approved(global: &Path, key: &str, v: bool) {
         std::fs::write(
             global,
             serde_json::to_string(&serde_json::json!({
-                "projects": { key: { "hasClaudeMdExternalIncludesApproved": v } }
+                "projects": { key: { "hasLingxiMdExternalIncludesApproved": v } }
             }))
             .unwrap(),
         )
@@ -1082,7 +1082,7 @@ mod tests {
         let t = temp_config();
         let key = project_path_for_config(&t.project);
         seed_external_approved(&t.global, &key, true);
-        assert!(check_has_claude_md_external_includes_approved(&t.global, &t.project));
+        assert!(check_has_lingxi_md_external_includes_approved(&t.global, &t.project));
     }
 
     #[test]
@@ -1091,7 +1091,7 @@ mod tests {
         let key = project_path_for_config(&t.project);
         // Stored `false` must read as not-approved (matches only boolean `true`).
         seed_external_approved(&t.global, &key, false);
-        assert!(!check_has_claude_md_external_includes_approved(&t.global, &t.project));
+        assert!(!check_has_lingxi_md_external_includes_approved(&t.global, &t.project));
     }
 
     #[test]
@@ -1103,7 +1103,7 @@ mod tests {
         std::fs::create_dir_all(&child).unwrap();
         let parent_key = project_path_for_config(&t.project);
         seed_external_approved(&t.global, &parent_key, true);
-        assert!(!check_has_claude_md_external_includes_approved(&t.global, &child));
+        assert!(!check_has_lingxi_md_external_includes_approved(&t.global, &child));
     }
 
     #[test]
@@ -1111,20 +1111,20 @@ mod tests {
         let t = temp_config();
         std::fs::write(
             &t.global,
-            r#"{"projects":{"/some/other/proj":{"hasClaudeMdExternalIncludesApproved":true}}}"#,
+            r#"{"projects":{"/some/other/proj":{"hasLingxiMdExternalIncludesApproved":true}}}"#,
         )
         .unwrap();
-        assert!(!check_has_claude_md_external_includes_approved(&t.global, &t.project));
+        assert!(!check_has_lingxi_md_external_includes_approved(&t.global, &t.project));
     }
 
     #[test]
     fn external_includes_check_corrupt_or_missing_is_false() {
         let t = temp_config();
         // Missing file → false (fail-safe to local-only).
-        assert!(!check_has_claude_md_external_includes_approved(&t.global, &t.project));
+        assert!(!check_has_lingxi_md_external_includes_approved(&t.global, &t.project));
         // Corrupt file → false, no panic.
         std::fs::write(&t.global, "{ broken").unwrap();
-        assert!(!check_has_claude_md_external_includes_approved(&t.global, &t.project));
+        assert!(!check_has_lingxi_md_external_includes_approved(&t.global, &t.project));
     }
 
     /// Session-level (in-memory) trust short-circuits the disk check —
@@ -1154,7 +1154,7 @@ mod tests {
         assert!(!check_has_trust_dialog_accepted(&t.global, &t.project));
     }
 
-    /// `trust_homedir` sources `$HOME` the same way `claude_config_home` does
+    /// `trust_homedir` sources `$HOME` the same way `lingxi_config_home` does
     /// (`std::env::var_os("HOME")`), so the dialog's `cwd === homedir()` check
     /// matches the rest of the crate.
     #[test]

@@ -120,9 +120,9 @@ pub struct SettingsJson {
 
     /// `claudeMdExcludes` (array-merge, concat-dedup): glob patterns or absolute
     /// paths of `LINGXI.md` files to exclude from loading (claude-code
-    /// `settings/types.ts:1053`, gate `isClaudeMdExcluded`, `claudemd.ts:547`).
+    /// `settings/types.ts:1053`, gate `isLingxiMdExcluded`, `claudemd.ts:547`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_md_excludes: Option<Vec<String>>,
+    pub lingxi_md_excludes: Option<Vec<String>>,
 
     /// Object-merge field (deep-merge).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -217,7 +217,7 @@ impl SettingsJson {
             ),
             ("enabledTools", self.enabled_tools.as_deref()),
             ("additionalIncludes", self.additional_includes.as_deref()),
-            ("claudeMdExcludes", self.claude_md_excludes.as_deref()),
+            ("claudeMdExcludes", self.lingxi_md_excludes.as_deref()),
         ] {
             if let Some(arr) = array {
                 for (i, s) in arr.iter().enumerate() {

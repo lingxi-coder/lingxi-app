@@ -26,7 +26,7 @@ pub struct DoctorDiagnostics {
     /// e.g. "1.82.0".
     pub rust_toolchain: String,
     /// Absolute claude config home (e.g. "~/.lingxi" expanded).
-    pub claude_home: String,
+    pub lingxi_home: String,
     /// Working directory.
     pub cwd: String,
     /// MCP servers configured (any state).
@@ -62,7 +62,7 @@ impl DoctorDiagnostics {
         Self {
             cli_version: format!("lingxi-cli v{}", env!("CARGO_PKG_VERSION")),
             rust_toolchain: rust_toolchain_version(),
-            claude_home: claude_home_dir(),
+            lingxi_home: lingxi_home_dir(),
             cwd: cwd.display().to_string(),
             mcp_configured,
             mcp_connected,
@@ -87,7 +87,7 @@ fn rust_toolchain_version() -> String {
 /// Claude config home dir as a display string. Reuses the standard
 /// config-dir resolution the rest of the workspace uses (`$LINGXI_CONFIG_DIR`
 /// → `~/.claude`). Falls back to "~/.lingxi" when the home dir is unknown.
-fn claude_home_dir() -> String {
+fn lingxi_home_dir() -> String {
     // claude-code `tr()` `??`: a SET `$LINGXI_CONFIG_DIR` wins verbatim (incl.
     // empty); only UNSET falls back to `<home>/.claude`.
     if let Ok(explicit) = std::env::var(branding::CONFIG_DIR_ENV) {
@@ -113,7 +113,7 @@ pub fn DoctorScreen(props: &DoctorScreenProps) -> impl Into<AnyElement<'static>>
     let d = props.diag.clone().unwrap_or(DoctorDiagnostics {
         cli_version: String::new(),
         rust_toolchain: String::new(),
-        claude_home: String::new(),
+        lingxi_home: String::new(),
         cwd: String::new(),
         mcp_configured: 0,
         mcp_connected: 0,
@@ -148,7 +148,7 @@ pub fn DoctorScreen(props: &DoctorScreenProps) -> impl Into<AnyElement<'static>>
             Text(content: "Diagnostics", weight: Weight::Bold)
             Text(content: format!("└ Version: {}", d.cli_version))
             Text(content: format!("└ Rust toolchain: {}", d.rust_toolchain))
-            Text(content: format!("└ Claude home: {}", d.claude_home))
+            Text(content: format!("└ Claude home: {}", d.lingxi_home))
             Text(content: format!("└ Working dir: {}", d.cwd))
             Text(content: format!("└ MCP servers: {mcp_status}"))
             Text(content: format!("└ Auth: {}", d.auth_state))
@@ -171,7 +171,7 @@ mod tests {
         let diag = DoctorDiagnostics {
             cli_version: "lingxi-cli v0.8.0".into(),
             rust_toolchain: "1.82.0".into(),
-            claude_home: "/home/u/.lingxi".into(),
+            lingxi_home: "/home/u/.lingxi".into(),
             cwd: "/work/proj".into(),
             mcp_configured: 2,
             mcp_connected: 0,

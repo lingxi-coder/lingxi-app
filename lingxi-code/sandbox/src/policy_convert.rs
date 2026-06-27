@@ -21,7 +21,7 @@ const TOOL_WEBFETCH: &str = "WebFetch";
 
 /// Session/host-side seeds that claude-code's `convertToSandboxRuntimeConfig`
 /// reads from module-level state (`getClaudeTempDir`, `SETTING_SOURCES`,
-/// `getManagedSettingsDropInDir`, `getCwdState`, `getAdditionalDirectoriesForClaudeMd`,
+/// `getManagedSettingsDropInDir`, `getCwdState`, `getAdditionalDirectoriesForLingxiMd`,
 /// `worktreeMainRepoPath`, …). In Rust we have no global session object, so the
 /// caller threads these in explicitly. All fields default to empty/`None`, so a
 /// minimal caller passes `&SandboxConvertContext::default()` and gets the same
@@ -33,7 +33,7 @@ pub struct SandboxConvertContext {
     /// Claude temp dir (`getClaudeTempDir()`), seeded into `allow_write` right
     /// after `.` (sandbox-adapter.ts:225). Needed for Shell.ts cwd tracking
     /// files. `None` => not seeded (only `.`).
-    pub claude_temp_dir: Option<String>,
+    pub lingxi_temp_dir: Option<String>,
     /// Resolved settings-file paths across all sources
     /// (`SETTING_SOURCES.map(getSettingsFilePathForSource)`), each unconditionally
     /// added to `deny_write` to prevent sandbox escape (sandbox-adapter.ts:232-235).
@@ -52,7 +52,7 @@ pub struct SandboxConvertContext {
     /// `allow_write` when present and `!= cwd` (sandbox-adapter.ts:286-288).
     pub worktree_main_repo_path: Option<String>,
     /// Session-only `--add-dir` / `/add-dir` directories
-    /// (`getAdditionalDirectoriesForClaudeMd()`), unioned with
+    /// (`getAdditionalDirectoriesForLingxiMd()`), unioned with
     /// `permissions.additionalDirectories` into `allow_write`
     /// (sandbox-adapter.ts:295-299).
     pub additional_md_dirs: Vec<String>,
@@ -101,7 +101,7 @@ fn parse_rule(rule: &str) -> Option<(&str, &str)> {
 /// sandbox-adapter.ts:295-299).
 ///
 /// Seeds (sandbox-adapter.ts:225-299, applied BEFORE the rule walk):
-/// - `allow_write` starts with `["."]`, then `ctx.claude_temp_dir` if `Some`;
+/// - `allow_write` starts with `["."]`, then `ctx.lingxi_temp_dir` if `Some`;
 /// - `deny_write` is extended with `ctx.settings_file_paths`, then
 ///   `ctx.managed_drop_in_dir` if `Some`, then `ctx.cwd_settings_paths` and
 ///   `ctx.skills_dirs`;
@@ -138,7 +138,7 @@ pub fn convert_settings_to_runtime_config(
     // --- Seeds (sandbox-adapter.ts:225-299), applied BEFORE the rule walk. ---
     // Always include current directory and Claude temp directory as writable.
     filesystem.allow_write.push(".".to_string());
-    if let Some(tmp) = &ctx.claude_temp_dir {
+    if let Some(tmp) = &ctx.lingxi_temp_dir {
         filesystem.allow_write.push(tmp.clone());
     }
     // Always deny writes to settings.json files / managed drop-in dir / cwd

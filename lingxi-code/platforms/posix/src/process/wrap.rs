@@ -22,17 +22,17 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// `(name, value)` tuples for the env-vars claude-code injects into every
 /// `Shell.execute` spawn. The runtime impl in [`super::runner`] applies
 /// these on top of the caller-supplied env.
-pub const ENV_CLAUDECODE: (&str, &str) = ("CLAUDECODE", "1");
+pub const ENV_LINGXI_MARKER: (&str, &str) = ("LINGXI", "1");
 /// Marks every spawned process as running inside a claude-code CHILD session —
 /// claude-code `Uot` sets `LINGXI_CHILD_SESSION:"1"` UNCONDITIONALLY (#7).
-pub const ENV_CLAUDE_CODE_CHILD_SESSION: (&str, &str) = ("LINGXI_CHILD_SESSION", "1");
+pub const ENV_LINGXI_CHILD_SESSION: (&str, &str) = ("LINGXI_CHILD_SESSION", "1");
 /// Forces `git`'s editor to a no-op so interactive git commands cannot
 /// block the shell.
 pub const ENV_GIT_EDITOR: (&str, &str) = ("GIT_EDITOR", "true");
 /// Name of the `SHELL` env var inherited from the user's environment.
 pub const ENV_SHELL: &str = "SHELL";
 /// Name of the session-id env var the IDE bridge / hooks consume.
-pub const ENV_CLAUDE_CODE_SESSION_ID: &str = "LINGXI_SESSION_ID";
+pub const ENV_LINGXI_SESSION_ID: &str = "LINGXI_SESSION_ID";
 /// Name of the agent-identity env var claude-code's `Uot` injects into child
 /// shell spawns. The value (see [`ai_agent_value`]) mirrors claude-code's
 /// `Mer("agent")`.
@@ -149,14 +149,14 @@ mod tests {
 
     #[test]
     fn env_constants_match_claude_code() {
-        assert_eq!(ENV_CLAUDECODE, ("CLAUDECODE", "1"));
+        assert_eq!(ENV_LINGXI_MARKER, ("LINGXI", "1"));
         assert_eq!(
-            ENV_CLAUDE_CODE_CHILD_SESSION,
+            ENV_LINGXI_CHILD_SESSION,
             ("LINGXI_CHILD_SESSION", "1")
         );
         assert_eq!(ENV_GIT_EDITOR, ("GIT_EDITOR", "true"));
         assert_eq!(ENV_SHELL, "SHELL");
-        assert_eq!(ENV_CLAUDE_CODE_SESSION_ID, "LINGXI_SESSION_ID");
+        assert_eq!(ENV_LINGXI_SESSION_ID, "LINGXI_SESSION_ID");
         assert_eq!(ENV_AI_AGENT, "AI_AGENT");
     }
 

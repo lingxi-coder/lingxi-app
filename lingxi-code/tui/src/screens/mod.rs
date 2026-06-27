@@ -124,7 +124,7 @@ pub enum Screen {
     /// `root::handle_screen_key` runs the pure `stats::handle_stats_key`
     /// (Tab/Shift-Tab switch tab, scroll keys via the embedded `ScrollState`,
     /// Esc/`q` close). Opened by `/stats` via the async `pump_open_stats` (the
-    /// fs walk over `<claude_home>/projects/` runs OUTSIDE the `AppState` lock).
+    /// fs walk over `<lingxi_home>/projects/` runs OUTSIDE the `AppState` lock).
     /// `StatsData` carries only integer/string fields (no `f64`), so the
     /// `Screen: PartialEq` bound is satisfiable.
     Stats(stats::StatsState),

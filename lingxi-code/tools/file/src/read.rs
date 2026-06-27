@@ -693,7 +693,7 @@ fn get_file_extension_for_analytics(path: &std::path::Path) -> Option<String> {
 #[must_use]
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn detect_session_file_type(path: &std::path::Path) -> Option<&'static str> {
-    let config_dir = claude_config_home_dir();
+    let config_dir = lingxi_config_home_dir();
     let normalized = to_comparable(path);
     let config_cmp = to_comparable(&config_dir);
     if !normalized.starts_with(&config_cmp) {
@@ -718,7 +718,7 @@ fn to_comparable(path: &std::path::Path) -> String {
 /// `$LINGXI_CONFIG_DIR` when set is honored verbatim (`??`, incl. an empty value
 /// → cwd-relative), else `$HOME/.claude` (falling back to `USERPROFILE` then a
 /// bare `.claude`). Mirrors the ports in `tools/task` / `commands/core`.
-fn claude_config_home_dir() -> PathBuf {
+fn lingxi_config_home_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
         return PathBuf::from(dir);
     }
@@ -3310,9 +3310,9 @@ mod tests {
         // session_memory: <configHome>/.../session-memory/*.md
         // session_transcript: <configHome>/.../projects/*.jsonl
         // Build paths under the resolved config home (no process-global env
-        // mutation — that would race other parallel tests). `claude_config_home_dir`
+        // mutation — that would race other parallel tests). `lingxi_config_home_dir`
         // resolves the same way `detect_session_file_type` reads it.
-        let config_home = claude_config_home_dir();
+        let config_home = lingxi_config_home_dir();
         let mem = config_home.join("agents/session-memory/abc.md");
         let trans = config_home.join("projects/foo/bar.jsonl");
         let plain = config_home.join("settings.json");

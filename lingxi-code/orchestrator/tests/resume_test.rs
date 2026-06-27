@@ -22,8 +22,8 @@ async fn setup_two_turn_jsonl() -> (
     let cwd_path = temp.path().join("proj");
     tokio::fs::create_dir(&cwd_path).await.unwrap();
     let cwd = cwd_path.to_string_lossy().into_owned();
-    let claude_home = temp.path().join("home");
-    let subdir = claude_home.join("projects").join(project_dir_name(&cwd));
+    let lingxi_home = temp.path().join("home");
+    let subdir = lingxi_home.join("projects").join(project_dir_name(&cwd));
     tokio::fs::create_dir_all(&subdir).await.unwrap();
 
     let sid = Uuid::new_v4();
@@ -62,13 +62,13 @@ async fn setup_two_turn_jsonl() -> (
         .await
         .unwrap();
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(temp.path().to_path_buf()));
-    (temp, claude_home, cwd, sid, m2, fs)
+    (temp, lingxi_home, cwd, sid, m2, fs)
 }
 
 #[tokio::test]
 async fn replay_returns_state_with_last_uuid_set() {
-    let (_temp, claude_home, cwd, sid, last_uuid, fs) = setup_two_turn_jsonl().await;
-    let replayed = replay_session_state(&claude_home, &cwd, sid, fs)
+    let (_temp, lingxi_home, cwd, sid, last_uuid, fs) = setup_two_turn_jsonl().await;
+    let replayed = replay_session_state(&lingxi_home, &cwd, sid, fs)
         .await
         .expect("replay ok");
     assert_eq!(replayed.messages.len(), 2);
@@ -91,8 +91,8 @@ async fn state_from_messages_matches_disk_replay() {
     // transcript ALREADY in hand (no second disk read). `state_from_messages`
     // over `replayed.messages` must reproduce the SAME `SessionState.history` +
     // `session_id` the on-disk `replay_session_state` produced.
-    let (_temp, claude_home, cwd, sid, _last_uuid, fs) = setup_two_turn_jsonl().await;
-    let replayed = replay_session_state(&claude_home, &cwd, sid, fs)
+    let (_temp, lingxi_home, cwd, sid, _last_uuid, fs) = setup_two_turn_jsonl().await;
+    let replayed = replay_session_state(&lingxi_home, &cwd, sid, fs)
         .await
         .expect("replay ok");
 
@@ -108,9 +108,9 @@ async fn replay_propagates_loader_error() {
     let cwd_path = temp.path().join("proj");
     tokio::fs::create_dir(&cwd_path).await.unwrap();
     let cwd = cwd_path.to_string_lossy().into_owned();
-    let claude_home = temp.path().join("home");
+    let lingxi_home = temp.path().join("home");
     let sid = Uuid::new_v4();
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(temp.path().to_path_buf()));
-    let res = replay_session_state(&claude_home, &cwd, sid, fs).await;
+    let res = replay_session_state(&lingxi_home, &cwd, sid, fs).await;
     assert!(matches!(res, Err(ResumeError::Loader(_))));
 }

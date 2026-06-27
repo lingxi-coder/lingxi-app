@@ -23,7 +23,7 @@ pub struct RecentModel {
 }
 
 fn settings_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| memory::claude_md::user_config_dir(&h).join("settings.json"))
+    dirs::home_dir().map(|h| memory::lingxi_md::user_config_dir(&h).join("settings.json"))
 }
 
 /// Load the recent list (most-recent-first). Empty on any error.

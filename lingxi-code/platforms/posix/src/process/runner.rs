@@ -1,7 +1,7 @@
 //! `tokio::process`-backed [`ProcessRunner`] for desktop hosts.
 //!
 //! Foreground `run` applies the claude-code spawn-env contract
-//! (`CLAUDECODE=1`, `GIT_EDITOR=true`, `AI_AGENT=<…>`, `SHELL=<bin>` for the
+//! (`LINGXI=1`, `GIT_EDITOR=true`, `AI_AGENT=<…>`, `SHELL=<bin>` for the
 //! bash provider) plus a 30-minute
 //! default timeout. `spawn_background` lands a real child with
 //! file-mode stdio (POSIX `O_NOFOLLOW`) wired to a per-task output file
@@ -14,7 +14,7 @@ use crate::process::kill_tree::kill_tree_force;
 use crate::process::spawn_unsafe::attach_setsid;
 use crate::process::wrap::{
     ai_agent_value, is_bash_provider_shell, task_output_path, DEFAULT_TIMEOUT, ENV_AI_AGENT,
-    ENV_CLAUDECODE, ENV_CLAUDE_CODE_CHILD_SESSION, ENV_CLAUDE_CODE_SESSION_ID, ENV_GIT_EDITOR,
+    ENV_LINGXI_MARKER, ENV_LINGXI_CHILD_SESSION, ENV_LINGXI_SESSION_ID, ENV_GIT_EDITOR,
     ENV_SHELL,
 };
 use async_trait::async_trait;
@@ -34,7 +34,7 @@ use traits::{
 /// 199137330). For `source==="harness"`, `Uot` does NOT emit `AI_AGENT`
 /// (that is gated `source==="agent"`), and the hook env carries no
 /// `GIT_EDITOR` (that is a Bash-spawn-only var). The hooks crate already
-/// folds the full `Uot(harness)` set (`CLAUDECODE` / `LINGXI_SESSION_ID`
+/// folds the full `Uot(harness)` set (`LINGXI` / `LINGXI_SESSION_ID`
 /// / `LINGXI_CHILD_SESSION` / `LINGXI_EFFORT`) into the command env, so
 /// the runner must NOT layer the Bash-spawn `AI_AGENT` / `GIT_EDITOR` on top
 /// of a hook child. We detect a hook command by this audit reason and skip
@@ -133,7 +133,7 @@ impl PosixProcess {
     ///
     /// Env-var precedence (matches claude-code `Shell.ts:317-328`):
     /// 1. Caller-supplied env vars on the [`SandboxedCommand`].
-    /// 2. `CLAUDECODE=1`, `GIT_EDITOR=true`, `AI_AGENT=<Mer("agent")>`, and
+    /// 2. `LINGXI=1`, `GIT_EDITOR=true`, `AI_AGENT=<Mer("agent")>`, and
     ///    `SHELL=<inner.command>` (the last only for the bash provider) —
     ///    overwritten on top so callers cannot accidentally clobber them.
     /// 3. `LINGXI_SESSION_ID` is propagated only when the caller has
@@ -175,11 +175,11 @@ impl PosixProcess {
             tcmd.env(k, v);
         }
         // 2. Spawn-env contract (overrides anything the caller set).
-        tcmd.env(ENV_CLAUDECODE.0, ENV_CLAUDECODE.1);
+        tcmd.env(ENV_LINGXI_MARKER.0, ENV_LINGXI_MARKER.1);
         // #7: claude-code `Uot` always marks child processes as a child session.
         tcmd.env(
-            ENV_CLAUDE_CODE_CHILD_SESSION.0,
-            ENV_CLAUDE_CODE_CHILD_SESSION.1,
+            ENV_LINGXI_CHILD_SESSION.0,
+            ENV_LINGXI_CHILD_SESSION.1,
         );
         // #7: claude-code `Uot` injects `AI_AGENT=Mer("agent")` for the Bash
         // spawn (`source:"agent"`); a hook child (`source:"harness"`) gets
@@ -225,8 +225,8 @@ impl PosixProcess {
             tcmd.env_remove(ENV_SHELL);
         }
         // 3. LINGXI_SESSION_ID propagated only if explicitly provided.
-        if let Some(sess) = inner.env.get(ENV_CLAUDE_CODE_SESSION_ID) {
-            tcmd.env(ENV_CLAUDE_CODE_SESSION_ID, sess);
+        if let Some(sess) = inner.env.get(ENV_LINGXI_SESSION_ID) {
+            tcmd.env(ENV_LINGXI_SESSION_ID, sess);
         }
         // 4. GHA subprocess secret-scrub (`subprocessEnv()`, subprocessEnv.ts:86-97):
         //    when `LINGXI_SUBPROCESS_ENV_SCRUB` is truthy (claude-code-action's
@@ -415,7 +415,7 @@ mod hook_env_tests {
             "runner must NOT overwrite GIT_EDITOR on a hook child; env was:\n{dump}",
         );
         // The always-present `Uot` markers are still set on a hook child.
-        assert!(lines.iter().any(|l| *l == "CLAUDECODE=1"));
+        assert!(lines.iter().any(|l| *l == "LINGXI=1"));
         assert!(lines.iter().any(|l| *l == "LINGXI_CHILD_SESSION=1"));
     }
 

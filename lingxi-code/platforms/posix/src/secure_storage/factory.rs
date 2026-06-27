@@ -41,7 +41,7 @@ pub async fn secure_storage_for_platform(
 ) -> Result<Arc<dyn SecureStorage>, SecureStorageError> {
     #[cfg(target_os = "macos")]
     {
-        let default_dir = default_claude_dir();
+        let default_dir = default_lingxi_dir();
         match super::macos::MacOsKeychainStorage::new(
             user.clone(),
             config_dir.clone(),
@@ -64,7 +64,7 @@ pub async fn secure_storage_for_platform(
         // try the `libsecret` `secret-tool` backend first, falling back to
         // plaintext (with the documented warning) when it cannot initialise —
         // the same try-keychain-then-plaintext shape as the macOS arm.
-        let default_dir = default_claude_dir();
+        let default_dir = default_lingxi_dir();
         match super::linux::LinuxSecretStorage::new(
             user.clone(),
             config_dir.clone(),
@@ -98,7 +98,7 @@ pub async fn secure_storage_for_platform(
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn default_claude_dir() -> PathBuf {
+fn default_lingxi_dir() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
         PathBuf::from(home).join(branding::DOT_DIR)
     } else {

@@ -39,15 +39,15 @@ async fn write_then_resume_then_append_then_read_full_chain_intact() {
     let cwd_path = temp.path().join("proj");
     tokio::fs::create_dir(&cwd_path).await.unwrap();
     let cwd = cwd_path.to_string_lossy().into_owned();
-    let claude_home = temp.path().join("home");
-    let subdir = claude_home.join("projects").join(project_dir_name(&cwd));
+    let lingxi_home = temp.path().join("home");
+    let subdir = lingxi_home.join("projects").join(project_dir_name(&cwd));
     tokio::fs::create_dir_all(&subdir).await.unwrap();
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(temp.path().to_path_buf()));
 
     let sid = Uuid::new_v4();
     let m1 = Uuid::new_v4();
     let m2 = Uuid::new_v4();
-    let path = session_path(&claude_home, &cwd, &sid.to_string());
+    let path = session_path(&lingxi_home, &cwd, &sid.to_string());
 
     // (1) initial 2-turn write via the M5-07 writer.
     let writer = Arc::new(JsonlWriter::new(path.clone(), fs.clone()));
@@ -61,7 +61,7 @@ async fn write_then_resume_then_append_then_read_full_chain_intact() {
         .unwrap();
 
     // (2) load via M5-08.
-    let replayed = replay_session_state(&claude_home, &cwd, sid, fs.clone())
+    let replayed = replay_session_state(&lingxi_home, &cwd, sid, fs.clone())
         .await
         .unwrap();
     assert_eq!(replayed.messages.len(), 2);

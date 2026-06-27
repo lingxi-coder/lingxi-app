@@ -76,7 +76,7 @@ pub struct MigrationEnv {
     /// `~/.lingxi.json` (resolved by `global_config::global_config_path`).
     pub global_config_path: PathBuf,
     /// `~/.claude` (config home — settings.json + cache/ live here).
-    pub claude_config_home: PathBuf,
+    pub lingxi_config_home: PathBuf,
     /// Project directory (for `settings.local.json` + the project-config key).
     pub project_dir: PathBuf,
     /// Provider/subscription gates.

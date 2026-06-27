@@ -208,7 +208,7 @@ impl PermissionRuleSource {
     /// [`crate::shadow::format_source`] (`"user settings"` etc.). Byte-locked to
     /// claude-code's `SettingSource` union.
     #[must_use]
-    pub fn claude_settings_source(self) -> &'static str {
+    pub fn lingxi_settings_source(self) -> &'static str {
         match self {
             Self::UserSettings => "userSettings",
             Self::ProjectSettings => "projectSettings",

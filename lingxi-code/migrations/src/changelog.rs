@@ -23,7 +23,7 @@ pub async fn migrate_changelog_from_config(env: &MigrationEnv) {
         return;
     }
 
-    let cache_dir = env.claude_config_home.join("cache");
+    let cache_dir = env.lingxi_config_home.join("cache");
     let cache_path = cache_dir.join("changelog.md");
     if tokio::fs::create_dir_all(&cache_dir).await.is_ok() {
         // `wx` flag parity (`releaseNotes.ts:66`): write only if the file
@@ -63,7 +63,7 @@ mod tests {
     fn test_env(t: &crate::test_support::TempConfig) -> crate::context::MigrationEnv {
         crate::context::MigrationEnv {
             global_config_path: t.global.clone(),
-            claude_config_home: t.home.clone(),
+            lingxi_config_home: t.home.clone(),
             project_dir: t.project.clone(),
             ctx: crate::context::MigrationContext { first_party: true, subscription_type: None },
             bus: None,

@@ -40,7 +40,7 @@ pub struct SessionMetadata {
     /// Output style name in effect.
     pub current_output_style: String,
     /// LINGXI.md hierarchy used for context priming.
-    pub claude_md_paths: Vec<PathBuf>,
+    pub lingxi_md_paths: Vec<PathBuf>,
     /// Wall-clock time of the most recent metadata write.
     pub last_modified: SystemTime,
 }

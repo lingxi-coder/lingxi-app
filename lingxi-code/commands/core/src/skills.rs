@@ -51,7 +51,7 @@ pub struct SkillsHandler {
 #[derive(Debug, Clone, Default)]
 struct SkillsRoots {
     cwd: PathBuf,
-    claude_home: PathBuf,
+    lingxi_home: PathBuf,
     managed_dir: Option<PathBuf>,
     additional_skill_dirs: Vec<PathBuf>,
 }
@@ -63,13 +63,13 @@ impl SkillsHandler {
         Self { roots: None }
     }
 
-    /// Construct a handler pinned to explicit `(cwd, claude_home)` roots.
+    /// Construct a handler pinned to explicit `(cwd, lingxi_home)` roots.
     #[must_use]
-    pub fn with_roots(cwd: PathBuf, claude_home: PathBuf) -> Self {
+    pub fn with_roots(cwd: PathBuf, lingxi_home: PathBuf) -> Self {
         Self {
             roots: Some(SkillsRoots {
                 cwd,
-                claude_home,
+                lingxi_home,
                 managed_dir: None,
                 additional_skill_dirs: Vec::new(),
             }),
@@ -81,14 +81,14 @@ impl SkillsHandler {
     #[must_use]
     pub fn with_all_roots(
         cwd: PathBuf,
-        claude_home: PathBuf,
+        lingxi_home: PathBuf,
         managed_dir: Option<PathBuf>,
         additional_skill_dirs: Vec<PathBuf>,
     ) -> Self {
         Self {
             roots: Some(SkillsRoots {
                 cwd,
-                claude_home,
+                lingxi_home,
                 managed_dir,
                 additional_skill_dirs,
             }),
@@ -101,14 +101,14 @@ impl BuiltinCommandHandler for SkillsHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
         let roots = self.roots.clone().unwrap_or_else(|| SkillsRoots {
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            claude_home: claude_home_dir(),
+            lingxi_home: lingxi_home_dir(),
             managed_dir: None,
             additional_skill_dirs: Vec::new(),
         });
         CommandResult::Done {
             display: Some(render_available_skills_with_roots(
                 &roots.cwd,
-                &roots.claude_home,
+                &roots.lingxi_home,
                 roots.managed_dir.as_deref(),
                 &roots.additional_skill_dirs,
             )),
@@ -124,7 +124,7 @@ impl BuiltinCommandHandler for SkillsHandler {
     }
 }
 
-fn claude_home_dir() -> PathBuf {
+fn lingxi_home_dir() -> PathBuf {
     // claude-code `tr()`: `$LINGXI_CONFIG_DIR` when set wins (`??`: an empty value
     // is honored verbatim → cwd-relative), else `$HOME/.claude` (with a
     // `$USERPROFILE` fallback for Windows, matching tools/file + tools/task).
@@ -140,19 +140,19 @@ fn claude_home_dir() -> PathBuf {
 }
 
 #[cfg(test)]
-fn render_available_skills(cwd: &Path, claude_home: &Path) -> String {
-    render_sections(&skill_api::load_file_skill_sections(cwd, claude_home))
+fn render_available_skills(cwd: &Path, lingxi_home: &Path) -> String {
+    render_sections(&skill_api::load_file_skill_sections(cwd, lingxi_home))
 }
 
 fn render_available_skills_with_roots(
     cwd: &Path,
-    claude_home: &Path,
+    lingxi_home: &Path,
     managed_dir: Option<&Path>,
     additional_skill_dirs: &[PathBuf],
 ) -> String {
     render_sections(&skill_api::load_file_skill_sections_with_roots(
         cwd,
-        claude_home,
+        lingxi_home,
         managed_dir,
         additional_skill_dirs,
     ))

@@ -285,7 +285,7 @@ pub fn check_path_safety_for_auto_edit(raw: &str, roots: &FsRoots) -> AutoEditSa
     }
 
     // 2. Claude config files.
-    if is_claude_config_file_path(&expanded, roots) {
+    if is_lingxi_config_file_path(&expanded, roots) {
         return AutoEditSafety::Unsafe {
             message: format!(
                 "Claude requested permissions to write to {raw}, but you haven't granted it yet."
@@ -328,7 +328,7 @@ pub fn check_path_safety_for_auto_edit(raw: &str, roots: &FsRoots) -> AutoEditSa
 /// `classifier_approvable: true` outcome — so the only observable effect of
 /// this branch is preferring the "haven't granted it yet" message over the
 /// "sensitive file" message for the settings files it does match.
-fn is_claude_config_file_path(expanded: &Path, roots: &FsRoots) -> bool {
+fn is_lingxi_config_file_path(expanded: &Path, roots: &FsRoots) -> bool {
     let normalized = normalize_case_for_comparison(&expanded.to_string_lossy());
 
     // `isClaudeSettingsPath` structural arm — POSIX separator (`/`).
@@ -522,7 +522,7 @@ mod tests {
         FsRoots {
             cwd: PathBuf::from("/proj"),
             home: Some(PathBuf::from("/home/u")),
-            claude_home: PathBuf::from("/home/u/.lingxi"),
+            lingxi_home: PathBuf::from("/home/u/.lingxi"),
         }
     }
 

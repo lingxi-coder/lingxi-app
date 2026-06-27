@@ -56,7 +56,7 @@ pub struct HostFakePlatform {
 }
 
 impl HostFakePlatform {
-    /// Construct a host fake rooted at `root` (the temp `cwd`/`claude_home`).
+    /// Construct a host fake rooted at `root` (the temp `cwd`/`lingxi_home`).
     #[must_use]
     pub fn new(root: std::path::PathBuf) -> Self {
         use platform_posix_minimal::{
@@ -156,13 +156,13 @@ impl PermissionRequestSink for CollectingPermissionSink {
     }
 }
 
-/// A `MobileConfig` rooted at `cwd` (`cwd` + `claude_home` under it), otherwise
+/// A `MobileConfig` rooted at `cwd` (`cwd` + `lingxi_home` under it), otherwise
 /// the frozen defaults — the off-device build recipe the host tests share.
 #[must_use]
 pub fn test_config(cwd: &std::path::Path) -> MobileConfig {
     MobileConfig {
         cwd: cwd.to_path_buf(),
-        claude_home: cwd.join(branding::DOT_DIR),
+        lingxi_home: cwd.join(branding::DOT_DIR),
         ..MobileConfig::default()
     }
 }

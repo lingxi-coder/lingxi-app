@@ -1856,7 +1856,7 @@ mod tests {
         FsRoots {
             cwd: PathBuf::from("/proj"),
             home: Some(PathBuf::from("/home/u")),
-            claude_home: PathBuf::from("/home/u/.lingxi"),
+            lingxi_home: PathBuf::from("/home/u/.lingxi"),
         }
     }
 
@@ -2556,7 +2556,7 @@ mod tests {
     }
 
     #[test]
-    fn user_settings_content_rule_roots_at_claude_home() {
+    fn user_settings_content_rule_roots_at_lingxi_home() {
         // `/x/**` in a USER-settings rule resolves against ~/.claude, not cwd.
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{ "permissions": { "deny": ["Read(/agents/**)"] } }"#,
@@ -3464,11 +3464,11 @@ mod tests {
         );
         // Raw SettingSource identifier is byte-locked to claude-code.
         assert_eq!(
-            PermissionRuleSource::ProjectSettings.claude_settings_source(),
+            PermissionRuleSource::ProjectSettings.lingxi_settings_source(),
             "projectSettings"
         );
         assert_eq!(
-            PermissionRuleSource::LocalSettings.claude_settings_source(),
+            PermissionRuleSource::LocalSettings.lingxi_settings_source(),
             "localSettings"
         );
         let mut set = p.agent_deny_content_types();

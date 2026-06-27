@@ -81,27 +81,27 @@ pub fn sanitize_name(name: &str) -> String {
 /// `$HOME/.claude` (tests redirect `$HOME` to a tempdir). Returns `None` when
 /// neither resolves.
 #[must_use]
-pub fn claude_home() -> Option<PathBuf> {
+pub fn lingxi_home() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
         return Some(PathBuf::from(dir));
     }
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(branding::DOT_DIR))
 }
 
-/// `getTeamDir` (`teamHelpers.ts:115-117`): `<claude_home>/teams/{sanitize}`.
+/// `getTeamDir` (`teamHelpers.ts:115-117`): `<lingxi_home>/teams/{sanitize}`.
 #[must_use]
 pub fn team_dir(home: &Path, name: &str) -> PathBuf {
     home.join("teams").join(sanitize_name(name))
 }
 
 /// `getTeamFilePath` (`teamHelpers.ts:122-124`):
-/// `<claude_home>/teams/{sanitize}/config.json`.
+/// `<lingxi_home>/teams/{sanitize}/config.json`.
 #[must_use]
 pub fn team_file_path(home: &Path, name: &str) -> PathBuf {
     team_dir(home, name).join("config.json")
 }
 
-/// `getTasksDir` analog: `<claude_home>/tasks/{sanitize}`.
+/// `getTasksDir` analog: `<lingxi_home>/tasks/{sanitize}`.
 #[must_use]
 pub fn task_dir(home: &Path, name: &str) -> PathBuf {
     home.join("tasks").join(sanitize_name(name))

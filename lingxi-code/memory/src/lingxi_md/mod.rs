@@ -11,7 +11,7 @@ pub mod excludes;
 pub mod hierarchy;
 pub mod loader;
 
-pub use excludes::ClaudeMdExcluder;
+pub use excludes::LingxiMdExcluder;
 pub use hierarchy::{user_config_dir, Hierarchy, HierarchyEntry};
 pub use loader::{LoadedFile, LoaderError};
 
@@ -23,14 +23,14 @@ pub use loader::{LoadedFile, LoaderError};
 ///
 /// - **splice / discovery order** (`getMemoryFiles`, claudemd.ts:803-934):
 ///   Managed first, then User, then Project, then Local.
-/// - **the injection description** (`getClaudeMds`, claudemd.ts:1168-1186):
+/// - **the injection description** (`getLingxiMds`, claudemd.ts:1168-1186):
 ///   Managed and User share the "private global instructions" wording; Project
 ///   and Local each have their own.
 ///
 /// DISTINCT from [`crate::tier::MemoryTier`], which models the separate memdir
 /// subsystem (Project/User/Session/Team). Do NOT overload one for the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ClaudeMdTier {
+pub enum LingxiMdTier {
     /// Enterprise / managed policy memory (`<managed>/LINGXI.md` +
     /// `<managed>/.lingxi/rules/**`). Always loaded, never settings-gated,
     /// never excludable; lowest priority (spliced first).

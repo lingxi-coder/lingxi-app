@@ -66,15 +66,15 @@ fn other_platform_wire() -> &'static str {
 fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfig) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let cwd = tmp.path().to_path_buf();
-    let claude_home = cwd.join(".lingxi");
-    std::fs::create_dir_all(&claude_home).expect("mkdir .lingxi");
-    std::fs::write(claude_home.join("settings.json"), settings_json).expect("write settings.json");
+    let lingxi_home = cwd.join(".lingxi");
+    std::fs::create_dir_all(&lingxi_home).expect("mkdir .lingxi");
+    std::fs::write(lingxi_home.join("settings.json"), settings_json).expect("write settings.json");
 
     let cfg = DesktopConfig {
         api_base: "https://api.anthropic.com".to_string(),
         api_key: String::new(),
         cwd: cwd.clone(),
-        claude_home,
+        lingxi_home,
         default_model: "claude-sonnet-4-20250514".to_string(),
         fallback_model: None,
         provider_profiles: None,

@@ -138,9 +138,9 @@ pub enum LoaderError {
     },
 }
 
-/// Resolve `<claude_home>/projects/<sanitize(cwd)>[-djb2]` for a given cwd.
-fn project_dir_for_cwd(claude_home: &Path, cwd: &str) -> PathBuf {
-    claude_home.join("projects").join(project_dir_name(cwd))
+/// Resolve `<lingxi_home>/projects/<sanitize(cwd)>[-djb2]` for a given cwd.
+fn project_dir_for_cwd(lingxi_home: &Path, cwd: &str) -> PathBuf {
+    lingxi_home.join("projects").join(project_dir_name(cwd))
 }
 
 /// Parse the `worktree ` lines of `git worktree list --porcelain` into absolute
@@ -505,7 +505,7 @@ fn has_visible_content(content: Option<&Value>, assistant: bool) -> bool {
 /// worktrees — or when git is unavailable / not a repo — we scan ONLY the exact cwd's
 /// project dir, behaving byte-for-byte as before.
 pub async fn list_recent_sessions(
-    claude_home: &Path,
+    lingxi_home: &Path,
     cwd: &str,
     limit: usize,
     fs: Arc<dyn FileSystem>,
@@ -513,14 +513,14 @@ pub async fn list_recent_sessions(
     // `git_worktree_paths` already returns empty for git-error / non-repo /
     // single-worktree, so an empty vec is the "behave exactly as before" signal.
     let worktree_paths = git_worktree_paths(cwd);
-    list_recent_sessions_inner(claude_home, cwd, limit, &fs, &worktree_paths).await
+    list_recent_sessions_inner(lingxi_home, cwd, limit, &fs, &worktree_paths).await
 }
 
 /// Worktree-path-injectable core of [`list_recent_sessions`] (so unit tests can
 /// drive the multi-worktree branch without a real git repo). `worktree_paths`
 /// empty ⇒ today's single-cwd-dir behavior; len > 1 ⇒ the SESSION.5 union.
 async fn list_recent_sessions_inner(
-    claude_home: &Path,
+    lingxi_home: &Path,
     cwd: &str,
     limit: usize,
     fs: &Arc<dyn FileSystem>,
@@ -533,13 +533,13 @@ async fn list_recent_sessions_inner(
         // `collect_dir` returns false on NotFound; the `rows.is_empty()` check
         // below collapses both "missing dir" and "no resumable files" into the
         // original `EmptyDirectory`, while other I/O errors propagate as `Io`.
-        collect_dir(&project_dir_for_cwd(claude_home, cwd), fs, &mut rows).await?;
+        collect_dir(&project_dir_for_cwd(lingxi_home, cwd), fs, &mut rows).await?;
     } else {
         // > 1 worktrees: union every projects-root subdir whose name matches a
         // worktree's sanitized prefix (this also covers the cwd's own dir, since
         // the cwd is — or is under — one of the worktree paths), then dedupe by
         // session id. Mirrors `getStatOnlyLogsForWorktrees`.
-        let projects_root = claude_home.join("projects");
+        let projects_root = lingxi_home.join("projects");
         let prefixes: Vec<String> = worktree_paths
             .iter()
             .map(|wt| project_dir_name(wt))
@@ -574,7 +574,7 @@ async fn list_recent_sessions_inner(
             // Projects root unreadable: fall back to the cwd's project dir, like
             // claude-code's `getStatOnlyLogsForWorktrees` catch branch.
             Err(_) => {
-                collect_dir(&project_dir_for_cwd(claude_home, cwd), fs, &mut rows).await?;
+                collect_dir(&project_dir_for_cwd(lingxi_home, cwd), fs, &mut rows).await?;
             }
         }
 
@@ -624,13 +624,13 @@ async fn list_recent_sessions_inner(
 /// produced from this load path; structural anomalies are downgraded to a
 /// `tracing::warn` + a best-effort partial chain.
 pub async fn load_session(
-    claude_home: &Path,
+    lingxi_home: &Path,
     cwd: &str,
     session_id: Uuid,
     fs: Arc<dyn FileSystem>,
 ) -> Result<Vec<JsonlMessage>, LoaderError> {
     let arg = session_id.to_string();
-    let path = session_path(claude_home, cwd, &arg);
+    let path = session_path(lingxi_home, cwd, &arg);
     if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
         return Err(LoaderError::SessionNotFound { arg });
     }
@@ -1175,8 +1175,8 @@ mod tests {
         Arc::new(PosixFileSystem::new(root.to_path_buf()))
     }
 
-    /// Build `<claude_home>/projects/<sanitize(cwd)>/` and return
-    /// `(tempdir, claude_home, cwd, project_subdir)`.
+    /// Build `<lingxi_home>/projects/<sanitize(cwd)>/` and return
+    /// `(tempdir, lingxi_home, cwd, project_subdir)`.
     fn setup() -> (TempDir, PathBuf, String, PathBuf) {
         let temp = TempDir::new().expect("tempdir");
         let cwd = temp
@@ -1184,10 +1184,10 @@ mod tests {
             .join("workproj")
             .to_string_lossy()
             .into_owned();
-        let claude_home = temp.path().join("home");
-        let project_subdir = claude_home.join("projects").join(project_dir_name(&cwd));
+        let lingxi_home = temp.path().join("home");
+        let project_subdir = lingxi_home.join("projects").join(project_dir_name(&cwd));
         std::fs::create_dir_all(&project_subdir).expect("mkdir");
-        (temp, claude_home, cwd, project_subdir)
+        (temp, lingxi_home, cwd, project_subdir)
     }
 
     /// Write one `<uuid>.jsonl` first-user-message session (the M5-07/M5-08
@@ -1226,7 +1226,7 @@ mod tests {
 
     #[tokio::test]
     async fn excludes_sidechain_and_teamname_sessions() {
-        let (temp, claude_home, cwd, dir) = setup();
+        let (temp, lingxi_home, cwd, dir) = setup();
         let base = SystemTime::now();
         // Newer mtimes for the hidden rows ensures they would have sorted FIRST
         // if not filtered — so a passing assertion proves the filter, not luck.
@@ -1249,7 +1249,7 @@ mod tests {
         );
 
         let fs = make_fs(temp.path());
-        let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+        let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
             .await
             .expect("list");
 
@@ -1262,11 +1262,11 @@ mod tests {
     async fn empty_teamname_string_is_not_filtered() {
         // TS `if (enriched.teamName)` is a truthiness check — an empty-string
         // `teamName` is falsy and must NOT hide an otherwise-normal session.
-        let (temp, claude_home, cwd, dir) = setup();
+        let (temp, lingxi_home, cwd, dir) = setup();
         let keep = write_session(&dir, &cwd, "kept", SystemTime::now(), false, Some(""));
 
         let fs = make_fs(temp.path());
-        let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+        let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
             .await
             .expect("list");
 
@@ -1278,12 +1278,12 @@ mod tests {
     async fn all_sidechain_dir_is_empty_directory() {
         // If every candidate is a hidden sidechain, the picker has nothing to
         // show — same surface as a project dir with no `.jsonl` files.
-        let (temp, claude_home, cwd, dir) = setup();
+        let (temp, lingxi_home, cwd, dir) = setup();
         let _ = write_session(&dir, &cwd, "sub a", SystemTime::now(), true, None);
         let _ = write_session(&dir, &cwd, "sub b", SystemTime::now(), true, None);
 
         let fs = make_fs(temp.path());
-        match list_recent_sessions(&claude_home, &cwd, 5, fs).await {
+        match list_recent_sessions(&lingxi_home, &cwd, 5, fs).await {
             Err(LoaderError::EmptyDirectory) => {}
             other => panic!("expected EmptyDirectory, got {other:?}"),
         }
@@ -1360,12 +1360,12 @@ mod tests {
         // `list_recent_sessions_inner` with an EMPTY worktree slice must behave
         // exactly like the pre-SESSION.5 single-dir scan: only the cwd's project
         // dir is consulted, sibling dirs are ignored.
-        let (temp, claude_home, cwd, dir) = setup();
+        let (temp, lingxi_home, cwd, dir) = setup();
         let base = SystemTime::now();
         let main = write_session(&dir, &cwd, "main", base, false, None);
 
         // A sibling worktree dir exists on disk but must be invisible here.
-        let sibling = claude_home
+        let sibling = lingxi_home
             .join("projects")
             .join(project_dir_name("/other/wt"));
         let _hidden = {
@@ -1375,7 +1375,7 @@ mod tests {
         };
 
         let fs = make_fs(temp.path());
-        let rows = list_recent_sessions_inner(&claude_home, &cwd, 5, &fs, &[])
+        let rows = list_recent_sessions_inner(&lingxi_home, &cwd, 5, &fs, &[])
             .await
             .expect("list");
         assert_eq!(rows.len(), 1);
@@ -1385,8 +1385,8 @@ mod tests {
     #[tokio::test]
     async fn includes_sibling_worktree_sessions_deduped() {
         let temp = TempDir::new().unwrap();
-        let claude_home = temp.path().join("home");
-        let projects = claude_home.join("projects");
+        let lingxi_home = temp.path().join("home");
+        let projects = lingxi_home.join("projects");
         std::fs::create_dir_all(&projects).unwrap();
 
         let wt_a = "/wt/alpha";
@@ -1448,7 +1448,7 @@ mod tests {
 
         let fs = make_fs(temp.path());
         let worktrees = vec![wt_a.to_string(), wt_b.to_string()];
-        let rows = list_recent_sessions_inner(&claude_home, wt_a, 50, &fs, &worktrees)
+        let rows = list_recent_sessions_inner(&lingxi_home, wt_a, 50, &fs, &worktrees)
             .await
             .expect("list");
 
@@ -1478,12 +1478,12 @@ mod tests {
         // picker has nothing to resume, surfaced as EmptyDirectory (same as the
         // single-dir empty case).
         let temp = TempDir::new().unwrap();
-        let claude_home = temp.path().join("home");
-        std::fs::create_dir_all(claude_home.join("projects")).unwrap();
+        let lingxi_home = temp.path().join("home");
+        std::fs::create_dir_all(lingxi_home.join("projects")).unwrap();
 
         let fs = make_fs(temp.path());
         let worktrees = vec!["/wt/alpha".to_string(), "/wt/beta".to_string()];
-        match list_recent_sessions_inner(&claude_home, "/wt/alpha", 5, &fs, &worktrees).await {
+        match list_recent_sessions_inner(&lingxi_home, "/wt/alpha", 5, &fs, &worktrees).await {
             Err(LoaderError::EmptyDirectory) => {}
             other => panic!("expected EmptyDirectory, got {other:?}"),
         }

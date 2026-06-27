@@ -342,7 +342,7 @@ pub struct StdioControlPermissionGate {
     /// `persistPermissionUpdates`). `None` ⇒ persistence is skipped (the gate
     /// still maps the allow; only the settings write is suppressed — e.g. in
     /// unit tests with no real settings tree). Wired via [`Self::with_persist`]
-    /// from the CLI config (`cfg.claude_home` / `cfg.cwd`).
+    /// from the CLI config (`cfg.lingxi_home` / `cfg.cwd`).
     persist_paths: Option<PermissionPaths>,
 }
 
@@ -358,7 +358,7 @@ impl StdioControlPermissionGate {
 
     /// Attach the settings-file roots so an ALLOW response's `updatedPermissions`
     /// rule updates are PERSISTED (mirrors `TuiPermissionGate::with_persist`):
-    /// `claude_home` resolves `userSettings`, `cwd` resolves
+    /// `lingxi_home` resolves `userSettings`, `cwd` resolves
     /// project/local settings. Without this the host's rule updates are parsed +
     /// dropped (no settings write).
     #[must_use]
@@ -1430,7 +1430,7 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("lx-p5-2b-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let paths = PermissionPaths {
-            claude_home: tmp.join("home/.lingxi"),
+            lingxi_home: tmp.join("home/.lingxi"),
             cwd: tmp.join("proj"),
         };
         let (plane, mut rx) = plane_with_channel();

@@ -350,7 +350,7 @@ fn cron_scheduler_enabled(disable_cron_env: Option<&str>) -> bool {
 ///
 /// `ctx` carries the session/host seeds (`getClaudeTempDir()`, the settings-file
 /// `deny_write` paths, the managed drop-in dir, `.lingxi/skills`, …). It is built
-/// by the caller (the composition root has `claude_home`/`cwd`/`managed` in scope,
+/// by the caller (the composition root has `lingxi_home`/`cwd`/`managed` in scope,
 /// so the helper stays pure and unit-testable; tests pass a minimal seed). See
 /// the `build()` call site and spec §5 for which seeds have a boot-time analog.
 #[must_use]
@@ -447,12 +447,12 @@ fn managed_only_sandbox_overrides(
 }
 
 /// claude-code `getClaudeTempDir()` + `getClaudeTempDirName()` analog (Shell.ts:307),
-/// identical to the canonical private `claude_temp_dir()` in `tool-shell`'s
+/// identical to the canonical private `lingxi_temp_dir()` in `tool-shell`'s
 /// `prompt.rs`: `baseTmpDir = LINGXI_TMPDIR || (windows ? tmpdir() : "/tmp")`,
 /// realpath-resolved, name `claude` on Windows else `claude-{uid}`, joined with a
 /// trailing separator. Seeded into the sandbox `allow_write` so the shell's
 /// cwd-tracking file stays writable.
-fn claude_temp_dir() -> String {
+fn lingxi_temp_dir() -> String {
     let base: std::path::PathBuf = std::env::var_os("LINGXI_TMPDIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
@@ -720,7 +720,7 @@ struct TaskRegistryWorkflowLauncher {
     cwd: std::path::PathBuf,
     /// The claude home directory (e.g. `~/.claude`), used to derive
     /// `transcriptDir = <sessionProjectDir>/<sessionId>/subagents/workflows/<runId>`.
-    claude_home: std::path::PathBuf,
+    lingxi_home: std::path::PathBuf,
     /// The main session UUID (bare uuid string, no `sess:` prefix), threaded
     /// from the composition root's `main_session_uuid` so the transcript dir
     /// anchors on the correct session.
@@ -810,11 +810,11 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
         // `transcriptDir` = `<sessionProjectDir>/<sessionId>/subagents/workflows/<runId>`
         // (claude-code `Nte(runId)` → `path.join(CU() ?? _g(gr()), xt(), "subagents",
         // "workflows", e)`). We derive via `orchestrator::transcript_paths::subagents_dir`
-        // which computes `<claude_home>/projects/<sanitize(cwd)>/<session_uuid>/subagents`,
+        // which computes `<lingxi_home>/projects/<sanitize(cwd)>/<session_uuid>/subagents`,
         // then append `workflows/<runId>`.
         let transcript_dir = {
             let subagents = orchestrator::transcript_paths::subagents_dir(
-                &self.claude_home,
+                &self.lingxi_home,
                 &self.cwd.to_string_lossy(),
                 &self.session_uuid,
             );
@@ -997,7 +997,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 /// - `api_base` — `resolve_api_base()` (env `LINGXI_API_BASE_URL`, init.rs:95).
 /// - `api_key` — env `ANTHROPIC_API_KEY` (init.rs:153).
 /// - `cwd` — `std::env::current_dir()` (init.rs:248).
-/// - `claude_home` — the `~/.claude` (and platform config-dir) root the hook /
+/// - `lingxi_home` — the `~/.claude` (and platform config-dir) root the hook /
 ///   agents / global-MCP loaders walk (init.rs:253-317); made explicit so the
 ///   bridge-server can point it at a sandbox in tests.
 /// - `default_model` — `Argv::model` ⟶ `OrchestratorConfig.model` (init.rs:213).
@@ -1022,7 +1022,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     api_base: "https://api.anthropic.com".to_string(),
 ///     api_key: "sk-test".to_string(),
 ///     cwd: PathBuf::from("/tmp/project"),
-///     claude_home: PathBuf::from("/tmp/home/.lingxi"),
+///     lingxi_home: PathBuf::from("/tmp/home/.lingxi"),
 ///     default_model: "claude-sonnet-4-20250514".to_string(),
 ///     fallback_model: None,
 ///     provider_profiles: Some(BTreeMap::new()),
@@ -1068,7 +1068,7 @@ pub struct DesktopConfig {
     pub cwd: std::path::PathBuf,
     /// The `~/.claude` root the hook / agents / global-MCP / settings loaders
     /// walk. Explicit so a host can redirect it to a sandbox.
-    pub claude_home: std::path::PathBuf,
+    pub lingxi_home: std::path::PathBuf,
     /// Model id the build defaults to (`OrchestratorConfig.model`).
     pub default_model: String,
     /// Fallback model id (`OrchestratorConfig.fallback_model`). `None` ⟶ no
@@ -1228,7 +1228,7 @@ impl std::fmt::Debug for DesktopConfig {
             .field("api_base", &self.api_base)
             .field("api_key", &self.api_key)
             .field("cwd", &self.cwd)
-            .field("claude_home", &self.claude_home)
+            .field("lingxi_home", &self.lingxi_home)
             .field("default_model", &self.default_model)
             .field("fallback_model", &self.fallback_model)
             .field("provider_profiles", &self.provider_profiles)
@@ -1285,7 +1285,7 @@ impl Default for DesktopConfig {
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             cwd: std::path::PathBuf::from("."),
-            claude_home: std::path::PathBuf::new(),
+            lingxi_home: std::path::PathBuf::new(),
             default_model: DesktopEngineConfig::default().default_model,
             fallback_model: None,
             provider_profiles: None,
@@ -1325,7 +1325,7 @@ pub async fn desktop_command_registry(
     handle: Arc<dyn OrchestratorHandle>,
     auth: Arc<dyn AuthHandle>,
     cwd: &std::path::Path,
-    claude_home: &std::path::Path,
+    lingxi_home: &std::path::Path,
     connect_writer: Arc<dyn command_core::ConnectCredentialWriter>,
     connect_copilot: Arc<dyn command_core::CopilotConnectDriver>,
     connect_chatgpt: Arc<dyn command_core::ChatGptConnectDriver>,
@@ -1355,12 +1355,12 @@ pub async fn desktop_command_registry(
     // (project up to git-root/home, plus user + managed layers), the same
     // layering claude-code's getCommands uses. Registered AFTER builtins so a
     // same-named custom command shadows a builtin (TS findCommand order).
-    let home = dirs::home_dir().unwrap_or_else(|| claude_home.to_path_buf());
+    let home = dirs::home_dir().unwrap_or_else(|| lingxi_home.to_path_buf());
     let managed_dir = crate::settings_watch::managed_settings_dir();
     let registered = command_core::load_and_register_custom_commands(
         &mut reg,
         cwd,
-        claude_home,
+        lingxi_home,
         &managed_dir,
         &home,
     )
@@ -1368,7 +1368,7 @@ pub async fn desktop_command_registry(
     let registered_skills = command_core::load_and_register_skill_commands_with_roots(
         &mut reg,
         cwd,
-        claude_home,
+        lingxi_home,
         Some(&managed_dir),
         &home,
         &[],
@@ -1376,7 +1376,7 @@ pub async fn desktop_command_registry(
     .await;
     reg.register_builtin_handler(Arc::new(command_core::SkillsHandler::with_all_roots(
         cwd.to_path_buf(),
-        claude_home.to_path_buf(),
+        lingxi_home.to_path_buf(),
         Some(managed_dir),
         Vec::new(),
     )));
@@ -1720,11 +1720,11 @@ fn load_merged_output_style(project_dir: &std::path::Path) -> Option<String> {
 /// boot. Malformed files / a missing key degrade to an empty map (no plugins),
 /// matching claude-code's resilient read-only boot.
 async fn load_enabled_plugins(
-    claude_home: &std::path::Path,
+    lingxi_home: &std::path::Path,
     cwd: &std::path::Path,
 ) -> std::collections::BTreeMap<String, bool> {
     let mut merged: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
-    let user = claude_home.join("settings.json");
+    let user = lingxi_home.join("settings.json");
     let project = cwd.join(branding::DOT_DIR).join("settings.json");
     // User first, project second → project overrides on identical keys.
     for path in [user, project] {
@@ -1872,22 +1872,22 @@ fn mcp_on_authorization_url() -> mcp::oauth::OnAuthorizationUrl {
 /// per-user dirs apart in a shared `/tmp`). Shares the crate's single
 /// [`current_uid`] helper (a SAFE `nix::unistd::getuid` wrapper) rather than a
 /// second `getuid` crate, so the sandbox seed and the task-spool dir agree.
-fn claude_temp_dir_name() -> String {
+fn lingxi_temp_dir_name() -> String {
     format!("claude-{}", current_uid())
 }
 
 /// Base Claude temp dir for the task spool — port of `getClaudeTempDir`
 /// (`permissions/filesystem.ts:331-346`): `$LINGXI_TMPDIR || /tmp`, joined
-/// with [`claude_temp_dir_name`]. (claude resolves symlinks; the spool path only
+/// with [`lingxi_temp_dir_name`]. (claude resolves symlinks; the spool path only
 /// needs to be writable + session-unique, so the realpath step is omitted.)
-/// Distinct from the sandbox-seed [`claude_temp_dir`] (which returns the
+/// Distinct from the sandbox-seed [`lingxi_temp_dir`] (which returns the
 /// realpath-resolved, trailing-separator String form).
-fn claude_temp_dir_path() -> std::path::PathBuf {
+fn lingxi_temp_dir_path() -> std::path::PathBuf {
     let base = std::env::var_os("LINGXI_TMPDIR").map_or_else(
         || std::path::PathBuf::from("/tmp"),
         std::path::PathBuf::from,
     );
-    base.join(claude_temp_dir_name())
+    base.join(lingxi_temp_dir_name())
 }
 
 /// Sanitize a path string for use as a single dir component — port of
@@ -1912,7 +1912,7 @@ fn sanitize_path_component(name: &str) -> String {
 /// `checkReadableInternalPath`.
 #[must_use]
 pub fn session_task_output_dir(cwd: &std::path::Path, session_id: &str) -> std::path::PathBuf {
-    claude_temp_dir_path()
+    lingxi_temp_dir_path()
         .join(sanitize_path_component(&cwd.to_string_lossy()))
         .join(session_id)
         .join("tasks")
@@ -1931,7 +1931,7 @@ pub async fn build(
     let cwd = cfg.cwd.clone();
 
     // FIX A/B/C: mint the boot-canonical MAIN session id ONCE and derive the
-    // session's transcript path + subagents dir from `(claude_home, cwd, id)`.
+    // session's transcript path + subagents dir from `(lingxi_home, cwd, id)`.
     // claude-code's `createBaseHookInput` (utils/hooks.ts:322) ALWAYS stamps
     // `transcript_path: getTranscriptPathForSession(sessionId)` on EVERY hook
     // payload, and `getAgentTranscriptPath` anchors spawned-subagent transcripts
@@ -1957,12 +1957,12 @@ pub async fn build(
         .unwrap_or_else(protocol::SessionId::new);
     let main_session_uuid = main_session_id.as_uuid().to_string();
     let main_transcript_path = orchestrator::transcript_paths::main_transcript_path(
-        &cfg.claude_home,
+        &cfg.lingxi_home,
         &cwd.to_string_lossy(),
         &main_session_uuid,
     );
     let main_subagents_dir = orchestrator::transcript_paths::subagents_dir(
-        &cfg.claude_home,
+        &cfg.lingxi_home,
         &cwd.to_string_lossy(),
         &main_session_uuid,
     );
@@ -1972,8 +1972,8 @@ pub async fn build(
     let clock = Arc::new(PosixClock::new());
     let storage = secure_storage_for_platform(
         std::env::var("USER").unwrap_or_else(|_| "default".to_string()),
-        cfg.claude_home.clone(),
-        cfg.claude_home.join(".credentials.json"),
+        cfg.lingxi_home.clone(),
+        cfg.lingxi_home.join(".credentials.json"),
     )
     .await
     .map_err(|e| BuildError::SecureStorage(e.to_string()))?;
@@ -2460,7 +2460,7 @@ pub async fn build(
     // `settings.outputStyle` naming a disk style now activates it
     // (`outputstyles::resolve_output_style`); absent dirs ⇒ builtin-only.
     orch_cfg.output_style_dirs = vec![
-        cfg.claude_home.join("output-styles"),
+        cfg.lingxi_home.join("output-styles"),
         cfg.cwd.join(branding::DOT_DIR).join("output-styles"),
     ];
     // CLI `--system-prompt` / `--system-prompt-file`: override the assembled
@@ -2668,7 +2668,7 @@ pub async fn build(
             // (3c) Persist an `AllowAlways` choice to `<cwd>/.lingxi/settings.local.json`.
             let gate = Arc::new(AdapterPermissionGate::new(permission_sink).with_persist(
                 permission::PermissionPaths {
-                    claude_home: cfg.claude_home.clone(),
+                    lingxi_home: cfg.lingxi_home.clone(),
                     cwd: cwd.clone(),
                 },
             ));
@@ -2726,12 +2726,12 @@ pub async fn build(
     // dispatcher wiring.
 
     // (5.2) HookRegistry — read settings.json hooks from project
-    //       (cwd/.lingxi/settings.json) then user (claude_home/settings.json),
+    //       (cwd/.lingxi/settings.json) then user (lingxi_home/settings.json),
     //       project last so it wins on identical command registration. The user
-    //       root is `cfg.claude_home` (was `dirs::config_dir()/claude`).
+    //       root is `cfg.lingxi_home` (was `dirs::config_dir()/claude`).
     let mut hook_registry = hooks::HookRegistry::new();
     let project_settings_path = cwd.join(branding::DOT_DIR).join("settings.json");
-    let user_settings_path = cfg.claude_home.join("settings.json");
+    let user_settings_path = cfg.lingxi_home.join("settings.json");
     // `--setting-sources` scope (default `(true, true)` = all tiers): skip the
     // user tier when `!include_user` and the project tier when `!include_project`
     // so e.g. `--setting-sources project` does NOT register user-level hooks.
@@ -2852,7 +2852,7 @@ pub async fn build(
             let (incl_user_settings, incl_project_settings) = cfg.setting_source_scope;
             for (path, source, included) in [
                 (
-                    cfg.claude_home.join("settings.json"),
+                    cfg.lingxi_home.join("settings.json"),
                     permission::PermissionRuleSource::UserSettings,
                     incl_user_settings,
                 ),
@@ -2900,13 +2900,13 @@ pub async fn build(
             let rule_count = rules.len();
             // Phase 3a: supply the filesystem roots so file-path CONTENT rules
             // (`Edit(src/**)`, `Read(./secrets/**)`) match the input path. Roots
-            // resolve per rule source — user settings against `claude_home`,
+            // resolve per rule source — user settings against `lingxi_home`,
             // project/local against `cwd` — exactly as claude-code's
             // `rootPathForSource` does.
             let roots = permission::FsRoots {
                 cwd: cwd.clone(),
                 home: dirs::home_dir(),
-                claude_home: cfg.claude_home.clone(),
+                lingxi_home: cfg.lingxi_home.clone(),
             };
             // Phase 3a-bash: attach the sandbox-auto-allow config derived from
             // the SAME settings tiers, so a sandboxable bash command that
@@ -3116,7 +3116,7 @@ pub async fn build(
     let xaa_config: Option<Arc<dyn mcp::registry::XaaConfigProvider>> = {
         let mut tiers: Vec<String> = Vec::new();
         for p in [
-            cfg.claude_home.join("settings.json"),
+            cfg.lingxi_home.join("settings.json"),
             cwd.join(branding::DOT_DIR).join("settings.json"),
             cwd.join(branding::DOT_DIR).join("settings.local.json"),
         ] {
@@ -3161,9 +3161,9 @@ pub async fn build(
 
     // (5.3) Agent catalog — load from project + user agents/. Project wins on
     //       collision (passed SECOND; later paths win). The user agents dir is
-    //       `cfg.claude_home/agents` (was `dirs::home_dir()/.lingxi/agents`).
+    //       `cfg.lingxi_home/agents` (was `dirs::home_dir()/.lingxi/agents`).
     let project_agents_dir = cwd.join(branding::DOT_DIR).join("agents");
-    let user_agents_dir = cfg.claude_home.join("agents");
+    let user_agents_dir = cfg.lingxi_home.join("agents");
     let agents = agent::load_agents_from_dirs(&[
         (user_agents_dir, agent::definition::AgentSource::UserDefined),
         (project_agents_dir, agent::definition::AgentSource::Project),
@@ -3580,7 +3580,7 @@ pub async fn build(
     let sandbox_runtime_cfg = {
         let mut tiers: Vec<String> = Vec::new();
         for p in [
-            cfg.claude_home.join("settings.json"),
+            cfg.lingxi_home.join("settings.json"),
             cwd.join(branding::DOT_DIR).join("settings.json"),
             cwd.join(branding::DOT_DIR).join("settings.local.json"),
         ] {
@@ -3611,9 +3611,9 @@ pub async fn build(
         let managed = crate::settings_watch::managed_settings_dir();
         let to_s = |p: std::path::PathBuf| p.to_string_lossy().into_owned();
         let ctx = sandbox::policy_convert::SandboxConvertContext {
-            claude_temp_dir: Some(claude_temp_dir()),
+            lingxi_temp_dir: Some(lingxi_temp_dir()),
             settings_file_paths: vec![
-                to_s(cfg.claude_home.join("settings.json")),
+                to_s(cfg.lingxi_home.join("settings.json")),
                 to_s(cwd.join(branding::DOT_DIR).join("settings.json")),
                 to_s(cwd.join(branding::DOT_DIR).join("settings.local.json")),
                 to_s(managed.join("managed-settings.json")),
@@ -3924,7 +3924,7 @@ pub async fn build(
             Arc::new(TaskRegistryWorkflowLauncher {
                 registry: task_registry.clone(),
                 cwd: cwd.clone(),
-                claude_home: cfg.claude_home.clone(),
+                lingxi_home: cfg.lingxi_home.clone(),
                 session_uuid: main_session_uuid.clone(),
             });
         tools_inner.register_builtin(Arc::new(tool_workflow::WorkflowTool::new(Some(
@@ -4083,7 +4083,7 @@ pub async fn build(
     // `getTranscriptPathForSession`) even though PRODUCTION wires NO `JsonlWriter`
     // (every `with_jsonl_writer` call site is a test). Without this every
     // PreToolUse / PostToolBatch / lifecycle hook fired with an empty path.
-    .with_config_home(cfg.claude_home.clone())
+    .with_config_home(cfg.lingxi_home.clone())
     // Share the SAME mutable-cwd cell the `cwd_changed_firer` writes on a Bash
     // `cd`, so hook payloads read the post-`cd` directory (claude-code parity).
     .with_current_cwd(current_cwd_cell)
@@ -4212,7 +4212,7 @@ pub async fn build(
         handle,
         auth.clone(),
         &cfg.cwd,
-        &cfg.claude_home,
+        &cfg.lingxi_home,
         connect_writer,
         connect_copilot,
         connect_chatgpt,
@@ -4255,7 +4255,7 @@ pub async fn build(
     //       registries.
     {
         let plugins_dir = std::env::var_os("LINGXI_PLUGIN_CACHE_DIR").map_or_else(
-            || cfg.claude_home.join("plugins"),
+            || cfg.lingxi_home.join("plugins"),
             std::path::PathBuf::from,
         );
         // Primary (faithful) path: resolve the `settings.enabledPlugins`
@@ -4264,7 +4264,7 @@ pub async fn build(
         // `loadAllPluginsCacheOnly` (`pluginLoader.ts:1888`) consumes a real
         // `~/.lingxi/plugins`. Read `enabledPlugins` from the user then project
         // settings (project wins), mirroring `getSettings_DEPRECATED()`.
-        let enabled = load_enabled_plugins(&cfg.claude_home, &cwd_for_plugins).await;
+        let enabled = load_enabled_plugins(&cfg.lingxi_home, &cwd_for_plugins).await;
         let mut discovered = plugin::discover_enabled_plugins(&plugins_dir, &enabled).await;
         // Fallback: when no allowlist resolves anything (e.g. a flat directory
         // of pre-fetched plugin dirs supplied directly, as with `--add-dir`),
@@ -4437,7 +4437,7 @@ pub async fn build(
         let watch_fs: Arc<dyn traits::FileSystem> =
             Arc::new(PosixFileSystem::new(watch_cwd.clone()));
         let firer: Arc<dyn settings_watch::ConfigChangeFirer> = orch.clone();
-        settings_watch::SettingsWatcher::new(&cfg.claude_home, &watch_cwd, firer)
+        settings_watch::SettingsWatcher::new(&cfg.lingxi_home, &watch_cwd, firer)
             .spawn(watch_fs)
             .await
     } else {
@@ -4811,7 +4811,7 @@ mod tests {
         assert_eq!(cfg.api_base, "https://api.anthropic.com");
         assert!(cfg.api_key.is_empty());
         assert_eq!(cfg.cwd, std::path::PathBuf::from("."));
-        assert_eq!(cfg.claude_home, std::path::PathBuf::new());
+        assert_eq!(cfg.lingxi_home, std::path::PathBuf::new());
         // Mirrors `DesktopEngineConfig::default().default_model`.
         assert_eq!(cfg.default_model, "claude-sonnet-4-20250514");
         // Opus-fallback default: no fallback model unless argv supplies one.
@@ -4928,12 +4928,12 @@ mod tests {
     fn test_config(use_noop: bool) -> (tempfile::TempDir, DesktopConfig) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
-        let claude_home = cwd.join(".lingxi");
+        let lingxi_home = cwd.join(".lingxi");
         let cfg = DesktopConfig {
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             cwd: cwd.clone(),
-            claude_home,
+            lingxi_home,
             default_model: "claude-sonnet-4-20250514".to_string(),
             fallback_model: None,
             provider_profiles: None,
@@ -5020,10 +5020,10 @@ mod tests {
     #[tokio::test]
     async fn build_wires_xaa_config_when_xaaidp_settings_present() {
         let (_tmp, cfg) = test_config(true);
-        // Lay down a settings.json with an `xaaIdp` block under claude_home.
-        std::fs::create_dir_all(&cfg.claude_home).unwrap();
+        // Lay down a settings.json with an `xaaIdp` block under lingxi_home.
+        std::fs::create_dir_all(&cfg.lingxi_home).unwrap();
         std::fs::write(
-            cfg.claude_home.join("settings.json"),
+            cfg.lingxi_home.join("settings.json"),
             r#"{"xaaIdp":{"issuer":"https://idp.example.com","clientId":"idp-client-id"}}"#,
         )
         .unwrap();
@@ -5041,14 +5041,14 @@ mod tests {
         );
     }
 
-    /// GAP E: a plugin installed on disk under `<claude_home>/plugins` is
+    /// GAP E: a plugin installed on disk under `<lingxi_home>/plugins` is
     /// discovered + materialised at bootstrap — its command lands in the live
     /// command registry the slash dispatcher reads.
     #[tokio::test]
     async fn build_discovers_and_materialises_an_installed_plugin() {
         let (_tmp, cfg) = test_config(true);
-        // Lay down a fixture plugin under `<claude_home>/plugins/myplugin`.
-        let plugin_dir = cfg.claude_home.join("plugins").join("myplugin");
+        // Lay down a fixture plugin under `<lingxi_home>/plugins/myplugin`.
+        let plugin_dir = cfg.lingxi_home.join("plugins").join("myplugin");
         std::fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
         std::fs::write(
             plugin_dir.join(".lingxi-plugin").join("plugin.json"),
@@ -5100,7 +5100,7 @@ mod tests {
         let (_tmp, cfg) = test_config(true);
         // Versioned cache dir, exactly as getVersionedCachePath lays it out.
         let versioned = cfg
-            .claude_home
+            .lingxi_home
             .join("plugins")
             .join("cache")
             .join("acme")
@@ -5120,7 +5120,7 @@ mod tests {
         .unwrap();
         // Enable it via user settings.json `enabledPlugins`.
         std::fs::write(
-            cfg.claude_home.join("settings.json"),
+            cfg.lingxi_home.join("settings.json"),
             r#"{"enabledPlugins":{"weather@acme":true}}"#,
         )
         .unwrap();
@@ -5145,7 +5145,7 @@ mod tests {
         }
     }
 
-    /// GAP E: a fresh install with no `<claude_home>/plugins` directory boots
+    /// GAP E: a fresh install with no `<lingxi_home>/plugins` directory boots
     /// with zero plugins — discovery is a strict no-op (non-breaking).
     #[tokio::test]
     async fn build_with_no_plugins_dir_is_a_noop() {
@@ -5536,10 +5536,10 @@ mod tests {
         let (_tmp, cfg) = test_config(true);
         // Project settings the hooks loader reads at boot
         // (cwd/.lingxi/settings.json) — a single `SessionStart` command hook.
-        let claude_dir = cfg.cwd.join(".lingxi");
-        std::fs::create_dir_all(&claude_dir).expect("mk .lingxi");
+        let lingxi_dir = cfg.cwd.join(".lingxi");
+        std::fs::create_dir_all(&lingxi_dir).expect("mk .lingxi");
         std::fs::write(
-            claude_dir.join("settings.json"),
+            lingxi_dir.join("settings.json"),
             r#"{ "hooks": { "SessionStart": [ { "hooks": [
                 { "type": "command", "command": "true" }
             ] } ] } }"#,
@@ -5596,10 +5596,10 @@ mod tests {
         let (_tmp, cfg) = test_config(true);
         // Project settings the hooks loader reads at boot
         // (cwd/.lingxi/settings.json) — a single `InstructionsLoaded` command hook.
-        let claude_dir = cfg.cwd.join(".lingxi");
-        std::fs::create_dir_all(&claude_dir).expect("mk .lingxi");
+        let lingxi_dir = cfg.cwd.join(".lingxi");
+        std::fs::create_dir_all(&lingxi_dir).expect("mk .lingxi");
         std::fs::write(
-            claude_dir.join("settings.json"),
+            lingxi_dir.join("settings.json"),
             r#"{ "hooks": { "InstructionsLoaded": [ { "hooks": [
                 { "type": "command", "command": "true" }
             ] } ] } }"#,
@@ -5662,10 +5662,10 @@ mod tests {
         // Register an InstructionsLoaded hook so the in-build
         // `fire_instructions_loaded()` actually dispatches over the injected
         // file (best-effort; the stub runner makes it a no-op side-effect-wise).
-        let claude_dir = cfg.cwd.join(".lingxi");
-        std::fs::create_dir_all(&claude_dir).expect("mk .lingxi");
+        let lingxi_dir = cfg.cwd.join(".lingxi");
+        std::fs::create_dir_all(&lingxi_dir).expect("mk .lingxi");
         std::fs::write(
-            claude_dir.join("settings.json"),
+            lingxi_dir.join("settings.json"),
             r#"{ "hooks": { "InstructionsLoaded": [ { "hooks": [
                 { "type": "command", "command": "true" }
             ] } ] } }"#,
@@ -5681,7 +5681,7 @@ mod tests {
             path: memory_path.clone(),
             body: memory_body.to_string(),
             is_local_override: false,
-            tier: orchestrator::prompt::ClaudeMdTier::Project,
+            tier: orchestrator::prompt::LingxiMdTier::Project,
             globs: None,
         };
         cfg.memory_provider = Some(Arc::new(
@@ -5702,7 +5702,7 @@ mod tests {
 
         // The injected LINGXI.md must reach the assembled system prompt: the
         // memory section (GAP 3 — preamble + `Contents of …:` per file, 1:1 with
-        // claude-code getClaudeMds) carries the file's path + tier description +
+        // claude-code getLingxiMds) carries the file's path + tier description +
         // body. This proves the controlled provider flowed through build() into
         // the orchestrator's prompt assembly — the gap (desktop loads NO memory)
         // is closed.
@@ -6888,7 +6888,7 @@ mod tests {
         // verbatim as its own path segment (matching claude `join(..., sessionId,
         // 'tasks')`, where the session id is a fixed-shape token).
         let expected = std::path::Path::new("/pin-tmp")
-            .join(super::claude_temp_dir_name()) // claude-<uid>
+            .join(super::lingxi_temp_dir_name()) // claude-<uid>
             .join("-Users-me-proj")
             .join("sess:abc-123")
             .join("tasks");

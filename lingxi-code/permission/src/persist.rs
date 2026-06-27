@@ -51,7 +51,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct PermissionPaths {
     /// Claude config home (`~/.claude`) — holds `userSettings`.
-    pub claude_home: PathBuf,
+    pub lingxi_home: PathBuf,
     /// Project working directory — holds `.lingxi/settings.json` (project) and
     /// `.lingxi/settings.local.json` (local).
     pub cwd: PathBuf,
@@ -64,7 +64,7 @@ impl PermissionPaths {
     #[must_use]
     pub fn destination_path(&self, dest: PermissionUpdateDestination) -> Option<PathBuf> {
         match dest {
-            PermissionUpdateDestination::UserSettings => Some(self.claude_home.join("settings.json")),
+            PermissionUpdateDestination::UserSettings => Some(self.lingxi_home.join("settings.json")),
             PermissionUpdateDestination::ProjectSettings => {
                 Some(self.cwd.join(branding::DOT_DIR).join("settings.json"))
             }
@@ -515,7 +515,7 @@ mod tests {
     #[test]
     fn destination_paths() {
         let p = PermissionPaths {
-            claude_home: PathBuf::from("/home/u/.lingxi"),
+            lingxi_home: PathBuf::from("/home/u/.lingxi"),
             cwd: PathBuf::from("/proj"),
         };
         assert_eq!(
@@ -545,7 +545,7 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("lx-3c-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let paths = PermissionPaths {
-            claude_home: tmp.join("home/.lingxi"),
+            lingxi_home: tmp.join("home/.lingxi"),
             cwd: tmp.join("proj"),
         };
         let update = allow_rule("Bash", PermissionUpdateDestination::LocalSettings);
@@ -566,7 +566,7 @@ mod tests {
     #[tokio::test]
     async fn persist_session_destination_is_noop() {
         let paths = PermissionPaths {
-            claude_home: PathBuf::from("/nonexistent/.lingxi"),
+            lingxi_home: PathBuf::from("/nonexistent/.lingxi"),
             cwd: PathBuf::from("/nonexistent/proj"),
         };
         let update = allow_rule("Bash", PermissionUpdateDestination::Session);
@@ -584,7 +584,7 @@ mod tests {
         std::fs::write(&path, "{ broken").unwrap();
 
         let paths = PermissionPaths {
-            claude_home: tmp.join("home/.lingxi"),
+            lingxi_home: tmp.join("home/.lingxi"),
             cwd: tmp.join("proj"),
         };
         let update = allow_rule("Bash", PermissionUpdateDestination::LocalSettings);
@@ -655,7 +655,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("proj")).unwrap();
         let paths = PermissionPaths {
-            claude_home: tmp.join("home/.lingxi"),
+            lingxi_home: tmp.join("home/.lingxi"),
             cwd: tmp.join("proj"),
         };
         // Add → file created with the dir.

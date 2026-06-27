@@ -259,8 +259,8 @@ fn load_provider_profiles(include_user: bool, include_project: bool) -> Option<s
 
 /// Load the merged `settings.claudeMdExcludes` (project + user + env layers) —
 /// glob patterns / absolute paths of `LINGXI.md` files to exclude from the
-/// system prompt (claude-code `isClaudeMdExcluded`). Empty when unset.
-fn load_claude_md_excludes(include_user: bool, include_project: bool) -> Vec<String> {
+/// system prompt (claude-code `isLingxiMdExcluded`). Empty when unset.
+fn load_lingxi_md_excludes(include_user: bool, include_project: bool) -> Vec<String> {
     let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
     let inputs = engine::settings::LoadInputs {
@@ -270,7 +270,7 @@ fn load_claude_md_excludes(include_user: bool, include_project: bool) -> Vec<Str
     };
     engine::settings::Settings::load_scoped(inputs, include_user, include_project)
         .ok()
-        .and_then(|eff| eff.settings.claude_md_excludes)
+        .and_then(|eff| eff.settings.lingxi_md_excludes)
         .unwrap_or_default()
 }
 
@@ -304,8 +304,8 @@ fn load_routing(include_user: bool, include_project: bool) -> Option<serde_json:
 /// - `api_key` ← env `ANTHROPIC_API_KEY` (empty string is valid).
 /// - `cwd` ← `std::env::current_dir()` (the process has already `chdir`'d into
 ///   any `--cwd`).
-/// - `claude_home` ← config-home (`$LINGXI_CONFIG_DIR` else `~/.claude`, via
-///   `run::claude_home_dir`) — the hook / agents / settings loader root.
+/// - `lingxi_home` ← config-home (`$LINGXI_CONFIG_DIR` else `~/.claude`, via
+///   `run::lingxi_home_dir`) — the hook / agents / settings loader root.
 /// - `default_model` ← `Argv::model`, else the desktop default.
 /// - `fallback_model` ← `Argv::fallback_model`, but ONLY in `--print` mode
 ///   (claude-code restricts `--fallback-model` to non-interactive runs); the
@@ -326,7 +326,7 @@ pub(crate) fn resolve_desktop_config(
     permission_mode: permission::PermissionMode,
 ) -> DesktopConfig {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let claude_home = crate::run::claude_home_dir();
+    let lingxi_home = crate::run::lingxi_home_dir();
     let mut project_mcp_path = cwd.join(".mcp.json");
     // User/global-scope MCP servers live INSIDE `~/.lingxi.json` (top-level
     // `mcpServers`), exactly like claude-code — NOT a standalone file under the
@@ -396,7 +396,7 @@ pub(crate) fn resolve_desktop_config(
         api_base: resolve_api_base(),
         api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
         cwd,
-        claude_home,
+        lingxi_home,
         default_model,
         fallback_model,
         provider_profiles: load_provider_profiles(incl_user, incl_project),
@@ -433,7 +433,7 @@ pub(crate) fn resolve_desktop_config(
         // `fire_instructions_loaded()` fire over those files. Tests inject a
         // controlled provider (or `None`); only this real-host path reads the FS.
         memory_provider: Some(orchestrator::prompt::real_provider_with_excludes(
-            load_claude_md_excludes(incl_user, incl_project),
+            load_lingxi_md_excludes(incl_user, incl_project),
         )),
         // CLI-resolved session permission mode (`initialPermissionModeFromCLI`),
         // threaded in by `run_cli`.
@@ -574,7 +574,7 @@ pub async fn build_runtime_for_tui(argv: &Argv) -> Result<TuiBuild, InitError> {
     let gate = std::sync::Arc::new(
         tui::permission_bridge::TuiPermissionGate::new(perm_tx, session_allow_rules).with_persist(
             permission::PermissionPaths {
-                claude_home: cfg.claude_home.clone(),
+                lingxi_home: cfg.lingxi_home.clone(),
                 cwd: cfg.cwd.clone(),
             },
         ),

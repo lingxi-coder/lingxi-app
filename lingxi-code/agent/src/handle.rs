@@ -134,7 +134,7 @@ pub struct PoolSubagentSpawner {
     /// [`Self::with_hook_context`]; defaults to an empty path.
     hook_cwd: std::path::PathBuf,
     /// FIX C: the MAIN session's subagents directory —
-    /// `<claude_home>/projects/<sanitize(cwd)>/<session_uuid>/subagents`
+    /// `<lingxi_home>/projects/<sanitize(cwd)>/<session_uuid>/subagents`
     /// (claude-code `getAgentTranscriptPath`'s base dir). Precomputed at the
     /// composition root and set at boot via [`Self::with_hook_context`] (the
     /// `agent` crate has no `session`/`orchestrator` dep to derive it, so the host
@@ -335,7 +335,7 @@ impl PoolSubagentSpawner {
     /// Builder: set the session id + cwd stamped on the `HookContext` the child
     /// runner builds for the SubagentStart fire, plus the precomputed
     /// `subagents_dir` used to seed each spawned child's REAL `transcript_subdir`
-    /// (FIX C — `<claude_home>/projects/<sanitize(cwd)>/<session>/subagents`,
+    /// (FIX C — `<lingxi_home>/projects/<sanitize(cwd)>/<session>/subagents`,
     /// supplied by the host since `agent` has no `session`/`orchestrator` dep to
     /// derive it). Without it the defaults (nil session / empty cwd / no subagents
     /// dir ⇒ `/tmp` placeholder subdir) are used — only consulted when a hook

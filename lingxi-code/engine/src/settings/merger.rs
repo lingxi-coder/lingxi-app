@@ -23,7 +23,7 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         ),
         enabled_tools: concat_dedup(prev.enabled_tools, next.enabled_tools),
         additional_includes: concat_dedup(prev.additional_includes, next.additional_includes),
-        claude_md_excludes: concat_dedup(prev.claude_md_excludes, next.claude_md_excludes),
+        lingxi_md_excludes: concat_dedup(prev.lingxi_md_excludes, next.lingxi_md_excludes),
         sandbox: deep_merge_object(prev.sandbox, next.sandbox),
         hooks: deep_merge_object(prev.hooks, next.hooks),
         // Deep-merge the opaque block. NOTE: claude-code concat-dedups the

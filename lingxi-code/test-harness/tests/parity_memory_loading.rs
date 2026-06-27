@@ -1,14 +1,14 @@
 //! Parity fixture: LINGXI.md hierarchy walk (no size drop).
 //!
-//! Locks the shape of `claude_md::hierarchy::walk` + `claude_md::loader::load_file`
+//! Locks the shape of `lingxi_md::hierarchy::walk` + `lingxi_md::loader::load_file`
 //! against claude-code's reference (`src/memory/hierarchy.ts:22-71`,
 //! `src/memory/loader.ts:14-38`). Each scenario builds a tempdir layout
 //! and asserts the walk order. GAP 4: claude-code reads every file whole (no
 //! size drop), so no file is ever skipped for size — `expected_skipped` is
 //! always empty and an oversized file appears in `expected_order`.
 
-use memory::claude_md::hierarchy::walk;
-use memory::claude_md::loader::load_file;
+use memory::lingxi_md::hierarchy::walk;
+use memory::lingxi_md::loader::load_file;
 use memory::MAX_MEMORY_FILE_SIZE;
 use serde::Deserialize;
 use std::collections::BTreeMap;

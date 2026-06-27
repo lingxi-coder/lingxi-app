@@ -254,10 +254,10 @@ pub fn project_dirs_up_to_home(subdir: &str, cwd: &Path, home: &Path) -> Vec<Pat
             break;
         }
 
-        let claude_subdir = current.join(branding::DOT_DIR).join(subdir);
+        let lingxi_subdir = current.join(branding::DOT_DIR).join(subdir);
         // Perf filter: only existing dirs (the worktree fallback relies on this).
-        if std::fs::metadata(&claude_subdir).is_ok() {
-            dirs.push(claude_subdir);
+        if std::fs::metadata(&lingxi_subdir).is_ok() {
+            dirs.push(lingxi_subdir);
         }
 
         // Stop after processing the git-root directory.
@@ -324,8 +324,8 @@ fn canonical_git_root(git_root: &Path) -> Option<PathBuf> {
 /// for `subdir == "commands"`.
 ///
 /// * `cwd` — the session working directory (drives the project upward walk).
-/// * `claude_home` — the user config dir (TS `getClaudeConfigHomeDir()`); the
-///   user layer is `claude_home/commands`.
+/// * `lingxi_home` — the user config dir (TS `getClaudeConfigHomeDir()`); the
+///   user layer is `lingxi_home/commands`.
 /// * `managed_dir` — the managed-policy root (TS `getManagedFilePath()`); the
 ///   managed layer is `managed_dir/.lingxi/commands`.
 /// * `home` — the user's home directory, the upward-walk stop boundary.
@@ -335,13 +335,13 @@ fn canonical_git_root(git_root: &Path) -> Option<PathBuf> {
 #[must_use]
 pub async fn load_command_markdown_files(
     cwd: &Path,
-    claude_home: &Path,
+    lingxi_home: &Path,
     managed_dir: &Path,
     home: &Path,
 ) -> Vec<MarkdownCommandFile> {
     const SUBDIR: &str = "commands";
 
-    let user_dir = claude_home.join(SUBDIR);
+    let user_dir = lingxi_home.join(SUBDIR);
     let managed_commands_dir = managed_dir.join(branding::DOT_DIR).join(SUBDIR);
     let mut project_dirs = project_dirs_up_to_home(SUBDIR, cwd, home);
 
@@ -357,9 +357,9 @@ pub async fn load_command_markdown_files(
                     .iter()
                     .any(|d| normalize_for_comparison(d) == worktree_subdir);
                 if !worktree_has_subdir {
-                    let main_claude_subdir = canonical_root.join(branding::DOT_DIR).join(SUBDIR);
-                    if !project_dirs.iter().any(|d| *d == main_claude_subdir) {
-                        project_dirs.push(main_claude_subdir);
+                    let main_lingxi_subdir = canonical_root.join(branding::DOT_DIR).join(SUBDIR);
+                    if !project_dirs.iter().any(|d| *d == main_lingxi_subdir) {
+                        project_dirs.push(main_lingxi_subdir);
                     }
                 }
             }
@@ -386,10 +386,10 @@ pub async fn load_command_markdown_files(
 #[must_use]
 pub async fn load_skill_markdown_files(
     cwd: &Path,
-    claude_home: &Path,
+    lingxi_home: &Path,
     home: &Path,
 ) -> Vec<SkillMarkdownCommandFile> {
-    load_skill_markdown_files_with_roots(cwd, claude_home, None, home, &[]).await
+    load_skill_markdown_files_with_roots(cwd, lingxi_home, None, home, &[]).await
 }
 
 /// Load directory-format `.lingxi/skills/<name>/SKILL.md` files from managed,
@@ -400,7 +400,7 @@ pub async fn load_skill_markdown_files(
 #[must_use]
 pub async fn load_skill_markdown_files_with_roots(
     cwd: &Path,
-    claude_home: &Path,
+    lingxi_home: &Path,
     managed_dir: Option<&Path>,
     home: &Path,
     additional_skill_dirs: &[PathBuf],
@@ -413,7 +413,7 @@ pub async fn load_skill_markdown_files_with_roots(
         ));
     }
     all_files.extend(load_skill_dir(
-        &claude_home.join("skills"),
+        &lingxi_home.join("skills"),
         CommandSource::User,
     ));
     for project_dir in project_dirs_up_to_home("skills", cwd, home) {
@@ -1294,11 +1294,11 @@ mod tests {
 
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = root.join("home").join(".lingxi");
+        let lingxi_home = root.join("home").join(".lingxi");
         let managed = root.join("managed-none");
 
         let files =
-            load_command_markdown_files(&root.join("proj"), &claude_home, &managed, &home).await;
+            load_command_markdown_files(&root.join("proj"), &lingxi_home, &managed, &home).await;
         let mut names: Vec<String> = files
             .iter()
             .map(|f| command_name_from_path(&f.file_path, &f.base_dir))
@@ -1327,8 +1327,8 @@ mod tests {
         // Hardlink the same inode into the managed dir.
         fs::hard_link(proj_cmds.join("shared.md"), managed_cmds.join("shared.md")).unwrap();
 
-        let claude_home = root.join("home").join(".lingxi");
-        let files = load_command_markdown_files(&project, &claude_home, &managed, &home).await;
+        let lingxi_home = root.join("home").join(".lingxi");
+        let files = load_command_markdown_files(&project, &lingxi_home, &managed, &home).await;
         let shared: Vec<&MarkdownCommandFile> = files
             .iter()
             .filter(|f| f.content == "shared body")
@@ -1360,12 +1360,12 @@ mod tests {
 
         // The user commands dir is a SYMLINK to the project's commands dir, so the
         // same `real.md` is reachable as both project and user.
-        let claude_home = root.join("home").join(".lingxi");
-        fs::create_dir_all(&claude_home).unwrap();
-        std::os::unix::fs::symlink(&proj_cmds, claude_home.join("commands")).unwrap();
+        let lingxi_home = root.join("home").join(".lingxi");
+        fs::create_dir_all(&lingxi_home).unwrap();
+        std::os::unix::fs::symlink(&proj_cmds, lingxi_home.join("commands")).unwrap();
 
         let managed = root.join("managed-none");
-        let files = load_command_markdown_files(&project, &claude_home, &managed, &home).await;
+        let files = load_command_markdown_files(&project, &lingxi_home, &managed, &home).await;
         let bodies: Vec<&MarkdownCommandFile> =
             files.iter().filter(|f| f.content == "real body").collect();
         assert_eq!(
@@ -1382,10 +1382,10 @@ mod tests {
         let root = temp_dir("empty");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = root.join("home").join(".lingxi");
+        let lingxi_home = root.join("home").join(".lingxi");
         let managed = root.join("nope");
         let files =
-            load_command_markdown_files(&root.join("noproj"), &claude_home, &managed, &home).await;
+            load_command_markdown_files(&root.join("noproj"), &lingxi_home, &managed, &home).await;
         assert!(files.is_empty());
         fs::remove_dir_all(&root).ok();
     }
@@ -1407,8 +1407,8 @@ mod tests {
             "# Legacy demo\n",
         );
 
-        let claude_home = home.join(".lingxi");
-        let skill_files = load_skill_markdown_files(&repo, &claude_home, &home).await;
+        let lingxi_home = home.join(".lingxi");
+        let skill_files = load_skill_markdown_files(&repo, &lingxi_home, &home).await;
         assert_eq!(skill_files.len(), 1);
 
         let cmd = build_skill_command(&skill_files[0], CommandSource::Project);
@@ -1430,7 +1430,7 @@ mod tests {
             other => panic!("expected Markdown kind, got {other:?}"),
         }
 
-        let command_files = load_command_markdown_files(&repo, &claude_home, &root, &home).await;
+        let command_files = load_command_markdown_files(&repo, &lingxi_home, &root, &home).await;
         let legacy = command_files
             .iter()
             .find(|f| f.file_path.ends_with("demo.md"))
@@ -1451,12 +1451,12 @@ mod tests {
         let root = temp_dir("skill-collision");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = home.join(".lingxi");
+        let lingxi_home = home.join(".lingxi");
 
         let repo = root.join("repo");
         fs::create_dir_all(repo.join(".git")).unwrap();
         write(
-            &claude_home.join("skills").join("dup").join("SKILL.md"),
+            &lingxi_home.join("skills").join("dup").join("SKILL.md"),
             "---\ndescription: User skill\n---\nUSER body\n",
         );
         write(
@@ -1468,7 +1468,7 @@ mod tests {
             "---\ndescription: Project skill\n---\nPROJECT body\n",
         );
 
-        let skill_files = load_skill_markdown_files(&repo, &claude_home, &home).await;
+        let skill_files = load_skill_markdown_files(&repo, &lingxi_home, &home).await;
         let first_dup = skill_files
             .iter()
             .find(|f| f.skill_root.file_name().is_some_and(|n| n == "dup"))
@@ -1484,7 +1484,7 @@ mod tests {
         let root = temp_dir("skill-layering");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = home.join(".lingxi");
+        let lingxi_home = home.join(".lingxi");
         let managed = root.join("managed");
         let additional = root.join("extra-skills");
 
@@ -1499,7 +1499,7 @@ mod tests {
             "---\ndescription: Managed skill\n---\nMANAGED body\n",
         );
         write(
-            &claude_home.join("skills").join("dup").join("SKILL.md"),
+            &lingxi_home.join("skills").join("dup").join("SKILL.md"),
             "---\ndescription: User skill\n---\nUSER body\n",
         );
         write(
@@ -1517,7 +1517,7 @@ mod tests {
 
         let skill_files = load_skill_markdown_files_with_roots(
             &repo,
-            &claude_home,
+            &lingxi_home,
             Some(&managed),
             &home,
             std::slice::from_ref(&additional),

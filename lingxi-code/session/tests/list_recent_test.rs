@@ -8,15 +8,15 @@ use tempfile::TempDir;
 use traits::FileSystem;
 use uuid::Uuid;
 
-/// Build a tempdir that mimics `<claude_home>/projects/<sanitize(cwd)>/` and
-/// returns (tempdir, `claude_home`, `cwd_string`).
+/// Build a tempdir that mimics `<lingxi_home>/projects/<sanitize(cwd)>/` and
+/// returns (tempdir, `lingxi_home`, `cwd_string`).
 async fn setup_project(file_count: usize) -> (TempDir, std::path::PathBuf, String) {
     let temp = TempDir::new().expect("tempdir");
     let cwd_path = temp.path().join("workproj");
     tokio::fs::create_dir(&cwd_path).await.unwrap();
     let cwd = cwd_path.to_string_lossy().into_owned();
-    let claude_home = temp.path().join("home");
-    let project_subdir = claude_home.join("projects").join(project_dir_name(&cwd));
+    let lingxi_home = temp.path().join("home");
+    let project_subdir = lingxi_home.join("projects").join(project_dir_name(&cwd));
     tokio::fs::create_dir_all(&project_subdir).await.unwrap();
 
     let base = SystemTime::now();
@@ -41,7 +41,7 @@ async fn setup_project(file_count: usize) -> (TempDir, std::path::PathBuf, Strin
         let mtime = base + Duration::from_secs(i as u64);
         filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(mtime)).unwrap();
     }
-    (temp, claude_home, cwd)
+    (temp, lingxi_home, cwd)
 }
 
 fn make_fs(root: &std::path::Path) -> Arc<dyn FileSystem> {
@@ -50,9 +50,9 @@ fn make_fs(root: &std::path::Path) -> Arc<dyn FileSystem> {
 
 #[tokio::test]
 async fn returns_up_to_limit_sorted_newest_first() {
-    let (temp, claude_home, cwd) = setup_project(7).await;
+    let (temp, lingxi_home, cwd) = setup_project(7).await;
     let fs = make_fs(temp.path());
-    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
         .await
         .expect("list");
     assert_eq!(rows.len(), 5);
@@ -68,12 +68,12 @@ async fn empty_project_dir_returns_empty_error() {
     let cwd_path = temp.path().join("noproj");
     tokio::fs::create_dir(&cwd_path).await.unwrap();
     let cwd = cwd_path.to_string_lossy().into_owned();
-    let claude_home = temp.path().join("home");
+    let lingxi_home = temp.path().join("home");
     // Create the projects dir but no jsonl in it.
-    let subdir = claude_home.join("projects").join(project_dir_name(&cwd));
+    let subdir = lingxi_home.join("projects").join(project_dir_name(&cwd));
     tokio::fs::create_dir_all(&subdir).await.unwrap();
     let fs = make_fs(temp.path());
-    match list_recent_sessions(&claude_home, &cwd, 5, fs).await {
+    match list_recent_sessions(&lingxi_home, &cwd, 5, fs).await {
         Err(LoaderError::EmptyDirectory) => {}
         other => panic!("expected EmptyDirectory, got {other:?}"),
     }
@@ -85,9 +85,9 @@ async fn nonexistent_project_dir_returns_empty_error() {
     let cwd_path = temp.path().join("nope");
     tokio::fs::create_dir(&cwd_path).await.unwrap();
     let cwd = cwd_path.to_string_lossy().into_owned();
-    let claude_home = temp.path().join("home");
+    let lingxi_home = temp.path().join("home");
     let fs = make_fs(temp.path());
-    match list_recent_sessions(&claude_home, &cwd, 5, fs).await {
+    match list_recent_sessions(&lingxi_home, &cwd, 5, fs).await {
         Err(LoaderError::EmptyDirectory) => {}
         other => panic!("expected EmptyDirectory, got {other:?}"),
     }
@@ -95,13 +95,13 @@ async fn nonexistent_project_dir_returns_empty_error() {
 
 #[tokio::test]
 async fn skips_non_uuid_filenames() {
-    let (temp, claude_home, cwd) = setup_project(2).await;
-    let subdir = claude_home.join("projects").join(project_dir_name(&cwd));
+    let (temp, lingxi_home, cwd) = setup_project(2).await;
+    let subdir = lingxi_home.join("projects").join(project_dir_name(&cwd));
     tokio::fs::write(subdir.join("not-a-uuid.jsonl"), "{}\n")
         .await
         .unwrap();
     let fs = make_fs(temp.path());
-    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
         .await
         .expect("list");
     assert_eq!(rows.len(), 2); // the 2 from setup_project, not the bogus one
@@ -118,14 +118,14 @@ async fn skips_non_uuid_filenames() {
 /// Set up a single-session project dir whose ONE `.jsonl` file is built from the
 /// supplied raw JSONL `lines` (already-serialized, one per element). The filename
 /// stem is `sid` (== the picker's `sid` key for custom/ai titles). Returns the
-/// `claude_home` + `cwd` so the caller can run `list_recent_sessions`.
+/// `lingxi_home` + `cwd` so the caller can run `list_recent_sessions`.
 async fn setup_one(lines: &[String], sid: Uuid) -> (TempDir, std::path::PathBuf, String) {
     let temp = TempDir::new().expect("tempdir");
     let cwd_path = temp.path().join("workproj");
     tokio::fs::create_dir(&cwd_path).await.unwrap();
     let cwd = cwd_path.to_string_lossy().into_owned();
-    let claude_home = temp.path().join("home");
-    let subdir = claude_home.join("projects").join(project_dir_name(&cwd));
+    let lingxi_home = temp.path().join("home");
+    let subdir = lingxi_home.join("projects").join(project_dir_name(&cwd));
     tokio::fs::create_dir_all(&subdir).await.unwrap();
 
     let mut body = String::new();
@@ -136,7 +136,7 @@ async fn setup_one(lines: &[String], sid: Uuid) -> (TempDir, std::path::PathBuf,
     tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
         .await
         .unwrap();
-    (temp, claude_home, cwd)
+    (temp, lingxi_home, cwd)
 }
 
 /// A `user` first-prompt line whose `uuid` is also the chain tip (single-message
@@ -194,10 +194,10 @@ async fn summary_for_tip_leaf_becomes_picker_title() {
         summary_line(tip, "Refactor the JSONL parser"),
         user_line(tip, sid, "/cwd-ignored", "please look at the parser"),
     ];
-    let (temp, claude_home, cwd) = setup_one(&lines, sid).await;
+    let (temp, lingxi_home, cwd) = setup_one(&lines, sid).await;
     let fs = make_fs(temp.path());
 
-    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
         .await
         .expect("list");
     assert_eq!(rows.len(), 1);
@@ -217,10 +217,10 @@ async fn custom_title_wins_over_ai_title_and_summary() {
         custom_title_line(sid, "My Renamed Session"),
         user_line(tip, sid, "/cwd", "the original first prompt"),
     ];
-    let (temp, claude_home, cwd) = setup_one(&lines, sid).await;
+    let (temp, lingxi_home, cwd) = setup_one(&lines, sid).await;
     let fs = make_fs(temp.path());
 
-    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
         .await
         .expect("list");
     assert_eq!(rows.len(), 1);
@@ -237,10 +237,10 @@ async fn ai_title_wins_over_summary() {
         ai_title_line(sid, "Generated Title"),
         user_line(tip, sid, "/cwd", "the first prompt"),
     ];
-    let (temp, claude_home, cwd) = setup_one(&lines, sid).await;
+    let (temp, lingxi_home, cwd) = setup_one(&lines, sid).await;
     let fs = make_fs(temp.path());
 
-    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
         .await
         .expect("list");
     assert_eq!(rows.len(), 1);
@@ -254,10 +254,10 @@ async fn plain_session_falls_back_to_first_user_message() {
     let sid = Uuid::new_v4();
     let tip = sid;
     let lines = vec![user_line(tip, sid, "/cwd", "what does this function do?")];
-    let (temp, claude_home, cwd) = setup_one(&lines, sid).await;
+    let (temp, lingxi_home, cwd) = setup_one(&lines, sid).await;
     let fs = make_fs(temp.path());
 
-    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
         .await
         .expect("list");
     assert_eq!(rows.len(), 1);
@@ -276,10 +276,10 @@ async fn summary_for_a_non_tip_leaf_is_not_used() {
         summary_line(other_leaf, "summary for some other leaf"),
         user_line(tip, sid, "/cwd", "the real first prompt"),
     ];
-    let (temp, claude_home, cwd) = setup_one(&lines, sid).await;
+    let (temp, lingxi_home, cwd) = setup_one(&lines, sid).await;
     let fs = make_fs(temp.path());
 
-    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
         .await
         .expect("list");
     assert_eq!(rows.len(), 1);
@@ -303,15 +303,15 @@ async fn branched_fixture_surfaces_ai_title() {
     let cwd_path = temp.path().join("workproj");
     tokio::fs::create_dir(&cwd_path).await.unwrap();
     let cwd = cwd_path.to_string_lossy().into_owned();
-    let claude_home = temp.path().join("home");
-    let subdir = claude_home.join("projects").join(project_dir_name(&cwd));
+    let lingxi_home = temp.path().join("home");
+    let subdir = lingxi_home.join("projects").join(project_dir_name(&cwd));
     tokio::fs::create_dir_all(&subdir).await.unwrap();
     tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixture)
         .await
         .unwrap();
 
     let fs = make_fs(temp.path());
-    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
         .await
         .expect("list");
     assert_eq!(rows.len(), 1);

@@ -26,7 +26,7 @@
 //!   same shape off the Rust `SandboxRuntimeConfig`. `read.allowWithinDeny`
 //!   (from `filesystem.allow_read`), `network.deniedHosts` (from
 //!   `network.denied_domains`), and the `$TMPDIR` cross-user temp-dir
-//!   normalization (via [`claude_temp_dir`] / [`normalize_allow_only`]) are all
+//!   normalization (via [`lingxi_temp_dir`] / [`normalize_allow_only`]) are all
 //!   reproduced. See [`sandbox_section`] for the field-by-field mapping.
 //! - **Tool-name literals are STRING LITERALS** (`"Glob"`, `"Grep"`, `"Read"`,
 //!   `"Edit"`, `"Write"`, `"Bash"`) matching the claude-code wire names, rather
@@ -158,7 +158,7 @@ fn dedup(items: &[String]) -> Vec<String> {
 /// the unresolved base on failure. The directory NAME is `claude` on Windows
 /// (tmpdir is already per-user) or `claude-{uid}` elsewhere. The result is
 /// `join(resolvedBase, name) + sep` (trailing separator included).
-fn claude_temp_dir() -> String {
+fn lingxi_temp_dir() -> String {
     let base: std::path::PathBuf = std::env::var_os("LINGXI_TMPDIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
@@ -205,7 +205,7 @@ fn current_uid() -> u32 {
 /// already sets `$TMPDIR` at runtime). Applied ONLY to `write.allowOnly` — never
 /// to deny/read lists.
 fn normalize_allow_only(paths: &[String]) -> Vec<String> {
-    let tmp = claude_temp_dir();
+    let tmp = lingxi_temp_dir();
     dedup(paths)
         .into_iter()
         .map(|p| if p == tmp { "$TMPDIR".to_string() } else { p })
@@ -939,21 +939,21 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_section_normalizes_claude_temp_dir_to_tmpdir_literal() {
+    fn sandbox_section_normalizes_lingxi_temp_dir_to_tmpdir_literal() {
         let _g = ENV_LOCK.lock().unwrap();
-        // Pin the temp-dir base via LINGXI_TMPDIR so claude_temp_dir() is
+        // Pin the temp-dir base via LINGXI_TMPDIR so lingxi_temp_dir() is
         // deterministic across hosts/users.
         let tmp_base = tempfile::tempdir().unwrap();
         let prior = std::env::var_os("LINGXI_TMPDIR");
         std::env::set_var("LINGXI_TMPDIR", tmp_base.path());
 
-        let claude_dir = claude_temp_dir();
+        let lingxi_dir = lingxi_temp_dir();
         let cfg = SandboxRuntimeConfig {
             enabled: true,
             filesystem: sandbox::runtime_config::FilesystemRestrictionConfig {
                 // The Claude temp dir collapses to $TMPDIR; an unrelated path is
                 // emitted verbatim.
-                allow_write: vec![claude_dir.clone(), "/work/project".into()],
+                allow_write: vec![lingxi_dir.clone(), "/work/project".into()],
                 ..Default::default()
             },
             ..Default::default()
@@ -970,7 +970,7 @@ mod tests {
             "claude temp dir must normalize to $TMPDIR (not the literal); got:\n{p}"
         );
         assert!(
-            !p.contains(&claude_dir),
+            !p.contains(&lingxi_dir),
             "the per-UID temp dir literal must NOT appear; got:\n{p}"
         );
     }

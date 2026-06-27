@@ -51,7 +51,7 @@ fn memory_files_are_not_spliced_into_the_prompt() {
         path: PathBuf::from("/proj/LINGXI.md"),
         body: "notes".into(),
         is_local_override: false,
-        tier: memory::claude_md::ClaudeMdTier::Project,
+        tier: memory::lingxi_md::LingxiMdTier::Project,
         globs: None,
     }];
     ctx.tool_names = vec!["Read".into(), "Write".into()];

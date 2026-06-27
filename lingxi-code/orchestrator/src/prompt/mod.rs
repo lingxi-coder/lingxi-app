@@ -29,7 +29,7 @@ pub use memory_block::{
 /// Re-export of the LINGXI.md tier enum so consumers that depend on
 /// `orchestrator` (but not the `memory` crate directly) can name
 /// [`MemoryFile::tier`] without an extra dependency.
-pub use memory::claude_md::ClaudeMdTier;
+pub use memory::lingxi_md::LingxiMdTier;
 
 // `FOOTER` is intentionally NOT imported here: the MAIN assembler no longer
 // appends it (R-P1b). It remains exported from `locked_templates` for the
@@ -304,7 +304,7 @@ pub struct FileTreeEntry {
 
 /// One loaded LINGXI.md (or `LINGXI.local.md`) file.
 ///
-/// Distinct from [`memory::claude_md::LoadedFile`] — the
+/// Distinct from [`memory::lingxi_md::LoadedFile`] — the
 /// assembler keeps a leaner representation post-trim.
 #[derive(Debug, Clone)]
 pub struct MemoryFile {
@@ -320,10 +320,10 @@ pub struct MemoryFile {
     /// driven by [`MemoryFile::tier`] (a `Local` tier implies this is `true`).
     pub is_local_override: bool,
     /// Which LINGXI.md tier the file came from. Selects the injection
-    /// description (`getClaudeMds`, claudemd.ts:1168-1186): Managed and User
+    /// description (`getLingxiMds`, claudemd.ts:1168-1186): Managed and User
     /// share the global-instructions wording; Project and Local each have
     /// their own.
-    pub tier: memory::claude_md::ClaudeMdTier,
+    pub tier: memory::lingxi_md::LingxiMdTier,
     /// `paths:` frontmatter globs, when the file is a CONDITIONAL rule
     /// (`parseFrontmatterPaths`, claudemd.ts:254-279). `None` for an
     /// unconditional file. Conditional rules are NOT eagerly injected into the
@@ -383,7 +383,7 @@ mod tests {
             path: PathBuf::from("/proj/LINGXI.md"),
             body: "# title\nbody\n".into(),
             is_local_override: false,
-            tier: memory::claude_md::ClaudeMdTier::Project,
+            tier: memory::lingxi_md::LingxiMdTier::Project,
             globs: None,
         };
         assert!(!f.is_local_override);

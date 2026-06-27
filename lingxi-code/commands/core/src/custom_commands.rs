@@ -72,7 +72,7 @@ use std::path::{Path, PathBuf};
 ///
 /// * `reg` — the registry to populate.
 /// * `cwd` — session working directory (drives the project upward walk).
-/// * `claude_home` — user config dir; the user layer is `claude_home/commands`.
+/// * `lingxi_home` — user config dir; the user layer is `lingxi_home/commands`.
 /// * `managed_dir` — managed-policy root; the managed layer is
 ///   `managed_dir/.lingxi/commands`.
 /// * `home` — the user's home directory, the upward-walk stop boundary.
@@ -91,11 +91,11 @@ use std::path::{Path, PathBuf};
 pub async fn load_and_register_custom_commands(
     reg: &mut CommandRegistry,
     cwd: &Path,
-    claude_home: &Path,
+    lingxi_home: &Path,
     managed_dir: &Path,
     home: &Path,
 ) -> usize {
-    let files = load_command_markdown_files(cwd, claude_home, managed_dir, home).await;
+    let files = load_command_markdown_files(cwd, lingxi_home, managed_dir, home).await;
 
     // First-wins over the loader's `[managed, user, project]` order (see the
     // module docs): `register_command` is last-wins, so we must skip a name once
@@ -117,10 +117,10 @@ pub async fn load_and_register_custom_commands(
 pub async fn load_and_register_skill_commands(
     reg: &mut CommandRegistry,
     cwd: &Path,
-    claude_home: &Path,
+    lingxi_home: &Path,
     home: &Path,
 ) -> usize {
-    load_and_register_skill_commands_with_roots(reg, cwd, claude_home, None, home, &[]).await
+    load_and_register_skill_commands_with_roots(reg, cwd, lingxi_home, None, home, &[]).await
 }
 
 /// Discover every directory-format `.lingxi/skills/<name>/SKILL.md` command
@@ -129,14 +129,14 @@ pub async fn load_and_register_skill_commands(
 pub async fn load_and_register_skill_commands_with_roots(
     reg: &mut CommandRegistry,
     cwd: &Path,
-    claude_home: &Path,
+    lingxi_home: &Path,
     managed_dir: Option<&Path>,
     home: &Path,
     additional_skill_dirs: &[PathBuf],
 ) -> usize {
     let files = load_skill_markdown_files_with_roots(
         cwd,
-        claude_home,
+        lingxi_home,
         managed_dir,
         home,
         additional_skill_dirs,
@@ -190,7 +190,7 @@ mod tests {
         let root = temp_dir("resolve");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = home.join(".lingxi");
+        let lingxi_home = home.join(".lingxi");
         let managed = root.join("managed-none");
 
         let project = root.join("proj");
@@ -201,7 +201,7 @@ mod tests {
 
         let mut reg = CommandRegistry::new();
         let n =
-            load_and_register_custom_commands(&mut reg, &project, &claude_home, &managed, &home)
+            load_and_register_custom_commands(&mut reg, &project, &lingxi_home, &managed, &home)
                 .await;
         assert_eq!(n, 2, "two custom commands registered");
 
@@ -229,7 +229,7 @@ mod tests {
         let root = temp_dir("skill-resolve");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = home.join(".lingxi");
+        let lingxi_home = home.join(".lingxi");
         let project = root.join("proj");
         fs::create_dir_all(project.join(".git")).unwrap();
         let skill_dir = project.join(".lingxi").join("skills").join("demo");
@@ -239,7 +239,7 @@ mod tests {
         );
 
         let mut reg = CommandRegistry::new();
-        let n = load_and_register_skill_commands(&mut reg, &project, &claude_home, &home).await;
+        let n = load_and_register_skill_commands(&mut reg, &project, &lingxi_home, &home).await;
         assert_eq!(n, 1);
 
         let cmd = reg.resolve("demo").expect("/demo should resolve");
@@ -256,10 +256,10 @@ mod tests {
         let root = temp_dir("skill-collide");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = home.join(".lingxi");
+        let lingxi_home = home.join(".lingxi");
         let project = root.join("proj");
         fs::create_dir_all(project.join(".git")).unwrap();
-        let user_skill_dir = claude_home.join("skills").join("dup");
+        let user_skill_dir = lingxi_home.join("skills").join("dup");
         let project_skill_dir = project.join(".lingxi").join("skills").join("dup");
         write(
             &user_skill_dir.join("SKILL.md"),
@@ -271,7 +271,7 @@ mod tests {
         );
 
         let mut reg = CommandRegistry::new();
-        let n = load_and_register_skill_commands(&mut reg, &project, &claude_home, &home).await;
+        let n = load_and_register_skill_commands(&mut reg, &project, &lingxi_home, &home).await;
         assert_eq!(n, 1);
 
         let cmd = reg.resolve("dup").expect("/dup should resolve");
@@ -292,7 +292,7 @@ mod tests {
         let root = temp_dir("skill-managed-collide");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = home.join(".lingxi");
+        let lingxi_home = home.join(".lingxi");
         let managed = root.join("managed");
         let additional = root.join("additional-skills");
         let project = root.join("proj");
@@ -304,7 +304,7 @@ mod tests {
             "---\ndescription: Managed skill\n---\nMANAGED body\n",
         );
         write(
-            &claude_home.join("skills").join("dup").join("SKILL.md"),
+            &lingxi_home.join("skills").join("dup").join("SKILL.md"),
             "---\ndescription: User skill\n---\nUSER body\n",
         );
         write(
@@ -324,7 +324,7 @@ mod tests {
         let n = load_and_register_skill_commands_with_roots(
             &mut reg,
             &project,
-            &claude_home,
+            &lingxi_home,
             Some(&managed),
             &home,
             std::slice::from_ref(&additional),
@@ -355,11 +355,11 @@ mod tests {
         let root = temp_dir("collide");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = home.join(".lingxi");
+        let lingxi_home = home.join(".lingxi");
         let managed = root.join("managed-none");
 
-        // User layer: claude_home/commands/dup.md
-        write(&claude_home.join("commands").join("dup.md"), "USER body");
+        // User layer: lingxi_home/commands/dup.md
+        write(&lingxi_home.join("commands").join("dup.md"), "USER body");
         // Project layer: <proj>/.lingxi/commands/dup.md
         let project = root.join("proj");
         write(
@@ -368,7 +368,7 @@ mod tests {
         );
 
         let mut reg = CommandRegistry::new();
-        load_and_register_custom_commands(&mut reg, &project, &claude_home, &managed, &home).await;
+        load_and_register_custom_commands(&mut reg, &project, &lingxi_home, &managed, &home).await;
 
         let dup = reg.resolve("dup").expect("/dup should resolve");
         match &dup.kind {
@@ -391,7 +391,7 @@ mod tests {
         let root = temp_dir("override");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = home.join(".lingxi");
+        let lingxi_home = home.join(".lingxi");
         let managed = root.join("managed-none");
 
         let project = root.join("proj");
@@ -411,7 +411,7 @@ mod tests {
             "precondition: /commit is a builtin before custom registration"
         );
 
-        load_and_register_custom_commands(&mut reg, &project, &claude_home, &managed, &home).await;
+        load_and_register_custom_commands(&mut reg, &project, &lingxi_home, &managed, &home).await;
 
         let commit = reg.resolve("commit").expect("/commit still resolves");
         assert!(
@@ -428,13 +428,13 @@ mod tests {
         let root = temp_dir("empty");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let claude_home = home.join(".lingxi");
+        let lingxi_home = home.join(".lingxi");
         let managed = root.join("managed-none");
         let project = root.join("noproj");
 
         let mut reg = CommandRegistry::new();
         let n =
-            load_and_register_custom_commands(&mut reg, &project, &claude_home, &managed, &home)
+            load_and_register_custom_commands(&mut reg, &project, &lingxi_home, &managed, &home)
                 .await;
         assert_eq!(n, 0, "no custom commands discovered");
         assert!(reg.resolve("anything").is_none());

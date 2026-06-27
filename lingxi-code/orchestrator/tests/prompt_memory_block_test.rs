@@ -1,13 +1,13 @@
 
-use memory::claude_md::ClaudeMdTier;
+use memory::lingxi_md::LingxiMdTier;
 use orchestrator::prompt::{memory_block, MemoryFile};
 use std::path::PathBuf;
 
-fn mf(path: &str, body: &str, tier: ClaudeMdTier) -> MemoryFile {
+fn mf(path: &str, body: &str, tier: LingxiMdTier) -> MemoryFile {
     MemoryFile {
         path: PathBuf::from(path),
         body: body.into(),
-        is_local_override: tier == ClaudeMdTier::Local,
+        is_local_override: tier == LingxiMdTier::Local,
         tier,
         globs: None,
     }
@@ -24,12 +24,12 @@ fn empty_input_returns_empty_string_no_tags() {
 
 #[test]
 fn single_entry_shape() {
-    // GAP 3: 1:1 with claude-code getClaudeMds — preamble + `Contents of …`,
+    // GAP 3: 1:1 with claude-code getLingxiMds — preamble + `Contents of …`,
     // tier description, trimmed body. NO enclosing tag, NO trailing newline.
     let out = memory_block::format(&[mf(
         "/home/u/.lingxi/LINGXI.md",
         "global notes",
-        ClaudeMdTier::User,
+        LingxiMdTier::User,
     )]);
     let expected = format!(
         "{PREAMBLE}\n\n\
@@ -45,9 +45,9 @@ fn multi_entry_splice_order_locked() {
     // Order verified here: User, then Project, then Local. Each tier gets its
     // own description; blocks are joined by a blank line; no trailing newline.
     let out = memory_block::format(&[
-        mf("/home/u/.lingxi/LINGXI.md", "home", ClaudeMdTier::User),
-        mf("/proj/LINGXI.md", "repo", ClaudeMdTier::Project),
-        mf("/proj/LINGXI.local.md", "local", ClaudeMdTier::Local),
+        mf("/home/u/.lingxi/LINGXI.md", "home", LingxiMdTier::User),
+        mf("/proj/LINGXI.md", "repo", LingxiMdTier::Project),
+        mf("/proj/LINGXI.local.md", "local", LingxiMdTier::Local),
     ]);
     let expected = format!(
         "{PREAMBLE}\n\n\
@@ -63,14 +63,14 @@ local"
 
 #[test]
 fn managed_tier_uses_organization_managed_description() {
-    // Binary `getClaudeMds` (`nUt`) gives Managed its OWN description
+    // Binary `getLingxiMds` (`nUt`) gives Managed its OWN description
     // "(organization-managed policy instructions)" — it does NOT share the User
     // "global instructions" wording (the prior claudemd.ts:1177 citation was
     // stale src; verified against the v2.1.193 binary switch).
     let out = memory_block::format(&[mf(
         "/Library/Application Support/LingXi/LINGXI.md",
         "policy",
-        ClaudeMdTier::Managed,
+        LingxiMdTier::Managed,
     )]);
     let expected = format!(
         "{PREAMBLE}\n\n\
@@ -91,7 +91,7 @@ fn conditional_rule_with_paths_is_excluded_from_eager_block() {
         path: PathBuf::from("/proj/.lingxi/rules/always.md"),
         body: "always".into(),
         is_local_override: false,
-        tier: ClaudeMdTier::Project,
+        tier: LingxiMdTier::Project,
         globs: None,
     };
     // The provider would have dropped this one (globs.is_some()); assert that a
@@ -100,7 +100,7 @@ fn conditional_rule_with_paths_is_excluded_from_eager_block() {
         path: PathBuf::from("/proj/.lingxi/rules/scoped.md"),
         body: "scoped".into(),
         is_local_override: false,
-        tier: ClaudeMdTier::Project,
+        tier: LingxiMdTier::Project,
         globs: Some(vec!["src".into()]),
     };
     let eager: Vec<MemoryFile> = [included.clone(), conditional]
@@ -151,13 +151,13 @@ async fn real_provider_loads_in_spec_splice_order_via_temp_repo() {
     std::env::set_var("HOME", &home);
     let empty_managed = tmp.path().join("no-managed");
     std::env::set_var(
-        memory::claude_md::hierarchy::MANAGED_DIR_ENV,
+        memory::lingxi_md::hierarchy::MANAGED_DIR_ENV,
         &empty_managed,
     );
 
     let p = RealMemoryHierarchyProvider;
     let files = p.load(&proj).await;
-    std::env::remove_var(memory::claude_md::hierarchy::MANAGED_DIR_ENV);
+    std::env::remove_var(memory::lingxi_md::hierarchy::MANAGED_DIR_ENV);
     let bodies: Vec<String> = files.iter().map(|f| f.body.clone()).collect();
     // §F: `load()` now RETAINS the conditional rule (with globs). Splice order:
     // HOME → REPO → unconditional rule → conditional rule → LOCAL. (Within the
@@ -166,11 +166,11 @@ async fn real_provider_loads_in_spec_splice_order_via_temp_repo() {
     // The included unconditional rule carries no globs; tiers are tagged.
     let always = files.iter().find(|f| f.body == "ALWAYS").unwrap();
     assert!(always.globs.is_none());
-    assert_eq!(always.tier, ClaudeMdTier::Project);
+    assert_eq!(always.tier, LingxiMdTier::Project);
     // The conditional rule carries its `paths:` globs (trailing `/**` stripped).
     let scoped = files.iter().find(|f| f.body == "SCOPED").unwrap();
     assert_eq!(scoped.globs, Some(vec!["src".to_string()]));
-    assert_eq!(scoped.tier, ClaudeMdTier::Project);
+    assert_eq!(scoped.tier, LingxiMdTier::Project);
 
     // §F eager filter: the eager `format()` block EXCLUDES the conditional rule
     // (mirrors claude-code `conditionalRule:false`), while keeping everything

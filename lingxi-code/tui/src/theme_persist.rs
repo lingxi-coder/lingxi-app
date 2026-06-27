@@ -18,7 +18,7 @@ use crate::theme::ThemeSetting;
 /// `$LINGXI_CONFIG_DIR` when set, else `~/.claude`.
 #[must_use]
 fn settings_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| memory::claude_md::user_config_dir(&h).join("settings.json"))
+    dirs::home_dir().map(|h| memory::lingxi_md::user_config_dir(&h).join("settings.json"))
 }
 
 /// Read the stored theme setting, if any. Returns `None` on any error

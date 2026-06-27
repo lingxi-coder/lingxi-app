@@ -94,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
     //     reap are factored into `boot::publish_lockfile` so the headless serve
     //     test drives the SAME code with a temp dir.
     let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let bridge_dir = boot::claude_config_home()
+    let bridge_dir = boot::lingxi_config_home()
         .ok_or_else(|| anyhow::anyhow!("no home directory to root the bridge lockfile"))?
         .join("bridge");
     std::fs::create_dir_all(&bridge_dir)

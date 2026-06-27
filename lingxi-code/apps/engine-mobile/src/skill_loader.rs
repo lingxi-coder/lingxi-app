@@ -3,7 +3,7 @@
 //! Makes the mobile `Skill` tool functional. It discovers on-disk
 //! `.lingxi/commands/**.md` + directory-format `.lingxi/skills/<name>/SKILL.md`
 //! under the device's app-private root (`app_files_root` = Android `filesDir`,
-//! with `claude_home = <app_files_root>/.claude`) and resolves a model-supplied
+//! with `lingxi_home = <app_files_root>/.claude`) and resolves a model-supplied
 //! skill name to a real prompt [`SkillDescriptor`] — the mobile analog of
 //! engine-desktop's `CommandRegistrySkillLoader` (which is apps-local and so
 //! cannot be reused across the `app → app` dependency boundary).
@@ -114,26 +114,26 @@ pub struct MobileDiskSkillLoader {
 
 impl MobileDiskSkillLoader {
     /// Build the loader by discovering on-disk custom commands + directory-format
-    /// skills under `cwd` (project) and `claude_home` (user). `home` is the
+    /// skills under `cwd` (project) and `lingxi_home` (user). `home` is the
     /// home-walk root the loader uses for the user layer; on a device pass `cwd`
     /// so `home/.claude` resolves to the same app-private `.claude` as
-    /// `claude_home` (the underlying loaders dedup by name across layers, so the
+    /// `lingxi_home` (the underlying loaders dedup by name across layers, so the
     /// collision is harmless). Mobile has no managed-settings layer, so a
     /// non-existent managed dir is passed (the loader skips missing dirs).
     pub async fn load_from_disk(
         cwd: &Path,
-        claude_home: &Path,
+        lingxi_home: &Path,
         home: &Path,
         session_id: Option<String>,
     ) -> Self {
         let mut registry = CommandRegistry::new();
         // Mobile has no managed (enterprise policy) settings dir; a path that does
         // not exist makes the loader's managed layer a no-op.
-        let no_managed = claude_home.join("__lingxi_no_managed_settings__");
+        let no_managed = lingxi_home.join("__lingxi_no_managed_settings__");
         command_core::load_and_register_custom_commands(
             &mut registry,
             cwd,
-            claude_home,
+            lingxi_home,
             &no_managed,
             home,
         )
@@ -141,7 +141,7 @@ impl MobileDiskSkillLoader {
         command_core::load_and_register_skill_commands_with_roots(
             &mut registry,
             cwd,
-            claude_home,
+            lingxi_home,
             None,
             home,
             &[],
@@ -185,8 +185,8 @@ mod tests {
         .await
         .unwrap();
 
-        // Mirror the mobile host wiring: claude_home = <root>/.claude, home = root
-        // (so home/.claude == claude_home; the loaders dedup by name across layers).
+        // Mirror the mobile host wiring: lingxi_home = <root>/.claude, home = root
+        // (so home/.claude == lingxi_home; the loaders dedup by name across layers).
         let loader =
             MobileDiskSkillLoader::load_from_disk(root, &root.join(".lingxi"), root, None).await;
 

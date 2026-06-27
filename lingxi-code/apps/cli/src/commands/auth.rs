@@ -337,12 +337,12 @@ fn print_status_text(
 /// SAME `~/.claude` (or `$LINGXI_CONFIG_DIR`) location the desktop runtime and
 /// `/login` write to, so `status` / `logout` observe real credentials.
 async fn build_credential_manager() -> Result<secret::CredentialManager, anyhow::Error> {
-    let claude_home = crate::run::claude_home_dir();
+    let lingxi_home = crate::run::lingxi_home_dir();
     let user = std::env::var("USER").unwrap_or_else(|_| "default".to_string());
     let storage = platform_posix::secure_storage_for_platform(
         user,
-        claude_home.clone(),
-        claude_home.join(".credentials.json"),
+        lingxi_home.clone(),
+        lingxi_home.join(".credentials.json"),
     )
     .await
     .map_err(|e| anyhow::anyhow!("secure storage: {e}"))?;

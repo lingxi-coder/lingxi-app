@@ -323,7 +323,7 @@ impl Tool for TeamDeleteTool {
         let team_name = self.team.team_name().await;
         let remaining = self.team.list().await.len();
         if remaining == 0 {
-            let home = self.home_override.clone().or_else(team_file::claude_home);
+            let home = self.home_override.clone().or_else(team_file::lingxi_home);
             if let (Some(name), Some(home)) = (&team_name, home) {
                 team_file::cleanup_team_directories(&home, name);
             }

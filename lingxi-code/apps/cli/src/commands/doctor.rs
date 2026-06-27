@@ -49,7 +49,7 @@ pub async fn run(_cli: &Cli) -> i32 {
     );
 
     // ── Config locations ──────────────────────────────────────────────────
-    let config_home = crate::run::claude_home_dir();
+    let config_home = crate::run::lingxi_home_dir();
     let config_home_exists = config_home.is_dir();
     println!(
         "Config directory: {} ({})",

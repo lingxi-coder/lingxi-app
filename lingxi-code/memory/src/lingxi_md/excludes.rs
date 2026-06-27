@@ -1,10 +1,10 @@
 //! `claudeMdExcludes` — exclude `LINGXI.md` files matching glob patterns or
-//! absolute paths from loading. 1:1 with claude-code `isClaudeMdExcluded`
+//! absolute paths from loading. 1:1 with claude-code `isLingxiMdExcluded`
 //! (`claudemd.ts:547-573`) + `resolveExcludePatterns`. Only `User` / `Project` /
 //! `Local` tier files are excludable; `Managed` (and AutoMem/TeamMem) are never
 //! excluded.
 
-use crate::claude_md::ClaudeMdTier;
+use crate::lingxi_md::LingxiMdTier;
 use glob::{MatchOptions, Pattern};
 use std::path::Path;
 
@@ -21,11 +21,11 @@ fn match_opts() -> MatchOptions {
 /// Compiled `claudeMdExcludes` matcher. Build once from the merged settings
 /// patterns; query per file via [`Self::is_excluded`].
 #[derive(Debug, Default, Clone)]
-pub struct ClaudeMdExcluder {
+pub struct LingxiMdExcluder {
     patterns: Vec<Pattern>,
 }
 
-impl ClaudeMdExcluder {
+impl LingxiMdExcluder {
     /// Build from the merged `claudeMdExcludes` patterns. Each ABSOLUTE pattern
     /// also contributes a realpath-resolved variant (resolving its longest
     /// existing directory prefix) so a pattern written against `/tmp/...` still
@@ -50,13 +50,13 @@ impl ClaudeMdExcluder {
 
     /// Whether the `LINGXI.md` at `path` (tier `tier`) is excluded. Only
     /// `User` / `Project` / `Local` are excludable; `Managed` is never excluded
-    /// (`isClaudeMdExcluded`, `claudemd.ts:548-550`).
+    /// (`isLingxiMdExcluded`, `claudemd.ts:548-550`).
     #[must_use]
-    pub fn is_excluded(&self, path: &Path, tier: ClaudeMdTier) -> bool {
+    pub fn is_excluded(&self, path: &Path, tier: LingxiMdTier) -> bool {
         if self.patterns.is_empty()
             || !matches!(
                 tier,
-                ClaudeMdTier::User | ClaudeMdTier::Project | ClaudeMdTier::Local
+                LingxiMdTier::User | LingxiMdTier::Project | LingxiMdTier::Local
             )
         {
             return false;
@@ -126,17 +126,17 @@ mod tests {
 
     #[test]
     fn empty_excluder_excludes_nothing() {
-        let ex = ClaudeMdExcluder::new(&[]);
+        let ex = LingxiMdExcluder::new(&[]);
         assert!(ex.is_empty());
-        assert!(!ex.is_excluded(Path::new("/p/LINGXI.md"), ClaudeMdTier::Project));
+        assert!(!ex.is_excluded(Path::new("/p/LINGXI.md"), LingxiMdTier::Project));
     }
 
     #[test]
     fn managed_tier_is_never_excluded() {
-        let ex = ClaudeMdExcluder::new(&["**/LINGXI.md".to_string()]);
+        let ex = LingxiMdExcluder::new(&["**/LINGXI.md".to_string()]);
         // A glob that DOES match the path, but Managed tier is exempt.
-        assert!(!ex.is_excluded(Path::new("/mgr/LINGXI.md"), ClaudeMdTier::Managed));
-        assert!(ex.is_excluded(Path::new("/proj/LINGXI.md"), ClaudeMdTier::Project));
+        assert!(!ex.is_excluded(Path::new("/mgr/LINGXI.md"), LingxiMdTier::Managed));
+        assert!(ex.is_excluded(Path::new("/proj/LINGXI.md"), LingxiMdTier::Project));
     }
 
     #[test]
@@ -155,16 +155,16 @@ mod tests {
 
     #[test]
     fn glob_and_absolute_patterns_match() {
-        let ex = ClaudeMdExcluder::new(&[
+        let ex = LingxiMdExcluder::new(&[
             "**/secret/LINGXI.md".to_string(),
             "/etc/proj/LINGXI.md".to_string(),
         ]);
-        assert!(ex.is_excluded(Path::new("/a/secret/LINGXI.md"), ClaudeMdTier::User));
-        assert!(ex.is_excluded(Path::new("/etc/proj/LINGXI.md"), ClaudeMdTier::Local));
-        assert!(!ex.is_excluded(Path::new("/a/public/LINGXI.md"), ClaudeMdTier::User));
+        assert!(ex.is_excluded(Path::new("/a/secret/LINGXI.md"), LingxiMdTier::User));
+        assert!(ex.is_excluded(Path::new("/etc/proj/LINGXI.md"), LingxiMdTier::Local));
+        assert!(!ex.is_excluded(Path::new("/a/public/LINGXI.md"), LingxiMdTier::User));
         // `*` does not cross `/`.
-        assert!(!ex.is_excluded(Path::new("/a/b/LINGXI.md"), ClaudeMdTier::Project)
-            && ClaudeMdExcluder::new(&["/a/*/LINGXI.md".to_string()])
-                .is_excluded(Path::new("/a/b/LINGXI.md"), ClaudeMdTier::Project));
+        assert!(!ex.is_excluded(Path::new("/a/b/LINGXI.md"), LingxiMdTier::Project)
+            && LingxiMdExcluder::new(&["/a/*/LINGXI.md".to_string()])
+                .is_excluded(Path::new("/a/b/LINGXI.md"), LingxiMdTier::Project));
     }
 }

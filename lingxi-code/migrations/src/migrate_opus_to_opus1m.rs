@@ -59,7 +59,7 @@ pub async fn run(env: &MigrationEnv) {
     if !is_opus1m_merge_enabled(env) {
         return;
     }
-    let sp = settings_path(SettingsSource::User, &env.claude_config_home, &env.project_dir);
+    let sp = settings_path(SettingsSource::User, &env.lingxi_config_home, &env.project_dir);
     let model = read_settings_map(&sp)
         .ok()
         .and_then(|m| m.get("model").and_then(Value::as_str).map(String::from));
@@ -97,7 +97,7 @@ mod tests {
     fn test_env(t: &crate::test_support::TempConfig) -> crate::context::MigrationEnv {
         crate::context::MigrationEnv {
             global_config_path: t.global.clone(),
-            claude_config_home: t.home.clone(),
+            lingxi_config_home: t.home.clone(),
             project_dir: t.project.clone(),
             ctx: crate::context::MigrationContext { first_party: true, subscription_type: None },
             bus: None,

@@ -274,17 +274,17 @@ pub(crate) async fn mount_tui_runtime(tui_runtime: tui::session::Runtime) -> i32
     }
 }
 
-/// Resolve `(claude_home, project_dir)` the settings reader/writer address.
+/// Resolve `(lingxi_home, project_dir)` the settings reader/writer address.
 ///
-/// `claude_home = ~/.claude` (the user settings root; `/dev/null` when no home
+/// `lingxi_home = ~/.claude` (the user settings root; `/dev/null` when no home
 /// dir, matching `init::resolve_desktop_config`'s degrade); `project_dir =
 /// std::env::current_dir()`, read AFTER `cwd::apply_cwd` so it reflects any
 /// `--cwd`. These feed `migrations::settings_update::settings_path`.
 fn settings_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
-    let claude_home = crate::run::claude_home_dir();
+    let lingxi_home = crate::run::lingxi_home_dir();
     let project_dir =
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    (claude_home, project_dir)
+    (lingxi_home, project_dir)
 }
 
 /// (A6 batch-6 Task 2) Read + merge the `statusLine` setting from the USER
@@ -313,14 +313,14 @@ fn settings_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
 /// diverges — real configs carry the whole object in one tier, so this is
 /// acceptable.
 fn read_status_line_config_from(
-    claude_home: &std::path::Path,
+    lingxi_home: &std::path::Path,
     project_dir: &std::path::Path,
 ) -> Option<tui::components::status_line_command::StatusLineConfig> {
     use migrations::settings_update::{read_settings_map, settings_path, SettingsSource};
     // Local-over-User: read User first, then let Local's `statusLine` override.
     let mut status_line: Option<serde_json::Value> = None;
     for source in [SettingsSource::User, SettingsSource::Local] {
-        let p = settings_path(source, claude_home, project_dir);
+        let p = settings_path(source, lingxi_home, project_dir);
         if let Ok(map) = read_settings_map(&p) {
             if let Some(v) = map.get("statusLine") {
                 status_line = Some(v.clone());
@@ -335,8 +335,8 @@ fn read_status_line_config_from(
 /// (A6 batch-6 Task 2) Live wrapper over [`read_status_line_config_from`],
 /// resolving the User+Local settings roots via [`settings_dirs`].
 fn read_status_line_config() -> Option<tui::components::status_line_command::StatusLineConfig> {
-    let (claude_home, project_dir) = settings_dirs();
-    read_status_line_config_from(&claude_home, &project_dir)
+    let (lingxi_home, project_dir) = settings_dirs();
+    read_status_line_config_from(&lingxi_home, &project_dir)
 }
 
 /// True iff `skipDangerousModePermissionPrompt` is truthy in EITHER the user
@@ -346,9 +346,9 @@ fn read_status_line_config() -> Option<tui::components::status_line_command::Sta
 /// substrate). On any read failure the tier degrades to `false`.
 fn read_skip_dangerous_prompt() -> bool {
     use migrations::settings_update::{read_settings_map, settings_path, SettingsSource};
-    let (claude_home, project_dir) = settings_dirs();
+    let (lingxi_home, project_dir) = settings_dirs();
     [SettingsSource::User, SettingsSource::Local].iter().any(|s| {
-        let p = settings_path(*s, &claude_home, &project_dir);
+        let p = settings_path(*s, &lingxi_home, &project_dir);
         read_settings_map(&p)
             .ok()
             .and_then(|m| {
@@ -365,8 +365,8 @@ fn read_skip_dangerous_prompt() -> bool {
 /// throws; the migration port follows the same warn-and-continue contract).
 fn persist_skip_dangerous_prompt() {
     use migrations::settings_update::{settings_path, update_settings, SettingsSource};
-    let (claude_home, project_dir) = settings_dirs();
-    let path = settings_path(SettingsSource::User, &claude_home, &project_dir);
+    let (lingxi_home, project_dir) = settings_dirs();
+    let path = settings_path(SettingsSource::User, &lingxi_home, &project_dir);
     if let Err(e) = update_settings(
         &path,
         vec![(
@@ -509,13 +509,13 @@ mod tests {
     #[test]
     fn status_line_config_read_from_user_settings() {
         let tmp = std::env::temp_dir().join(format!("slc-user-{}", std::process::id()));
-        let claude_home = tmp.join("home");
+        let lingxi_home = tmp.join("home");
         let project_dir = tmp.join("proj");
         write_settings(
-            &claude_home.join("settings.json"),
+            &lingxi_home.join("settings.json"),
             r#"{"statusLine":{"type":"command","command":"echo hi"}}"#,
         );
-        let cfg = read_status_line_config_from(&claude_home, &project_dir);
+        let cfg = read_status_line_config_from(&lingxi_home, &project_dir);
         let cfg = cfg.expect("user statusLine parses");
         assert_eq!(cfg.command, "echo hi");
         assert_eq!(cfg.kind, "command");
@@ -527,17 +527,17 @@ mod tests {
     #[test]
     fn status_line_config_local_overrides_user() {
         let tmp = std::env::temp_dir().join(format!("slc-prec-{}", std::process::id()));
-        let claude_home = tmp.join("home");
+        let lingxi_home = tmp.join("home");
         let project_dir = tmp.join("proj");
         write_settings(
-            &claude_home.join("settings.json"),
+            &lingxi_home.join("settings.json"),
             r#"{"statusLine":{"type":"command","command":"user-cmd"}}"#,
         );
         write_settings(
             &project_dir.join(".lingxi").join("settings.local.json"),
             r#"{"statusLine":{"type":"command","command":"local-cmd"}}"#,
         );
-        let cfg = read_status_line_config_from(&claude_home, &project_dir)
+        let cfg = read_status_line_config_from(&lingxi_home, &project_dir)
             .expect("merged statusLine parses");
         assert_eq!(cfg.command, "local-cmd", "Local wins over User");
         std::fs::remove_dir_all(&tmp).ok();
@@ -547,10 +547,10 @@ mod tests {
     #[test]
     fn status_line_config_absent_is_none() {
         let tmp = std::env::temp_dir().join(format!("slc-none-{}", std::process::id()));
-        let claude_home = tmp.join("home");
+        let lingxi_home = tmp.join("home");
         let project_dir = tmp.join("proj");
-        write_settings(&claude_home.join("settings.json"), r#"{"theme":"dark"}"#);
-        assert!(read_status_line_config_from(&claude_home, &project_dir).is_none());
+        write_settings(&lingxi_home.join("settings.json"), r#"{"theme":"dark"}"#);
+        assert!(read_status_line_config_from(&lingxi_home, &project_dir).is_none());
         std::fs::remove_dir_all(&tmp).ok();
     }
 

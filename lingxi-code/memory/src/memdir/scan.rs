@@ -27,7 +27,7 @@ pub fn scan_memdir(roots: &super::paths::MemdirRoots) -> std::io::Result<MemdirS
 /// Scan with explicit `now` (testable). Files older than
 /// `MEMORY_AGE_HARD_DROP_DAYS` are dropped; oversized files (>10 MB) are
 /// dropped too (their event is emitted by the caller through
-/// [`crate::claude_md::loader::emit_file_too_large`] for hierarchy files;
+/// [`crate::lingxi_md::loader::emit_file_too_large`] for hierarchy files;
 /// memdir files emit the same event via the loader path used by the
 /// engine wrapper — see Task 13).
 ///

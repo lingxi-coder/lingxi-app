@@ -166,10 +166,10 @@ fn network_override_does_not_clobber_derived_denied_domains() {
 }
 
 #[test]
-fn seeds_allow_write_with_dot_and_claude_temp_dir() {
+fn seeds_allow_write_with_dot_and_lingxi_temp_dir() {
     let s = settings(vec!["Edit(/proj)"], vec![]);
     let c = SandboxConvertContext {
-        claude_temp_dir: Some("/tmp/claude-501".into()),
+        lingxi_temp_dir: Some("/tmp/claude-501".into()),
         ..Default::default()
     };
     let cfg = convert_settings_to_runtime_config(&s, &c);
@@ -275,7 +275,7 @@ fn webfetch_and_edit_rules_reach_runtime_config() {
         settings_dir: Some(PathBuf::from("/proj")),
     };
     // The default ctx (only `.` seeded into allow_write) is what
-    // `sandbox_runtime_config_from_settings_tiers` passes (sans claude_temp_dir).
+    // `sandbox_runtime_config_from_settings_tiers` passes (sans lingxi_temp_dir).
     let cfg = convert_settings_to_runtime_config(&s, &SandboxConvertContext::default());
 
     assert!(

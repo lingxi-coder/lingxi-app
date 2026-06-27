@@ -1,13 +1,13 @@
 //! 4-tier memory subsystem for `LingXi` Core.
 //!
 //! v0.4.0 (M3-02) extends the v0.3.0 scaffold with the production
-//! `claude_md` hierarchy loader, `memdir` scanner + fixed-point u64
+//! `lingxi_md` hierarchy loader, `memdir` scanner + fixed-point u64
 //! ranker, real `team_paths` resolution, and a thin secret-scan adapter
 //! over the v3 §16.5 `lingxi-secret` rule set.
 
 #![forbid(unsafe_code)]
 
-pub mod claude_md;
+pub mod lingxi_md;
 pub mod file;
 pub mod memdir;
 pub mod prefetch;

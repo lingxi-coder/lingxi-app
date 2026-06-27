@@ -8,7 +8,7 @@ fn fixed_diag() -> DoctorDiagnostics {
     DoctorDiagnostics {
         cli_version: "lingxi-cli v0.8.0".into(),
         rust_toolchain: "1.82.0".into(),
-        claude_home: "/home/u/.lingxi".into(),
+        lingxi_home: "/home/u/.lingxi".into(),
         cwd: "/work/proj".into(),
         mcp_configured: 2,
         mcp_connected: 0,

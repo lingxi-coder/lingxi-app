@@ -1385,14 +1385,14 @@ async fn run_resume_iocraft(_argv: &Argv, sink: &dyn OutputSink) -> i32 {
 }
 
 /// Load the recent-session rows for the current cwd via the M5-08 loader.
-/// Shared by the stdio + iocraft branches (DRY). Resolves `claude_home`
+/// Shared by the stdio + iocraft branches (DRY). Resolves `lingxi_home`
 /// (`$LINGXI_CONFIG_DIR` → `~/.claude`), the cwd, and a disk-backed
 /// [`PosixFileSystem`] — the same loader inputs M5-08 expects, then delegates
 /// to the pure [`load_resume_rows_from`].
 async fn load_resume_rows() -> Result<Vec<SessionMetadata>, LoaderError> {
-    let claude_home = claude_home_dir();
+    let lingxi_home = lingxi_home_dir();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    load_resume_rows_from(&claude_home, &cwd).await
+    load_resume_rows_from(&lingxi_home, &cwd).await
 }
 
 /// Production disk→[`SessionMetadata`] path with the inputs passed in (no env /
@@ -1400,25 +1400,25 @@ async fn load_resume_rows() -> Result<Vec<SessionMetadata>, LoaderError> {
 /// [`platform_posix::PosixFileSystem`] the live branches use and
 /// asks the M5-08 loader for up to 5 most-recent rows.
 async fn load_resume_rows_from(
-    claude_home: &std::path::Path,
+    lingxi_home: &std::path::Path,
     cwd: &std::path::Path,
 ) -> Result<Vec<SessionMetadata>, LoaderError> {
     let cwd_str = cwd.to_string_lossy().into_owned();
     let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(
         cwd.to_path_buf(),
     ));
-    list_recent_sessions(claude_home, &cwd_str, 5, fs).await
+    list_recent_sessions(lingxi_home, &cwd_str, 5, fs).await
 }
 
 /// Load a concrete session by UUID for the `--resume <uuid>` path, using the
-/// live `claude_home` (`$LINGXI_CONFIG_DIR` → `~/.claude`) + process cwd. Thin
+/// live `lingxi_home` (`$LINGXI_CONFIG_DIR` → `~/.claude`) + process cwd. Thin
 /// env-reading wrapper over [`load_resume_session_from`] (mirrors the
 /// `load_resume_rows` / `load_resume_rows_from` split so the disk logic stays
 /// testable with no env / process-cwd reads).
 async fn load_resume_session(session_id: uuid::Uuid) -> Result<Vec<JsonlMessage>, LoaderError> {
-    let claude_home = claude_home_dir();
+    let lingxi_home = lingxi_home_dir();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    load_resume_session_from(&claude_home, &cwd, session_id).await
+    load_resume_session_from(&lingxi_home, &cwd, session_id).await
 }
 
 /// Production disk→`Vec<JsonlMessage>` load with the inputs passed in (no env /
@@ -1428,7 +1428,7 @@ async fn load_resume_session(session_id: uuid::Uuid) -> Result<Vec<JsonlMessage>
 /// [`LoaderError::SessionNotFound`] when no `<uuid>.jsonl` exists under the
 /// cwd's project dir.
 async fn load_resume_session_from(
-    claude_home: &std::path::Path,
+    lingxi_home: &std::path::Path,
     cwd: &std::path::Path,
     session_id: uuid::Uuid,
 ) -> Result<Vec<JsonlMessage>, LoaderError> {
@@ -1436,14 +1436,14 @@ async fn load_resume_session_from(
     let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(
         cwd.to_path_buf(),
     ));
-    load_session(claude_home, &cwd_str, session_id, fs).await
+    load_session(lingxi_home, &cwd_str, session_id, fs).await
 }
 
 /// Claude config home dir. `$LINGXI_CONFIG_DIR` when set wins (claude-code `tr()`
 /// `??`: an empty value is honored verbatim → cwd-relative), else `~/.claude`.
 /// Shared across the CLI's settings/MCP/desktop-config resolution (`lib`, `mode`,
 /// `init`) so every user-tier path honors `$LINGXI_CONFIG_DIR`.
-pub(crate) fn claude_home_dir() -> PathBuf {
+pub(crate) fn lingxi_home_dir() -> PathBuf {
     if let Ok(explicit) = std::env::var(branding::CONFIG_DIR_ENV) {
         return PathBuf::from(explicit);
     }
@@ -1522,9 +1522,9 @@ mod tests {
         uuid
     }
 
-    /// `<claude_home>/projects/<sanitize(cwd)>/` — the dir the loader scans.
-    fn make_project_dir(claude_home: &std::path::Path, cwd: &str) -> std::path::PathBuf {
-        let dir = claude_home.join("projects").join(project_dir_name(cwd));
+    /// `<lingxi_home>/projects/<sanitize(cwd)>/` — the dir the loader scans.
+    fn make_project_dir(lingxi_home: &std::path::Path, cwd: &str) -> std::path::PathBuf {
+        let dir = lingxi_home.join("projects").join(project_dir_name(cwd));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -1532,11 +1532,11 @@ mod tests {
     #[tokio::test]
     async fn load_resume_rows_from_returns_sorted_rows_with_titles_and_counts() {
         let temp = tempfile::TempDir::new().unwrap();
-        let claude_home = temp.path().join("home");
+        let lingxi_home = temp.path().join("home");
         // `cwd` is only used as the project-dir key; it need not exist on disk.
         let cwd = std::path::PathBuf::from("/tmp/workproj");
         let cwd_str = cwd.to_string_lossy().into_owned();
-        let project_dir = make_project_dir(&claude_home, &cwd_str);
+        let project_dir = make_project_dir(&lingxi_home, &cwd_str);
 
         // Three sessions with staggered mtimes; "newest" has the latest mtime.
         let base = SystemTime::now();
@@ -1552,7 +1552,7 @@ mod tests {
             base + Duration::from_secs(20),
         );
 
-        let rows = load_resume_rows_from(&claude_home, &cwd)
+        let rows = load_resume_rows_from(&lingxi_home, &cwd)
             .await
             .expect("loader should produce rows");
 
@@ -1574,13 +1574,13 @@ mod tests {
     #[tokio::test]
     async fn load_resume_rows_from_empty_project_dir_is_empty_directory() {
         let temp = tempfile::TempDir::new().unwrap();
-        let claude_home = temp.path().join("home");
+        let lingxi_home = temp.path().join("home");
         let cwd = std::path::PathBuf::from("/tmp/emptyproj");
         let cwd_str = cwd.to_string_lossy().into_owned();
         // Create the project dir but write no `.jsonl` files into it.
-        make_project_dir(&claude_home, &cwd_str);
+        make_project_dir(&lingxi_home, &cwd_str);
 
-        match load_resume_rows_from(&claude_home, &cwd).await {
+        match load_resume_rows_from(&lingxi_home, &cwd).await {
             Err(LoaderError::EmptyDirectory) => {}
             other => panic!("expected EmptyDirectory, got {other:?}"),
         }
@@ -1589,11 +1589,11 @@ mod tests {
     #[tokio::test]
     async fn load_resume_rows_from_missing_project_dir_is_empty_directory() {
         let temp = tempfile::TempDir::new().unwrap();
-        let claude_home = temp.path().join("home");
+        let lingxi_home = temp.path().join("home");
         // No projects dir at all — the loader treats NotFound as empty-state.
         let cwd = std::path::PathBuf::from("/tmp/neverproj");
 
-        match load_resume_rows_from(&claude_home, &cwd).await {
+        match load_resume_rows_from(&lingxi_home, &cwd).await {
             Err(LoaderError::EmptyDirectory) => {}
             other => panic!("expected EmptyDirectory, got {other:?}"),
         }
@@ -1607,14 +1607,14 @@ mod tests {
         // "Resumed session {id}" success. It must now error with the
         // TS-faithful line (main.tsx:3681) and a non-zero exit instead.
         let temp = tempfile::TempDir::new().unwrap();
-        let claude_home = temp.path().join("home");
+        let lingxi_home = temp.path().join("home");
         let cwd = std::path::PathBuf::from("/tmp/resumeproj");
         let cwd_str = cwd.to_string_lossy().into_owned();
         // Create the project dir but write NO session file for this id.
-        make_project_dir(&claude_home, &cwd_str);
+        make_project_dir(&lingxi_home, &cwd_str);
         let missing = Uuid::new_v4();
 
-        let loaded = load_resume_session_from(&claude_home, &cwd, missing).await;
+        let loaded = load_resume_session_from(&lingxi_home, &cwd, missing).await;
         assert!(
             matches!(loaded, Err(LoaderError::SessionNotFound { .. })),
             "a missing <uuid>.jsonl must surface SessionNotFound, got {loaded:?}"
@@ -1641,13 +1641,13 @@ mod tests {
         // `resume_by_id_error` returns None, so the "Resumed session {id}"
         // success line is reached.
         let temp = tempfile::TempDir::new().unwrap();
-        let claude_home = temp.path().join("home");
+        let lingxi_home = temp.path().join("home");
         let cwd = std::path::PathBuf::from("/tmp/resumeproj");
         let cwd_str = cwd.to_string_lossy().into_owned();
-        let project_dir = make_project_dir(&claude_home, &cwd_str);
+        let project_dir = make_project_dir(&lingxi_home, &cwd_str);
         let id = write_session(&project_dir, "hello", SystemTime::now());
 
-        let loaded = load_resume_session_from(&claude_home, &cwd, id).await;
+        let loaded = load_resume_session_from(&lingxi_home, &cwd, id).await;
         let messages = loaded.as_ref().expect("existing session must load");
         assert_eq!(messages.len(), 1, "the single fixture line is parsed");
         assert!(

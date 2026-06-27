@@ -164,7 +164,7 @@ pub struct TeamScanFailedPayload {
 /// Payload for [`CLAUDE_MD_HIERARCHY_WALKED`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ClaudeMdHierarchyWalkedPayload {
+pub struct LingxiMdHierarchyWalkedPayload {
     /// Maximum walk depth reached.
     pub depth: u32,
     /// Total LINGXI.md (or local override) files visited.

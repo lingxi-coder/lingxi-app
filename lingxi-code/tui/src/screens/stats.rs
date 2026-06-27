@@ -1,6 +1,6 @@
 //! `/stats` usage-stats screen (claude-code `Stats.tsx` parity): an in-tree
 //! aggregation of the `*.jsonl` session transcripts under
-//! `<claude_home>/projects/`, presented as a two-tab overlay (`Overview` /
+//! `<lingxi_home>/projects/`, presented as a two-tab overlay (`Overview` /
 //! `Models`) with a multi-series asciichart tokens-per-day chart and a
 //! GitHub-style activity heatmap.
 //!
@@ -12,7 +12,7 @@
 //! [`render_stats_to_string`] oracle.
 //!
 //! Aggregation source: the same session transcripts the M5-08 resume loader
-//! discovers (`<claude_home>/projects/<dir>/*.jsonl`), but walked across ALL
+//! discovers (`<lingxi_home>/projects/<dir>/*.jsonl`), but walked across ALL
 //! project dirs (claude-code `getAllSessionFiles`) — not just the cwd's. Each
 //! line is the `JsonlMessage` wire shape; we read the inner `message.usage`
 //! (input/output/cache-read tokens) + `message.model` from `assistant` rows and
@@ -639,7 +639,7 @@ fn track_date(stats: &mut StatsData, date: &str) {
 // Result cache (claude-code `statsCache.ts` parity). The intent is the same as
 // claude-code's `PersistedStatsCache`: a second `/stats` open returns the
 // already-aggregated [`StatsData`] WITHOUT re-walking + re-parsing the whole
-// `<claude_home>/projects/` history, re-computing only when the history has
+// `<lingxi_home>/projects/` history, re-computing only when the history has
 // actually changed.
 //
 // FORCED DIVERGENCE from claude-code: claude-code keys validity on a

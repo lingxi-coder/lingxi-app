@@ -4,9 +4,9 @@
 //! Spec §3 M5-08 row + §4.x resume completeness checks.
 //!
 //! Plan adaptation: the M5-07 `load_session` surface takes
-//! `(claude_home, cwd, session_id, fs)` (rather than the plan-doc's
+//! `(lingxi_home, cwd, session_id, fs)` (rather than the plan-doc's
 //! `(session_id, cwd)`), so [`replay_session_state`] mirrors that signature.
-//! The CLI/REPL callers already have a `claude_home: PathBuf` and an
+//! The CLI/REPL callers already have a `lingxi_home: PathBuf` and an
 //! `Arc<dyn FileSystem>` from M3-01 + M4-01, so threading them through is
 //! cheap and avoids hard-coding `dirs::home_dir()` inside the orchestrator.
 
@@ -55,7 +55,7 @@ pub struct ReplayedSession {
 /// Errors: any [`LoaderError`] from `load_session` is wrapped in
 /// [`ResumeError::Loader`].
 pub async fn replay_session_state(
-    claude_home: &Path,
+    lingxi_home: &Path,
     cwd: &str,
     session_id: Uuid,
     fs: Arc<dyn FileSystem>,
@@ -65,7 +65,7 @@ pub async fn replay_session_state(
         event = RESUME_STARTED,
         session_id = %sid_str,
     );
-    let messages = load_session(claude_home, cwd, session_id, fs).await?;
+    let messages = load_session(lingxi_home, cwd, session_id, fs).await?;
     let (state, last_uuid) = build_state_from_jsonl(session_id, &messages);
     tracing::info!(
         event = RESUME_COMPLETED,
@@ -198,7 +198,7 @@ impl ConversationOrchestrator {
     pub async fn with_resume(
         mut config: OrchestratorConfig,
         session_id: Uuid,
-        claude_home: PathBuf,
+        lingxi_home: PathBuf,
         cwd_str: String,
         fs: Arc<dyn FileSystem>,
         api: Arc<dyn OrchestratorApiClient>,
@@ -211,7 +211,7 @@ impl ConversationOrchestrator {
         jsonl_writer: Option<Arc<JsonlWriter>>,
     ) -> Result<Self, ResumeError> {
         config.resume_session_id = Some(session_id);
-        let replayed = replay_session_state(&claude_home, &cwd_str, session_id, fs).await?;
+        let replayed = replay_session_state(&lingxi_home, &cwd_str, session_id, fs).await?;
 
         let mut orch = Self::new_with_streaming(
             config,

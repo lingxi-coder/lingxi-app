@@ -1,13 +1,13 @@
 //! M3-02 phase 10: full LINGXI.md hierarchy load with mocked home dir.
 //!
-//! Exercises `claude_md::hierarchy::walk` + `claude_md::loader::load_file`
+//! Exercises `lingxi_md::hierarchy::walk` + `lingxi_md::loader::load_file`
 //! together. The hierarchy must surface entries in cwd-first order with
 //! `LINGXI.local.md` shadowing `LINGXI.md` at the same depth. GAP 4: the
 //! LINGXI.md loader has NO size drop (parity with claude-code `readFile`), so
 //! an oversized file loads in full rather than being skipped.
 
-use memory::claude_md::hierarchy::walk;
-use memory::claude_md::loader::load_file;
+use memory::lingxi_md::hierarchy::walk;
+use memory::lingxi_md::loader::load_file;
 use memory::MAX_MEMORY_FILE_SIZE;
 use std::fs;
 use tempfile::TempDir;
@@ -20,9 +20,9 @@ fn touch(path: &std::path::Path, body: &str) {
 fn full_hierarchy_walk_then_load_returns_innermost_first() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
-    let user_claude = home.join(".lingxi");
-    fs::create_dir_all(&user_claude).unwrap();
-    touch(&user_claude.join("LINGXI.md"), "# user notes\n");
+    let user_lingxi = home.join(".lingxi");
+    fs::create_dir_all(&user_lingxi).unwrap();
+    touch(&user_lingxi.join("LINGXI.md"), "# user notes\n");
 
     let repo = tmp.path().join("repo");
     let pkg = repo.join("pkg");
@@ -46,7 +46,7 @@ fn full_hierarchy_walk_then_load_returns_innermost_first() {
             pkg.join("LINGXI.local.md"),
             pkg.join("LINGXI.md"),
             repo.join("LINGXI.md"),
-            user_claude.join("LINGXI.md"),
+            user_lingxi.join("LINGXI.md"),
         ]
     );
     assert!(loaded[0].body.contains("pkg local override"));
@@ -59,9 +59,9 @@ fn oversized_file_loads_whole_no_size_drop_other_files_also_load() {
     // larger than the legacy 10 MB cap must now LOAD in full alongside the rest.
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
-    let user_claude = home.join(".lingxi");
-    fs::create_dir_all(&user_claude).unwrap();
-    touch(&user_claude.join("LINGXI.md"), "# small\n");
+    let user_lingxi = home.join(".lingxi");
+    fs::create_dir_all(&user_lingxi).unwrap();
+    touch(&user_lingxi.join("LINGXI.md"), "# small\n");
 
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
@@ -83,7 +83,7 @@ fn oversized_file_loads_whole_no_size_drop_other_files_also_load() {
         (MAX_MEMORY_FILE_SIZE + 1) as u64,
         "oversized file is read whole, not truncated"
     );
-    assert_eq!(by_path(&user_claude.join("LINGXI.md")).body, "# small\n");
+    assert_eq!(by_path(&user_lingxi.join("LINGXI.md")).body, "# small\n");
 }
 
 #[test]

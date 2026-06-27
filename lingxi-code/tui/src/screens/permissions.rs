@@ -7,7 +7,7 @@
 //!
 //! ## Data source
 //! Reads the SAME three settings files the enforcement loader reads
-//! (`engine-desktop`): `<claude_home>/settings.json` (user),
+//! (`engine-desktop`): `<lingxi_home>/settings.json` (user),
 //! `<cwd>/.lingxi/settings.json` (project), `<cwd>/.lingxi/settings.local.json`
 //! (local). These are the PERSISTED rules — the ones `LINGXI_ENFORCE_PERMISSIONS`
 //! enforces and that an Ask→"always allow" (3c) writes to. The frozen
@@ -254,7 +254,7 @@ fn mode_wire_name(m: permission::PermissionMode) -> &'static str {
 #[must_use]
 pub fn load_permission_sections(
     cwd: &std::path::Path,
-    claude_home: &std::path::Path,
+    lingxi_home: &std::path::Path,
 ) -> PermissionsScreenState {
     let mut rows = Vec::new();
     let mut workspace_dirs: Vec<String> = Vec::new();
@@ -264,7 +264,7 @@ pub fn load_permission_sections(
 
     for (path, source) in [
         (
-            claude_home.join("settings.json"),
+            lingxi_home.join("settings.json"),
             PermissionRuleSource::UserSettings,
         ),
         (
@@ -870,12 +870,12 @@ mod tests {
     fn load_reads_tiers_and_mode() {
         let tmp = std::env::temp_dir().join(format!("lx-perm-view-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        let claude_home = tmp.join("home/.lingxi");
+        let lingxi_home = tmp.join("home/.lingxi");
         let cwd = tmp.join("proj");
-        std::fs::create_dir_all(&claude_home).unwrap();
+        std::fs::create_dir_all(&lingxi_home).unwrap();
         std::fs::create_dir_all(cwd.join(".lingxi")).unwrap();
         std::fs::write(
-            claude_home.join("settings.json"),
+            lingxi_home.join("settings.json"),
             r#"{ "permissions": { "allow": ["Bash"] } }"#,
         )
         .unwrap();
@@ -885,7 +885,7 @@ mod tests {
         )
         .unwrap();
 
-        let st = load_permission_sections(&cwd, &claude_home);
+        let st = load_permission_sections(&cwd, &lingxi_home);
         assert_eq!(st.mode, "acceptEdits", "local defaultMode wins");
         // user Bash allow + local Read deny.
         assert!(st

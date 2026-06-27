@@ -246,7 +246,7 @@ fn write_session_memory(path: &Path, content: &str) -> Result<(), MemoryError> {
 /// else a bare `.claude`.
 ///
 /// Delegates the `$LINGXI_CONFIG_DIR`-vs-home resolution to the canonical
-/// [`crate::claude_md::user_config_dir`]; this fn only resolves the fallback home
+/// [`crate::lingxi_md::user_config_dir`]; this fn only resolves the fallback home
 /// from `$HOME`/`$USERPROFILE` (the memory crate has no `dirs` dependency).
 /// `Path::new("").join(".lingxi") == ".lingxi"`, so the no-home case stays the
 /// bare `.claude` form — byte-identical to the prior inline implementation.
@@ -255,7 +255,7 @@ pub fn config_home_dir() -> PathBuf {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map_or_else(|| PathBuf::from(""), PathBuf::from);
-    crate::claude_md::user_config_dir(&home)
+    crate::lingxi_md::user_config_dir(&home)
 }
 
 /// Distillation instruction handed to the forked extractor. Kept terse — the

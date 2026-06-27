@@ -826,7 +826,7 @@ pub struct AppState {
     /// usage-stats screen. The SYNC submit path can't `.await` the multi-project
     /// `*.jsonl` fs walk (slow over many files), so it only RAISES this flag;
     /// the async open pump in `root.rs` (`pump_open_stats`, on the ticker
-    /// `use_future`) walks `<claude_home>/projects/` OUTSIDE the `AppState`
+    /// `use_future`) walks `<lingxi_home>/projects/` OUTSIDE the `AppState`
     /// lock, aggregates, and calls [`Self::open_stats`]. Mirrors
     /// `pending_open_agents` — but the walk needs no `OrchestratorHandle`, so
     /// the pump runs unconditionally (not gated on a wired handle).

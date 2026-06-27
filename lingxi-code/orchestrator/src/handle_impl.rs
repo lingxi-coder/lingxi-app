@@ -124,14 +124,14 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn open_memory_editor(&self) -> Result<MemoryEditorOutcome, HandleError> {
         // `/memory` edits the USER-tier LINGXI.md — the SAME file the system-prompt
-        // hierarchy loads (memory::claude_md::user_config_dir): `$LINGXI_CONFIG_DIR`
+        // hierarchy loads (memory::lingxi_md::user_config_dir): `$LINGXI_CONFIG_DIR`
         // when set, else `~/.lingxi/LINGXI.md`. (Previously this targeted
         // `dirs::config_dir()/claude/LINGXI.md` — a different, never-loaded path that
         // also ignored `$LINGXI_CONFIG_DIR`.)
         let home = dirs::home_dir().ok_or_else(|| {
             HandleError::ActionFailed("home dir unavailable on this platform".into())
         })?;
-        let target = memory::claude_md::user_config_dir(&home).join(branding::MEMORY_FILE);
+        let target = memory::lingxi_md::user_config_dir(&home).join(branding::MEMORY_FILE);
         spawn_editor_on(target, "").await
     }
 
@@ -203,7 +203,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // Application Support` on macOS), which is a different, never-used tree.
         let config_dir = dirs::home_dir().map_or_else(
             || std::path::PathBuf::from("."),
-            |h| memory::claude_md::user_config_dir(&h),
+            |h| memory::lingxi_md::user_config_dir(&h),
         );
         // Also diagnose the global config `~/.lingxi.json` (the one path NOT under
         // `tr()`: `($LINGXI_CONFIG_DIR || $HOME)/.lingxi.json`), which claude-code's
@@ -247,7 +247,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let home = dirs::home_dir().ok_or_else(|| {
             HandleError::ActionFailed("home dir unavailable on this platform".into())
         })?;
-        let target = memory::claude_md::user_config_dir(&home).join("settings.json");
+        let target = memory::lingxi_md::user_config_dir(&home).join("settings.json");
         spawn_editor_on(target, "{}\n").await
     }
 
@@ -257,7 +257,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let home = dirs::home_dir().ok_or_else(|| {
             HandleError::ActionFailed("home dir unavailable on this platform".into())
         })?;
-        let target = memory::claude_md::user_config_dir(&home).join("settings.json");
+        let target = memory::lingxi_md::user_config_dir(&home).join("settings.json");
         spawn_editor_on(target, "{}\n").await
     }
 
@@ -379,7 +379,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // Enumerate the on-disk JSONL session store the resume path reads
         // from: `<config-home>/projects/<project_dir_name(cwd)>/<uuid>.jsonl`.
         // `config-home` is `$LINGXI_CONFIG_DIR` (else `~/.claude`) — the SAME
-        // env-aware resolver the CLI loader (`run::claude_home_dir`) uses, so the
+        // env-aware resolver the CLI loader (`run::lingxi_home_dir`) uses, so the
         // picker lists exactly what `--resume` can load. Each entry maps to
         // `(session_id, label)`; label is the id (the first-prompt label +
         // interactive picker are deferred). Newest-first by mtime. Returns an
@@ -388,7 +388,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             return Vec::new();
         };
         let cwd = self.cwd.to_string_lossy();
-        let project_dir = memory::claude_md::user_config_dir(&home)
+        let project_dir = memory::lingxi_md::user_config_dir(&home)
             .join("projects")
             .join(session::project_dir_name(&cwd));
         let Ok(entries) = std::fs::read_dir(&project_dir) else {

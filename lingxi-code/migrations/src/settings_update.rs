@@ -24,9 +24,9 @@ pub enum SettingsSource {
 
 /// Resolve the file path for a source (TS `getSettingsFilePathForSource`).
 #[must_use]
-pub fn settings_path(source: SettingsSource, claude_home: &Path, project_dir: &Path) -> PathBuf {
+pub fn settings_path(source: SettingsSource, lingxi_home: &Path, project_dir: &Path) -> PathBuf {
     match source {
-        SettingsSource::User => claude_home.join("settings.json"),
+        SettingsSource::User => lingxi_home.join("settings.json"),
         SettingsSource::Local => project_dir
             .join(branding::DOT_DIR)
             .join("settings.local.json"),

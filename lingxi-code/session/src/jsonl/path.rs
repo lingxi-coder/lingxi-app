@@ -22,10 +22,10 @@ pub fn project_dir_name(cwd: &str) -> String {
     format!("{head}-{suffix}")
 }
 
-/// `<claude_home>/projects/<project_dir_name(cwd)>/<session_uuid>.jsonl`.
+/// `<lingxi_home>/projects/<project_dir_name(cwd)>/<session_uuid>.jsonl`.
 #[must_use]
-pub fn session_path(claude_home: &Path, cwd: &str, session_uuid: &str) -> PathBuf {
-    let mut p = claude_home.to_path_buf();
+pub fn session_path(lingxi_home: &Path, cwd: &str, session_uuid: &str) -> PathBuf {
+    let mut p = lingxi_home.to_path_buf();
     p.push("projects");
     p.push(project_dir_name(cwd));
     p.push(format!("{session_uuid}.jsonl"));

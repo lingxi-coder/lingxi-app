@@ -1,7 +1,7 @@
 //! Product-A V2 todo-task store — file-backed 1:1 port of claude-code
 //! `src/utils/tasks.ts`.
 //!
-//! Each task list lives under `<claude_config_home>/tasks/<sanitize(list_id)>/`
+//! Each task list lives under `<lingxi_config_home>/tasks/<sanitize(list_id)>/`
 //! with one `<id>.json` per task (`id` is a decimal string `"1".."N"`) plus a
 //! `.highwatermark` file recording the highest id ever assigned (so deleting /
 //! resetting never reuses an id). Tasks carry `engine::TodoState`
@@ -100,7 +100,7 @@ impl TodoTask {
 /// `$LINGXI_CONFIG_DIR` when set is honored verbatim (`??`, incl. an empty value
 /// → cwd-relative), else `$HOME/.claude` (falling back to `USERPROFILE` and
 /// finally a bare `.claude` so the path is always well-formed).
-fn claude_config_home_dir() -> PathBuf {
+fn lingxi_config_home_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
         return PathBuf::from(dir);
     }
@@ -112,7 +112,7 @@ fn claude_config_home_dir() -> PathBuf {
 
 /// `{configHome}/tasks` (parent of every per-list tasks dir).
 fn tasks_root() -> PathBuf {
-    claude_config_home_dir().join("tasks")
+    lingxi_config_home_dir().join("tasks")
 }
 
 /// Port of `sanitizePathComponent()` (`utils/tasks.ts`): replace every char

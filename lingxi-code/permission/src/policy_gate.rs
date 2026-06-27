@@ -353,12 +353,12 @@ impl PermissionGate for PolicyPermissionGate {
     /// tool can reject a denied subagent type with the byte-exact
     /// `AgentTypeError` message (claude-code `getDenyRuleForAgent`). The source is
     /// rendered as the raw `SettingSource` identifier
-    /// ([`PermissionRuleSource::claude_settings_source`]), matching the binary's
+    /// ([`PermissionRuleSource::lingxi_settings_source`]), matching the binary's
     /// `… from ${rule.source}.`.
     async fn agent_type_deny(&self, agent_type: &str) -> Option<String> {
         self.policy
             .agent_type_deny_source(agent_type)
-            .map(|s| s.claude_settings_source().to_string())
+            .map(|s| s.lingxi_settings_source().to_string())
     }
 
     /// Surface the wrapped policy's CONTENT-ful `Agent(<x>)` deny set so the

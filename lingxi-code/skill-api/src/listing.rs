@@ -39,10 +39,10 @@ pub struct FileSkillSection {
 ///
 /// Project skills come from every existing `<ancestor>/.lingxi/skills` from
 /// `cwd` up to the nearest git root, most-specific first. User skills come from
-/// `<claude_home>/skills`. Empty sections are omitted.
+/// `<lingxi_home>/skills`. Empty sections are omitted.
 #[must_use]
-pub fn load_file_skill_sections(cwd: &Path, claude_home: &Path) -> Vec<FileSkillSection> {
-    load_file_skill_sections_with_roots(cwd, claude_home, None, &[])
+pub fn load_file_skill_sections(cwd: &Path, lingxi_home: &Path) -> Vec<FileSkillSection> {
+    load_file_skill_sections_with_roots(cwd, lingxi_home, None, &[])
 }
 
 /// Load managed, project, user, and additional file-based skills for display.
@@ -52,7 +52,7 @@ pub fn load_file_skill_sections(cwd: &Path, claude_home: &Path) -> Vec<FileSkill
 #[must_use]
 pub fn load_file_skill_sections_with_roots(
     cwd: &Path,
-    claude_home: &Path,
+    lingxi_home: &Path,
     managed_dir: Option<&Path>,
     additional_skill_dirs: &[PathBuf],
 ) -> Vec<FileSkillSection> {
@@ -61,9 +61,9 @@ pub fn load_file_skill_sections_with_roots(
     let managed_rows = managed_skills_dir.as_ref().map_or_else(Vec::new, |dir| {
         load_skills_from_dirs(std::slice::from_ref(dir), SkillSource::Managed, &mut seen)
     });
-    let project_dirs = project_skills_dirs(cwd, claude_home);
+    let project_dirs = project_skills_dirs(cwd, lingxi_home);
     let project_rows = load_skills_from_dirs(&project_dirs, SkillSource::Project, &mut seen);
-    let user_skills_dir = claude_home.join("skills");
+    let user_skills_dir = lingxi_home.join("skills");
     let user_rows = load_skills_from_dirs(
         std::slice::from_ref(&user_skills_dir),
         SkillSource::User,
@@ -104,8 +104,8 @@ pub fn load_file_skill_sections_with_roots(
     sections
 }
 
-fn project_skills_dirs(cwd: &Path, claude_home: &Path) -> Vec<PathBuf> {
-    let home = claude_home.parent();
+fn project_skills_dirs(cwd: &Path, lingxi_home: &Path) -> Vec<PathBuf> {
+    let home = lingxi_home.parent();
     let git_root = nearest_git_root(cwd);
     let mut dirs = Vec::new();
     let mut current = Some(cwd);

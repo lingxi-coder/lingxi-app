@@ -2,8 +2,8 @@
 //! to the executor in priority order.
 
 use crate::definition::{HookDefinition, HookSource};
-use crate::events::HookEvent;
-use crate::matcher::{matches_if_condition, matches_pattern};
+use crate::events::{HookEvent, HookEventType};
+use crate::matcher::{is_bare_mcp_server_matcher, matches_if_condition, matches_pattern_with};
 use protocol::{AgentId, HookId, PluginId, SessionId};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -126,12 +126,16 @@ impl HookRegistry {
 
     /// Register a hook under its declared source.
     pub fn register(&mut self, hook: HookDefinition) {
+        warn_if_bare_mcp_matcher(&hook);
         self.sources.entry(hook.source).or_default().push(hook);
     }
 
     /// Register a batch of hooks owned by `plugin_id`. Replaces any previous
     /// registration under that plugin.
     pub fn register_plugin_hooks(&mut self, plugin_id: PluginId, hooks: Vec<HookDefinition>) {
+        for hook in &hooks {
+            warn_if_bare_mcp_matcher(hook);
+        }
         self.plugin.insert(plugin_id, hooks);
     }
 
@@ -260,6 +264,11 @@ impl HookRegistry {
     #[must_use]
     pub fn match_event(&self, event: &HookEvent, _ctx: &HookContext) -> Vec<&HookDefinition> {
         let et = event.event_type();
+        // Comma-mode (`atf`) widens the simple-pattern matcher (comma-separated
+        // lists + the v2.1.195 hyphen) for this event type — claude
+        // `matchesPattern`'s `n` argument. The port has no `toolAliases`, so the
+        // `r` extra-alias map is `None`.
+        let comma_mode = comma_mode_for(&et);
         let match_query = Self::match_query_for(event);
         let if_target = Self::if_match_target(event);
         let keep = |h: &&HookDefinition| -> bool {
@@ -270,7 +279,9 @@ impl HookRegistry {
             // the event yields a `matchQuery`; otherwise every subscribed hook
             // passes. A hook with no matcher always passes.
             let tool_name_ok = match (&match_query, h.matcher()) {
-                (Some(query), Some(matcher)) => matches_pattern(query, matcher),
+                (Some(query), Some(matcher)) => {
+                    matches_pattern_with(query, matcher, comma_mode, None)
+                }
                 _ => true,
             };
             if !tool_name_ok {
@@ -333,6 +344,11 @@ impl HookRegistry {
             return Vec::new();
         };
         let et = event.event_type();
+        // Comma-mode (`atf`) widens the simple-pattern matcher (comma-separated
+        // lists + the v2.1.195 hyphen) for this event type — claude
+        // `matchesPattern`'s `n` argument. The port has no `toolAliases`, so the
+        // `r` extra-alias map is `None`.
+        let comma_mode = comma_mode_for(&et);
         let match_query = Self::match_query_for(event);
         let if_target = Self::if_match_target(event);
         let keep = |h: &&HookDefinition| -> bool {
@@ -340,7 +356,9 @@ impl HookRegistry {
                 return false;
             }
             let tool_name_ok = match (&match_query, h.matcher()) {
-                (Some(query), Some(matcher)) => matches_pattern(query, matcher),
+                (Some(query), Some(matcher)) => {
+                    matches_pattern_with(query, matcher, comma_mode, None)
+                }
                 _ => true,
             };
             if !tool_name_ok {
@@ -386,6 +404,11 @@ impl HookRegistry {
         exclude_agent_id: AgentId,
     ) -> Vec<&HookDefinition> {
         let et = event.event_type();
+        // Comma-mode (`atf`) widens the simple-pattern matcher (comma-separated
+        // lists + the v2.1.195 hyphen) for this event type — claude
+        // `matchesPattern`'s `n` argument. The port has no `toolAliases`, so the
+        // `r` extra-alias map is `None`.
+        let comma_mode = comma_mode_for(&et);
         let match_query = Self::match_query_for(event);
         let if_target = Self::if_match_target(event);
         let keep = |h: &&HookDefinition| -> bool {
@@ -393,7 +416,9 @@ impl HookRegistry {
                 return false;
             }
             let tool_name_ok = match (&match_query, h.matcher()) {
-                (Some(query), Some(matcher)) => matches_pattern(query, matcher),
+                (Some(query), Some(matcher)) => {
+                    matches_pattern_with(query, matcher, comma_mode, None)
+                }
                 _ => true,
             };
             if !tool_name_ok {
@@ -430,19 +455,20 @@ impl HookRegistry {
         matched
     }
 
-    /// Compute the `matchQuery` string for `event`, mirroring the tool-name
+    /// Compute the `matchQuery` string for `event`, mirroring the per-event
     /// arms of the switch in claude-code `getMatchingHooks`
-    /// (`utils/hooks.ts:1616-1623`).
+    /// (`utils/hooks.ts`, as of 2.1.195).
     ///
-    /// This is the B3 MATCHER half: the query is the tool name for tool-name
-    /// events (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`,
-    /// `PermissionRequest`, `PermissionDenied`). For every other event TS
-    /// derives the query from event-specific fields, but those non-tool match
-    /// queries (and the events' payload shapes) are scoped to later batches —
-    /// here they return `None`, so the matcher filter is skipped (TS:
-    /// `matchQuery ? filter : hookMatchers`) and the subscribed hooks fire
-    /// exactly as before. This keeps the change purely additive for non-tool
-    /// events while enforcing tool-name matchers faithfully.
+    /// The query is the tool name for tool events (`PreToolUse`, `PostToolUse`,
+    /// `PostToolUseFailure`, `PermissionRequest`, `PermissionDenied`), and the
+    /// event-specific field for the MCP / config / instructions / file events
+    /// the binary added: `Elicitation`/`ElicitationResult` → the MCP server
+    /// name; `ConfigChange` → the settings `source` (wire string);
+    /// `InstructionsLoaded` → the `load_reason` (wire string); `FileChanged` →
+    /// the changed file's basename (`path.basename(file_path)`). Every other
+    /// event derives no query and returns `None`, so the matcher filter is
+    /// skipped (TS `matchQuery ? filter : hookMatchers`) and the subscribed
+    /// hooks fire regardless of any declared matcher.
     fn match_query_for(event: &HookEvent) -> Option<String> {
         match event {
             HookEvent::PreToolUse { tool_name, .. }
@@ -450,6 +476,22 @@ impl HookRegistry {
             | HookEvent::PostToolUseFailure { tool_name, .. }
             | HookEvent::PermissionRequest { tool_name, .. }
             | HookEvent::PermissionDenied { tool_name, .. } => Some(tool_name.clone()),
+            // claude `i = r.mcp_server_name` for both elicitation events.
+            HookEvent::Elicitation { server_name, .. }
+            | HookEvent::ElicitationResult { server_name, .. } => Some(server_name.clone()),
+            // claude `i = r.source` — the settings layer that changed, as its
+            // wire (snake_case) string.
+            HookEvent::ConfigChange { source, .. } => {
+                Some(config_change_source_wire(*source).to_string())
+            }
+            // claude `i = r.load_reason` — the (snake_case) reload reason.
+            HookEvent::InstructionsLoaded { load_reason, .. } => {
+                Some(load_reason_wire(*load_reason).to_string())
+            }
+            // claude `i = path.basename(r.file_path)`.
+            HookEvent::FileChanged { path, .. } => path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned()),
             _ => None,
         }
     }
@@ -534,6 +576,80 @@ impl HookRegistry {
         out.extend(self.plugin.values().flatten());
         out.extend(self.frontmatter.values().flatten());
         out
+    }
+}
+
+/// Whether claude-code enables matcher "comma-mode" for `event_type` — the
+/// `atf` set (`utils/hooks.ts`, claude-code 2.1.195). For these events the
+/// simple-pattern matcher accepts comma-separated lists and the v2.1.195 hyphen
+/// char class; every other event uses the classic pipe-only matcher. Mirrors
+/// the binary's `atf` membership exactly (note: `FileChanged`,
+/// `UserPromptSubmit`, `Stop`, the task/teammate events, etc. are NOT in it).
+fn comma_mode_for(event_type: &HookEventType) -> bool {
+    matches!(
+        event_type,
+        HookEventType::PreToolUse
+            | HookEventType::PostToolUse
+            | HookEventType::PostToolUseFailure
+            | HookEventType::PermissionRequest
+            | HookEventType::PermissionDenied
+            | HookEventType::UserPromptExpansion
+            | HookEventType::SessionStart
+            | HookEventType::SessionEnd
+            | HookEventType::Setup
+            | HookEventType::PreCompact
+            | HookEventType::PostCompact
+            | HookEventType::Notification
+            | HookEventType::SubagentStart
+            | HookEventType::SubagentStop
+            | HookEventType::Elicitation
+            | HookEventType::ElicitationResult
+            | HookEventType::ConfigChange
+            | HookEventType::InstructionsLoaded
+    )
+}
+
+/// Emit claude-code 2.1.195's bare-MCP-server-matcher deprecation
+/// (`isBareMcpServerMatcher`) when a hook declares a `mcp__<server>` matcher
+/// with no tool suffix. claude warns to use `mcp__<server>__.*` ("See CHANGELOG
+/// v2.1.195"). The port surfaces it once at registration time (a natural
+/// dedup point) rather than per-dispatch; it is a non-behavioral log.
+fn warn_if_bare_mcp_matcher(hook: &HookDefinition) {
+    if let Some(matcher) = hook.matcher() {
+        if is_bare_mcp_server_matcher(matcher) {
+            tracing::warn!(
+                matcher = %matcher,
+                "Hook matcher `{matcher}` targets a bare MCP server; use \
+                 `{matcher}__.*` to match its tools. See CHANGELOG v2.1.195."
+            );
+        }
+    }
+}
+
+/// The wire (snake_case) string for a [`crate::events::ConfigChangeSource`] —
+/// the `source` value claude uses as the `ConfigChange` match query.
+fn config_change_source_wire(source: crate::events::ConfigChangeSource) -> &'static str {
+    use crate::events::ConfigChangeSource as S;
+    match source {
+        S::UserSettings => "user_settings",
+        S::ProjectSettings => "project_settings",
+        S::LocalSettings => "local_settings",
+        S::PolicySettings => "policy_settings",
+        S::Skills => "skills",
+    }
+}
+
+/// The wire (snake_case) string for a [`crate::events::InstructionsLoadReason`]
+/// — the `load_reason` value claude uses as the `InstructionsLoaded` match
+/// query.
+fn load_reason_wire(reason: crate::events::InstructionsLoadReason) -> &'static str {
+    use crate::events::InstructionsLoadReason as R;
+    match reason {
+        R::SessionStart => "session_start",
+        R::NestedTraversal => "nested_traversal",
+        R::PathGlobMatch => "path_glob_match",
+        R::Include => "include",
+        R::Compact => "compact",
     }
 }
 
@@ -1137,5 +1253,76 @@ mod match_event_matcher_tests {
         reg.register(h);
         let non_matching = pre_tool_use_in("Bash", serde_json::json!({ "command": "git status" }));
         assert_eq!(matched_names(&reg, &non_matching), vec!["builtin"]);
+    }
+
+    // ── comma-mode dispatch + non-tool-event match queries (claude 2.1.195) ────
+
+    #[test]
+    fn comma_mode_tool_event_applies_comma_separated_matcher() {
+        // PreToolUse is in the comma-mode set, so a comma-separated matcher list
+        // filters by tool name across both `,` and spaces.
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with(
+            "multi",
+            HookEventType::PreToolUse,
+            Some("Write, Edit"),
+        ));
+        assert_eq!(matched_names(&reg, &pre_tool_use("Write")), vec!["multi"]);
+        assert_eq!(matched_names(&reg, &pre_tool_use("Edit")), vec!["multi"]);
+        assert!(matched_names(&reg, &pre_tool_use("Bash")).is_empty());
+    }
+
+    #[test]
+    fn elicitation_event_filters_by_server_name() {
+        // Elicitation derives its match query from the MCP server name, and the
+        // event is in comma-mode so a hyphenated server name matches as a simple
+        // entry (the v2.1.195 hyphen).
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with(
+            "srv",
+            HookEventType::Elicitation,
+            Some("mcp__my-server"),
+        ));
+        let elicit = |server: &str| HookEvent::Elicitation {
+            server_name: server.into(),
+            message: "pick one".into(),
+            mode: None,
+            url: None,
+            elicitation_id: None,
+            requested_schema: None,
+        };
+        assert_eq!(
+            matched_names(&reg, &elicit("mcp__my-server")),
+            vec!["srv"],
+            "matching server name fires"
+        );
+        assert!(
+            matched_names(&reg, &elicit("mcp__other")).is_empty(),
+            "non-matching server name is filtered out"
+        );
+    }
+
+    #[test]
+    fn file_changed_event_filters_by_basename() {
+        // FileChanged derives its query from the changed file's basename.
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with(
+            "watch",
+            HookEventType::FileChanged,
+            Some("config.toml"),
+        ));
+        let changed = |p: &str| HookEvent::FileChanged {
+            path: std::path::PathBuf::from(p),
+            kind: "modify".into(),
+        };
+        assert_eq!(
+            matched_names(&reg, &changed("/proj/src/config.toml")),
+            vec!["watch"],
+            "basename matches"
+        );
+        assert!(
+            matched_names(&reg, &changed("/proj/src/main.rs")).is_empty(),
+            "different basename is filtered out"
+        );
     }
 }

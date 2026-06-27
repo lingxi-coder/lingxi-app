@@ -27,6 +27,7 @@ use permission::shell_command::{command_from_input, rule_matches_any_subcommand}
 use permission::shell_rule_matching::match_wildcard_pattern;
 use permission::PermissionRuleValue;
 use regex::Regex;
+use std::collections::HashMap;
 
 /// Maps a legacy tool name to its canonical name — `normalizeLegacyToolName`
 /// (`permissionRuleParser.ts:21-33`): `LEGACY_TOOL_NAME_ALIASES[name] ?? name`.
@@ -62,32 +63,77 @@ pub fn get_legacy_tool_names(canonical_name: &str) -> Vec<String> {
     }
 }
 
-/// Returns `true` if `matcher` matches `match_query`.
+/// Returns `true` if `matcher` matches `match_query` using the classic
+/// (non-comma) matcher mode.
 ///
-/// Byte-faithful port of `matchesPattern` (`src/utils/hooks.ts:1346-1381`).
-///
-/// * `match_query` — the value derived from the event (the tool name for
-///   tool events).
-/// * `matcher` — the hook's declared pattern.
+/// Thin back-compat wrapper over [`matches_pattern_with`] with
+/// `comma_mode = false` and no tool-alias map — exactly claude-code's
+/// `matchesPattern(e, t)` (the `n`/`r` parameters defaulting off). Callers that
+/// have the event type (and so can decide comma-mode) should use
+/// [`matches_pattern_with`] directly; this keeps the simpler call shape for
+/// contexts that always want pipe-only matching.
 #[must_use]
 pub fn matches_pattern(match_query: &str, matcher: &str) -> bool {
-    // TS: `if (!matcher || matcher === '*') return true`
+    matches_pattern_with(match_query, matcher, false, None)
+}
+
+/// Byte-faithful port of `matchesPattern` (`dtf(e,t,n,r)`,
+/// `src/utils/hooks.ts`, as of claude-code 2.1.195).
+///
+/// * `match_query` (`e`) — the value derived from the event (the tool name for
+///   tool events; the MCP server name / config source / load reason / changed
+///   file basename for the corresponding non-tool events).
+/// * `matcher` (`t`) — the hook's declared pattern.
+/// * `comma_mode` (`n`) — `true` for events in claude's comma-mode set (`atf`);
+///   it widens the "simple pattern" char class to `^[a-zA-Z0-9_|, -]+$` (the
+///   space + comma were always allowed in comma-mode; the **`-` hyphen is the
+///   v2.1.195 addition**, so hyphenated names — e.g. MCP server names — match as
+///   simple list entries) and splits the simple pattern on BOTH `|` and `,`.
+///   When `false`, the classic `^[a-zA-Z0-9_|]+$` / `|`-only behavior applies.
+/// * `tool_aliases` (`r`) — claude `toolPermissionContext.toolAliases`: an extra
+///   runtime alias map layered on top of the static legacy-tool-name map. It
+///   expands each matcher segment (`ofn(xP(i), r)`) and the regex-branch reverse
+///   lookup (`sfn(e, r)`). The port carries no tool aliases yet, so the registry
+///   passes `None`; the map then collapses to a no-op, byte-identical to the TS
+///   when `toolAliases` is empty.
+#[must_use]
+pub fn matches_pattern_with(
+    match_query: &str,
+    matcher: &str,
+    comma_mode: bool,
+    tool_aliases: Option<&HashMap<String, String>>,
+) -> bool {
+    // TS: `if (!t || t === "*") return true`
     if matcher.is_empty() || matcher == "*" {
         return true;
     }
 
-    // TS: `if (/^[a-zA-Z0-9_|]+$/.test(matcher))` — a simple string or
-    // pipe-separated list with no regex specials other than `|`.
-    if is_simple_pattern(matcher) {
-        // TS: `if (matcher.includes('|'))` — pipe-separated exact matches.
-        if matcher.contains('|') {
-            return matcher
-                .split('|')
-                .map(|p| normalize_legacy_tool_name(p.trim()))
-                .any(|p| p == match_query);
+    // TS: `if ((n ? /^[a-zA-Z0-9_|, -]+$/ : /^[a-zA-Z0-9_|]+$/).test(t))`.
+    if is_simple_pattern(matcher, comma_mode) {
+        // TS: `t.split(n ? /[|,]/ : "|").map(trim).filter(Boolean)
+        //        .flatMap(i => ofn(xP(i), r)).includes(e)`.
+        for segment in matcher.split(|c| c == '|' || (comma_mode && c == ',')) {
+            let segment = segment.trim();
+            if segment.is_empty() {
+                // `.filter(Boolean)` drops empty segments (e.g. trailing `,`).
+                continue;
+            }
+            // `xP(i)` = normalizeLegacyToolName; `ofn(name, r)` yields
+            // `[name]`, or `[name, mapped]` when the alias map remaps it to a
+            // different name — `.includes(e)` matches if EITHER equals the query.
+            let normalized = normalize_legacy_tool_name(segment);
+            if normalized == match_query {
+                return true;
+            }
+            if let Some(map) = tool_aliases {
+                if let Some(mapped) = map.get(&normalized) {
+                    if mapped != &normalized && mapped == match_query {
+                        return true;
+                    }
+                }
+            }
         }
-        // TS: `return matchQuery === normalizeLegacyToolName(matcher)`
-        return match_query == normalize_legacy_tool_name(matcher);
+        return false;
     }
 
     // TS: otherwise treat as regex.
@@ -100,14 +146,47 @@ pub fn matches_pattern(match_query: &str, matcher: &str) -> bool {
     if regex.is_match(match_query) {
         return true;
     }
-    // TS: also test against legacy names so patterns like "^Task$" still match
-    // the canonical name (e.g. query "Agent" → legacy ["Task"]).
+    // TS: also test the query's legacy names so patterns like "^Task$" still
+    // match the canonical name (e.g. query "Agent" → legacy ["Task"]) — `rfn(e)`.
     for legacy_name in get_legacy_tool_names(match_query) {
         if regex.is_match(&legacy_name) {
             return true;
         }
     }
+    // TS: `for (let i of sfn(e, r)) if (s.test(i)) return true` — the extra alias
+    // map's reverse lookup (keys whose value equals the query). No-op when the
+    // port passes `None`.
+    if let Some(map) = tool_aliases {
+        for (key, value) in map {
+            if value == match_query && regex.is_match(key) {
+                return true;
+            }
+        }
+    }
     false
+}
+
+/// Returns `true` when `matcher` is a *bare MCP server matcher* — a simple
+/// (comma-mode) pattern in which some segment is `mcp__<server>` with no tool
+/// suffix (`mcp__<server>__<tool>`).
+///
+/// Byte-faithful port of claude-code 2.1.195's `isBareMcpServerMatcher`
+/// (`Qic`): `/^[a-zA-Z0-9_|, -]+$/.test(e)` then any `[|,]`-split, trimmed
+/// segment that `startsWith("mcp__")` whose remainder contains no `"__"`.
+/// claude warns (once) that such a matcher should be written `mcp__server__.*`
+/// ("See CHANGELOG v2.1.195"); the registry uses this to emit that deprecation.
+#[must_use]
+pub fn is_bare_mcp_server_matcher(matcher: &str) -> bool {
+    if !is_simple_pattern(matcher, true) {
+        return false;
+    }
+    matcher
+        .split(|c| c == '|' || c == ',')
+        .map(str::trim)
+        .any(|seg| {
+            seg.strip_prefix("mcp__")
+                .is_some_and(|rest| !rest.contains("__"))
+        })
 }
 
 /// Returns `true` if a hook's `if`-condition `if_condition` (a permission-rule
@@ -203,12 +282,18 @@ fn string_field<'a>(input: &'a serde_json::Value, field: &str) -> Option<&'a str
     input.get(field).and_then(serde_json::Value::as_str)
 }
 
-/// True when every byte of `s` is in `[A-Za-z0-9_|]` and `s` is non-empty —
-/// the Rust equivalent of the JS `/^[a-zA-Z0-9_|]+$/` test.
-fn is_simple_pattern(s: &str) -> bool {
+/// True when `s` is non-empty and every byte is in the "simple pattern" char
+/// class — the Rust equivalent of the JS `(n ? /^[a-zA-Z0-9_|, -]+$/ :
+/// /^[a-zA-Z0-9_|]+$/).test(s)` test. In comma-mode the class additionally
+/// admits comma, space, and (since v2.1.195) the hyphen.
+fn is_simple_pattern(s: &str, comma_mode: bool) -> bool {
     !s.is_empty()
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'|')
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || b == b'_'
+                || b == b'|'
+                || (comma_mode && (b == b',' || b == b' ' || b == b'-'))
+        })
 }
 
 #[cfg(test)]
@@ -438,5 +523,79 @@ mod tests {
         assert!(!matches_if_condition("Bash(git push:*)", "Bash", &empty));
         assert!(!matches_if_condition("Edit(*.rs)", "Edit", &empty));
         assert!(matches_if_condition("Bash", "Bash", &empty));
+    }
+
+    // ── comma-mode matcher (`matchesPattern` `n`/`r`, claude 2.1.195) ──────────
+
+    #[test]
+    fn comma_mode_splits_on_comma_and_pipe() {
+        // In comma-mode a list may use commas, pipes, or both, with spaces.
+        assert!(matches_pattern_with("Edit", "Write, Edit", true, None));
+        assert!(matches_pattern_with("Read", "Write | Edit | Read", true, None));
+        assert!(matches_pattern_with("Read", "Write, Edit | Read", true, None));
+        assert!(!matches_pattern_with("Bash", "Write, Edit", true, None));
+        // Empty segments (trailing/double separators) are dropped, not matched.
+        assert!(matches_pattern_with("Edit", "Write,,Edit,", true, None));
+        assert!(!matches_pattern_with("", "Write,,Edit,", true, None));
+    }
+
+    #[test]
+    fn comma_mode_off_keeps_comma_as_regex() {
+        // Without comma-mode a comma makes the pattern NON-simple, so it falls
+        // through to the regex branch — exactly the classic behavior. `Write,
+        // Edit` as a regex does not match the bare query "Edit".
+        assert!(!matches_pattern_with("Edit", "Write, Edit", false, None));
+        // The 2-arg wrapper is comma-mode OFF.
+        assert!(!matches_pattern("Edit", "Write, Edit"));
+    }
+
+    #[test]
+    fn comma_mode_hyphen_is_simple_match() {
+        // The v2.1.195 hyphen: a hyphenated name (e.g. an MCP server) is a
+        // SIMPLE list entry in comma-mode (exact match), not a regex.
+        assert!(matches_pattern_with("mcp__my-server", "mcp__my-server", true, None));
+        assert!(matches_pattern_with(
+            "mcp__my-server",
+            "Bash, mcp__my-server",
+            true,
+            None
+        ));
+        // Exact, not substring (simple pattern ⇒ exact).
+        assert!(!matches_pattern_with("mcp__my-server__tool", "mcp__my-server", true, None));
+        // With comma-mode OFF the hyphen pattern is NOT simple → regex branch,
+        // where `mcp__my-server` matches as an unanchored substring.
+        assert!(matches_pattern_with("x_mcp__my-server_y", "mcp__my-server", false, None));
+    }
+
+    #[test]
+    fn comma_mode_tool_aliases_expand_segments() {
+        // `r` extra map: a matcher segment that the alias map remaps also
+        // matches the mapped name (`ofn(xP(i), r)` → [name, mapped]).
+        let mut aliases = HashMap::new();
+        aliases.insert("Deploy".to_string(), "Bash".to_string());
+        // Matcher "Deploy" → normalized "Deploy" → alias map → "Bash": matches a
+        // "Bash" query.
+        assert!(matches_pattern_with("Bash", "Deploy", true, Some(&aliases)));
+        // Still matches the literal name too.
+        assert!(matches_pattern_with("Deploy", "Deploy", true, Some(&aliases)));
+        // Unrelated query does not match.
+        assert!(!matches_pattern_with("Read", "Deploy", true, Some(&aliases)));
+        // Regex branch reverse lookup (`sfn`): a regex over the query "Bash"
+        // also matches the alias key "Deploy" that maps to it.
+        assert!(matches_pattern_with("Bash", "^Deploy$", true, Some(&aliases)));
+    }
+
+    #[test]
+    fn is_bare_mcp_server_matcher_detects_suffixless_mcp() {
+        // `mcp__server` with no `__tool` suffix is "bare" (deprecation target).
+        assert!(is_bare_mcp_server_matcher("mcp__github"));
+        assert!(is_bare_mcp_server_matcher("Bash, mcp__github"));
+        assert!(is_bare_mcp_server_matcher("mcp__my-server")); // hyphen ok
+        // A fully-qualified MCP tool matcher is NOT bare.
+        assert!(!is_bare_mcp_server_matcher("mcp__github__create_issue"));
+        // Non-MCP matchers are never bare.
+        assert!(!is_bare_mcp_server_matcher("Write|Edit"));
+        // A regex (non-simple) matcher is never classified as bare.
+        assert!(!is_bare_mcp_server_matcher("^mcp__github$"));
     }
 }

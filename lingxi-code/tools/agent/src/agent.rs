@@ -141,6 +141,46 @@ pub struct AgentToolInput {
     pub context_paths: Vec<PathBuf>,
 }
 
+/// claude `Agt()` (`AgentTool.tsx`): normalize a subagent-type candidate for the
+/// fuzzy fallback match — lowercase, then strip all whitespace, dashes (Unicode
+/// `Pd`), and underscores, so `"Explore"` / `"explore"` / `"ex-plore"` /
+/// `"general_purpose"` collapse to a comparable key.
+///
+/// claude additionally applies `NFKC` first; agent-type names are ASCII (where
+/// NFKC is the identity), so it is omitted here — add `unicode-normalization`
+/// if non-ASCII custom agent types ever need compatibility folding.
+fn normalize_agent_type(s: &str) -> String {
+    s.chars()
+        .flat_map(char::to_lowercase)
+        .filter(|c| !(c.is_whitespace() || *c == '_' || is_pd_dash(*c)))
+        .collect()
+}
+
+/// Unicode `Pd` (dash punctuation) membership test for [`normalize_agent_type`].
+fn is_pd_dash(c: char) -> bool {
+    matches!(
+        c,
+        '-' | '\u{058A}'
+            | '\u{05BE}'
+            | '\u{1400}'
+            | '\u{1806}'
+            | '\u{2010}'..='\u{2015}'
+            | '\u{2E17}'
+            | '\u{2E1A}'
+            | '\u{2E3A}'
+            | '\u{2E3B}'
+            | '\u{2E40}'
+            | '\u{301C}'
+            | '\u{3030}'
+            | '\u{30A0}'
+            | '\u{FE31}'
+            | '\u{FE32}'
+            | '\u{FE58}'
+            | '\u{FE63}'
+            | '\u{FF0D}'
+    )
+}
+
 static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
@@ -1116,22 +1156,81 @@ impl Tool for AgentTool {
                             Some(gate) => gate.agent_deny_content_types().await,
                             None => Vec::new(),
                         };
-                        let available = listing
+                        let is_denied = |t: &str| denied.iter().any(|d| d.as_str() == t);
+                        let available = || {
+                            listing
+                                .iter()
+                                .filter(|a| !denied.iter().any(|d| d == &a.agent_type))
+                                .map(|a| a.agent_type.clone())
+                                .collect::<Vec<_>>()
+                        };
+                        // claude `Agt()` normalized fallback (AgentTool.tsx): when the
+                        // exact name misses, match candidates whose normalized form
+                        // (NFKC/lowercase/strip ws+dash+underscore) equals the
+                        // candidate's. A single available match resolves; multiple is
+                        // an ambiguity error; zero (or a single denied match) falls
+                        // through to not-found.
+                        let norm = normalize_agent_type(explicit);
+                        let matches: Vec<String> = listing
                             .iter()
-                            .filter(|a| !denied.iter().any(|d| d == &a.agent_type))
+                            .filter(|a| normalize_agent_type(&a.agent_type) == norm)
                             .map(|a| a.agent_type.clone())
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        Self::emit_failed(
-                            &bus,
-                            &invocation_id,
-                            "agent_type_not_found",
-                            started.elapsed().as_millis() as u64,
-                        )
-                        .await;
-                        return Err(ToolError::InvalidInput(format!(
-                            "Agent type '{explicit}' not found. Available agents: {available}"
-                        )));
+                            .collect();
+                        if matches.len() > 1 {
+                            let avail_matches: Vec<&String> =
+                                matches.iter().filter(|&m| !is_denied(m)).collect();
+                            let matches_disp = matches
+                                .iter()
+                                .map(|m| {
+                                    if is_denied(m) {
+                                        format!("{m} (unavailable)")
+                                    } else {
+                                        m.clone()
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let tail = if avail_matches.is_empty() {
+                                format!(
+                                    "None of these are available. Available agents: {}",
+                                    available().join(", ")
+                                )
+                            } else {
+                                format!(
+                                    "Use the exact name: {}",
+                                    avail_matches
+                                        .iter()
+                                        .map(|s| s.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(" or ")
+                                )
+                            };
+                            Self::emit_failed(
+                                &bus,
+                                &invocation_id,
+                                "agent_type_ambiguous",
+                                started.elapsed().as_millis() as u64,
+                            )
+                            .await;
+                            return Err(ToolError::InvalidInput(format!(
+                                "Agent type '{explicit}' is ambiguous — matches {matches_disp}. {tail}"
+                            )));
+                        }
+                        if matches.len() == 1 && !is_denied(&matches[0]) {
+                            matches.into_iter().next().unwrap()
+                        } else {
+                            Self::emit_failed(
+                                &bus,
+                                &invocation_id,
+                                "agent_type_not_found",
+                                started.elapsed().as_millis() as u64,
+                            )
+                            .await;
+                            return Err(ToolError::InvalidInput(format!(
+                                "Agent type '{explicit}' not found. Available agents: {}",
+                                available().join(", ")
+                            )));
+                        }
                     }
                 }
             }
@@ -1644,6 +1743,21 @@ mod tests {
         arc_mock_budget, arc_mock_mailbox, arc_mock_spawner, arc_mock_task_registry,
         MockBudgetEnforcerHandle, MockSubagentSpawner,
     };
+
+    // claude `Agt()` normalized-type key: lowercase + strip whitespace, dashes,
+    // and underscores so case/spacing/punctuation variants of a subagent type
+    // collapse to one comparable form (drives the fuzzy fallback match).
+    #[test]
+    fn normalize_agent_type_collapses_case_ws_dash_underscore() {
+        assert_eq!(normalize_agent_type("Explore"), "explore");
+        assert_eq!(normalize_agent_type("EXPLORE"), "explore");
+        assert_eq!(normalize_agent_type("ex plore"), "explore");
+        assert_eq!(normalize_agent_type("general-purpose"), "generalpurpose");
+        assert_eq!(normalize_agent_type("general_purpose"), "generalpurpose");
+        assert_eq!(normalize_agent_type("General Purpose"), "generalpurpose");
+        // em-dash (U+2014) is Unicode Pd and is stripped too.
+        assert_eq!(normalize_agent_type("a—b"), "ab");
+    }
 
     // A KEPT worktree appends byte-exact `worktreePath:`/`worktreeBranch:` lines
     // to the result trailer, right before the `<usage>` block (claude-code

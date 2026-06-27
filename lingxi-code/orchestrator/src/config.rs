@@ -22,7 +22,7 @@ pub const MAX_TURNS_DEFAULT: u32 = 0;
 /// CLI flags (M3-01 + M5-12); this value is only used when the embedder
 /// constructs an orchestrator with `OrchestratorConfig::default()` for
 /// tests.
-pub const DEFAULT_MODEL: &str = "claude-opus-4-7";
+pub const DEFAULT_MODEL: &str = "claude-opus-4-8";
 
 /// Runtime configuration for [`crate::ConversationOrchestrator`].
 //
@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn default_model_is_locked_string() {
-        assert_eq!(OrchestratorConfig::default().model, "claude-opus-4-7");
+        assert_eq!(OrchestratorConfig::default().model, "claude-opus-4-8");
     }
 
     #[test]

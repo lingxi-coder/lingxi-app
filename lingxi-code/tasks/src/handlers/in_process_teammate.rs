@@ -1184,7 +1184,7 @@ mod tests {
             .build_context(protocol::AgentId::new(), "lead", "", "", def)
             .await;
         assert!(
-            matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-opus-4-7"),
+            matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-opus-4-8"),
             "opusplan + plan mode must resolve an Inherit teammate to Opus, got {:?}",
             ctx.agent_definition.model
         );

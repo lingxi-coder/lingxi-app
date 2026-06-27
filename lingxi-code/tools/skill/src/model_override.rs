@@ -22,8 +22,9 @@
 //!   check intentionally stops re-appending `[1m]` for the bare `opus` alias —
 //!   exactly as the unchanged TS would, until its `@[MODEL LAUNCH]` pattern is
 //!   bumped. Keep this aligned with `compaction::context_window`.
-//! - the family default ids (`opus`→`claude-opus-4-7`, …) mirror
+//! - the family default ids (`opus`→`claude-opus-4-8`, …) mirror
 //!   `agent::model_resolution::family_default_id` + orchestrator `DEFAULT_MODEL`.
+//!   Opus is provider-aware (firstParty→4-8, Bedrock/Vertex/Foundry→4-6).
 //!   Keep them aligned when the catalog versions change.
 //! - the ant-model registry, the legacy Opus 4.0/4.1 first-party remap, and the
 //!   Foundry deployment-id passthrough branches of `parseUserSpecifiedModel` are
@@ -80,7 +81,7 @@ fn model_supports_1m(model: &str) -> bool {
 /// resolution; see the module DRIFT NOTE on keeping the catalog aligned.
 fn family_default_id(family_lower: &str) -> Option<&'static str> {
     match family_lower {
-        "opus" => Some("claude-opus-4-7"),
+        "opus" => Some("claude-opus-4-8"),
         "sonnet" => Some("claude-sonnet-4-6"),
         "haiku" => Some("claude-haiku-4-5"),
         _ => None,
@@ -137,6 +138,28 @@ fn default_sonnet_model() -> String {
     SONNET_3P_DEFAULT_ID.to_string()
 }
 
+/// The Opus family default id for non-firstParty (3P) providers (Bedrock/Vertex/
+/// Foundry). Mirrors `agent::model_resolution::OPUS_3P_DEFAULT_ID`.
+const OPUS_3P_DEFAULT_ID: &str = "claude-opus-4-6";
+
+/// `getDefaultOpusModel()` (`model.ts:105-116`): env override (non-empty) wins;
+/// else provider-aware — `claude-opus-4-8` for firstParty, `claude-opus-4-6` for
+/// Bedrock/Vertex/Foundry. Mirrors `agent::model_resolution::get_default_opus_model`.
+fn default_opus_model() -> String {
+    if let Some(v) = env::var("ANTHROPIC_DEFAULT_OPUS_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        return v;
+    }
+    if api_provider_is_first_party() {
+        return family_default_id("opus")
+            .expect("opus is a known family")
+            .to_string();
+    }
+    OPUS_3P_DEFAULT_ID.to_string()
+}
+
 /// `getAPIProvider() === 'firstParty'` (`providers.ts:6-13`): first-party iff none
 /// of `CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` / `_FOUNDRY` is env-truthy (strict
 /// allowlist). Mirrors `agent::model_resolution::api_provider_is_first_party`.
@@ -166,7 +189,8 @@ fn parse_user_specified_model(model_input: &str) -> String {
         // on the skill `model:` path.
         "opusplan" | "sonnet" => format!("{}{suffix}", default_sonnet_model()),
         "haiku" => format!("{}{suffix}", env_default("ANTHROPIC_DEFAULT_HAIKU_MODEL", "haiku")),
-        "opus" => format!("{}{suffix}", env_default("ANTHROPIC_DEFAULT_OPUS_MODEL", "opus")),
+        // #2: Opus is provider-aware in 2.1.193 (firstParty→4-8, 3P→4-6).
+        "opus" => format!("{}{suffix}", default_opus_model()),
         _ => {
             // Non-alias: preserve the original case, normalizing only `[1m]`.
             if has_1m_tag {
@@ -360,7 +384,7 @@ mod tests {
         // under the ENV_LOCK to assert the 1P ids deterministically.
         let _lock = ENV_LOCK.lock().unwrap();
         let _g = clear_provider_env();
-        assert_eq!(parse_user_specified_model("opus"), "claude-opus-4-7");
+        assert_eq!(parse_user_specified_model("opus"), "claude-opus-4-8");
         assert_eq!(parse_user_specified_model("sonnet"), "claude-sonnet-4-6");
         assert_eq!(parse_user_specified_model("haiku"), "claude-haiku-4-5");
         assert_eq!(parse_user_specified_model("opusplan"), "claude-sonnet-4-6");

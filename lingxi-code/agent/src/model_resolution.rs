@@ -60,7 +60,7 @@ use traits::env::is_env_truthy;
 /// `tools/skill/src/model_override.rs`) when the default model versions change.
 fn family_default_id(family_lower: &str) -> Option<&'static str> {
     match family_lower {
-        "opus" => Some("claude-opus-4-7"),
+        "opus" => Some("claude-opus-4-8"),
         "sonnet" => Some("claude-sonnet-4-6"),
         "haiku" => Some("claude-haiku-4-5"),
         _ => None,
@@ -75,18 +75,37 @@ fn family_default_id(family_lower: &str) -> Option<&'static str> {
 /// providers may not yet have Sonnet 4.6. firstParty stays on `sonnet46`
 /// (`family_default_id("sonnet")`).
 ///
-/// Opus and Haiku do NOT diverge by provider today (`getDefaultOpusModel`'s
-/// 3P branch returns the same value as firstParty, and `getDefaultHaikuModel`
-/// has no provider branch — Haiku 4.5 is on all platforms), so only Sonnet is
-/// modeled provider-aware here.
+/// Haiku does NOT diverge by provider (`getDefaultHaikuModel` has no provider
+/// branch — Haiku 4.5 is on all platforms). Opus DOES in 2.1.193 — see
+/// [`OPUS_3P_DEFAULT_ID`] / [`get_default_opus_model`].
 const SONNET_3P_DEFAULT_ID: &str = "claude-sonnet-4-5-20250929";
 
+/// The Opus family default id for the non-firstParty (3P) providers the port
+/// models (Bedrock/Vertex/Foundry). `getDefaultOpusModel()` returns `opus46`
+/// (`claude-opus-4-6`) for `!['firstParty','anthropicAws','gateway']`, while
+/// firstParty gets `opus48` (`family_default_id("opus")` = `claude-opus-4-8`).
+/// (claude also maps mantle / anthropicAws / gateway to `opus47`; the port
+/// detects only Bedrock/Vertex/Foundry via the `CLAUDE_CODE_USE_*` env vars, so
+/// those providers are not represented — same 2-way detection as Sonnet.)
+const OPUS_3P_DEFAULT_ID: &str = "claude-opus-4-6";
+
 /// `getDefaultOpusModel()` (`model.ts:105-116`): the `ANTHROPIC_DEFAULT_OPUS_MODEL`
-/// env override, else the family default. (The TS 3P-vs-firstParty branch returns
-/// the same value today, so it is collapsed; `family_default_id` is the single
-/// source.)
+/// env override (when non-empty) wins; else provider-aware — `claude-opus-4-8`
+/// for firstParty, `claude-opus-4-6` (`OPUS_3P_DEFAULT_ID`) for
+/// Bedrock/Vertex/Foundry.
 fn get_default_opus_model() -> String {
-    env_default("ANTHROPIC_DEFAULT_OPUS_MODEL", "opus")
+    if let Some(v) = std::env::var("ANTHROPIC_DEFAULT_OPUS_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        return v;
+    }
+    if api_provider_is_first_party() {
+        return family_default_id("opus")
+            .expect("opus is a known family")
+            .to_string();
+    }
+    OPUS_3P_DEFAULT_ID.to_string()
 }
 
 /// `getDefaultSonnetModel()` (`model.ts:118-128`): the
@@ -621,7 +640,7 @@ mod tests {
                 DEFAULT,
                 None,
             ),
-            "claude-opus-4-7"
+            "claude-opus-4-8"
         );
         assert_eq!(
             resolve_agent_model(
@@ -637,6 +656,9 @@ mod tests {
     #[test]
     fn cross_tier_family_alias_resolves_to_that_familys_default() {
         // parent is sonnet, agent asks for opus (different tier) → opus default id.
+        // The opus default is provider-aware (#2), so pin firstParty deterministically.
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
         assert_eq!(
             resolve_agent_model(
                 &AgentModel::Alias("opus".to_string()),
@@ -644,7 +666,7 @@ mod tests {
                 DEFAULT,
                 None,
             ),
-            "claude-opus-4-7"
+            "claude-opus-4-8"
         );
     }
 
@@ -694,6 +716,10 @@ mod tests {
 
     #[test]
     fn inherit_opusplan_plan_mode_resolves_to_opus() {
+        // opusplan in plan mode resolves to the opus default, which is
+        // provider-aware (#2) → pin firstParty deterministically.
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
         assert_eq!(
             resolve_agent_model(
                 &AgentModel::Inherit,
@@ -701,7 +727,7 @@ mod tests {
                 PermissionMode::Plan,
                 Some("opusplan"),
             ),
-            "claude-opus-4-7"
+            "claude-opus-4-8"
         );
     }
 
@@ -968,15 +994,16 @@ mod tests {
     }
 
     #[test]
-    fn opus_and_haiku_defaults_do_not_differ_by_provider() {
-        // Verify the claim that only Sonnet diverges: opus/haiku are identical on
-        // firstParty and on a 3P provider.
+    fn opus_differs_by_provider_haiku_does_not() {
+        // #2: Opus is provider-aware (firstParty→claude-opus-4-8,
+        // Bedrock/Vertex/Foundry→claude-opus-4-6); Haiku has no provider branch
+        // (same id on all platforms), like the existing Sonnet split.
         let _lock = ENV_LOCK.lock().unwrap();
         let _g = clear_provider_env();
-        let opus_fp = get_default_opus_model();
+        assert_eq!(get_default_opus_model(), "claude-opus-4-8");
         let haiku_fp = get_default_haiku_model();
         let _b = EnvGuard::set("CLAUDE_CODE_USE_BEDROCK", "1");
-        assert_eq!(get_default_opus_model(), opus_fp);
+        assert_eq!(get_default_opus_model(), "claude-opus-4-6");
         assert_eq!(get_default_haiku_model(), haiku_fp);
     }
 

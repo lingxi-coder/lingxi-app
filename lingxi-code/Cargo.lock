@@ -709,6 +709,7 @@ dependencies = [
  "client-adapter",
  "client-protocol",
  "command-api",
+ "command-core",
  "dirs",
  "engine",
  "engine-desktop",

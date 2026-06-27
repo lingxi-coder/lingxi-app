@@ -243,6 +243,11 @@ pub(crate) async fn build_tui_runtime(
     // the `/connect` screen's `pump_store_provider_key` persists a collected key
     // via `CredentialManager::set_provider_key`.
     let provider_key_store = tui_build.runtime.provider_key_store.clone();
+    // (`/connect` Copilot device-flow) Project the engine GitHub-Copilot OAuth
+    // device-flow driver off the runtime so picking GitHub Copilot in `/connect`
+    // runs the real web sign-in (browser open + device-code poll + token store)
+    // via `root`'s copilot-login task. `.clone()` only bumps the `Arc`.
+    let copilot_connect_driver = tui_build.runtime.connect_copilot.clone();
     // (M5-13) Seed the prior conversation last so a resumed session paints its
     // existing history on the first frame. For a fresh launch this is `[]`.
     tui::session::Runtime::with_bridge(session_id, bridge, status)
@@ -256,6 +261,7 @@ pub(crate) async fn build_tui_runtime(
         .with_provider_availability(provider_availability)
         .with_model_providers(model_providers)
         .with_provider_key_store(provider_key_store)
+        .with_copilot_connect_driver(copilot_connect_driver)
         // (B4 Task 5) Thread the composition root's shared subscription slot so
         // the TUI rate-limit composer reads the live snapshot at compose time.
         .with_subscription(tui_build.runtime.subscription.clone())

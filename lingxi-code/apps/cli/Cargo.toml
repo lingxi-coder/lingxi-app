@@ -30,6 +30,11 @@ engine-desktop = { path = "../engine-desktop" }
 # `/connect` screen persists provider keys. Naming the leaf `secret` type re-adds
 # it as a direct dep.
 secret = { path = "../../secret" }
+# (`/connect` Copilot device-flow) The CLI `Runtime` re-projects
+# `DesktopRuntime.connect_copilot` (`Arc<dyn command_core::CopilotConnectDriver>`)
+# and threads it into the TUI session so picking GitHub Copilot in `/connect`
+# runs the real web sign-in. Naming the trait re-adds command-core as a direct dep.
+command-core = { path = "../../commands/core" }
 # F2-01: `engine_desktop::build` takes an `Arc<dyn client_adapter::PermissionRequestSink>`
 # whose method carries a `client_protocol::permission::PermissionRequest`. The CLI
 # defines a no-op sink (it opts into `NoOpPermissionGate`), so it names both

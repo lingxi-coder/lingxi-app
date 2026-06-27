@@ -10,10 +10,22 @@
 //! dedup path consume this registry.
 //!
 //! This module is intentionally minimal — it stores the `{content, mtime_ms,
-//! offset, limit}` tuple keyed by absolute [`PathBuf`]. The TS 100-entry LRU
-//! eviction + MRU promotion remain unported (consistent with the documented
-//! `/files` divergence in `orchestrator::conversation`); the entry shape is a
-//! faithful port.
+//! offset, limit}` tuple keyed by absolute [`PathBuf`] in a plain map; the
+//! entry shape is a faithful port.
+//!
+//! DEFERRED divergence (verified vs 2.1.195, low impact). claude-code's
+//! `readFileState` is an `lru-cache`, constructed
+//! `new LRUCache({ max, maxSize, sizeCalculation: n => Math.max(1,
+//! Buffer.byteLength(n.content)) })` — a BYTE-budgeted LRU (entry cap `max` +
+//! byte budget `maxSize`) with MRU-promote on `get` and `dump()`/`load()`
+//! cross-session persistence (telemetry `file_state_cache:{entries, bytes}`).
+//! This port uses an unbounded [`HashMap`] with no eviction or MRU ordering.
+//! The divergence only manifests once a session's cached content exceeds the
+//! byte budget (claude then evicts least-recently-used entries; this port keeps
+//! them). A faithful port needs the exact `max`/`maxSize` values (config-
+//! indirected in the binary) plus the dump/load persistence, so it is deferred
+//! rather than guessed. NOTE: an earlier comment here called this a "100-entry
+//! LRU" — that was inaccurate; the cap is byte-budgeted, not a fixed count.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

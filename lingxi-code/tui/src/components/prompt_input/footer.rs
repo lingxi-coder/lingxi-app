@@ -205,11 +205,17 @@ pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement
                     Text(content: p, color: TuiTheme::DIM)
                 }
             }))
-            #(show_hint.then(|| element! {
-                View(flex_direction: FlexDirection::Row) {
-                    Text(content: hint_text.to_string(), color: TuiTheme::DIM)
-                }
-            }))
+            // ALWAYS reserve the hint row (blank when the hint is hidden) so the
+            // footer keeps a constant height. Without this the row vanishes the
+            // moment the buffer becomes non-empty, shrinking the bottom-pinned
+            // input zone by one row — which makes the border lines bracketing
+            // the input jump up a row on the first keystroke.
+            View(flex_direction: FlexDirection::Row) {
+                Text(
+                    content: if show_hint { hint_text.to_string() } else { String::new() },
+                    color: TuiTheme::DIM,
+                )
+            }
         }
     }
     .into_any()

@@ -329,7 +329,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
             }))
             // Top border line of the input view.
             View(flex_direction: FlexDirection::Row) {
-                Text(content: prompt_rule.clone(), color: dim)
+                Text(content: prompt_rule.clone(), color: Color::Cyan)
             }
             PromptInput(
                 text: prompt_text,
@@ -340,7 +340,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
             )
             // Bottom border line of the input view.
             View(flex_direction: FlexDirection::Row) {
-                Text(content: prompt_rule.clone(), color: dim)
+                Text(content: prompt_rule.clone(), color: Color::Cyan)
             }
             PromptInputFooter(
                 mode: crate::components::prompt_input::FooterMode::Prompt,

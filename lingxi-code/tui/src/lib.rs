@@ -34,6 +34,7 @@ pub mod state;
 pub mod streaming;
 pub mod telemetry;
 pub(crate) mod terminal;
+pub(crate) mod theme_detect;
 pub mod theme;
 pub mod theme_persist;
 

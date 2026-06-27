@@ -281,7 +281,12 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // `--debug` is now `Option<String>` (optional category filter); collapse to
     // on/off for logging init. `--mcp-debug` (deprecated alias) and `--debug-file`
     // also imply debug mode.
-    logging::init(parsed.debug_enabled());
+    // The interactive fullscreen TUI owns the terminal — suppress stderr logging
+    // there so WARN lines don't corrupt the rendered frame. A subcommand
+    // (mcp/auth/…) or print/stdio mode keeps the normal stderr logger.
+    let interactive_tui = parsed.command.is_none()
+        && matches!(crate::mode::decide_mode(&parsed), crate::mode::Mode::Tui);
+    logging::init(parsed.debug_enabled(), interactive_tui);
     tracing::debug!(?parsed, "argv parsed");
 
     // `--cwd <dir>` must apply BEFORE the subcommand dispatch, not just for

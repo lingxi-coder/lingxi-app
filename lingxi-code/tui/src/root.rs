@@ -1899,6 +1899,16 @@ pub async fn pump_switch_model(
             // The status line reads `status.model`; update it so the header
             // reflects the switch immediately (the next status refresh agrees).
             st.status.model.clone_from(&model);
+            // Persist the choice as the `model` setting so the NEXT launch
+            // defaults to it (the picker otherwise switches only the live
+            // session). Use the profile-qualified id (e.g.
+            // `deepseek/deepseek-chat`) so startup resolution is unambiguous
+            // across providers.
+            let qualified = match &profile {
+                Some(p) => format!("{p}/{model}"),
+                None => model.clone(),
+            };
+            crate::recent_models::record_default_model(&qualified);
             st.push_message(crate::state::RenderedMessage::SystemText {
                 body: format!("Set model to {model}"),
                 timestamp: chrono::Utc::now().timestamp(),
@@ -3411,10 +3421,12 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
 
 /// Fixed (non-prompt) chrome rows the REPL screen reserves around the
 /// scrollback: 1 status line + 1 spinner row (always reserved so the
-/// scrollback doesn't jitter on `TurnStart`) + 2 footer rows (the
-/// mode-indicator/placeholder row + the help/newline hint row from
-/// [`crate::components::prompt_input::PromptInputFooter`]).
-const FIXED_CHROME_ROWS: usize = 4;
+/// scrollback doesn't jitter on `TurnStart`) + 2 input-view border rows (the
+/// top + bottom rule lines that bracket the prompt) + 1 footer row (the
+/// always-reserved help/newline hint row from
+/// [`crate::components::prompt_input::PromptInputFooter`]; its prompt-glyph row
+/// only renders when a placeholder is set, which the live REPL never does).
+const FIXED_CHROME_ROWS: usize = 5;
 
 /// Compute the scrollback viewport height given the live terminal `rows` and
 /// the **current prompt height** (`prompt_visual_rows`, from
@@ -3596,10 +3608,10 @@ mod tests {
 
     #[test]
     fn viewport_height_reserves_fixed_chrome_plus_single_prompt_row() {
-        // Single-line prompt (1 visual row) → reserve FIXED_CHROME_ROWS(4) + 1
-        // = 5 rows. 24 rows → 19 visible; saturates to 0 below the floor.
-        assert_eq!(viewport_height(24, 1), 19);
-        assert_eq!(viewport_height(5, 1), 0);
+        // Single-line prompt (1 visual row) → reserve FIXED_CHROME_ROWS(5) + 1
+        // = 6 rows. 24 rows → 18 visible; saturates to 0 below the floor.
+        assert_eq!(viewport_height(24, 1), 18);
+        assert_eq!(viewport_height(6, 1), 0);
         assert_eq!(viewport_height(0, 1), 0);
     }
 
@@ -3625,9 +3637,10 @@ mod tests {
                 n - 1
             );
         }
-        // The 2-row footer is baked into FIXED_CHROME_ROWS: single-row prompt
-        // reserves status(1)+spinner(1)+footer(2)+prompt(1) = 5.
-        assert_eq!(single, usize::from(rows) - 5);
+        // The 1-row footer + 2 input-border rows are baked into
+        // FIXED_CHROME_ROWS: single-row prompt reserves
+        // status(1)+spinner(1)+border(2)+footer(1)+prompt(1) = 6.
+        assert_eq!(single, usize::from(rows) - 6);
     }
 
     /// (M7-08) Build an iocraft `KeyEvent` for a printable char (Press).

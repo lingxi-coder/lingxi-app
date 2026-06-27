@@ -10,7 +10,18 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 /// Initialise the global tracing subscriber. Idempotent — subsequent calls
 /// (e.g. from a second test in the same process) are silent no-ops.
-pub fn init(debug: bool) {
+pub fn init(debug: bool, suppress_terminal: bool) {
+    // The fullscreen TUI reconciler owns the terminal, so routing tracing to
+    // stderr corrupts the rendered frame (stray WARN lines drawn over the input
+    // box / borders). When the interactive TUI is about to mount, install an
+    // inert "off" subscriber: log macros stay cheap no-ops and nothing reaches
+    // the screen. Use `--no-tui` or `--print` to see logs on stderr.
+    if suppress_terminal {
+        let _ = tracing_subscriber::registry()
+            .with(EnvFilter::new("off"))
+            .try_init();
+        return;
+    }
     let default_filter = if debug { "lingxi=debug,info" } else { "warn" };
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
@@ -40,12 +51,17 @@ mod tests {
 
     #[test]
     fn init_with_debug_does_not_panic() {
-        init(true);
+        init(true, false);
     }
 
     #[test]
     fn init_twice_does_not_panic() {
-        init(false);
-        init(true);
+        init(false, false);
+        init(true, false);
+    }
+
+    #[test]
+    fn init_suppressed_does_not_panic() {
+        init(false, true);
     }
 }

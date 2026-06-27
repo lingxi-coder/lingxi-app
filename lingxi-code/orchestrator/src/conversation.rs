@@ -2517,14 +2517,19 @@ impl ConversationOrchestrator {
             s.model_profile = None;
             prev
         };
-        // User-visible warning. Byte-exact reproduction of the binary's
-        // `Bwn(originalModel, fallbackModel, "other")` =
-        //   `${mRd} Switched to ${Xd(fallback)}. ${nnt}`
-        // for the common `category == "other"` path (the cyber/bio/frontier_llm
-        // variants and the model-label resolver `Xd` are residuals — the raw
-        // fallback id stands in for the friendly label).
+        // User-visible warning. Byte-exact reproduction of the binary's swap
+        // warning `INn(original, fallback, "other")` (≡ `baa`) =
+        //   `${Jct(n) ? Cio(e) : Rio(e,n)} Switched to ${vp(fallback)}. ${Yct}`
+        // for the common `category == "other"` path: `Jct("other")` is false, so
+        // `Rio(e,"other")` fires, and with no friendly label it returns `tlp =
+        // "This model's safeguards flagged this message. …"`. (The cyber/bio
+        // `Cio` variant and the `vp` label resolver are residuals — the raw
+        // fallback id stands in for the friendly label.) `Yct` is the feedback
+        // line. 2.1.195 reworded the old "… has safety measures that flagged
+        // something in this session" phrasing to "… 's safeguards flagged this
+        // message" everywhere.
         let warning = format!(
-            "This model has safety measures that flagged something in this session. \
+            "This model's safeguards flagged this message. \
 This sometimes happens with safe, normal conversations. Switched to {fallback}. \
 Send feedback with /feedback or learn more: https://support.claude.com/en/articles/15363606"
         );
@@ -7518,7 +7523,7 @@ mod turn_recovery_tests {
         orch.run_turn_streaming("go").await.expect("turn ends");
 
         let events = output.snapshot().await;
-        let expected = "API Error: Opus 4.8 has safety measures that flagged something in this session (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations. LingXi can't respond to this request with Opus 4.8.\n\nTry rephrasing the request in a new session or change your model.\n\nLearn more: https://support.claude.com/en/articles/15363606";
+        let expected = "API Error: Opus 4.8's safeguards flagged this message (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations. LingXi can't respond to this request with Opus 4.8.\nTry rephrasing the request in a new session or change your model.\nLearn more: https://support.claude.com/en/articles/15363606";
         assert!(
             events
                 .iter()
@@ -10335,11 +10340,12 @@ mod refusal_fallback_tests {
         assert!(orch.maybe_swap_to_refusal_fallback().await);
         let texts = out.text_events().await;
         assert_eq!(texts.len(), 1, "exactly one warning emitted");
-        // Byte-exact reproduction of the binary's
-        // `Bwn(original, fallback, "other")` for category == "other".
+        // Byte-exact reproduction of the binary's swap warning
+        // `INn(original, fallback, "other")` (≡ `baa`) for category == "other"
+        // (2.1.195 `Rio`→`tlp` rewording: "'s safeguards flagged this message").
         assert_eq!(
             texts[0],
-            "This model has safety measures that flagged something in this session. \
+            "This model's safeguards flagged this message. \
 This sometimes happens with safe, normal conversations. Switched to claude-sonnet-4-6. \
 Send feedback with /feedback or learn more: https://support.claude.com/en/articles/15363606"
         );

@@ -1450,7 +1450,7 @@ pub(crate) async fn surface_rapid_refill_thrashing(
 /// ([`surface_terminal_api_error`]) terminal arms so both paths surface
 /// byte-identical text (claude-code `claude.ts:2266/2279`, `U2e`). The refusal
 /// cyber/bio category variant, the `stop_details.explanation` clause, and the
-/// `\n\nRequest ID: …` suffix remain residuals on BOTH paths — LingXi does not
+/// `\nRequest ID: …` suffix remain residuals on BOTH paths — LingXi does not
 /// thread `stop_details`/requestId into the terminal arm, so the non-cyber,
 /// no-explanation path (the common terminal) fires.
 pub(crate) fn terminal_api_error_text(
@@ -1488,17 +1488,23 @@ pub(crate) fn terminal_api_error_text(
                     } else {
                         "Learn more: https://support.claude.com/en/articles/15363606"
                     };
-                    // `A`: the cyber/bio variant (`rnt`) vs the generic one.
+                    // `h` (binary `U2e`): the cyber/bio variant (`Jct(cat)=cat∈
+                    // {cyber,bio}`) appends `Saa`, the generic one a fixed tail.
+                    //   Saa = `They may flag safe, normal content as well. ${elp}`
+                    //   elp = `These measures let us bring you Mythos-level
+                    //          capabilities sooner, and we're working to refine them.`
                     let a = if cyber_or_bio {
                         format!(
-                            "{label} has safety measures that flag messages on most cybersecurity or biology topics (https://www.anthropic.com/legal/aup). They may flag safe, normal content as well. These measures let us bring you Mythos-level capability in other areas sooner, and we're working to refine them."
+                            "{label}'s safeguards flagged this message (https://www.anthropic.com/legal/aup). They may flag safe, normal content as well. These measures let us bring you Mythos-level capabilities sooner, and we're working to refine them."
                         )
                     } else {
                         format!(
-                            "{label} has safety measures that flagged something in this session (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations."
+                            "{label}'s safeguards flagged this message (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations."
                         )
                     };
-                    format!("API Error: {a} LingXi can't respond to this request with {label}.\n\n{m}\n\n{f}")
+                    // Frame `c = `${bT}: ${h} <brand> can't respond … with ${l}.\n${m}\n${f}``
+                    // — SINGLE `\n` separators (binary). `<brand>` is the LingXi rebrand.
+                    format!("API Error: {a} LingXi can't respond to this request with {label}.\n{m}\n{f}")
                 }
                 None => {
                     // NO-LABEL branch.
@@ -1517,8 +1523,12 @@ pub(crate) fn terminal_api_error_text(
                         };
                         let exemption =
                             refusal_exemption_url(stop_details.and_then(|sd| sd.explanation.as_deref()));
+                        // Binary: `${bT}: ${g}'s safeguards flagged this message
+                        // for a cybersecurity topic. … exemption: ${_aa(expl)}\n${m}\n${h}`
+                        // where `g = r!=null ? vp(r) : "This model"` — no marketing
+                        // name here, so `g` = "This model". SINGLE `\n` separators.
                         format!(
-                            "API Error: This model has safety measures that flagged this message for a cybersecurity topic. If your work requires this access, you can apply for an exemption: {exemption}\n\n{m}\n\n{f}"
+                            "API Error: This model's safeguards flagged this message for a cybersecurity topic. If your work requires this access, you can apply for an exemption: {exemption}\n{m}\n{f}"
                         )
                     } else {
                         format!(
@@ -1527,9 +1537,10 @@ pub(crate) fn terminal_api_error_text(
                     }
                 }
             };
-            // `\n\nRequest ID: ${n}` suffix (REFUSAL-ONLY), binary @197279553.
+            // Binary `u = n ? `\nRequest ID: ${n}` : ""` — SINGLE `\n`, appended to
+            // `base` only when a request id is present (REFUSAL-ONLY surface).
             let suffix = match request_id {
-                Some(id) if !id.is_empty() => format!("\n\nRequest ID: {id}"),
+                Some(id) if !id.is_empty() => format!("\nRequest ID: {id}"),
                 _ => String::new(),
             };
             Some(format!("{base}{suffix}"))
@@ -1580,7 +1591,7 @@ pub(crate) async fn surface_terminal_api_error(
         (s.model.clone(), orch.config.interactive_permissions)
     };
     // The just-completed call's Anthropic `request-id` — for the refusal
-    // message's `\n\nRequest ID: …` suffix (recorded by the adapter from the
+    // message's `\nRequest ID: …` suffix (recorded by the adapter from the
     // response headers; same slot the JSONL `requestId` reads from).
     let request_id = orch.api.last_request_id();
     let text = terminal_api_error_text(
@@ -3384,15 +3395,16 @@ mod terminal_api_error_tests {
         }
     }
 
-    /// The refusal message appends `\n\nRequest ID: {id}` when a request id is
-    /// present (binary @197279553 `u = n ? `\n\nRequest ID: ${n}` : ""`), and
+    /// The refusal message appends `\nRequest ID: {id}` (single newline) when a
+    /// request id is present (binary `u = n ? `\nRequest ID: ${n}` : ""`), and
     /// omits it otherwise. The suffix is REFUSAL-ONLY.
     #[test]
     fn refusal_appends_request_id_suffix() {
         let with =
             terminal_api_error_text("claude-opus-4-8", true, "refusal", Some("req_011abc"), None)
                 .expect("refusal text");
-        assert!(with.ends_with("\n\nRequest ID: req_011abc"), "got: {with}");
+        assert!(with.ends_with("\nRequest ID: req_011abc"), "got: {with}");
+        assert!(!with.ends_with("\n\nRequest ID: req_011abc"), "single newline; got: {with}");
 
         let without = terminal_api_error_text("claude-opus-4-8", true, "refusal", None, None)
             .expect("refusal text");
@@ -3423,13 +3435,13 @@ mod terminal_api_error_tests {
         // opus-4-8 HAS a marketing name → the label branch.
         let t = terminal_api_error_text("claude-opus-4-8", true, "refusal", None, None)
             .expect("refusal");
-        assert!(t.contains("has safety measures that flagged something in this session"), "got: {t}");
+        assert!(t.contains("'s safeguards flagged this message (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations."), "got: {t}");
         assert!(!t.contains("cybersecurity"), "got: {t}");
     }
 
-    /// LABEL branch + cyber/bio category → the "flag messages on most
-    /// cybersecurity or biology topics … They may flag safe, normal content…"
-    /// variant (binary `U2e` `rnt(cat)` path).
+    /// LABEL branch + cyber/bio category → the `Saa` variant: "… They may flag
+    /// safe, normal content as well. These measures let us bring you Mythos-level
+    /// capabilities sooner …" (binary `U2e` `Jct(cat)` path; `Saa`+`elp`).
     #[test]
     fn refusal_label_cyber_or_bio_variant() {
         for cat in ["cyber", "bio"] {
@@ -3443,11 +3455,11 @@ mod terminal_api_error_tests {
             )
             .expect("refusal");
             assert!(
-                t.contains("flag messages on most cybersecurity or biology topics"),
+                t.contains("'s safeguards flagged this message (https://www.anthropic.com/legal/aup). They may flag safe, normal content as well."),
                 "{cat}: {t}"
             );
             assert!(
-                t.contains("They may flag safe, normal content as well."),
+                t.contains("These measures let us bring you Mythos-level capabilities sooner, and we're working to refine them."),
                 "{cat}: {t}"
             );
             assert!(t.contains("LingXi can't respond to this request with"), "{cat}: {t}");
@@ -3467,11 +3479,12 @@ mod terminal_api_error_tests {
         let t = terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd))
             .expect("refusal");
         assert!(
-            t.contains("flagged this message for a cybersecurity topic"),
+            t.contains("This model's safeguards flagged this message for a cybersecurity topic"),
             "got: {t}"
         );
-        // Extracted URL (trailing comma stripped).
-        assert!(t.contains("exemption: https://claude.com/form/abc123\n\n"), "got: {t}");
+        // Extracted URL (trailing comma stripped) — SINGLE newline separator.
+        assert!(t.contains("exemption: https://claude.com/form/abc123\n"), "got: {t}");
+        assert!(!t.contains("exemption: https://claude.com/form/abc123\n\n"), "single newline; got: {t}");
         assert!(!t.contains("abc123,"), "trailing punct must be stripped; got: {t}");
     }
 

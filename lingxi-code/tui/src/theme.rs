@@ -10,6 +10,38 @@
 
 use iocraft::Color;
 
+/// Terminal color capability used to choose between the truecolor themes
+/// (`Dark`/`Light`) and the 16-color `-ansi` themes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ColorDepth {
+    /// 24-bit color available — use the rgb themes.
+    Truecolor,
+    /// 256/16-color (or unknown) — use the `-ansi` themes to avoid the terminal
+    /// quantizing truecolor SGR to the wrong nearest ANSI slot.
+    Low,
+}
+
+/// Pure color-depth classification from `$COLORTERM` + `$TERM`.
+pub(crate) fn color_depth_from(colorterm: Option<&str>, term: Option<&str>) -> ColorDepth {
+    if matches!(colorterm, Some("truecolor") | Some("24bit")) {
+        return ColorDepth::Truecolor;
+    }
+    if let Some(t) = term {
+        if t.contains("direct") || t.contains("truecolor") {
+            return ColorDepth::Truecolor;
+        }
+    }
+    ColorDepth::Low
+}
+
+/// Color depth from the live environment.
+pub(crate) fn color_depth() -> ColorDepth {
+    color_depth_from(
+        std::env::var("COLORTERM").ok().as_deref(),
+        std::env::var("TERM").ok().as_deref(),
+    )
+}
+
 /// One of claude-code's 6 renderable themes (`utils/theme.ts` `THEME_NAMES`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeName {
@@ -454,6 +486,16 @@ mod tests {
         assert_eq!(colorfgbg_theme(Some("0;15")), Some(ThemeName::Light));
         // `fg;other;bg` form — last segment wins.
         assert_eq!(colorfgbg_theme(Some("15;default;0")), Some(ThemeName::Dark));
+    }
+
+    #[test]
+    fn color_depth_detection() {
+        assert_eq!(color_depth_from(Some("truecolor"), None), ColorDepth::Truecolor);
+        assert_eq!(color_depth_from(Some("24bit"), None), ColorDepth::Truecolor);
+        assert_eq!(color_depth_from(None, Some("xterm-direct")), ColorDepth::Truecolor);
+        assert_eq!(color_depth_from(None, Some("xterm-256color")), ColorDepth::Low);
+        assert_eq!(color_depth_from(None, Some("screen")), ColorDepth::Low);
+        assert_eq!(color_depth_from(None, None), ColorDepth::Low);
     }
 
     #[test]

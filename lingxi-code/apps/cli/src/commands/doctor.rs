@@ -1,4 +1,4 @@
-//! `lingxi-cli doctor` — Check the health of your Claude Code auto-updater.
+//! `lingxi-cli doctor` — Check the health of your LingXi auto-updater.
 //!
 //! claude-code's `doctor` checks the NATIVE auto-updater install (the
 //! self-updating binary distribution) and, as a side effect, spawns the stdio

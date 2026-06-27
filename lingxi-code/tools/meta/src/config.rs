@@ -1,4 +1,4 @@
-//! `ConfigTool` — get/set Claude Code settings against `~/.lingxi/settings.json`.
+//! `ConfigTool` — get/set LingXi settings against `~/.lingxi/settings.json`.
 //!
 //! no-truncation: ConfigTool returns a single bounded value — one setting's
 //! value (get) or a short confirmation/status (set/list) — never large content,
@@ -415,7 +415,7 @@ fn config_home_dir(home: &Path) -> PathBuf {
     }
 }
 
-/// `ConfigTool` — get/set Claude Code settings.
+/// `ConfigTool` — get/set LingXi settings.
 pub struct ConfigTool {
     pub(crate) ctx: tool_api::BuiltinToolContext,
 }

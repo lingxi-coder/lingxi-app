@@ -3,7 +3,7 @@
 //! (`bin/claude.exe` offsets 204439967 / 204440687).
 //!
 //! A `PreToolUse`/etc. hook may return a top-level `terminalSequence` string
-//! asking Claude Code to emit a terminal escape sequence on its behalf — e.g. an
+//! asking LingXi to emit a terminal escape sequence on its behalf — e.g. an
 //! OSC 9 / OSC 777 desktop notification. The apply path (`szn`, BIN off
 //! 205755390) validates the sequence through this allowlist and either writes it
 //! to the active terminal (`BEo`) or warns + drops it:

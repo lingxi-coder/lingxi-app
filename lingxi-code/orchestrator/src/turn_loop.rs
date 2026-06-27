@@ -2270,7 +2270,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             prevent_continuation = true;
         }
         // #40 terminalSequence apply (claude-code `szn`, BIN off 205755390): a
-        // hook may return a top-level `terminalSequence` for Claude Code to emit
+        // hook may return a top-level `terminalSequence` for LingXi to emit
         // (OSC 9 / 777 desktop notification, etc.). Run the allowlist validator
         // (`NEo`) over the folded sequence: on REJECT, warn (the observable half,
         // byte-faithful to claude-code's reject message). On ACCEPT the

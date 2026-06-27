@@ -1,4 +1,4 @@
-//! `/release-notes` — show the Claude Code release notes (or a link to them).
+//! `/release-notes` — show the LingXi release notes (or a link to them).
 //!
 //! Ported 1:1 from the claude-code TS local command
 //! `src/commands/release-notes/release-notes.ts` (and its changelog util

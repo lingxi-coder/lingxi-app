@@ -30,15 +30,16 @@
 //!  - You are powered by the model named {name}. The exact model ID is {id}.   (or id-only)
 //!  - Assistant knowledge cutoff is {cutoff}.   (omitted when unknown)
 //!  - The most recent Claude models are Fable 5 and the Claude 4.X family. …
-//!  - Claude Code is available as a CLI in the terminal, …
-//!  - Fast mode for Claude Code uses Claude Opus with faster output …
+//!  - LingXi is available as a CLI in the terminal, …
+//!  - Fast mode for LingXi uses Claude Opus with faster output …
 //! ```
 //!
 //! NOTE: the model line `s` and cutoff line `a` are SEPARATE array elements,
 //! so each becomes its own ` - ` bullet (the cutoff is NOT joined to the model
 //! line by a blank line as in the old `<env>` form). The static
-//! Model-IDs / Claude-Code-availability / Fast-mode lines are verbatim
-//! (`Claude Code` kept as-is — LingXi is a 1:1 copy). The em-dash in
+//! Model-IDs / availability / Fast-mode lines carry the product name `LingXi`
+//! (rebranded from claude-code's `Claude Code`); the model-family name `Claude`
+//! (Opus/Sonnet/Fable) stays. The em-dash in
 //! "Model IDs —" and "isolated copy …— Run" is U+2014.
 #![forbid(unsafe_code)]
 

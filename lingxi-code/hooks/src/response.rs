@@ -104,7 +104,7 @@ pub struct HookResponse {
     #[serde(default)]
     pub retry: Option<bool>,
     /// Top-level `terminalSequence` a hook returned (#40, claude-code schema
-    /// BIN off 200873127). A hook may ask Claude Code to emit a terminal escape
+    /// BIN off 200873127). A hook may ask LingXi to emit a terminal escape
     /// sequence (e.g. an OSC 9 / OSC 777 desktop notification). This is a
     /// TOP-LEVEL field (NOT under `hookSpecificOutput`) and applies for ALL hook
     /// result types (command/stdout, HTTP, mcp_tool, callback). The apply path

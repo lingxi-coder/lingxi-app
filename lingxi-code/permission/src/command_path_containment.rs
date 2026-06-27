@@ -7,7 +7,7 @@
 //! ## The gap this closes
 //! Even with a `Bash(cat:*)` allow rule, `cat /etc/passwd` (cwd `/proj/work`)
 //! must return **ask** — "concatenate files from … was blocked. For security,
-//! Claude Code may only … the allowed working directories for this session: …".
+//! LingXi may only … the allowed working directories for this session: …".
 //! The sibling [`crate::path_constraints`] only covers output-redirection + `cd`
 //! targets; THIS module covers the ~31 path-taking commands' POSITIONAL FILE
 //! ARGUMENTS (cat/head/tail/grep/rg/find/ls/sort/uniq/wc/cut/paste/column/tr/

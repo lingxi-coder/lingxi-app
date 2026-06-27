@@ -1,5 +1,5 @@
 //! `/insights` — returns the locked insights prompt as an injected user
-//! message so the next turn reports on the user's Claude Code usage.
+//! message so the next turn reports on the user's LingXi usage.
 //!
 //! 1:1 behavioral port of the claude-code `insights` slash command
 //! (`src/commands/insights.ts`, a `type: 'prompt'` command whose

@@ -1,6 +1,6 @@
 //! `ExitPlanMode` dialog — user approves a plan-mode exit (M6-05).
 //!
-//! Header literal `"Claude Code needs your approval for the plan"` is
+//! Header literal `"LingXi needs your approval for the plan"` is
 //! byte-locked from `claude-code/src/components/permissions/PermissionRequest.tsx:131`.
 //! The 3-button bindings and grammar are identical to
 //! [`super::tool_use_confirm`].

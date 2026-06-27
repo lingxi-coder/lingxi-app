@@ -94,7 +94,7 @@ impl LinuxSecretStorage {
     /// `service_suffix`.
     ///
     /// Callers pass `"-credentials"` (OAuth) or `""` (legacy API key) — the
-    /// "Claude Code" prefix and `dir_hash` are interpolated here so the
+    /// "LingXi" prefix and `dir_hash` are interpolated here so the
     /// resulting string matches claude-code's literal layout and the macOS
     /// sibling byte-for-byte.
     pub(crate) fn service_name(&self, service_suffix: &str) -> String {
@@ -174,7 +174,7 @@ impl SecureStorage for LinuxSecretStorage {
     }
 }
 
-/// `secret-tool store --label="Claude Code" service <svc> account <acct> user <user>`.
+/// `secret-tool store --label="LingXi" service <svc> account <acct> user <user>`.
 ///
 /// The label is cosmetic; the `(service, account, user)` attribute set is the
 /// real lookup key — `user` mirrors the macOS keychain `-a <user>` identity

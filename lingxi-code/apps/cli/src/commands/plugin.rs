@@ -1,4 +1,4 @@
-//! `lingxi-cli plugin` (alias `plugins`) — Manage Claude Code plugins.
+//! `lingxi-cli plugin` (alias `plugins`) — Manage LingXi plugins.
 //!
 //! Byte-faithful clap surface vs `claude plugin --help` (claude-code 2.1.191):
 //! the family has 12 children plus a nested `marketplace` group with 4 of its
@@ -70,7 +70,7 @@ pub enum Sub {
     /// List installed plugins
     List(ListArgs),
 
-    /// Manage Claude Code marketplaces
+    /// Manage LingXi marketplaces
     Marketplace(MarketplaceArgs),
 
     /// Remove auto-installed dependencies that are no longer needed

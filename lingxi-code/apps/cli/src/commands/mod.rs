@@ -43,17 +43,17 @@ pub enum Commands {
     /// Inspect auto mode classifier configuration
     #[command(name = "auto-mode")]
     AutoMode(auto_mode::Cli),
-    /// Check the health of your Claude Code auto-updater. Note: The workspace
+    /// Check the health of your LingXi auto-updater. Note: The workspace
     /// trust dialog is skipped and stdio servers from .mcp.json are spawned for
     /// health checks. Only use this command in directories you trust.
     Doctor(doctor::Cli),
-    /// Install Claude Code native build. Use [target] to specify version
+    /// Install LingXi native build. Use [target] to specify version
     /// (stable, latest, or specific version)
     Install(install::Cli),
-    /// Manage Claude Code plugins
+    /// Manage LingXi plugins
     #[command(name = "plugin", visible_alias = "plugins")]
     Plugin(plugin::Cli),
-    /// Manage Claude Code project state
+    /// Manage LingXi project state
     Project(project::Cli),
     /// Set up a long-lived authentication token (requires Claude subscription)
     #[command(name = "setup-token")]

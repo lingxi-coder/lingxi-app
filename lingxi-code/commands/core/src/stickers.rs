@@ -1,4 +1,4 @@
-//! `/stickers` — open the Claude Code sticker page in the browser.
+//! `/stickers` — open the LingXi sticker page in the browser.
 //!
 //! Ported 1:1 from the claude-code TS local command
 //! `src/commands/stickers/stickers.ts`, which opens

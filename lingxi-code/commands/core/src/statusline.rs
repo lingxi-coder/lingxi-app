@@ -1,4 +1,4 @@
-//! `/statusline` — set up Claude Code's status line UI.
+//! `/statusline` — set up LingXi's status line UI.
 //!
 //! 1:1 behavioral port of the TS `statusline` prompt command
 //! (`src/commands/statusline.tsx`). The TS `getPromptForCommand` trims the

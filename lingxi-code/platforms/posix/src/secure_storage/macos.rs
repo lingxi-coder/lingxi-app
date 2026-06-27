@@ -106,7 +106,7 @@ impl MacOsKeychainStorage {
     /// Return the full keychain service name for the supplied `service_suffix`.
     ///
     /// Callers pass `"-credentials"` (OAuth) or `""` (legacy API key) — the
-    /// "Claude Code" prefix and `dir_hash` are interpolated here so the
+    /// "LingXi" prefix and `dir_hash` are interpolated here so the
     /// resulting string matches claude-code's literal layout.
     pub(crate) fn keychain_service_name(&self, service_suffix: &str) -> String {
         let dir_hash = super::helpers::compute_dir_hash(

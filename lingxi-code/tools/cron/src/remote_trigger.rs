@@ -1,4 +1,4 @@
-//! `RemoteTriggerTool` — manage scheduled remote Claude Code agents (triggers)
+//! `RemoteTriggerTool` — manage scheduled remote LingXi agents (triggers)
 //! via the claude.ai CCR API.
 //!
 //! 1:1 port of claude-code's

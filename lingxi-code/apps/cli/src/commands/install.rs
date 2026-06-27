@@ -1,4 +1,4 @@
-//! `lingxi-cli install` — Install Claude Code native build
+//! `lingxi-cli install` — Install LingXi native build
 //!
 //! NOT-APPLICABLE to lingxi-cli. claude-code's `install` drives Anthropic's
 //! native-binary auto-installer (downloads + swaps a prebuilt `claude`

@@ -96,7 +96,7 @@ pub enum Transport {
 /// `claude mcp --help`.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Sub {
-    /// Add an MCP server to Claude Code.
+    /// Add an MCP server to LingXi.
     ///
     /// Examples:
     ///   # Add HTTP server:
@@ -135,7 +135,7 @@ pub enum Sub {
     /// this project
     #[command(name = "reset-project-choices")]
     ResetProjectChoices,
-    /// Start the Claude Code MCP server
+    /// Start the LingXi MCP server
     Serve(ServeArgs),
 }
 

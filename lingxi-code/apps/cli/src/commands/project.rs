@@ -1,8 +1,8 @@
-//! `lingxi-cli project` — Manage Claude Code project state.
+//! `lingxi-cli project` — Manage LingXi project state.
 //!
 //! Byte-faithful clap surface for the `project` family plus a real (safe)
 //! implementation of `project purge`. The single child `purge [path]` deletes a
-//! project's locally-stored Claude Code state: its session transcripts under
+//! project's locally-stored LingXi state: its session transcripts under
 //! `<config-home>/projects/<encoded>/` and its entry in the global config
 //! (`~/.lingxi.json` `projects` map). Two sub-stores claude also nominally
 //! tracks — per-list task spools and the temp file-history — are NOT keyed by
@@ -31,7 +31,7 @@ pub struct Cli {
 /// `project` children. Matches `claude project --help` (one child: `purge`).
 #[derive(Debug, Clone, Subcommand)]
 pub enum Sub {
-    /// Delete all Claude Code state for a project (transcripts, tasks, file
+    /// Delete all LingXi state for a project (transcripts, tasks, file
     /// history, config entry).
     Purge(PurgeArgs),
 }

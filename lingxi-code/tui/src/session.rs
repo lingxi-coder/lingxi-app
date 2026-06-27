@@ -388,6 +388,10 @@ pub async fn run_tui_session(
     // capture, which iocraft's Drop misses) so a crash or `kill` doesn't leave
     // the shell in raw/alt/mouse-reporting mode spewing `<b>;<x>;<y>M` garbage.
     crate::terminal::install_terminal_safety_hooks();
+    // Detect the terminal background (OSC-11) + color depth once, before the
+    // first `Auto.resolve()` in `AppState::new`, so every screen renders with
+    // the correct theme on light/dark and low-color terminals.
+    crate::theme_detect::detect_terminal_theme();
 
     // Shared AppState — the bridge pump task + key handlers mutate it,
     // the render path reads it. Wrapped in a tokio Mutex so the pump
@@ -567,6 +571,7 @@ pub async fn run_resume_picker(
     // `None → Some(_)` transition instrumented like every other screen.
     crate::telemetry::screen_opened("resume");
     crate::terminal::install_terminal_safety_hooks();
+    crate::theme_detect::detect_terminal_theme();
     let state = Arc::new(Mutex::new(app));
 
     let result = element! {

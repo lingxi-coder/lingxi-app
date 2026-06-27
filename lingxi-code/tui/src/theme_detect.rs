@@ -1,5 +1,8 @@
 //! Terminal background + color-depth detection feeding `ThemeSetting::Auto`.
 //! One-shot OSC-11 pre-flight at startup; pure helpers below are I/O-free.
+// `TimedStdin` calls `libc::poll` + `libc::read` via `unsafe` blocks.
+// Everything unsafe is isolated to that struct's `Read` impl (unix-only).
+#![allow(unsafe_code)]
 
 use crate::theme::ThemeName;
 use std::io::{Read, Write};
@@ -82,6 +85,65 @@ pub(crate) fn detect_with_io<R: Read, W: Write>(mut reader: R, mut writer: W) ->
     } else {
         ThemeName::Dark
     })
+}
+
+/// A `Read` over stdin that returns `Ok(0)` once a deadline passes, so a silent
+/// terminal can't make detection hang. Uses `poll(2)` so there is NO background
+/// reader thread that could steal the user's first keystroke.
+#[cfg(unix)]
+struct TimedStdin {
+    deadline: std::time::Instant,
+}
+
+#[cfg(unix)]
+impl Read for TimedStdin {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let now = std::time::Instant::now();
+        if now >= self.deadline {
+            return Ok(0);
+        }
+        let ms = (self.deadline - now).as_millis().min(i32::MAX as u128) as i32;
+        let mut pfd = libc::pollfd {
+            fd: libc::STDIN_FILENO,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: single valid pollfd; standard poll() usage.
+        let ready = unsafe { libc::poll(&mut pfd, 1, ms) };
+        if ready <= 0 {
+            return Ok(0); // timeout or poll error → behave like EOF
+        }
+        // SAFETY: reading into the caller's buffer up to its length.
+        let n = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len()) };
+        if n < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(n as usize)
+        }
+    }
+}
+
+/// One-shot startup pre-flight: query the terminal background via OSC-11 and
+/// cache the result for `ThemeSetting::Auto`. Best-effort and non-blocking
+/// (≤ ~100 ms). No-op unless both stdin and stdout are TTYs. Unix-only; on other
+/// platforms Auto falls back to `$COLORFGBG`/Dark.
+pub fn detect_terminal_theme() {
+    #[cfg(unix)]
+    {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            return;
+        }
+        if crossterm::terminal::enable_raw_mode().is_err() {
+            return;
+        }
+        let reader = TimedStdin {
+            deadline: std::time::Instant::now() + std::time::Duration::from_millis(100),
+        };
+        let bg = detect_with_io(reader, std::io::stdout());
+        let _ = crossterm::terminal::disable_raw_mode();
+        set_detected_background(bg);
+    }
 }
 
 #[cfg(test)]

@@ -4882,20 +4882,19 @@ mod tests {
             assert!(st.pending_connect.is_none(), "pending_connect drained");
         }
 
-        // github-copilot → device-flow.
+        // github-copilot → GitHub deployment-type picker FIRST (Public vs
+        // Enterprise); that screen then opens the device-flow Copilot screen.
         let mut st2 = AppState::new(crate::state::StatusSnapshot::default());
         st2.pending_connect = Some("github-copilot".to_string());
         let state2 = Arc::new(Mutex::new(st2));
         assert!(pump_open_connect(&state2).await);
         {
             let st2 = state2.lock().await;
-            assert!(matches!(
-                &st2.active_screen,
-                Some(Screen::Connect(ConnectScreenState {
-                    flow: ConnectFlow::Copilot,
-                    ..
-                }))
-            ));
+            assert!(
+                matches!(&st2.active_screen, Some(Screen::GithubDeployment(_))),
+                "github-copilot opens the deployment-type picker, got {:?}",
+                st2.active_screen
+            );
         }
     }
 

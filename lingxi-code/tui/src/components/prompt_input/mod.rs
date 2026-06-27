@@ -463,18 +463,28 @@ pub fn PromptInput(props: &PromptInputProps) -> impl Into<AnyElement<'static>> {
                 // trailing space, so (mirroring `BaseTextInput.tsx:105`'s
                 // `value.endsWith(" ") ? "" : " "`) no extra separator is added.
                 let line_hint = if i == last_line { argument_hint.clone() } else { None };
-                // iocraft has no "reverse video" attribute; emulate the cursor as
-                // a filled block by swapping fg/bg on the cursor chunk
-                // (View(background_color) + Text(color)). A Cyan block (black
-                // glyph) makes the caret clearly visible, matching claude-code's
-                // cyan cursor.
+                // The caret is inverse-video: claude-code renders the cursor as
+                // `invert(atCursor)` (utils/Cursor.ts) — chalk.inverse swaps the
+                // glyph's fg/bg against the terminal defaults, i.e. a solid block
+                // the color of the default foreground (white) with the glyph
+                // punched out in the background color (black). We render that as a
+                // White-background box with a Black glyph rather than
+                // `Text(invert: true)`: iocraft TRIMS inverted TRAILING whitespace,
+                // so the synthetic end-of-line / empty-prompt caret (a single
+                // cursor space) would vanish under SGR-reverse — the MOST common
+                // caret position. A `View(background_color)` box is an explicit
+                // styled cell that is never trimmed, so the block stays visible at
+                // end-of-line. For the prompt's uncolored text a white/black block
+                // is pixel-identical to true inverse. (The earlier Cyan block had
+                // the right idea but the wrong color — claude-code has no cyan
+                // cursor.)
                 element! {
                     View(flex_direction: FlexDirection::Row) {
                         Text(content: prefix.to_string())
                         #(chunks.into_iter().map(|(seg, is_cursor)| {
                             if is_cursor {
                                 element! {
-                                    View(background_color: Color::Cyan) {
+                                    View(background_color: Color::White) {
                                         Text(content: seg, color: Color::Black)
                                     }
                                 }.into_any()

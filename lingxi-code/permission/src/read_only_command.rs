@@ -76,13 +76,31 @@ const READONLY_BASE_COMMANDS: &[&str] = &[
     "diff",
     // true / false
     "true", "false",
-    // Misc. safe commands
-    "sleep", "which", "type", "expr", "test", "getconf", "seq", "tsort", "pr",
+    // Misc. safe commands. (Binary `vho` = `…,"expr","seq","tsort","pr"` — NO
+    // `test`/`getconf`; the port previously over-allowed those two read-only.)
+    "sleep", "which", "type", "expr", "seq", "tsort", "pr",
     // Hand-written read-only regex commands whose simple forms reduce to a
     // base-word + metachar-free-args shape (`pwd`, `whoami`, `ls`, `find`,
     // `cd`, `arch`, `alias`). `echo`/`grep`/`rg`/`jq`/`uniq`/`history` are
     // handled with their TS-specific guards in `is_read_only_subcommand`.
     "pwd", "whoami", "ls", "find", "cd", "arch", "alias",
+];
+
+/// `find` primary actions that WRITE / execute / side-effect — binary `vDp`
+/// reject set. A `find` invocation carrying any of these is NOT read-only; most
+/// notably `-delete` has no shell metacharacter to trip the generic guard, so
+/// without this it would be wrongly auto-allowed.
+const FIND_DANGEROUS_ACTIONS: &[&str] = &[
+    "-delete",
+    "-exec",
+    "-execdir",
+    "-ok",
+    "-okdir",
+    "-fprint",
+    "-fprint0",
+    "-fls",
+    "-fprintf",
+    "-files0-from",
 ];
 
 /// Quote-aware scan for an ACTIVE `$` expansion or backtick command
@@ -257,12 +275,41 @@ fn is_read_only_subcommand(sub: &str) -> bool {
             Some(arg) => words.next().is_none() && arg.bytes().all(|b| b.is_ascii_digit()),
         };
     }
+    // `find` is read-only ONLY when it carries no destructive/side-effecting
+    // action (binary `vDp`). The generic metachar guard catches `-exec … {} \;`
+    // forms (via `{`/`}`/`;`), but `-delete` and bare `-fls`/`-fprint*` slip
+    // through metachar-free, so reject them explicitly.
+    if base == "find" {
+        return !words.any(|w| FIND_DANGEROUS_ACTIONS.contains(&w));
+    }
     READONLY_BASE_COMMANDS.contains(&base)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Binary `vho` read-only base set excludes `test`/`getconf`; the port
+    // previously over-allowed them.
+    #[test]
+    fn test_and_getconf_are_not_read_only() {
+        assert!(!command_is_read_only("test -f foo"));
+        assert!(!command_is_read_only("getconf PAGE_SIZE"));
+    }
+
+    // `find` is read-only only without a destructive/side-effecting action
+    // (binary `vDp`). `-delete` carries no shell metachar, so it would slip past
+    // the generic guard without the explicit reject.
+    #[test]
+    fn find_read_only_only_without_dangerous_actions() {
+        assert!(command_is_read_only("find . -name foo.rs"));
+        assert!(command_is_read_only("find src -type f"));
+        assert!(!command_is_read_only("find . -delete"));
+        assert!(!command_is_read_only("find . -name x -delete"));
+        assert!(!command_is_read_only("find . -fls out.txt"));
+        assert!(!command_is_read_only("find . -fprint out.txt"));
+        assert!(!command_is_read_only("find . -files0-from list"));
+    }
 
     #[test]
     fn core_read_commands_are_read_only() {

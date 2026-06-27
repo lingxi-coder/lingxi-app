@@ -224,8 +224,6 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let viewing_teammate = props.viewing_teammate.clone();
     let session_agent_color = props.session_agent_color.clone();
     let dim = theme.dim;
-    // Horizontal rule bracketing the input view (top + bottom border lines).
-    let prompt_rule = "─".repeat(prompt_width.max(1));
     element! {
         View(flex_direction: FlexDirection::Column, width: 100pct, height: 100pct) {
             StatusLine(
@@ -327,20 +325,28 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                     SessionColorBanner(color_name: name, width: prompt_width)
                 }
             }))
-            // Top border line of the input view.
-            View(flex_direction: FlexDirection::Row) {
-                Text(content: prompt_rule.clone(), color: Color::Cyan)
-            }
-            PromptInput(
-                text: prompt_text,
-                cursor: prompt_cursor,
-                width: prompt_width,
-                show_cursor: true,
-                argument_hint: prompt_argument_hint,
-            )
-            // Bottom border line of the input view.
-            View(flex_direction: FlexDirection::Row) {
-                Text(content: prompt_rule.clone(), color: Color::Cyan)
+            // The input view is a SINGLE bordered box — the 1:1 of claude-code's
+            // `PromptInput` `<Box borderStyle="round" borderLeft={false}
+            // borderRight={false} borderBottom>`: top + bottom rules only (no
+            // side edges → iocraft draws bare `─` lines, no corners), colored
+            // `promptBorder` (= `theme.dim` == rgb(153,153,153), claude-code's
+            // exact value). Drawn as ONE View so the box renders AND clears
+            // atomically; hand-drawing two independent `Text("─")` rule rows let
+            // the borders ghost / jump / vanish whenever the bottom zone's height
+            // changed (palette open/close, wrap, hint toggle).
+            View(
+                border_style: BorderStyle::Round,
+                border_color: theme.dim,
+                border_edges: Edges::Top | Edges::Bottom,
+                width: 100pct,
+            ) {
+                PromptInput(
+                    text: prompt_text,
+                    cursor: prompt_cursor,
+                    width: prompt_width,
+                    show_cursor: true,
+                    argument_hint: prompt_argument_hint,
+                )
             }
             PromptInputFooter(
                 mode: crate::components::prompt_input::FooterMode::Prompt,

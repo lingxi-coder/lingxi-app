@@ -3,6 +3,6 @@ source: tui/tests/render_repl_screen.rs
 expression: element.to_string()
 ---
 ⏺ Hello!
-─
+────────
 ❯ next 
-─
+────────

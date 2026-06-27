@@ -461,6 +461,11 @@ impl Tool for ExitWorktreeTool {
         let handle = WorktreeHandle {
             path: PathBuf::from(&parsed.path),
             branch_name: parsed.branch_name.clone(),
+            // The tool reconstructs the handle from user input (path + branch);
+            // it has no captured `originalHeadCommit`, so the ahead-commit count
+            // falls to 0 (claude's `if (!headCommit)`). Threading the real
+            // baseline here needs the worktree-state side-map (deferred).
+            base_commit: None,
         };
 
         // Capture the worktree's dirty state BEFORE removal — once the

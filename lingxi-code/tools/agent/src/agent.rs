@@ -1594,12 +1594,13 @@ Use /mcp to configure and authenticate the required MCP servers.",
 
         // Worktree lifecycle (claude `fe()`): once the agent finished, KEEP the
         // worktree (return its path + branch) if it left changes, else REMOVE it
-        // (auto-clean). `worktree_change_summary().is_dirty()` = `git status
-        // --porcelain` non-empty. (LingXi's handle carries no base commit, so the
-        // `commitsAhead>0` half of claude's keep test is not evaluated — the
-        // dirty-working-tree signal is the dominant case; a clean tree with only
-        // commits would be removed here, a documented minor divergence.) Runs for
-        // ANY outcome so a worktree never leaks on a failed/killed agent.
+        // (auto-clean). `worktree_change_summary().is_dirty()` is claude's full
+        // keep test — `dirty || commitsAhead > 0` — where `dirty` is `git status
+        // --porcelain` non-empty and `commitsAhead` is
+        // `git rev-list --count <originalHeadCommit>..HEAD` (the handle's
+        // `base_commit`, captured at creation). So a clean working tree carrying
+        // commits ahead of base is correctly KEPT, not discarded. Runs for ANY
+        // outcome so a worktree never leaks on a failed/killed agent.
         let worktree_result: Option<(String, String)> = match &agent_worktree {
             Some(handle) => {
                 let dirty = self

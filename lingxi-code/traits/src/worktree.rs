@@ -171,6 +171,17 @@ pub struct WorktreeHandle {
     pub path: PathBuf,
     /// Git branch name checked out inside the worktree.
     pub branch_name: String,
+    /// The commit `git worktree add` checked out at creation — claude-code's
+    /// `originalHeadCommit` (`ExitWorktreeTool.ts`). Used by
+    /// [`WorktreeManager::worktree_change_summary`] to count ahead-commits as
+    /// `git rev-list --count <base>..HEAD`; without it a clean-but-committed
+    /// worktree would report `commits: 0` and be auto-removed (data loss).
+    /// `None` when the baseline could not be captured — the count then falls to
+    /// `0`, exactly claude's `if (!headCommit) commitsAhead = 0`. Additive
+    /// (`#[serde(default)]`) + `skip_serializing_if` so a `None` serializes
+    /// byte-identically to the pre-`base_commit` shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
 }
 
 /// Metadata for a worktree returned by [`WorktreeManager::list_worktrees`].

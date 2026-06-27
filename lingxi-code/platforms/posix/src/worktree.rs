@@ -203,9 +203,29 @@ impl WorktreeManager for PosixWorktreeManager {
                 .map_err(|e| WorktreeError::Io(e.to_string()))?;
         }
 
+        // Capture the worktree's initial HEAD — claude-code's
+        // `originalHeadCommit` (the commit `git worktree add` checked out).
+        // `worktree_change_summary` counts ahead-commits as
+        // `rev-list --count <base>..HEAD`, so without this baseline a
+        // clean-but-committed worktree would report `commits: 0` and be
+        // auto-removed. Best-effort: a failure leaves `base_commit: None`,
+        // which yields `commits: 0` (claude's `if (!headCommit)`).
+        let base_commit = Command::new("git")
+            .arg("-C")
+            .arg(&worktree_path)
+            .arg("rev-parse")
+            .arg("HEAD")
+            .output()
+            .await
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty());
+
         Ok(WorktreeHandle {
             path: worktree_path,
             branch_name,
+            base_commit,
         })
     }
 
@@ -314,16 +334,39 @@ impl WorktreeManager for PosixWorktreeManager {
         let stdout = String::from_utf8_lossy(&status.stdout);
         let changed_files = count_porcelain_changed_files(&stdout);
 
-        // The TS counts ahead-commits via `rev-list --count base..HEAD`, but
-        // that needs `originalHeadCommit` — a baseline the Rust
-        // `WorktreeHandle` does not carry. Without a baseline we cannot prove
-        // a commit count, so we report `commits: 0` and let the working-tree
-        // dirty count stand on its own. (TS fail-closes the whole summary to
-        // null in this case; here the file count is still meaningful for the
-        // exit summary, so we surface it rather than discarding it.)
+        // Ahead-commit count, mirroring claude-code `countWorktreeChanges`
+        // (ExitWorktreeTool.ts): `git rev-list --count <base>..HEAD` where
+        // `<base>` is the worktree's `originalHeadCommit` captured at creation
+        // ([`WorktreeHandle::base_commit`]). When the handle carries no baseline
+        // (`None`) — or the rev-list spawn / parse fails — the count is `0`,
+        // exactly claude's `if (!headCommit) commitsAhead = 0` /
+        // `if (o.code !== 0) commitsAhead = 0`. The dirty working-tree count
+        // already succeeded above, so a rev-list failure degrades only the
+        // commit half rather than discarding the whole summary.
+        let commits = match &handle.base_commit {
+            Some(base) => Command::new("git")
+                .arg("-C")
+                .arg(&handle.path)
+                .arg("rev-list")
+                .arg("--count")
+                .arg(format!("{base}..HEAD"))
+                .output()
+                .await
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .trim()
+                        .parse::<usize>()
+                        .ok()
+                })
+                .unwrap_or(0),
+            None => 0,
+        };
+
         Ok(Some(WorktreeChangeSummary {
             changed_files,
-            commits: 0,
+            commits,
         }))
     }
 }
@@ -573,6 +616,7 @@ mod change_summary_tests {
         let handle = WorktreeHandle {
             path: repo.clone(),
             branch_name: "main".into(),
+            base_commit: None,
         };
         let summary = PosixWorktreeManager::new(repo)
             .worktree_change_summary(&handle)
@@ -600,6 +644,7 @@ mod change_summary_tests {
         let handle = WorktreeHandle {
             path: repo.clone(),
             branch_name: "main".into(),
+            base_commit: None,
         };
         let summary = PosixWorktreeManager::new(repo)
             .worktree_change_summary(&handle)
@@ -623,11 +668,56 @@ mod change_summary_tests {
         let handle = WorktreeHandle {
             path: not_git.clone(),
             branch_name: "x".into(),
+            base_commit: None,
         };
         let summary = PosixWorktreeManager::new(not_git)
             .worktree_change_summary(&handle)
             .await
             .unwrap();
         assert_eq!(summary, None, "non-git path must fail-closed to None");
+    }
+
+    #[tokio::test]
+    async fn change_summary_counts_ahead_commits_with_clean_tree() {
+        // The data-loss case: a CLEAN working tree (no porcelain lines) that
+        // carries commits ahead of its base must still be reported dirty so the
+        // worktree is KEPT, not auto-removed. Mirrors claude-code's keep half:
+        // `commitsAhead = rev-list --count <originalHeadCommit>..HEAD`.
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().to_path_buf();
+        init_repo(&repo).await;
+        // Baseline = HEAD right after the seed commit.
+        let base = String::from_utf8(
+            Command::new("git")
+                .current_dir(&repo)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .await
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        // A second commit, leaving the working tree CLEAN.
+        tokio::fs::write(repo.join("seed.txt"), "v2").await.unwrap();
+        git(&repo, &["commit", "-qam", "v2"]).await;
+
+        let handle = WorktreeHandle {
+            path: repo.clone(),
+            branch_name: "main".into(),
+            base_commit: Some(base),
+        };
+        let summary = PosixWorktreeManager::new(repo)
+            .worktree_change_summary(&handle)
+            .await
+            .unwrap()
+            .expect("git status succeeds → Some");
+        assert_eq!(summary.changed_files, 0, "working tree is clean");
+        assert_eq!(summary.commits, 1, "one commit ahead of base");
+        assert!(
+            summary.is_dirty(),
+            "clean-but-committed worktree must be kept (is_dirty via commits)"
+        );
     }
 }

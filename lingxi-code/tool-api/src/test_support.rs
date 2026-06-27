@@ -426,6 +426,7 @@ impl WorktreeManager for MockWorktreeManager {
         let handle = WorktreeHandle {
             path,
             branch_name: format!("worktree-{flat}"),
+            base_commit: None,
         };
         self.inner
             .lock()

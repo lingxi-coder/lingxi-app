@@ -182,9 +182,27 @@ impl WorktreeManager for WindowsWorktreeManager {
                 .map_err(|e| WorktreeError::Io(e.to_string()))?;
         }
 
+        // Capture the worktree's initial HEAD — claude-code's
+        // `originalHeadCommit` — so `worktree_change_summary` can count
+        // ahead-commits (`rev-list --count <base>..HEAD`) and a
+        // clean-but-committed worktree is kept rather than auto-removed.
+        // Best-effort: a failure leaves `base_commit: None` ⇒ `commits: 0`.
+        let base_commit = Command::new("git")
+            .arg("-C")
+            .arg(&worktree_path)
+            .arg("rev-parse")
+            .arg("HEAD")
+            .output()
+            .await
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty());
+
         Ok(WorktreeHandle {
             path: worktree_path,
             branch_name,
+            base_commit,
         })
     }
 

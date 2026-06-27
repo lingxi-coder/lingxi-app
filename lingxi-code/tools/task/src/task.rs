@@ -1790,7 +1790,7 @@ impl Tool for TaskUpdateTool {
             && ctx.agent_id.is_some()
             && is_agent_swarms_enabled()
         {
-            content.push_str("\n\nTask completed. Call TaskList now to find your next available task or see if your work unblocked others.");
+            content.push_str("\nTask completed. Call TaskList now to find your next available task or see if your work unblocked others.");
         }
         if nudge_needed {
             content.push_str(&verification_nudge_suffix());
@@ -2268,7 +2268,8 @@ fn format_task_output(output: &str, task_id: &str, output_path: Option<&str>) ->
 
 /// 1:1 port of `TaskOutputTool.tsx`'s `mapToolResultToToolResultBlockParam`
 /// (lines 283-308): the XML render of a `retrieval_status` + optional `task`,
-/// joined by a blank line. Fed to the model verbatim via the `content` key.
+/// joined by a single newline (`n.join("\n")`). Fed to the model verbatim via
+/// the `content` key.
 fn render_task_output(
     retrieval_status: &str,
     task: Option<&TaskOutputView>,
@@ -2301,7 +2302,7 @@ fn render_task_output(
             parts.push(format!("<error>{error}</error>"));
         }
     }
-    parts.join("\n\n")
+    parts.join("\n")
 }
 
 /// The `task` payload surfaced by `TaskOutputTool` — the subset of the TS
@@ -3535,7 +3536,7 @@ mod tests {
 
         // ── T5 teammate completion reminder (TaskUpdateTool.ts:386-394) ──────
         const TEAMMATE_REMINDER: &str =
-            "\n\nTask completed. Call TaskList now to find your next available task or see if your work unblocked others.";
+            "\nTask completed. Call TaskList now to find your next available task or see if your work unblocked others.";
 
         #[tokio::test]
         async fn teammate_completion_reminder_present_for_swarm_completed_agent() {
@@ -4687,8 +4688,8 @@ mod tests {
             assert!(content.contains("<status>completed</status>"));
             assert!(content.contains("<exit_code>0</exit_code>"));
             assert!(content.contains("<output>\nall done\n</output>"));
-            // Tags joined by a blank line.
-            assert!(content.contains("</retrieval_status>\n\n<task_id>"));
+            // Tags joined by a single newline.
+            assert!(content.contains("</retrieval_status>\n<task_id>"));
         }
 
         #[tokio::test]

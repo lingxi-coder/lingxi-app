@@ -965,8 +965,7 @@ async fn exec_with_retry_hook() -> Arc<HookExecutorImpl> {
 }
 
 fn retry_meta_present(history: &[ConversationMessage]) -> bool {
-    let verbatim = "The PermissionDenied hook indicated this command is now approved. \
-You may retry it if you would like.";
+    let verbatim = "The PermissionDenied hook indicated you may retry this tool call.";
     history.iter().any(|m| {
         matches!(m, ConversationMessage::User { content, .. }
             if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == verbatim)))
@@ -1009,8 +1008,7 @@ async fn permission_denied_retry_pushes_meta_when_classifier_gate_forced_on() {
         .position(|m| matches!(m, ConversationMessage::User { content, .. }
             if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { tool_use_id: tu, is_error: true, .. } if *tu == tool_use_id))))
         .expect("deny tool_result present");
-    let verbatim = "The PermissionDenied hook indicated this command is now approved. \
-You may retry it if you would like.";
+    let verbatim = "The PermissionDenied hook indicated you may retry this tool call.";
     let retry_pos = s
         .history
         .iter()

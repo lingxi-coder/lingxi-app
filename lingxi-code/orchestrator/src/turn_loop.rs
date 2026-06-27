@@ -284,7 +284,7 @@ pub(crate) const MAX_OUTPUT_TOKENS_RECOVERY_NUDGE: &str = concat!(
 /// max-output-tokens nudge above), so the meta message is a plain user text
 /// message carrying these exact bytes.
 pub(crate) const PERMISSION_DENIED_RETRY_MESSAGE: &str =
-    "The PermissionDenied hook indicated this command is now approved. You may retry it if you would like.";
+    "The PermissionDenied hook indicated you may retry this tool call.";
 
 /// Byte-exact user-facing message surfaced when the prompt is too long and the
 /// reactive 413 recovery (Batch 5) is exhausted. 1:1 with claude-code

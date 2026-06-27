@@ -285,10 +285,10 @@ mod tests {
         let res = firer
             .fire_task_created("t1", "ship it", Some("desc"), None, None)
             .await;
-        // The Prompt arm wraps the model `reason` in a fixed prefix.
+        // The Prompt arm surfaces the block as `[<hook prompt>]: <reason>`.
         assert_eq!(
             res,
-            Err("Prompt hook condition was not met: creation denied".to_string()),
+            Err("[block? $ARGUMENTS]: creation denied".to_string()),
             "a blocking TaskCreated hook must surface as Err(reason)"
         );
     }
@@ -305,7 +305,7 @@ mod tests {
             .await;
         assert_eq!(
             res,
-            Err("Prompt hook condition was not met: not done yet".to_string()),
+            Err("[block? $ARGUMENTS]: not done yet".to_string()),
             "a blocking TaskCompleted hook must surface as Err(reason)"
         );
     }

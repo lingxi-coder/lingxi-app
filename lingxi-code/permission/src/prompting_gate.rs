@@ -35,7 +35,7 @@ const MAX_RETRIES: u32 = 3;
 /// - Generic tools: `"Claude needs your permission to use {tool_name}\n[Y/n] "`
 ///   or `[y/N]` depending on the tool's default.
 /// - `Agent` and its legacy alias `Task`:
-///   `"Agent tool requires permission to spawn sub-agents.\n[Y/n] "`.
+///   `"Agent tool requires permission to spawn subagents.\n[Y/n] "`.
 ///
 /// The suffix bracket pair is always followed by a single space.
 ///
@@ -48,7 +48,7 @@ pub(crate) fn format_prompt_tool_use(tool_name: &str, default_decision: PromptDe
         PromptDefault::DenyByDefault => "[y/N] ",
     };
     if tool_name == "Agent" || tool_name == "Task" {
-        format!("Agent tool requires permission to spawn sub-agents.\n{suffix}")
+        format!("Agent tool requires permission to spawn subagents.\n{suffix}")
     } else {
         format!("Claude needs your permission to use {tool_name}\n{suffix}")
     }
@@ -294,7 +294,7 @@ mod tests {
         let s = format_prompt_tool_use("Agent", PromptDefault::AllowByDefault);
         assert_eq!(
             s.as_bytes(),
-            b"Agent tool requires permission to spawn sub-agents.\n[Y/n] "
+            b"Agent tool requires permission to spawn subagents.\n[Y/n] "
         );
     }
 
@@ -304,7 +304,7 @@ mod tests {
         let s = format_prompt_tool_use("Task", PromptDefault::AllowByDefault);
         assert_eq!(
             s.as_bytes(),
-            b"Agent tool requires permission to spawn sub-agents.\n[Y/n] "
+            b"Agent tool requires permission to spawn subagents.\n[Y/n] "
         );
     }
 

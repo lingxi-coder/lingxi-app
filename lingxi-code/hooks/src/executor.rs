@@ -5363,7 +5363,7 @@ mod prompt_dispatch_tests {
         assert_eq!(agg.decision, Some(HookDecision::Block));
         assert_eq!(
             agg.reason.as_deref(),
-            Some("Prompt hook condition was not met: destructive")
+            Some("[Is this safe? $ARGUMENTS]: destructive")
         );
         assert!(agg.prevent_continuation);
         let (_, r) = &agg.all_results[0];

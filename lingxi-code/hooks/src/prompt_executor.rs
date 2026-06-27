@@ -304,9 +304,10 @@ impl PromptExecutor {
                     exit_code: None,
                     response: Some(HookResponse {
                         decision: Some(HookDecision::Block),
-                        reason: Some(format!(
-                            "Prompt hook condition was not met: {reason}"
-                        )),
+                        // 2.1.195 surfaces the prompt-hook block as
+                        // `[${e.prompt}]: ${reason}` — the hook's own (raw) prompt
+                        // in brackets, then the model's reason (oracle off 519000).
+                        reason: Some(format!("[{prompt_template}]: {reason}")),
                         // `continueOnBlock` (schemas/hooks.ts): default false →
                         // a block prevents continuation; true lets the turn proceed.
                         prevent_continuation: !continue_on_block,
@@ -443,7 +444,7 @@ mod tests {
         assert_eq!(resp.decision, Some(HookDecision::Block));
         assert_eq!(
             resp.reason.as_deref(),
-            Some("Prompt hook condition was not met: rm -rf is dangerous")
+            Some("[vet it]: rm -rf is dangerous")
         );
         assert!(resp.prevent_continuation);
     }
@@ -475,7 +476,7 @@ mod tests {
         assert_eq!(resp.decision, Some(HookDecision::Block));
         assert_eq!(
             resp.reason.as_deref(),
-            Some("Prompt hook condition was not met: ")
+            Some("[vet it]: ")
         );
         assert!(resp.prevent_continuation);
     }

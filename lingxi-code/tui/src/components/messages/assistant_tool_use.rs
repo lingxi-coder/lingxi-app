@@ -181,7 +181,7 @@ pub fn render_assistant_tool_use_to_string(props: AssistantToolUseProps) -> Stri
 /// inserts one space after each top-level `:` and `,` (string contents
 /// are left untouched). No truncation — the caller's iocraft `Text`
 /// element handles wrapping.
-fn single_line_json_preview(input: &serde_json::Value) -> String {
+pub(crate) fn single_line_json_preview(input: &serde_json::Value) -> String {
     let s = input.to_string(); // compact form: {"k":"v"}
     let mut out = String::with_capacity(s.len() + 16);
     let mut in_string = false;

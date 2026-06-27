@@ -182,13 +182,32 @@ impl OutputStream for BridgeOutputStream {
         &self,
         id: &protocol::ToolUseId,
         tool: &str,
-        _model_text: &str,
+        model_text: &str,
         result: &serde_json::Value,
     ) {
+        // (gap-3 general) Many tools return a structured `data` object with no
+        // human-display string (Read's `{type,file:{…}}`, …), so the scrollback
+        // renderer pretty-printed the raw JSON. `model_text` is the human/model
+        // -facing body the tool already produced ("the render rides on
+        // model_content" — read.rs). Carry it into the result object as
+        // `model_content` so `body_text` can surface it; the structured fields
+        // stay intact for tools that render off them (Bash stdout/stderr,
+        // Edit/Write diffs).
+        let result = match result.as_object() {
+            Some(obj) if !model_text.is_empty() && !obj.contains_key("model_content") => {
+                let mut obj = obj.clone();
+                obj.insert(
+                    "model_content".to_string(),
+                    serde_json::Value::String(model_text.to_string()),
+                );
+                serde_json::Value::Object(obj)
+            }
+            _ => result.clone(),
+        };
         let _ = self.tx.send(TurnEvent::ToolUseResult {
             id: id.clone(),
             tool: tool.to_string(),
-            result: result.clone(),
+            result,
         });
     }
 

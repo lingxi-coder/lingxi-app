@@ -189,7 +189,56 @@ pub fn body_text(result: &serde_json::Value) -> String {
             return out;
         }
     }
+    // (gap-3 general) The orchestrator bridge carries every tool's human/model
+    // -facing body into the structured `data` object as `model_content` (see
+    // `orchestrator_bridge::emit_tool_result`). When a tool returns a structured
+    // result with no `content` of its own (Read's `{type,file:{…}}`, …), surface
+    // that text instead of pretty-printing the raw JSON. Sits AFTER the
+    // `content` cases so tools that already carry a display string (Grep, …) and
+    // the replay bare-string path are byte-unchanged.
+    if let Some(s) = result.get("model_content").and_then(|c| c.as_str()) {
+        if !s.is_empty() {
+            return s.to_string();
+        }
+    }
     serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string())
+}
+
+/// (gap-3) A LIVE Bash tool result arrives as the structured `data` object the
+/// `BashTool` builds — `{"stdout":…,"stderr":…,"interrupted":…,"isImage":…,
+/// "noOutputExpected":…}` (source: `tools/shell/src/bash.rs` `bash_result_data`)
+/// — with NO `"content"` field. When `result` is such an object, return its
+/// `(stdout, stderr)` so the render/measure paths show the command output text
+/// instead of [`body_text`]'s pretty-printed raw JSON.
+///
+/// Returns `None` for every other shape: a bare string or a `{"content": …}`
+/// object (the replay/resume path persists tool_result that way) keeps falling
+/// through to [`body_text`] — DO NOT break those. The `"content"` guard means a
+/// hypothetical result carrying both keys still prefers the persisted content.
+#[must_use]
+pub fn bash_structured_output(result: &serde_json::Value) -> Option<(String, String)> {
+    if result.get("content").is_some() {
+        return None;
+    }
+    let stdout = result.get("stdout").and_then(serde_json::Value::as_str)?;
+    let stderr = result
+        .get("stderr")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    Some((stdout.to_string(), stderr.to_string()))
+}
+
+/// The human-displayable body string for a tool result. For a LIVE Bash result
+/// (the structured `{"stdout":…}` object, see [`bash_structured_output`]) this
+/// is the joined stdout/stderr; every other shape falls back to [`body_text`].
+#[must_use]
+pub(crate) fn display_body(tool: &str, result: &serde_json::Value) -> String {
+    if tool == "Bash" {
+        if let Some((stdout, stderr)) = bash_structured_output(result) {
+            return crate::components::messages::bash_output::join_bash_output(&stdout, &stderr);
+        }
+    }
+    body_text(result)
 }
 
 /// claude-code `CANCEL_MESSAGE` (utils/messages.ts:210) — the user clicked
@@ -372,7 +421,10 @@ pub fn render_user_tool_result_to_string(props: UserToolResultProps) -> String {
         return out;
     }
 
-    let body = body_text(&props.result);
+    // (gap-3) A live Bash result is the structured `{"stdout":…}` object;
+    // display its stdout/stderr (NOT the pretty-printed raw JSON). Replay /
+    // non-Bash results keep [`body_text`].
+    let body = display_body(&props.tool, &props.result);
 
     // Collapsed: 1-line summary.
     if !props.expanded {
@@ -417,6 +469,18 @@ pub fn render_user_tool_result_to_string(props: UserToolResultProps) -> String {
 /// output (the only case M6 exercised).
 #[must_use]
 pub fn render_user_tool_result_body_spans(props: &UserToolResultProps) -> Vec<StyledSpan> {
+    // (gap-3) A live Bash result is the structured `{"stdout":…}` object —
+    // route its stdout/stderr through the shared bash-output span pipeline
+    // (ANSI-parsed, escape-stripped) instead of pretty-printing the raw JSON.
+    // A bare-string / `{"content": …}` result (replay/resume) returns `None`
+    // and keeps the legacy `body_text` + `parse_ansi` path below.
+    if props.tool == "Bash" {
+        if let Some((stdout, stderr)) = bash_structured_output(&props.result) {
+            return crate::components::messages::bash_output::render_bash_output_spans(
+                &stdout, &stderr,
+            );
+        }
+    }
     let body = body_text(&props.result);
     let (truncated, _dropped) = truncate(&body);
     if props.tool == "Bash" {
@@ -723,6 +787,75 @@ mod tests {
     fn body_text_extracts_string_content() {
         let v = serde_json::json!({"content": "hi"});
         assert_eq!(body_text(&v), "hi");
+    }
+
+    #[test]
+    fn bash_structured_output_extracts_stdout_stderr() {
+        // (gap-3) The live Bash `data` object — stdout/stderr pulled out.
+        let v = serde_json::json!({
+            "stdout": "same-cmd",
+            "stderr": "",
+            "interrupted": false,
+            "isImage": false,
+            "noOutputExpected": false,
+        });
+        assert_eq!(
+            bash_structured_output(&v),
+            Some(("same-cmd".to_string(), String::new()))
+        );
+        // stderr is carried through.
+        let v = serde_json::json!({"stdout": "out", "stderr": "err"});
+        assert_eq!(
+            bash_structured_output(&v),
+            Some(("out".to_string(), "err".to_string()))
+        );
+        // A `{"content": …}` object (replay/resume) is NOT treated as structured.
+        let v = serde_json::json!({"content": "plain"});
+        assert_eq!(bash_structured_output(&v), None);
+        // A bare string (replay) is NOT structured.
+        let v = serde_json::Value::String("plain".to_string());
+        assert_eq!(bash_structured_output(&v), None);
+        // Content wins even if stdout is also present.
+        let v = serde_json::json!({"content": "c", "stdout": "s"});
+        assert_eq!(bash_structured_output(&v), None);
+    }
+
+    #[test]
+    fn structured_bash_collapsed_shows_stdout_not_json() {
+        // (gap-3) Collapsed render of a live Bash result shows the stdout
+        // first line, NOT the pretty-printed `{ (+N lines)` JSON.
+        let props = UserToolResultProps {
+            id: ToolUseId::from("t"),
+            tool: "Bash".into(),
+            result: serde_json::json!({
+                "stdout": "same-cmd",
+                "stderr": "",
+                "interrupted": false,
+                "isImage": false,
+                "noOutputExpected": false,
+            }),
+            expanded: false,
+            ..Default::default()
+        };
+        let s = render_user_tool_result_to_string(props);
+        assert_eq!(s, format!("{MARKER}same-cmd"));
+        assert!(!s.contains('{'), "must not show raw JSON: {s}");
+    }
+
+    #[test]
+    fn structured_bash_spans_render_stdout_lines() {
+        // (gap-3) Expanded span body routes stdout/stderr through the bash
+        // output pipeline (2 stdout lines + 1 stderr line, ANSI-stripped).
+        let props = UserToolResultProps {
+            id: ToolUseId::from("t"),
+            tool: "Bash".into(),
+            result: serde_json::json!({"stdout": "a\nb", "stderr": "e"}),
+            expanded: true,
+            ..Default::default()
+        };
+        let spans = render_user_tool_result_body_spans(&props);
+        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(joined, "a\nb\ne");
     }
 
     #[test]

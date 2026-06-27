@@ -106,6 +106,12 @@ pub struct TuiRootProps {
     /// picker / smoke / bridge-less mounts) makes `pump_slash` run the raw line
     /// as a turn, preserving the pre-dispatch behavior for those mounts.
     pub dispatcher: Option<Arc<dyn traits::SlashCommandDispatcher>>,
+    /// (`!` bash mode) Host's sandboxed Bash runner. The live submit path's
+    /// `pump_bash` runs a typed `!command` through it (the SAME `BashTool` the
+    /// model uses) and folds the output into a `UserBashOutput` row — no LLM
+    /// turn. `None` (resume picker / smoke / bridge-less mounts) makes `pump_bash`
+    /// inert; the `!` line is echoed but not run.
+    pub bash_runner: Option<Arc<dyn crate::bash_runner::BashRunner>>,
     /// (TUI-PERM) Receiver for `TuiPermissionGate` exchanges. `None` for
     /// bridge-less mounts (resume picker / smoke gates) — the pump stays inert.
     pub permission_rx: Option<PermissionRxSlot>,
@@ -1630,6 +1636,54 @@ pub async fn pump_slash(
     true
 }
 
+/// (`!` bash mode) Live-key bash-command submit pump.
+///
+/// The sync `app::dispatch(KeyAction::Submit)` echoes a typed `!command` as a
+/// `UserBashInput` row and RAISES [`AppState::pending_bash`] (the command text,
+/// without the `!`) — it cannot `.await` the sandboxed Bash executor. This pump,
+/// on the same 100ms ticker as [`pump_turn`] / [`pump_slash`] and under the SAME
+/// permission/screen/streaming priority guard, drains the flag, runs the command
+/// through the host [`BashRunner`] (the SAME sandboxed `BashTool` the model's
+/// `Bash` tool uses — never a raw process), and folds the captured stdout/stderr
+/// into a [`RenderedMessage::UserBashOutput`] row. No LLM turn is spawned.
+///
+/// Returns `true` iff it consumed a pending command (so the caller bumps the
+/// redraw tick). The actual `runner.run(..)` happens OUTSIDE the `AppState` lock.
+///
+/// [`BashRunner`]: crate::bash_runner::BashRunner
+pub async fn pump_bash(
+    state: &Arc<Mutex<AppState>>,
+    runner: &Arc<dyn crate::bash_runner::BashRunner>,
+) -> bool {
+    // 1) Take the command under the lock, respecting the same priority guard as
+    //    `pump_turn`/`pump_slash` (never while a permission dialog / screen owns
+    //    the surface or a turn is already streaming).
+    let command = {
+        let mut st = state.lock().await;
+        if st.pending_bash.is_none() {
+            return false;
+        }
+        if st.pending_permission.is_some()
+            || st.active_screen.is_some()
+            || st.streaming.is_some()
+        {
+            return false;
+        }
+        st.pending_bash.take().expect("checked is_some")
+    };
+
+    // 2) Run the command OUTSIDE the lock through the sandboxed host runner.
+    let out = runner.run(&command).await;
+
+    // 3) Re-lock and fold the captured output into a `UserBashOutput` row.
+    let mut st = state.lock().await;
+    st.push_message(crate::state::RenderedMessage::UserBashOutput {
+        stdout: out.stdout,
+        stderr: out.stderr,
+    });
+    true
+}
+
 /// (M9-08) Async agent-discovery open pump.
 ///
 /// Mirrors `pump_open_settings`. The sync `/agents` submit path raises
@@ -1988,10 +2042,13 @@ pub async fn pump_compact(
             // Mirror the bridge `CompactionCompleted` handler (streaming.rs):
             // a `CompactBoundary` carrying the before/after counts → the UI
             // renders `✻ Conversation compacted (ctrl+o for history)`.
-            st.push_message(crate::state::RenderedMessage::CompactBoundary {
-                messages_before: summary.messages_before,
-                messages_after: summary.messages_after,
-            });
+            //
+            // Gap #4: in the desktop build the real `force_compact` ALSO emits
+            // `OutputEvent::CompactionCompleted`, which the output bridge turns
+            // into `TurnEvent::CompactionCompleted` → streaming.rs pushes a
+            // boundary too. `push_compact_boundary` de-dupes consecutive
+            // boundaries so a single `/compact` renders ONE marker, not two.
+            st.push_compact_boundary(summary.messages_before, summary.messages_after);
         }
         Err(e) => {
             st.push_message(crate::state::RenderedMessage::SystemText {
@@ -2917,6 +2974,10 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         // Slash dispatcher for the live submit path's `pump_slash` (typed
         // `/loop` etc. expand + run as a turn). `None` for bridge-less mounts.
         let dispatcher = props.dispatcher.clone();
+        // (`!` bash mode) Host's sandboxed Bash runner for the live submit
+        // path's `pump_bash`. `None` (resume/smoke/bridge-less mounts) makes the
+        // bash pump inert — a `!` line is echoed but not run.
+        let bash_runner = props.bash_runner.clone();
         // (`/color`) Session id for the agent-color persistence pump. `Copy`, so
         // capturing it here does not disturb the key handler's own use.
         let ticker_session_id = session_id;
@@ -3002,6 +3063,17 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                     // or surface its display text. Same handle+tx gate as
                     // `pump_turn`; `dispatcher` may be `None` (runs the line raw).
                     if pump_slash(&state, handle, dispatcher.as_ref(), tx).await {
+                        needs_redraw = true;
+                    }
+                }
+                // (`!` bash mode) Bash-command submit pump. When `dispatch(Submit)`
+                // echoed a `!command` it RAISED `pending_bash`; this runs it through
+                // the host's sandboxed `BashRunner` (the SAME `BashTool` the model
+                // uses) and folds the output into a `UserBashOutput` row — no LLM
+                // turn. Gated only on a wired runner (no handle/tx needed): the
+                // command never reaches the model. `None` (resume/smoke) → inert.
+                if let Some(runner) = bash_runner.as_ref() {
+                    if pump_bash(&state, runner).await {
                         needs_redraw = true;
                     }
                 }
@@ -3152,9 +3224,21 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 // coalescer only batches printables before they reach it.
                 let now = std::time::Instant::now();
                 let overlay_active = st.pending_permission.is_some()
+                    || st.active_screen.is_some()
                     || st.history_search.is_some()
+                    || st.message_selector.open
                     || st.palette.open
-                    || st.completion.open;
+                    || st.completion.open
+                    // Vim NORMAL/VISUAL: printable keys are COMMANDS (motions,
+                    // operators, `i`/`a`/`x`/…), not text — they must reach
+                    // `handle_live_key`'s vim branch (priority 4), NOT the
+                    // composer-bound paste coalescer. Only INSERT mode (and
+                    // vim-disabled) types text. Same class of fix as the
+                    // `active_screen` guard above; without it every normal-mode
+                    // command was siphoned into the composer as literal text.
+                    || (st.vim_enabled
+                        && st.vim.mode
+                            != crate::components::prompt_input::VimMode::Insert);
                 let printable = matches!(k.code, KeyCode::Char(_))
                     && !k.modifiers.contains(KeyModifiers::CONTROL)
                     && !k.modifiers.contains(KeyModifiers::ALT);
@@ -3311,7 +3395,18 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         system.exit();
     }
 
-    element
+    // Pin the whole frame to the full terminal size. iocraft's fullscreen root
+    // sizes to its CONTENT height, so a child `height: 100%` collapses and the
+    // scrollback's `flex_grow` has no slack to absorb — leaving the prompt +
+    // footer stuck at the TOP with blank rows below. A fixed-size parent gives
+    // the column a real height, so the flex-grow scrollback expands and the
+    // input view sits at the BOTTOM (claude-code layout).
+    element! {
+        View(width: cols.max(1), height: rows.max(1)) {
+            #(std::iter::once(element))
+        }
+    }
+    .into_any()
 }
 
 /// Fixed (non-prompt) chrome rows the REPL screen reserves around the
@@ -3437,6 +3532,66 @@ mod tests {
         );
         drop(g);
         assert!(rx.try_recv().is_err(), "no TurnStarted for a display-only command");
+    }
+
+    // ---- pump_bash: the `!` bash-mode submit path ----
+
+    /// A canned `BashRunner`: records the command it ran and returns preset
+    /// stdout/stderr. Proves `pump_bash` (a) consumes `pending_bash`, (b) runs
+    /// the command through the runner, and (c) folds the output into a
+    /// `UserBashOutput` row — without spawning any LLM turn.
+    struct CannedBashRunner {
+        got: std::sync::Mutex<Option<String>>,
+        out: crate::bash_runner::BashRunOutput,
+    }
+    #[async_trait::async_trait]
+    impl crate::bash_runner::BashRunner for CannedBashRunner {
+        async fn run(&self, command: &str) -> crate::bash_runner::BashRunOutput {
+            *self.got.lock().unwrap() = Some(command.to_string());
+            self.out.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn pump_bash_runs_command_and_pushes_output_row() {
+        let canned = Arc::new(CannedBashRunner {
+            got: std::sync::Mutex::new(None),
+            out: crate::bash_runner::BashRunOutput {
+                stdout: "hi\n".to_string(),
+                stderr: String::new(),
+            },
+        });
+        let runner: Arc<dyn crate::bash_runner::BashRunner> = canned.clone();
+        let st = Arc::new(Mutex::new(AppState::new(crate::state::StatusSnapshot::default())));
+        st.lock().await.pending_bash = Some("echo hi".to_string());
+
+        let acted = pump_bash(&st, &runner).await;
+
+        assert!(acted, "pump_bash must act when a bash command is pending");
+        // The runner ran the exact command (no `!` prefix).
+        assert_eq!(canned.got.lock().unwrap().clone(), Some("echo hi".to_string()));
+        let g = st.lock().await;
+        assert!(g.pending_bash.is_none(), "flag consumed (no double-run)");
+        assert!(
+            matches!(
+                g.messages.last(),
+                Some(crate::state::RenderedMessage::UserBashOutput { stdout, stderr })
+                    if stdout == "hi\n" && stderr.is_empty()
+            ),
+            "captured output must be folded into a UserBashOutput row"
+        );
+    }
+
+    #[tokio::test]
+    async fn pump_bash_noop_when_nothing_pending() {
+        let runner: Arc<dyn crate::bash_runner::BashRunner> = Arc::new(CannedBashRunner {
+            got: std::sync::Mutex::new(None),
+            out: crate::bash_runner::BashRunOutput::default(),
+        });
+        let st = Arc::new(Mutex::new(AppState::new(crate::state::StatusSnapshot::default())));
+        // No pending_bash → pump is a no-op.
+        let acted = pump_bash(&st, &runner).await;
+        assert!(!acted, "pump_bash must be a no-op with no pending command");
     }
 
     #[test]

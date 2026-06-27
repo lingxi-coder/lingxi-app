@@ -227,6 +227,11 @@ pub(crate) async fn build_tui_runtime(
     // dispatcher field is otherwise unused in TUI mode, so move it out here.
     let slash_dispatcher: Arc<dyn traits::SlashCommandDispatcher> =
         Arc::new(tui_build.runtime.dispatcher);
+    // (`!` bash mode) The engine-built sandboxed Bash runner (over the same
+    // `BuiltinToolContext`/`BashTool` the model uses). Threaded into the TUI so a
+    // typed `!command` runs sandboxed and renders inline — no LLM turn, no raw
+    // process. `.clone()` only bumps the `Arc` (disjoint field on the runtime).
+    let bash_runner = tui_build.runtime.bash_runner.clone();
     // (Plan 3c §8 / I1/I2) Project the engine-computed provider maps off the
     // runtime (disjoint fields, read before `turn_tx` is moved out below) so the
     // `/model` picker can badge unconfigured providers + resolve a bare
@@ -247,6 +252,7 @@ pub(crate) async fn build_tui_runtime(
         .with_permission_rx(tui_build.permission_rx)
         .with_command_registry(command_registry)
         .with_dispatcher(slash_dispatcher)
+        .with_bash_runner(bash_runner)
         .with_provider_availability(provider_availability)
         .with_model_providers(model_providers)
         .with_provider_key_store(provider_key_store)

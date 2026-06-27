@@ -463,17 +463,18 @@ pub fn PromptInput(props: &PromptInputProps) -> impl Into<AnyElement<'static>> {
                 // trailing space, so (mirroring `BaseTextInput.tsx:105`'s
                 // `value.endsWith(" ") ? "" : " "`) no extra separator is added.
                 let line_hint = if i == last_line { argument_hint.clone() } else { None };
-                // iocraft has no "reverse video" attribute; emulate by swapping
-                // fg/bg on the cursor chunk (View(background_color) + Text(color)),
-                // the same swap the theme preview uses. We have no theme handle
-                // here, so fall back to the spec's Color::Black-on-White inverse.
+                // iocraft has no "reverse video" attribute; emulate the cursor as
+                // a filled block by swapping fg/bg on the cursor chunk
+                // (View(background_color) + Text(color)). A Cyan block (black
+                // glyph) makes the caret clearly visible, matching claude-code's
+                // cyan cursor.
                 element! {
                     View(flex_direction: FlexDirection::Row) {
                         Text(content: prefix.to_string())
                         #(chunks.into_iter().map(|(seg, is_cursor)| {
                             if is_cursor {
                                 element! {
-                                    View(background_color: Color::White) {
+                                    View(background_color: Color::Cyan) {
                                         Text(content: seg, color: Color::Black)
                                     }
                                 }.into_any()

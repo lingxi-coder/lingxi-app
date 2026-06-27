@@ -41,21 +41,24 @@ fn no_tui_flag_takes_stdio_path() {
 }
 
 /// `-p "hello"` always prints one-shot regardless of TTY state. The CLI's
-/// `posix-minimal` HTTP transport is a stub that fails every request with a
-/// (retryable) "connection failed" — so the single turn fails and the binary
-/// exits. We only care that it exits without the TUI hijacking the terminal.
+/// The desktop build now wires a REAL streaming client (`ProviderApiAdapter`
+/// over `ReqwestHttp`), so the single print-mode turn makes an actual API call
+/// and exits on its failure. We only care that it exits without the TUI
+/// hijacking the terminal.
 ///
-/// `LINGXI_MAX_RETRIES=0` is REQUIRED for determinism: with the default of
-/// 10 retries the retryable stub error is retried with exponential backoff,
-/// whose accumulated sleeps exceed any short test timeout (the binary would
-/// eventually exit, but only after the full backoff sequence). Capping retries
-/// makes the failure-then-exit immediate, independent of the retry-backoff
-/// schedule and of any network.
+/// Determinism (independent of network + retry schedule) is pinned two ways:
+///   - `LINGXI_MAX_RETRIES=0` — no exponential-backoff retry loop whose
+///     accumulated sleeps could exceed a short timeout.
+///   - `LINGXI_API_BASE_URL=http://127.0.0.1:1` — the request targets a
+///     guaranteed-refused local port, so the turn fails IMMEDIATELY (connection
+///     refused) instead of doing a real internet round-trip to api.anthropic.com
+///     (whose latency under parallel test load is the only way this can flake).
 #[test]
 fn print_mode_unaffected_by_tui_routing() {
     let mut cmd = Command::cargo_bin("lingxi-cli").unwrap();
     cmd.arg("-p").arg("hello");
     cmd.env("LINGXI_MAX_RETRIES", "0");
+    cmd.env("LINGXI_API_BASE_URL", "http://127.0.0.1:1");
     cmd.timeout(Duration::from_secs(10));
     // Exit code may be 0 or 1 depending on the env. We assert only that the
     // process terminates within the timeout (no TUI takeover).

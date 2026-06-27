@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+pub mod bash_runner;
 pub mod commands;
 pub mod components;
 pub mod error;

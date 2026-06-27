@@ -1314,6 +1314,7 @@ dependencies = [
  "sandbox-runtime-runner",
  "secret",
  "serde_json",
+ "session",
  "sidequery",
  "skill-api",
  "tasks",
@@ -1342,6 +1343,7 @@ dependencies = [
  "tool-worktree",
  "tracing",
  "traits",
+ "tui",
  "workflow",
 ]
 

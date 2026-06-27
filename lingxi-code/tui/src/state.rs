@@ -707,6 +707,15 @@ pub struct AppState {
     /// expanded prompt; Handled/Unknown → display the text). `None` between
     /// submits.
     pub pending_slash: Option<String>,
+    /// A user-typed `!`-prefixed bash-mode command line (the text AFTER the
+    /// `!`). The sync `Submit` arm raises it here — it cannot `.await` the
+    /// sandboxed Bash executor — and echoes the command as a `UserBashInput`
+    /// row. The async `root::pump_bash` consumes the flag, runs the command
+    /// through the host `BashRunner` (the SAME sandboxed `BashTool` the model
+    /// uses), and folds the captured stdout/stderr into a `UserBashOutput` row.
+    /// `None` between submits, and on mounts with no runner wired the flag is
+    /// simply left/cleared (no LLM turn, no raw spawn).
+    pub pending_bash: Option<String>,
     /// (M6-04) Currently focused tool block (Up/Down in scroll mode walks
     /// this through the `AssistantToolUse` entries in scrollback order).
     pub focused_tool_id: Option<ToolUseId>,
@@ -1072,6 +1081,7 @@ impl AppState {
             pending_compact: false,
             pending_turn: None,
             pending_slash: None,
+            pending_bash: None,
             focused_tool_id: None,
             expanded: HashMap::new(),
             tool_call_inputs: HashMap::new(),
@@ -1461,6 +1471,36 @@ impl AppState {
     /// windows the viewport — no FIFO eviction).
     pub fn push_message(&mut self, msg: RenderedMessage) {
         self.messages.push(msg);
+    }
+
+    /// Push a [`RenderedMessage::CompactBoundary`], de-duplicating consecutive
+    /// boundaries (Gap #4).
+    ///
+    /// A single manual `/compact` can drive TWO push paths in the desktop
+    /// build: [`crate::root::pump_compact`] folds the `force_compact` result
+    /// into a boundary, AND the orchestrator emits
+    /// `OutputEvent::CompactionCompleted`, which the desktop output bridge
+    /// converts to `TurnEvent::CompactionCompleted` and the streaming handler
+    /// also renders as a boundary. Both firing for one compaction would render
+    /// the `✻ Conversation compacted (ctrl+o for history)` marker TWICE.
+    ///
+    /// Collapsing consecutive boundaries yields exactly ONE marker regardless
+    /// of which path(s) fire — and is context-independent: in unit tests where
+    /// the mock `force_compact` does NOT emit the event, only `pump_compact`
+    /// pushes (→ 1); in production both the bridge and `pump_compact` push
+    /// (→ still 1). Two genuinely distinct compactions are always separated by
+    /// the intervening conversation, so they never collapse.
+    pub fn push_compact_boundary(&mut self, messages_before: u32, messages_after: u32) {
+        if matches!(
+            self.messages.last(),
+            Some(RenderedMessage::CompactBoundary { .. })
+        ) {
+            return;
+        }
+        self.messages.push(RenderedMessage::CompactBoundary {
+            messages_before,
+            messages_after,
+        });
     }
 
     /// Seed the scrollback from a RESUMED session's prior conversation, before

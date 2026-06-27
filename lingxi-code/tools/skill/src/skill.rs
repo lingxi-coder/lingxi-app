@@ -113,11 +113,11 @@ pub struct SkillDescriptor {
     /// The skill's own base directory (TS `baseDir`). `Some(dir)` for file-based
     /// skills (the SKILL.md / command markdown's parent directory); `None` for
     /// non-file skills (e.g. MCP-sourced, which have no `baseDir`). When `Some`,
-    /// `${CLAUDE_SKILL_DIR}` in the body is replaced with this path so embedded
+    /// `${LINGXI_SKILL_DIR}` in the body is replaced with this path so embedded
     /// `!command` blocks can reference bundled scripts
     /// (`loadSkillsDir.ts:359-363`).
     pub skill_root: Option<std::path::PathBuf>,
-    /// The current session id, surfaced to substitute `${CLAUDE_SESSION_ID}` in
+    /// The current session id, surfaced to substitute `${LINGXI_SESSION_ID}` in
     /// the body (TS `getSessionId()`, `loadSkillsDir.ts:366-369`). `None` for
     /// hermetic/loaderless construction (the token is then left as-is); the
     /// production loader stamps the engine's per-session id here. Carried on the
@@ -742,8 +742,8 @@ ALREADY been loaded - follow the instructions directly instead of calling this t
         // and before the user message is built — see below. The TS tagging of the
         // message with the parent toolUseID (transient-until-resolved) has no Rust
         // `ConversationMessage` substrate and is scoped out: the expanded prompt
-        // enters as a plain user message. The adjacent TS `${CLAUDE_SKILL_DIR}` /
-        // `${CLAUDE_SESSION_ID}` token replacements (steps 2-3) run between
+        // enters as a plain user message. The adjacent TS `${LINGXI_SKILL_DIR}` /
+        // `${LINGXI_SESSION_ID}` token replacements (steps 2-3) run between
         // argument substitution and shell expansion — see just below.
         let args_for_expansion = args.as_deref().unwrap_or("");
         let expanded_prompt = if let Some(builder) = desc.dynamic_body.as_ref() {
@@ -775,11 +775,11 @@ ALREADY been loaded - follow the instructions directly instead of calling this t
             }
         };
 
-        // SKILLEXEC: `${CLAUDE_SKILL_DIR}` / `${CLAUDE_SESSION_ID}` token
+        // SKILLEXEC: `${LINGXI_SKILL_DIR}` / `${LINGXI_SESSION_ID}` token
         // replacement (TS `getPromptForCommand` steps 2-3,
         // `loadSkillsDir.ts:359-369`). Faithful ordering: AFTER argument
         // substitution, BEFORE the embedded `!command` shell expansion below, so
-        // a `!command` that references `${CLAUDE_SKILL_DIR}` / `${CLAUDE_SESSION_ID}`
+        // a `!command` that references `${LINGXI_SKILL_DIR}` / `${LINGXI_SESSION_ID}`
         // sees the substituted value. Both are plain literal-token replacements
         // (the tokens carry no regex metacharacters), so `str::replace` (global by
         // default) matches the TS global-regex `.replace(/.../g, …)` exactly.
@@ -788,7 +788,7 @@ ALREADY been loaded - follow the instructions directly instead of calling this t
         // unchanged by both `replace` calls (no match → no allocation difference
         // in output), preserving the byte-for-byte invariant for the common case.
         let mut expanded_prompt = expanded_prompt;
-        // Step 2: `${CLAUDE_SKILL_DIR}` — only for file-based skills (TS gates on
+        // Step 2: `${LINGXI_SKILL_DIR}` — only for file-based skills (TS gates on
         // `baseDir`). On Windows, normalize backslashes to forward slashes BEFORE
         // the replace so embedded shell commands don't treat them as escapes
         // (`loadSkillsDir.ts:360-361`).
@@ -799,13 +799,13 @@ ALREADY been loaded - follow the instructions directly instead of calling this t
             } else {
                 skill_dir.into_owned()
             };
-            expanded_prompt = expanded_prompt.replace("${CLAUDE_SKILL_DIR}", &skill_dir);
+            expanded_prompt = expanded_prompt.replace("${LINGXI_SKILL_DIR}", &skill_dir);
         }
-        // Step 3: `${CLAUDE_SESSION_ID}` — always replaced (TS calls
+        // Step 3: `${LINGXI_SESSION_ID}` — always replaced (TS calls
         // `getSessionId()` unconditionally). `None` (hermetic/loaderless) leaves
         // the token untouched rather than substituting an empty string.
         if let Some(session_id) = desc.session_id.as_ref() {
-            expanded_prompt = expanded_prompt.replace("${CLAUDE_SESSION_ID}", session_id);
+            expanded_prompt = expanded_prompt.replace("${LINGXI_SESSION_ID}", session_id);
         }
 
         // SKILLEXEC.6: embedded `!command` shell expansion over the substituted
@@ -1619,7 +1619,7 @@ mod tests {
     }
 
     // ========================================================================
-    // ${CLAUDE_SKILL_DIR} / ${CLAUDE_SESSION_ID} token substitution
+    // ${LINGXI_SKILL_DIR} / ${LINGXI_SESSION_ID} token substitution
     // (TS getPromptForCommand steps 2-3, loadSkillsDir.ts:359-369). The tokens
     // are substituted AFTER argument substitution and BEFORE shell expansion.
     // ========================================================================
@@ -1635,11 +1635,11 @@ mod tests {
         }
     }
 
-    /// Step 2: `${CLAUDE_SKILL_DIR}` is replaced with `skill_root` when present.
+    /// Step 2: `${LINGXI_SKILL_DIR}` is replaced with `skill_root` when present.
     #[tokio::test]
     async fn skill_dir_token_replaced_when_skill_root_present() {
         let desc = SkillDescriptor {
-            body: "scripts live in ${CLAUDE_SKILL_DIR}/bin".into(),
+            body: "scripts live in ${LINGXI_SKILL_DIR}/bin".into(),
             skill_root: Some(std::path::PathBuf::from("/skills/foo")),
             ..prompt_desc("dir")
         };
@@ -1679,11 +1679,11 @@ mod tests {
     }
 
     /// Step 2 (gate): with NO `skill_root` (e.g. MCP / non-file skills), the
-    /// `${CLAUDE_SKILL_DIR}` token is left untouched (TS gates on `baseDir`).
+    /// `${LINGXI_SKILL_DIR}` token is left untouched (TS gates on `baseDir`).
     #[tokio::test]
     async fn skill_dir_token_left_as_is_when_skill_root_absent() {
         let desc = SkillDescriptor {
-            body: "scripts live in ${CLAUDE_SKILL_DIR}/bin".into(),
+            body: "scripts live in ${LINGXI_SKILL_DIR}/bin".into(),
             skill_root: None,
             ..prompt_desc("dir")
         };
@@ -1697,16 +1697,16 @@ mod tests {
             .expect("ok");
         assert_eq!(
             injected_text(&out),
-            "scripts live in ${CLAUDE_SKILL_DIR}/bin"
+            "scripts live in ${LINGXI_SKILL_DIR}/bin"
         );
     }
 
-    /// Step 2: ALL occurrences of `${CLAUDE_SKILL_DIR}` are replaced (global,
+    /// Step 2: ALL occurrences of `${LINGXI_SKILL_DIR}` are replaced (global,
     /// matching the TS `/…/g` regex).
     #[tokio::test]
     async fn skill_dir_token_replaced_globally() {
         let desc = SkillDescriptor {
-            body: "${CLAUDE_SKILL_DIR}/a and ${CLAUDE_SKILL_DIR}/b".into(),
+            body: "${LINGXI_SKILL_DIR}/a and ${LINGXI_SKILL_DIR}/b".into(),
             skill_root: Some(std::path::PathBuf::from("/r")),
             ..prompt_desc("dir")
         };
@@ -1724,12 +1724,12 @@ mod tests {
         );
     }
 
-    /// Step 3: `${CLAUDE_SESSION_ID}` is replaced with the session id (always,
+    /// Step 3: `${LINGXI_SESSION_ID}` is replaced with the session id (always,
     /// when one is wired) — including every occurrence.
     #[tokio::test]
     async fn session_id_token_replaced() {
         let desc = SkillDescriptor {
-            body: "session ${CLAUDE_SESSION_ID} = ${CLAUDE_SESSION_ID}".into(),
+            body: "session ${LINGXI_SESSION_ID} = ${LINGXI_SESSION_ID}".into(),
             session_id: Some("sess:abc-123".into()),
             ..prompt_desc("sid")
         };
@@ -1749,7 +1749,7 @@ mod tests {
     #[tokio::test]
     async fn session_id_token_left_as_is_when_unset() {
         let desc = SkillDescriptor {
-            body: "session ${CLAUDE_SESSION_ID}".into(),
+            body: "session ${LINGXI_SESSION_ID}".into(),
             session_id: None,
             ..prompt_desc("sid")
         };
@@ -1761,7 +1761,7 @@ mod tests {
             .call(json!({"skill": "sid"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
-        assert_eq!(injected_text(&out), "session ${CLAUDE_SESSION_ID}");
+        assert_eq!(injected_text(&out), "session ${LINGXI_SESSION_ID}");
     }
 
     /// A `ProcessRunner` that records the embedded shell command it was handed
@@ -1804,7 +1804,7 @@ mod tests {
         }
     }
 
-    /// ORDERING: a `!command` block that references `${CLAUDE_SESSION_ID}` sees
+    /// ORDERING: a `!command` block that references `${LINGXI_SESSION_ID}` sees
     /// the SUBSTITUTED value — token replacement (step 3) runs BEFORE the embedded
     /// `!command` shell expansion (step 4). We capture the command string the
     /// shell runner is handed and assert the token is already substituted there.
@@ -1817,7 +1817,7 @@ mod tests {
         let mut ctx = shell_test_ctx(dummy_out());
         ctx.process = capture.clone();
         let desc = SkillDescriptor {
-            body: "pre !`echo ${CLAUDE_SESSION_ID}` post".into(),
+            body: "pre !`echo ${LINGXI_SESSION_ID}` post".into(),
             session_id: Some("sess:zzz".into()),
             ..prompt_desc("ord")
         };
@@ -1837,7 +1837,7 @@ mod tests {
             seen[0]
         );
         assert!(
-            !seen[0].contains("${CLAUDE_SESSION_ID}"),
+            !seen[0].contains("${LINGXI_SESSION_ID}"),
             "token must be substituted BEFORE shell expansion, got: {}",
             seen[0]
         );

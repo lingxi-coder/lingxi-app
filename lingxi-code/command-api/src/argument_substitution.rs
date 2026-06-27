@@ -680,10 +680,10 @@ mod tests {
 
     #[test]
     fn session_id_placeholder_left_untouched() {
-        // ${CLAUDE_SESSION_ID} is not an arg placeholder; substitution ignores it.
+        // ${LINGXI_SESSION_ID} is not an arg placeholder; substitution ignores it.
         // $1 -> index 1 -> "b".
-        let out = sub("id=${CLAUDE_SESSION_ID} $1", Some("a b"), true, &[]);
-        assert_eq!(out, "id=${CLAUDE_SESSION_ID} b");
+        let out = sub("id=${LINGXI_SESSION_ID} $1", Some("a b"), true, &[]);
+        assert_eq!(out, "id=${LINGXI_SESSION_ID} b");
     }
 
     // ----- shim -----

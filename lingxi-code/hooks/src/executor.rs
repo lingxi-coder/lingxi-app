@@ -1005,7 +1005,7 @@ impl Dispatcher {
                 // "${LINGXI_PROJECT_DIR}",()=>S)`, applied as `k=[_e(e.command),
                 // e.args.map(_e)]`). A non-shell exec / arg never gets a shell to
                 // expand `$LINGXI_PROJECT_DIR`, so the literal `${…}` token must be
-                // replaced here. `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}`
+                // replaced here. `${LINGXI_PLUGIN_ROOT}` / `${LINGXI_PLUGIN_DATA}`
                 // need plugin scope (not on `HookExecutor::Command`) and are a
                 // documented residual — a string carrying only those tokens passes
                 // through unchanged, matching claude when no plugin scope is bound.
@@ -1260,7 +1260,7 @@ impl HookExecutorImpl {
 /// path is NOT treated as a replacement-pattern special; `str::replace` matches
 /// that (it inserts the replacement verbatim).
 ///
-/// The plugin tokens `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}` are NOT
+/// The plugin tokens `${LINGXI_PLUGIN_ROOT}` / `${LINGXI_PLUGIN_DATA}` are NOT
 /// handled here: they require plugin scope (`pluginRoot` / `pluginData`), which
 /// `HookExecutor::Command` does not carry — a documented residual. A string
 /// containing only those tokens (and no `${LINGXI_PROJECT_DIR}`) passes through
@@ -3008,8 +3008,8 @@ mod command_arm_tests {
         // The plugin tokens are NOT substituted here (no plugin scope) — a
         // residual; a string carrying only those passes through unchanged.
         assert_eq!(
-            substitute_project_dir("${CLAUDE_PLUGIN_ROOT}/x", "/root"),
-            "${CLAUDE_PLUGIN_ROOT}/x",
+            substitute_project_dir("${LINGXI_PLUGIN_ROOT}/x", "/root"),
+            "${LINGXI_PLUGIN_ROOT}/x",
         );
     }
 

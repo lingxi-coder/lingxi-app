@@ -2,20 +2,20 @@
 //!
 //! Faithful port of the `getPromptForCommand` closure built in
 //! `claude-code/src/skills/loadSkillsDir.ts:344-399` (the regular-command path,
-//! i.e. `loadedFrom !== 'mcp'` and no `skillRoot`/`${CLAUDE_SKILL_DIR}` — that
+//! i.e. `loadedFrom !== 'mcp'` and no `skillRoot`/`${LINGXI_SKILL_DIR}` — that
 //! substitution applies only to MCP/skill commands, not the `.lingxi/commands`
 //! files this loader produces). The order of operations is:
 //!
 //! 1. [`crate::substitute_arguments_faithful`] over the markdown body with the
 //!    raw argument string, `append_if_no_placeholder = true`, and the command's
 //!    declared `argument_names`.
-//! 2. Replace every literal `${CLAUDE_SESSION_ID}` with the session id (TS
+//! 2. Replace every literal `${LINGXI_SESSION_ID}` with the session id (TS
 //!    `finalContent.replace(/\$\{CLAUDE_SESSION_ID\}/g, getSessionId())`).
 //! 3. [`crate::execute_shell_commands_in_prompt`] to run any embedded inline
 //!    bang-backtick commands or fenced bang blocks, routed through the
 //!    frontmatter `shell`.
 //!
-//! `${CLAUDE_SKILL_DIR}` is intentionally NOT substituted here: regular commands
+//! `${LINGXI_SKILL_DIR}` is intentionally NOT substituted here: regular commands
 //! have no skill root (TS only does it `if (baseDir)`, which is `undefined` for
 //! non-`SKILL.md` command files).
 
@@ -26,9 +26,9 @@ use crate::shell_expansion::{
 };
 
 /// Context for [`expand_markdown_command`]. Carries the session id (for the
-/// `${CLAUDE_SESSION_ID}` token) and the injected shell-expansion dependencies.
+/// `${LINGXI_SESSION_ID}` token) and the injected shell-expansion dependencies.
 pub struct ExpandCtx<'a> {
-    /// Current session id substituted for `${CLAUDE_SESSION_ID}`.
+    /// Current session id substituted for `${LINGXI_SESSION_ID}`.
     pub session_id: &'a str,
     /// Injected runner + permission gate for embedded shell commands.
     pub shell: &'a ShellExpansionCtx,
@@ -53,12 +53,12 @@ pub enum ExpandError {
 
 /// The literal token replaced with the session id. Mirrors the TS regex
 /// `/\$\{CLAUDE_SESSION_ID\}/g` (a literal substring, no metacharacters).
-const SESSION_ID_TOKEN: &str = "${CLAUDE_SESSION_ID}";
+const SESSION_ID_TOKEN: &str = "${LINGXI_SESSION_ID}";
 
 /// Expand a markdown slash command into the final model prompt.
 ///
 /// Faithful to the regular-command `getPromptForCommand`: argument substitution,
-/// then `${CLAUDE_SESSION_ID}` replacement, then embedded shell-command
+/// then `${LINGXI_SESSION_ID}` replacement, then embedded shell-command
 /// execution. Returns [`ExpandError::NotMarkdown`] for non-markdown commands.
 ///
 /// # Errors
@@ -95,7 +95,7 @@ pub async fn expand_markdown_command(
         &frontmatter.argument_names,
     )?;
 
-    // (2) ${CLAUDE_SESSION_ID} -> session id (global literal replace).
+    // (2) ${LINGXI_SESSION_ID} -> session id (global literal replace).
     if content.contains(SESSION_ID_TOKEN) {
         content = content.replace(SESSION_ID_TOKEN, ctx.session_id);
     }
@@ -264,7 +264,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_id_substituted() {
-        let cmd = markdown_cmd("foo", "session=${CLAUDE_SESSION_ID}", vec![]);
+        let cmd = markdown_cmd("foo", "session=${LINGXI_SESSION_ID}", vec![]);
         let parsed = parse_slash_command("/foo").unwrap();
         let runner = Arc::new(EchoRunner {
             calls: Mutex::new(Vec::new()),
@@ -294,9 +294,9 @@ mod tests {
 
     #[tokio::test]
     async fn ordering_session_id_before_shell() {
-        // ${CLAUDE_SESSION_ID} is replaced before shell execution, so the shell
+        // ${LINGXI_SESSION_ID} is replaced before shell execution, so the shell
         // command body can reference it.
-        let cmd = markdown_cmd("foo", "!`echo ${CLAUDE_SESSION_ID}`", vec![]);
+        let cmd = markdown_cmd("foo", "!`echo ${LINGXI_SESSION_ID}`", vec![]);
         let parsed = parse_slash_command("/foo").unwrap();
         let runner = Arc::new(EchoRunner {
             calls: Mutex::new(Vec::new()),

@@ -955,7 +955,7 @@ pub async fn build_mobile_inner(
     // so `home/.claude` resolves to the same app-private `.claude` as lingxi_home
     // (the loaders dedup by name across project/user/managed layers). No
     // session id at build time on mobile (the session is per-connection), so
-    // `${CLAUDE_SESSION_ID}` is left un-substituted — matching the loader's None
+    // `${LINGXI_SESSION_ID}` is left un-substituted — matching the loader's None
     // path. The loader owns its own registry, so this needs no reordering of the
     // composition below.
     let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> = Arc::new(

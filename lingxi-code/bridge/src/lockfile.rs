@@ -102,7 +102,7 @@ impl IdeLockfile {
     /// Returns I/O errors if the home directory cannot be resolved or the
     /// `~/.lingxi/ide` directory cannot be created.
     pub fn for_user(port: u16, workspace_folders: Vec<PathBuf>) -> std::io::Result<Self> {
-        // Honor `$LINGXI_CONFIG_DIR` (set+non-empty) else `~/.claude`, like the
+        // Honor `$LINGXI_CONFIG_DIR` (set+non-empty) else `~/.lingxi`, like the
         // rest of the config-home tree, so the IDE discovery lockfile lands where
         // the engine/peers look for it.
         let config_home = std::env::var_os(branding::CONFIG_DIR_ENV)
@@ -139,7 +139,7 @@ impl IdeLockfile {
     /// Returns I/O errors if the home directory cannot be resolved or the
     /// `~/.lingxi/bridge` directory cannot be created.
     pub fn for_bridge(port: u16, workspace_folders: Vec<PathBuf>) -> std::io::Result<Self> {
-        // Honor `$LINGXI_CONFIG_DIR` (set+non-empty) else `~/.claude`, matching
+        // Honor `$LINGXI_CONFIG_DIR` (set+non-empty) else `~/.lingxi`, matching
         // the config-home tree (the Electron app reads this discovery file).
         let config_home = std::env::var_os(branding::CONFIG_DIR_ENV)
             .map(PathBuf::from)

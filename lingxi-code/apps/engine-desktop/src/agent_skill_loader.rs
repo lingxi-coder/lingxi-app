@@ -12,11 +12,11 @@
 //!
 //! DOCUMENTED APPROXIMATION (flagged): claude's `getPromptForCommand('', ctx)`
 //! runs the FULL skill-body pipeline — `$ARGUMENTS`/`$N` argument substitution
-//! (here: empty args), `${CLAUDE_SKILL_DIR}`/`${CLAUDE_SESSION_ID}` token
+//! (here: empty args), `${LINGXI_SKILL_DIR}`/`${LINGXI_SESSION_ID}` token
 //! replacement, AND embedded `!command` shell expansion. This loader applies the
-//! empty-args argument substitution and the `${CLAUDE_SESSION_ID}` token (carried
+//! empty-args argument substitution and the `${LINGXI_SESSION_ID}` token (carried
 //! on the descriptor) but does NOT run shell `!command` expansion or
-//! `${CLAUDE_SKILL_DIR}` substitution — those live in the `Skill` tool's shell
+//! `${LINGXI_SKILL_DIR}` substitution — those live in the `Skill` tool's shell
 //! substrate, unreachable from this composition-root adapter without re-plumbing
 //! the tool. The model still receives the skill's prompt body; full shell
 //! expansion parity is a follow-up.
@@ -31,7 +31,7 @@ use traits::skill_loader::{SkillLoad, SkillLoader};
 /// [`SkillLoader`] backed by the shared desktop [`CommandRegistry`].
 pub struct AgentSkillLoader {
     registry: Arc<RwLock<CommandRegistry>>,
-    /// Per-session id substituted for `${CLAUDE_SESSION_ID}` in the skill body
+    /// Per-session id substituted for `${LINGXI_SESSION_ID}` in the skill body
     /// (claude `getSessionId()`); `None` leaves the token un-substituted.
     session_id: Option<String>,
 }
@@ -39,7 +39,7 @@ pub struct AgentSkillLoader {
 impl AgentSkillLoader {
     /// Wrap the shared command-registry handle (the SAME `Arc` the slash
     /// dispatcher + `Skill` tool read), stamping `session_id` for
-    /// `${CLAUDE_SESSION_ID}` substitution.
+    /// `${LINGXI_SESSION_ID}` substitution.
     #[must_use]
     pub fn new(registry: Arc<RwLock<CommandRegistry>>, session_id: Option<String>) -> Self {
         Self {
@@ -77,7 +77,7 @@ impl AgentSkillLoader {
     /// Build the skill's content blocks from a resolved markdown/plugin command.
     /// Returns `None` for non-prompt commands (builtin / MCP — claude's
     /// `skill.type !== 'prompt'` skip). Applies empty-args `$ARGUMENTS`/`$N`
-    /// substitution + the `${CLAUDE_SESSION_ID}` token (see the module-level
+    /// substitution + the `${LINGXI_SESSION_ID}` token (see the module-level
     /// approximation note for what is intentionally NOT expanded).
     fn to_skill_load(&self, cmd: &SlashCommand, display_name: &str) -> Option<SkillLoad> {
         let (frontmatter, prompt_template) = match &cmd.kind {
@@ -93,14 +93,14 @@ impl AgentSkillLoader {
             } => (frontmatter, prompt_template),
             // Bundled programmatic skill (`/loop`): prompt-typed, but the body is
             // produced by the dynamic builder with empty args (claude
-            // `getPromptForCommand('')`). `${CLAUDE_SESSION_ID}` still applies.
+            // `getPromptForCommand('')`). `${LINGXI_SESSION_ID}` still applies.
             SlashCommandKind::Bundled {
                 prompt_fn: Some(builder),
                 ..
             } => {
                 let body = builder.build("");
                 let body = match &self.session_id {
-                    Some(sid) => body.replace("${CLAUDE_SESSION_ID}", sid),
+                    Some(sid) => body.replace("${LINGXI_SESSION_ID}", sid),
                     None => body,
                 };
                 return Some(SkillLoad {
@@ -124,9 +124,9 @@ impl AgentSkillLoader {
             &frontmatter.argument_names,
         )
         .unwrap_or_else(|_| prompt_template.clone());
-        // `${CLAUDE_SESSION_ID}` token (claude step 3, runs regardless of source).
+        // `${LINGXI_SESSION_ID}` token (claude step 3, runs regardless of source).
         let body = match &self.session_id {
-            Some(sid) => body.replace("${CLAUDE_SESSION_ID}", sid),
+            Some(sid) => body.replace("${LINGXI_SESSION_ID}", sid),
             None => body,
         };
         Some(SkillLoad {
@@ -242,7 +242,7 @@ mod tests {
     #[tokio::test]
     async fn session_id_token_substituted() {
         let mut reg = CommandRegistry::new();
-        reg.register_command(md("s", "id=${CLAUDE_SESSION_ID}"));
+        reg.register_command(md("s", "id=${LINGXI_SESSION_ID}"));
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), Some("sess:42".to_string()));
         let load = loader.resolve_and_load("s", "a").await.expect("resolved");
         assert!(matches!(

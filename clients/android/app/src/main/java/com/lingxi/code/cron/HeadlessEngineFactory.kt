@@ -10,7 +10,7 @@ import com.lingxi.code.voice.buildVoiceEngine
 /**
  * Builds a NO-UI [MobileEngineHandle] for the cron background path — the same
  * engine the foreground app builds (same `filesDir` root ⇒ the same
- * `.claude/scheduled_tasks.json`, the same `SecureKeyStore` credentials), but
+ * `.lingxi/scheduled_tasks.json`, the same `SecureKeyStore` credentials), but
  * with discarding event / permission sinks because a fired cron job runs
  * headless: its result comes back from `runDueCronNow()`, not from streamed
  * events, and there is no human to answer a permission prompt (the Rust gate

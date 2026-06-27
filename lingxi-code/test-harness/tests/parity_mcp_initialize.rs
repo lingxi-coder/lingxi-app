@@ -5,7 +5,7 @@
 //! reference (`src/services/mcp/client.ts:985-1002`):
 //!
 //! - `clientInfo.name = "lingxi"` (literal),
-//! - `clientInfo.title = "Claude Code"` (literal),
+//! - `clientInfo.title = "LingXi"` (literal),
 //! - `clientInfo.websiteUrl = "https://claude.com/claude-code"` (literal),
 //! - `clientInfo.version = env!("CARGO_PKG_VERSION")` of `lingxi-mcp`,
 //! - `capabilities.roots` and `capabilities.elicitation` are the LITERAL
@@ -85,7 +85,7 @@ fn mcp_initialize_request_matches_claude_code_identity() {
 }
 
 #[test]
-fn mcp_initialize_wire_bytes_contain_claude_code_marker() {
+fn mcp_initialize_wire_bytes_contain_lingxi_marker() {
     // Lock the BYTES of the outgoing JSON payload — every MCP server
     // receives this exact string for `clientInfo.name`. Catches any
     // accidental rename or serde rename-all-snake-case slip.
@@ -94,7 +94,7 @@ fn mcp_initialize_wire_bytes_contain_claude_code_marker() {
     let s = std::str::from_utf8(&bytes).expect("utf8");
     assert!(
         s.contains(r#""name":"lingxi""#),
-        "wire bytes must contain literal \"name\":\"claude-code\", got: {s}",
+        "wire bytes must contain literal \"name\":\"lingxi\", got: {s}",
     );
     assert!(
         s.contains(r#""websiteUrl":"https://claude.com/claude-code""#),

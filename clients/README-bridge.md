@@ -16,7 +16,7 @@ Electron / iOS shell  ──ws──▶  bridge-server (loopback)  ──▶  de
 
 The `bridge-server` binary (`lingxi-code/apps/bridge-server`) boots one local
 conversation over a `127.0.0.1` WebSocket, publishes a discovery lockfile at
-`~/.claude/bridge/<port>.lock`, and drives a real `engine_desktop` runtime. The
+`~/.lingxi/bridge/<port>.lock`, and drives a real `engine_desktop` runtime. The
 Node-side `@lingxi/bridge-client` SDK (`clients/shared`) connects through that
 lockfile, performs the version handshake, sends prompts, and consumes the
 streamed `ClientEvent`s.
@@ -102,7 +102,7 @@ Electron app) at the published lockfile:
 cd lingxi-code
 export ANTHROPIC_API_KEY=sk-ant-...
 ./target/debug/bridge-server --cwd /path/to/your/project
-# logs: bridge-server: listening … port=<N> lockfile=~/.claude/bridge/<N>.lock
+# logs: bridge-server: listening … port=<N> lockfile=~/.lingxi/bridge/<N>.lock
 # stop with ctrl-c (reaps the lockfile)
 ```
 

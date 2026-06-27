@@ -102,14 +102,14 @@ mod tests {
     }
 
     #[test]
-    fn raw_wire_bytes_contain_literal_claude_code_marker() {
+    fn raw_wire_bytes_contain_literal_lingxi_marker() {
         // Lock the BYTES of the outgoing JSON-RPC payload.
         let params = InitializeParams::default();
         let bytes = serde_json::to_vec(&params).expect("serialize");
         let s = std::str::from_utf8(&bytes).expect("utf8");
         assert!(
             s.contains(r#""name":"lingxi""#),
-            "wire bytes must contain literal \"name\":\"claude-code\", got: {s}",
+            "wire bytes must contain literal \"name\":\"lingxi\", got: {s}",
         );
     }
 }

@@ -66,7 +66,7 @@ pub type JsonMap = Map<String, Value>;
 /// `process.env.LINGXI_CONFIG_DIR || homedir()`-shaped (`""` falsy ⇒ home);
 /// `getClaudeConfigHomeDir` (`envUtils.ts:8-14`) is `??`-shaped, so under
 /// `LINGXI_CONFIG_DIR=""` TS resolves config-home to `""` — a cwd-RELATIVE
-/// path, not `~/.claude`. That is pathological, not a behavior worth porting;
+/// path, not `~/.lingxi`. That is pathological, not a behavior worth porting;
 /// this port treats `""` as unset everywhere.
 fn lingxi_config_dir_env() -> Option<PathBuf> {
     std::env::var_os(branding::CONFIG_DIR_ENV)
@@ -76,7 +76,7 @@ fn lingxi_config_dir_env() -> Option<PathBuf> {
 
 /// `getClaudeConfigHomeDir` (`envUtils.ts:7-14`): `$LINGXI_CONFIG_DIR` if
 /// set (non-empty — see [`lingxi_config_dir_env`] for the empty-string
-/// divergence), else `$HOME/.claude`. `None` when neither env var exists.
+/// divergence), else `$HOME/.lingxi`. `None` when neither env var exists.
 #[must_use]
 pub fn lingxi_config_home() -> Option<PathBuf> {
     if let Some(dir) = lingxi_config_dir_env() {
@@ -613,7 +613,7 @@ mod tests {
         let _g = env_lock();
         // Deliberate divergence (see `lingxi_config_dir_env`): TS's
         // `??`-shaped getClaudeConfigHomeDir would use "" (cwd-relative);
-        // this port treats "" as unset and falls back to ~/.claude.
+        // this port treats "" as unset and falls back to ~/.lingxi.
         std::env::set_var("LINGXI_CONFIG_DIR", "");
         std::env::set_var("HOME", "/tmp/cc-test-h4");
         assert_eq!(

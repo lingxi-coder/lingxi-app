@@ -148,7 +148,7 @@ pub fn DoctorScreen(props: &DoctorScreenProps) -> impl Into<AnyElement<'static>>
             Text(content: "Diagnostics", weight: Weight::Bold)
             Text(content: format!("└ Version: {}", d.cli_version))
             Text(content: format!("└ Rust toolchain: {}", d.rust_toolchain))
-            Text(content: format!("└ Claude home: {}", d.lingxi_home))
+            Text(content: format!("└ LingXi home: {}", d.lingxi_home))
             Text(content: format!("└ Working dir: {}", d.cwd))
             Text(content: format!("└ MCP servers: {mcp_status}"))
             Text(content: format!("└ Auth: {}", d.auth_state))

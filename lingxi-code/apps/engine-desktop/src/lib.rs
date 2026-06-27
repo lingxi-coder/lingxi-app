@@ -3858,7 +3858,7 @@ pub async fn build(
     let shared_command_registry: Arc<RwLock<CommandRegistry>> =
         Arc::new(RwLock::new(CommandRegistry::new()));
     // SKILLEXEC: the per-session id stamped onto every resolved skill descriptor
-    // so the `Skill` tool substitutes `${CLAUDE_SESSION_ID}` in the body (TS
+    // so the `Skill` tool substitutes `${LINGXI_SESSION_ID}` in the body (TS
     // `getSessionId()`, a per-process session value). Generated once here at build
     // time; format mirrors the engine's `SessionId` Display (`sess:<uuid>`).
     let skill_session_id = protocol::SessionId::new().to_string();

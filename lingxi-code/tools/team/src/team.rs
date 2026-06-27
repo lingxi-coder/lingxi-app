@@ -103,7 +103,7 @@ pub fn resolve_team_dir(home: &Path, team_name: &str) -> PathBuf {
 }
 
 /// User config-home: `$LINGXI_CONFIG_DIR` when set (claude-code `tr()` `??`: an
-/// empty value is honored verbatim → cwd-relative), else `<home>/.claude`.
+/// empty value is honored verbatim → cwd-relative), else `<home>/.lingxi`.
 #[must_use]
 fn config_home_dir(home: &Path) -> PathBuf {
     match std::env::var_os(branding::CONFIG_DIR_ENV) {

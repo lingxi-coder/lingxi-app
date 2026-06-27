@@ -29,7 +29,7 @@ use tool_skill::skill::{SkillCommandType, SkillDescriptor, SkillLoader};
 /// Project a registered [`SlashCommand`] onto the [`SkillDescriptor`] subset the
 /// `Skill` tool surfaces (verbatim with engine-desktop's `skill_loader::to_descriptor`).
 /// `session_id` is stamped on every descriptor so the tool can substitute
-/// `${CLAUDE_SESSION_ID}` in the body.
+/// `${LINGXI_SESSION_ID}` in the body.
 fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescriptor {
     let session_id = session_id.map(str::to_owned);
     match &cmd.kind {
@@ -107,7 +107,7 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
 /// `.lingxi/commands` + `.lingxi/skills` layers.
 pub struct MobileDiskSkillLoader {
     registry: CommandRegistry,
-    /// Per-session id stamped on resolved descriptors (`${CLAUDE_SESSION_ID}`),
+    /// Per-session id stamped on resolved descriptors (`${LINGXI_SESSION_ID}`),
     /// or `None` to leave the token un-substituted.
     session_id: Option<String>,
 }

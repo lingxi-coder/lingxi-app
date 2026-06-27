@@ -456,19 +456,30 @@ impl HookRegistry {
     }
 
     /// Compute the `matchQuery` string for `event`, mirroring the per-event
-    /// arms of the switch in claude-code `getMatchingHooks`
-    /// (`utils/hooks.ts`, as of 2.1.195).
+    /// `switch (hook_event_name)` in claude-code `getMatchingHooks`
+    /// (`utils/hooks.ts`, as of 2.1.195) — every case the binary derives a query
+    /// for is reproduced here so the declared matcher actually filters that
+    /// event. Events with no case (`TeammateIdle`/`TaskCreated`/`TaskCompleted`
+    /// and `default`) derive no query and return `None`, so the matcher filter
+    /// is skipped (TS `matchQuery ? filter : hookMatchers`) and subscribed hooks
+    /// fire regardless of any declared matcher.
     ///
-    /// The query is the tool name for tool events (`PreToolUse`, `PostToolUse`,
-    /// `PostToolUseFailure`, `PermissionRequest`, `PermissionDenied`), and the
-    /// event-specific field for the MCP / config / instructions / file events
-    /// the binary added: `Elicitation`/`ElicitationResult` → the MCP server
-    /// name; `ConfigChange` → the settings `source` (wire string);
-    /// `InstructionsLoaded` → the `load_reason` (wire string); `FileChanged` →
-    /// the changed file's basename (`path.basename(file_path)`). Every other
-    /// event derives no query and returns `None`, so the matcher filter is
-    /// skipped (TS `matchQuery ? filter : hookMatchers`) and the subscribed
-    /// hooks fire regardless of any declared matcher.
+    /// claude's full switch:
+    /// - tool events → `tool_name`;
+    /// - `UserPromptExpansion` → `command_name`; `SessionStart` → `source`;
+    ///   `SessionEnd` → `reason`; `StopFailure` → `error`;
+    ///   `SubagentStart`/`SubagentStop` → `agent_type`; `Notification` →
+    ///   `notification_type`; `Setup`/`PreCompact`/`PostCompact` → `trigger`;
+    /// - `Elicitation`/`ElicitationResult` → `mcp_server_name`; `ConfigChange`
+    ///   → `source`; `InstructionsLoaded` → `load_reason`; `FileChanged` →
+    ///   `basename(file_path)`.
+    ///
+    /// Three of those map onto a port variant that carries no equivalent field
+    /// (an event-*payload*-schema gap, distinct from this matcher wiring):
+    /// `Setup` (no fields), `PostCompact` (carries `summary`/`tokens_freed`, no
+    /// `trigger`), and `SubagentStop` (carries `agent_id`/`status`, no
+    /// `agent_type`). Those return `None` here (matcher skipped) until the
+    /// variants gain the field; see the `match` arm comments.
     fn match_query_for(event: &HookEvent) -> Option<String> {
         match event {
             HookEvent::PreToolUse { tool_name, .. }
@@ -476,6 +487,22 @@ impl HookRegistry {
             | HookEvent::PostToolUseFailure { tool_name, .. }
             | HookEvent::PermissionRequest { tool_name, .. }
             | HookEvent::PermissionDenied { tool_name, .. } => Some(tool_name.clone()),
+            // claude `i = r.command_name`.
+            HookEvent::UserPromptExpansion { command_name, .. } => Some(command_name.clone()),
+            // claude `i = r.source` — the session-start trigger source string.
+            HookEvent::SessionStart { source, .. } => Some(source.clone()),
+            // claude `i = r.reason`.
+            HookEvent::SessionEnd { reason, .. } => Some(reason.clone()),
+            // claude `i = r.error`.
+            HookEvent::StopFailure { error, .. } => Some(error.clone()),
+            // claude `i = r.agent_type` — the spawned subagent's type.
+            HookEvent::SubagentStart { agent_type, .. } => Some(agent_type.clone()),
+            // claude `i = r.notification_type`; the port carries it as `kind`.
+            HookEvent::Notification { kind, .. } => Some(kind.clone()),
+            // claude `i = r.trigger`; the port's PreCompact carries it as
+            // `reason` (e.g. "manual"). (`Setup`/`PostCompact` carry no such
+            // field — see the `_ =>` gap note.)
+            HookEvent::PreCompact { reason, .. } => Some(reason.clone()),
             // claude `i = r.mcp_server_name` for both elicitation events.
             HookEvent::Elicitation { server_name, .. }
             | HookEvent::ElicitationResult { server_name, .. } => Some(server_name.clone()),
@@ -492,6 +519,12 @@ impl HookRegistry {
             HookEvent::FileChanged { path, .. } => path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned()),
+            // Remaining query-deriving events whose port variant lacks the
+            // field claude reads (event-schema gap): `Setup`→`trigger`,
+            // `PostCompact`→`trigger`, `SubagentStop`→`agent_type`. They fall
+            // here and skip the matcher filter until the variants carry the
+            // field. Everything else (TeammateIdle/TaskCreated/TaskCompleted,
+            // WorktreeCreate/Remove, CwdChanged, …) has no claude query either.
             _ => None,
         }
     }
@@ -1323,6 +1356,62 @@ mod match_event_matcher_tests {
         assert!(
             matched_names(&reg, &changed("/proj/src/main.rs")).is_empty(),
             "different basename is filtered out"
+        );
+    }
+
+    #[test]
+    fn session_start_event_filters_by_source() {
+        // SessionStart derives its query from the `source` trigger string.
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with("boot", HookEventType::SessionStart, Some("startup")));
+        let start = |src: &str| HookEvent::SessionStart {
+            session_id: SessionId::new(),
+            source: src.into(),
+        };
+        assert_eq!(matched_names(&reg, &start("startup")), vec!["boot"]);
+        assert!(matched_names(&reg, &start("resume")).is_empty());
+    }
+
+    #[test]
+    fn subagent_start_event_filters_by_agent_type() {
+        // SubagentStart derives its query from the subagent type; the event is
+        // in comma-mode so a hyphenated agent type matches as a simple entry.
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with(
+            "review",
+            HookEventType::SubagentStart,
+            Some("code-reviewer"),
+        ));
+        let start = |ty: &str| HookEvent::SubagentStart {
+            agent_id: AgentId::new(),
+            agent_type: ty.into(),
+            parent_agent_id: None,
+        };
+        assert_eq!(matched_names(&reg, &start("code-reviewer")), vec!["review"]);
+        assert!(matched_names(&reg, &start("general-purpose")).is_empty());
+    }
+
+    #[test]
+    fn subagent_stop_fires_unfiltered_pending_agent_type_field() {
+        // Documents the event-schema gap: claude keys SubagentStop matchers on
+        // `agent_type`, but the port's SubagentStop variant carries no
+        // `agent_type` field yet, so `match_query_for` returns `None` and the
+        // declared matcher is skipped (the hook fires for ANY subagent). When
+        // the variant gains `agent_type` this should filter like SubagentStart.
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with(
+            "any-stop",
+            HookEventType::SubagentStop,
+            Some("code-reviewer"),
+        ));
+        let stop = HookEvent::SubagentStop {
+            agent_id: AgentId::new(),
+            status: "completed".into(),
+        };
+        assert_eq!(
+            matched_names(&reg, &stop),
+            vec!["any-stop"],
+            "matcher currently skipped (no agent_type query) → fires"
         );
     }
 }

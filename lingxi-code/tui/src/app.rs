@@ -993,58 +993,103 @@ pub fn render_screen(
                 .into_any()
             }
             Screen::Model(m) => {
-                // The model picker renders the pure `render_model_to_string` body
-                // (highlight-only single-select, snapshot-tested) line-by-line in
-                // a column View. Mirrors the Mcp/Hooks arm.
-                use crate::screens::model::render_model_to_string;
-                use crate::theme::TuiTheme;
-                let body = render_model_to_string(m);
-                let lines: Vec<String> = body.lines().map(str::to_string).collect();
-                // (model-header-not-bold-no-subheader) claude-code's
-                // <Text color="remember" bold>Select model</Text> then a dim
-                // sub-header line — both are ALWAYS lines 0/1 of the oracle's
-                // fixed layout. LingXi's Theme has no "remember" (blue) token;
-                // `suggestion` is the closest existing accent color.
-                element! {
-                    View(flex_direction: FlexDirection::Column, padding: 1) {
-                        #(lines.into_iter().enumerate().map(|(i, line)| {
-                            let (color, weight) = match i {
-                                0 => (state.theme.suggestion, Weight::Bold),
-                                1 => (TuiTheme::DIM, Weight::Normal),
-                                _ => (Color::Reset, Weight::Normal),
+                // (opencode-style popup) The `/model` picker renders as a
+                // centered, rounded-border popup window: title + `esc`, a Search
+                // line, a `Recent` group (rows mixing providers → provider shown
+                // dim), then one group per provider. The current model gets a `●`
+                // marker; an unconfigured provider's rows badge `[Connect]`.
+                use crate::components::picker_popup::{render_picker_popup, PopupLine, PopupMarker};
+                use crate::screens::model::VisibleLine;
+                let mut lines: Vec<PopupLine> = Vec::new();
+                let mut item_pos = 0usize;
+                let mut in_recent = false;
+                for vl in m.visible_lines() {
+                    match vl {
+                        VisibleLine::Header(h) => {
+                            in_recent = h == "Recent";
+                            lines.push(PopupLine::Header(h));
+                        }
+                        VisibleLine::Item(idx) => {
+                            let row = &m.rows[idx];
+                            let selected = item_pos == m.selected;
+                            item_pos += 1;
+                            let marker = if row.request_model == m.current {
+                                PopupMarker::Dot
+                            } else {
+                                PopupMarker::None
                             };
-                            element! {
-                                Text(content: line, color: color, weight: weight)
-                            }
-                        }))
+                            // Recent rows mix providers → show the provider dim;
+                            // a provider group's header already names it.
+                            let detail = if in_recent {
+                                row.provider_label.clone()
+                            } else {
+                                String::new()
+                            };
+                            let badge = if row.available {
+                                String::new()
+                            } else {
+                                "[Connect]".to_string()
+                            };
+                            lines.push(PopupLine::Item {
+                                marker,
+                                label: row.display_model.clone(),
+                                detail,
+                                badge,
+                                selected,
+                            });
+                        }
                     }
                 }
-                .into_any()
+                render_picker_popup(
+                    "Select model",
+                    &m.query,
+                    &lines,
+                    None,
+                    viewport_width,
+                    viewport_height,
+                    &state.theme,
+                )
             }
             Screen::ConnectPicker(c) => {
-                // The bare-`/connect` provider picker renders the pure
-                // `render_connect_picker_to_string` body line-by-line in a
-                // column View, coloring line 0 (title) accent+bold, line 1
-                // (sub-header) dim, the rest default — mirroring the Model arm.
-                use crate::screens::connect_picker::render_connect_picker_to_string;
-                use crate::theme::TuiTheme;
-                let body = render_connect_picker_to_string(c);
-                let lines: Vec<String> = body.lines().map(str::to_string).collect();
-                element! {
-                    View(flex_direction: FlexDirection::Column, padding: 1) {
-                        #(lines.into_iter().enumerate().map(|(i, line)| {
-                            let (color, weight) = match i {
-                                0 => (state.theme.suggestion, Weight::Bold),
-                                1 => (TuiTheme::DIM, Weight::Normal),
-                                _ => (Color::Reset, Weight::Normal),
-                            };
-                            element! {
-                                Text(content: line, color: color, weight: weight)
-                            }
-                        }))
+                // (opencode-style popup) The bare-`/connect` provider picker
+                // renders as a centered, rounded-border popup window: a bold
+                // title + `esc`, a Search line, and the Popular/Providers groups
+                // with `✓` for connected providers + a peach highlight on the
+                // selected row. Structured rows feed the shared `picker_popup`.
+                use crate::components::picker_popup::{render_picker_popup, PopupLine, PopupMarker};
+                use crate::screens::connect_picker::VisibleLine;
+                let mut lines: Vec<PopupLine> = Vec::new();
+                let mut item_pos = 0usize;
+                for vl in c.visible_lines() {
+                    match vl {
+                        VisibleLine::Header(h) => lines.push(PopupLine::Header(h)),
+                        VisibleLine::Item(idx) => {
+                            let row = &c.rows[idx];
+                            let selected = item_pos == c.selected;
+                            item_pos += 1;
+                            lines.push(PopupLine::Item {
+                                marker: if row.connected {
+                                    PopupMarker::Check
+                                } else {
+                                    PopupMarker::None
+                                },
+                                label: row.label.clone(),
+                                detail: row.description.clone(),
+                                badge: String::new(),
+                                selected,
+                            });
+                        }
                     }
                 }
-                .into_any()
+                render_picker_popup(
+                    "Connect a provider",
+                    &c.query,
+                    &lines,
+                    None,
+                    viewport_width,
+                    viewport_height,
+                    &state.theme,
+                )
             }
             Screen::Permissions(p) => {
                 // The read-only permissions viewer renders the pure

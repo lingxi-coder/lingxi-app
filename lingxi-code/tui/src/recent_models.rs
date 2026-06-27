@@ -110,6 +110,39 @@ pub fn record_recent_model_to(
     std::fs::write(path, body)
 }
 
+/// Persist `qualified_model` (the profile-qualified id the picker committed,
+/// e.g. `deepseek/deepseek-chat`) as the `model` setting in
+/// `~/.claude/settings.json`, so the NEXT launch defaults to the model the user
+/// picked instead of the built-in default. Best-effort; logs + swallows errors.
+pub fn record_default_model(qualified_model: &str) {
+    let Some(path) = settings_path() else {
+        tracing::debug!("default-model persist skipped: no home dir");
+        return;
+    };
+    if let Err(e) = record_default_model_to(&path, qualified_model) {
+        tracing::debug!(error = %e, "default-model persist failed (session-only)");
+    }
+}
+
+/// Test seam: read-modify-write the `model` key at an explicit path, preserving
+/// every other key. Pretty JSON + trailing newline (config-tool shape).
+pub fn record_default_model_to(path: &Path, qualified_model: &str) -> std::io::Result<()> {
+    let mut obj: Map<String, Value> = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|b| serde_json::from_str(&b).ok())
+        .unwrap_or_default();
+    obj.insert(
+        "model".to_string(),
+        Value::String(qualified_model.to_string()),
+    );
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut body = serde_json::to_string_pretty(&obj)?;
+    body.push('\n');
+    std::fs::write(path, body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1899,6 +1899,16 @@ pub async fn pump_switch_model(
             // The status line reads `status.model`; update it so the header
             // reflects the switch immediately (the next status refresh agrees).
             st.status.model.clone_from(&model);
+            // Persist the choice as the `model` setting so the NEXT launch
+            // defaults to it (the picker otherwise switches only the live
+            // session). Use the profile-qualified id (e.g.
+            // `deepseek/deepseek-chat`) so startup resolution is unambiguous
+            // across providers.
+            let qualified = match &profile {
+                Some(p) => format!("{p}/{model}"),
+                None => model.clone(),
+            };
+            crate::recent_models::record_default_model(&qualified);
             st.push_message(crate::state::RenderedMessage::SystemText {
                 body: format!("Set model to {model}"),
                 timestamp: chrono::Utc::now().timestamp(),

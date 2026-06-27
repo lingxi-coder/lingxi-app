@@ -263,6 +263,24 @@ fn load_provider_profiles(include_user: bool, include_project: bool) -> Option<s
         .and_then(|eff| eff.settings.providers)
 }
 
+/// Load the persisted `settings.model` (the `/model` picker writes it via
+/// `tui::recent_models::record_default_model`). Used as the default model when
+/// `--model` is absent, so the picker choice survives a restart. `None` when
+/// unset / on any load failure → the caller keeps the built-in default.
+fn load_settings_model(include_user: bool, include_project: bool) -> Option<String> {
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir: &project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
+        .ok()
+        .and_then(|eff| eff.settings.model)
+        .filter(|m| !m.trim().is_empty())
+}
+
 /// Load the merged `settings.claudeMdExcludes` (project + user + env layers) —
 /// glob patterns / absolute paths of `CLAUDE.md` files to exclude from the
 /// system prompt (claude-code `isClaudeMdExcluded`). Empty when unset.
@@ -364,6 +382,11 @@ pub(crate) fn resolve_desktop_config(
     let (incl_user, incl_project) = setting_source_flags(argv.setting_sources.as_deref());
 
     let mut default_model = DesktopConfig::default().default_model;
+    // Persisted `model` from settings.json (written by the `/model` picker) so the
+    // last choice survives a restart. `--model` still wins below.
+    if let Some(persisted) = load_settings_model(incl_user, incl_project) {
+        default_model = persisted;
+    }
     if let Some(m) = &argv.model {
         default_model.clone_from(m);
     }

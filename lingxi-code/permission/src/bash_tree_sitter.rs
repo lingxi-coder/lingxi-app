@@ -287,6 +287,230 @@ pub fn extract_quote_context(command: &str) -> Option<QuoteContext> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Dangerous-pattern flags. Ports `extractDangerousPatterns`
+// (`treeSitterAnalysis.ts:448`): a single DFS setting a flag per node kind.
+// ---------------------------------------------------------------------------
+
+/// AST dangerous-pattern flags (TS `DangerousPatterns`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DangerousPatterns {
+    /// `$(…)` / backtick command substitution (`command_substitution`).
+    pub has_command_substitution: bool,
+    /// `<(…)` / `>(…)` process substitution (`process_substitution`).
+    pub has_process_substitution: bool,
+    /// `${…}` parameter expansion (`expansion`).
+    pub has_parameter_expansion: bool,
+    /// A heredoc (`heredoc_redirect`).
+    pub has_heredoc: bool,
+    /// A `# …` comment (`comment`).
+    pub has_comment: bool,
+}
+
+/// Extract dangerous-pattern flags from the AST (TS `extractDangerousPatterns`).
+/// `None` when the command is empty / over the length cap / unparseable (the
+/// caller keeps the legacy path).
+#[must_use]
+pub fn extract_dangerous_patterns(command: &str) -> Option<DangerousPatterns> {
+    let tree = parse(command)?;
+    let mut out = DangerousPatterns::default();
+    walk_dangerous(tree.root_node(), &mut out);
+    Some(out)
+}
+
+fn walk_dangerous(node: Node<'_>, out: &mut DangerousPatterns) {
+    match node.kind() {
+        "command_substitution" => out.has_command_substitution = true,
+        "process_substitution" => out.has_process_substitution = true,
+        "expansion" => out.has_parameter_expansion = true,
+        "heredoc_redirect" => out.has_heredoc = true,
+        "comment" => out.has_comment = true,
+        _ => {}
+    }
+    for child in children(node) {
+        walk_dangerous(child, out);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compound-structure extraction (the AST command splitter). Ports
+// `extractCompoundStructure` (`treeSitterAnalysis.ts:296`) — the tree-sitter
+// replacement for the heuristic `splitCommand`. The TS `walkTopLevel`'s
+// `walkTopLevel({...node, children:[x]})` reconstruction is rendered here as a
+// direct call to [`process_top_level_child`] on the single child `x` (it just
+// means "process `x` as a top-level child").
+// ---------------------------------------------------------------------------
+
+/// AST compound-command structure (TS `CompoundStructure`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CompoundStructure {
+    /// Has top-level `&&`/`||`/`;` operators (TS `operators.length > 0`).
+    pub has_compound_operators: bool,
+    /// Has a pipeline (`pipeline`).
+    pub has_pipeline: bool,
+    /// Has a subshell (`subshell`).
+    pub has_subshell: bool,
+    /// Has a command group `{ … }` (`compound_statement`).
+    pub has_command_group: bool,
+    /// Top-level operator tokens found, in order (`&&` / `||` / `;`).
+    pub operators: Vec<String>,
+    /// Command segments split by the compound operators.
+    pub segments: Vec<String>,
+}
+
+/// Extract compound structure from the AST (TS `extractCompoundStructure`).
+/// `None` when the command is empty / over the length cap / unparseable.
+#[must_use]
+pub fn extract_compound_structure(command: &str) -> Option<CompoundStructure> {
+    let tree = parse(command)?;
+    let src = command.as_bytes();
+    let mut acc = CompoundStructure::default();
+    for child in children(tree.root_node()) {
+        process_top_level_child(child, src, &mut acc);
+    }
+    // TS: "If no segments found, the whole command is one segment."
+    if acc.segments.is_empty() {
+        acc.segments.push(command.to_string());
+    }
+    acc.has_compound_operators = !acc.operators.is_empty();
+    Some(acc)
+}
+
+/// The node's source text (TS `node.text`).
+fn node_text(node: Node<'_>, src: &[u8]) -> String {
+    node.utf8_text(src).unwrap_or("").to_string()
+}
+
+/// Per-top-level-child arm of TS `walkTopLevel` (`treeSitterAnalysis.ts:308`).
+fn process_top_level_child(child: Node<'_>, src: &[u8], acc: &mut CompoundStructure) {
+    match child.kind() {
+        "list" => {
+            for lc in children(child) {
+                match lc.kind() {
+                    "&&" | "||" => acc.operators.push(lc.kind().to_string()),
+                    // Nested list / redirected_statement wrapping a list|pipeline:
+                    // recurse so inner operators/pipelines are detected.
+                    "list" | "redirected_statement" => process_top_level_child(lc, src, acc),
+                    "pipeline" => {
+                        acc.has_pipeline = true;
+                        acc.segments.push(node_text(lc, src));
+                    }
+                    "subshell" => {
+                        acc.has_subshell = true;
+                        acc.segments.push(node_text(lc, src));
+                    }
+                    "compound_statement" => {
+                        acc.has_command_group = true;
+                        acc.segments.push(node_text(lc, src));
+                    }
+                    _ => acc.segments.push(node_text(lc, src)),
+                }
+            }
+        }
+        ";" => acc.operators.push(";".to_string()),
+        "pipeline" => {
+            acc.has_pipeline = true;
+            acc.segments.push(node_text(child, src));
+        }
+        "subshell" => {
+            acc.has_subshell = true;
+            acc.segments.push(node_text(child, src));
+        }
+        "compound_statement" => {
+            acc.has_command_group = true;
+            acc.segments.push(node_text(child, src));
+        }
+        "command" | "declaration_command" | "variable_assignment" => {
+            acc.segments.push(node_text(child, src));
+        }
+        "redirected_statement" => {
+            // Recurse into the non-redirect body (TS skips `file_redirect`).
+            let mut found_inner = false;
+            for inner in children(child) {
+                if inner.kind() == "file_redirect" {
+                    continue;
+                }
+                found_inner = true;
+                process_top_level_child(inner, src, acc);
+            }
+            if !found_inner {
+                acc.segments.push(node_text(child, src));
+            }
+        }
+        "negated_command" => {
+            acc.segments.push(node_text(child, src));
+            for c in children(child) {
+                process_top_level_child(c, src, acc);
+            }
+        }
+        "if_statement" | "while_statement" | "for_statement" | "case_statement"
+        | "function_definition" => {
+            acc.segments.push(node_text(child, src));
+            for c in children(child) {
+                process_top_level_child(c, src, acc);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod analysis_tests {
+    use super::*;
+
+    #[test]
+    fn dangerous_patterns_detected_per_kind() {
+        let d = extract_dangerous_patterns("echo $(whoami)").unwrap();
+        assert!(d.has_command_substitution && !d.has_process_substitution);
+        assert!(extract_dangerous_patterns("cat <(ls)").unwrap().has_process_substitution);
+        assert!(extract_dangerous_patterns("echo ${HOME}").unwrap().has_parameter_expansion);
+        assert!(extract_dangerous_patterns("cat <<EOF\nx\nEOF").unwrap().has_heredoc);
+        assert!(extract_dangerous_patterns("echo hi # note").unwrap().has_comment);
+        // A plain command trips nothing.
+        assert_eq!(
+            extract_dangerous_patterns("ls -la").unwrap(),
+            DangerousPatterns::default()
+        );
+        assert_eq!(extract_dangerous_patterns(""), None);
+    }
+
+    #[test]
+    fn compound_operators_and_segments() {
+        let c = extract_compound_structure("echo a && echo b").unwrap();
+        assert!(c.has_compound_operators);
+        assert_eq!(c.operators, vec!["&&".to_string()]);
+        assert_eq!(c.segments, vec!["echo a".to_string(), "echo b".to_string()]);
+
+        let s = extract_compound_structure("echo a ; echo b").unwrap();
+        assert_eq!(s.operators, vec![";".to_string()]);
+        assert_eq!(s.segments.len(), 2);
+
+        let pipe = extract_compound_structure("cat x | grep y").unwrap();
+        assert!(pipe.has_pipeline && !pipe.has_compound_operators);
+        assert_eq!(pipe.segments, vec!["cat x | grep y".to_string()]);
+    }
+
+    #[test]
+    fn subshell_and_command_group_and_single() {
+        assert!(extract_compound_structure("(echo a)").unwrap().has_subshell);
+        assert!(extract_compound_structure("{ echo a; }").unwrap().has_command_group);
+        // A single plain command yields exactly one segment = the whole command.
+        let one = extract_compound_structure("echo hello world").unwrap();
+        assert!(!one.has_compound_operators && !one.has_pipeline);
+        assert_eq!(one.segments, vec!["echo hello world".to_string()]);
+        assert_eq!(extract_compound_structure(""), None);
+    }
+
+    #[test]
+    fn redirected_compound_recurses_to_inner_operators() {
+        // `cmd1 && cmd2 2>/dev/null` — tree-sitter wraps the list in a
+        // redirected_statement; the inner `&&` must still be detected.
+        let c = extract_compound_structure("echo a && echo b 2>/dev/null").unwrap();
+        assert!(c.has_compound_operators, "inner && detected through redirect");
+        assert_eq!(c.operators, vec!["&&".to_string()]);
+    }
+}
+
 #[cfg(test)]
 mod quote_context_tests {
     use super::*;

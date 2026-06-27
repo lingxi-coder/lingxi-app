@@ -476,9 +476,15 @@ pub fn builtin_agent_definitions() -> Vec<AgentDefinition> {
             d.color = Some("orange".to_string());
             d
         },
+        // claude 2.1.193 Explore carries BOTH `whenToUse` (M6p, full) and
+        // `whenToUseLean` (N6p, lean); the model-facing agent listing renders the
+        // LEAN variant, so `when_to_use` (the port's single listing field) holds
+        // N6p verbatim. The full M6p text is used only by non-listing surfaces the
+        // port does not have yet; adding a separate `when_to_use_lean` field is
+        // deferred (it would ripple to 40+ AgentDefinition literals).
         def(
             "Explore",
-            "Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. \"src/components/**/*.tsx\"), search code for keywords (eg. \"API endpoints\"), or answer questions about the codebase (eg. \"how do API endpoints work?\"). When calling this agent, specify the desired thoroughness level: \"quick\" for basic searches, \"medium\" for moderate exploration, or \"very thorough\" for comprehensive analysis across multiple locations and naming conventions.",
+            "Read-only search agent for broad fan-out searches — when answering means sweeping many files, directories, or naming conventions and you only need the conclusion, not the file dumps. It reads excerpts rather than whole files, so it locates code; it doesn't review or audit it. Specify search breadth: \"medium\" for moderate exploration, \"very thorough\" for multiple locations and naming conventions.",
             AgentToolPolicy::Except(read_only_disallowed()),
             AgentModel::Alias("haiku".to_string()),
             EXPLORE_PROMPT,

@@ -1927,8 +1927,8 @@ mod tests {
         );
         // statusline-setup: Explicit([Read, Edit]).
         assert_eq!(by["statusline-setup"].tools_description, "Read, Edit");
-        // when_to_use carried through verbatim.
-        assert!(by["Explore"].when_to_use.contains("exploring codebases"));
+        // when_to_use carried through verbatim (claude 2.1.193 lean variant N6p).
+        assert!(by["Explore"].when_to_use.contains("broad fan-out searches"));
     }
 
     #[tokio::test]

@@ -233,6 +233,30 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+/// The MODEL-FACING input schema = [`AGENT_INPUT_SCHEMA`] with `cwd` removed.
+///
+/// claude resolves the AgentTool's advertised schema as `yJp().omit({cwd:!0})`
+/// (`eEo`): `cwd` exists on the call signature — set internally by
+/// `isolation:"worktree"` or an explicit override — but is NEVER advertised to
+/// the model, so the model cannot pass it. `AGENT_INPUT_SCHEMA` (with `cwd`)
+/// stays the canonical/full schema for deserialization; this projection is what
+/// [`Tool::input_schema`] exposes.
+///
+/// claude additionally omits `run_in_background` when background tasks are
+/// disabled or on the pro plan (`K8t||MY() ? e.omit({run_in_background:!0}) : e`);
+/// that is runtime-conditional and `input_schema(&self)` has no context, so it
+/// is left in place (deferred).
+static AGENT_INPUT_SCHEMA_MODEL: Lazy<Value> = Lazy::new(|| {
+    let mut schema = AGENT_INPUT_SCHEMA.clone();
+    if let Some(props) = schema
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+    {
+        props.remove("cwd");
+    }
+    schema
+});
+
 /// Format the M3-05 byte-locked budget-exceeded denial string.
 ///
 /// Caller passes `current_nano_usd`; output is the literal
@@ -935,7 +959,9 @@ impl Tool for AgentTool {
         None
     }
     fn input_schema(&self) -> &Value {
-        &AGENT_INPUT_SCHEMA
+        // claude advertises `yJp().omit({cwd:!0})` — the model-facing schema
+        // never exposes `cwd` (set internally by isolation / explicit override).
+        &AGENT_INPUT_SCHEMA_MODEL
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -2123,6 +2149,35 @@ mod tests {
             AGENT_INPUT_SCHEMA["properties"]["description"]["description"],
             json!("A short (3-5 word) description of the task")
         );
+    }
+
+    // claude advertises `yJp().omit({cwd:!0})` — the MODEL-facing schema (what
+    // `input_schema()` returns) omits `cwd` while keeping every other property;
+    // the full `AGENT_INPUT_SCHEMA` still carries `cwd` for deserialization.
+    #[test]
+    fn model_schema_omits_cwd() {
+        let model_props = AGENT_INPUT_SCHEMA_MODEL["properties"]
+            .as_object()
+            .expect("model properties is an object");
+        assert!(!model_props.contains_key("cwd"), "model schema omits cwd");
+        for k in [
+            "description",
+            "prompt",
+            "subagent_type",
+            "model",
+            "run_in_background",
+            "name",
+            "team_name",
+            "mode",
+            "isolation",
+        ] {
+            assert!(model_props.contains_key(k), "model schema keeps {k}");
+        }
+        // the canonical/full schema still carries `cwd` (used for deserialization).
+        assert!(AGENT_INPUT_SCHEMA["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("cwd"));
     }
 
     // #1 — an EXPLICIT unknown `subagent_type` is REJECTED with claude's

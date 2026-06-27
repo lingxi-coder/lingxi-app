@@ -313,6 +313,18 @@ async fn collect_dir(
         // `teamName`. `teamName` is an outer field captured in
         // `JsonlMessage::extra`; the truthiness test matches TS
         // `if (enriched.teamName)` (an empty-string teamName is falsy).
+        // Binary `vkm`: `let a = qpn.has(vsc() ?? "")` where
+        // `qpn = new Set(["sdk-cli","sdk-ts","sdk-py"])` and `vsc()` returns the
+        // CURRENT process entrypoint (`CLAUDE_CODE_ENTRYPOINT`). So `a` is true
+        // when *this* process is itself running under an SDK entrypoint — and the
+        // SDK-entrypoint and `/loop` session filters below are gated on `!a`:
+        // when running as an SDK runtime we do NOT hide SDK/loop sessions from the
+        // picker. (This is process-constant, so we read it once per session row.)
+        let current_is_sdk_entrypoint = matches!(
+            std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
+            Ok("sdk-cli" | "sdk-ts" | "sdk-py")
+        );
+
         if let Some(first) = loaded.messages_in_order.first() {
             let has_team_name = first.extra.get("teamName").is_some_and(|v| match v {
                 serde_json::Value::Null => false,
@@ -334,14 +346,14 @@ async fn collect_dir(
             }
 
             // Gap #3 fix — SESSION.3: filter SDK-entrypoint sessions.
-            // Binary `vkm`: `k9l=new Set(["sdk-cli","sdk-ts","sdk-py"])`;
-            //   `if(!a && k9l.has(n.entrypoint??"")) return C(...),null`
+            // Binary `vkm`: `qpn=new Set(["sdk-cli","sdk-ts","sdk-py"])`;
+            //   `if(!a && qpn.has(n.entrypoint??"")) return C(...),null`
             // Binary log: `"# filtered from /resume: entrypoint="` @ 113414513.
-            // The `!a` guard means this only applies when the session is NOT already
-            // flagged (i.e., passes the daemon check above). The entrypoint field IS
-            // a named struct field on JsonlMessage.
+            // `!a` = the CURRENT process is NOT an SDK runtime (see
+            // `current_is_sdk_entrypoint` above): SDK sessions are hidden only from
+            // a normal CLI picker. The entrypoint field IS a named struct field.
             let entrypoint = first.entrypoint.as_deref().unwrap_or("");
-            if matches!(entrypoint, "sdk-cli" | "sdk-ts" | "sdk-py") {
+            if !current_is_sdk_entrypoint && matches!(entrypoint, "sdk-cli" | "sdk-ts" | "sdk-py") {
                 continue;
             }
         }
@@ -370,7 +382,9 @@ async fn collect_dir(
                     .and_then(|m| serde_json::to_string(m).ok())
                     .unwrap_or_default()
             };
-            if raw_first_line.contains("<command-name>/loop</command-name>") {
+            if !current_is_sdk_entrypoint
+                && raw_first_line.contains("<command-name>/loop</command-name>")
+            {
                 continue;
             }
         }
@@ -454,27 +468,45 @@ fn is_visible_message(m: &JsonlMessage) -> bool {
     }
 }
 
-/// Whether a message's `content` carries user-visible output. String content is
-/// visible when non-empty after trim. Array content is visible when it contains a
-/// `text` block with non-empty trimmed text (both roles), or — for USER messages
-/// only — an `image`/`document` block. A `tool_result`-only user message and a
-/// `tool_use`/`thinking`-only assistant message are NOT visible.
+/// Whether a message's `content` carries user-visible output. Ports the two
+/// claude-code predicates exactly:
+///
+/// - USER (`JZm`): a non-empty string, OR an array containing any block whose
+///   `type` is `text`/`image`/`document` — **by type alone** (a `text` block
+///   counts even when its text is empty/whitespace).
+/// - ASSISTANT (`XZm`): the content MUST be an array (a bare string is never
+///   visible), and that array must contain a `text` block with non-empty
+///   trimmed text. `image`/`document` blocks do NOT make an assistant message
+///   visible.
+///
+/// A `tool_result`-only user message and a `tool_use`/`thinking`-only assistant
+/// message are NOT visible under either predicate.
 fn has_visible_content(content: Option<&Value>, assistant: bool) -> bool {
     let Some(content) = content else { return false };
     if let Some(s) = content.as_str() {
-        return !s.trim().is_empty();
+        // `XZm` requires an array, so a string content is never visible for an
+        // assistant message; `JZm` treats a non-empty string as visible.
+        return !assistant && !s.trim().is_empty();
     }
     let Some(arr) = content.as_array() else {
         return false;
     };
     arr.iter().any(|block| {
         match block.get("type").and_then(Value::as_str) {
-            Some("text") => block
-                .get("text")
-                .and_then(Value::as_str)
-                .is_some_and(|t| !t.trim().is_empty()),
-            // Images/documents make a USER message visible; assistant messages
-            // are visible only via text blocks.
+            Some("text") => {
+                if assistant {
+                    // `XZm`: assistant text block is visible only when non-empty.
+                    block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|t| !t.trim().is_empty())
+                } else {
+                    // `JZm`: user text block is visible by TYPE ALONE.
+                    true
+                }
+            }
+            // `JZm`: images/documents make a USER message visible; `XZm`
+            // (assistant) counts only text blocks.
             Some("image" | "document") => !assistant,
             _ => false,
         }
@@ -1178,8 +1210,52 @@ mod tests {
 
     use super::*;
     use platform_posix::fs::PosixFileSystem;
+    use serde_json::json;
     use std::time::Duration;
     use tempfile::TempDir;
+
+    // `has_visible_content` ports the two claude-code predicates `JZm` (user) and
+    // `XZm` (assistant) exactly. `JZm`: non-empty string, OR an array with any
+    // text/image/document block by TYPE ALONE. `XZm`: content MUST be an array
+    // (a string is never visible) containing a NON-EMPTY text block; image/
+    // document blocks do not count for an assistant.
+    #[test]
+    fn has_visible_content_matches_jzm_user_predicate() {
+        let v = |c| has_visible_content(Some(&c), /* assistant = */ false);
+        // String: non-empty visible, empty/whitespace not.
+        assert!(v(json!("hi")));
+        assert!(!v(json!("   ")));
+        assert!(!v(json!("")));
+        // Array text block is visible BY TYPE ALONE — even when text is empty.
+        assert!(v(json!([{ "type": "text", "text": "" }])));
+        assert!(v(json!([{ "type": "text", "text": "  " }])));
+        assert!(v(json!([{ "type": "text", "text": "hello" }])));
+        // image / document make a USER message visible.
+        assert!(v(json!([{ "type": "image" }])));
+        assert!(v(json!([{ "type": "document" }])));
+        // tool_result-only is NOT visible.
+        assert!(!v(json!([{ "type": "tool_result", "content": "x" }])));
+        // Non-string / non-array content is not visible.
+        assert!(!v(json!(123)));
+    }
+
+    #[test]
+    fn has_visible_content_matches_xzm_assistant_predicate() {
+        let v = |c| has_visible_content(Some(&c), /* assistant = */ true);
+        // `XZm` requires an array — a bare string is NEVER visible for assistant.
+        assert!(!v(json!("hi")));
+        assert!(!v(json!("")));
+        // Array text block is visible only when its text is non-empty.
+        assert!(v(json!([{ "type": "text", "text": "hello" }])));
+        assert!(!v(json!([{ "type": "text", "text": "" }])));
+        assert!(!v(json!([{ "type": "text", "text": "   " }])));
+        // image / document do NOT make an assistant message visible.
+        assert!(!v(json!([{ "type": "image" }])));
+        assert!(!v(json!([{ "type": "document" }])));
+        // tool_use-only / thinking-only assistant is NOT visible.
+        assert!(!v(json!([{ "type": "tool_use", "name": "Read" }])));
+        assert!(!v(json!([{ "type": "thinking", "thinking": "…" }])));
+    }
 
     fn make_fs(root: &Path) -> Arc<dyn FileSystem> {
         Arc::new(PosixFileSystem::new(root.to_path_buf()))

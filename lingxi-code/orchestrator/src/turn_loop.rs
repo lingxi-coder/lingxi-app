@@ -1475,6 +1475,7 @@ pub(crate) fn terminal_api_error_text(
             let category = stop_details.and_then(|sd| sd.category.as_deref());
             let cyber_or_bio = matches!(category, Some("cyber" | "bio"));
             let is_cyber = matches!(category, Some("cyber"));
+            let is_military_weapons = matches!(category, Some("military_weapons"));
             let base = match crate::prompt::env_meta::marketing_name_for_model(model) {
                 Some(label) => {
                     // LABEL branch. `m`/`f` are the interactive suffixes.
@@ -1529,6 +1530,24 @@ pub(crate) fn terminal_api_error_text(
                         // name here, so `g` = "This model". SINGLE `\n` separators.
                         format!(
                             "API Error: This model's safeguards flagged this message for a cybersecurity topic. If your work requires this access, you can apply for an exemption: {exemption}\n{m}\n{f}"
+                        )
+                    } else if is_military_weapons {
+                        // Binary no-label `else if (f === "military_weapons")` arm:
+                        //   `${bT}: ${h} has added safeguards for weapons-related
+                        //   content, which blocked this request. Not weapons-related?
+                        //   This may be a false positive.\n${m}${p?"":`\nIf you
+                        //   believe this was flagged in error, send feedback with
+                        //   /feedback.`}`
+                        // `h = r!=null ? vp(r) : "This model"` — no marketing name
+                        // here ⇒ "This model". The feedback clause is interactive-only
+                        // (`p` = non-interactive; the `${p?"":…}` tail fires when `!p`).
+                        let tail = if interactive {
+                            "\nIf you believe this was flagged in error, send feedback with /feedback."
+                        } else {
+                            ""
+                        };
+                        format!(
+                            "API Error: This model has added safeguards for weapons-related content, which blocked this request. Not weapons-related? This may be a false positive.\n{m}{tail}"
                         )
                     } else {
                         format!(
@@ -3486,6 +3505,38 @@ mod terminal_api_error_tests {
         assert!(t.contains("exemption: https://claude.com/form/abc123\n"), "got: {t}");
         assert!(!t.contains("exemption: https://claude.com/form/abc123\n\n"), "single newline; got: {t}");
         assert!(!t.contains("abc123,"), "trailing punct must be stripped; got: {t}");
+    }
+
+    /// NO-LABEL branch + `military_weapons` category → the weapons-safeguards
+    /// variant (binary `else if (f === "military_weapons")`). The feedback clause
+    /// is interactive-only.
+    #[test]
+    fn refusal_nolabel_military_weapons_variant() {
+        let sd = details("military_weapons", None);
+        // Interactive → includes the "send feedback" clause.
+        let ti = terminal_api_error_text("unknown-model-xyz", true, "refusal", None, Some(&sd))
+            .expect("refusal");
+        assert!(
+            ti.starts_with("API Error: This model has added safeguards for weapons-related content, which blocked this request. Not weapons-related? This may be a false positive.\n"),
+            "got: {ti}"
+        );
+        assert!(
+            ti.contains("\nIf you believe this was flagged in error, send feedback with /feedback."),
+            "interactive feedback clause; got: {ti}"
+        );
+        // Non-interactive → NO "send feedback" clause.
+        let tn = terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd))
+            .expect("refusal");
+        assert!(
+            tn.contains("has added safeguards for weapons-related content"),
+            "got: {tn}"
+        );
+        assert!(
+            !tn.contains("If you believe this was flagged in error"),
+            "non-interactive must omit the feedback clause; got: {tn}"
+        );
+        // Must NOT fall through to the generic Usage-Policy message.
+        assert!(!tn.contains("violate our Usage Policy"), "got: {tn}");
     }
 
     /// `oUi` exemption-URL extraction: form URL extracted (trailing punctuation

@@ -1,6 +1,24 @@
 //! Terminal background + color-depth detection feeding `ThemeSetting::Auto`.
 //! One-shot OSC-11 pre-flight at startup; pure helpers below are I/O-free.
 
+use crate::theme::ThemeName;
+use std::sync::OnceLock;
+
+/// Process-global detected background (set once at startup). `Some(Light|Dark)`
+/// when the OSC-11 query succeeded; `None`/unset otherwise.
+static DETECTED_BACKGROUND: OnceLock<Option<ThemeName>> = OnceLock::new();
+
+/// Record the startup OSC-11 detection result (idempotent; first write wins).
+pub(crate) fn set_detected_background(bg: Option<ThemeName>) {
+    let _ = DETECTED_BACKGROUND.set(bg);
+}
+
+/// The detected background (`Light`/`Dark`), or `None` if detection didn't run
+/// or didn't resolve.
+pub(crate) fn detected_background() -> Option<ThemeName> {
+    DETECTED_BACKGROUND.get().copied().flatten()
+}
+
 /// Parse an OSC-11 background reply body (`...rgb:RRRR/GGGG/BBBB...`) into
 /// 0..1-normalized channels. Tolerates 8- or 16-bit-per-channel hex and a
 /// trailing terminator (BEL `\x07` or ST `\x1b\\`). `None` if not parseable.

@@ -137,22 +137,47 @@ impl ThemeSetting {
         ThemeName::from_wire(s).map(ThemeSetting::Named)
     }
 
-    /// Resolve to a concrete renderable theme. (theme-02) `Auto` consults
-    /// `$COLORFGBG` (claude-code `detectFromColorFgBg`) for a synchronous
-    /// best-effort guess — set by some terminals (rxvt-family, Konsole,
-    /// iTerm2 with the option enabled); falls back to `Dark` when absent or
-    /// unparseable. The OSC-11 terminal-background round-trip claude-code
-    /// also uses is a real terminal query this headless port can't perform,
-    /// so that refinement stays deferred.
+    /// Resolve to a concrete renderable theme. `Auto` consults the
+    /// process-global OSC-11 detection cache (set at startup), then
+    /// `$COLORFGBG` (claude-code `detectFromColorFgBg`) as a fallback, and
+    /// finally defaults to `Dark`. Color depth then selects the truecolor or
+    /// `-ansi` variant of the chosen background.
     #[must_use]
     pub fn resolve(self) -> ThemeName {
         match self {
-            ThemeSetting::Auto => {
-                colorfgbg_theme(std::env::var("COLORFGBG").ok().as_deref()).unwrap_or(ThemeName::Dark)
-            }
+            ThemeSetting::Auto => resolve_auto(
+                crate::theme_detect::detected_background(),
+                std::env::var("COLORFGBG").ok().as_deref(),
+                color_depth(),
+            ),
             ThemeSetting::Named(n) => n,
         }
     }
+}
+
+/// Select the concrete theme from a detected background and color depth.
+/// `background` is only ever `Light` or `Dark`; the `_` arm covers `Dark`.
+pub(crate) fn resolve_theme(background: ThemeName, depth: ColorDepth) -> ThemeName {
+    match (background, depth) {
+        (ThemeName::Light, ColorDepth::Truecolor) => ThemeName::Light,
+        (ThemeName::Light, ColorDepth::Low) => ThemeName::LightAnsi,
+        (_, ColorDepth::Truecolor) => ThemeName::Dark,
+        (_, ColorDepth::Low) => ThemeName::DarkAnsi,
+    }
+}
+
+/// Pure `Auto` resolution: detected background → `$COLORFGBG` → Dark, combined
+/// with color depth. Extracted from `resolve()` so the precedence is testable
+/// without touching process-global state or the environment.
+pub(crate) fn resolve_auto(
+    detected: Option<ThemeName>,
+    colorfgbg: Option<&str>,
+    depth: ColorDepth,
+) -> ThemeName {
+    let background = detected
+        .or_else(|| colorfgbg_theme(colorfgbg))
+        .unwrap_or(ThemeName::Dark);
+    resolve_theme(background, depth)
 }
 
 /// (theme-02) claude-code `detectFromColorFgBg`: parse `$COLORFGBG`
@@ -501,13 +526,44 @@ mod tests {
     #[test]
     fn auto_falls_back_to_dark_without_colorfgbg() {
         // Best-effort: in a test environment without $COLORFGBG set, Auto
-        // resolves to the documented fallback. (If a developer's real shell
-        // happens to export $COLORFGBG, this assertion would reflect that —
-        // acceptable, since the pure-helper test above is what actually
-        // locks the parsing behavior.)
+        // resolves to the documented dark fallback. (If a developer's real
+        // shell happens to export $COLORFGBG, this assertion would reflect
+        // that — acceptable, since the pure-helper test above is what
+        // actually locks the parsing behavior.) After theme-03 the result
+        // is also shaped by color depth: Dark in truecolor environments,
+        // DarkAnsi in 16-color ones — both are the "dark" family.
         if std::env::var("COLORFGBG").is_err() {
-            assert_eq!(ThemeSetting::Auto.resolve(), ThemeName::Dark);
+            let resolved = ThemeSetting::Auto.resolve();
+            assert!(
+                resolved == ThemeName::Dark || resolved == ThemeName::DarkAnsi,
+                "expected Dark or DarkAnsi without $COLORFGBG, got {resolved:?}"
+            );
         }
+    }
+
+    #[test]
+    fn resolve_theme_four_cells() {
+        use ColorDepth::*;
+        assert_eq!(resolve_theme(ThemeName::Light, Truecolor), ThemeName::Light);
+        assert_eq!(resolve_theme(ThemeName::Light, Low), ThemeName::LightAnsi);
+        assert_eq!(resolve_theme(ThemeName::Dark, Truecolor), ThemeName::Dark);
+        assert_eq!(resolve_theme(ThemeName::Dark, Low), ThemeName::DarkAnsi);
+    }
+
+    #[test]
+    fn resolve_auto_precedence() {
+        use ColorDepth::Truecolor;
+        // Detected background wins over COLORFGBG.
+        assert_eq!(
+            resolve_auto(Some(ThemeName::Light), Some("0;15"), Truecolor),
+            ThemeName::Light
+        );
+        // No detection → COLORFGBG light (bg index 15) wins over the Dark default.
+        assert_eq!(resolve_auto(None, Some("0;15"), Truecolor), ThemeName::Light);
+        // No detection, no COLORFGBG → Dark.
+        assert_eq!(resolve_auto(None, None, Truecolor), ThemeName::Dark);
+        // Low color depth degrades to the -ansi theme.
+        assert_eq!(resolve_auto(None, None, ColorDepth::Low), ThemeName::DarkAnsi);
     }
 
     #[test]

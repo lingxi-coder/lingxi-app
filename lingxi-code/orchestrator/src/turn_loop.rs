@@ -1848,12 +1848,21 @@ async fn handle_malformed_tool_use(
     state: &mut RecoveryState,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
     if state.malformed_tool_use_retried {
-        // Second failure → terminal NON-meta message, complete the turn.
+        // Second failure → terminal NON-meta message, complete the turn. The
+        // binary builds this via `ql(...)`→`mcc({isApiErrorMessage:!0})`, i.e. an
+        // ASSISTANT api-error message (`role:"assistant", stop_reason:
+        // "stop_sequence", stop_details:null`) appended AFTER the malformed
+        // assistant response — two assistant messages in a row, matching the
+        // binary. (The port previously persisted a USER message here.) Shape
+        // mirrors `surface_model_error`'s assistant-api-error message.
         orch.output.emit_text(MALFORMED_TOOL_USE_RETRY_FAILED).await;
-        let failed_msg = ConversationMessage::user(
-            MessageId::new(),
-            MALFORMED_TOOL_USE_RETRY_FAILED.to_string(),
-        );
+        let failed_msg = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text {
+                text: MALFORMED_TOOL_USE_RETRY_FAILED.to_string(),
+            }],
+            stop_reason: Some("stop_sequence".to_string()),
+        };
         {
             let mut s = orch.session.lock().await;
             s.history.push(failed_msg.clone());
@@ -5278,7 +5287,9 @@ mod malformed_and_thinking_only_tests {
     }
 
     /// Second malformed `tool_use` (guard already armed) → Ended with
-    /// stop_reason `end_turn`, the non-meta terminal message appended.
+    /// stop_reason `end_turn`, the non-meta terminal message appended as an
+    /// ASSISTANT api-error message (binary `ql`→`mcc`: stop_reason
+    /// "stop_sequence"), NOT a user message.
     #[tokio::test]
     async fn malformed_tool_use_second_failure_ends_turn() {
         let orch = orch_with_responses(vec![malformed_tool_use_response()]);
@@ -5297,10 +5308,23 @@ mod malformed_and_thinking_only_tests {
             TurnStepOutcome::Continue => panic!("expected Ended on second failure"),
         }
         let h = history(&orch).await;
-        assert_eq!(
-            last_user_text(&h).as_deref(),
-            Some(MALFORMED_TOOL_USE_RETRY_FAILED)
-        );
+        // Terminal message = ASSISTANT api-error message, stop_reason
+        // "stop_sequence"; it is NOT persisted as a user message.
+        match h.last().expect("history non-empty") {
+            ConversationMessage::Assistant {
+                content,
+                stop_reason,
+                ..
+            } => {
+                assert_eq!(stop_reason.as_deref(), Some("stop_sequence"));
+                assert!(matches!(
+                    content.first(),
+                    Some(ContentBlock::Text { text }) if text == MALFORMED_TOOL_USE_RETRY_FAILED
+                ));
+            }
+            other => panic!("expected Assistant api-error message, got {other:?}"),
+        }
+        assert_eq!(last_user_text(&h), None);
     }
 
     /// A NORMAL `tool_use` response (with an actual tool_use block) must NOT

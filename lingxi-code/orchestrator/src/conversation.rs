@@ -5438,11 +5438,20 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 Some("tool_use") => {
                     if malformed_tool_use_retried {
                         // Second failure → terminal NON-meta message, complete.
+                        // Binary `ql(...)`→`mcc({isApiErrorMessage:!0})`: an
+                        // ASSISTANT api-error message (`role:"assistant",
+                        // stop_reason:"stop_sequence", stop_details:null`) appended
+                        // after the malformed assistant response (two assistants in
+                        // a row, matching the binary). Shape mirrors
+                        // `surface_model_error`. (Was a USER message.)
                         self.output.emit_text(MALFORMED_TOOL_USE_RETRY_FAILED).await;
-                        let failed_msg = ConversationMessage::user(
-                            MessageId::new(),
-                            MALFORMED_TOOL_USE_RETRY_FAILED.to_string(),
-                        );
+                        let failed_msg = ConversationMessage::Assistant {
+                            id: MessageId::new(),
+                            content: vec![ContentBlock::Text {
+                                text: MALFORMED_TOOL_USE_RETRY_FAILED.to_string(),
+                            }],
+                            stop_reason: Some("stop_sequence".to_string()),
+                        };
                         {
                             let mut s = self.session.lock().await;
                             s.history.push(failed_msg.clone());

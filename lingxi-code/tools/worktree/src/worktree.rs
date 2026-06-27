@@ -61,28 +61,37 @@ pub const EXIT_TOOL_NAME: &str = "ExitWorktree";
 /// # Errors
 /// Returns [`WorktreeError::InvalidSlug`] with a human-readable detail.
 pub fn validate_worktree_slug(slug: &str) -> Result<(), WorktreeError> {
-    if slug.is_empty() {
-        return Err(WorktreeError::InvalidSlug("slug is empty".into()));
-    }
+    // 1:1 with the binary `_Tt`: a length cap (64 = `oac`), then per-`/`-segment
+    // checks — reject the `.`/`..` path segments, reject the reserved `.git`
+    // directory name (case-insensitive, trailing dots stripped), and require the
+    // allowed set `ytf=/^[a-zA-Z0-9._-]+$/` (which also rejects empty segments).
+    // Error messages are byte-exact: the binary wraps the slug/segment in LITERAL
+    // double-quotes (`"${e}"`/`"${t}"`), so we format `"{slug}"` — NOT `{slug:?}`.
     if slug.len() > MAX_WORKTREE_SLUG_LENGTH {
         return Err(WorktreeError::InvalidSlug(format!(
-            "slug exceeds {MAX_WORKTREE_SLUG_LENGTH} chars (got {})",
+            "Invalid worktree name: must be {MAX_WORKTREE_SLUG_LENGTH} characters or fewer (got {})",
             slug.len()
         )));
     }
     for segment in slug.split('/') {
-        if segment.is_empty() {
+        if segment == "." || segment == ".." {
             return Err(WorktreeError::InvalidSlug(format!(
-                "slug contains empty segment: {slug:?}"
+                "Invalid worktree name \"{slug}\": must not contain \".\" or \"..\" path segments"
             )));
         }
-        for ch in segment.chars() {
-            let allowed = ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-';
-            if !allowed {
-                return Err(WorktreeError::InvalidSlug(format!(
-                    "slug contains invalid character {ch:?} in segment {segment:?}"
-                )));
-            }
+        if segment.to_lowercase().trim_end_matches('.') == ".git" {
+            return Err(WorktreeError::InvalidSlug(format!(
+                "Invalid worktree name \"{slug}\": \"{segment}\" is a reserved git directory name"
+            )));
+        }
+        if segment.is_empty()
+            || !segment
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-')
+        {
+            return Err(WorktreeError::InvalidSlug(format!(
+                "Invalid worktree name \"{slug}\": each \"/\"-separated segment must be non-empty and contain only letters, digits, dots, underscores, and dashes"
+            )));
         }
     }
     Ok(())

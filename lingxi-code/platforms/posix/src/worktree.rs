@@ -41,28 +41,38 @@ pub const MAX_WORKTREE_SLUG_LENGTH: usize = 64;
 /// any rule fails. The detail is suitable for direct surfacing in `/doctor`
 /// or CLI error output.
 pub fn validate_worktree_slug(slug: &str) -> Result<(), WorktreeError> {
-    if slug.is_empty() {
-        return Err(WorktreeError::InvalidSlug("slug is empty".into()));
-    }
+    // 1:1 with the binary `_Tt`: a length cap (64 = `oac`), then per-`/`-segment
+    // checks — reject the `.`/`..` path segments, reject the reserved `.git`
+    // directory name (case-insensitive, trailing dots stripped), and require the
+    // allowed set `ytf=/^[a-zA-Z0-9._-]+$/` (which also rejects empty segments).
+    // Error messages are byte-exact: the binary wraps the slug/segment in LITERAL
+    // double-quotes (`"${e}"`/`"${t}"`), so we format `"{slug}"` — NOT `{slug:?}`
+    // (Rust Debug quoting would escape differently).
     if slug.len() > MAX_WORKTREE_SLUG_LENGTH {
         return Err(WorktreeError::InvalidSlug(format!(
-            "slug exceeds {MAX_WORKTREE_SLUG_LENGTH} chars (got {})",
+            "Invalid worktree name: must be {MAX_WORKTREE_SLUG_LENGTH} characters or fewer (got {})",
             slug.len()
         )));
     }
     for segment in slug.split('/') {
-        if segment.is_empty() {
+        if segment == "." || segment == ".." {
             return Err(WorktreeError::InvalidSlug(format!(
-                "slug contains empty segment: {slug:?}"
+                "Invalid worktree name \"{slug}\": must not contain \".\" or \"..\" path segments"
             )));
         }
-        for ch in segment.chars() {
-            let allowed = ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-';
-            if !allowed {
-                return Err(WorktreeError::InvalidSlug(format!(
-                    "slug contains invalid character {ch:?} in segment {segment:?}"
-                )));
-            }
+        if segment.to_lowercase().trim_end_matches('.') == ".git" {
+            return Err(WorktreeError::InvalidSlug(format!(
+                "Invalid worktree name \"{slug}\": \"{segment}\" is a reserved git directory name"
+            )));
+        }
+        if segment.is_empty()
+            || !segment
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-')
+        {
+            return Err(WorktreeError::InvalidSlug(format!(
+                "Invalid worktree name \"{slug}\": each \"/\"-separated segment must be non-empty and contain only letters, digits, dots, underscores, and dashes"
+            )));
         }
     }
     Ok(())
@@ -273,9 +283,12 @@ impl WorktreeManager for PosixWorktreeManager {
                     branch: String::new(),
                     created_at: std::time::SystemTime::now(),
                 });
-            } else if let Some(rest) = line.strip_prefix("branch refs/heads/") {
+            } else if let Some(rest) = line.strip_prefix("branch ") {
                 if let Some(c) = current.as_mut() {
-                    c.branch = rest.to_string();
+                    // Binary: `a.slice(7).replace(/^refs\/heads\//,"")` — strip the
+                    // `branch ` prefix (7 chars), then a leading `refs/heads/` if
+                    // present (a porcelain `branch ` line need not carry it).
+                    c.branch = rest.strip_prefix("refs/heads/").unwrap_or(rest).to_string();
                 }
             }
         }
@@ -334,35 +347,34 @@ impl WorktreeManager for PosixWorktreeManager {
         let stdout = String::from_utf8_lossy(&status.stdout);
         let changed_files = count_porcelain_changed_files(&stdout);
 
-        // Ahead-commit count, mirroring claude-code `countWorktreeChanges`
-        // (ExitWorktreeTool.ts): `git rev-list --count <base>..HEAD` where
-        // `<base>` is the worktree's `originalHeadCommit` captured at creation
-        // ([`WorktreeHandle::base_commit`]). When the handle carries no baseline
-        // (`None`) — or the rev-list spawn / parse fails — the count is `0`,
-        // exactly claude's `if (!headCommit) commitsAhead = 0` /
-        // `if (o.code !== 0) commitsAhead = 0`. The dirty working-tree count
-        // already succeeded above, so a rev-list failure degrades only the
-        // commit half rather than discarding the whole summary.
-        let commits = match &handle.base_commit {
-            Some(base) => Command::new("git")
-                .arg("-C")
-                .arg(&handle.path)
-                .arg("rev-list")
-                .arg("--count")
-                .arg(format!("{base}..HEAD"))
-                .output()
-                .await
-                .ok()
-                .filter(|o| o.status.success())
-                .and_then(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .trim()
-                        .parse::<usize>()
-                        .ok()
-                })
-                .unwrap_or(0),
-            None => 0,
+        // Ahead-commit count, 1:1 with the binary `LTl`: `git rev-list --count
+        // <base>..HEAD` where `<base>` is the worktree's baseline captured at
+        // creation ([`WorktreeHandle::base_commit`]). The binary returns `null`
+        // for the WHOLE summary — NOT a {n,0} half-result — when there is no
+        // baseline (`if (!t) return null`) or the rev-list spawn fails / exits
+        // non-zero (`if (o.code !== 0) return null`); the caller then defaults to
+        // `{0,0}` (`?? {changedFiles:0,commits:0}`) and emits no discard note.
+        // Only a zero-exit-but-unparseable count degrades to `0` (`parseInt||0`).
+        let Some(base) = &handle.base_commit else {
+            return Ok(None);
         };
+        let rev = Command::new("git")
+            .arg("-C")
+            .arg(&handle.path)
+            .arg("rev-list")
+            .arg("--count")
+            .arg(format!("{base}..HEAD"))
+            .output()
+            .await;
+        let rev = match rev {
+            Ok(o) if o.status.success() => o,
+            // Spawn failure or non-zero exit ⇒ null (whole summary discarded).
+            _ => return Ok(None),
+        };
+        let commits = String::from_utf8_lossy(&rev.stdout)
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(0);
 
         Ok(Some(WorktreeChangeSummary {
             changed_files,
@@ -411,6 +423,53 @@ mod slug_tests {
             Err(WorktreeError::InvalidSlug(_)),
         ));
         assert!(validate_worktree_slug(&"a".repeat(64)).is_ok());
+    }
+
+    // Binary `_Tt` per-segment rules: reject `.`/`..` path segments and the
+    // reserved `.git` directory name (case-insensitive, trailing dots stripped).
+    #[test]
+    fn validate_rejects_dot_dotdot_and_dotgit_segments() {
+        for bad in [
+            ".", "..", "foo/.", "foo/..", "../x", ".git", ".GIT", ".git.", ".git...",
+            "a/.git", "a/.git/b",
+        ] {
+            assert!(
+                matches!(
+                    validate_worktree_slug(bad),
+                    Err(WorktreeError::InvalidSlug(_))
+                ),
+                "expected err: {bad:?}"
+            );
+        }
+        // A `.git`-prefixed name that is NOT exactly the reserved dir is fine.
+        assert!(validate_worktree_slug(".gitfoo").is_ok());
+        assert!(validate_worktree_slug("foo.git").is_ok());
+    }
+
+    // Byte-exact error wording (binary `_Tt`, literal double-quotes around the
+    // slug/segment — not Rust Debug quoting).
+    #[test]
+    fn validate_error_messages_are_byte_exact() {
+        let msg = |s: &str| match validate_worktree_slug(s) {
+            Err(WorktreeError::InvalidSlug(d)) => d,
+            other => panic!("expected InvalidSlug, got {other:?}"),
+        };
+        assert_eq!(
+            msg(".."),
+            "Invalid worktree name \"..\": must not contain \".\" or \"..\" path segments"
+        );
+        assert_eq!(
+            msg(".git"),
+            "Invalid worktree name \".git\": \".git\" is a reserved git directory name"
+        );
+        assert_eq!(
+            msg("a b"),
+            "Invalid worktree name \"a b\": each \"/\"-separated segment must be non-empty and contain only letters, digits, dots, underscores, and dashes"
+        );
+        assert_eq!(
+            msg(&"a".repeat(65)),
+            "Invalid worktree name: must be 64 characters or fewer (got 65)"
+        );
     }
 
     #[test]
@@ -596,6 +655,17 @@ mod change_summary_tests {
         );
     }
 
+    async fn head_sha(dir: &std::path::Path) -> String {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success(), "git rev-parse HEAD failed");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
     /// Deterministic git repo: one commit, then a controllable dirty state.
     async fn init_repo(dir: &std::path::Path) {
         git(dir, &["init", "-q", "-b", "main"]).await;
@@ -613,10 +683,13 @@ mod change_summary_tests {
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().to_path_buf();
         init_repo(&repo).await;
+        // A baseline is required for a Some summary (binary `LTl` `if(!t)return
+        // null`); use HEAD so rev-list HEAD..HEAD = 0 commits.
+        let base = head_sha(&repo).await;
         let handle = WorktreeHandle {
             path: repo.clone(),
             branch_name: "main".into(),
-            base_commit: None,
+            base_commit: Some(base),
         };
         let summary = PosixWorktreeManager::new(repo)
             .worktree_change_summary(&handle)
@@ -641,10 +714,11 @@ mod change_summary_tests {
         tokio::fs::write(repo.join("untracked.txt"), "x")
             .await
             .unwrap();
+        let base = head_sha(&repo).await;
         let handle = WorktreeHandle {
             path: repo.clone(),
             branch_name: "main".into(),
-            base_commit: None,
+            base_commit: Some(base),
         };
         let summary = PosixWorktreeManager::new(repo)
             .worktree_change_summary(&handle)
@@ -656,6 +730,32 @@ mod change_summary_tests {
         assert_eq!(
             summary.changed_files_phrase(),
             Some("2 uncommitted files".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn change_summary_no_base_is_none() {
+        // Binary `LTl`: `if (!t) return null` — no baseline ⇒ the WHOLE summary
+        // is None (caller defaults to {0,0}, emits no discard note), even with a
+        // dirty working tree.
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().to_path_buf();
+        init_repo(&repo).await;
+        tokio::fs::write(repo.join("seed.txt"), "changed")
+            .await
+            .unwrap();
+        let handle = WorktreeHandle {
+            path: repo.clone(),
+            branch_name: "main".into(),
+            base_commit: None,
+        };
+        let summary = PosixWorktreeManager::new(repo)
+            .worktree_change_summary(&handle)
+            .await
+            .unwrap();
+        assert!(
+            summary.is_none(),
+            "no baseline ⇒ None, not a {{n,0}} half-result"
         );
     }
 

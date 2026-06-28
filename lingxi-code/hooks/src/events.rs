@@ -202,6 +202,10 @@ pub enum HookEvent {
         tool_output: Value,
         /// Tool invocation ID, matching the prior `PreToolUse`.
         tool_use_id: ToolUseId,
+        /// Tool execution time in ms (excludes permission-prompt + hook time) —
+        /// surfaced to the hook payload as `duration_ms` (claude-code 2.1.195).
+        /// `None` when the firer does not time the call (e.g. tests).
+        duration_ms: Option<u64>,
     },
     /// A tool call returned an error.
     PostToolUseFailure {
@@ -214,6 +218,9 @@ pub enum HookEvent {
         error: String,
         /// Tool invocation ID, matching the prior `PreToolUse`.
         tool_use_id: ToolUseId,
+        /// Tool execution time in ms (excludes permission-prompt + hook time) —
+        /// surfaced as `duration_ms` (claude-code 2.1.195). `None` when untimed.
+        duration_ms: Option<u64>,
     },
     /// A new session was opened.
     SessionStart {

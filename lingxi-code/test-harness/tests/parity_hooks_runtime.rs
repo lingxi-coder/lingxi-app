@@ -65,6 +65,7 @@ fn post_tool_use_event() -> HookEvent {
         tool_input: serde_json::json!({"command": "echo hi"}),
         tool_output: serde_json::json!({"output": "hi"}),
         tool_use_id: ToolUseId::new(),
+        duration_ms: None,
     }
 }
 

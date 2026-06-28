@@ -1320,6 +1320,7 @@ fn build_envelope_body(event: &HookEvent, ctx: &HookContext) -> Option<(&'static
             tool_input,
             tool_output,
             tool_use_id,
+            duration_ms,
         } => {
             let payload = PostToolUsePayload {
                 hook_event_name: HookEventNamePost,
@@ -1334,6 +1335,7 @@ fn build_envelope_body(event: &HookEvent, ctx: &HookContext) -> Option<(&'static
                 tool_input: tool_input.clone(),
                 tool_response: tool_output.clone(),
                 tool_use_id: tool_use_id.to_string(),
+                duration_ms: *duration_ms,
             };
             Some(("PostToolUse", serde_json::to_string(&payload).ok()?))
         }
@@ -1564,6 +1566,7 @@ fn build_lifecycle_envelope_body(
             tool_input,
             error,
             tool_use_id,
+            duration_ms,
         } => {
             let payload = PostToolUseFailurePayload {
                 hook_event_name: HookEventNamePostToolUseFailure,
@@ -1579,6 +1582,7 @@ fn build_lifecycle_envelope_body(
                 tool_use_id: tool_use_id.to_string(),
                 error: error.clone(),
                 is_interrupt: None,
+                duration_ms: *duration_ms,
             };
             Some(("PostToolUseFailure", serde_json::to_string(&payload).ok()?))
         }
@@ -3334,6 +3338,7 @@ mod command_arm_tests {
                 tool_input: json!({"command": "ls"}),
                 error: "boom".into(),
                 tool_use_id: ToolUseId::new(),
+                duration_ms: None,
             },
         )
         .await;
@@ -3725,6 +3730,7 @@ mod command_arm_tests {
                     tool_input: json!({}),
                     error: "boom".into(),
                     tool_use_id: ToolUseId::new(),
+                    duration_ms: None,
                 },
                 "PostToolUseFailure",
             ),
@@ -4770,6 +4776,7 @@ mod once_and_status_message_tests {
             tool_input: serde_json::json!({}),
             tool_output: serde_json::json!({ "content": "original" }),
             tool_use_id: ToolUseId::new(),
+            duration_ms: None,
         };
         let agg = exec.execute(post, HookContext::default()).await;
         assert_eq!(
@@ -4825,6 +4832,7 @@ mod once_and_status_message_tests {
             tool_input: serde_json::json!({}),
             tool_output: serde_json::json!("original"),
             tool_use_id: ToolUseId::new(),
+            duration_ms: None,
         };
         let agg = exec.execute(post, HookContext::default()).await;
         assert_eq!(
@@ -4913,6 +4921,7 @@ mod once_and_status_message_tests {
             tool_input: serde_json::json!({}),
             tool_output: serde_json::json!({ "content": "original" }),
             tool_use_id: ToolUseId::new(),
+            duration_ms: None,
         };
         let agg = exec.execute(post, HookContext::default()).await;
         assert!(

@@ -200,6 +200,11 @@ pub struct PostToolUsePayload {
     pub tool_input: Value,
     pub tool_response: Value,
     pub tool_use_id: String,
+    /// Tool execution time in ms (binary appends `duration_ms` last; schema
+    /// `.number().optional()` — "Tool execution time in milliseconds. Excludes
+    /// permission-prompt and hook time.").
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub duration_ms: Option<u64>,
 }
 
 /// Wire-format `Stop` payload (1:1 with `coreSchemas.ts:513-527`
@@ -452,6 +457,10 @@ pub struct PostToolUseFailurePayload {
     pub error: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub is_interrupt: Option<bool>,
+    /// Tool execution time in ms (binary appends `duration_ms` after
+    /// `is_interrupt`; schema `.number().optional()`).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub duration_ms: Option<u64>,
 }
 
 /// Wire-format `SessionEnd` payload (1:1 with `coreSchemas.ts:758-765`
@@ -1282,6 +1291,7 @@ mod tests {
             tool_input: json!({"path": "/x"}),
             tool_response: json!({"content": "data"}),
             tool_use_id: "tu-2".into(),
+            duration_ms: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains(r#""hook_event_name":"PostToolUse""#));
@@ -2194,6 +2204,7 @@ mod tests {
             tool_use_id: "tu-1".into(),
             error: "boom".into(),
             is_interrupt: None,
+            duration_ms: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert_eq!(
@@ -2218,6 +2229,7 @@ mod tests {
             tool_use_id: "tu".into(),
             error: "cancelled".into(),
             is_interrupt: Some(true),
+            duration_ms: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains(r#""tool_input":{"file_path":"/f"}"#));

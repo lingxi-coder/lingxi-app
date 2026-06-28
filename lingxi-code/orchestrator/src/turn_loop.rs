@@ -2884,9 +2884,15 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         let (progress_tx, _progress_rx) =
             tokio::sync::mpsc::channel::<tool_api::progress::ToolProgress>(8);
 
+        // Time the tool dispatch ONLY (excludes the permission prompt above and
+        // the Post hooks below) — surfaced to PostToolUse/Failure hooks as
+        // `duration_ms` (claude-code 2.1.195).
+        let tool_started = std::time::Instant::now();
         let tool_outcome = tool_handle
             .call(effective_input.clone(), ctx, progress_tx)
             .await;
+        #[allow(clippy::cast_possible_truncation)]
+        let tool_duration_ms = tool_started.elapsed().as_millis() as u64;
 
         let (content, is_error, emit_payload) = match tool_outcome {
             Ok(result) => {
@@ -2977,6 +2983,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 tool_input: effective_input.clone(),
                 error,
                 tool_use_id: tool_use_id.clone(),
+                duration_ms: Some(tool_duration_ms),
             }
         } else {
             HookEvent::PostToolUse {
@@ -2984,6 +2991,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 tool_input: effective_input.clone(),
                 tool_output: emit_payload.clone(),
                 tool_use_id: tool_use_id.clone(),
+                duration_ms: Some(tool_duration_ms),
             }
         };
         let post_started = std::time::Instant::now();

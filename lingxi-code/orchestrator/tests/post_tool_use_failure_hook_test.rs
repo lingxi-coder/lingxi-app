@@ -238,6 +238,7 @@ impl BuiltinHookHandler for RecordingHandler {
                 tool_input,
                 error,
                 tool_use_id,
+                ..
             } => self.log.lock().unwrap().push(Seen::PostFailure {
                 tool_name: tool_name.clone(),
                 tool_input: tool_input.clone(),

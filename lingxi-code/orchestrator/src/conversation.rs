@@ -7532,7 +7532,7 @@ mod turn_recovery_tests {
         orch.run_turn_streaming("go").await.expect("turn ends");
 
         let events = output.snapshot().await;
-        let expected = "API Error: Opus 4.8's safeguards flagged this message (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations. LingXi can't respond to this request with Opus 4.8.\nTry rephrasing the request in a new session or change your model.\nLearn more: https://support.claude.com/en/articles/15363606";
+        let expected = "API Error: Opus 4.8's safeguards flagged this message (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations. LingXi can't respond to this request with Opus 4.8.\n\nTry rephrasing the request in a new session or change your model.\n\nLearn more: https://support.claude.com/en/articles/15363606";
         assert!(
             events
                 .iter()

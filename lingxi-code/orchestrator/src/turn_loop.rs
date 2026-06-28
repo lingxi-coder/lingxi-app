@@ -1450,7 +1450,7 @@ pub(crate) async fn surface_rapid_refill_thrashing(
 /// ([`surface_terminal_api_error`]) terminal arms so both paths surface
 /// byte-identical text (claude-code `claude.ts:2266/2279`, `U2e`). The refusal
 /// cyber/bio category variant, the `stop_details.explanation` clause, and the
-/// `\nRequest ID: …` suffix remain residuals on BOTH paths — LingXi does not
+/// `\n\nRequest ID: …` suffix remain residuals on BOTH paths — LingXi does not
 /// thread `stop_details`/requestId into the terminal arm, so the non-cyber,
 /// no-explanation path (the common terminal) fires.
 pub(crate) fn terminal_api_error_text(
@@ -1503,9 +1503,11 @@ pub(crate) fn terminal_api_error_text(
                             "{label}'s safeguards flagged this message (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations."
                         )
                     };
-                    // Frame `c = `${bT}: ${h} <brand> can't respond … with ${l}.\n${m}\n${f}``
-                    // — SINGLE `\n` separators (binary). `<brand>` is the LingXi rebrand.
-                    format!("API Error: {a} LingXi can't respond to this request with {label}.\n{m}\n{f}")
+                    // Frame `c = `${bT}: ${h} <brand> can't respond … with ${l}.\n\n${m}\n\n${f}``
+                    // — DOUBLE `\n` separators (od -c verified on 2.1.195 @206804081;
+                    // the `strings` dump misled an earlier pass into single `\n`).
+                    // `<brand>` is the LingXi rebrand.
+                    format!("API Error: {a} LingXi can't respond to this request with {label}.\n\n{m}\n\n{f}")
                 }
                 None => {
                     // NO-LABEL branch.
@@ -1525,29 +1527,31 @@ pub(crate) fn terminal_api_error_text(
                         let exemption =
                             refusal_exemption_url(stop_details.and_then(|sd| sd.explanation.as_deref()));
                         // Binary: `${bT}: ${g}'s safeguards flagged this message
-                        // for a cybersecurity topic. … exemption: ${_aa(expl)}\n${m}\n${h}`
+                        // for a cybersecurity topic. … exemption: ${_aa(expl)}\n\n${m}\n\n${h}`
                         // where `g = r!=null ? vp(r) : "This model"` — no marketing
-                        // name here, so `g` = "This model". SINGLE `\n` separators.
+                        // name here, so `g` = "This model". DOUBLE `\n` separators
+                        // (od -c verified on 2.1.195 @206804566).
                         format!(
-                            "API Error: This model's safeguards flagged this message for a cybersecurity topic. If your work requires this access, you can apply for an exemption: {exemption}\n{m}\n{f}"
+                            "API Error: This model's safeguards flagged this message for a cybersecurity topic. If your work requires this access, you can apply for an exemption: {exemption}\n\n{m}\n\n{f}"
                         )
                     } else if is_military_weapons {
                         // Binary no-label `else if (f === "military_weapons")` arm:
                         //   `${bT}: ${h} has added safeguards for weapons-related
                         //   content, which blocked this request. Not weapons-related?
-                        //   This may be a false positive.\n${m}${p?"":`\nIf you
+                        //   This may be a false positive.\n\n${m}${p?"":`\n\nIf you
                         //   believe this was flagged in error, send feedback with
                         //   /feedback.`}`
                         // `h = r!=null ? vp(r) : "This model"` — no marketing name
                         // here ⇒ "This model". The feedback clause is interactive-only
                         // (`p` = non-interactive; the `${p?"":…}` tail fires when `!p`).
+                        // DOUBLE `\n` separators (od -c verified on 2.1.195 @206804812).
                         let tail = if interactive {
-                            "\nIf you believe this was flagged in error, send feedback with /feedback."
+                            "\n\nIf you believe this was flagged in error, send feedback with /feedback."
                         } else {
                             ""
                         };
                         format!(
-                            "API Error: This model has added safeguards for weapons-related content, which blocked this request. Not weapons-related? This may be a false positive.\n{m}{tail}"
+                            "API Error: This model has added safeguards for weapons-related content, which blocked this request. Not weapons-related? This may be a false positive.\n\n{m}{tail}"
                         )
                     } else {
                         // Binary final `else`: `${bT}: <brand> is unable to respond
@@ -1564,10 +1568,12 @@ pub(crate) fn terminal_api_error_text(
                     }
                 }
             };
-            // Binary `u = n ? `\nRequest ID: ${n}` : ""` — SINGLE `\n`, appended to
+            // Binary `u = n ? `\n\nRequest ID: ${n}` : ""` — DOUBLE `\n`, appended to
             // `base` only when a request id is present (REFUSAL-ONLY surface).
+            // (od -c verified on 2.1.195 @206805081; strings dump misled an earlier
+            // pass into single `\n`.)
             let suffix = match request_id {
-                Some(id) if !id.is_empty() => format!("\nRequest ID: {id}"),
+                Some(id) if !id.is_empty() => format!("\n\nRequest ID: {id}"),
                 _ => String::new(),
             };
             Some(format!("{base}{suffix}"))
@@ -3461,16 +3467,15 @@ mod terminal_api_error_tests {
         }
     }
 
-    /// The refusal message appends `\nRequest ID: {id}` (single newline) when a
-    /// request id is present (binary `u = n ? `\nRequest ID: ${n}` : ""`), and
+    /// The refusal message appends `\n\nRequest ID: {id}` (double newline) when a
+    /// request id is present (binary `u = n ? `\n\nRequest ID: ${n}` : ""`), and
     /// omits it otherwise. The suffix is REFUSAL-ONLY.
     #[test]
     fn refusal_appends_request_id_suffix() {
         let with =
             terminal_api_error_text("claude-opus-4-8", true, "refusal", Some("req_011abc"), None)
                 .expect("refusal text");
-        assert!(with.ends_with("\nRequest ID: req_011abc"), "got: {with}");
-        assert!(!with.ends_with("\n\nRequest ID: req_011abc"), "single newline; got: {with}");
+        assert!(with.ends_with("\n\nRequest ID: req_011abc"), "double newline; got: {with}");
 
         let without = terminal_api_error_text("claude-opus-4-8", true, "refusal", None, None)
             .expect("refusal text");
@@ -3548,9 +3553,8 @@ mod terminal_api_error_tests {
             t.contains("This model's safeguards flagged this message for a cybersecurity topic"),
             "got: {t}"
         );
-        // Extracted URL (trailing comma stripped) — SINGLE newline separator.
-        assert!(t.contains("exemption: https://claude.com/form/abc123\n"), "got: {t}");
-        assert!(!t.contains("exemption: https://claude.com/form/abc123\n\n"), "single newline; got: {t}");
+        // Extracted URL (trailing comma stripped) — DOUBLE newline separator.
+        assert!(t.contains("exemption: https://claude.com/form/abc123\n\n"), "double newline; got: {t}");
         assert!(!t.contains("abc123,"), "trailing punct must be stripped; got: {t}");
     }
 
@@ -3564,12 +3568,12 @@ mod terminal_api_error_tests {
         let ti = terminal_api_error_text("unknown-model-xyz", true, "refusal", None, Some(&sd))
             .expect("refusal");
         assert!(
-            ti.starts_with("API Error: This model has added safeguards for weapons-related content, which blocked this request. Not weapons-related? This may be a false positive.\n"),
+            ti.starts_with("API Error: This model has added safeguards for weapons-related content, which blocked this request. Not weapons-related? This may be a false positive.\n\n"),
             "got: {ti}"
         );
         assert!(
-            ti.contains("\nIf you believe this was flagged in error, send feedback with /feedback."),
-            "interactive feedback clause; got: {ti}"
+            ti.contains("\n\nIf you believe this was flagged in error, send feedback with /feedback."),
+            "interactive feedback clause (double newline); got: {ti}"
         );
         // Non-interactive → NO "send feedback" clause.
         let tn = terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd))

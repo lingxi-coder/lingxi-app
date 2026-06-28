@@ -256,7 +256,9 @@ fn check_telemetry_schema() -> DoctorCheck {
     // Permission flow: +1 (permission::NAMES, bypass dialog accept) → 344.
     // Coordinator swarm: +3 (coordinator::NAMES — team_created/team_deleted/
     //        coordinator_mode_switched) → 347.
-    let expected = 347;
+    // Strict-parity (2.1.195): dropped port-only tengu_cost_recorded (cost
+    //        block 10 → 9) → 346.
+    let expected = 346;
     DoctorCheck {
         name: "telemetry-schema".to_string(),
         status: if actual == expected {

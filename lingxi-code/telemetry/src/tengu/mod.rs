@@ -87,7 +87,28 @@ pub const ALL_EVENT_NAMES: &[&str] = {
     // Coordinator swarm events: +3 (coordinator::NAMES — tengu_team_created,
     //        tengu_team_deleted, tengu_coordinator_mode_switched) appended as
     //        their own GLOBAL-TAIL block after the permission block → 347 total.
-    const TOTAL: usize = 25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + 17 + 4 + 54 + 13 + 4 + 9 + 1 + 3;
+    // Strict-parity removed events (D1 tengu_tool_todo_write_*, D2 port-only
+    // tengu_cost_recorded — both absent in claude-code 2.1.195) shrank their
+    // blocks. Rather than hand-maintain a brittle running sum (which drifted and
+    // left empty `""` slots → duplicate/bad-prefix failures), derive TOTAL from
+    // the actual per-block `NAMES.len()` so the array size ALWAYS equals the
+    // number of names concat_all appends, in the SAME block order.
+    const TOTAL: usize = api::NAMES.len()
+        + agent::NAMES.len()
+        + session::NAMES.len()
+        + tool::NAMES.len()
+        + cost::NAMES.len()
+        + oauth::NAMES.len()
+        + memory::NAMES.len()
+        + settings::NAMES.len()
+        + orchestrator::NAMES.len()
+        + release::NAMES.len()
+        + command::NAMES.len()
+        + tui::NAMES.len()
+        + tool::FILE_READ_ANALYTICS_NAMES.len()
+        + migration::NAMES.len()
+        + permission::NAMES.len()
+        + coordinator::NAMES.len();
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;

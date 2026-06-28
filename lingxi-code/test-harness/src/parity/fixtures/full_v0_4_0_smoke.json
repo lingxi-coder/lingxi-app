@@ -75,7 +75,7 @@
   },
   "cost_events": {
     "tengu_cost_event_names": [
-      "tengu_cost_recorded",
+      "tengu_api_success",
       "tengu_cost_budget_warning",
       "tengu_cost_budget_exceeded"
     ],

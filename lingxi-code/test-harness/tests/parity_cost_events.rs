@@ -1,16 +1,18 @@
-//! Parity fixture: `tengu_cost_*` event names + payload shapes locked against
-//! the M3 spec (`docs/superpowers/specs/2026-05-23-m3-engine-completion-design.md` §7).
+//! Parity fixture: `tengu_api_success` event name + payload field subset locked
+//! against claude-code 2.1.195's per-request success emission, plus the
+//! surviving `tengu_cost_budget_*` thresholds.
 //!
-//! Drift on this fixture breaks downstream `BigQuery` / Statsig dashboards that
-//! join on `model` + `session_id` + `cost_usd` so a parity test is the right
-//! place to lock it.
+//! Strict-parity note: the former `tengu_cost_recorded` event was PORT-ONLY
+//! (0 hits in claude-code 2.1.195) and was dropped; the per-request success
+//! telemetry is now `tengu_api_success` (`cost::emit_api_success`). The
+//! HashMap-backed sink does not byte-lock field order — only the field-name
+//! SET + value types/values are observable.
 
 use async_trait::async_trait;
 use cost::{
-    emit_cost_recorded, BATCH_DISCOUNT_BPS, BUDGET_EXCEEDED_THRESHOLD_BPS,
+    emit_api_success, ApiSuccessFields, BATCH_DISCOUNT_BPS, BUDGET_EXCEEDED_THRESHOLD_BPS,
     BUDGET_WARNING_THRESHOLD_BPS,
 };
-use protocol::SessionId;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -21,8 +23,8 @@ use test_harness::parity::load_fixture;
 struct Fixture {
     event_names: EventNames,
     thresholds_bps: Thresholds,
-    canonical_cost_recorded_input: CanonicalInput,
-    expected_payload_keys_in_declaration_order: Vec<String>,
+    canonical_api_success_input: CanonicalInput,
+    expected_payload_keys: Vec<String>,
     expected_payload_values: HashMap<String, serde_json::Value>,
     budget_warning_payload_keys: Vec<String>,
     budget_exceeded_payload_keys: Vec<String>,
@@ -30,7 +32,7 @@ struct Fixture {
 
 #[derive(Deserialize)]
 struct EventNames {
-    cost_recorded: String,
+    api_success: String,
     budget_warning: String,
     budget_exceeded: String,
 }
@@ -47,11 +49,26 @@ struct CanonicalInput {
     model: String,
     input_tokens: u64,
     output_tokens: u64,
-    cache_read_input_tokens: u64,
-    cache_creation_input_tokens: u64,
+    cached_input_tokens: u64,
+    uncached_input_tokens: u64,
+    duration_ms: u64,
+    duration_ms_including_retries: u64,
+    attempt: u32,
     cost_nano_usd: u64,
-    session_id: String,
-    is_batch_request: bool,
+    provider: String,
+    stop_reason: String,
+    request_id: String,
+    message_count: u32,
+    message_tokens: u64,
+    did_fall_back_to_non_streaming: bool,
+    is_non_interactive_session: bool,
+    print: bool,
+    is_tty: bool,
+    query_source: String,
+    permission_mode: String,
+    ttft_ms: u64,
+    fast_mode: bool,
+    time_since_last_api_call_ms: u64,
 }
 
 #[derive(Default)]
@@ -76,8 +93,8 @@ impl AnalyticsSink for CaptureSink {
 fn event_names_match_fixture_byte_for_byte() {
     let fx: Fixture = load_fixture("cost_events");
     assert_eq!(
-        fx.event_names.cost_recorded, "tengu_cost_recorded",
-        "fixture must declare the spec-locked cost_recorded event name"
+        fx.event_names.api_success, "tengu_api_success",
+        "fixture must declare the claude-2.1.195 api_success event name"
     );
     assert_eq!(fx.event_names.budget_warning, "tengu_cost_budget_warning");
     assert_eq!(fx.event_names.budget_exceeded, "tengu_cost_budget_exceeded");
@@ -101,7 +118,7 @@ fn thresholds_match_constants_byte_for_byte() {
 }
 
 #[tokio::test]
-async fn cost_recorded_payload_matches_fixture_byte_for_byte() {
+async fn api_success_payload_matches_fixture_byte_for_byte() {
     let fx: Fixture = load_fixture("cost_events");
 
     let bus = Arc::new(AnalyticsBus::new());
@@ -109,38 +126,56 @@ async fn cost_recorded_payload_matches_fixture_byte_for_byte() {
     bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>)
         .await;
 
-    // SessionId::nil().to_string() = "sess:00000000-0000-0000-0000-000000000000"
-    // (the `sess:` prefix is part of the Display impl in lingxi-protocol::ids).
-    let session = SessionId::nil();
-    assert_eq!(
-        session.to_string(),
-        fx.canonical_cost_recorded_input.session_id,
-        "SessionId::nil().to_string() must match fixture",
-    );
-
-    emit_cost_recorded(
+    let inp = &fx.canonical_api_success_input;
+    emit_api_success(
         &bus,
-        &fx.canonical_cost_recorded_input.model,
-        fx.canonical_cost_recorded_input.input_tokens,
-        fx.canonical_cost_recorded_input.output_tokens,
-        fx.canonical_cost_recorded_input.cache_read_input_tokens,
-        fx.canonical_cost_recorded_input.cache_creation_input_tokens,
-        fx.canonical_cost_recorded_input.cost_nano_usd,
-        &session,
-        fx.canonical_cost_recorded_input.is_batch_request,
+        &ApiSuccessFields {
+            model: inp.model.clone(),
+            input_tokens: inp.input_tokens,
+            output_tokens: inp.output_tokens,
+            cached_input_tokens: inp.cached_input_tokens,
+            uncached_input_tokens: inp.uncached_input_tokens,
+            duration_ms: inp.duration_ms,
+            duration_ms_including_retries: inp.duration_ms_including_retries,
+            attempt: inp.attempt,
+            cost_nano_usd: inp.cost_nano_usd,
+            provider: inp.provider.clone(),
+            stop_reason: Some(inp.stop_reason.clone()),
+            request_id: Some(inp.request_id.clone()),
+            message_count: inp.message_count,
+            message_tokens: inp.message_tokens,
+            did_fall_back_to_non_streaming: inp.did_fall_back_to_non_streaming,
+            is_non_interactive_session: inp.is_non_interactive_session,
+            print: inp.print,
+            is_tty: inp.is_tty,
+            query_source: inp.query_source.clone(),
+            permission_mode: inp.permission_mode.clone(),
+            ttft_ms: Some(inp.ttft_ms),
+            fast_mode: inp.fast_mode,
+            time_since_last_api_call_ms: Some(inp.time_since_last_api_call_ms),
+        },
     )
     .await;
 
     let events = sink.events.lock().unwrap();
-    assert_eq!(events.len(), 1, "exactly one cost event");
-    assert_eq!(events[0].0, fx.event_names.cost_recorded);
+    assert_eq!(events.len(), 1, "exactly one api_success event");
+    assert_eq!(events[0].0, fx.event_names.api_success);
     let payload = &events[0].1;
 
     // Every expected key is present and matches its expected value.
-    for key in &fx.expected_payload_keys_in_declaration_order {
+    for key in &fx.expected_payload_keys {
         let actual = payload
             .get(key)
             .unwrap_or_else(|| panic!("payload missing key {key}"));
+        // `buildAgeMins:THl()` is wall-clock-derived (non-deterministic): assert
+        // PRESENCE + Int type only, never an exact minutes value.
+        if key == "buildAgeMins" {
+            assert!(
+                matches!(actual, AnalyticsValue::Int(_)),
+                "buildAgeMins must be Int, got {actual:?}"
+            );
+            continue;
+        }
         let expected = fx
             .expected_payload_values
             .get(key)
@@ -153,6 +188,11 @@ async fn cost_recorded_payload_matches_fixture_byte_for_byte() {
                 let e_i64 = e.as_i64().expect("fixture int");
                 assert_eq!(*a, e_i64, "key {key} int mismatch");
             }
+            // costUSD is a DOLLARS float (claude `costUSD:p`).
+            (AnalyticsValue::Float(a), serde_json::Value::Number(e)) => {
+                let e_f64 = e.as_f64().expect("fixture float");
+                assert!((a - e_f64).abs() < 1e-12, "key {key} float mismatch");
+            }
             (AnalyticsValue::Bool(a), serde_json::Value::Bool(e)) => {
                 assert_eq!(*a, *e, "key {key} bool mismatch");
             }
@@ -162,11 +202,11 @@ async fn cost_recorded_payload_matches_fixture_byte_for_byte() {
     // No extra keys.
     assert_eq!(
         payload.len(),
-        fx.expected_payload_keys_in_declaration_order.len(),
+        fx.expected_payload_keys.len(),
         "payload has extra keys: {:?}",
         payload
             .keys()
-            .filter(|k| !fx.expected_payload_keys_in_declaration_order.contains(k))
+            .filter(|k| !fx.expected_payload_keys.contains(k))
             .collect::<Vec<_>>(),
     );
 }

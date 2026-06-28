@@ -2496,8 +2496,9 @@ pub async fn build(
     // profile/roles fetch) so the drive loops read subscriber/enterprise state at
     // call time — `subscriber_state` remains the build-time seed/fallback.
     // M7: one analytics bus shared by the provider adapter (`tengu_api_*`) and the
-    // orchestrator (`tengu_cost_recorded`) so all live telemetry lands on the same
-    // sink set — 1:1 with claude-code, where `logEvent` is a single global pipeline.
+    // orchestrator (`tengu_api_success` per completed response) so all live
+    // telemetry lands on the same sink set — 1:1 with claude-code, where
+    // `logEvent` is a single global pipeline.
     let analytics_bus = Arc::new(telemetry::AnalyticsBus::new());
     // metadata.user_id (getAPIMetadata, claude.ts:519): the JSON-string identity
     // `{...extra, device_id, account_uuid, session_id}`. `device_id` =

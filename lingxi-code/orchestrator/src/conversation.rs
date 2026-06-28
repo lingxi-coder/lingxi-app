@@ -778,9 +778,10 @@ pub struct ConversationOrchestrator {
     pub(crate) cost_tracker: Option<Arc<cost::CostTracker>>,
     /// Optional analytics bus wired by [`Self::with_analytics_bus`] (M7). When
     /// present (desktop composition root), the live turn loop fires
-    /// `tengu_cost_recorded` per recorded API response — 1:1 with claude-code's
-    /// `logEvent('tengu_cost_recorded', …)`. `None` for library/test callers,
-    /// which then silently skip the emission (the tracker still accrues totals).
+    /// `tengu_api_success` per completed API response — 1:1 with claude-code
+    /// 2.1.195's `logEvent('tengu_api_success', …)`. `None` for library/test
+    /// callers, which then silently skip the emission (the tracker still accrues
+    /// totals).
     pub(crate) analytics_bus: Option<Arc<telemetry::AnalyticsBus>>,
     /// Monotonic timestamp captured at orchestrator construction. Used by
     /// `snapshot_cost` to compute the `session_duration` field of the
@@ -794,6 +795,10 @@ pub struct ConversationOrchestrator {
     /// does not carry a per-call counter; `ModelUsage::usage.add()` merges
     /// the token totals but not "how many times we recorded".
     pub(crate) api_calls_recorded: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// `tengu_api_success` `timeSinceLastApiCallMs:W` source: ms-since-session-start
+    /// of the PREVIOUS successful API call (claude's module-level `G`). `-1` until
+    /// the first call. Shared by the streaming + non-streaming emit sites.
+    pub(crate) last_api_call_at_ms: std::sync::Arc<std::sync::atomic::AtomicI64>,
     /// MCP registry (M2-02b). `None` when not wired — `list_mcp_servers`
     /// then returns `vec![]`. The CLI binary (M6-07 init.rs) populates
     /// this from `.mcp.json` + `~/.config/lingxi/mcp.json`.
@@ -1109,6 +1114,19 @@ fn find_unresolved_tool_use_in_history(
 }
 
 impl ConversationOrchestrator {
+    /// `tengu_api_success` `timeSinceLastApiCallMs`: ms since the previous
+    /// successful API call, then record this call's timestamp. Returns `None`
+    /// on the first call (claude `W=G!==null?Math.max(0,Math.round(M-G)):void 0`).
+    #[allow(clippy::cast_sign_loss)]
+    pub(crate) fn record_api_call_gap_ms(&self) -> Option<u64> {
+        use std::sync::atomic::Ordering;
+        let now_ms =
+            i64::try_from(self.session_started_at.elapsed().as_millis()).unwrap_or(i64::MAX);
+        let prev = self.last_api_call_at_ms.swap(now_ms, Ordering::SeqCst);
+        // `prev < 0` is the `-1` sentinel = no prior call → OMIT the field.
+        (prev >= 0).then(|| (now_ms - prev).max(0) as u64)
+    }
+
     /// Construct a new orchestrator with a fresh in-memory session and
     /// BOTH batched + streaming API clients wired.
     ///
@@ -1161,6 +1179,7 @@ impl ConversationOrchestrator {
             analytics_bus: None,
             session_started_at: std::time::Instant::now(),
             api_calls_recorded: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            last_api_call_at_ms: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(-1)),
             mcp_registry: None,
             hook_registry: None,
             agent_catalog: None,
@@ -1298,7 +1317,7 @@ impl ConversationOrchestrator {
     }
 
     /// Attach an analytics bus so the live turn loop fires
-    /// `tengu_cost_recorded` per recorded API response (M7). Without this the
+    /// `tengu_api_success` per completed API response (M7). Without this the
     /// cost tracker still accrues totals but emits no analytics event — matching
     /// the pre-M7 behavior (and library/test callers that don't want telemetry).
     /// The desktop composition root passes the SAME bus it gives the provider
@@ -4944,6 +4963,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // `self.streaming_api.last_retry_count()` at the billing site below.
             let api_call_started = std::time::Instant::now();
 
+            // tengu_api_success `messageCount:n` / `messageTokens:r`: capture from
+            // the OUTGOING snapshot BEFORE it is moved into `.stream(...)`.
+            let api_success_message_count =
+                u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
+            let api_success_message_tokens =
+                compaction::grouping::estimate_tokens_for_range(&snapshot);
+
             // Either an open stream to pump, or a turn already RECOVERED from a
             // connect-phase prompt-too-long (#1, see the ContextOverflow arm).
             enum OpenOutcome {
@@ -5311,18 +5337,67 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     let cache_read = usage.billable_tokens.cache_read;
                     let cache_create = usage.billable_tokens.cache_write;
                     let model_ref = crate::cost_wiring::model_ref_from_string(&model);
-                    let _cost = tracker
+                    let elapsed = api_call_started.elapsed();
+                    let retries = self.streaming_api.last_retry_count();
+                    let cost_for_this_call = tracker
                         .record_api_response_v2(
-                            model_ref,
+                            model_ref.clone(),
                             cost_usage,
-                            api_call_started.elapsed(),
-                            self.streaming_api.last_retry_count(),
+                            elapsed,
+                            retries,
                             cache_read,
                             cache_create,
                             false, // is_batch_request — streaming is never batch
-                            self.analytics_bus.as_ref(), // M7: fire tengu_cost_recorded
+                            self.analytics_bus.as_ref(),
                         )
                         .await;
+                    // strict-parity (2.1.195): fire `tengu_api_success` on the
+                    // streaming per-request success path (claude
+                    // `j("tengu_api_success", {...})`). `tengu_cost_recorded`
+                    // was port-only and dropped.
+                    if let Some(bus) = self.analytics_bus.as_ref() {
+                        #[allow(clippy::cast_possible_truncation)]
+                        let dur_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+                        cost::emit_api_success(
+                            bus,
+                            &cost::ApiSuccessFields {
+                                model: model.clone(),
+                                input_tokens: usage.billable_tokens.input,
+                                output_tokens: usage.billable_tokens.output,
+                                cached_input_tokens: cache_read,
+                                uncached_input_tokens: cache_create,
+                                duration_ms: dur_ms,
+                                duration_ms_including_retries: dur_ms,
+                                attempt: retries + 1,
+                                cost_nano_usd: cost_for_this_call,
+                                provider: crate::cost_wiring::provider_tag(&model_ref.provider),
+                                stop_reason: pumped.stop_reason.clone(),
+                                request_id: self.api.last_request_id(),
+                                message_count: api_success_message_count,
+                                message_tokens: api_success_message_tokens,
+                                // The 529 non-streaming fallback flows through this
+                                // SAME emit; threading a real flag through
+                                // `PumpedTurn` is deferred, so `false` uniformly
+                                // (documented close divergence vs claude `m`).
+                                did_fall_back_to_non_streaming: false,
+                                is_non_interactive_session:
+                                    traits::session_flags::is_non_interactive_session(),
+                                print: traits::session_flags::is_non_interactive_session(),
+                                is_tty: false,
+                                query_source: "user".into(),
+                                permission_mode: if self.session.lock().await.plan_mode {
+                                    "plan"
+                                } else {
+                                    "default"
+                                }
+                                .to_string(),
+                                ttft_ms: None,
+                                fast_mode: usage.speed.as_deref() == Some("fast"),
+                                time_since_last_api_call_ms: self.record_api_call_gap_ms(),
+                            },
+                        )
+                        .await;
+                    }
                     self.api_calls_recorded
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }

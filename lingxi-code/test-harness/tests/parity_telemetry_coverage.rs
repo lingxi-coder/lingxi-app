@@ -51,8 +51,9 @@ const TOOL_SNAKE: &[(&str, &str)] = &[
     // Web (2)
     ("WebFetch", "web_fetch"),
     ("WebSearch", "web_search"),
-    // Workflow (5)
-    ("TodoWrite", "todo_write"),
+    // Workflow (4) — TodoWrite is omitted: claude-code 2.1.195 emits NO
+    // tengu_tool_todo_write_* telemetry (D1 strict-parity removal), so the
+    // Rust port emits none either.
     ("EnterPlanMode", "enter_plan_mode"),
     ("ExitPlanMode", "exit_plan_mode"),
     ("EnterWorktree", "enter_worktree"),
@@ -89,20 +90,21 @@ const TOOL_SNAKE: &[(&str, &str)] = &[
 ];
 
 #[test]
-fn snake_table_covers_40_tools() {
+fn snake_table_covers_39_tools() {
     // Grep and Glob are intentionally absent: claude-code v2.1.183 emits NO
     // tengu_tool_grep_* / tengu_tool_glob_* telemetry, so the port emits none
-    // and the coverage table drops those 2 rows (42 → 40).
+    // and the coverage table drops those 2 rows (42 → 40). Strict-parity
+    // (2.1.195) then drops TodoWrite (D1, no tengu_tool_todo_write_*): 40 → 39.
     assert_eq!(
         TOOL_SNAKE.len(),
-        40,
-        "telemetry snake table must cover 40 tools (got {})",
+        39,
+        "telemetry snake table must cover 39 tools (got {})",
         TOOL_SNAKE.len()
     );
     let unique: BTreeSet<&str> = TOOL_SNAKE.iter().map(|(n, _)| *n).collect();
-    assert_eq!(unique.len(), 40, "tool display-names unique");
+    assert_eq!(unique.len(), 39, "tool display-names unique");
     let unique_snakes: BTreeSet<&str> = TOOL_SNAKE.iter().map(|(_, s)| *s).collect();
-    assert_eq!(unique_snakes.len(), 40, "snake suffixes unique");
+    assert_eq!(unique_snakes.len(), 39, "snake suffixes unique");
 }
 
 #[test]
@@ -128,11 +130,12 @@ fn every_tool_has_three_registered_events() {
 fn names_cardinality_locked() {
     // M3-06 baseline + M4-02..08 deltas, minus the 6 fabricated grep/glob
     // events (claude-code v2.1.183 emits no tengu_tool_grep_* /
-    // tengu_tool_glob_* telemetry), land at 134 entries.
+    // tengu_tool_glob_* telemetry), land at 134 entries. Strict-parity (2.1.195)
+    // then drops the 3 tengu_tool_todo_write_* events (D1): 134 - 3 = 131.
     let count = tool_event_names().len();
     assert_eq!(
-        count, 134,
-        "tengu_tool_* events in ALL_EVENT_NAMES locked at 134 entries (Grep/Glob emit no telemetry, matching claude-code)"
+        count, 131,
+        "tengu_tool_* events in ALL_EVENT_NAMES locked at 131 entries (Grep/Glob/TodoWrite emit no telemetry, matching claude-code 2.1.195)"
     );
 }
 

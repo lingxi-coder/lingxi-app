@@ -46,8 +46,8 @@ pub struct CostState {
 ///
 /// M3-05 adds `cache_read_input_tokens` and `cache_creation_input_tokens`
 /// (declaration position locked AFTER `usage` and BEFORE `cost_nano_usd`).
-/// These are Anthropic-specific prompt-caching counters forwarded to the
-/// `tengu_cost_recorded` payload; they default to `0` for non-Anthropic
+/// These are Anthropic-specific prompt-caching counters surfaced in the
+/// `tengu_api_success` payload; they default to `0` for non-Anthropic
 /// providers.
 ///
 /// `#[serde(default)]` on the new fields preserves on-disk compatibility:
@@ -123,9 +123,8 @@ impl CostTracker {
             .await;
     }
 
-    /// M3-05 entry point: record one successful API response and emit
-    /// `tengu_cost_recorded` if a bus is provided. Returns the recorded
-    /// cost in nano-USD for this single call.
+    /// M3-05 entry point: record one successful API response. Returns the
+    /// recorded cost in nano-USD for this single call.
     ///
     /// # Spec parity
     ///
@@ -133,13 +132,11 @@ impl CostTracker {
     ///   arithmetic per v3 §17.
     /// - **NEVER applies the batches discount in M3** even if
     ///   `is_batch_request = true` (which it isn't in M3 because the
-    ///   `/v1/messages/batches` endpoint is M4). The `is_batch_request` arg is
-    ///   forwarded verbatim to the `tengu_cost_recorded` payload so dashboards
-    ///   can group by it later. M4 will multiply `cost` by
+    ///   `/v1/messages/batches` endpoint is M4). M4 will multiply `cost` by
     ///   `(10000 - BATCH_DISCOUNT_BPS) / 10000` for true.
-    /// - Emits `tengu_cost_recorded` AFTER the in-memory state is updated and
-    ///   AFTER the snapshot is forwarded to `persist_tx`, so the event reflects
-    ///   the post-record state.
+    /// - The per-request success telemetry (`tengu_api_success`) is fired from
+    ///   the orchestrator success path, not here; the port-only
+    ///   `tengu_cost_recorded` event was dropped under strict parity.
     ///
     /// # Returns
     ///
@@ -223,21 +220,12 @@ impl CostTracker {
         };
         let _ = self.persist_tx.send(snap).await;
 
-        // ----- emit tengu_cost_recorded -----
-        if let Some(bus) = bus {
-            crate::events::emit_cost_recorded(
-                bus,
-                &model_ref.model,
-                usage.tokens.input,
-                usage.tokens.output,
-                cache_read_input_tokens,
-                cache_creation_input_tokens,
-                cost,
-                &session_id,
-                is_batch_request,
-            )
-            .await;
-        }
+        // `tengu_cost_recorded` was a PORT-ONLY event (0 hits in claude-code
+        // 2.1.195) — dropped under strict parity. The per-request success
+        // telemetry is now `tengu_api_success`, fired from the orchestrator
+        // success path (where request id / stop reason / provider live), not
+        // from here. Cost ACCOUNTING above is untouched.
+        let _ = (&bus, is_batch_request, &session_id);
 
         cost
     }
@@ -292,38 +280,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_v2_tracks_cache_tokens_and_emits_event() {
-        use async_trait::async_trait;
-        use std::sync::Mutex;
-        use telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
-
-        #[derive(Default)]
-        struct CaptureSink {
-            events: Mutex<Vec<(String, LogEventMetadata)>>,
-        }
-        #[async_trait]
-        impl AnalyticsSink for CaptureSink {
-            async fn log_event(&self, name: &str, metadata: LogEventMetadata) {
-                self.events.lock().unwrap().push((name.into(), metadata));
-            }
-            async fn log_event_async(&self, name: &str, metadata: LogEventMetadata) {
-                self.events.lock().unwrap().push((name.into(), metadata));
-            }
-            fn name(&self) -> &str {
-                "capture"
-            }
-        }
-
+    async fn record_v2_tracks_cache_tokens() {
+        // Strict-parity note: the tracker no longer emits a telemetry event —
+        // `tengu_cost_recorded` was a port-only event (0 hits in claude-code
+        // 2.1.195) and was dropped; the per-request success telemetry is now
+        // `tengu_api_success`, fired from the orchestrator. This test asserts
+        // the cost ACCOUNTING (return value + per-model cache counters).
         let (tx, mut rx) = mpsc::channel(8);
         let tracker = CostTracker::new(
             SessionId::nil(),
             Arc::new(PricingCatalog::builtin_reference()),
             tx,
         );
-        let bus = Arc::new(AnalyticsBus::new());
-        let sink: Arc<CaptureSink> = Arc::new(CaptureSink::default());
-        bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>)
-            .await;
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
 
         let mr = ModelRef {
             provider: ProviderId::Anthropic,
@@ -358,28 +327,11 @@ mod tests {
         let entry = snap.per_model_usage.get(&mr).expect("model entry present");
         assert_eq!(entry.cache_read_input_tokens, 128);
         assert_eq!(entry.cache_creation_input_tokens, 64);
-
-        // tengu_cost_recorded fired exactly once with the cache counters.
-        let events = sink.events.lock().unwrap();
-        assert_eq!(events.len(), 1, "exactly one cost event");
-        assert_eq!(events[0].0, "tengu_cost_recorded");
-        match &events[0].1["cache_read_input_tokens"] {
-            AnalyticsValue::Int(n) => assert_eq!(*n, 128),
-            other => panic!("expected Int(128), got {other:?}"),
-        }
-        match &events[0].1["cache_creation_input_tokens"] {
-            AnalyticsValue::Int(n) => assert_eq!(*n, 64),
-            other => panic!("expected Int(64), got {other:?}"),
-        }
-        match &events[0].1["is_batch_request"] {
-            AnalyticsValue::Bool(b) => assert!(!*b, "M3 always false"),
-            other => panic!("expected Bool(false), got {other:?}"),
-        }
     }
 
     #[tokio::test]
-    async fn record_v2_without_bus_silently_skips_emission() {
-        // No bus → no event but state still updates.
+    async fn record_v2_without_bus_still_updates_state() {
+        // No bus → state still updates (the tracker emits no telemetry).
         let (tx, mut rx) = mpsc::channel(8);
         let tracker = CostTracker::new(
             SessionId::nil(),

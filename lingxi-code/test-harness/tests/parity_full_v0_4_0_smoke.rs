@@ -217,10 +217,12 @@ fn full_v0_4_0_smoke_fixture_loads_and_self_consistent() {
 
     // --- Cost events literals ---
     assert_eq!(fx.cost_events.tengu_cost_event_names.len(), 3);
+    // Strict-parity (2.1.195): per-request success event is `tengu_api_success`
+    // (the port-only `tengu_cost_recorded` was dropped — 0 hits in 2.1.195).
     assert!(fx
         .cost_events
         .tengu_cost_event_names
-        .contains(&"tengu_cost_recorded".to_string()));
+        .contains(&"tengu_api_success".to_string()));
     assert!(fx
         .cost_events
         .tengu_cost_event_names

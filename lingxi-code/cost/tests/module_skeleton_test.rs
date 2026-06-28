@@ -4,10 +4,12 @@
 #[test]
 fn events_module_exports_emit_fn() {
     // Compile-time assertion: the function signature is reachable.
+    // (Was `cost::emit_cost_recorded`; that port-only event was dropped under
+    // strict parity — the per-request success emitter is now `emit_api_success`.)
     let _: fn() = || {
-        // Reference the symbol so the linker pulls it in.
-        let _: &dyn std::any::Any = &cost::emit_cost_recorded;
+        let _: &dyn std::any::Any = &cost::emit_api_success;
     };
+    assert_eq!(cost::EVENT_NAME_API_SUCCESS, "tengu_api_success");
 }
 
 #[test]

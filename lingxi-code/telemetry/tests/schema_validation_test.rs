@@ -23,20 +23,18 @@ fn agent_started_round_trips() {
 }
 
 #[test]
-fn cost_recorded_round_trips() {
-    let p = tengu::cost::RecordedPayload {
-        model: Verified::assert_safe("claude-sonnet-4-5".into()),
-        input_tokens: 1,
-        output_tokens: 2,
-        cache_read_input_tokens: 3,
-        cache_creation_input_tokens: 4,
-        cost_usd: 5,
-        session_id: Verified::assert_safe("s1".into()),
-        is_batch_request: false,
+fn cost_budget_warning_round_trips() {
+    // (Was `cost_recorded_round_trips`; the port-only `tengu_cost_recorded`
+    // schema was dropped under strict parity — this exercises a representative
+    // surviving cost-category payload.)
+    let p = tengu::cost::BudgetWarningPayload {
+        limit_usd: 1_000_000_000,
+        current_usd: 800_000_000,
+        percent_bps: 8000,
     };
     let j = serde_json::to_string(&p).unwrap();
-    let back: tengu::cost::RecordedPayload = serde_json::from_str(&j).unwrap();
-    assert!(!back.is_batch_request);
+    let back: tengu::cost::BudgetWarningPayload = serde_json::from_str(&j).unwrap();
+    assert_eq!(back.percent_bps, 8000);
 }
 
 #[test]

@@ -14,8 +14,8 @@ async fn statsig_wire_payload_matches_logstatsigevent_shape() {
     );
     md.insert("cost_usd".into(), AnalyticsValue::Int(1_500_000_000));
 
-    let wire = sink.statsig_wire_payload("tengu_cost_recorded", &md, Some(1.5));
-    assert_eq!(wire["event_name"], "tengu_cost_recorded");
+    let wire = sink.statsig_wire_payload("tengu_api_success", &md, Some(1.5));
+    assert_eq!(wire["event_name"], "tengu_api_success");
     assert_eq!(wire["value"], 1.5);
     assert_eq!(wire["metadata"]["model"], "claude-sonnet-4-5");
     assert_eq!(wire["metadata"]["cost_usd"], 1_500_000_000_i64);

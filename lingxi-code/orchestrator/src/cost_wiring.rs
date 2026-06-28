@@ -81,6 +81,20 @@ pub(crate) fn model_ref_from_string(model: &str) -> ModelRef {
     }
 }
 
+/// Stable provider tag string for the `tengu_api_success` `provider` field
+/// (claude `provider:y9()`). The value comes from the RESOLVED provider, so
+/// multi-LLM routing is preserved (it is not hardcoded to Anthropic).
+#[must_use]
+pub(crate) fn provider_tag(provider: &ProviderId) -> String {
+    match provider {
+        ProviderId::Anthropic => "anthropic".to_string(),
+        ProviderId::OpenAI => "openai".to_string(),
+        ProviderId::GoogleGemini => "gemini".to_string(),
+        ProviderId::AmazonBedrock => "bedrock".to_string(),
+        ProviderId::OpenAICompatible { name } | ProviderId::Custom { name } => name.clone(),
+    }
+}
+
 /// Map a `cost::pricing::ProviderId` to its `llm_client::ProviderId` equivalent.
 ///
 /// Mapping:

@@ -624,6 +624,11 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // reactive-recovery tail) so the CostTracker records a REAL duration instead
     // of `Duration::ZERO`. Paired with `orch.api.last_retry_count()` below.
     let api_call_started = std::time::Instant::now();
+    // tengu_api_success `messageCount:n` / `messageTokens:r`: capture from the
+    // input snapshot BEFORE it is moved into `call_api_with_ptl_recovery`.
+    let api_success_message_count = u32::try_from(history_snapshot.len()).unwrap_or(u32::MAX);
+    let api_success_message_tokens =
+        compaction::grouping::estimate_tokens_for_range(&history_snapshot);
     let response = match call_api_with_ptl_recovery(
         orch,
         system,
@@ -749,18 +754,63 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         let cache_read = response.usage.billable_tokens.cache_read;
         let cache_create = response.usage.billable_tokens.cache_write;
         let model_ref = crate::cost_wiring::model_ref_from_string(&model);
-        let _cost_for_this_call = tracker
+        let elapsed = api_call_started.elapsed();
+        let retries = orch.api.last_retry_count();
+        let cost_for_this_call = tracker
             .record_api_response_v2(
-                model_ref,
+                model_ref.clone(),
                 usage,
-                api_call_started.elapsed(),
-                orch.api.last_retry_count(),
+                elapsed,
+                retries,
                 cache_read,
                 cache_create,
                 false, // is_batch_request — M6 always false
-                orch.analytics_bus.as_ref(), // M7: fire tengu_cost_recorded on the live path
+                orch.analytics_bus.as_ref(),
             )
             .await;
+        // strict-parity (2.1.195): fire `tengu_api_success` on the per-request
+        // success path (claude `j("tengu_api_success", {...})`). The port-only
+        // `tengu_cost_recorded` event was dropped. request id / stop reason /
+        // provider live on the orchestrator, so we emit directly here.
+        if let Some(bus) = orch.analytics_bus.as_ref() {
+            #[allow(clippy::cast_possible_truncation)]
+            let dur_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+            cost::emit_api_success(
+                bus,
+                &cost::ApiSuccessFields {
+                    model: model.clone(),
+                    input_tokens: response.usage.billable_tokens.input,
+                    output_tokens: response.usage.billable_tokens.output,
+                    cached_input_tokens: cache_read,
+                    uncached_input_tokens: cache_create,
+                    duration_ms: dur_ms,
+                    duration_ms_including_retries: dur_ms,
+                    attempt: retries + 1,
+                    cost_nano_usd: cost_for_this_call,
+                    provider: crate::cost_wiring::provider_tag(&model_ref.provider),
+                    stop_reason: response.stop_reason.clone(),
+                    request_id: orch.api.last_request_id(),
+                    message_count: api_success_message_count,
+                    message_tokens: api_success_message_tokens,
+                    did_fall_back_to_non_streaming: false,
+                    is_non_interactive_session:
+                        traits::session_flags::is_non_interactive_session(),
+                    print: traits::session_flags::is_non_interactive_session(),
+                    is_tty: false,
+                    query_source: "user".into(),
+                    permission_mode: if orch.session.lock().await.plan_mode {
+                        "plan"
+                    } else {
+                        "default"
+                    }
+                    .to_string(),
+                    ttft_ms: None,
+                    fast_mode: response.usage.speed.as_deref() == Some("fast"),
+                    time_since_last_api_call_ms: orch.record_api_call_gap_ms(),
+                },
+            )
+            .await;
+        }
         orch.api_calls_recorded
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }

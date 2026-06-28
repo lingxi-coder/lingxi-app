@@ -29,7 +29,7 @@ async fn in_memory_sink_e2e_captures_all() {
     let mut md = HashMap::new();
     md.insert("model".into(), AnalyticsValue::String("m".into()));
     bus.log_event("tengu_api_request_started", md.clone()).await;
-    bus.log_event("tengu_cost_recorded", md.clone()).await;
+    bus.log_event("tengu_api_success", md.clone()).await;
     bus.log_event("tengu_settings_loaded", md).await;
 
     let events = sink.events().await;

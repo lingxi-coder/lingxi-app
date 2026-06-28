@@ -85,12 +85,13 @@ async fn turn_with_known_tokens_records_real_cost() {
     assert_eq!(snap.total_nano_usd, 17_500_000);
 }
 
-/// M7: with an `AnalyticsBus` wired (as the desktop composition root does), a
-/// live turn fires `tengu_cost_recorded` per recorded API response — 1:1 with
-/// claude-code's `logEvent('tengu_cost_recorded', …)`. Without a bus (every
-/// other test here), the tracker accrues totals but emits no analytics event.
+/// With an `AnalyticsBus` wired (as the desktop composition root does), a live
+/// turn fires `tengu_api_success` per completed API response — 1:1 with
+/// claude-code 2.1.195's `logEvent('tengu_api_success', …)`. (The port-only
+/// `tengu_cost_recorded` event was dropped under strict parity.) Without a bus
+/// (every other test here), the tracker accrues totals but emits no event.
 #[tokio::test]
-async fn run_turn_emits_tengu_cost_recorded_when_bus_attached() {
+async fn run_turn_emits_tengu_api_success_when_bus_attached() {
     use telemetry::{AnalyticsBus, InMemorySink};
 
     let response = end_turn_response_with_usage(1_000, 500);
@@ -130,8 +131,8 @@ async fn run_turn_emits_tengu_cost_recorded_when_bus_attached() {
     let events = sink.events().await;
     let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
     assert!(
-        names.contains(&"tengu_cost_recorded"),
-        "a live turn with a wired bus must fire tengu_cost_recorded; got {names:?}"
+        names.contains(&"tengu_api_success"),
+        "a live turn with a wired bus must fire tengu_api_success; got {names:?}"
     );
 }
 

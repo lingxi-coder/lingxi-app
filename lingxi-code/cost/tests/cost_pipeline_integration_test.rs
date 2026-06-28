@@ -1,6 +1,12 @@
-//! End-to-end cost pipeline: 3 simulated API responses trip
-//! `tengu_cost_recorded` × 3 + `tengu_cost_budget_warning` + `tengu_cost_budget_exceeded`
-//! in the locked order.
+//! End-to-end cost pipeline: 3 simulated API responses trip the budget gate,
+//! firing `tengu_cost_budget_warning` + `tengu_cost_budget_exceeded` in the
+//! locked order.
+//!
+//! Strict-parity note: the per-call `tengu_cost_recorded` event was PORT-ONLY
+//! (0 hits in claude-code 2.1.195) and was dropped — the `CostTracker` no
+//! longer emits a per-call telemetry event (the per-request success event,
+//! `tengu_api_success`, is fired by the orchestrator, not the tracker). So the
+//! tracker pipeline now produces ONLY the two budget-threshold alarms.
 
 use async_trait::async_trait;
 use cost::{
@@ -97,17 +103,18 @@ async fn three_calls_trigger_warning_then_exceeded() {
     let events = sink.events.lock().unwrap();
     let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
 
-    // 3 cost_recorded + 1 budget_warning + 1 budget_exceeded = 5 events total.
-    assert_eq!(events.len(), 5, "expected 5 events; got {names:?}");
+    // The tracker emits NO per-call event now (tengu_cost_recorded dropped);
+    // only the two budget alarms fire. 1 budget_warning + 1 budget_exceeded = 2.
+    assert_eq!(events.len(), 2, "expected 2 events; got {names:?}");
 
-    // tengu_cost_recorded fires three times.
+    // No per-call cost event is emitted by the tracker any more.
     assert_eq!(
         names
             .iter()
             .filter(|n| **n == "tengu_cost_recorded")
             .count(),
-        3,
-        "three cost recordings"
+        0,
+        "tengu_cost_recorded was dropped under strict parity"
     );
     // tengu_cost_budget_warning fires exactly once.
     assert_eq!(
@@ -128,15 +135,9 @@ async fn three_calls_trigger_warning_then_exceeded() {
         "one 100% exceeded"
     );
 
-    // Ordering: cost_recorded comes BEFORE the threshold alarm in each tripping call.
-    // Call 1: cost_recorded (40%) — no alarm
-    // Call 2: cost_recorded (80%), warning (80%)
-    // Call 3: cost_recorded (120%), exceeded (>=100%)
-    assert_eq!(names[0], "tengu_cost_recorded", "call 1");
-    assert_eq!(names[1], "tengu_cost_recorded", "call 2 record");
-    assert_eq!(names[2], "tengu_cost_budget_warning", "call 2 warning");
-    assert_eq!(names[3], "tengu_cost_recorded", "call 3 record");
-    assert_eq!(names[4], "tengu_cost_budget_exceeded", "call 3 exceeded");
+    // Ordering: warning (after call 2, 80%) precedes exceeded (after call 3, 120%).
+    assert_eq!(names[0], "tengu_cost_budget_warning", "call 2 warning");
+    assert_eq!(names[1], "tengu_cost_budget_exceeded", "call 3 exceeded");
 }
 
 #[tokio::test]

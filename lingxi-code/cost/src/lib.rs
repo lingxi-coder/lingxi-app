@@ -23,7 +23,7 @@ pub use budget::{
     BUDGET_EXCEEDED_THRESHOLD_BPS, BUDGET_WARNING_THRESHOLD_BPS,
 };
 pub use calculator::CostCalculator;
-pub use events::emit_cost_recorded;
+pub use events::{emit_api_success, ApiSuccessFields, EVENT_NAME_API_SUCCESS};
 pub use pricing::{
     nano_usd_to_dollars_format, CostError, ModelPricing, ModelRef, MoneyPerToken,
     NonTokenBillableUnit, PricingCatalog, PricingResolution, PricingSource, ProviderId, TokenClass,

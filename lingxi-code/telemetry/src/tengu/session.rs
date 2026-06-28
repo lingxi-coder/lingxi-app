@@ -48,12 +48,11 @@ pub const APPENDED: &str = "tengu_session_appended";
 pub const ROTATED: &str = "tengu_session_rotated";
 /// `tengu_session_corrupted` — writer or reader detected an unrecoverable I/O / parse error.
 pub const CORRUPTED: &str = "tengu_session_corrupted";
-/// `tengu_session_resume_started` — `/resume` or `--resume <id>` began loading the JSONL.
-pub const RESUME_STARTED: &str = "tengu_session_resume_started";
-/// `tengu_session_resume_completed` — resume successfully replayed all messages into the orchestrator.
-pub const RESUME_COMPLETED: &str = "tengu_session_resume_completed";
+// NOTE: claude emits a single `tengu_session_resumed` ([`RESUMED`]) on resume —
+// the started/completed pair (`tengu_session_resume_started/_completed`) has 0
+// hits in the 2.1.195 binary, so it was removed for strict parity.
 
-/// Order-locked array of all 20 names; consumed by `tengu::ALL_EVENT_NAMES`.
+/// Order-locked array of all 18 names; consumed by `tengu::ALL_EVENT_NAMES`.
 pub(crate) const NAMES: &[&str] = &[
     STARTED,
     RESUMED,
@@ -70,11 +69,9 @@ pub(crate) const NAMES: &[&str] = &[
     IMPORT_STARTED,
     IMPORT_COMPLETED,
     IMPORT_FAILED,
-    APPENDED,         // M5-07
-    ROTATED,          // M5-07
-    CORRUPTED,        // M5-07
-    RESUME_STARTED,   // M5-08
-    RESUME_COMPLETED, // M5-08
+    APPENDED,  // M5-07
+    ROTATED,   // M5-07
+    CORRUPTED, // M5-07
 ];
 
 // -- Payload structs (deny_unknown_fields locked) -----------------------------
@@ -270,20 +267,3 @@ pub struct CorruptedPayload {
     pub error: Verified,
 }
 
-/// Payload for [`RESUME_STARTED`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResumeStartedPayload {
-    /// Session UUID being resumed.
-    pub session_id: Verified,
-}
-
-/// Payload for [`RESUME_COMPLETED`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResumeCompletedPayload {
-    /// Session UUID that was resumed.
-    pub session_id: Verified,
-    /// Number of messages replayed from the on-disk JSONL.
-    pub message_count: u64,
-}

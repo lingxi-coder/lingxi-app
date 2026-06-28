@@ -18,7 +18,7 @@ use protocol::{ContentBlock, ConversationMessage, MessageId, SessionId};
 use session::jsonl::{load_session, JsonlMessage, JsonlWriter, LoaderError};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use telemetry::tengu::session::{RESUME_COMPLETED, RESUME_STARTED};
+use telemetry::tengu::session::RESUMED;
 use tokio::sync::Mutex;
 use tool_api::registry::ToolRegistry;
 use traits::{FileSystem, OutputStream};
@@ -48,9 +48,9 @@ pub struct ReplayedSession {
     pub messages: Vec<JsonlMessage>,
 }
 
-/// Load + replay a session by UUID. Emits
-/// [`RESUME_STARTED`] before the disk read and
-/// [`RESUME_COMPLETED`] after a successful replay.
+/// Load + replay a session by UUID. Emits a single [`RESUMED`]
+/// (`tengu_session_resumed`) after a successful replay — matching claude's
+/// single resume event (the started/completed pair is not in the binary).
 ///
 /// Errors: any [`LoaderError`] from `load_session` is wrapped in
 /// [`ResumeError::Loader`].
@@ -61,14 +61,12 @@ pub async fn replay_session_state(
     fs: Arc<dyn FileSystem>,
 ) -> Result<ReplayedSession, ResumeError> {
     let sid_str = session_id.to_string();
-    tracing::info!(
-        event = RESUME_STARTED,
-        session_id = %sid_str,
-    );
     let messages = load_session(lingxi_home, cwd, session_id, fs).await?;
     let (state, last_uuid) = build_state_from_jsonl(session_id, &messages);
+    // claude emits a SINGLE `tengu_session_resumed` on resume (no started/
+    // completed pair — those names have 0 hits in the 2.1.195 binary).
     tracing::info!(
-        event = RESUME_COMPLETED,
+        event = RESUMED,
         session_id = %sid_str,
         message_count = messages.len() as u64,
     );

@@ -1374,7 +1374,14 @@ fn deny_with_rule_content(
                 format!("Permission to use {tool_name} with command {} has been denied.", cmd.trim())
             })
     } else {
-        None
+        // Generic CONTENT deny (binary `uMe`/`mZt`: `Permission to use ${e.name}
+        // with ${s.ruleValue.ruleContent} has been denied.`, od -c @215384392).
+        // Non-shell tools with a dedicated content rule (e.g. `WebFetch(domain:…)`,
+        // `Agent(type)`) surface the matched `ruleContent`; a tool-wide rule
+        // (`rule_content == None`) falls through to the bare generic message.
+        rule.value.rule_content.as_deref().map(|content| {
+            format!("Permission to use {tool_name} with {content} has been denied.")
+        })
     };
     PermissionResult::Deny {
         reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },

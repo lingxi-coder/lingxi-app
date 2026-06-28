@@ -504,8 +504,10 @@ fn contains_dangerous_operations(expression: &str) -> bool {
     if cmd.contains('{') || cmd.contains('}') {
         return true;
     }
-    // Reject newlines.
-    if cmd.contains('\n') {
+    // Reject newlines and carriage returns — binary `containsDangerousOperations`
+    // checks `t.includes("\n")||t.includes("\r")` (od -c @208745623). An embedded
+    // CR survives single-quote tokenization and must be treated as dangerous.
+    if cmd.contains('\n') || cmd.contains('\r') {
         return true;
     }
     // Reject comments (`#` not immediately after `s`).

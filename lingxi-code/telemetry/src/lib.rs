@@ -86,6 +86,21 @@ pub fn emit_command_failed(event: &'static str, error: &str) {
     tracing::error!(event = event, error = %error);
 }
 
+// -- EXPERIMENTAL_SKILL_SEARCH skill-discovery emit helper -------------------
+
+/// Emit `tengu_skill_discovery_collected` with the `hidden_by_main_turn` field
+/// (claude-code `query.ts:1617`: `true` when the per-iteration skill-discovery
+/// prefetch resolved BEFORE collection — i.e. it hid under the main turn's
+/// streaming + tool execution; expected >98%). The sole emitter of this field;
+/// fired by the orchestrator's `skill_discovery_reminder_message` on the gated
+/// (flag-ON) path only — inert (never reached) in the default-OFF build.
+pub fn emit_skill_discovery_collected(hidden_by_main_turn: bool) {
+    tracing::info!(
+        event = "tengu_skill_discovery_collected",
+        hidden_by_main_turn = hidden_by_main_turn,
+    );
+}
+
 // -- Kairos (`/loop`) autonomous-loop emit helper ----------------------------
 
 /// Emit `tengu_kairos_loop_persistent_activated` with the `variant` field.

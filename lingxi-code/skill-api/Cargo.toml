@@ -19,6 +19,14 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
 thiserror.workspace = true
+# EXPERIMENTAL_SKILL_SEARCH skill-discovery prefetch (register-but-disable,
+# default OFF): the one-shot-backed background discovery handle + the async
+# candidate-source seam. Mirrors the `memory` crate's prefetch deps.
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 
 [lints]
 workspace = true

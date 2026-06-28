@@ -475,6 +475,12 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // wired, keeping the locked turn-loop fixtures byte-identical. See
     // [`ConversationOrchestrator::start_memory_prefetch`].
     orch.start_memory_prefetch().await;
+    // EXPERIMENTAL_SKILL_SEARCH (batched twin): arm the skill-discovery prefetch
+    // CONCURRENTLY with this turn (claude-code `startSkillDiscoveryPrefetch`,
+    // bundle `B=at1?.startSkillDiscoveryPrefetch(null,V,T)`). A strict no-op when
+    // no prefetch is wired (default OFF), keeping the locked fixtures
+    // byte-identical. See [`ConversationOrchestrator::start_skill_discovery_prefetch`].
+    orch.start_skill_discovery_prefetch().await;
     // P1 (§6.5, batched twin): background-fork a session-memory extraction if the
     // tool-call threshold has crossed (inert unless wired + enabled).
     orch.maybe_extract_session_memory().await;
@@ -603,6 +609,18 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // when no prefetch is wired / empty result / everything already injected. See
     // [`ConversationOrchestrator::relevant_memory_reminder_message`].
     if let Some(reminder) = orch.relevant_memory_reminder_message().await {
+        history_snapshot.push(reminder);
+    }
+
+    // EXPERIMENTAL_SKILL_SEARCH (batched twin): per-turn, transient
+    // `skill_discovery` SURFACING reminder — the discovery prefetch result
+    // rendered as one `<system-reminder>` meta user message. Collected AFTER the
+    // memory consume above (matches the bundle order: memory `P.consumedOnIteration`
+    // → then `at1.collectSkillDiscoveryPrefetch`). Appended to THIS call's
+    // OUTGOING snapshot only. `None` when no prefetch is wired (default OFF) /
+    // empty result / everything already surfaced. See
+    // [`ConversationOrchestrator::skill_discovery_reminder_message`].
+    if let Some(reminder) = orch.skill_discovery_reminder_message().await {
         history_snapshot.push(reminder);
     }
 

@@ -4335,6 +4335,36 @@ pub async fn build(
         _ => orch_builder,
     };
 
+    // EXPERIMENTAL_SKILL_SEARCH skill-discovery prefetch ACTIVATION (gated,
+    // default OFF). claude-code keeps this behind `feature('EXPERIMENTAL_SKILL_SEARCH')`
+    // — DCE'd out of the shipping 2.1.195 binary (every skill-search literal = 0
+    // hits), so default-OFF is the correct parity state. The composition-root
+    // PRESENCE of the prefetch IS the gate (`skill_discovery_prefetch.is_some()`),
+    // exactly like the memory prefetch above. Wired ONLY when the flag is ON via
+    // `telemetry::flag_bool` (the GrowthBook-style sync reader; empty snapshot ⇒
+    // returns the `false` default by default), OR one of the env overrides is
+    // truthy (`bun`-bundle `envBool(..., false)` parity). The faithful local
+    // backend is a `RegistryCandidateSource` over the desktop skill set (substring
+    // trigger discovery — the binary's native lexical index; AKI/Haiku backends
+    // are out of scope). Unset/false ⇒ no prefetch ⇒ everything inert and the
+    // locked fixtures byte-identical.
+    let skill_search_on = telemetry::flag_bool("EXPERIMENTAL_SKILL_SEARCH", false)
+        || is_env_truthy("CLAUDE_CODE_EXPERIMENTAL_SKILL_SEARCH")
+        || is_env_truthy("LINGXI_SKILL_SEARCH");
+    let orch_builder = if skill_search_on {
+        let source: Arc<dyn skill_api::SkillCandidateSource> = Arc::new(
+            skill_api::RegistryCandidateSource::new(Arc::new(desktop_skill_registry())),
+        );
+        orch_builder.with_skill_discovery_prefetch(Arc::new(
+            skill_api::SkillDiscoveryPrefetch::new(
+                source,
+                Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
+            ),
+        ))
+    } else {
+        orch_builder
+    };
+
     // P1 session-memory standalone trigger (§6.5, gated, default OFF). When
     // `LINGXI_SESSION_MEMORY` is truthy, wire the threshold-gated extractor
     // so durable notes are background-distilled (a Haiku-class fork) once the

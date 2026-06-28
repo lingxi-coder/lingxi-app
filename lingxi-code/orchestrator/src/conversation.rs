@@ -1051,6 +1051,30 @@ pub struct ConversationOrchestrator {
     /// also consults so a file already loaded as a nested/conditional attachment
     /// (P3.2) is never double-injected here.
     pub(crate) surfaced_memory_paths: Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    /// EXPERIMENTAL_SKILL_SEARCH: the skill-discovery prefetcher, fired at turn
+    /// start to select skills relevant to the turn query CONCURRENTLY with the
+    /// main API call + tool execution (1:1 with claude-code's
+    /// `startSkillDiscoveryPrefetch`, bundle fn `C1z`:
+    /// `B=at1?.startSkillDiscoveryPrefetch(null,V,T)`). `None` when no prefetch is
+    /// wired — then [`Self::start_skill_discovery_prefetch`] +
+    /// [`Self::skill_discovery_reminder_message`] are strict no-ops, keeping the
+    /// channel inert and the locked fixtures byte-identical. The LingXi gate is
+    /// purely `skill_discovery_prefetch.is_some()` at the composition root,
+    /// mirroring claude-code's `feature('EXPERIMENTAL_SKILL_SEARCH')` (default
+    /// false). Wired (flag ON) via [`Self::with_skill_discovery_prefetch`].
+    pub(crate) skill_discovery_prefetch: Option<Arc<skill_api::SkillDiscoveryPrefetch>>,
+    /// EXPERIMENTAL_SKILL_SEARCH per-turn slot holding the in-flight prefetch
+    /// handle armed by [`Self::start_skill_discovery_prefetch`] at turn start and
+    /// consumed by [`Self::skill_discovery_reminder_message`] before snapshot
+    /// assembly. `None` between turns / when no prefetch is wired. Mirrors
+    /// [`Self::pending_memory_prefetch`].
+    pub(crate) pending_skill_prefetch: Mutex<Option<skill_api::PendingSkillDiscoveryPrefetch>>,
+    /// EXPERIMENTAL_SKILL_SEARCH surfacing dedup: skill NAMES already surfaced via
+    /// the `skill_discovery` channel this session, so a skill surfaced once is
+    /// never re-injected on a later turn. Analog of [`Self::sent_skill_names`] /
+    /// [`Self::surfaced_memory_paths`], keyed on `name` (skill names are not
+    /// files, so this does NOT consult `read_file_state`).
+    pub(crate) surfaced_skill_names: Mutex<std::collections::HashSet<String>>,
     /// P1 session-memory standalone trigger (§6.5). `None` = inert (no caller
     /// wires it). When wired (via [`Self::with_session_memory`]) AND the
     /// extractor's threshold is crossed, [`Self::maybe_extract_session_memory`]
@@ -1210,6 +1234,9 @@ impl ConversationOrchestrator {
             memory_prefetch: None,
             pending_memory_prefetch: Mutex::new(None),
             surfaced_memory_paths: Mutex::new(std::collections::HashSet::new()),
+            skill_discovery_prefetch: None,
+            pending_skill_prefetch: Mutex::new(None),
+            surfaced_skill_names: Mutex::new(std::collections::HashSet::new()),
             session_memory: None,
             startup_responses_websocket_prewarm: std::sync::Mutex::new(None),
         }
@@ -1400,6 +1427,28 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn has_memory_prefetch(&self) -> bool {
         self.memory_prefetch.is_some()
+    }
+
+    /// Wire the EXPERIMENTAL_SKILL_SEARCH skill-discovery prefetcher. The
+    /// composition root calls this ONLY when the flag is ON (default OFF), so an
+    /// unwired build keeps [`Self::start_skill_discovery_prefetch`] +
+    /// [`Self::skill_discovery_reminder_message`] strict no-ops and the locked
+    /// fixtures byte-identical (the presence of the prefetch IS the gate, exactly
+    /// like `with_memory_prefetch`).
+    #[must_use]
+    pub fn with_skill_discovery_prefetch(
+        mut self,
+        prefetch: Arc<skill_api::SkillDiscoveryPrefetch>,
+    ) -> Self {
+        self.skill_discovery_prefetch = Some(prefetch);
+        self
+    }
+
+    /// Whether a skill-discovery prefetcher has been wired via
+    /// [`Self::with_skill_discovery_prefetch`] (EXPERIMENTAL_SKILL_SEARCH).
+    #[must_use]
+    pub fn has_skill_discovery_prefetch(&self) -> bool {
+        self.skill_discovery_prefetch.is_some()
     }
 
     /// Wire the standalone session-memory extractor (§6.5). `None` (the default)
@@ -4731,6 +4780,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // when no prefetch is wired, keeping the locked streaming fixtures
             // byte-identical. See [`Self::start_memory_prefetch`].
             self.start_memory_prefetch().await;
+            // EXPERIMENTAL_SKILL_SEARCH (streaming twin): arm the skill-discovery
+            // prefetch CONCURRENTLY with this turn (claude-code
+            // `startSkillDiscoveryPrefetch`). A strict no-op when no prefetch is
+            // wired (default OFF), keeping the locked streaming fixtures
+            // byte-identical. See [`Self::start_skill_discovery_prefetch`].
+            self.start_skill_discovery_prefetch().await;
             // P1 (§6.5): background-fork a session-memory extraction if the
             // tool-call threshold has crossed (inert unless wired + enabled).
             self.maybe_extract_session_memory().await;
@@ -4875,6 +4930,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // no prefetch is wired / empty result / everything already injected.
             // See [`Self::relevant_memory_reminder_message`].
             if let Some(reminder) = self.relevant_memory_reminder_message().await {
+                snapshot.push(reminder);
+            }
+
+            // EXPERIMENTAL_SKILL_SEARCH (streaming twin): per-turn, transient
+            // `skill_discovery` SURFACING reminder, collected AFTER the memory
+            // consume above (bundle order: memory consume → `collectSkill...`).
+            // Appended to THIS turn's OUTGOING snapshot only. `None` when no
+            // prefetch is wired (default OFF) / empty / everything already
+            // surfaced. See [`Self::skill_discovery_reminder_message`].
+            if let Some(reminder) = self.skill_discovery_reminder_message().await {
                 snapshot.push(reminder);
             }
 
@@ -7142,6 +7207,110 @@ As you answer the user's questions, you can use the following context:\n\
         }
 
         let content = memory::surfacing::render_surfacing_block(&fresh);
+        Some(ConversationMessage::user(MessageId::new(), content))
+    }
+
+    /// EXPERIMENTAL_SKILL_SEARCH: arm the skill-discovery prefetch CONCURRENTLY
+    /// with this turn (1:1 with claude-code `startSkillDiscoveryPrefetch`, bundle
+    /// fn `C1z`: `B=at1?.startSkillDiscoveryPrefetch(null,V,T)` at iteration top).
+    /// A strict no-op when no prefetch is wired ([`Self::skill_discovery_prefetch`]
+    /// is `None`) — then the slot stays empty and the surfacing reminder is `None`,
+    /// keeping the locked fixtures byte-identical.
+    ///
+    /// The prefetch query is the latest non-meta user-message text (same scan as
+    /// [`Self::start_memory_prefetch`], mirroring TS `findLast(user/!meta)`). The
+    /// per-iteration `findWritePivot` guard (`query.ts:323` — discovery only fires
+    /// on write-pivot iterations) is computed from the most recent assistant
+    /// message's requested tools (see [`skill_api::find_write_pivot`],
+    /// [RECONSTRUCTED]); on a non-write iteration the prefetch ships empty.
+    pub(crate) async fn start_skill_discovery_prefetch(&self) {
+        let Some(prefetch) = self.skill_discovery_prefetch.as_ref() else {
+            return; // no prefetch wired ⇒ discovery channel stays inert
+        };
+        // Latest non-meta user message = the turn query (TS findLast user/!meta),
+        // and the most recent assistant message's tool names for the write-pivot
+        // predicate — both read in one history lock.
+        let (query, last_assistant_tools) = {
+            let s = self.session.lock().await;
+            let query = s
+                .history
+                .iter()
+                .rev()
+                .find(|m| matches!(m.role(), protocol::MessageRole::User))
+                .map(ConversationMessage::text_content)
+                .unwrap_or_default();
+            let last_assistant_tools = s
+                .history
+                .iter()
+                .rev()
+                .find(|m| matches!(m.role(), protocol::MessageRole::Assistant))
+                .map(|m| {
+                    m.tool_calls()
+                        .into_iter()
+                        .filter_map(|b| match b {
+                            protocol::ContentBlock::ToolUse { name, .. } => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<String>>()
+                })
+                .unwrap_or_default();
+            (query, last_assistant_tools)
+        };
+        let is_write_pivot = skill_api::find_write_pivot(&last_assistant_tools);
+        let pending = prefetch.start(query, is_write_pivot).await;
+        *self.pending_skill_prefetch.lock().await = Some(pending);
+    }
+
+    /// EXPERIMENTAL_SKILL_SEARCH: the per-turn, transient `skill_discovery`
+    /// SURFACING reminder — the prefetch result rendered as a single
+    /// `<system-reminder>` meta user message (1:1 with claude-code's
+    /// `collectSkillDiscoveryPrefetch` → `skill_discovery` attachment,
+    /// `messages.ts:3506-3519`). Returns `None` when no prefetch was armed this
+    /// turn, the prefetch resolved to an empty set, or every discovered skill was
+    /// already surfaced.
+    ///
+    /// Emits the `hidden_by_main_turn` telemetry field (`query.ts:1617`): `true`
+    /// when the prefetch resolved BEFORE collection (it hid under the main turn's
+    /// streaming + tool execution; expected >98%). Peeked via
+    /// [`skill_api::PendingSkillDiscoveryPrefetch::is_ready`] before the consuming
+    /// `take`.
+    ///
+    /// DEDUP: a skill is skipped when its `name` is in
+    /// [`Self::surfaced_skill_names`] (already surfaced a prior turn). Keyed on
+    /// `name` (skill names are not files, so — unlike the memory channel — this
+    /// does NOT consult `read_file_state`). Surfaced names are recorded so each
+    /// skill injects ONCE. Like every other per-turn reminder, the message is
+    /// appended ONLY to the per-turn OUTGOING snapshot (never `session.history` /
+    /// JSONL).
+    pub(crate) async fn skill_discovery_reminder_message(&self) -> Option<ConversationMessage> {
+        // Consume the in-flight prefetch handle armed at turn start.
+        let pending = self.pending_skill_prefetch.lock().await.take()?;
+
+        // hidden_by_main_turn — peek readiness BEFORE the consuming take.
+        let hidden = pending.is_ready();
+        telemetry::emit_skill_discovery_collected(hidden);
+
+        let skills = pending.take().await;
+        if skills.is_empty() {
+            return None;
+        }
+
+        // DEDUP by name — skip any skill already surfaced this session.
+        let fresh: Vec<skill_api::DiscoveredSkill> = {
+            let mut surfaced = self.surfaced_skill_names.lock().await;
+            let mut out = Vec::new();
+            for s in skills {
+                if surfaced.contains(&s.name) {
+                    continue; // already surfaced a prior turn
+                }
+                surfaced.insert(s.name.clone());
+                out.push(s);
+            }
+            out
+        };
+
+        // render returns None on empty (TS `return []`).
+        let content = skill_api::render_skill_discovery_block(&fresh)?;
         Some(ConversationMessage::user(MessageId::new(), content))
     }
 
@@ -10648,6 +10817,193 @@ mod relevant_memory_reminder_tests {
             !text.contains("/m/seen.md"),
             "already-read memory leaked: {text}"
         );
+    }
+}
+
+// ── EXPERIMENTAL_SKILL_SEARCH skill-discovery surfacing (default OFF) ─────────
+#[cfg(test)]
+mod skill_discovery_reminder_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use async_trait::async_trait;
+    use protocol::ContentBlock;
+    use skill_api::DiscoveredSkill;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tool_api::registry::ToolRegistry;
+
+    /// A runtime that actually RUNS the spawned future so the one-shot resolves.
+    struct InlineRuntime;
+    #[async_trait]
+    impl traits::RuntimeSpawner for InlineRuntime {
+        async fn spawn(
+            &self,
+            name: &str,
+            task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+            tokio::spawn(task);
+            Ok(traits::BackgroundTaskHandle {
+                task_name: name.to_string(),
+                task_id: 0,
+            })
+        }
+        async fn sleep(&self, _d: std::time::Duration) {}
+        async fn cancel(
+            &self,
+            _h: &traits::BackgroundTaskHandle,
+        ) -> Result<(), traits::RuntimeError> {
+            Ok(())
+        }
+    }
+
+    fn skill(name: &str, description: &str) -> DiscoveredSkill {
+        DiscoveredSkill {
+            name: name.into(),
+            description: description.into(),
+            short_id: None,
+        }
+    }
+
+    /// Build an orchestrator with NO skill prefetch wired (channel inert).
+    fn orch_bare() -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            PathBuf::from("/work/repo"),
+        )
+    }
+
+    /// Build an orchestrator whose skill prefetch resolves to `seed`.
+    fn orch_with_seed(seed: Vec<DiscoveredSkill>) -> ConversationOrchestrator {
+        let runtime: Arc<dyn traits::RuntimeSpawner> = Arc::new(InlineRuntime);
+        let prefetch = Arc::new(skill_api::SkillDiscoveryPrefetch::with_fixed_result(
+            runtime, seed,
+        ));
+        orch_bare().with_skill_discovery_prefetch(prefetch)
+    }
+
+    /// Push an assistant message that requested an `Edit` so `find_write_pivot`
+    /// reports a write pivot and the prefetch fires.
+    async fn push_write_pivot(orch: &ConversationOrchestrator) {
+        let msg = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolUse {
+                id: protocol::ToolUseId::new(),
+                name: "Edit".into(),
+                input: serde_json::json!({}),
+                provider_id: None,
+            }],
+            stop_reason: None,
+        };
+        orch.session.lock().await.history.push(msg);
+    }
+
+    // (D.8) Flag OFF (no prefetch wired) = zero change: both calls are strict
+    // no-ops and `has_skill_discovery_prefetch()` is false.
+    #[tokio::test]
+    async fn no_prefetch_wired_is_inert() {
+        let orch = orch_bare();
+        push_write_pivot(&orch).await;
+        orch.start_skill_discovery_prefetch().await;
+        assert!(orch.skill_discovery_reminder_message().await.is_none());
+        assert!(!orch.has_skill_discovery_prefetch());
+    }
+
+    // (D.9) Flag ON = byte-exact attachment injected.
+    #[tokio::test]
+    async fn seeded_prefetch_renders_skill_discovery_block() {
+        let orch = orch_with_seed(vec![
+            skill("git-commit", "Commit staged changes"),
+            skill("rebase", "Interactive rebase helper"),
+        ]);
+        assert!(orch.has_skill_discovery_prefetch());
+        push_write_pivot(&orch).await;
+        orch.start_skill_discovery_prefetch().await;
+        let text = orch
+            .skill_discovery_reminder_message()
+            .await
+            .expect("seeded prefetch must surface")
+            .text_content();
+        assert_eq!(
+            text,
+            "<system-reminder>\n\
+             Skills relevant to your task:\n\n\
+             - git-commit: Commit staged changes\n\
+             - rebase: Interactive rebase helper\n\n\
+             These skills encode project-specific conventions. \
+             Invoke via Skill(\"<name>\") for complete instructions.\n\
+             </system-reminder>"
+        );
+    }
+
+    // (D.4 integration) Non-write iteration (no write-pivot tool) ⇒ inert even
+    // with a seeded prefetch.
+    #[tokio::test]
+    async fn non_write_pivot_is_inert() {
+        let orch = orch_with_seed(vec![skill("a", "da")]);
+        // No assistant tool-use in history ⇒ find_write_pivot == false.
+        orch.start_skill_discovery_prefetch().await;
+        assert!(
+            orch.skill_discovery_reminder_message().await.is_none(),
+            "non-write iteration must surface nothing"
+        );
+    }
+
+    // Empty result ⇒ None.
+    #[tokio::test]
+    async fn empty_result_yields_none() {
+        let orch = orch_with_seed(vec![]);
+        push_write_pivot(&orch).await;
+        orch.start_skill_discovery_prefetch().await;
+        assert!(orch.skill_discovery_reminder_message().await.is_none());
+    }
+
+    // Not armed (slot empty) ⇒ None.
+    #[tokio::test]
+    async fn not_armed_yields_none() {
+        let orch = orch_with_seed(vec![skill("a", "da")]);
+        assert!(orch.skill_discovery_reminder_message().await.is_none());
+    }
+
+    // (D.10) Dedup across turns: same skill armed turn N and N+1 ⇒ injects once.
+    #[tokio::test]
+    async fn surfaced_once_then_not_reinjected_across_turns() {
+        let orch = orch_with_seed(vec![skill("a", "da")]);
+        push_write_pivot(&orch).await;
+        // Turn 0: surfaced.
+        orch.start_skill_discovery_prefetch().await;
+        assert!(
+            orch.skill_discovery_reminder_message().await.is_some(),
+            "first surfacing must inject"
+        );
+        // Turn 1: same skill ⇒ already in surfaced_skill_names ⇒ no re-inject.
+        orch.start_skill_discovery_prefetch().await;
+        assert!(
+            orch.skill_discovery_reminder_message().await.is_none(),
+            "an already-surfaced skill must not be re-injected"
+        );
+    }
+
+    // Partial dedup: only the fresh skill surfaces on turn N+1.
+    #[tokio::test]
+    async fn partial_dedup_surfaces_only_fresh_skills() {
+        let orch = orch_with_seed(vec![skill("seen", "ds")]);
+        push_write_pivot(&orch).await;
+        orch.start_skill_discovery_prefetch().await;
+        assert!(orch.skill_discovery_reminder_message().await.is_some());
+
+        // Re-seed the SAME prefetch slot is not possible (fixed_result is fixed);
+        // instead assert the surfaced_skill_names set recorded "seen".
+        assert!(orch.surfaced_skill_names.lock().await.contains("seen"));
     }
 }
 

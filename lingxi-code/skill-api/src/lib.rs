@@ -1,6 +1,7 @@
 //! Skill subsystem abstraction (M8-P8): the [`Skill`] data model, the
 //! [`SkillRegistry`] with trigger-based discovery, the markdown frontmatter
-//! loader, MCP-derived skill builders, and a discovery-prefetch placeholder.
+//! loader, MCP-derived skill builders, and the EXPERIMENTAL_SKILL_SEARCH
+//! skill-discovery [`prefetch`] service (register-but-disable, default OFF).
 //!
 //! Extracted from the former monolithic `skills` crate. The model-visible
 //! `Skill` *tool* lives in `tool-skill` (P7); compiled-in builtin skill
@@ -27,5 +28,9 @@ pub use listing::{
 };
 pub use mcp_builders::skill_from_mcp_tool;
 pub use model::{LoadedFrom, Skill, SkillFrontmatter, SkillSource};
-pub use prefetch::SkillDiscoveryPrefetch;
+pub use prefetch::{
+    find_write_pivot, render_skill_discovery_block, DiscoveredSkill, DiscoverySource,
+    PendingSkillDiscoveryPrefetch, RegistryCandidateSource, SkillCandidateSource,
+    SkillDiscoveryPrefetch,
+};
 pub use registry::SkillRegistry;

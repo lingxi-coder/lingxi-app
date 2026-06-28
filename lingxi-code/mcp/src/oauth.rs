@@ -644,8 +644,10 @@ pub async fn perform_oauth_flow(
         build_authorize_url(&meta, &client_id, &redirect_uri, &scope);
     on_auth_url(&auth_url);
 
-    // 6. Wait for the redirect, validate state, capture the code.
-    let params = listener.accept(&state).await?;
+    // 6. Wait for the redirect, validate state, capture the code. `redirect_uri`
+    //    is echoed into the listener's 404 page ("registered redirect_uri must
+    //    be {T}").
+    let params = listener.accept(&state, &redirect_uri).await?;
 
     // 7. Exchange the code for tokens.
     exchange_code(

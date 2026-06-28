@@ -450,7 +450,7 @@ pub async fn acquire_idp_id_token(
 
     // 4. Wait for the redirect, validate state, capture the code.
     let params = listener
-        .accept(&state)
+        .accept(&state, &redirect_uri)
         .await
         .map_err(|e| McpError::OAuth(format!("XAA IdP: callback: {e}")))?;
 

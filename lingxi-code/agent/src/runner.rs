@@ -976,7 +976,11 @@ async fn run_subagent_loop(
                             structured_result = Some(input.clone());
                             tool_results.push(ContentBlock::ToolResult {
                                 tool_use_id: tool_use_id.clone(),
-                                content: "(structured output captured)".to_string(),
+                                // claude's StructuredOutput tool returns
+                                // `data: "Structured output provided successfully"`
+                                // as the tool-result content (binary 2.1.195
+                                // strings :311431 / :438281).
+                                content: "Structured output provided successfully".to_string(),
                                 is_error: false,
                                 provider_tool_use_id: provider_id.clone(),
                                 content_blocks: None,
@@ -1150,7 +1154,13 @@ async fn run_subagent_loop(
                 let _ = out_tx
                     .send(SubagentEvent::Failed {
                         agent_id,
-                        error: "agent({schema}): subagent completed without calling StructuredOutput (after 2 in-conversation nudges)".to_string(),
+                        // Byte-locked to claude 2.1.195 (binary strings :331985 /
+                // :514141, the workflow `agent({schema})` runtime): the give-up
+                // wording is SINGULAR "(after in-conversation nudge)" with no
+                // count. (claude's exact in-conversation nudge body and its
+                // nudge count are not discoverable static strings in the binary,
+                // so the port's nudge text + 2× retry are left as-is.)
+                error: "agent({schema}): subagent completed without calling StructuredOutput (after in-conversation nudge)".to_string(),
                     })
                     .await;
                 return;
@@ -2218,7 +2228,7 @@ mod tests {
             .expect("a Failed event");
         assert_eq!(
             err,
-            "agent({schema}): subagent completed without calling StructuredOutput (after 2 in-conversation nudges)"
+            "agent({schema}): subagent completed without calling StructuredOutput (after in-conversation nudge)"
         );
         // 3 round-trips: the original turn + 2 nudge re-runs.
         assert_eq!(api2.call_count(), 3);

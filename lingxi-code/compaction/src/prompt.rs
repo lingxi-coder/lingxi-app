@@ -160,10 +160,12 @@ pub fn get_compact_prompt(custom_instructions: Option<&str>) -> String {
 
     if let Some(custom) = custom_instructions {
         if !custom.trim().is_empty() {
-            // Binary: `t += `\nAdditional Instructions:\n${e}`` — a SINGLE leading
-            // `\n`. BASE_COMPACT_PROMPT already ends with `</example>\n`, so the
-            // boundary nets exactly `\n\n` (one blank line), not `\n\n\n`.
-            prompt.push_str("\nAdditional Instructions:\n");
+            // Binary: `t += `\n\nAdditional Instructions:\n${e}`` — DOUBLE leading
+            // `\n` (verified via `od -c` on the 2.1.195 binary JS source at the
+            // `t+=` template; the `strings` dump splits real newlines and misled
+            // an earlier pass into a single `\n`). BASE_COMPACT_PROMPT ends with
+            // `</example>\n`, so the boundary nets `\n\n\n` (two blank lines).
+            prompt.push_str("\n\nAdditional Instructions:\n");
             prompt.push_str(custom);
         }
     }
@@ -187,8 +189,11 @@ fn first_tag_span(haystack: &str, open: &str, close: &str) -> Option<(usize, usi
     Some((open_at, end))
 }
 
-/// Collapse runs of two-or-more newlines down to a single `\n` — mirrors the
-/// binary `aup` (`formatCompactSummary`) trailing `replace(/\n\n+/g, '\n')`.
+/// Collapse runs of two-or-more newlines down to `\n\n` (one preserved blank
+/// line) — mirrors the binary `aup` (`formatCompactSummary`) trailing
+/// `replace(/\n\n+/g, '\n\n')`. (The replacement is `\n\n`, verified via
+/// `od -c` on the 2.1.195 binary — the `strings` dump misled an earlier pass
+/// into collapsing to a single `\n`.)
 fn collapse_blank_lines(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let bytes = input.as_bytes();
@@ -200,9 +205,9 @@ fn collapse_blank_lines(input: &str) -> String {
             while i + run < bytes.len() && bytes[i + run] == b'\n' {
                 run += 1;
             }
-            // Any run of newlines (1 or 2+) collapses to a single `\n`:
-            // `/\n\n+/g` → `\n` rewrites 2+; a lone `\n` is already single.
-            out.push('\n');
+            // `/\n\n+/g` → `\n\n`: a run of 2+ newlines collapses to one
+            // preserved blank line; a lone `\n` stays single.
+            out.push_str(if run >= 2 { "\n\n" } else { "\n" });
             i += run;
         } else {
             // Copy this (possibly multibyte) UTF-8 scalar verbatim.
@@ -231,7 +236,7 @@ fn utf8_char_len(first_byte: u8) -> usize {
 /// 1. Strip the first `<analysis>…</analysis>` block (drafting scratchpad).
 /// 2. Extract the first `<summary>…</summary>` block's inner content and
 ///    rewrite it in place as `Summary:\n{content.trim()}`.
-/// 3. Collapse `\n\n+` runs to a single `\n`.
+/// 3. Collapse `\n\n+` runs to `\n\n` (preserve one blank line).
 /// 4. `trim()` the whole result.
 #[must_use]
 pub fn format_compact_summary(summary: &str) -> String {
@@ -273,11 +278,13 @@ pub fn format_compact_summary(summary: &str) -> String {
 /// Build the user-facing continuation message — `getCompactUserSummaryMessage`
 /// (TS `UOt(e,t,n,r,o)`, `bin/claude.exe` offset 197355616).
 ///
-/// Byte-faithful order, each segment appended only when its flag/arg is set:
-/// 1. base: `This session is being continued… covers the earlier portion…\n{summary}`
-/// 2. `transcript_path` (`n`): `\nIf you need specific details…read the full transcript at: {path}`
-/// 3. `recent_messages_preserved` (`r`, #58): `\nRecent messages are preserved verbatim.`
-///    (claude `PUt` joins every segment with a SINGLE `\n`, not `\n\n`.)
+/// Byte-faithful order, each segment appended only when its flag/arg is set
+/// (segment prefixes verified via `od -c` on the 2.1.195 binary `K9t` JS source
+/// — every appended segment uses `\n\n`; ONLY the final continuation uses a
+/// single `\n`. An earlier pass misread the `strings` dump as single `\n`.):
+/// 1. base: `This session is being continued… covers the earlier portion…\n\n{summary}`
+/// 2. `transcript_path` (`n`): `\n\nIf you need specific details…read the full transcript at: {path}`
+/// 3. `recent_messages_preserved` (`r`, #58): `\n\nRecent messages are preserved verbatim.`
 /// 4. (`o` `replVmCleared` — the REPL VM-state addendum — is an intentional
 ///    deferral; the REPL VM reset is a separate finding.)
 /// 5. `suppress_follow_up_questions` (`t`): `\nContinue the conversation…`
@@ -295,19 +302,19 @@ pub fn get_compact_user_summary_message(
     let formatted_summary = format_compact_summary(summary);
 
     let mut base_summary = format!(
-        "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n{formatted_summary}"
+        "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n{formatted_summary}"
     );
 
     if let Some(path) = transcript_path {
         base_summary.push_str(&format!(
-            "\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: {path}"
+            "\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: {path}"
         ));
     }
 
     // #58: when a verbatim tail rides after the summary, tell the model so it
     // does not re-derive recent state from the summary (`UOt`'s `r` arg).
     if recent_messages_preserved {
-        base_summary.push_str("\nRecent messages are preserved verbatim.");
+        base_summary.push_str("\n\nRecent messages are preserved verbatim.");
     }
 
     if suppress_follow_up_questions {
@@ -370,13 +377,13 @@ mod tests {
     #[test]
     fn get_compact_prompt_appends_custom_instructions_when_non_blank() {
         let p = get_compact_prompt(Some("focus on rust"));
-        // Base ends `</example>\n`; the custom block adds a SINGLE leading `\n`
-        // (binary `t += `\nAdditional Instructions:\n${e}``), netting exactly one
-        // blank line at the boundary — NOT a triple newline.
-        assert!(p.contains("\nAdditional Instructions:\nfocus on rust"));
+        // Base ends `</example>\n`; the custom block adds a DOUBLE leading `\n`
+        // (binary `t += `\n\nAdditional Instructions:\n${e}``), netting a triple
+        // newline (two blank lines) at the boundary.
+        assert!(p.contains("\n\nAdditional Instructions:\nfocus on rust"));
         assert!(
-            !p.contains("\n\n\nAdditional Instructions:"),
-            "exactly one blank line before the header; got a triple newline"
+            p.contains("\n\n\nAdditional Instructions:"),
+            "base `</example>\\n` + `\\n\\n` prefix nets a triple newline"
         );
         // Trailer still last.
         assert!(p.ends_with(NO_TOOLS_TRAILER));
@@ -415,8 +422,8 @@ mod tests {
     fn format_collapses_blank_lines() {
         let raw = "<summary>line1\n\n\n\nline2</summary>";
         let out = format_compact_summary(raw);
-        // Binary `aup` collapses any run of 2+ newlines to a SINGLE `\n`.
-        assert_eq!(out, "Summary:\nline1\nline2");
+        // Binary `aup` collapses any run of 2+ newlines to `\n\n` (one blank line).
+        assert_eq!(out, "Summary:\nline1\n\nline2");
     }
 
     #[test]
@@ -430,8 +437,8 @@ mod tests {
     fn format_passthrough_collapses_and_trims_plain_text() {
         let raw = "\n\n  alpha\n\n\nbeta  \n\n";
         let out = format_compact_summary(raw);
-        // Leading/trailing whitespace trimmed, internal run collapsed to ONE `\n`.
-        assert_eq!(out, "alpha\nbeta");
+        // Leading/trailing whitespace trimmed, internal run collapsed to `\n\n`.
+        assert_eq!(out, "alpha\n\nbeta");
     }
 
     #[test]
@@ -440,9 +447,9 @@ mod tests {
         let out = format_compact_summary(raw);
         assert!(!out.contains("thinking..."));
         assert!(out.contains("Summary:\n1. Primary Request"));
-        // The triple-newline inside the summary collapsed to a SINGLE `\n`.
-        assert!(out.contains("1. Primary Request\n2. Concepts"));
-        assert!(!out.contains("1. Primary Request\n\n2. Concepts"));
+        // The triple-newline inside the summary collapsed to `\n\n` (one blank line).
+        assert!(out.contains("1. Primary Request\n\n2. Concepts"));
+        assert!(!out.contains("1. Primary Request\n\n\n2. Concepts"));
         // Preface and trailer survive (only analysis stripped, summary
         // rewritten in place).
         assert!(out.starts_with("preface"));
@@ -462,7 +469,7 @@ mod tests {
     fn format_handles_multibyte_content() {
         let raw = "<summary>café — naïve\n\n\nrésumé</summary>";
         let out = format_compact_summary(raw);
-        assert_eq!(out, "Summary:\ncafé — naïve\nrésumé");
+        assert_eq!(out, "Summary:\ncafé — naïve\n\nrésumé");
     }
 
     #[test]
@@ -512,8 +519,8 @@ mod tests {
         let msg =
             get_compact_user_summary_message("<summary>S</summary>", false, None, true);
         assert!(msg.contains("Summary:\nS"));
-        // Byte-exact preserved-tail sentence (claude PUt joins with a single \n).
-        assert!(msg.contains("\nRecent messages are preserved verbatim."));
+        // Byte-exact preserved-tail sentence (binary K9t joins with `\n\n`).
+        assert!(msg.contains("\n\nRecent messages are preserved verbatim."));
     }
 
     #[test]
@@ -543,7 +550,7 @@ mod tests {
         assert!(!without.contains("Recent messages are preserved verbatim."));
         // The only delta between them is the inserted preserved-tail sentence.
         assert_eq!(
-            with_tail.replace("\nRecent messages are preserved verbatim.", ""),
+            with_tail.replace("\n\nRecent messages are preserved verbatim.", ""),
             without
         );
     }

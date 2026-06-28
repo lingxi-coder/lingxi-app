@@ -459,6 +459,31 @@ fn entrypoint_value() -> String {
         .unwrap_or_else(|| "cli".to_string())
 }
 
+/// The top-level api-error envelope fields claude-code stamps on a synthetic
+/// assistant line built via `createAssistantAPIErrorMessage` (`ql`/`tc`) or the
+/// refusal builder (`fje`). On disk these are SIBLINGS of `message` —
+/// `isApiErrorMessage` (always `true`), an optional `error` category string, and
+/// an optional `apiErrorStatus` HTTP status — read back by the loader's
+/// transcript reconstruction (`ht=Ie.isApiErrorMessage===!0, st=Ie.apiErrorStatus`).
+///
+/// Field shapes are pinned against the 2.1.195 binary + real transcripts:
+/// - `error` is the category passed to the builder; it is OMITTED (not `null`)
+///   when the builder is called with no `error:` arg — e.g. the top-level
+///   `model_error` catch (`createAssistantAPIErrorMessage({content})`) and the
+///   malformed-tool-use terminal (`ql({content})`).
+/// - `api_error_status` mirrors `KNn`'s `r.apiErrorStatus=e.status` — set only
+///   when the error was an `APIError` with a numeric status; otherwise omitted.
+/// - `inner_stop_reason` overrides the synthetic inner `message.stop_reason`.
+///   The `ql`/`tc` path leaves it `"stop_sequence"` (the default); the refusal
+///   `fje` path keeps `"refusal"` (verified on disk: the sole refusal line
+///   carries `stop_reason:"refusal", error:"invalid_request"`).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ApiErrorEnvelope {
+    pub error: Option<&'static str>,
+    pub api_error_status: Option<u16>,
+    pub inner_stop_reason: Option<&'static str>,
+}
+
 /// Build the persisted assistant-envelope `usage` value from a normalized
 /// [`llm_client::Usage`]. Prefers the raw Anthropic usage object the codec
 /// retained on `provider_metadata` (byte-faithful to claude-code's persisted
@@ -2658,6 +2683,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     ) -> session::JsonlMessage {
         self.to_jsonl_message_with_inner_id(
             msg, session_id, parent_uuid, git_branch, entrypoint, prompt_id, None, None, None, None,
+            None,
         )
     }
 
@@ -2695,6 +2721,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // → the top-level `requestId` field (via `extra`). `None` (synthetic /
         // user / system) omits it, matching claude-code's `requestId: undefined`.
         request_id: Option<&str>,
+        // When `Some`, this is a synthetic api-error assistant line: stamp the
+        // top-level `isApiErrorMessage`/`error`/`apiErrorStatus` envelope fields
+        // (via `extra`) and apply any inner `stop_reason` override. `None`
+        // (every non-api-error line) leaves the shape exactly as before.
+        api_error: Option<&ApiErrorEnvelope>,
     ) -> session::JsonlMessage {
         let (kind, mut inner_message) = match msg {
             ConversationMessage::User { content, .. } => (
@@ -2776,7 +2807,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     m.insert("stop_details".to_string(), serde_json::Value::Null);
                     m.insert(
                         "stop_reason".to_string(),
-                        serde_json::Value::String("stop_sequence".to_string()),
+                        serde_json::Value::String(
+                            // `ql`/`tc` leave the synthetic inner `stop_reason` as
+                            // `"stop_sequence"`; the refusal `fje` path overrides
+                            // it to `"refusal"` (verified on disk).
+                            api_error
+                                .and_then(|e| e.inner_stop_reason)
+                                .unwrap_or("stop_sequence")
+                                .to_string(),
+                        ),
                     );
                     m.insert(
                         "stop_sequence".to_string(),
@@ -2832,6 +2871,31 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 "requestId".to_string(),
                 serde_json::Value::String(rid.to_string()),
             );
+        }
+        // Top-level api-error envelope (`createAssistantAPIErrorMessage`/`fje`):
+        // `error` (omitted when the builder took no `error:` arg), the always-on
+        // `isApiErrorMessage: true`, and `apiErrorStatus` (set only for an
+        // `APIError` with a numeric status). On disk these sit between
+        // `requestId` and `userType`; the engine's `extra` flatten emits them
+        // here (outer-field key ORDER is a separately-tracked deferral, but
+        // presence + values are 1:1). See [`ApiErrorEnvelope`].
+        if let Some(ae) = api_error {
+            if let Some(cat) = ae.error {
+                extra.insert(
+                    "error".to_string(),
+                    serde_json::Value::String(cat.to_string()),
+                );
+            }
+            extra.insert(
+                "isApiErrorMessage".to_string(),
+                serde_json::Value::Bool(true),
+            );
+            if let Some(status) = ae.api_error_status {
+                extra.insert(
+                    "apiErrorStatus".to_string(),
+                    serde_json::Value::Number(status.into()),
+                );
+            }
         }
         session::JsonlMessage {
             message_type: kind.to_string(),
@@ -3107,6 +3171,31 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         msg: &ConversationMessage,
         parent_override: Option<String>,
     ) {
+        self.persist_message_to_jsonl_inner(msg, parent_override, None)
+            .await;
+    }
+
+    /// Persist a synthetic api-error assistant line, stamping the top-level
+    /// `isApiErrorMessage`/`error`/`apiErrorStatus` envelope (and any inner
+    /// `stop_reason` override) from `env`. 1:1 with claude-code's
+    /// `createAssistantAPIErrorMessage` (`ql`/`tc`) and refusal (`fje`) lines.
+    pub(crate) async fn persist_api_error_message_to_jsonl(
+        &self,
+        msg: &ConversationMessage,
+        env: ApiErrorEnvelope,
+    ) {
+        self.persist_message_to_jsonl_inner(msg, None, Some(env))
+            .await;
+    }
+
+    /// Shared append body for [`Self::persist_message_to_jsonl_with_parent`] and
+    /// [`Self::persist_api_error_message_to_jsonl`].
+    async fn persist_message_to_jsonl_inner(
+        &self,
+        msg: &ConversationMessage,
+        parent_override: Option<String>,
+        api_error: Option<ApiErrorEnvelope>,
+    ) {
         let Some(writer) = self.jsonl_writer.as_ref() else {
             return;
         };
@@ -3129,13 +3218,18 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let git_branch = self.resolve_git_branch().await;
         let entrypoint = Some(entrypoint_value());
         let prompt_id = self.prompt_id_for_message(msg).await;
-        let jmsg = self.to_jsonl_message(
+        let jmsg = self.to_jsonl_message_with_inner_id(
             msg,
             &session_id_str,
             parent_uuid,
             git_branch,
             entrypoint,
             prompt_id,
+            None,
+            None,
+            None,
+            None,
+            api_error.as_ref(),
         );
         let uuid_for_chain = jmsg.uuid.clone();
         match writer.append(&jmsg).await {
@@ -3236,6 +3330,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 Some(&model),
                 usage,
                 request_id,
+                None,
             );
             let line_uuid = jmsg.uuid.clone();
             match writer.append(&jmsg).await {
@@ -10611,6 +10706,7 @@ mod persist_with_parent_tests {
             Some("claude-opus-4-8"),
             Some(&usage),
             Some("req_test123"),
+            None,
         );
         // The real-response path stamps the top-level `requestId` (via `extra`).
         assert_eq!(
@@ -10658,6 +10754,7 @@ mod persist_with_parent_tests {
             None,
             None,
             None,
+            None,
         );
         // No request_id supplied → no top-level `requestId` (the synthetic case).
         assert!(
@@ -10699,6 +10796,134 @@ mod persist_with_parent_tests {
         );
         assert_eq!(pinner["content"][0]["type"], serde_json::json!("text"));
         assert_eq!(pinner["content"][0]["text"], serde_json::json!("hi"));
+    }
+
+    #[tokio::test]
+    async fn synthetic_api_error_envelope_stamps_top_level_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let orch = orch_with_writer(dir.path(), dir.path().join("s.jsonl"));
+        let msg = ConversationMessage::Assistant {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::Text {
+                text: "API Error: boom".into(),
+            }],
+            stop_reason: Some("model_error".into()),
+        };
+
+        // 1. No-category builder (top-level `model_error` catch / malformed
+        //    terminal): `isApiErrorMessage:true`, `error`/`apiErrorStatus` OMITTED,
+        //    inner `stop_reason` stays `"stop_sequence"`.
+        let bare = orch.to_jsonl_message_with_inner_id(
+            &msg,
+            "sess",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&ApiErrorEnvelope::default()),
+        );
+        assert_eq!(
+            bare.extra.get("isApiErrorMessage"),
+            Some(&serde_json::Value::Bool(true)),
+            "isApiErrorMessage is always stamped"
+        );
+        assert!(!bare.extra.contains_key("error"), "no error category");
+        assert!(
+            !bare.extra.contains_key("apiErrorStatus"),
+            "no apiErrorStatus"
+        );
+        assert_eq!(
+            bare.message["stop_reason"],
+            serde_json::json!("stop_sequence"),
+            "no-override keeps the synthetic stop_sequence"
+        );
+
+        // 2. `max_output_tokens` category (max_tokens / context-window cap).
+        let cap = orch.to_jsonl_message_with_inner_id(
+            &msg,
+            "sess",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&ApiErrorEnvelope {
+                error: Some("max_output_tokens"),
+                api_error_status: None,
+                inner_stop_reason: None,
+            }),
+        );
+        assert_eq!(
+            cap.extra.get("error").and_then(|v| v.as_str()),
+            Some("max_output_tokens")
+        );
+        assert_eq!(
+            cap.extra.get("isApiErrorMessage"),
+            Some(&serde_json::Value::Bool(true))
+        );
+
+        // 3. Refusal: `error:"invalid_request"` + inner `stop_reason:"refusal"`.
+        let refusal = orch.to_jsonl_message_with_inner_id(
+            &msg,
+            "sess",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&ApiErrorEnvelope {
+                error: Some("invalid_request"),
+                api_error_status: None,
+                inner_stop_reason: Some("refusal"),
+            }),
+        );
+        assert_eq!(
+            refusal.extra.get("error").and_then(|v| v.as_str()),
+            Some("invalid_request")
+        );
+        assert_eq!(
+            refusal.message["stop_reason"],
+            serde_json::json!("refusal"),
+            "refusal overrides the inner stop_reason"
+        );
+
+        // 4. With an HTTP status → `apiErrorStatus` is a JSON number.
+        let with_status = orch.to_jsonl_message_with_inner_id(
+            &msg,
+            "sess",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&ApiErrorEnvelope {
+                error: Some("rate_limit"),
+                api_error_status: Some(429),
+                inner_stop_reason: None,
+            }),
+        );
+        assert_eq!(
+            with_status.extra.get("apiErrorStatus"),
+            Some(&serde_json::Value::Number(429.into()))
+        );
+
+        // 5. A normal (non-api-error) assistant line stamps NOTHING.
+        let normal = orch.to_jsonl_message(&msg, "sess", None, None, None, None);
+        assert!(!normal.extra.contains_key("isApiErrorMessage"));
+        assert!(!normal.extra.contains_key("error"));
     }
 
     // ── transcript per-line cwd reflects the LIVE (post-`cd`) session cwd ──────

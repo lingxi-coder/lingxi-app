@@ -1,6 +1,6 @@
 //! Inner turn-by-turn loop helpers. Private to `ConversationOrchestrator`.
 
-use crate::conversation::ConversationOrchestrator;
+use crate::conversation::{ApiErrorEnvelope, ConversationOrchestrator};
 use crate::error::OrchestratorError;
 use crate::test_support::{PermissionDecision, PermissionDecisionSource, PermissionResolution};
 use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
@@ -1674,7 +1674,31 @@ pub(crate) async fn surface_terminal_api_error(
         let mut s = orch.session.lock().await;
         s.history.push(assistant_msg.clone());
     }
-    orch.persist_message_to_jsonl(&assistant_msg).await;
+    // Top-level api-error envelope per builder/stop_reason (verified vs the
+    // 2.1.195 binary + on-disk transcripts):
+    // - `max_tokens` / `model_context_window_exceeded`: claude-code's
+    //   `ql({content,apiError:"max_output_tokens",error:"max_output_tokens"})` →
+    //   `error:"max_output_tokens"` (no HTTP status), inner `stop_sequence`.
+    // - `refusal`: the `fje("refusal", …)` builder keeps inner
+    //   `stop_reason:"refusal"` and tags `error:"invalid_request"` (the sole
+    //   on-disk refusal line: `stop_reason:"refusal", error:"invalid_request"`).
+    let env = match stop_reason {
+        "max_tokens" | "model_context_window_exceeded" => ApiErrorEnvelope {
+            error: Some("max_output_tokens"),
+            api_error_status: None,
+            inner_stop_reason: None,
+        },
+        "refusal" => ApiErrorEnvelope {
+            error: Some("invalid_request"),
+            api_error_status: None,
+            inner_stop_reason: Some("refusal"),
+        },
+        // `terminal_api_error_text` returned `Some` only for the three reasons
+        // above; any other value can't reach here.
+        _ => ApiErrorEnvelope::default(),
+    };
+    orch.persist_api_error_message_to_jsonl(&assistant_msg, env)
+        .await;
     orch.output.emit_text(&text).await;
     Some(assistant_id)
 }
@@ -1750,7 +1774,15 @@ pub(crate) async fn surface_model_error(
         let mut s = orch.session.lock().await;
         s.history.push(assistant_msg.clone());
     }
-    orch.persist_message_to_jsonl(&assistant_msg).await;
+    // The top-level `model_error` catch builds this via
+    // `createAssistantAPIErrorMessage({content})` with NO `error:` arg
+    // (`query.ts:955-997`), so the persisted line carries `isApiErrorMessage:
+    // true` but OMITS the `error` category and `apiErrorStatus` (inner
+    // `stop_reason` stays `"stop_sequence"`). The per-request error classifier
+    // (`Flp`/`KNn`, which would tag `error:"unknown"`/`"server_error"`/… +
+    // `apiErrorStatus`) is a separate, deferred surface.
+    orch.persist_api_error_message_to_jsonl(&assistant_msg, ApiErrorEnvelope::default())
+        .await;
     orch.output.emit_text(&text).await;
     assistant_id
 }
@@ -1911,7 +1943,11 @@ async fn handle_malformed_tool_use(
             let mut s = orch.session.lock().await;
             s.history.push(failed_msg.clone());
         }
-        orch.persist_message_to_jsonl(&failed_msg).await;
+        // claude-code builds the terminal via `ql({content})` with no `error:`
+        // arg → `isApiErrorMessage: true`, `error`/`apiErrorStatus` OMITTED,
+        // inner `stop_reason:"stop_sequence"`.
+        orch.persist_api_error_message_to_jsonl(&failed_msg, ApiErrorEnvelope::default())
+            .await;
         return Ok(TurnStepOutcome::Ended {
             final_message_id: assistant_id,
             stop_reason: "end_turn".to_string(),

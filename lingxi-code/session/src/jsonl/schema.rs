@@ -1,16 +1,26 @@
-//! `JsonlMessage` — outer JSONL line schema, byte-locked to
-//! `claude-code/src/types/logs.ts:8-17, 221-231`.
+//! `JsonlMessage` — outer JSONL line schema.
+//!
+//! Field NAMES are parity-locked to claude-code's transcript schema (verified
+//! against real 2.1.195 on-disk transcripts). Field ORDER is NOT yet 1:1: this
+//! struct emits a single flat declared order, whereas claude wraps a per-kind
+//! message envelope in the middle of common fields — real on-disk order is
+//! `parentUuid, [logicalParentUuid,] isSidechain, [promptId,] <inner envelope:
+//! type/uuid/timestamp/message + kind-specific siblings>, [sessionKind,]
+//! userType, entrypoint, cwd, sessionId, version, gitBranch, [slug]`. Matching
+//! that byte-for-byte needs an ordered/per-kind serializer (tracked as a
+//! dedicated parity task; see memory `session-jsonl-keyorder-oracle`).
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// One line of the session JSONL file.
 ///
-/// Outer fields are byte-locked; the `message` field is an opaque `Value`
-/// because its inner schema depends on `type` (Anthropic Messages API for
-/// `user`/`assistant`, claude-code internal shapes for `system`/`attachment`).
-/// All un-named outer fields land in `extra` via `#[serde(flatten)]` so
-/// read→write round-trips preserve every byte we read.
+/// Outer field NAMES match claude; field ORDER does not yet (see module
+/// docs — claude spreads a per-kind envelope mid-line). The `message` field is
+/// an opaque `Value` because its inner schema depends on `type` (Anthropic
+/// Messages API for `user`/`assistant`, claude-code internal shapes for
+/// `system`/`attachment`). All un-named outer fields land in `extra` via
+/// `#[serde(flatten)]` so read→write round-trips preserve every byte we read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonlMessage {
     /// `"user" | "assistant" | "system" | "attachment" | "summary" | ...`

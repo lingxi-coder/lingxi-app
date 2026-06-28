@@ -14,7 +14,7 @@
 //!   `:421-427`:
 //!   - `Unknown skill: <name>`
 //!   - `Skill <name> cannot be used with Skill tool due to disable-model-invocation`
-//!   - `Skill <name> is not a prompt-based skill`
+//!   - `<name> is a built-in CLI command, not a skill. Ask the user to run /<name> themselves — it cannot be invoked via the Skill tool.`
 //! - Output (inline path) mirrors the TS inline output union (TS `:301-326`):
 //!   `{success:true, commandName, allowedTools?, model?, status:"inline"}`.
 //!
@@ -69,7 +69,7 @@ pub enum SkillCommandType {
     /// A prompt-based slash command (the only model-invocable kind).
     Prompt,
     /// Any other command kind (local/jsx/etc.) — rejected with the locked
-    /// "is not a prompt-based skill" error.
+    /// "is a built-in CLI command, not a skill…" error.
     Other,
 }
 
@@ -601,8 +601,14 @@ ALREADY been loaded - follow the instructions directly instead of calling this t
                     )));
                 }
                 if desc.command_type != SkillCommandType::Prompt {
+                    // Binary `skill_invoke_not_prompt_type`: `${name} is a ${u}
+                    // command, not a skill. Ask the user to run /${name}
+                    // themselves — it cannot be invoked via the Skill tool.`
+                    // where `u = type==="local-jsx" ? "UI" : "built-in CLI"`. The
+                    // port collapses non-prompt to `Other` (it does not surface
+                    // local-jsx commands as skills), so `u` = "built-in CLI".
                     return Err(ValidationError(format!(
-                        "Skill {normalized} is not a prompt-based skill"
+                        "{normalized} is a built-in CLI command, not a skill. Ask the user to run /{normalized} themselves — it cannot be invoked via the {SKILL_TOOL_NAME} tool."
                     )));
                 }
                 Ok(())
@@ -692,8 +698,9 @@ ALREADY been loaded - follow the instructions directly instead of calling this t
         // Locked rejection: non-prompt skill (TS `:421-427`).
         if desc.command_type != SkillCommandType::Prompt {
             emit_failed(&bus, "not_prompt", started.elapsed().as_millis() as u64).await;
+            // Binary `skill_invoke_not_prompt_type` reject (see validate_input).
             return Err(ToolError::InvalidInput(format!(
-                "Skill {command_name} is not a prompt-based skill"
+                "{command_name} is a built-in CLI command, not a skill. Ask the user to run /{command_name} themselves — it cannot be invoked via the {SKILL_TOOL_NAME} tool."
             )));
         }
 
@@ -1118,7 +1125,9 @@ mod tests {
             .call(json!({"skill": "local-cmd"}), fresh_ctx(), fresh_tx())
             .await
             .expect_err("non-prompt");
-        assert!(format!("{err}").contains("Skill local-cmd is not a prompt-based skill"));
+        assert!(format!("{err}").contains(
+            "local-cmd is a built-in CLI command, not a skill. Ask the user to run /local-cmd themselves — it cannot be invoked via the Skill tool."
+        ));
     }
 
     #[tokio::test]

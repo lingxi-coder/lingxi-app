@@ -268,8 +268,10 @@ fn process_cell(cell: &Value, index: usize, code_language: &str) -> Value {
 /// `raw` is the file's UTF-8 text (already decoded by the caller). The language
 /// is read from `metadata.language_info.name`, defaulting to `"python"`.
 pub fn read_notebook(raw: &str) -> Result<Vec<Value>, String> {
-    let notebook: Value =
-        serde_json::from_str(raw).map_err(|e| format!("notebook JSON parse: {e}"))?;
+    // Binary `readNotebook` (atl): byte-locked invalid-JSON error.
+    let notebook: Value = serde_json::from_str(raw).map_err(|e| {
+        format!("Notebook file is not valid JSON (it may be truncated, corrupted, or still being written): {e}")
+    })?;
     let language = notebook
         .get("metadata")
         .and_then(|m| m.get("language_info"))
@@ -277,10 +279,13 @@ pub fn read_notebook(raw: &str) -> Result<Vec<Value>, String> {
         .and_then(Value::as_str)
         .unwrap_or("python")
         .to_string();
+    // Binary `readNotebook` (atl): byte-locked invalid-cells error.
     let cells = notebook
         .get("cells")
         .and_then(Value::as_array)
-        .ok_or_else(|| "notebook missing `cells` array".to_string())?;
+        .ok_or_else(|| {
+            "Notebook file is not a valid Jupyter notebook (top-level \"cells\" must be an array of cell objects).".to_string()
+        })?;
     Ok(cells
         .iter()
         .enumerate()

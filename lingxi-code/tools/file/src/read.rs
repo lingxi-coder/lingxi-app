@@ -2787,7 +2787,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("notebook JSON parse"), "got: {err}");
+        assert!(
+            err.to_string().contains("Notebook file is not valid JSON (it may be truncated, corrupted, or still being written):"),
+            "got: {err}"
+        );
     }
 
     // ───────────────────────── Read dedup (file_unchanged) ──────────────────

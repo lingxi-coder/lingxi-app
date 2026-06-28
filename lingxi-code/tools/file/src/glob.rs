@@ -27,7 +27,8 @@
 //! Wire locks:
 //! - `MAX_GLOB_MATCHES = 100` (`GlobTool.ts:157`).
 //! - Excess truncated → returns `truncated: true` field on output + appends the
-//!   `(Results are truncated…)` advisory (`GlobTool.ts:190-194`).
+//!   dynamic `(Showing N of M matching files; K more are not listed…)` notice
+//!   (binary GlobTool `zem`).
 //! - Results sorted OLDEST-first by mtime, capped to the first 100 (claude-code
 //!   `--sort=modified` is oldest-first + `slice(0, limit)`, `utils/glob.ts:94,127`).
 
@@ -59,8 +60,10 @@ pub const MAX_GLOB_MATCHES: usize = 100;
 
 /// Advisory appended to the model-facing result when matches were capped at
 /// `MAX_GLOB_MATCHES` (`GlobTool.ts:190-194`, byte-exact).
-const TRUNCATION_ADVISORY: &str =
-    "(Results are truncated. Consider using a more specific path or pattern.)";
+// (The static "(Results are truncated…)" advisory is the binary's
+// `totalMatches===undefined` fallback in `zem()`; the live Glob path always has
+// a defined `totalMatches`, so it emits the dynamic count message instead — see
+// the truncated branch below. The static string is intentionally not emitted.)
 
 /// Model-facing string when no files matched (`GlobTool.ts:178-183`, byte-exact).
 const NO_FILES_FOUND: &str = "No files found";
@@ -362,7 +365,17 @@ impl Tool for GlobTool {
         let content = if matches.is_empty() {
             NO_FILES_FOUND.to_string()
         } else if truncated {
-            format!("{}\n{TRUNCATION_ADVISORY}", matches.join("\n"))
+            // Binary GlobTool `zem(e)`: the live walk always sets
+            // `totalMatches` (defined) and `countIsComplete=true`, so the
+            // truncation notice is the DYNAMIC count message, not the static
+            // "(Results are truncated…)" fallback (which only fires when
+            // `totalMatches===undefined` — never on this path).
+            let shown = matches.len();
+            let remaining = total - shown;
+            format!(
+                "{}\n(Showing {shown} of {total} matching files; {remaining} more are not listed. Narrow the pattern or path to see the rest.)",
+                matches.join("\n")
+            )
         } else {
             matches.join("\n")
         };
@@ -877,11 +890,12 @@ mod tests {
             .await
             .unwrap();
         let content = result.model_content.as_deref().unwrap();
+        // Binary `zem`: dynamic count message (150 hits, capped at 100 → 50 more).
         assert!(
             content.ends_with(
-                "\n(Results are truncated. Consider using a more specific path or pattern.)"
+                "\n(Showing 100 of 150 matching files; 50 more are not listed. Narrow the pattern or path to see the rest.)"
             ),
-            "model_content should end with the truncation advisory: {content}"
+            "model_content should end with the dynamic truncation notice: {content}"
         );
         assert_eq!(result.data["truncated"], true);
         // `totalMatches` is the pre-cap count (150); `numFiles` is the capped 100.

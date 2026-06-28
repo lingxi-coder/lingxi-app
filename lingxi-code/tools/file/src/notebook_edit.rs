@@ -350,7 +350,12 @@ Usage:\n\
         let cells = nb
             .get_mut("cells")
             .and_then(Value::as_array_mut)
-            .ok_or_else(|| ToolError::InvalidInput("notebook missing `cells` array".into()))?;
+            .ok_or_else(|| {
+                // Binary `readNotebook` (atl): byte-locked invalid-cells error.
+                ToolError::InvalidInput(
+                    "Notebook file is not a valid Jupyter notebook (top-level \"cells\" must be an array of cell objects).".into(),
+                )
+            })?;
         let cells_len = cells.len();
 
         // A missing `cell_id` is only valid for `insert` (TS validateInput

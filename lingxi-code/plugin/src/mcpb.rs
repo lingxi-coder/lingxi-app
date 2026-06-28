@@ -47,7 +47,11 @@ fn unpack_mcpb_limited(
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))
         .map_err(|e| format!("Failed to extract MCPB {}: {e}", dest.display()))?;
     if zip.len() > max_files {
-        return Err(format!("Archive contains too many files: {}", zip.len()));
+        // Binary: `Archive contains too many files: ${fileCount} (max: ${MAX_FILE_COUNT})`.
+        return Err(format!(
+            "Archive contains too many files: {} (max: {max_files})",
+            zip.len()
+        ));
     }
     let mut total: u64 = 0;
     for i in 0..zip.len() {

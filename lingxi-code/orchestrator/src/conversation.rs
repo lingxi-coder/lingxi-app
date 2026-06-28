@@ -2967,9 +2967,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // `error` (omitted when the builder took no `error:` arg), the always-on
         // `isApiErrorMessage: true`, and `apiErrorStatus` (set only for an
         // `APIError` with a numeric status). On disk these sit between
-        // `requestId` and `userType`; the engine's `extra` flatten emits them
-        // here (outer-field key ORDER is a separately-tracked deferral, but
-        // presence + values are 1:1). See [`ApiErrorEnvelope`].
+        // `requestId` and `userType`. These flow through the `extra` channel;
+        // `JsonlMessage`'s hand-written `Serialize` (session/jsonl/schema.rs)
+        // now places them in claude's EXACT per-kind outer-key order
+        // (api-error head: type, uuid, timestamp, message, requestId?, error?,
+        // isApiErrorMessage, apiErrorStatus?) — presence + values + ORDER are
+        // 1:1. See [`ApiErrorEnvelope`].
         if let Some(ae) = api_error {
             if let Some(cat) = ae.error {
                 extra.insert(

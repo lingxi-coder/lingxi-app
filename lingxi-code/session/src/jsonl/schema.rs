@@ -1,16 +1,36 @@
 //! `JsonlMessage` — outer JSONL line schema.
 //!
-//! Field NAMES are parity-locked to claude-code's transcript schema (verified
-//! against real 2.1.195 on-disk transcripts). Field ORDER is NOT yet 1:1: this
-//! struct emits a single flat declared order, whereas claude wraps a per-kind
-//! message envelope in the middle of common fields — real on-disk order is
-//! `parentUuid, [logicalParentUuid,] isSidechain, [promptId,] <inner envelope:
-//! type/uuid/timestamp/message + kind-specific siblings>, [sessionKind,]
-//! userType, entrypoint, cwd, sessionId, version, gitBranch, [slug]`. Matching
-//! that byte-for-byte needs an ordered/per-kind serializer (tracked as a
-//! dedicated parity task; see memory `session-jsonl-keyorder-oracle`).
+//! Field NAMES **and ORDER** are parity-locked to claude-code's transcript
+//! schema (verified against real 2.1.195 on-disk transcripts —
+//! ~810k lines). `Serialize` is hand-written ([`impl Serialize for
+//! JsonlMessage`]) to emit claude's EXACT per-kind outer-key order instead of
+//! the struct-declaration order; `Deserialize` stays derived (the reader is
+//! order-independent).
+//!
+//! Per-kind head order (everything before the common trailer), for the fields
+//! this engine actually emits:
+//! - **user**: `parentUuid, isSidechain, [promptId,] type, message, [isMeta,]
+//!   uuid, timestamp`
+//! - **assistant (normal)**: `parentUuid, isSidechain, message, [requestId,]
+//!   type, uuid, timestamp`
+//! - **assistant (api-error)**: `parentUuid, isSidechain, type, uuid,
+//!   timestamp, message, [requestId,] [error,] isApiErrorMessage,
+//!   [apiErrorStatus]`
+//! - **system**: `parentUuid, [logicalParentUuid,] isSidechain, type, message,
+//!   [isMeta,] uuid, timestamp` (the port emits an inner `{role,content}`
+//!   `message`; claude's flattened `subtype`/`content` top-level system
+//!   envelope is an UNPORTED feature, so those siblings — when present in
+//!   `extra` — are tail-appended verbatim rather than synthesized into claude's
+//!   positions).
+//!
+//! Common trailer (every kind): `userType, [entrypoint,] cwd, sessionId,
+//! version, [gitBranch,] [slug]`. Any UNRECOGNIZED `extra` key (an unported
+//! claude field, e.g. `agentId`/`toolUseResult`/`attachment`) is appended after
+//! the trailer in `extra` iteration order, so read→write round-trips of
+//! unported fields stay byte-faithful.
 
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 /// One line of the session JSONL file.
@@ -21,7 +41,7 @@ use serde_json::{Map, Value};
 /// Messages API for `user`/`assistant`, claude-code internal shapes for
 /// `system`/`attachment`). All un-named outer fields land in `extra` via
 /// `#[serde(flatten)]` so read→write round-trips preserve every byte we read.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct JsonlMessage {
     /// `"user" | "assistant" | "system" | "attachment" | "summary" | ...`
     /// — see `claude-code/src/types/logs.ts:297` `Entry` union.
@@ -136,4 +156,137 @@ pub struct JsonlMessage {
     /// read->write so round-trips are byte-equivalent.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// `extra` keys this serializer pulls into their claude-ordered positions.
+/// Anything NOT in this set is appended verbatim after the common trailer
+/// (forward-compat for unported claude fields like `agentId`/`toolUseResult`).
+const RECOGNIZED_EXTRA: &[&str] = &[
+    "isMeta",
+    "requestId",
+    "error",
+    "errorDetails",
+    "isApiErrorMessage",
+    "apiErrorStatus",
+];
+
+// Hand-written `Serialize` so the outer JSONL keys land in claude-code's EXACT
+// per-kind order (see module docs). `Deserialize` stays derived — the reader is
+// order-independent. VALUES are byte-identical to the derived impl; only key
+// POSITION changes. Skip predicates mirror the struct's `skip_serializing_if`
+// so presence parity is preserved.
+impl Serialize for JsonlMessage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // serde_json's map serializer preserves `serialize_entry` insertion
+        // order, so emitting entries in sequence yields claude's on-disk order.
+        let mut map = serializer.serialize_map(None)?;
+
+        let is_user = self.message_type == "user";
+        let is_assistant = self.message_type == "assistant";
+        let is_system = self.message_type == "system";
+        let is_api_error = self.extra.contains_key("isApiErrorMessage");
+
+        // (a) parentUuid — ALWAYS first, emitted even when null.
+        map.serialize_entry("parentUuid", &self.parent_uuid)?;
+        // (b) logicalParentUuid — system places it right after parentUuid. The
+        //     port only ever sets it on a (future) compact boundary; omitted
+        //     when None to match the TS `undefined` skip.
+        if self.logical_parent_uuid.is_some() {
+            map.serialize_entry("logicalParentUuid", &self.logical_parent_uuid)?;
+        }
+        // (c) isSidechain — always.
+        map.serialize_entry("isSidechain", &self.is_sidechain)?;
+
+        if is_user {
+            // (d) user head: promptId?, type, message, isMeta?, uuid, timestamp.
+            if let Some(pid) = &self.prompt_id {
+                map.serialize_entry("promptId", pid)?;
+            }
+            map.serialize_entry("type", &self.message_type)?;
+            map.serialize_entry("message", &self.message)?;
+            if let Some(v) = self.extra.get("isMeta") {
+                map.serialize_entry("isMeta", v)?;
+            }
+            map.serialize_entry("uuid", &self.uuid)?;
+            map.serialize_entry("timestamp", &self.timestamp)?;
+        } else if is_assistant && is_api_error {
+            // (e1) assistant api-error head: type, uuid, timestamp, message,
+            //      requestId?, error?, isApiErrorMessage, apiErrorStatus?.
+            map.serialize_entry("type", &self.message_type)?;
+            map.serialize_entry("uuid", &self.uuid)?;
+            map.serialize_entry("timestamp", &self.timestamp)?;
+            map.serialize_entry("message", &self.message)?;
+            if let Some(v) = self.extra.get("requestId") {
+                map.serialize_entry("requestId", v)?;
+            }
+            if let Some(v) = self.extra.get("error") {
+                map.serialize_entry("error", v)?;
+            }
+            if let Some(v) = self.extra.get("errorDetails") {
+                map.serialize_entry("errorDetails", v)?;
+            }
+            // isApiErrorMessage is guaranteed present (gated `is_api_error`).
+            if let Some(v) = self.extra.get("isApiErrorMessage") {
+                map.serialize_entry("isApiErrorMessage", v)?;
+            }
+            if let Some(v) = self.extra.get("apiErrorStatus") {
+                map.serialize_entry("apiErrorStatus", v)?;
+            }
+        } else if is_assistant {
+            // (e2) assistant normal head: message, requestId?, type, uuid,
+            //      timestamp.
+            map.serialize_entry("message", &self.message)?;
+            if let Some(v) = self.extra.get("requestId") {
+                map.serialize_entry("requestId", v)?;
+            }
+            map.serialize_entry("type", &self.message_type)?;
+            map.serialize_entry("uuid", &self.uuid)?;
+            map.serialize_entry("timestamp", &self.timestamp)?;
+        } else {
+            // (f) system + any other kind: type, message, isMeta?, uuid,
+            //     timestamp. The port emits an inner `message`; claude's
+            //     flattened system envelope (subtype/content as top-level
+            //     siblings) is unported, so those `extra` keys tail-append.
+            map.serialize_entry("type", &self.message_type)?;
+            map.serialize_entry("message", &self.message)?;
+            if let Some(v) = self.extra.get("isMeta") {
+                map.serialize_entry("isMeta", v)?;
+            }
+            map.serialize_entry("uuid", &self.uuid)?;
+            map.serialize_entry("timestamp", &self.timestamp)?;
+        }
+        let _ = is_system;
+
+        // (h) Common trailer — same emit/skip predicates as the derived impl,
+        //     only the POSITION moves (it now follows the per-kind envelope).
+        if let Some(v) = &self.user_type {
+            map.serialize_entry("userType", v)?;
+        }
+        if let Some(v) = &self.entrypoint {
+            map.serialize_entry("entrypoint", v)?;
+        }
+        map.serialize_entry("cwd", &self.cwd)?;
+        map.serialize_entry("sessionId", &self.session_id)?;
+        map.serialize_entry("version", &self.version)?;
+        if let Some(v) = &self.git_branch {
+            map.serialize_entry("gitBranch", v)?;
+        }
+        if let Some(v) = &self.slug {
+            map.serialize_entry("slug", v)?;
+        }
+
+        // (i) Tail — any UNRECOGNIZED extra key (unported claude field), in
+        //     `extra` iteration order, so round-trips of those survive.
+        for (k, v) in &self.extra {
+            if RECOGNIZED_EXTRA.contains(&k.as_str()) {
+                continue;
+            }
+            map.serialize_entry(k, v)?;
+        }
+
+        map.end()
+    }
 }

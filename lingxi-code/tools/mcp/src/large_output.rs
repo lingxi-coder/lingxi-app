@@ -106,12 +106,22 @@ pub fn process_mcp_result(
         return truncate_mcp_content(content);
     }
 
-    // Serialize for persistence (client.ts:2771-2772): a bare string is written
-    // as-is (.txt); array content is pretty-printed JSON (.json), matching
-    // `getToolResultPath(id, isJson)`.
-    let (content_str, mime): (String, &str) = match content {
-        Value::String(s) => (s.clone(), "text/plain"),
-        other => (
+    // Singleton-unwrap (`tengu_mcp_singleton_unwrap`, Statsig default true ⇒
+    // always-on here): a transformed content array of exactly ONE `text` block
+    // with no `annotations`/`_meta` is unwrapped to that block's raw text and
+    // treated exactly like a bare string — persisted as plain text (.txt) with
+    // line stats. Binary `processMCPResult`: `f = …d[0].text`, `h = typeof
+    // d==="string"?d:f??Pe(d,null,2)`, `g = i==="toolResult" || f!==void 0`.
+    let unwrapped: Option<String> = singleton_text_unwrap(content);
+    let is_plain_text = unwrapped.is_some() || matches!(content, Value::String(_));
+
+    // Serialize for persistence (client.ts:2771-2772): a bare string (or an
+    // unwrapped singleton text block) is written as-is (.txt); other array
+    // content is pretty-printed JSON (.json), matching `getToolResultPath`.
+    let (content_str, mime): (String, &str) = match (&unwrapped, content) {
+        (Some(text), _) => (text.clone(), "text/plain"),
+        (None, Value::String(s)) => (s.clone(), "text/plain"),
+        (None, other) => (
             serde_json::to_string_pretty(other).unwrap_or_default(),
             "application/json",
         ),
@@ -133,14 +143,17 @@ pub fn process_mcp_result(
         // (`toolResult`) shape only — `h = i==="toolResult" || f!==void 0`
         // (client.ts:2773); array/JSON content carries no `{count,maxLen}`.
         PersistBinaryResult::Ok { filepath, .. } => {
-            let line_stats = match content {
-                Value::String(_) => Some(compute_line_stats(&content_str)),
-                _ => None,
+            // `g = i==="toolResult" || f!==void 0`: line stats accompany the
+            // plain-text shape (bare string OR unwrapped singleton text block).
+            let line_stats = if is_plain_text {
+                Some(compute_line_stats(&content_str))
+            } else {
+                None
             };
             Value::String(get_large_output_instructions(
                 &filepath,
                 content_length,
-                &format_description(content),
+                &format_description(content, is_plain_text),
                 line_stats.as_ref(),
             ))
         }
@@ -215,14 +228,37 @@ fn is_image_block(block: &Value) -> bool {
 }
 
 /// `getFormatDescription(type, schema)` (`mcpOutputStorage.ts:16-28`) for the
-/// two content shapes this path persists: a bare string is `toolResult` →
-/// `"Plain text"`; array content is `contentArray` → `"JSON array with schema:
-/// <schema>"` where `<schema>` comes from [`infer_compact_schema`].
-fn format_description(content: &Value) -> String {
-    match content {
-        Value::String(_) => "Plain text".to_string(),
-        other => format!("JSON array with schema: {}", infer_compact_schema(other, 2)),
+/// two content shapes this path persists: the plain-text shape (`toolResult` —
+/// a bare string OR an unwrapped singleton text block) is `"Plain text"`; other
+/// array content is `contentArray` → `"JSON array with schema: <schema>"` where
+/// `<schema>` comes from [`infer_compact_schema`].
+fn format_description(content: &Value, is_plain_text: bool) -> String {
+    if is_plain_text {
+        "Plain text".to_string()
+    } else {
+        format!("JSON array with schema: {}", infer_compact_schema(content, 2))
     }
+}
+
+/// Singleton-unwrap (`tengu_mcp_singleton_unwrap`, Statsig default true): when a
+/// transformed MCP content array is exactly ONE `text` block with no
+/// `annotations`/`_meta`, the persisted form is that block's raw text (treated
+/// as plain text), not the JSON array. Binary `processMCPResult`:
+/// `f = p && Array.isArray(d) && d.length===1 && d[0]?.type==="text"
+///      && !("annotations" in d[0]) && !("_meta" in d[0]) ? d[0].text : void 0`.
+fn singleton_text_unwrap(content: &Value) -> Option<String> {
+    let arr = content.as_array()?;
+    if arr.len() != 1 {
+        return None;
+    }
+    let obj = arr[0].as_object()?;
+    if obj.get("type").and_then(Value::as_str) != Some("text") {
+        return None;
+    }
+    if obj.contains_key("annotations") || obj.contains_key("_meta") {
+        return None;
+    }
+    obj.get("text").and_then(Value::as_str).map(String::from)
 }
 
 /// `inferCompactSchema(value, depth)` (`client.ts:2644-2660`): a compact,
@@ -537,7 +573,9 @@ mod tests {
     fn over_limit_no_images_persists_and_returns_instructions() {
         let dir = tempfile::tempdir().unwrap();
         // ~15000-token estimate (60000 chars / 4) → over the 12500 threshold.
-        let content = Value::Array(vec![text_of_len(60_000)]);
+        // TWO text blocks → NOT a singleton, so the JSON-array path (not the
+        // singleton-unwrap plain-text path) is exercised here.
+        let content = Value::Array(vec![text_of_len(30_000), text_of_len(30_000)]);
         let out = process_mcp_result(&content, "srv", "tool", dir.path(), 1700);
 
         let text = out.as_str().expect("persist path returns a string");
@@ -566,6 +604,40 @@ mod tests {
         assert!(!text.contains("- Note: this file's lines are too long"));
         // v2.1.185 final bullet.
         assert!(text.ends_with("- If after a few attempts you cannot read the file (file not found, lines too long for Read's offset/limit, no shell access), STOP retrying. Summarize what you were able to read, explicitly state which portion you could not read and why, and proceed.\n"));
+    }
+
+    #[test]
+    fn over_limit_singleton_text_block_unwraps_to_plaintext() {
+        // Binary singleton-unwrap (tengu_mcp_singleton_unwrap): an over-limit
+        // content array of exactly ONE text block (no annotations/_meta) is
+        // persisted as PLAIN TEXT (.txt) with line stats + Format "Plain text".
+        let dir = tempfile::tempdir().unwrap();
+        let content = Value::Array(vec![text_of_len(60_000)]);
+        let out = process_mcp_result(&content, "srv", "tool", dir.path(), 1700);
+
+        let text = out.as_str().expect("persist path returns a string");
+        // Persisted as .txt (plain text), and the on-disk bytes are the raw
+        // unwrapped text — NOT the JSON array.
+        let txt_path = dir.path().join("mcp-srv-tool-1700.txt");
+        assert!(txt_path.exists(), "unwrapped singleton persisted as .txt");
+        assert!(!dir.path().join("mcp-srv-tool-1700.json").exists());
+        assert_eq!(std::fs::read_to_string(&txt_path).unwrap(), "a".repeat(60_000));
+        // Plain-text Format + line-count phrase (NOT the JSON-array schema).
+        assert!(text.contains("Format: Plain text\n"), "got: {text}");
+        assert!(!text.contains("JSON array with schema"));
+        assert!(text.contains("characters across"), "plain text carries line stats");
+    }
+
+    #[test]
+    fn singleton_with_annotations_does_not_unwrap() {
+        // `!("annotations" in d[0])`: a singleton text block carrying annotations
+        // is NOT unwrapped — it stays the JSON-array path.
+        let dir = tempfile::tempdir().unwrap();
+        let content = json!([{ "type": "text", "text": "a".repeat(60_000), "annotations": {} }]);
+        let out = process_mcp_result(&content, "srv", "tool", dir.path(), 1700);
+        let text = out.as_str().expect("persist path returns a string");
+        assert!(dir.path().join("mcp-srv-tool-1700.json").exists(), "stays JSON");
+        assert!(text.contains("JSON array with schema"), "got: {text}");
     }
 
     #[test]

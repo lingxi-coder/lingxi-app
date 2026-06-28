@@ -851,9 +851,17 @@ impl Tool for WebSearchTool {
         input: &Value,
         _ctx: &ToolUseContext,
     ) -> Result<(), tool_api::tool_trait::ValidationError> {
-        let q = input.get("query").and_then(Value::as_str).ok_or_else(|| {
-            tool_api::tool_trait::ValidationError("missing required field: query".into())
-        })?;
+        // Binary `validateInput`: `if(!t.length) return {message:"Error: Missing
+        // query",errorCode:1}`. The min-2 constraint is schema-enforced
+        // (`A.string().min(2)` == the "minLength":2 in this tool's input schema),
+        // NOT a validateInput message — the manual <2 guard below is belt-and-
+        // suspenders and keeps the port safe if the schema is not pre-validated.
+        let q = input.get("query").and_then(Value::as_str).unwrap_or("");
+        if q.is_empty() {
+            return Err(tool_api::tool_trait::ValidationError(
+                "Error: Missing query".into(),
+            ));
+        }
         if q.chars().count() < 2 {
             return Err(tool_api::tool_trait::ValidationError(
                 "query must be at least 2 characters".into(),
@@ -903,6 +911,11 @@ impl Tool for WebSearchTool {
     ) -> Result<ToolCallResult, ToolError> {
         let parsed_input: WebSearchInput = serde_json::from_value(input)
             .map_err(|e| ToolError::InvalidInput(format!("invalid input: {e}")))?;
+        // Binary `validateInput`: empty query -> "Error: Missing query"; min-2 is
+        // schema-enforced (belt-and-suspenders guard retained).
+        if parsed_input.query.is_empty() {
+            return Err(ToolError::InvalidInput("Error: Missing query".into()));
+        }
         if parsed_input.query.chars().count() < 2 {
             return Err(ToolError::InvalidInput(
                 "query must be at least 2 characters".into(),

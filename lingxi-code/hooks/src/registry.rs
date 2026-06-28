@@ -321,7 +321,7 @@ impl HookRegistry {
             matched.extend(hooks.iter().filter(keep));
         }
         matched.sort_by(|a, b| b.priority.cmp(&a.priority));
-        matched
+        drop_http_for_session_events(matched, &et)
     }
 
     /// Like [`Self::match_event`] but restricted to the frontmatter hooks scoped
@@ -616,6 +616,34 @@ impl HookRegistry {
 /// `atf` set (`utils/hooks.ts`, claude-code 2.1.195). For these events the
 /// simple-pattern matcher accepts comma-separated lists and the v2.1.195 hyphen
 /// char class; every other event uses the classic pipe-only matcher. Mirrors
+/// Binary `Bjo` (`getMatchingHooks`): HTTP hooks are NOT supported for the
+/// `SessionStart` and `Setup` events, so they are dropped from the matched set
+/// (with a skip log) — `R.filter(k=>k.hook.type==="http"?(log,!1):!0)`. A strict
+/// no-op for every other event type, so non-session events are byte-identical.
+fn drop_http_for_session_events<'a>(
+    matched: Vec<&'a HookDefinition>,
+    event_type: &HookEventType,
+) -> Vec<&'a HookDefinition> {
+    let event_label = match event_type {
+        HookEventType::SessionStart => "SessionStart",
+        HookEventType::Setup => "Setup",
+        _ => return matched,
+    };
+    matched
+        .into_iter()
+        .filter(|h| match &h.executor {
+            crate::definition::HookExecutor::Http { url, .. } => {
+                // Byte-locked skip message (binary `Bjo`, em-dash U+2014).
+                tracing::debug!(
+                    "Skipping HTTP hook {url} \u{2014} HTTP hooks are not supported for {event_label}"
+                );
+                false
+            }
+            _ => true,
+        })
+        .collect()
+}
+
 /// the binary's `atf` membership exactly (note: `FileChanged`,
 /// `UserPromptSubmit`, `Stop`, the task/teammate events, etc. are NOT in it).
 fn comma_mode_for(event_type: &HookEventType) -> bool {
@@ -719,10 +747,58 @@ mod all_hooks_tests {
         }
     }
 
+    fn hk_http(name: &str, event: HookEventType) -> HookDefinition {
+        let mut h = hk(name, event, HookSource::User);
+        h.executor = HookExecutor::Http {
+            url: "https://example.com/hook".into(),
+            method: "POST".into(),
+            headers: std::collections::HashMap::new(),
+            allowed_env_vars: vec![],
+            timeout: std::time::Duration::from_secs(5),
+        };
+        h
+    }
+
     #[test]
     fn all_hooks_returns_empty_for_fresh_registry() {
         let r = HookRegistry::new();
         assert!(r.all_hooks().is_empty());
+    }
+
+    // Binary `Bjo`: HTTP hooks are dropped from SessionStart / Setup results
+    // (unsupported), but fire normally for other events.
+    #[test]
+    fn http_hooks_dropped_for_sessionstart_and_setup_only() {
+        let mut r = HookRegistry::new();
+        r.register(hk_http("http-ss", HookEventType::SessionStart));
+        r.register(hk("builtin-ss", HookEventType::SessionStart, HookSource::User));
+        r.register(hk_http("http-setup", HookEventType::Setup));
+        r.register(hk_http("http-pre", HookEventType::PreToolUse));
+
+        let ss = r.match_event(
+            &HookEvent::SessionStart {
+                session_id: protocol::SessionId::new(),
+                source: "cli".into(),
+            },
+            &HookContext::default(),
+        );
+        let ss_names: Vec<&str> = ss.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(ss_names, vec!["builtin-ss"], "HTTP hook dropped from SessionStart");
+
+        let setup = r.match_event(&HookEvent::Setup, &HookContext::default());
+        assert!(setup.is_empty(), "HTTP hook dropped from Setup; got {setup:?}");
+
+        // Non-session event: HTTP hook is kept.
+        let pre = r.match_event(
+            &HookEvent::PreToolUse {
+                tool_name: "Bash".into(),
+                tool_input: serde_json::json!({}),
+                tool_use_id: protocol::ToolUseId::new(),
+            },
+            &HookContext::default(),
+        );
+        let pre_names: Vec<&str> = pre.iter().map(|h| h.name.as_str()).collect();
+        assert!(pre_names.contains(&"http-pre"), "HTTP hook fires for PreToolUse; got {pre_names:?}");
     }
 
     #[test]

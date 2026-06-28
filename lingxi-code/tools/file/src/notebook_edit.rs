@@ -571,7 +571,10 @@ Usage:\n\
             json!(cell_type.as_deref().unwrap_or("code")),
         );
         nb_data.insert("language".to_string(), json!("python"));
-        nb_data.insert("edit_mode".to_string(), json!(edit_mode));
+        // Binary success data: `edit_mode:T??"replace"` where T is the EFFECTIVE
+        // mode — a replace targeting one-past-the-end is reported as "insert"
+        // (the conversion at the cell_index==cells_len check above).
+        nb_data.insert("edit_mode".to_string(), json!(effective_mode));
         if let Some(cid) = cell_id {
             nb_data.insert("cell_id".to_string(), json!(cid));
         }

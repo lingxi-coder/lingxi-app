@@ -3,7 +3,6 @@
 //! `pending` / `in_progress` / `completed`. The aliases `done` and `todo`
 //! are NOT accepted.
 
-use std::time::Instant;
 
 use async_trait::async_trait;
 use engine::{TodoItem, TodoState};
@@ -11,10 +10,6 @@ use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use telemetry::pii::Verified;
-use telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use telemetry::tengu::tool::{TODO_WRITE_COMPLETED, TODO_WRITE_FAILED, TODO_WRITE_STARTED};
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -335,73 +330,6 @@ impl TodoWriteTool {
         Self { ctx }
     }
 
-    fn fresh_invocation_id() -> String {
-        // Reuse the existing M4-01 invocation-id helper (ULID/UUID hybrid).
-        tool_api::util::ids::ulid_or_uuid()
-    }
-
-    async fn emit_started(&self, invocation_id: &str, todo_count: usize) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".into(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert(
-            "tool_name".into(),
-            AnalyticsValue::String(Verified::assert_safe(TOOL_NAME.into()).into_inner()),
-        );
-        md.insert("todo_count".into(), AnalyticsValue::Int(todo_count as i64));
-        self.ctx.bus.log_event(TODO_WRITE_STARTED, md).await;
-    }
-
-    async fn emit_completed(&self, invocation_id: &str, todos: &[TodoItem], duration_ms: u64) {
-        let (pending, in_progress, completed) = summary(todos);
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".into(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert(
-            "tool_name".into(),
-            AnalyticsValue::String(Verified::assert_safe(TOOL_NAME.into()).into_inner()),
-        );
-        md.insert("todo_count".into(), AnalyticsValue::Int(todos.len() as i64));
-        md.insert("pending".into(), AnalyticsValue::Int(i64::from(pending)));
-        md.insert(
-            "in_progress".into(),
-            AnalyticsValue::Int(i64::from(in_progress)),
-        );
-        md.insert(
-            "completed".into(),
-            AnalyticsValue::Int(i64::from(completed)),
-        );
-        md.insert(
-            "duration_ms".into(),
-            AnalyticsValue::Int(duration_ms as i64),
-        );
-        self.ctx.bus.log_event(TODO_WRITE_COMPLETED, md).await;
-    }
-
-    async fn emit_failed(&self, invocation_id: &str, error_kind: &str, duration_ms: u64) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".into(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert(
-            "tool_name".into(),
-            AnalyticsValue::String(Verified::assert_safe(TOOL_NAME.into()).into_inner()),
-        );
-        md.insert(
-            "error_kind".into(),
-            AnalyticsValue::String(Verified::assert_safe(error_kind.into()).into_inner()),
-        );
-        md.insert(
-            "duration_ms".into(),
-            AnalyticsValue::Int(duration_ms as i64),
-        );
-        self.ctx.bus.log_event(TODO_WRITE_FAILED, md).await;
-    }
 }
 
 #[async_trait]
@@ -464,19 +392,12 @@ impl Tool for TodoWriteTool {
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        let invocation_id = Self::fresh_invocation_id();
-        let started_at = Instant::now();
-
-        // Parse `todos` from `input`.
+        // Parse `todos` from `input`. (claude's TodoWrite emits NO per-tool
+        // telemetry — per-call success/error is recorded by the generic tool
+        // dispatcher — so the port no longer fires tengu_tool_todo_write_*.)
         let raw_todos = match input.get("todos") {
             Some(v) => v.clone(),
             None => {
-                self.emit_failed(
-                    &invocation_id,
-                    "missing_todos",
-                    started_at.elapsed().as_millis() as u64,
-                )
-                .await;
                 return Err(ToolError::InvalidInput(
                     "TodoWrite: missing required 'todos' field".into(),
                 ));
@@ -485,27 +406,13 @@ impl Tool for TodoWriteTool {
         let todos: Vec<TodoItem> = match serde_json::from_value(raw_todos) {
             Ok(v) => v,
             Err(e) => {
-                self.emit_failed(
-                    &invocation_id,
-                    "invalid_input",
-                    started_at.elapsed().as_millis() as u64,
-                )
-                .await;
                 return Err(ToolError::InvalidInput(format!(
                     "TodoWrite: invalid todos shape: {e}"
                 )));
             }
         };
 
-        self.emit_started(&invocation_id, todos.len()).await;
-
         if let Err(msg) = validate_todos(&todos) {
-            self.emit_failed(
-                &invocation_id,
-                "validation",
-                started_at.elapsed().as_millis() as u64,
-            )
-            .await;
             return Err(ToolError::InvalidInput(msg));
         }
 
@@ -535,10 +442,6 @@ impl Tool for TodoWriteTool {
             }
             old
         };
-
-        let duration_ms = started_at.elapsed().as_millis() as u64;
-        self.emit_completed(&invocation_id, &todos, duration_ms)
-            .await;
 
         // Model-facing result text (`TodoWriteTool.ts`
         // `mapToolResultToToolResultBlockParam`): in claude-code v2.1.183 the
@@ -836,10 +739,6 @@ mod tests {
             res.model_content.as_deref(),
             Some("Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable")
         );
-        let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
-        assert!(names.contains(&TODO_WRITE_STARTED.to_string()));
-        assert!(names.contains(&TODO_WRITE_COMPLETED.to_string()));
-        assert!(!names.contains(&TODO_WRITE_FAILED.to_string()));
     }
 
     #[tokio::test]
@@ -858,11 +757,6 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("TodoWrite: invalid todos shape"), "msg: {msg}");
         assert!(msg.contains("unknown variant"), "msg: {msg}");
-        let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
-        assert!(
-            names.contains(&TODO_WRITE_FAILED.to_string()),
-            "failed event must fire: {names:?}"
-        );
     }
 
     #[tokio::test]
@@ -886,9 +780,6 @@ mod tests {
             let s = session.lock().await;
             assert_eq!(s.todos.len(), 2);
         }
-        let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
-        assert!(names.contains(&TODO_WRITE_COMPLETED.to_string()));
-        assert!(!names.contains(&TODO_WRITE_FAILED.to_string()));
     }
 
     #[tokio::test]

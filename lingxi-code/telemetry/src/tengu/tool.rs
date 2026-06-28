@@ -109,14 +109,12 @@ pub const SLEEP_COMPLETED: &str = "tengu_tool_sleep_completed";
 /// `tengu_tool_sleep_failed` — `Sleep` invocation rejected/errored (M4-02).
 pub const SLEEP_FAILED: &str = "tengu_tool_sleep_failed";
 
-// -- M4-04 Workflow tools (15 events) ------------------------------------------
-
-/// `tengu_tool_todo_write_started` — `TodoWriteTool` began updating the session.
-pub const TODO_WRITE_STARTED: &str = "tengu_tool_todo_write_started";
-/// `tengu_tool_todo_write_completed` — `TodoWriteTool` finished updating.
-pub const TODO_WRITE_COMPLETED: &str = "tengu_tool_todo_write_completed";
-/// `tengu_tool_todo_write_failed` — `TodoWriteTool` errored (validation, etc.).
-pub const TODO_WRITE_FAILED: &str = "tengu_tool_todo_write_failed";
+// -- M4-04 Workflow tools ------------------------------------------------------
+//
+// NOTE: claude's TodoWrite emits NO per-tool telemetry (per-call success/error
+// is recorded by the generic tool dispatcher), so the port no longer defines or
+// fires tengu_tool_todo_write_started/completed/failed — removed for strict
+// 2.1.195 parity (0 hits in the binary).
 
 /// `tengu_tool_enter_plan_mode_started` — `EnterPlanModeTool` began (M4-04).
 pub const ENTER_PLAN_MODE_STARTED: &str = "tengu_tool_enter_plan_mode_started";
@@ -415,10 +413,7 @@ pub(crate) const NAMES: &[&str] = &[
     SLEEP_STARTED,
     SLEEP_COMPLETED,
     SLEEP_FAILED,
-    // M4-04 Workflow tools (15 events)
-    TODO_WRITE_STARTED,
-    TODO_WRITE_COMPLETED,
-    TODO_WRITE_FAILED,
+    // M4-04 Workflow tools (TodoWrite per-tool events removed for 2.1.195 parity)
     ENTER_PLAN_MODE_STARTED,
     ENTER_PLAN_MODE_COMPLETED,
     ENTER_PLAN_MODE_FAILED,
@@ -531,13 +526,6 @@ mod m4_04_workflow_event_tests {
     use super::*;
 
     #[test]
-    fn todo_write_constants_are_locked() {
-        assert_eq!(TODO_WRITE_STARTED, "tengu_tool_todo_write_started");
-        assert_eq!(TODO_WRITE_COMPLETED, "tengu_tool_todo_write_completed");
-        assert_eq!(TODO_WRITE_FAILED, "tengu_tool_todo_write_failed");
-    }
-
-    #[test]
     fn enter_plan_mode_constants_are_locked() {
         assert_eq!(
             ENTER_PLAN_MODE_STARTED,
@@ -581,11 +569,8 @@ mod m4_04_workflow_event_tests {
     }
 
     #[test]
-    fn names_array_contains_all_15_workflow_events() {
+    fn names_array_contains_all_workflow_events() {
         let workflow = [
-            TODO_WRITE_STARTED,
-            TODO_WRITE_COMPLETED,
-            TODO_WRITE_FAILED,
             ENTER_PLAN_MODE_STARTED,
             ENTER_PLAN_MODE_COMPLETED,
             ENTER_PLAN_MODE_FAILED,
@@ -607,8 +592,8 @@ mod m4_04_workflow_event_tests {
         }
         assert_eq!(
             NAMES.len(),
-            134,
-            "M3-06 34 (40 baseline − 6 grep/glob removed to match claude-code) + M4-02 9 + M4-03 3 + M4-04 15 + M4-05 24 + M4-06 6 + M4-07 13 + M4-08 24 + cron_delete/cron_list 6 = 134 (FileReadTool analytics 4 live in FILE_READ_ANALYTICS_NAMES, concatenated at the registry tail)"
+            131,
+            "M3-06 34 (40 baseline − 6 grep/glob removed to match claude-code) + M4-02 9 + M4-03 3 + M4-04 12 (TodoWrite 3 removed for 2.1.195 parity) + M4-05 24 + M4-06 6 + M4-07 13 + M4-08 24 + cron_delete/cron_list 6 = 131 (FileReadTool analytics 4 live in FILE_READ_ANALYTICS_NAMES, concatenated at the registry tail)"
         );
     }
 }

@@ -8,8 +8,7 @@ use telemetry::tengu::tool::{
     ENTER_PLAN_MODE_COMPLETED, ENTER_PLAN_MODE_FAILED, ENTER_PLAN_MODE_STARTED,
     ENTER_WORKTREE_COMPLETED, ENTER_WORKTREE_FAILED, ENTER_WORKTREE_STARTED,
     EXIT_PLAN_MODE_COMPLETED, EXIT_PLAN_MODE_FAILED, EXIT_PLAN_MODE_STARTED,
-    EXIT_WORKTREE_COMPLETED, EXIT_WORKTREE_FAILED, EXIT_WORKTREE_STARTED, TODO_WRITE_COMPLETED,
-    TODO_WRITE_FAILED, TODO_WRITE_STARTED,
+    EXIT_WORKTREE_COMPLETED, EXIT_WORKTREE_FAILED, EXIT_WORKTREE_STARTED,
 };
 use test_harness::parity::load_fixture;
 use tool_plan::plan_mode::{PLAN_MODE_ENTER_MARKER, PLAN_MODE_EXIT_MARKER};
@@ -111,11 +110,9 @@ fn worktree_invalid_slugs_all_reject() {
 #[test]
 fn event_names_match_fixture() {
     let f = fixture();
+    // (TodoWrite per-tool events removed for 2.1.195 parity — claude's TodoWrite
+    // emits no per-tool telemetry.)
     let pairs: &[(&str, [&str; 3])] = &[
-        (
-            "todo_write",
-            [TODO_WRITE_STARTED, TODO_WRITE_COMPLETED, TODO_WRITE_FAILED],
-        ),
         (
             "enter_plan_mode",
             [
@@ -164,7 +161,6 @@ fn event_suffix_is_completed_not_succeeded() {
     // the locked tengu schema (M3-06 commit cc05dc0) uses
     // `started/completed/failed`. Guard against future drift.
     for name in [
-        TODO_WRITE_COMPLETED,
         ENTER_PLAN_MODE_COMPLETED,
         EXIT_PLAN_MODE_COMPLETED,
         ENTER_WORKTREE_COMPLETED,

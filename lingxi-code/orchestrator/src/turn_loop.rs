@@ -1,6 +1,6 @@
 //! Inner turn-by-turn loop helpers. Private to `ConversationOrchestrator`.
 
-use crate::conversation::{ApiErrorEnvelope, ConversationOrchestrator};
+use crate::conversation::{classify_api_error, ApiErrorEnvelope, ConversationOrchestrator};
 use crate::error::OrchestratorError;
 use crate::test_support::{PermissionDecision, PermissionDecisionSource, PermissionResolution};
 use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
@@ -692,7 +692,12 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         // path runs neither). 0 output tokens.
         Err(e) if is_carveout_propagated(&e) => return Err(e),
         Err(e) => {
-            let assistant_id = surface_model_error(orch, &e.to_string()).await;
+            // Classify the TYPED error into the api-error envelope (`Flp`/`KNn`)
+            // BEFORE consuming it for the verbatim error text. The rendered
+            // message stays `e.to_string()` (`createAssistantAPIErrorMessage`
+            // renders content verbatim); the envelope adds `error`/`apiErrorStatus`.
+            let env = classify_api_error(&e);
+            let assistant_id = surface_model_error(orch, &e.to_string(), env).await;
             return Ok((
                 TurnStepOutcome::Ended {
                     final_message_id: assistant_id,
@@ -1747,6 +1752,7 @@ pub(crate) fn is_carveout_propagated(e: &OrchestratorError) -> bool {
 pub(crate) async fn surface_model_error(
     orch: &ConversationOrchestrator,
     error_text: &str,
+    env: ApiErrorEnvelope,
 ) -> MessageId {
     if let Some(bus) = orch.analytics_bus.as_ref() {
         let mut metadata = telemetry::LogEventMetadata::new();
@@ -1774,14 +1780,14 @@ pub(crate) async fn surface_model_error(
         let mut s = orch.session.lock().await;
         s.history.push(assistant_msg.clone());
     }
-    // The top-level `model_error` catch builds this via
-    // `createAssistantAPIErrorMessage({content})` with NO `error:` arg
-    // (`query.ts:955-997`), so the persisted line carries `isApiErrorMessage:
-    // true` but OMITS the `error` category and `apiErrorStatus` (inner
-    // `stop_reason` stays `"stop_sequence"`). The per-request error classifier
-    // (`Flp`/`KNn`, which would tag `error:"unknown"`/`"server_error"`/… +
-    // `apiErrorStatus`) is a separate, deferred surface.
-    orch.persist_api_error_message_to_jsonl(&assistant_msg, ApiErrorEnvelope::default())
+    // The top-level `model_error` catch builds the assistant line via
+    // `createAssistantAPIErrorMessage({content})` (content verbatim, inner
+    // `stop_reason` stays `"stop_sequence"`). The top-level api-error envelope
+    // — `error` category + optional `apiErrorStatus` — is computed by the
+    // per-request classifier (`Flp`/`KNn`, ported as
+    // [`crate::conversation::classify_api_error`]) at the call site from the
+    // TYPED error and passed in here (the classifier deferral is now CLOSED).
+    orch.persist_api_error_message_to_jsonl(&assistant_msg, env)
         .await;
     orch.output.emit_text(&text).await;
     assistant_id

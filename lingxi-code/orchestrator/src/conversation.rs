@@ -484,6 +484,97 @@ pub(crate) struct ApiErrorEnvelope {
     pub inner_stop_reason: Option<&'static str>,
 }
 
+/// Per-request api-error classifier — the port of claude-code's `Flp`/`KNn`
+/// (the message + CATEGORY producer and its `apiErrorStatus` decorator). Maps a
+/// model/runtime error that escaped the API layer to the top-level api-error
+/// envelope (`error` category string + optional `apiErrorStatus`) that the
+/// graceful `model_error` catch stamps on the persisted assistant line.
+///
+/// Recovered from the 2.1.195 binary (`Flp` if-chain + `KNn`):
+/// `Flp` returns `ql({content,error:<CATEGORY>})` per branch, and `KNn` adds
+/// `r.apiErrorStatus=e.status` ONLY when the error is an `APIError` with a
+/// numeric status (otherwise it is OMITTED, not `null`). The category strings
+/// (`rate_limit`/`invalid_request`/`server_error`/`authentication_failed`/
+/// `model_not_found`/`billing_error`/`unknown`) are byte-lockable file-format
+/// values read back by the loader's transcript reconstruction, so they are kept
+/// verbatim from the binary.
+///
+/// MULTI-PROVIDER CARVE-OUT: claude's `Flp` dispatches on `e instanceof $o &&
+/// e.status===N` (Anthropic `APIError`). This port instead dispatches on the
+/// provider-NEUTRAL [`LlmError`] semantic enum, so the classifier works
+/// identically for every provider (an OpenAI/Gemini rate-limit decoded into
+/// `LlmError::RateLimited` still maps to `rate_limit`/429). Because the raw HTTP
+/// status was already collapsed into the semantic variant, exact per-request
+/// status recovery for the long tail is unavailable; each variant maps to its
+/// CANONICAL status and the status is OMITTED (`None`) where the port has no
+/// confident canonical value — mirroring claude omitting `apiErrorStatus` when
+/// the error is not an `APIError`-with-numeric-status (a wrong status would be
+/// worse than an omitted one). On-disk 529 lines carry `error:"server_error"`
+/// (the `Flp` tail `status>=500` branch), which is authoritative over the `YNn`
+/// statusline classifier's `529→"overloaded"`.
+///
+/// `inner_stop_reason` is always `None` here: the `ql` path leaves the synthetic
+/// inner `message.stop_reason` at `"stop_sequence"` (verified on disk).
+pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
+    let (error, api_error_status) = match e {
+        OrchestratorError::ApiCall(inner) | OrchestratorError::Streaming(inner) => match inner {
+            // 429 family → "rate_limit" (status 429). Carved out before reaching
+            // `surface_model_error` for the non-streaming path; kept for totality
+            // and exercised only via a non-carved `Streaming` surface.
+            LlmError::RateLimited { .. } => (Some("rate_limit"), Some(429)),
+            // 529 overload: the ENVELOPE (`Flp` tail `status>=500`) and on-disk
+            // 529 lines tag `server_error` — NOT the `YNn` statusline
+            // `"overloaded"`. Carved out for the non-streaming path.
+            LlmError::Overloaded { .. } => (Some("server_error"), Some(529)),
+            // x-api-key / 401 → "authentication_failed".
+            LlmError::Authentication => (Some("authentication_failed"), Some(401)),
+            // 403 → "authentication_failed".
+            LlmError::PermissionDenied => (Some("authentication_failed"), Some(403)),
+            // Billing (`Fio`) is an Error-message match in `Flp`, not a status
+            // branch → category only, no `apiErrorStatus`.
+            LlmError::QuotaExceeded => (Some("billing_error"), None),
+            // PTL/context-window (`Nio`/`D9t`) → `ql({error:"invalid_request"})`
+            // with NO status set; the port decodes ContextOverflow from the
+            // message, so no `APIError` status is available → omit.
+            LlmError::ContextOverflow { .. } => (Some("invalid_request"), None),
+            // 400 invalid-request family → "invalid_request" (status 400).
+            LlmError::InvalidRequest { .. } => (Some("invalid_request"), Some(400)),
+            // 404 / bedrock model-id → "model_not_found".
+            LlmError::ModelUnavailable => (Some("model_not_found"), Some(404)),
+            // `Flp` tail `status>=500` → "server_error".
+            LlmError::ProviderInternal => (Some("server_error"), Some(500)),
+            // Timeout / transport / connection-lost tail → "server_error", no
+            // status (these are not `APIError`-with-numeric-status).
+            LlmError::Transport { .. } | LlmError::StreamInterrupted { .. } => {
+                (Some("server_error"), None)
+            }
+            // Generic `Error` fallthrough in `Flp` → "unknown".
+            LlmError::CostUnavailable { .. } | LlmError::UnsupportedCapability { .. } => {
+                (Some("unknown"), None)
+            }
+        },
+        // Generic-Error fallthrough (`Flp`: `if(e instanceof $o)→"unknown"`;
+        // generic Error → "unknown"). These orchestrator-internal variants never
+        // carry a status. `MaxTurnsReached`/`MaxBudgetReached` are handled
+        // upstream and never reach `surface_model_error` — dead arms kept for
+        // totality.
+        OrchestratorError::Internal(_)
+        | OrchestratorError::StreamingProtocol(_)
+        | OrchestratorError::StreamEndedWithoutStop
+        | OrchestratorError::Compaction(_)
+        | OrchestratorError::CompactionCancelled
+        | OrchestratorError::RepeatedOverloaded
+        | OrchestratorError::RateLimitRejected { .. }
+        | OrchestratorError::MaxTurnsReached { .. }
+        | OrchestratorError::MaxBudgetReached { .. } => (Some("unknown"), None),
+    };
+    ApiErrorEnvelope {
+        error,
+        api_error_status,
+        inner_stop_reason: None,
+    }
+}
+
 /// Build the persisted assistant-envelope `usage` value from a normalized
 /// [`llm_client::Usage`]. Prefers the raw Anthropic usage object the codec
 /// retained on `provider_metadata` (byte-faithful to claude-code's persisted
@@ -4984,7 +5075,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 // message instead of bubbling a hard error. No assistant message
                 // was persisted this turn, so no orphaned tool_use to repair.
                 Err(other) => {
-                    let id = crate::turn_loop::surface_model_error(self, &other.to_string()).await;
+                    // Classify the typed connect-phase error (`Flp`/`KNn`) before
+                    // consuming it for the verbatim message text. Wrap into the
+                    // `Streaming` variant — this is the connect-phase streaming
+                    // surface — so the classifier sees the inner `LlmError`.
+                    let env =
+                        classify_api_error(&OrchestratorError::Streaming(other.clone()));
+                    let id =
+                        crate::turn_loop::surface_model_error(self, &other.to_string(), env)
+                            .await;
                     let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn("model_error", &cost).await;
                     final_message_id = id;
@@ -5130,7 +5229,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 // AFTER a successful pump, so the errored pump left no orphaned
                 // tool_use to repair (TS `yieldMissingToolResultBlocks` no-op here).
                 Err(other) => {
-                    let id = crate::turn_loop::surface_model_error(self, &other.to_string()).await;
+                    // Classify the typed mid-stream error (`Flp`/`KNn`) into the
+                    // api-error envelope; the message text stays verbatim.
+                    let env = classify_api_error(&other);
+                    let id =
+                        crate::turn_loop::surface_model_error(self, &other.to_string(), env)
+                            .await;
                     let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn("model_error", &cost).await;
                     final_message_id = id;
@@ -10924,6 +11028,176 @@ mod persist_with_parent_tests {
         let normal = orch.to_jsonl_message(&msg, "sess", None, None, None, None);
         assert!(!normal.extra.contains_key("isApiErrorMessage"));
         assert!(!normal.extra.contains_key("error"));
+    }
+
+    // ── per-request api-error classifier (`Flp`/`KNn`) ────────────────────────
+
+    /// `classify_api_error` maps each typed [`LlmError`] semantic variant to the
+    /// canonical (category, status) pair recovered from the 2.1.195 `Flp`/`KNn`
+    /// classifier + the on-disk transcript aggregate. Status is OMITTED (`None`)
+    /// where the port has no confident canonical HTTP status (mirrors claude
+    /// omitting `apiErrorStatus` when the error is not an `APIError`-with-status).
+    #[test]
+    fn classify_api_error_maps_llm_variants_to_category_and_status() {
+        use llm_client::LlmError;
+        let cases: Vec<(LlmError, Option<&'static str>, Option<u16>)> = vec![
+            (
+                LlmError::RateLimited {
+                    retry_after: None,
+                    scope: None,
+                },
+                Some("rate_limit"),
+                Some(429),
+            ),
+            // On-disk 529 lines tag `server_error` (NOT the `YNn` statusline
+            // `"overloaded"`).
+            (
+                LlmError::Overloaded { repeated: false },
+                Some("server_error"),
+                Some(529),
+            ),
+            (LlmError::Authentication, Some("authentication_failed"), Some(401)),
+            (
+                LlmError::PermissionDenied,
+                Some("authentication_failed"),
+                Some(403),
+            ),
+            // Billing is an Error-message match in `Flp`, not a status branch.
+            (LlmError::QuotaExceeded, Some("billing_error"), None),
+            // PTL/context-window: `invalid_request` with NO status.
+            (
+                LlmError::ContextOverflow { token_gap: 12 },
+                Some("invalid_request"),
+                None,
+            ),
+            (
+                LlmError::InvalidRequest {
+                    message: "bad".into(),
+                },
+                Some("invalid_request"),
+                Some(400),
+            ),
+            (LlmError::ModelUnavailable, Some("model_not_found"), Some(404)),
+            (LlmError::ProviderInternal, Some("server_error"), Some(500)),
+            // Timeout/transport tail → `server_error`, no status.
+            (
+                LlmError::Transport {
+                    message: "t".into(),
+                },
+                Some("server_error"),
+                None,
+            ),
+            (
+                LlmError::StreamInterrupted {
+                    message: "s".into(),
+                },
+                Some("server_error"),
+                None,
+            ),
+            // Generic `Error` fallthrough → `unknown`.
+            (
+                LlmError::CostUnavailable {
+                    message: "c".into(),
+                },
+                Some("unknown"),
+                None,
+            ),
+            (
+                LlmError::UnsupportedCapability {
+                    capability: "x".into(),
+                },
+                Some("unknown"),
+                None,
+            ),
+        ];
+        for (inner, cat, status) in cases {
+            // Both wrapping variants classify identically.
+            for wrapped in [
+                OrchestratorError::ApiCall(inner.clone()),
+                OrchestratorError::Streaming(inner.clone()),
+            ] {
+                let env = classify_api_error(&wrapped);
+                assert_eq!(env.error, cat, "category for {inner:?}");
+                assert_eq!(env.api_error_status, status, "status for {inner:?}");
+                // The `ql` path never overrides the inner stop_reason.
+                assert_eq!(env.inner_stop_reason, None, "inner stop_reason for {inner:?}");
+            }
+        }
+    }
+
+    /// Orchestrator-internal / generic-Error variants fall through to `unknown`
+    /// with NO status (the `Flp` generic-`Error` tail).
+    #[test]
+    fn classify_api_error_generic_variants_are_unknown_no_status() {
+        for e in [
+            OrchestratorError::Internal("boom".into()),
+            OrchestratorError::StreamingProtocol("bad".into()),
+            OrchestratorError::StreamEndedWithoutStop,
+            OrchestratorError::RepeatedOverloaded,
+            OrchestratorError::MaxTurnsReached { max_turns: 30 },
+            OrchestratorError::MaxBudgetReached {
+                budget_nano_usd: 5_000_000_000,
+            },
+        ] {
+            let env = classify_api_error(&e);
+            assert_eq!(env.error, Some("unknown"), "{e:?}");
+            assert_eq!(env.api_error_status, None, "{e:?}");
+            assert_eq!(env.inner_stop_reason, None, "{e:?}");
+        }
+    }
+
+    /// End-to-end: a classified envelope drives the persisted JSONL line's
+    /// top-level `error`/`isApiErrorMessage`/`apiErrorStatus` fields with
+    /// presence + values 1:1 with the classifier output.
+    #[test]
+    fn classified_envelope_stamps_jsonl_top_level_fields() {
+        use llm_client::LlmError;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let orch = orch_with_writer(dir.path(), dir.path().join("s.jsonl"));
+        let msg = ConversationMessage::Assistant {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::Text {
+                text: "invalid request: bad".into(),
+            }],
+            stop_reason: Some("model_error".into()),
+        };
+
+        let env = classify_api_error(&OrchestratorError::ApiCall(LlmError::InvalidRequest {
+            message: "bad".into(),
+        }));
+        let line = orch.to_jsonl_message_with_inner_id(
+            &msg, "sess", None, None, None, None, None, None, None, None,
+            Some(&env),
+        );
+        assert_eq!(
+            line.extra.get("error").and_then(|v| v.as_str()),
+            Some("invalid_request")
+        );
+        assert_eq!(
+            line.extra.get("isApiErrorMessage"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert_eq!(
+            line.extra.get("apiErrorStatus"),
+            Some(&serde_json::Value::Number(400.into()))
+        );
+
+        // A no-status category (server_error from transport) OMITS apiErrorStatus.
+        let env2 = classify_api_error(&OrchestratorError::ApiCall(LlmError::Transport {
+            message: "t".into(),
+        }));
+        let line2 = orch.to_jsonl_message_with_inner_id(
+            &msg, "sess", None, None, None, None, None, None, None, None,
+            Some(&env2),
+        );
+        assert_eq!(
+            line2.extra.get("error").and_then(|v| v.as_str()),
+            Some("server_error")
+        );
+        assert!(
+            !line2.extra.contains_key("apiErrorStatus"),
+            "no-status category must omit apiErrorStatus"
+        );
     }
 
     // ── transcript per-line cwd reflects the LIVE (post-`cd`) session cwd ──────

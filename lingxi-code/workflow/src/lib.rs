@@ -97,9 +97,9 @@ globalThis.parallel = async (thunks) => {
 // be in a later stage while item B is still early, and each stage's agents
 // batch. A throwing stage drops that item to null.
 globalThis.pipeline = async (items, ...stages) => {
-  if (!Array.isArray(items)) throw new Error("pipeline() expects an array as the first argument");
+  if (!Array.isArray(items)) throw new TypeError("pipeline() expects an array as the first argument");
   if (items.length > 4096) throw new Error("array length " + items.length + " exceeds the maximum of 4096 supported across the workflow VM boundary");
-  for (const s of stages) if (typeof s !== "function") throw new Error("pipeline() stages must be functions: pipeline(items, item => ..., result => ...)");
+  for (const s of stages) if (typeof s !== "function") throw new TypeError("pipeline() stages must be functions: pipeline(items, item => ..., result => ...)");
   const chain = async (item, idx) => {
     let v = item;
     for (const s of stages) v = await s(v, item, idx);
@@ -1586,10 +1586,15 @@ log(rs.join(','))
     fn pipeline_rejects_non_array_first_arg() {
         let err = run("await pipeline('nope', x => x)", no_agents).unwrap_err();
         match err {
-            WorkflowError::Script(s) => assert!(
-                s.contains("pipeline() expects an array as the first argument"),
-                "got: {s}"
-            ),
+            WorkflowError::Script(s) => {
+                assert!(
+                    s.contains("pipeline() expects an array as the first argument"),
+                    "got: {s}"
+                );
+                // Binary throws `TypeError` (not generic `Error`) for this
+                // validator, matching parallel()'s validators.
+                assert!(s.contains("TypeError"), "must be a TypeError; got: {s}");
+            }
             other => panic!("got {other:?}"),
         }
     }

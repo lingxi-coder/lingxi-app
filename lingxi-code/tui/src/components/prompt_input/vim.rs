@@ -1601,7 +1601,9 @@ mod tests {
         // Baseline 330 − 6 (grep/glob fabricated events removed, #29) = 324
         // → 330 (CronDelete/CronList +6, LSP.7b) → 334 (FileRead analytics +4, W36/#13)
         // → 343 (config migrations +9) → 344 (permission flow +1) → 347 (coordinator swarm +3).
-        assert_eq!(telemetry::tengu::ALL_EVENT_NAMES.len(), 347);
+        // Strict-parity (2.1.195): −3 tengu_tool_todo_write_* (D1), −1 tengu_cost_recorded
+        // (D2), −2 session-resume consolidation (D3) → 341.
+        assert_eq!(telemetry::tengu::ALL_EVENT_NAMES.len(), 341);
     }
 
     #[test]
@@ -1614,7 +1616,9 @@ mod tests {
         // Baseline 330 − 6 (grep/glob fabricated events removed, #29) = 324
         // → 330 (CronDelete/CronList +6, LSP.7b) → 334 (FileRead analytics +4, W36/#13)
         // → 343 (config migrations +9) → 344 (permission flow +1) → 347 (coordinator swarm +3).
-        assert_eq!(telemetry::tengu::ALL_EVENT_NAMES.len(), 347);
+        // Strict-parity (2.1.195): −3 tengu_tool_todo_write_* (D1), −1 tengu_cost_recorded
+        // (D2), −2 session-resume consolidation (D3) → 341.
+        assert_eq!(telemetry::tengu::ALL_EVENT_NAMES.len(), 341);
     }
 
     #[test]

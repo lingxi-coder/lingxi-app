@@ -256,9 +256,12 @@ fn check_telemetry_schema() -> DoctorCheck {
     // Permission flow: +1 (permission::NAMES, bypass dialog accept) → 344.
     // Coordinator swarm: +3 (coordinator::NAMES — team_created/team_deleted/
     //        coordinator_mode_switched) → 347.
-    // Strict-parity (2.1.195): dropped port-only tengu_cost_recorded (cost
-    //        block 10 → 9) → 346.
-    let expected = 346;
+    // Strict-parity (2.1.195) removals reconciled against the real per-block
+    // NAMES (see telemetry::tengu::ALL_EVENT_NAMES): D1 dropped the 3
+    // tengu_tool_todo_write_* events (tool 134 → 131), D2 dropped port-only
+    // tengu_cost_recorded (cost 10 → 9), D3 consolidated session-resume
+    // (session 20 → 18). 347 − 3 − 1 − 2 = 341.
+    let expected = 341;
     DoctorCheck {
         name: "telemetry-schema".to_string(),
         status: if actual == expected {

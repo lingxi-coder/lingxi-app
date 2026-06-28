@@ -870,6 +870,61 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
     }
 }
 
+/// Composition-root source of the `Stop` / `SubagentStop` hook
+/// `background_tasks` + `session_crons` snapshot (claude-code
+/// `Lic(taskRegistry.all())` / `Mic()`), bound to the live task registry + the
+/// project-root cron file. Mirrors the [`orchestrator::RegistryTaskNotifications`]
+/// precedent: it owns the SAME `Arc<dyn TaskRegistryHandle>` the tool context
+/// holds, plus the shared `current_cwd` cell, and maps both sources through the
+/// orchestrator's pure `build_background_tasks` / `build_session_crons` builders.
+struct RegistryStopHookSnapshot {
+    registry: Arc<dyn traits::task_registry::TaskRegistryHandle>,
+    current_cwd: Arc<std::sync::Mutex<std::path::PathBuf>>,
+}
+
+#[async_trait::async_trait]
+impl orchestrator::StopHookSnapshotProvider for RegistryStopHookSnapshot {
+    async fn background_tasks(&self) -> Vec<hooks::HookBackgroundTask> {
+        // claude passes `taskRegistry.all()` (NOT `.running()`); `wA` inside the
+        // builder does the running|pending + isBackgrounded filtering. A registry
+        // error degrades to "no tasks" so a transient failure never breaks the
+        // turn.
+        let records = self
+            .registry
+            .list(traits::task_registry::TaskListFilter::default())
+            .await
+            .unwrap_or_default();
+        orchestrator::build_background_tasks(&records)
+    }
+
+    async fn session_crons(&self) -> Vec<hooks::HookSessionCron> {
+        // claude `Cv()` is the in-memory session cron list; the port persists the
+        // durable cron jobs to `<project_root>/.lingxi/scheduled_tasks.json`. Read
+        // + parse it (a missing/garbage file ⇒ no crons, matching claude's
+        // unreadable-file-as-empty contract) and map each task into the builder's
+        // neutral input.
+        let root = self
+            .current_cwd
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let path = cron::tasks_file::scheduled_tasks_path(&root);
+        let body = std::fs::read_to_string(&path).unwrap_or_default();
+        let doc = cron::tasks_file::parse_tasks(&body);
+        let inputs: Vec<orchestrator::CronSnapshotInput> = doc
+            .tasks
+            .into_iter()
+            .map(|t| orchestrator::CronSnapshotInput {
+                id: t.id,
+                cron: t.cron,
+                recurring: t.recurring,
+                prompt: t.prompt,
+            })
+            .collect();
+        orchestrator::build_session_crons(&inputs)
+    }
+}
+
 /// Register the desktop tool set into an existing (empty) registry.
 ///
 /// Each `tool_*::register_all` consumes a clone of `ctx`; the final crate
@@ -3985,6 +4040,10 @@ pub async fn build(
     // directory, 1:1 with claude-code's single global `getCwd()`/`setCwdState`.
     let current_cwd_cell =
         std::sync::Arc::new(std::sync::Mutex::new(cwd.clone()));
+    // Clone for the Stop/SubagentStop hook snapshot provider (it locates the
+    // project-root cron file via the live cwd); the original cell is moved into
+    // `.with_current_cwd(...)` below.
+    let current_cwd_cell_for_snapshot = current_cwd_cell.clone();
     let cwd_changed_firer: hooks::OptionalCwdChangedFirer = Some(Arc::new(
         orchestrator::OrchestratorCwdChangedFirer::new(
             hooks.clone(),
@@ -4236,6 +4295,17 @@ pub async fn build(
     .with_task_notifications(Arc::new(orchestrator::RegistryTaskNotifications::new(
         task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
     )))
+    // hook-bg-fields: populate the `Stop` / `SubagentStop` hook payload's
+    // `background_tasks` (claude-code `Lic(taskRegistry.all())`) +
+    // `session_crons` (claude-code `Mic()`) from the SAME live `TaskRegistry`
+    // Arc wired above plus the project-root `.lingxi/scheduled_tasks.json` cron
+    // file (located via the shared `current_cwd` cell). The orchestrator stamps
+    // the snapshot onto the payload ONLY at its Stop / SubagentStop firings
+    // (claude's tool-use-context `s` gate).
+    .with_stop_hook_snapshot(Arc::new(RegistryStopHookSnapshot {
+        registry: task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
+        current_cwd: current_cwd_cell_for_snapshot,
+    }))
     // Finding #73: supply the V2 task list to the per-turn `task_reminder`
     // (the default variant when tasks are enabled). Reads the file-backed
     // `TodoStore` for the active list each turn, resolving the list id via the

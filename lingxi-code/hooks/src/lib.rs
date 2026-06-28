@@ -45,8 +45,8 @@ pub use executor::{
     HOOK_HTTP_TIMEOUT_MS,
 };
 pub use hook_payload::{
-    parse_response, HookEventEnvelope, HookEventNamePost, HookEventNamePre, HookResponseParseError,
-    PostToolUsePayload, PreToolUsePayload,
+    parse_response, HookBackgroundTask, HookEventEnvelope, HookEventNamePost, HookEventNamePre,
+    HookResponseParseError, HookSessionCron, PostToolUsePayload, PreToolUsePayload,
 };
 pub use loader::{
     parse_hooks_from_settings_json, parse_hooks_from_settings_json_gated, HookPolicyGate,

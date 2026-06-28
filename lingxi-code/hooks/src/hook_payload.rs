@@ -155,6 +155,54 @@ impl EffortLevel {
     }
 }
 
+/// One entry in a `Stop` / `SubagentStop` payload `background_tasks` array
+/// (1:1 with claude-code `Lic`). `id` / `type` / `status` / `description`
+/// are always present in that order; the per-task-type extras are appended
+/// after `description` (claude switches on `n.type`):
+/// `local_bash` → `command`; `local_agent` → `agent_type`;
+/// `monitor_mcp` / `mcp_task` → `server`, `tool`; `local_workflow` → `name`.
+/// Each task type sets a disjoint subset, so declaration order
+/// (`command < agent_type < server < tool < name`) reproduces every
+/// claude case byte-exactly. The wire `type` value is claude's
+/// kind-label map `O1o` (e.g. `local_bash` → `"shell"`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct HookBackgroundTask {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub r#type: String,
+    pub status: String,
+    pub description: String,
+    /// `local_bash` only.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub command: Option<String>,
+    /// `local_agent` only.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    /// `monitor_mcp` / `mcp_task`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub server: Option<String>,
+    /// `monitor_mcp` / `mcp_task`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tool: Option<String>,
+    /// `local_workflow` only.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub name: Option<String>,
+}
+
+/// One entry in a `Stop` / `SubagentStop` payload `session_crons` array
+/// (1:1 with claude-code `Mic`): `{id, schedule, recurring, prompt}` in
+/// that order. `schedule` ← claude `t.cron`; `recurring` ← `t.recurring ?? false`;
+/// `prompt` is truncated to 1000 chars upstream (claude `TUe(t.prompt, 1000)`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct HookSessionCron {
+    pub id: String,
+    pub schedule: String,
+    pub recurring: bool,
+    pub prompt: String,
+}
+
 /// Wire-format `PreToolUse` payload (1:1 with `coreSchemas.ts:414-423`).
 ///
 /// Field meanings track claude-code exactly; see the schema reference above.
@@ -230,6 +278,17 @@ pub struct StopPayload {
     pub stop_hook_active: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub last_assistant_message: Option<String>,
+    /// Background-task snapshot, spread LAST by claude (`...m`, after
+    /// `last_assistant_message`) when a tool-use context is present. `None`
+    /// (claude `m = void 0`) omits both this and `session_crons`; `Some([])`
+    /// emits `[]`. 1:1 with claude `Lic(taskRegistry.all())`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub background_tasks: Option<Vec<HookBackgroundTask>>,
+    /// Session-cron snapshot, spread immediately after `background_tasks`
+    /// (1:1 with claude `Mic()`). See [`Self::background_tasks`] for the
+    /// None-vs-empty semantics.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub session_crons: Option<Vec<HookSessionCron>>,
 }
 
 /// Wire-format `SubagentStop` payload (1:1 with `coreSchemas.ts:550-567`
@@ -254,6 +313,12 @@ pub struct SubagentStopPayload {
     pub effort: Option<EffortLevel>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub last_assistant_message: Option<String>,
+    /// Background-task snapshot — see [`StopPayload::background_tasks`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub background_tasks: Option<Vec<HookBackgroundTask>>,
+    /// Session-cron snapshot — see [`StopPayload::session_crons`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub session_crons: Option<Vec<HookSessionCron>>,
 }
 
 /// Wire-format `TaskCompleted` payload (1:1 with `coreSchemas.ts:614-625`
@@ -1826,6 +1891,8 @@ mod tests {
             effort: None,
             stop_hook_active: true,
             last_assistant_message: None,
+            background_tasks: None,
+            session_crons: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert_eq!(
@@ -1847,6 +1914,8 @@ mod tests {
             effort: None,
             stop_hook_active: false,
             last_assistant_message: Some("done".into()),
+            background_tasks: None,
+            session_crons: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert_eq!(
@@ -1869,11 +1938,80 @@ mod tests {
             agent_type: "general-purpose".into(),
             effort: None,
             last_assistant_message: None,
+            background_tasks: None,
+            session_crons: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert_eq!(
             s,
             r#"{"hook_event_name":"SubagentStop","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","stop_hook_active":true,"agent_id":"agent-7","agent_transcript_path":"/tmp/agent-7.jsonl","agent_type":"general-purpose"}"#
+        );
+    }
+
+    #[test]
+    fn stop_payload_background_tasks_and_crons_byte_lock() {
+        // Locks the LAST-two-keys order (background_tasks then session_crons)
+        // and each element's claude key order (Lic / Mic). A `local_bash`
+        // task emits {id,type,status,description,command}; a cron emits
+        // {id,schedule,recurring,prompt}.
+        let p = StopPayload {
+            hook_event_name: HookEventNameStop,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            effort: None,
+            stop_hook_active: false,
+            last_assistant_message: None,
+            background_tasks: Some(vec![HookBackgroundTask {
+                id: "bt1".into(),
+                r#type: "shell".into(),
+                status: "running".into(),
+                description: "d".into(),
+                command: Some("ls".into()),
+                agent_type: None,
+                server: None,
+                tool: None,
+                name: None,
+            }]),
+            session_crons: Some(vec![HookSessionCron {
+                id: "c1".into(),
+                schedule: "* * * * *".into(),
+                recurring: false,
+                prompt: "p".into(),
+            }]),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"Stop","session_id":"s","transcript_path":"/t","cwd":"/w","stop_hook_active":false,"background_tasks":[{"id":"bt1","type":"shell","status":"running","description":"d","command":"ls"}],"session_crons":[{"id":"c1","schedule":"* * * * *","recurring":false,"prompt":"p"}]}"#
+        );
+    }
+
+    #[test]
+    fn stop_payload_empty_background_arrays_emit_brackets() {
+        // claude: when tool-use context IS present but registries are empty,
+        // both keys are emitted as `[]` (Some(vec![])), never omitted.
+        let p = StopPayload {
+            hook_event_name: HookEventNameStop,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            effort: None,
+            stop_hook_active: false,
+            last_assistant_message: None,
+            background_tasks: Some(vec![]),
+            session_crons: Some(vec![]),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"Stop","session_id":"s","transcript_path":"/t","cwd":"/w","stop_hook_active":false,"background_tasks":[],"session_crons":[]}"#
         );
     }
 
@@ -2144,6 +2282,8 @@ mod tests {
             agent_type: "general-purpose".into(),
             effort: None,
             last_assistant_message: Some("hi".into()),
+            background_tasks: None,
+            session_crons: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         let back: SubagentStopPayload = serde_json::from_str(&s).unwrap();

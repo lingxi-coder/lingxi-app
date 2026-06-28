@@ -1421,6 +1421,8 @@ fn build_lifecycle_envelope_body(
                 effort: b.effort,
                 stop_hook_active: false,
                 last_assistant_message: None,
+                background_tasks: ctx.background_tasks.clone(),
+                session_crons: ctx.session_crons.clone(),
             };
             Some(("Stop", serde_json::to_string(&payload).ok()?))
         }
@@ -1446,6 +1448,8 @@ fn build_lifecycle_envelope_body(
                 },
                 effort: b.effort,
                 last_assistant_message: None,
+                background_tasks: ctx.background_tasks.clone(),
+                session_crons: ctx.session_crons.clone(),
             };
             Some(("SubagentStop", serde_json::to_string(&payload).ok()?))
         }
@@ -3862,6 +3866,96 @@ mod command_arm_tests {
             // round-trips through parse_response without a mismatch error.
             assert!(body.contains(&format!(r#""hook_event_name":"{expected}""#)));
         }
+    }
+
+    /// hook-bg-fields: a populated `HookContext.background_tasks` /
+    /// `session_crons` flows into BOTH the `Stop` and `SubagentStop` wire bodies
+    /// (spread last, after `last_assistant_message`), and `Some(vec![])` emits
+    /// `[]` — while a NON-Stop lifecycle event (e.g. `UserPromptSubmit`) NEVER
+    /// carries the keys even when the context happens to hold them. The latter is
+    /// the orchestrator's `s`-gate (only Stop/SubagentStop firings populate the
+    /// snapshot); here we prove the executor's lifecycle payloads honor it
+    /// structurally (only Stop/SubagentStop have the fields at all).
+    #[test]
+    fn stop_and_subagentstop_carry_bg_snapshot_others_omit() {
+        use crate::hook_payload::{HookBackgroundTask, HookSessionCron};
+        let ctx = HookContext {
+            background_tasks: Some(vec![HookBackgroundTask {
+                id: "b1".into(),
+                r#type: "shell".into(),
+                status: "running".into(),
+                description: "build".into(),
+                command: Some("cargo build".into()),
+                agent_type: None,
+                server: None,
+                tool: None,
+                name: None,
+            }]),
+            session_crons: Some(vec![HookSessionCron {
+                id: "c1".into(),
+                schedule: "* * * * *".into(),
+                recurring: true,
+                prompt: "hi".into(),
+            }]),
+            ..HookContext::default()
+        };
+
+        // Stop: both arrays present, spread LAST (after last_assistant_message is
+        // null / omitted) and elements in Lic/Mic key order.
+        let (_, stop_body) = build_envelope_body(
+            &HookEvent::Stop { reason: "r".into() },
+            &ctx,
+        )
+        .expect("stop serializes");
+        assert!(
+            stop_body.contains(
+                r#""background_tasks":[{"id":"b1","type":"shell","status":"running","description":"build","command":"cargo build"}]"#
+            ),
+            "Stop must carry background_tasks: {stop_body}"
+        );
+        assert!(
+            stop_body.contains(
+                r#""session_crons":[{"id":"c1","schedule":"* * * * *","recurring":true,"prompt":"hi"}]"#
+            ),
+            "Stop must carry session_crons: {stop_body}"
+        );
+
+        // SubagentStop: same two arrays.
+        let (_, sa_body) = build_envelope_body(
+            &HookEvent::SubagentStop {
+                agent_id: protocol::AgentId::new(),
+                status: "completed".into(),
+                agent_type: "general-purpose".into(),
+            },
+            &ctx,
+        )
+        .expect("subagentstop serializes");
+        assert!(sa_body.contains(r#""background_tasks":[{"id":"b1""#), "SubagentStop bg: {sa_body}");
+        assert!(sa_body.contains(r#""session_crons":[{"id":"c1""#), "SubagentStop crons: {sa_body}");
+
+        // A non-Stop lifecycle event NEVER carries the keys even with a populated
+        // context (the fields live only on the Stop / SubagentStop payloads).
+        let (_, ups_body) = build_envelope_body(
+            &HookEvent::UserPromptSubmit { prompt: "p".into() },
+            &ctx,
+        )
+        .expect("ups serializes");
+        assert!(!ups_body.contains("background_tasks"), "UserPromptSubmit must omit bg: {ups_body}");
+        assert!(!ups_body.contains("session_crons"), "UserPromptSubmit must omit crons: {ups_body}");
+
+        // Some(vec![]) emits `[]` (the tool-use-context-present-but-empty case).
+        let empty_ctx = HookContext {
+            background_tasks: Some(vec![]),
+            session_crons: Some(vec![]),
+            ..HookContext::default()
+        };
+        let (_, empty_body) = build_envelope_body(
+            &HookEvent::Stop { reason: "r".into() },
+            &empty_ctx,
+        )
+        .expect("empty stop serializes");
+        assert!(empty_body.contains(r#""background_tasks":[]"#), "empty bg → []: {empty_body}");
+        assert!(empty_body.contains(r#""session_crons":[]"#), "empty crons → []: {empty_body}");
     }
 
     #[test]

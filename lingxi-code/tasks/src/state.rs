@@ -114,6 +114,14 @@ pub struct LocalAgentTaskState {
     pub base: TaskStateBase,
     /// Target agent.
     pub agent_id: AgentId,
+    /// Resolved subagent type label (one of the registered agent types, e.g.
+    /// `general-purpose`). Independent sibling of [`Self::agent_id`] (which is a
+    /// per-instance identity UUID). Mirrors claude-code `LocalAgentTaskState`'s
+    /// `agentType` — surfaced verbatim as the `Stop` / `SubagentStop` hook
+    /// `background_tasks[].agent_type` field (claude-code `Lic`'s `n.agentType`).
+    /// `#[serde(default)]` so older on-disk task rows (pre-field) still parse.
+    #[serde(default)]
+    pub subagent_type: String,
     /// Initial prompt.
     pub prompt: String,
     /// Error message if the agent failed.

@@ -956,6 +956,15 @@ pub struct ConversationOrchestrator {
     /// root from the `TaskRegistry`.
     pub(crate) task_notifications:
         Option<Arc<dyn crate::prompt::task_notification::TaskNotificationProvider>>,
+    /// Source of the `Stop` / `SubagentStop` hook `background_tasks` +
+    /// `session_crons` snapshot (claude-code `Lic(taskRegistry.all())` /
+    /// `Mic()`). Consulted ONLY at the `Stop` / `SubagentStop` firings (claude's
+    /// `s` = tool-use-context gate), so other lifecycle hooks omit both keys.
+    /// `None` ⇒ both fields stay `None` and the keys are omitted — keeping
+    /// no-registry builds byte-identical. Wired at the desktop composition root
+    /// from the live `TaskRegistry` + cron file.
+    pub(crate) stop_hook_snapshot:
+        Option<Arc<dyn crate::stop_hook_snapshot::StopHookSnapshotProvider>>,
     /// Mid-turn drain seam: source of queued user input to inject WITHIN a
     /// running streaming turn (claude-code's query.ts mid-turn injection,
     /// ~1570-1580). Empty ⇒ the streaming loop's mid-turn drain is a strict
@@ -1171,6 +1180,7 @@ impl ConversationOrchestrator {
             skill_listing: None,
             async_hook_responses: None,
             task_notifications: None,
+            stop_hook_snapshot: None,
             mid_turn_input: std::sync::OnceLock::new(),
             cancel_reason: std::sync::OnceLock::new(),
             todo_reminder_tasks: None,
@@ -1453,6 +1463,19 @@ impl ConversationOrchestrator {
         provider: Arc<dyn crate::prompt::task_notification::TaskNotificationProvider>,
     ) -> Self {
         self.task_notifications = Some(provider);
+        self
+    }
+
+    /// Wire the source of the `Stop` / `SubagentStop` hook `background_tasks` +
+    /// `session_crons` snapshot (claude-code `Lic(taskRegistry.all())` /
+    /// `Mic()`). Without it both fields stay `None` and the keys are omitted on
+    /// every payload (the no-registry default — byte-identical to today).
+    #[must_use]
+    pub fn with_stop_hook_snapshot(
+        mut self,
+        provider: Arc<dyn crate::stop_hook_snapshot::StopHookSnapshotProvider>,
+    ) -> Self {
+        self.stop_hook_snapshot = Some(provider);
         self
     }
 
@@ -3648,6 +3671,25 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         }
     }
 
+    /// Stamp the `Stop` / `SubagentStop` `background_tasks` + `session_crons`
+    /// snapshot onto a lifecycle [`HookContext`] (claude-code's `m = s ? {
+    /// background_tasks: Lic(s.taskRegistry.all()), session_crons: Mic() } :
+    /// undefined`, spread `...m` after `last_assistant_message`).
+    ///
+    /// Called ONLY at the `Stop` / `SubagentStop` firings — never on other
+    /// lifecycle hooks (`UserPromptSubmit`, expansion, …) — mirroring claude's
+    /// gate on the tool-use context `s`. When a snapshot provider is wired BOTH
+    /// fields become `Some(vec)` (possibly empty `[]`, which claude STILL emits
+    /// when `s` is present); when no provider is wired both stay `None` and the
+    /// executor omits the keys (claude `m = undefined`), keeping no-registry
+    /// builds byte-identical.
+    pub(crate) async fn populate_stop_hook_snapshot(&self, ctx: &mut HookContext) {
+        if let Some(provider) = self.stop_hook_snapshot.as_ref() {
+            ctx.background_tasks = Some(provider.background_tasks().await);
+            ctx.session_crons = Some(provider.session_crons().await);
+        }
+    }
+
     /// Public lifecycle [`HookContext`] for collaborators that fire engine
     /// hooks OUTSIDE the turn loop — notably the slash-command dispatcher,
     /// which fires `UserPromptExpansion` (#39) at command expansion and needs
@@ -3729,7 +3771,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// is registered.
     async fn fire_stop_hooks(&self, reason: &str, stop_hook_active: bool) -> StopHookDisposition {
         tracing::debug!(event = "hook_stop_started", reason, stop_hook_active);
-        let ctx = self.lifecycle_hook_ctx(stop_hook_active).await;
+        let mut ctx = self.lifecycle_hook_ctx(stop_hook_active).await;
+        // claude-code stamps `background_tasks` + `session_crons` onto the Stop
+        // payload whenever the tool-use context is present (`...m`). The
+        // orchestrator's main-loop Stop firing always runs inside a tool-use
+        // context, so populate the snapshot here (and ONLY here / SubagentStop).
+        self.populate_stop_hook_snapshot(&mut ctx).await;
         let agg = self
             .hooks
             .execute(
@@ -9605,6 +9652,78 @@ mod skill_listing_reminder_tests {
             orch.async_hook_response_reminder_message().await.is_none(),
             "no provider wired ⇒ strict no-op"
         );
+    }
+
+    // ── hook-bg-fields: Stop / SubagentStop background_tasks + session_crons ──
+
+    /// A [`StopHookSnapshotProvider`] that returns fixed fixtures, so the
+    /// orchestrator's `populate_stop_hook_snapshot` wiring is testable without a
+    /// live registry / cron file.
+    struct FixtureStopSnapshot {
+        tasks: Vec<hooks::HookBackgroundTask>,
+        crons: Vec<hooks::HookSessionCron>,
+    }
+    #[async_trait::async_trait]
+    impl crate::stop_hook_snapshot::StopHookSnapshotProvider for FixtureStopSnapshot {
+        async fn background_tasks(&self) -> Vec<hooks::HookBackgroundTask> {
+            self.tasks.clone()
+        }
+        async fn session_crons(&self) -> Vec<hooks::HookSessionCron> {
+            self.crons.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn populate_stop_hook_snapshot_stamps_both_arrays_when_wired() {
+        use hooks::{HookBackgroundTask, HookSessionCron};
+        let reg = ToolRegistry::new();
+        let orch = orch_with(reg, None).with_stop_hook_snapshot(Arc::new(FixtureStopSnapshot {
+            tasks: vec![HookBackgroundTask {
+                id: "b1".into(),
+                r#type: "shell".into(),
+                status: "running".into(),
+                description: "build".into(),
+                command: Some("cargo build".into()),
+                agent_type: None,
+                server: None,
+                tool: None,
+                name: None,
+            }],
+            crons: vec![HookSessionCron {
+                id: "c1".into(),
+                schedule: "* * * * *".into(),
+                recurring: true,
+                prompt: "hi".into(),
+            }],
+        }));
+        // A Stop-firing context (the only path that populates the snapshot)
+        // carries BOTH arrays, populated, after the snapshot helper runs.
+        let mut ctx = orch.lifecycle_hook_ctx(false).await;
+        // Before population the lifecycle ctx leaves both fields None (the
+        // default — a non-Stop lifecycle hook omits the keys).
+        assert!(ctx.background_tasks.is_none());
+        assert!(ctx.session_crons.is_none());
+        orch.populate_stop_hook_snapshot(&mut ctx).await;
+        let bg = ctx.background_tasks.expect("background_tasks populated");
+        assert_eq!(bg.len(), 1);
+        assert_eq!(bg[0].id, "b1");
+        assert_eq!(bg[0].r#type, "shell");
+        let crons = ctx.session_crons.expect("session_crons populated");
+        assert_eq!(crons.len(), 1);
+        assert_eq!(crons[0].id, "c1");
+        assert!(crons[0].recurring);
+    }
+
+    #[tokio::test]
+    async fn populate_stop_hook_snapshot_noop_without_provider() {
+        let reg = ToolRegistry::new();
+        let orch = orch_with(reg, None);
+        let mut ctx = orch.lifecycle_hook_ctx(false).await;
+        orch.populate_stop_hook_snapshot(&mut ctx).await;
+        // No provider wired ⇒ both fields stay None ⇒ the executor omits the
+        // keys (claude `m = undefined`), byte-identical to the pre-feature build.
+        assert!(ctx.background_tasks.is_none());
+        assert!(ctx.session_crons.is_none());
     }
 
     // ── T35: `task-notification` reminder folds in then drains once ──────────

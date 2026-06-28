@@ -92,6 +92,21 @@ pub struct HookContext {
     /// (binary-confirmed at BIN off 201745825). `None` when no title is
     /// available or not applicable (most event types). Additive default `None`.
     pub session_title: Option<String>,
+    /// Background-task snapshot stamped onto `Stop` / `SubagentStop` payloads
+    /// (claude `Lic(taskRegistry.all())`, spread `...m` after
+    /// `last_assistant_message`). `None` — the additive default — omits the
+    /// `background_tasks` key (claude `m = void 0` when no tool-use context);
+    /// `Some(vec)` emits the array (possibly empty `[]`). The orchestrator
+    /// populates this from the live task registry; the filter
+    /// (status running|pending, not `isBackgrounded === false`) and the
+    /// per-element truncation (1000 chars) are applied by that wiring, not by
+    /// the payload struct. Additive default `None`.
+    pub background_tasks: Option<Vec<crate::hook_payload::HookBackgroundTask>>,
+    /// Session-cron snapshot stamped onto `Stop` / `SubagentStop` payloads
+    /// (claude `Mic()`, spread immediately after `background_tasks`). Same
+    /// None-vs-`Some([])` semantics as [`Self::background_tasks`]. Additive
+    /// default `None`.
+    pub session_crons: Option<Vec<crate::hook_payload::HookSessionCron>>,
 }
 
 /// In-memory registry of hook definitions, sharded by their declared source.

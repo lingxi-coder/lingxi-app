@@ -82,12 +82,37 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
         TaskState::LocalBash(bash) => Some(bash.command.clone()),
         _ => None,
     };
+    // Per-task-type extras consumed by the `Stop` / `SubagentStop` hook
+    // `background_tasks` builder (claude-code `Lic`). Each variant fills only the
+    // subset claude-code's `switch (n.type)` sets; the rest stay `None`.
+    // `local_agent` carries `agent_type` (← the dispatched subagent type, sourced
+    // from the agent id's prefix label) + `is_backgrounded` (the `wA` filter
+    // field); `monitor_mcp` carries `server` (← `server_name`); `local_workflow`
+    // carries `name` (← `workflow_id`). The port has no `mcp_task` task type, and
+    // `MonitorMcpTaskState` carries no single tool name, so `tool` stays `None`.
+    let (agent_type, server, tool, name, is_backgrounded) = match s {
+        TaskState::LocalAgent(a) => (
+            Some(a.subagent_type.clone()),
+            None,
+            None,
+            None,
+            Some(a.is_backgrounded),
+        ),
+        TaskState::MonitorMcp(m) => (None, Some(m.server_name.clone()), None, None, None),
+        TaskState::LocalWorkflow(w) => (None, None, None, Some(w.workflow_id.clone()), None),
+        _ => (None, None, None, None, None),
+    };
     TaskRecord {
         task_id: b.id.clone(),
         task_type: task_type_to_wire(b.task_type).to_string(),
         status: status_to_wire(b.status).to_string(),
         description: b.description.clone(),
         command,
+        agent_type,
+        server,
+        tool,
+        name,
+        is_backgrounded,
     }
 }
 
@@ -217,6 +242,10 @@ impl TaskRegistryHandle for TaskRegistry {
             // a `local_bash` record gets its command once `state_to_record` reads
             // the populated bash state. `None` here matches the pre-spawn shape.
             command: None,
+            // The per-type hook-payload extras are likewise unpopulated at the
+            // placeholder-create point; they fill in once `state_to_record` reads
+            // a real spawned state.
+            ..Default::default()
         })
     }
 
@@ -576,6 +605,7 @@ mod tests {
             let state = TaskState::LocalAgent(crate::state::LocalAgentTaskState {
                 base,
                 agent_id: protocol::AgentId::nil(),
+                subagent_type: String::new(),
                 prompt: "do the thing".into(),
                 error: Some("model refused".into()),
                 messages: vec![],
@@ -666,6 +696,7 @@ mod tests {
         let state = TaskState::LocalAgent(crate::state::LocalAgentTaskState {
             base,
             agent_id: protocol::AgentId::nil(),
+            subagent_type: String::new(),
             prompt: "do it".into(),
             error: None,
             messages: vec![],

@@ -32,7 +32,7 @@ pub struct TaskUpdatePatch {
 }
 
 /// One task as surfaced to the tool layer.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskRecord {
     /// 9-char `[bartwmd][0-9a-z]{8}` task id.
     pub task_id: String,
@@ -49,6 +49,39 @@ pub struct TaskRecord {
     /// (`isLocalShellTask(task) ? task.command : task.description`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// `local_agent` only: the agent's type label, surfaced as the
+    /// `background_tasks[].agent_type` field of a `Stop` / `SubagentStop` hook
+    /// payload (claude-code `Lic`'s `r.agent_type = n.agentType`). `None` for
+    /// every other task type. Additive default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    /// `monitor_mcp` / `mcp_task` only: the MCP server name, surfaced as the
+    /// `background_tasks[].server` field (claude-code `Lic`'s `r.server`).
+    /// `None` for every other task type. Additive default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    /// `monitor_mcp` / `mcp_task` only: the MCP tool name, surfaced as the
+    /// `background_tasks[].tool` field (claude-code `Lic`'s `r.tool`). The port
+    /// `MonitorMcpTaskState` carries no per-tool name (it watches resources, not
+    /// a single tool), so this stays `None` for `monitor_mcp`; `mcp_task` is not
+    /// a port task type. Additive default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// `local_workflow` only: the workflow name, surfaced as the
+    /// `background_tasks[].name` field (claude-code `Lic`'s
+    /// `r.name = n.workflowName`). The port carries a `workflow_id` rather than a
+    /// separate display name, so the id is used. `None` for every other task
+    /// type. Additive default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `local_agent` only: whether the agent is currently backgrounded, used by
+    /// the `Stop` / `SubagentStop` `background_tasks` filter (claude-code `wA`:
+    /// drop a task when `"isBackgrounded" in e && e.isBackgrounded === false`).
+    /// Only `local_agent` tasks carry an `isBackgrounded` field in claude-code,
+    /// so this is `None` for every other task type (and such tasks are never
+    /// dropped by that filter clause). Additive default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_backgrounded: Option<bool>,
 }
 
 /// Agent-run usage for a `local_agent` task-notification's optional `<usage>`

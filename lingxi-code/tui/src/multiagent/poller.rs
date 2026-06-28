@@ -134,6 +134,7 @@ mod tests {
                 status: "running".into(),
                 description: "cargo build".into(),
                 command: None,
+                ..Default::default()
             },
             TaskRecord {
                 task_id: "a00000002".into(),
@@ -141,6 +142,7 @@ mod tests {
                 status: "completed".into(),
                 description: "explore".into(),
                 command: None,
+                ..Default::default()
             },
         ]));
         let feed = PollerFeed::new(stub);
@@ -165,6 +167,7 @@ mod tests {
             status: "running".into(),
             description: "cargo build".into(),
             command: None,
+            ..Default::default()
         }]));
         let feed = PollerFeed::new(stub.clone());
         assert!(feed.kill("b00000001").await.is_ok());

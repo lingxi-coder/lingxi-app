@@ -134,6 +134,7 @@ impl TaskRegistryHandle for MockTaskRegistry {
             status: "killed".into(),
             description: "stopped".into(),
             command: None,
+            ..Default::default()
         })
     }
     async fn output(
@@ -308,6 +309,7 @@ async fn task_list_command_emits_task_rows() {
                 status: "running".into(),
                 description: "build".into(),
                 command: None,
+                ..Default::default()
             },
             TaskRecord {
                 task_id: "a1c2d3e4f".into(),
@@ -315,6 +317,7 @@ async fn task_list_command_emits_task_rows() {
                 status: "completed".into(),
                 description: "review".into(),
                 command: None,
+                ..Default::default()
             },
         ],
     });
@@ -350,6 +353,7 @@ async fn task_list_poll_emits_task_row() {
             status: "running".into(),
             description: "poll me".into(),
             command: None,
+            ..Default::default()
         }],
     });
     let router = router_with(handle, tasks);

@@ -662,6 +662,7 @@ mod tests {
             status: "killed".to_string(),
             description: "build".to_string(),
             command: None,
+            ..Default::default()
         };
         let dto = lower_task_record(&rec);
         assert_eq!(dto.task_id, "b3f9zk2xq");

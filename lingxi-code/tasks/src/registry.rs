@@ -812,12 +812,14 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
         }
         TaskSpawnInput::LocalAgent {
             agent_id,
+            subagent_type,
             prompt,
             is_backgrounded,
             ..
         } => TaskState::LocalAgent(crate::state::LocalAgentTaskState {
             base,
             agent_id: *agent_id,
+            subagent_type: subagent_type.clone(),
             prompt: prompt.clone(),
             error: None,
             messages: vec![],
@@ -2233,6 +2235,7 @@ mod spawn_tests {
             .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
                 base,
                 agent_id: protocol::AgentId::nil(),
+                subagent_type: String::new(),
                 prompt: String::new(),
                 error: Some("rate limited".into()),
                 messages: vec![],
@@ -2324,6 +2327,7 @@ mod spawn_tests {
             .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
                 base,
                 agent_id: protocol::AgentId::nil(),
+                subagent_type: String::new(),
                 prompt: String::new(),
                 error: None,
                 messages: vec![],

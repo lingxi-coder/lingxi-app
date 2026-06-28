@@ -37,6 +37,7 @@ pub mod task_completed_firer;
 pub mod task_created_firer;
 pub mod task_lifecycle_hook_firer;
 pub mod task_notifications_provider;
+pub mod stop_hook_snapshot;
 pub mod teammate_idle_firer;
 pub mod todo_reminder_tasks_provider;
 pub mod token_budget;
@@ -71,6 +72,9 @@ pub use task_completed_firer::OrchestratorTaskCompletedFirer;
 pub use task_created_firer::OrchestratorTaskCreatedFirer;
 pub use task_lifecycle_hook_firer::OrchestratorTaskLifecycleHookFirer;
 pub use task_notifications_provider::RegistryTaskNotifications;
+pub use stop_hook_snapshot::{
+    build_background_tasks, build_session_crons, CronSnapshotInput, StopHookSnapshotProvider,
+};
 pub use teammate_idle_firer::OrchestratorTeammateIdleFirer;
 pub use todo_reminder_tasks_provider::TodoStoreReminderTasks;
 pub use prompt::{

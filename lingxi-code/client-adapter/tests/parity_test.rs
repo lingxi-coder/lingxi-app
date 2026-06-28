@@ -179,6 +179,7 @@ fn task_record_parity() {
         status: "running".to_string(),
         description: "cargo build".to_string(),
         command: None,
+        ..Default::default()
     };
     let completed = TaskRecord {
         task_id: "a00000002".to_string(),
@@ -186,6 +187,7 @@ fn task_record_parity() {
         status: "completed".to_string(),
         description: "explore".to_string(),
         command: None,
+        ..Default::default()
     };
 
     let running_dto = lower_task_record(&running);

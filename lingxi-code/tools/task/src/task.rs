@@ -4436,6 +4436,7 @@ mod tests {
                 // A `local_bash` task carries a distinct command; TaskStop must
                 // prefer this over `description` (claude-code stopTask.ts:97).
                 command: Some("echo hi > out.txt".into()),
+                ..Default::default()
             }
         }
 
@@ -4447,6 +4448,7 @@ mod tests {
                 description: "run the agent".into(),
                 // Non-bash tasks have no command; TaskStop falls back to description.
                 command: None,
+                ..Default::default()
             }
         }
 

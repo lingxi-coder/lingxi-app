@@ -16,6 +16,7 @@ fn record_to_row_mapping_is_total() {
         status: "running".into(),
         description: "build the workspace".into(),
         command: None,
+        ..Default::default()
     };
     let row = task_row_from_record(rec.clone());
     assert_eq!(row.task_id, rec.task_id);
@@ -34,6 +35,7 @@ async fn fixture_can_reproduce_a_poller_row() {
         status: "completed".into(),
         description: "review".into(),
         command: None,
+        ..Default::default()
     };
     let poller_row: TaskRow = task_row_from_record(rec.clone());
 

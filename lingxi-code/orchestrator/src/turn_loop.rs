@@ -3301,7 +3301,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // `agent_type` so the wire payload's `agent_type` is faithful
             // (claude-code passes the subagent's `agentType` into the hooks).
             // The session_id / cwd reuse the same context the pre/post hooks used.
-            let sa_ctx = HookContext {
+            let mut sa_ctx = HookContext {
                 agent_type: Some(subagent_type.clone()),
                 agent_id: Some(child_id),
                 ..hook_ctx.clone()
@@ -3326,6 +3326,13 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 // SubagentStart event, so source it from the cloned `sa_ctx`.
                 agent_type: sa_ctx.agent_type.clone().unwrap_or_default(),
             };
+            // claude-code stamps `background_tasks` + `session_crons` onto the
+            // SubagentStop payload too (the `$Ee` firer's `...m` covers both the
+            // Stop and SubagentStop branches when the tool-use context is
+            // present). Populate the snapshot onto the SubagentStop context ONLY
+            // (NOT the SubagentStart cloned above, which claude never carries it
+            // on).
+            orch.populate_stop_hook_snapshot(&mut sa_ctx).await;
             let sa_started = std::time::Instant::now();
             // EXCLUDE the child's own frontmatter bucket — the runner fired those
             // agent-scoped (claude fires a subagent's stop hooks in-child). This

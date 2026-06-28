@@ -39,7 +39,13 @@ pub enum OrchestratorError {
     /// The configured `max_budget_nano_usd` cost ceiling was reached before the
     /// model emitted `end_turn`. 1:1 with claude-code's `error_max_budget_usd`
     /// (`QueryEngine.ts:983-999`, "Reached maximum budget ($X)").
-    #[error("Reached maximum budget (${:.2})", (*budget_nano_usd as f64) / 1_000_000_000.0)]
+    ///
+    /// claude interpolates the raw `maxBudgetUsd` JS number with no `toFixed`
+    /// (`($${maxBudgetUsd})`), so `$5` renders `($5)` and `$1.5` renders
+    /// `($1.5)`. Rust's `{}` for `f64` uses the same shortest round-trip
+    /// stringification, so we match byte-for-byte for realistic budgets
+    /// instead of forcing two decimals.
+    #[error("Reached maximum budget (${})", (*budget_nano_usd as f64) / 1_000_000_000.0)]
     MaxBudgetReached {
         /// The cost ceiling that was reached, in nano-USD.
         budget_nano_usd: u64,
@@ -202,15 +208,17 @@ mod tests {
 
     #[test]
     fn max_budget_reached_display_formats_usd() {
-        // nano-USD → "$X.XX" (claude-code "Reached maximum budget ($X)").
+        // nano-USD → raw JS-number rendering (claude "Reached maximum budget
+        // ($X)"): no toFixed, so integers and short decimals drop trailing
+        // zeros — `$5` not `$5.00`, `$1.5` not `$1.50`.
         let err = OrchestratorError::MaxBudgetReached {
             budget_nano_usd: 5_000_000_000,
         };
-        assert_eq!(err.to_string(), "Reached maximum budget ($5.00)");
+        assert_eq!(err.to_string(), "Reached maximum budget ($5)");
         let err2 = OrchestratorError::MaxBudgetReached {
             budget_nano_usd: 1_500_000_000,
         };
-        assert_eq!(err2.to_string(), "Reached maximum budget ($1.50)");
+        assert_eq!(err2.to_string(), "Reached maximum budget ($1.5)");
     }
 
     #[test]

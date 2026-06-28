@@ -248,11 +248,11 @@ fn catalog_model_listings() -> Vec<traits::orchestrator::ModelListing> {
 pub(crate) fn model_description(request_model: &str) -> Option<&'static str> {
     let id = request_model.to_ascii_lowercase();
     if id.contains("opus") {
-        Some("Most capable for complex work")
+        Some("Best for everyday, complex tasks")
     } else if id.contains("haiku") {
         Some("Fastest for quick answers")
     } else if id.contains("sonnet") {
-        Some("Best for everyday tasks")
+        Some("Efficient for routine tasks")
     } else {
         None
     }
@@ -572,8 +572,8 @@ mod tests {
 
     #[test]
     fn model_description_matches_known_families() {
-        assert_eq!(model_description("claude-opus-4-7"), Some("Most capable for complex work"));
-        assert_eq!(model_description("anthropic/claude-sonnet-4-6"), Some("Best for everyday tasks"));
+        assert_eq!(model_description("claude-opus-4-7"), Some("Best for everyday, complex tasks"));
+        assert_eq!(model_description("anthropic/claude-sonnet-4-6"), Some("Efficient for routine tasks"));
         assert_eq!(model_description("claude-3-5-haiku"), Some("Fastest for quick answers"));
         assert_eq!(model_description("gpt-4o"), None);
     }

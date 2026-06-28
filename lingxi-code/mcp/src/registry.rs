@@ -377,8 +377,9 @@ impl McpRegistry {
             .await
             .map_err(|_elapsed| {
                 McpError::Connection(format!(
-                    "MCP connection timed out after {}s",
-                    connect_timeout.as_secs()
+                    "MCP server \"{}\" connection timed out after {}ms",
+                    config.name,
+                    connect_timeout.as_millis()
                 ))
             })? {
             Ok(pair) => pair,
@@ -396,8 +397,9 @@ impl McpRegistry {
                         .await
                         .map_err(|_elapsed| {
                             McpError::Connection(format!(
-                                "MCP connection timed out after {}s",
-                                connect_timeout.as_secs()
+                                "MCP server \"{}\" connection timed out after {}ms",
+                                config.name,
+                                connect_timeout.as_millis()
                             ))
                         })??
                 } else if error_is_401(&e) {
@@ -410,8 +412,9 @@ impl McpRegistry {
                         .await
                         .map_err(|_elapsed| {
                             McpError::Connection(format!(
-                                "MCP connection timed out after {}s",
-                                connect_timeout.as_secs()
+                                "MCP server \"{}\" connection timed out after {}ms",
+                                config.name,
+                                connect_timeout.as_millis()
                             ))
                         })??
                 } else {

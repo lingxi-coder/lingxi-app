@@ -26,6 +26,16 @@
 //! A prefetch with neither a source nor a fixed result resolves to an EMPTY set,
 //! so the surfacing reminder is a strict no-op and the locked fixtures stay
 //! byte-identical (analog of the `(None, None)` arm in `MemoryPrefetch::start`).
+//!
+//! DEFERRED (NON-GOALS, faithful stubs rather than full builds): the AKI
+//! remote/embedding backend + Haiku classifier; the `getSkillIndex` /
+//! `clearSkillIndexCache` memoization layer; remote canonical skills + the
+//! `DiscoverSkills` tool; TUI transcript rendering of `skill_discovery`; and the
+//! turn-0 BLOCKING discovery path (`attachments.ts:806 getTurnZeroSkillDiscovery`,
+//! which blocks inside `userInputAttachments` — the one signal with no prior work
+//! to hide under). The port ships only the per-iteration NON-blocking prefetch,
+//! which also covers the turn-0 query albeit non-blockingly. All are inert while
+//! the feature is OFF by default.
 
 #![allow(clippy::module_name_repetitions)]
 

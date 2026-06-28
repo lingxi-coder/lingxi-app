@@ -88,14 +88,23 @@ pub fn emit_command_failed(event: &'static str, error: &str) {
 
 // -- EXPERIMENTAL_SKILL_SEARCH skill-discovery emit helper -------------------
 
-/// Emit `tengu_skill_discovery_collected` with the `hidden_by_main_turn` field
+/// Emit the skill-discovery-collected event with the `hidden_by_main_turn` field
 /// (claude-code `query.ts:1617`: `true` when the per-iteration skill-discovery
 /// prefetch resolved BEFORE collection — i.e. it hid under the main turn's
 /// streaming + tool execution; expected >98%). The sole emitter of this field;
 /// fired by the orchestrator's `skill_discovery_reminder_message` on the gated
 /// (flag-ON) path only — inert (never reached) in the default-OFF build.
+///
+/// FAITHFULNESS: the FIELD `hidden_by_main_turn` is BYTE-FAITHFUL (canonical, from
+/// `query.ts:1617`). The EVENT NAME below is `[RECONSTRUCTED]` — the real
+/// `logEvent('…')` call lives in the DCE'd `services/skillSearch/prefetch.js`
+/// body and is NOT recoverable from the 2.1.195 binary or the readable bundle
+/// (0 hits for `tengu_skill_discovery_collected` in both); guessed via the
+/// `tengu_*` convention. Zero observable bytes (feature OFF by default); swap the
+/// literal if/when `services/skillSearch/` is recovered.
 pub fn emit_skill_discovery_collected(hidden_by_main_turn: bool) {
     tracing::info!(
+        // [RECONSTRUCTED — event name not in 2.1.195 / bundle; guessed by tengu_ convention]
         event = "tengu_skill_discovery_collected",
         hidden_by_main_turn = hidden_by_main_turn,
     );

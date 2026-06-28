@@ -170,6 +170,12 @@ impl Tool for SyntheticOutputTool {
         }
     }
 
+    fn search_hint(&self) -> Option<&str> {
+        // Binary StructuredOutput: `searchHint:"return the final response as
+        // structured JSON"`.
+        Some("return the final response as structured JSON")
+    }
+
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
         // TS: `description()` => 'Return structured output in the requested format'.
         "Return structured output in the requested format".into()

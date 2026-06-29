@@ -573,6 +573,25 @@ fn build_interrupted_result(stdout_partial: &str, stderr_partial: &str, cmd_str:
     }
 }
 
+fn invalidate_written_read_state(ctx: &BuiltinToolContext, cwd: &std::path::Path, command: &str) {
+    let paths = crate::command_semantics::parsed_written_paths(command);
+    if paths.is_empty() {
+        return;
+    }
+    let Ok(mut state) = ctx.read_file_state.lock() else {
+        return;
+    };
+    for raw in paths {
+        let path = std::path::Path::new(&raw);
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+        state.remove(&absolute);
+    }
+}
+
 // ===== Image-output handling (claude-code `BashTool/utils.ts`) ==============
 
 /// True when `content` is a base64 image data URI. 1:1 port of claude-code
@@ -1580,6 +1599,7 @@ impl Tool for BashTool {
                 );
                 meta.insert("truncated".into(), AnalyticsValue::Bool(truncated_out));
                 self.ctx.bus.log_event(BASH_COMPLETED, meta).await;
+                invalidate_written_read_state(&self.ctx, &cwd, &cmd_str);
 
                 // Model sees the plain-text `[stdout, stderr].join("\n")` render
                 // (`content` in the binary's tool_result mapper), NOT the JSON

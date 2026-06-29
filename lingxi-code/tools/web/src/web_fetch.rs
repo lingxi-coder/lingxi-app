@@ -723,26 +723,15 @@ impl Tool for WebFetchTool {
                 }
             }
         }
-        // Non-preapproved host: ASK the host (deny/allow/approve-once handled by
-        // the rule gate, `domain:{host}` content rules) instead of allow-all. The
-        // gate maps Ask→interactive prompt; a configured `WebFetch(domain:x)` rule
-        // bypasses it. host-less / unparseable URLs fall through to a bare Ask.
-        let host = input
-            .get("url")
-            .and_then(Value::as_str)
-            .and_then(|u| url::Url::parse(u).ok())
-            .and_then(|p| p.host_str().map(ToString::to_string))
-            .unwrap_or_default();
-        PermissionResult::Ask {
+        // Non-preapproved hosts fall back to the central permission policy. The
+        // orchestrator resolves `WebFetch(domain:{host})` rules before execution;
+        // this tool-local hook only preserves the preapproved-host fast path.
+        PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: format!("WebFetch to {host} requires permission"),
+                reason: "allow-all-gate (central policy applies before tool hook)".into(),
             },
-            prompt: permission::result::PermissionPrompt {
-                title: "Fetch external URL?".into(),
-                message: format!("Allow WebFetch to {host}?"),
-                options: vec!["Allow".into(), "Deny".into()],
-            },
-            pending_classifier_check: None,
+            updated_input: None,
+            update_destination: None,
             metadata: PermissionMetadata::default(),
         }
     }

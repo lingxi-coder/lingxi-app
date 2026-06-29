@@ -230,8 +230,14 @@ impl CompactionOrchestrator {
         // `keep_recent` count alone (the SPECS-noted fallback) rather than the
         // exact since-last-assistant idle gap.
         if self.micro.config.enabled {
-            let cached = self.cached_micro.compact_with(
+            let micro_key = (
+                self.micro.config.enabled,
+                self.micro.config.gap_threshold_minutes,
+                self.micro.config.keep_recent,
+            );
+            let cached = self.cached_micro.compact_with_key(
                 messages,
+                micro_key,
                 SystemTime::now(),
                 |input, now| self.micro.compact(input, now),
             );

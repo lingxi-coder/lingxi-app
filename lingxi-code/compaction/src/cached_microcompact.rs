@@ -34,7 +34,20 @@ impl CachedMicrocompact {
         now: SystemTime,
         compute: impl FnOnce(Vec<ConversationMessage>, SystemTime) -> MicrocompactResult,
     ) -> CachedMicrocompactResult {
-        let key = input_hash(&messages);
+        self.compact_with_key(messages, (), now, compute)
+    }
+
+    /// Same as [`Self::compact_with`], with caller-supplied key material such as
+    /// microcompact config. This avoids reusing a summary computed under a
+    /// different `keep_recent` / threshold policy.
+    pub fn compact_with_key(
+        &self,
+        messages: Vec<ConversationMessage>,
+        key_material: impl Hash,
+        now: SystemTime,
+        compute: impl FnOnce(Vec<ConversationMessage>, SystemTime) -> MicrocompactResult,
+    ) -> CachedMicrocompactResult {
+        let key = input_hash(&messages, key_material);
         if let Some(result) = self
             .entries
             .lock()
@@ -61,10 +74,11 @@ impl CachedMicrocompact {
     }
 }
 
-fn input_hash(messages: &[ConversationMessage]) -> u64 {
+fn input_hash(messages: &[ConversationMessage], key_material: impl Hash) -> u64 {
     let bytes = serde_json::to_vec(messages).expect("ConversationMessage serializes");
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
+    key_material.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -134,5 +148,19 @@ mod tests {
             second.result.messages[0].text_content(),
             first.result.messages[0].text_content()
         );
+    }
+
+    #[test]
+    fn different_key_material_misses_even_for_same_messages() {
+        let cache = CachedMicrocompact::default();
+        let input = messages("alpha");
+        let first = cache.compact_with_key(input.clone(), 1_u8, SystemTime::UNIX_EPOCH, |i, _| {
+            computed_summary(i)
+        });
+        let second = cache.compact_with_key(input, 2_u8, SystemTime::UNIX_EPOCH, |i, _| {
+            computed_summary(i)
+        });
+        assert!(!first.cache_hit);
+        assert!(!second.cache_hit, "different config/key material must miss");
     }
 }

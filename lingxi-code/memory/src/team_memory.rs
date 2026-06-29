@@ -3,7 +3,7 @@
 //! flag. Disabled ⇒ inert no-op. Path resolver from M3-02; poll/scan from M9.
 
 use crate::memdir::team_paths::resolve_team_memory_dir;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -52,19 +52,10 @@ impl TeamMemoryWatcher {
             return Vec::new();
         };
         let mut changed = Vec::new();
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!("team-memory watch read_dir failed, degrading: {e}");
-                return changed;
-            }
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|x| x.to_str()) != Some("md") {
-                continue;
-            }
-            let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
+        let mut current = HashSet::new();
+        for path in markdown_files(&dir) {
+            current.insert(path.clone());
+            let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
                 continue;
             };
             if self.seen.get(&path) != Some(&mtime) {
@@ -73,6 +64,7 @@ impl TeamMemoryWatcher {
                 changed.push(path);
             }
         }
+        self.seen.retain(|path, _| current.contains(path));
         changed
     }
 
@@ -93,6 +85,23 @@ impl TeamMemoryWatcher {
             Err(e) => tracing::warn!("team-memory secret scan skipped for {}: {e}", path.display()),
         }
     }
+}
+
+fn markdown_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        tracing::warn!("team-memory watch read_dir failed for {}, degrading", dir.display());
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(markdown_files(&path));
+        } else if path.extension().and_then(|x| x.to_str()) == Some("md") {
+            out.push(path);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -131,6 +140,21 @@ mod tests {
         let mut w = TeamMemoryWatcher::new(&tmp, true);
         assert_eq!(w.poll_changes().len(), 1, "first poll seeds + reports file");
         assert!(w.poll_changes().is_empty(), "unchanged ⇒ no event");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn poll_recurses_and_forgets_deleted_files() {
+        let tmp = std::env::temp_dir().join(format!("tmw_nested_{}", std::process::id()));
+        let nested = tmp.join(".lingxi/team-mem/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("a.md");
+        std::fs::write(&file, "hi").unwrap();
+        let mut w = TeamMemoryWatcher::new(&tmp, true);
+        assert_eq!(w.poll_changes(), vec![file.clone()]);
+        std::fs::remove_file(&file).unwrap();
+        assert!(w.poll_changes().is_empty());
+        assert!(w.seen.is_empty(), "deleted files must leave watcher state");
         std::fs::remove_dir_all(&tmp).ok();
     }
 }

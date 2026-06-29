@@ -1435,6 +1435,15 @@ impl AppState {
         crate::telemetry::screen_opened("github_deployment");
     }
 
+    /// Open the login-method choice screen (multi-method providers, e.g. Anthropic).
+    pub fn open_connect_method(
+        &mut self,
+        state: crate::screens::connect_method::ConnectMethodState,
+    ) {
+        self.active_screen = Some(crate::screens::Screen::ConnectMethod(state));
+        crate::telemetry::screen_opened("connect_method");
+    }
+
     /// Open the grouped bare-`/connect` provider PICKER. Called synchronously by
     /// the app.rs dispatch intercept for a bare `/connect` (no provider arg).
     /// Selecting a row raises `pending_connect` → `root::pump_open_connect` opens

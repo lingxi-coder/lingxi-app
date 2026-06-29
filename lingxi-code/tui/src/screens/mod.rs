@@ -7,6 +7,7 @@
 pub mod agents;
 pub mod background_tasks;
 pub mod connect;
+pub mod connect_method;
 pub mod connect_picker;
 pub mod doctor;
 pub mod github_deploy;
@@ -192,6 +193,11 @@ pub enum Screen {
     /// (then enter the host). Resolving opens the device-flow `Connect` screen
     /// with the chosen domain (`AppState.copilot_login_domain`).
     GithubDeployment(github_deploy::GithubDeploymentState),
+    /// (T2b) The login-METHOD choice shown for multi-method providers (Anthropic:
+    /// Pro/Max OAuth vs API key). `handle_screen_key` runs the pure
+    /// `connect_method::handle_connect_method_key`; the pick opens the chosen
+    /// `ConnectFlow`. Opened by `pump_open_connect` when `provider_methods` > 1.
+    ConnectMethod(connect_method::ConnectMethodState),
     /// (RRS-06) The Ctrl+O transcript toggle — claude-code `app:toggleTranscript`.
     /// A read-only, scrollable verbose dump of the FULL message log (every
     /// message, not the live-REPL folded/capped view), captured at open time.

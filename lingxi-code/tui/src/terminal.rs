@@ -41,7 +41,15 @@ static INSTALL_SAFETY: Once = Once::new();
 /// all, leaving raw + alt + mouse all on. This restore closes both gaps.
 pub fn restore_terminal_modes() {
     let mut out: Stdout = stdout();
-    let _ = execute!(out, DisableMouseCapture, LeaveAlternateScreen, Show);
+    if crate::inline_render_mode() {
+        // Inline mode (`LINGXI_TUI_INLINE`) never entered the alt screen, so
+        // emitting `LeaveAlternateScreen` (`\e[?1049l`) would wrongly switch the
+        // buffer / scroll the user's scrollback. Mouse-capture disable + cursor
+        // show stay (idempotent, harmless if never set).
+        let _ = execute!(out, DisableMouseCapture, Show);
+    } else {
+        let _ = execute!(out, DisableMouseCapture, LeaveAlternateScreen, Show);
+    }
     let _ = disable_raw_mode();
 }
 

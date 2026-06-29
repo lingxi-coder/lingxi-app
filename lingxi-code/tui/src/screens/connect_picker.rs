@@ -23,6 +23,10 @@ pub enum ConnectMethod {
     ApiKey,
     CopilotDevice,
     OAuthSoon,
+    /// (T2b) A LIVE first-party OAuth browser sign-in offered as an explicit
+    /// menu choice (Anthropic Pro/Max). Distinct from `OAuthSoon` so the choice
+    /// label is honest ("Sign in…", not "coming soon").
+    Oauth,
 }
 
 impl ConnectMethod {
@@ -41,8 +45,42 @@ impl ConnectMethod {
             Self::ApiKey => " \u{2014} API key",
             Self::CopilotDevice => " \u{2014} device sign-in",
             Self::OAuthSoon => " \u{2014} browser sign-in (coming soon)",
+            Self::Oauth => " \u{2014} Pro/Max sign-in",
         }
     }
+
+    /// Human menu label for the method-choice step (distinct from `suffix`,
+    /// which is the picker-row trailer). Used only by the MethodChoice screen.
+    #[must_use]
+    pub fn choice_label(self) -> &'static str {
+        match self {
+            Self::Oauth => "Sign in with Claude Pro/Max",
+            Self::ApiKey => "Use an API key",
+            Self::CopilotDevice => "Sign in with GitHub",
+            Self::OAuthSoon => "Browser sign-in (coming soon)",
+        }
+    }
+}
+
+/// The ordered set of login methods a provider offers. Single-method providers
+/// yield one entry (their catalog tag); Anthropic is special-cased to BOTH a
+/// live Pro/Max OAuth sign-in AND its API key (the engine tag stays "api_key";
+/// the TUI knows the OAuth backend — `EngineOAuthConnect`'s "anthropic" arm — is
+/// also live). OAuth is listed first (claude-code order: "Sign in" then "API key").
+#[must_use]
+pub fn provider_methods(profile_name: &str, tag: Option<&str>) -> Vec<ConnectMethod> {
+    match profile_name {
+        "anthropic" => vec![ConnectMethod::Oauth, ConnectMethod::ApiKey],
+        _ => vec![tag.map(ConnectMethod::from_tag).unwrap_or(ConnectMethod::ApiKey)],
+    }
+}
+
+/// Curated human label for a profile id (e.g. "anthropic" -> "Anthropic"),
+/// falling back to title-case. Public so the MethodChoice title and the OAuth
+/// success message can show a real label instead of the raw slug.
+#[must_use]
+pub fn provider_label(profile_name: &str) -> String {
+    connect_display_meta(profile_name).label
 }
 
 /// One selectable provider row in the grouped picker.
@@ -334,6 +372,37 @@ mod t3_tests {
         assert_eq!(ConnectMethod::from_tag("copilot_device"), ConnectMethod::CopilotDevice);
         assert_eq!(ConnectMethod::from_tag("oauth"), ConnectMethod::OAuthSoon);
         assert_eq!(ConnectMethod::from_tag("???"), ConnectMethod::OAuthSoon); // unknown → honest soon
+    }
+
+    #[test]
+    fn provider_methods_anthropic_offers_oauth_then_api_key() {
+        // Anthropic is the dual-method special case: live Pro/Max OAuth first,
+        // API key second (engine tag stays "api_key").
+        assert_eq!(
+            provider_methods("anthropic", Some("api_key")),
+            vec![ConnectMethod::Oauth, ConnectMethod::ApiKey]
+        );
+        // Single-method providers yield exactly their catalog tag's method.
+        assert_eq!(provider_methods("openai", Some("api_key")), vec![ConnectMethod::ApiKey]);
+        assert_eq!(
+            provider_methods("openai-chatgpt", Some("oauth")),
+            vec![ConnectMethod::OAuthSoon]
+        );
+        assert_eq!(
+            provider_methods("github-copilot", Some("copilot_device")),
+            vec![ConnectMethod::CopilotDevice]
+        );
+        // Typed-unknown (no tag) falls back to ApiKey, preserving today's behaviour.
+        assert_eq!(provider_methods("typed-unknown", None), vec![ConnectMethod::ApiKey]);
+    }
+
+    #[test]
+    fn choice_label_and_provider_label_values() {
+        assert_eq!(ConnectMethod::Oauth.choice_label(), "Sign in with Claude Pro/Max");
+        assert_eq!(ConnectMethod::ApiKey.choice_label(), "Use an API key");
+        assert_eq!(ConnectMethod::CopilotDevice.choice_label(), "Sign in with GitHub");
+        assert_eq!(provider_label("anthropic"), "Anthropic");
+        assert_eq!(provider_label("brand-new-provider"), "Brand New Provider");
     }
 
     #[test]

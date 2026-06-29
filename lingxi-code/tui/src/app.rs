@@ -1137,6 +1137,32 @@ pub fn render_screen(
                     ),
                 }
             }
+            Screen::ConnectMethod(m) => {
+                // (T2b) The login-method choice (multi-method providers, e.g.
+                // Anthropic): a menu of `choice_label`s in the shared popup.
+                use crate::components::picker_popup::{render_picker_popup, PopupLine, PopupMarker};
+                let lines: Vec<PopupLine> = m
+                    .options
+                    .iter()
+                    .enumerate()
+                    .map(|(i, opt)| PopupLine::Item {
+                        marker: PopupMarker::None,
+                        label: opt.choice_label().to_string(),
+                        detail: String::new(),
+                        badge: String::new(),
+                        selected: i == m.selected,
+                    })
+                    .collect();
+                render_picker_popup(
+                    &format!("Connect {}", m.label),
+                    "",
+                    &lines,
+                    Some("\u{2191}\u{2193} select  \u{00B7}  Enter  \u{00B7}  Esc to cancel"),
+                    viewport_width,
+                    viewport_height,
+                    &state.theme,
+                )
+            }
             Screen::Permissions(p) => {
                 // The read-only permissions viewer renders the pure
                 // `render_permissions_to_string` body (list↔detail, snapshot-

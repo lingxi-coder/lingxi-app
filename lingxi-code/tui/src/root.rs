@@ -544,6 +544,9 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
         // The GitHub deployment-type sub-flow shares the picker keymap (nav/
         // Enter/Esc + printable keys fall through to its reducer for the host input).
         Some(Screen::GithubDeployment(_)) => &["ModelPicker"],
+        // (T2b) The login-method choice shares the picker keymap: Up/Down nav +
+        // Enter/Esc resolve the same way (no printable input on this menu).
+        Some(Screen::ConnectMethod(_)) => &["ModelPicker"],
         // (GAP D fix) Settings is a TAB NAVIGATOR (Config/Settings/Status/Usage
         // tabs + an `e`/Enter $EDITOR handoff on the Config tab) — NOT a
         // settings-panel select-list. claude-code drives tab navigation through
@@ -919,6 +922,23 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                 }
                 DeployOutcome::Cancel => st.close_screen(),
                 DeployOutcome::Stay => {}
+            }
+        }
+        Some(Screen::ConnectMethod(state)) => {
+            // (T2b) The login-method choice for multi-method providers (Anthropic:
+            // Pro/Max OAuth vs API key). On Pick, replace the choice screen with the
+            // chosen flow via the shared `open_connect_route` (OAuth additionally
+            // raises `pending_oauth_login`, drained by the ticker → the OAuth task —
+            // the SAME mechanism the single-method OAuth path uses; no new task).
+            use crate::screens::connect_method::{handle_connect_method_key, MethodChoiceOutcome};
+            let ct_key = iocraft_to_crossterm028_key(k);
+            let provider = state.provider_id.clone();
+            match handle_connect_method_key(state, ct_key.code) {
+                MethodChoiceOutcome::Pick { method } => {
+                    open_connect_route(st, route_for_method(method), &provider);
+                }
+                MethodChoiceOutcome::Cancel => st.close_screen(),
+                MethodChoiceOutcome::Stay => {}
             }
         }
         Some(Screen::Skills(state)) => {
@@ -2024,6 +2044,42 @@ pub(crate) fn connect_route_for(_provider: &str, auth_tag: Option<&str>) -> Conn
     }
 }
 
+/// (T2b) Map a chosen `ConnectMethod` (from the MethodChoice step) to its flow.
+/// Both live OAuth variants drive the real browser flow.
+fn route_for_method(m: crate::screens::connect_picker::ConnectMethod) -> ConnectRoute {
+    use crate::screens::connect_picker::ConnectMethod;
+    match m {
+        ConnectMethod::CopilotDevice => ConnectRoute::Copilot,
+        ConnectMethod::Oauth | ConnectMethod::OAuthSoon => ConnectRoute::OAuth,
+        ConnectMethod::ApiKey => ConnectRoute::ApiKey,
+    }
+}
+
+/// (T2b) Open the credential screen for `route`. Shared by `pump_open_connect`
+/// (single-method) and the MethodChoice handler (dual-method pick), so the open
+/// logic + label humanization live in ONE place. OAuth additionally raises the
+/// one-shot `pending_oauth_login` signal (drained by the ticker → the OAuth task).
+fn open_connect_route(st: &mut AppState, route: ConnectRoute, provider: &str) {
+    let label = crate::screens::connect_picker::provider_label(provider); // m1: human header
+    match route {
+        ConnectRoute::Copilot => st.open_github_deployment(),
+        ConnectRoute::ApiKey => {
+            st.open_connect(crate::screens::connect::ConnectScreenState::api_key(provider, &label));
+        }
+        ConnectRoute::OAuth => {
+            st.oauth_login_provider = Some(provider.to_string());
+            st.pending_oauth_login = true;
+            st.open_connect(crate::screens::connect::ConnectScreenState::oauth(provider, &label));
+        }
+        ConnectRoute::Unavailable => {
+            st.open_connect(crate::screens::connect::ConnectScreenState::unavailable(
+                &label,
+                "browser sign-in isn't available in this build yet",
+            ));
+        }
+    }
+}
+
 /// (Plan 3c §6.3) Async `/connect` open pump. Consumes `AppState.pending_connect`
 /// (set by the picker's `Connect` outcome or a `/connect <provider>` intercept)
 /// under the priority guard and opens the credential screen: routes by the REAL
@@ -2047,32 +2103,21 @@ pub async fn pump_open_connect(state: &Arc<Mutex<AppState>>) -> bool {
         return false;
     }
     let tag = st.provider_auth_methods.get(&provider).cloned();
-    match connect_route_for(&provider, tag.as_deref()) {
-        ConnectRoute::Copilot => {
-            // GitHub Copilot first picks the deployment type (Public vs Enterprise).
-            // The deploy screen (handle_screen_key) then opens the device-flow screen
-            // + raises `pending_copilot_login` with the resolved `copilot_login_domain`.
-            st.open_github_deployment();
-        }
-        ConnectRoute::ApiKey => {
-            // The picker carried the human label, but the flag only holds the id; the
-            // header reads "Connect <id>" (the engine `/connect` group resolves the
-            // canonical label on the registry path).
-            st.open_connect(crate::screens::connect::ConnectScreenState::api_key(&provider, &provider));
-        }
-        ConnectRoute::OAuth => {
-            // (T2b) Open the OAuth screen ("Opening browser…") and raise the
-            // one-shot login signal; the oauth-login task drives the real flow.
-            st.oauth_login_provider = Some(provider.clone());
-            st.pending_oauth_login = true;
-            st.open_connect(crate::screens::connect::ConnectScreenState::oauth(&provider, &provider));
-        }
-        ConnectRoute::Unavailable => {
-            st.open_connect(crate::screens::connect::ConnectScreenState::unavailable(
-                &provider,
-                "browser sign-in isn't available in this build yet",
-            ));
-        }
+    let methods = crate::screens::connect_picker::provider_methods(&provider, tag.as_deref());
+    if methods.len() > 1 {
+        // (T2b) Dual-method provider (Anthropic = Pro/Max OAuth + API key) →
+        // present the method-CHOICE step first. The chosen method opens its flow
+        // from `handle_screen_key`'s `ConnectMethod` arm (shared `open_connect_route`).
+        let label = crate::screens::connect_picker::provider_label(&provider);
+        st.open_connect_method(crate::screens::connect_method::ConnectMethodState::new(
+            provider.clone(),
+            label,
+            methods,
+        ));
+    } else {
+        // Single-method provider → open its flow directly (unchanged behaviour).
+        let route = connect_route_for(&provider, tag.as_deref());
+        open_connect_route(&mut st, route, &provider);
     }
     true
 }
@@ -3501,7 +3546,7 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                     continue;
                 };
                 match driver.login(&provider).await {
-                    Ok(_msg) => {
+                    Ok(msg) => {
                         {
                             let mut st = state.lock().await;
                             // The driver stored the token; reflect availability so
@@ -3536,8 +3581,18 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                             );
                             if on_done {
                                 st.close_screen();
+                                // m1: prefer the driver's returned message (e.g.
+                                // "Connected Anthropic (me@example.com)."); fall back
+                                // to the human label, never the raw provider slug.
+                                let label =
+                                    crate::screens::connect_picker::provider_label(&provider);
+                                let body = if msg.trim().is_empty() {
+                                    format!("\u{2713} Signed in to {label}.")
+                                } else {
+                                    format!("\u{2713} {msg}")
+                                };
                                 st.push_message(crate::state::RenderedMessage::SystemText {
-                                    body: format!("\u{2713} Signed in to {provider}."),
+                                    body,
                                     timestamp: chrono::Utc::now().timestamp(),
                                     is_error: false,
                                 });
@@ -5071,6 +5126,91 @@ mod tests {
                 st2.active_screen
             );
         }
+    }
+
+    /// (T2b) Anthropic is the dual-method provider: `/connect anthropic` now opens
+    /// the method-CHOICE screen (Pro/Max OAuth + API key) instead of jumping
+    /// straight into the API-key field. The engine tag stays "api_key".
+    #[tokio::test]
+    async fn pump_open_connect_anthropic_opens_method_choice() {
+        use crate::screens::connect_picker::ConnectMethod;
+        use crate::screens::Screen;
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.pending_connect = Some("anthropic".to_string());
+        st.provider_auth_methods
+            .insert("anthropic".to_string(), "api_key".to_string());
+        let state = Arc::new(Mutex::new(st));
+        assert!(pump_open_connect(&state).await);
+        let st = state.lock().await;
+        match &st.active_screen {
+            Some(Screen::ConnectMethod(m)) => {
+                assert_eq!(m.provider_id, "anthropic");
+                assert_eq!(m.label, "Anthropic");
+                assert_eq!(m.options, vec![ConnectMethod::Oauth, ConnectMethod::ApiKey]);
+            }
+            other => panic!("expected ConnectMethod screen, got {other:?}"),
+        }
+    }
+
+    /// (T2b) The MethodChoice handler: picking OAuth opens the OAuth `ConnectFlow`
+    /// + raises `pending_oauth_login` (the SAME signal the single-method OAuth path
+    /// uses); picking API key opens the masked key field; Esc closes the screen.
+    #[test]
+    fn method_choice_pick_opens_the_right_flow() {
+        use crate::screens::connect::{ConnectFlow, ConnectScreenState};
+        use crate::screens::connect_method::ConnectMethodState;
+        use crate::screens::connect_picker::ConnectMethod;
+        use crate::screens::Screen;
+
+        let methods = vec![ConnectMethod::Oauth, ConnectMethod::ApiKey];
+
+        // Pick OAuth (idx 0): Enter → OAuth flow + pending_oauth_login set.
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.active_screen = Some(Screen::ConnectMethod(ConnectMethodState::new(
+            "anthropic".to_string(),
+            "Anthropic".to_string(),
+            methods.clone(),
+        )));
+        let enter = KeyEvent::new(KeyEventKind::Press, KeyCode::Enter);
+        handle_screen_key(&mut st, &enter);
+        match &st.active_screen {
+            Some(Screen::Connect(ConnectScreenState {
+                flow: ConnectFlow::OAuth { provider_id, .. },
+                ..
+            })) => assert_eq!(provider_id, "anthropic"),
+            other => panic!("expected OAuth connect screen, got {other:?}"),
+        }
+        assert!(st.pending_oauth_login, "OAuth pick raises pending_oauth_login");
+        assert_eq!(st.oauth_login_provider.as_deref(), Some("anthropic"));
+
+        // Pick API key (idx 1): Down then Enter → masked key field.
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.active_screen = Some(Screen::ConnectMethod(ConnectMethodState::new(
+            "anthropic".to_string(),
+            "Anthropic".to_string(),
+            methods.clone(),
+        )));
+        let down = KeyEvent::new(KeyEventKind::Press, KeyCode::Down);
+        handle_screen_key(&mut st, &down);
+        handle_screen_key(&mut st, &KeyEvent::new(KeyEventKind::Press, KeyCode::Enter));
+        match &st.active_screen {
+            Some(Screen::Connect(ConnectScreenState {
+                flow: ConnectFlow::ApiKey { provider_id, .. },
+                ..
+            })) => assert_eq!(provider_id, "anthropic"),
+            other => panic!("expected api-key connect screen, got {other:?}"),
+        }
+        assert!(!st.pending_oauth_login, "API-key pick does not raise OAuth signal");
+
+        // Esc cancels the whole flow (back to REPL).
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.active_screen = Some(Screen::ConnectMethod(ConnectMethodState::new(
+            "anthropic".to_string(),
+            "Anthropic".to_string(),
+            methods,
+        )));
+        handle_screen_key(&mut st, &KeyEvent::new(KeyEventKind::Press, KeyCode::Esc));
+        assert!(st.active_screen.is_none(), "Esc closes the method-choice screen");
     }
 
     /// (T2a Task 5) `connect_route_for` routes by the REAL catalog method tag.

@@ -204,23 +204,83 @@ pub(crate) const SPECIAL_VAR_NAMES: &[&str] = &["?", "$", "!", "#", "0", "-"];
 /// ast.ts:2060).
 pub(crate) const ZSH_DANGEROUS_BUILTINS: &[&str] = &[
     "zmodload", "emulate", "sysopen", "sysread", "syswrite", "sysseek", "zpty", "ztcp", "zsocket",
-    "zf_rm", "zf_mv", "zf_ln", "zf_chmod", "zf_chown", "zf_mkdir", "zf_rmdir", "zf_chgrp",
+    "zf_rm", "zf_mv", "zf_ln", "zf_chmod", "zf_chown", "zf_mkdir", "zf_rmdir", "zf_chgrp", "repeat",
+    "foreach", "zcompile", "setopt", "unsetopt", "disable", "shopt",
 ];
 
 /// Builtins that evaluate their arguments as shell code (TS `EVAL_LIKE_BUILTINS`,
-/// ast.ts:2086).
+/// ast.ts checkSemantics `k1n`). NOTE: `command`/`builtin`/`noglob` are NOT here —
+/// the 2.1.195 binary strips them as command-prefix WRAPPERS (see
+/// [`check_semantics`] wrapper loop), so by the time the name battery runs they
+/// have already been unwrapped to the real command.
 pub(crate) const EVAL_LIKE_BUILTINS: &[&str] = &[
-    "eval", "source", ".", "exec", "command", "builtin", "fc", "coproc", "noglob", "nocorrect",
-    "trap", "enable", "mapfile", "readarray", "hash", "bind", "complete", "compgen", "alias", "let",
+    "eval", "source", ".", "exec", "nocorrect", "fc", "coproc", "trap", "enable", "mapfile",
+    "readarray", "hash", "bind", "complete", "compgen", "alias", "let",
 ];
 
+/// Builtins whose argument IS run as a command — `watch rm -rf`, `flock f rm`,
+/// etc. (TS checkSemantics `C$t`). Denied when they carry any operand.
+pub(crate) const RUNS_ARG_COMMANDS: &[&str] = &[
+    "watch", "ionice", "chrt", "setsid", "taskset", "strace", "ltrace", "script", "flock",
+    "unshare", "nsenter",
+];
+
+/// Declare-family + zsh assignment builtins whose operands are scrutinised for
+/// flags/subscripts that change assignment-eval semantics (TS checkSemantics
+/// `w$t`).
+pub(crate) const DECLARE_FAMILY: &[&str] = &[
+    "declare", "typeset", "local", "export", "readonly", "print", "getopts", "set", "zparseopts",
+    "zformat", "zstyle", "autoload", "shift", "exit", "return", "break", "continue", "bye",
+    "logout", "vared", "private", "getln", "zregexparse", "float", "integer",
+];
+
+/// zsh `typeset`-family subset whose flags trigger matheval of the RHS (TS
+/// checkSemantics `_ra`).
+pub(crate) const ZSH_TYPESET_FAMILY: &[&str] = &[
+    "declare", "typeset", "local", "export", "readonly", "private", "float", "integer",
+];
+
+/// `set -o <name>` option names that are statically safe (TS checkSemantics
+/// `poo`). Compared after lowercasing and stripping `_`/`-`.
+pub(crate) const SET_O_SAFE: &[&str] = &[
+    "pipefail", "errexit", "nounset", "xtrace", "noglob", "noclobber", "verbose", "monitor",
+    "notify", "vi", "emacs", "errtrace", "functrace", "hashall", "physical", "ignoreeof",
+];
+
+/// `set -<letter>` single-letter options that are statically safe (TS
+/// checkSemantics `moo`).
+pub(crate) const SET_SAFE_LETTERS: &[&str] = &[
+    "e", "u", "x", "f", "C", "v", "m", "b", "E", "T", "h", "P", "n",
+];
+
+/// `find` primaries that execute commands or modify files (TS checkSemantics
+/// `coo`). Auto-allow via a `Bash(find:*)` prefix rule is unsafe with any of these.
+pub(crate) const FIND_ACTION_FLAGS: &[&str] = &[
+    "-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls",
+    "-files0-from",
+];
+
+/// `find` primaries that take a value operand (skip the operand; TS checkSemantics
+/// `R$t`). `-newerXY` is matched by [`find_newer_re`] instead.
+pub(crate) const FIND_VALUE_FLAGS: &[&str] = &[
+    "-name", "-iname", "-path", "-ipath", "-lname", "-ilname", "-regex", "-iregex", "-wholename",
+    "-iwholename", "-samefile", "-newer", "-anewer", "-cnewer", "-mnewer", "-perm", "-user",
+    "-group", "-uid", "-gid", "-size", "-type", "-xtype", "-fstype", "-inum", "-links", "-used",
+    "-context", "-amin", "-cmin", "-mmin", "-atime", "-ctime", "-mtime", "-mindepth", "-maxdepth",
+    "-printf", "-regextype", "-D", "-f", "-flags", "-Bnewer", "-Btime", "-Bmin", "-files0-from",
+    "-xattrname",
+];
+
+/// `read` flags that consume a NUMERIC value operand (TS checkSemantics `yra`).
+pub(crate) const READ_NUMERIC_DATA_FLAGS: &[&str] = &["-t", "-n", "-N"];
+
 /// Builtins → NAME-operand flags that evaluate array subscripts (TS
-/// `SUBSCRIPT_EVAL_FLAGS`, ast.ts:2143). Value-vecs are insertion-ordered (the
+/// `SUBSCRIPT_EVAL_FLAGS` / `uoo`). Value-vecs are insertion-ordered (the
 /// matched flag is interpolated into the reason string).
 pub(crate) const SUBSCRIPT_EVAL_FLAGS: &[(&str, &[&str])] = &[
-    ("test", &["-v", "-R"]),
-    ("[", &["-v", "-R"]),
-    ("[[", &["-v", "-R"]),
+    ("test", &["-v", "-R", "-t"]),
+    ("[", &["-v", "-R", "-t"]),
+    ("[[", &["-v", "-R", "-t"]),
     ("printf", &["-v"]),
     ("read", &["-a"]),
     ("unset", &["-v"]),
@@ -279,15 +339,54 @@ lazy_re!(nice_n_value_re, r"^-?\d+$");
 lazy_re!(nice_legacy_re, r"^-\d+$");
 // nice argument carrying an expansion (ast.ts:2304): `$`, `(`, or backtick.
 lazy_re!(nice_expansion_re, r"[$(`]");
-// jq dangerous flags (ast.ts:2606): -f/-L (fused or separated) and the long forms.
+// jq dangerous flags (2.1.195 checkSemantics): combined `-nf`/`-rf` (any letters
+// then f/L) plus the long forms. WIDER than the older `-[fL]`-prefix form.
 lazy_re!(
     jq_dangerous_flags_re,
-    r"^(?:-[fL](?:$|[^A-Za-z])|--(?:from-file|rawfile|slurpfile|library-path)(?:$|=))"
+    r"^(?:-[A-Za-z]*[fL]|--(?:from-file|rawfile|slurpfile|library-path)(?:$|=))"
 );
-// fc short-opt containing `e`/`s` (ast.ts:2634): re-execute / editor invocation.
-lazy_re!(fc_exec_re, r"^-[^-]*[es]");
-// compgen short-opt containing C/F/W (ast.ts:2643): execute / call func / word-expand.
-lazy_re!(compgen_exec_re, r"^-[^-]*[CFW]");
+// jq filter containing an include/import directive (2.1.195): module loading.
+lazy_re!(jq_include_re, r"\b(?:include|import)\b");
+// fc short-opt containing `e`/`s` (2.1.195 `^[+-].*[es]`): re-execute / editor.
+lazy_re!(fc_exec_re, r"^[+-].*[es]");
+// compgen short-opt containing C/F/W (2.1.195 `^[+-].*[CFW]`): exec / func / word-expand.
+lazy_re!(compgen_exec_re, r"^[+-].*[CFW]");
+
+// ── checkSemantics superset regexes (2.1.195 binary `checkSemantics`/`Mra`) ──
+// Nqe — bash arithmetic-context numeric literal (hex / base#n / decimal).
+lazy_re!(numeric_arith_re, r"^-?(0[xX][0-9a-fA-F]+|[0-9]+#[0-9a-zA-Z]+|[0-9]+)$");
+// Tra — `read` numeric value operand (decimal / float).
+lazy_re!(read_numeric_re, r"^(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)$");
+// Wrp — argv element that is a subscripted NAME (`arr[…`).
+lazy_re!(subscripted_name_re, r"^[A-Za-z_][A-Za-z0-9_]*\[");
+// ident followed by `[` anywhere — a subscripted identifier inside an operand.
+lazy_re!(ident_subscript_re, r"[A-Za-z_][A-Za-z0-9_]*\[");
+// declare/typeset/local flag changing assignment eval: -…[niaAEF].
+lazy_re!(declare_niaAEF_re, r"^[+-].*[niaAEF]");
+// zsh typeset matheval flag: -…[iEF].
+lazy_re!(declare_iEF_re, r"^[+-].*[iEF]");
+// declare/export/readonly/private pattern-assign flag: -…m / +…m.
+lazy_re!(declare_m_re, r"^[+-].*m");
+// zsh typeset tied-pair flag: -…T / +…T.
+lazy_re!(declare_T_re, r"^[+-].*T");
+// array-subscript operand that also carries an expansion (`[` + `$`/backtick).
+lazy_re!(subscript_expansion_re, r"[$`]");
+// leading `+`/`-` (float/integer operand with an explicit sign is benign).
+lazy_re!(leading_sign_re, r"^[+-]");
+// print `-P` prompt-expansion flag (`^[+-].*P`).
+lazy_re!(print_p_flag_re, r"^[+-].*P");
+// command substitution or backtick in an operand (`$(` or backtick).
+lazy_re!(cmdsub_or_backtick_re, r"\$\(|`");
+// jobs `-x` (executes its argument): `^[+-].*x`.
+lazy_re!(jobs_x_re, r"^[+-].*x");
+// `set` token begins with `-` or `+`.
+lazy_re!(set_flag_re, r"^[-+]");
+// find argument carrying a glob metacharacter (`[`, `]`, `*`, `?`).
+lazy_re!(find_glob_re, r"[\[\]*?]");
+// find `-newerXY` value-taking primary.
+lazy_re!(find_newer_re, r"^-newer[aBcm][aBcmt]$");
+// command-wrapper `command -pvV` allowed flags.
+lazy_re!(command_pvv_re, r"^-[pvV]+$");
 
 // ── L2 regexes (ast.ts:1659, 1773, 1835, 1894-1896) ──
 
@@ -1764,17 +1863,18 @@ pub fn walk_program(root: Node, src: &[u8]) -> ParseForSecurityResult {
 // the permission decision is a deliberately deferred separate step. Hence the
 // `#[allow(dead_code)]` (the tests below are its only consumers in a prod build).
 //
-// ⚠️ ORACLE-VERSION NOTE: the leaked `ast.ts` source is an OLDER revision of
-// `checkSemantics` than the 2.1.195 binary for THIS function. Every branch and
-// reason string ported here was spot-checked present in the 2.1.195 binary
-// (`/Users/luolingfeng/.local/bin/claude`). The binary additionally carries a
-// SUPERSET of branches the older source lacks (extra zsh hardening — `set -o`,
-// `jobs -x`, `print -P`, declare `-n/-E/-F` zsh matheval, `read … non-numeric`,
-// `find` validation, jq `include/import`, and `… or runtime-determined value`
-// subscript variants). Those extra branches are all ADDITIONAL Deny paths, so
-// this port is a conservative SUBSET: byte-faithful for every branch it covers,
-// never Denying where the binary wouldn't. Reconciling the superset belongs to
-// the (deferred) behavior-flip step against a matching source revision.
+// ⚠️ ORACLE = the 2.1.195 BINARY (not the leaked `claude-code/src`, which is an
+// OLDER ≈2.1.83 snapshot whose `checkSemantics` is a strict SUBSET). This function
+// is ported from the minified `checkSemantics`/`Mra` recovered from the 2.1.195
+// binary's embedded bundle (`/Users/luolingfeng/.local/bin/claude`), so it is the
+// FULL superset: path-aware wrapper strip incl. `command`/`builtin`/`noglob`;
+// subscript-eval with `-t`; `[[ … ]]` non-numeric arith operands; the zsh-aware
+// `read` flag machine; the declare/typeset/export/readonly/private/float/integer
+// family; `printf`/`set -o`/`set -<letter>`/`print -P`/`jobs -x`; jq
+// `include/import` + widened code/file flags; `find` action-primaries + unquoted
+// globs; and the `watch`/`flock`/… runs-its-argument family. Branch ORDER and
+// reason strings are byte-faithful to the binary; newline-`#` is DEFERRED (only
+// returned if nothing else denied), exactly as the binary's `t??=` does.
 // ────────────────────────────────────────────────────────────────────────────
 
 /// Verdict of [`check_semantics`] (TS `SemanticCheckResult`, ast.ts:2206:
@@ -1792,232 +1892,382 @@ pub(crate) enum SemanticCheckResult {
     },
 }
 
-/// TS `checkSemantics` (ast.ts:2213). Run the per-command name/argv safety
-/// battery over the extracted [`SimpleCommand`]s. [`SemanticCheckResult::Ok`] if
-/// nothing unsafe; [`SemanticCheckResult::Deny`] (fail-closed) otherwise.
+/// TS `A1n` — render placeholder tokens for display inside reason strings.
+#[allow(dead_code)]
+fn a1n_display(s: &str) -> String {
+    s.replace(CMDSUB_PLACEHOLDER, "$(\u{2026})")
+        .replace(VAR_PLACEHOLDER, "${\u{2026}}")
+}
+
+/// TS `Prp` — true iff `text` contains an unquoted glob metacharacter (`*`, `?`,
+/// `[`) outside single/double quotes, backticks, and `#` comments. A quote-aware
+/// scan over the raw command text (used by the `find` battery).
+#[allow(dead_code)]
+fn find_unquoted_glob(text: &str) -> bool {
+    let b: Vec<char> = text.chars().collect();
+    let n = b.len();
+    let mut in_sq = false; // t: single quote
+    let mut in_dq = false; // n: double quote
+    let mut in_bt = false; // r: backtick
+    let mut at_cmd_start = true; // o: at a command-start position (for `#`)
+    let mut s = 0usize;
+    while s < n {
+        let c = b[s];
+        if in_bt {
+            if c == '\\' && matches!(b.get(s + 1), Some('`') | Some('\\') | Some('$')) {
+                s += 2;
+            } else {
+                if c == '`' {
+                    in_bt = false;
+                }
+                s += 1;
+            }
+        } else if in_sq {
+            if c == '\'' {
+                in_sq = false;
+            }
+            s += 1;
+        } else if in_dq {
+            if c == '\\' && matches!(b.get(s + 1), Some('"') | Some('\\') | Some('`')) {
+                s += 2;
+            } else if c == '`' {
+                in_bt = true;
+                s += 1;
+            } else {
+                if c == '"' {
+                    in_dq = false;
+                }
+                s += 1;
+            }
+        } else if c == '\\' && s + 1 < n {
+            if b[s + 1] != '\n' {
+                at_cmd_start = false;
+            }
+            s += 2;
+        } else if c == '#' && at_cmd_start {
+            while s < n && b[s] != '\n' {
+                s += 1;
+            }
+            at_cmd_start = true;
+        } else if c == '`' {
+            in_bt = true;
+            at_cmd_start = false;
+            s += 1;
+        } else {
+            if c == '*' || c == '?' || c == '[' {
+                return true;
+            }
+            if c == '\'' {
+                in_sq = true;
+            } else if c == '"' {
+                in_dq = true;
+            }
+            at_cmd_start = matches!(
+                c,
+                ' ' | '\t' | '\n' | ';' | '|' | '&' | '(' | ')' | '<' | '>'
+            );
+            s += 1;
+        }
+    }
+    false
+}
+
+/// TS `checkSemantics` (2.1.195 binary `Mra`). Run the per-command name/argv
+/// safety battery over the extracted [`SimpleCommand`]s. [`SemanticCheckResult::Ok`]
+/// if nothing unsafe; [`SemanticCheckResult::Deny`] (fail-closed) otherwise.
+/// Branch order and reason strings are byte-faithful to the 2.1.195 binary.
 #[must_use]
 #[allow(dead_code)]
 pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult {
+    // TS `t`: a deferred newline-hash verdict, returned only if no earlier check
+    // produced an immediate Deny across ALL commands.
+    let mut deferred: Option<String> = None;
     for cmd in commands {
-        // ── Strip safe wrapper commands so `nohup eval "..."` /
-        // `timeout 5 jq 'system(...)'` are checked against the WRAPPED command,
-        // not the wrapper (ast.ts:2215-2384). ──
+        // Working argv (`r`), narrowed as safe command-prefix wrappers are stripped.
         let mut a: &[String] = &cmd.argv;
-        'strip: loop {
-            let first = a.first().map(String::as_str);
-            if first == Some("time") || first == Some("nohup") {
-                a = &a[1..];
-            } else if first == Some("timeout") {
-                // `timeout 5`, `5s`, `5.5`, plus optional GNU flags before the
-                // duration. SECURITY (SAST Mar 2026): handle known short flags
-                // AND fail closed on any unrecognized flag — an unknown flag
-                // means we can't locate the wrapped command.
-                let mut i = 1usize;
-                while i < a.len() {
-                    let arg = a[i].as_str();
-                    if arg == "--foreground" || arg == "--preserve-status" || arg == "--verbose" {
-                        i += 1; // known no-value long flags
-                    } else if timeout_long_value_re().is_match(arg) {
-                        i += 1; // --kill-after=5, --signal=TERM (fused)
-                    } else if (arg == "--kill-after" || arg == "--signal")
-                        && a.get(i + 1).map_or(false, |v| timeout_value_re().is_match(v))
-                    {
-                        i += 2; // --kill-after 5, --signal TERM (space-separated)
-                    } else if arg.starts_with("--") {
-                        // Unknown long flag, or --kill-after/--signal with a
-                        // non-allowlisted value. Fail closed.
-                        return SemanticCheckResult::Deny {
-                            reason: format!("timeout with {arg} flag cannot be statically analyzed"),
-                        };
-                    } else if arg == "-v" {
-                        i += 1; // --verbose, no argument
-                    } else if (arg == "-k" || arg == "-s")
-                        && a.get(i + 1).map_or(false, |v| timeout_value_re().is_match(v))
-                    {
-                        i += 2; // -k DURATION / -s SIGNAL — separate value
-                    } else if timeout_ks_fused_re().is_match(arg) {
-                        i += 1; // fused: -k5, -sTERM
-                    } else if arg.starts_with('-') {
-                        // Unknown flag, or -k/-s with non-allowlisted value.
-                        return SemanticCheckResult::Deny {
-                            reason: format!("timeout with {arg} flag cannot be statically analyzed"),
-                        };
-                    } else {
-                        break; // non-flag — should be the duration
-                    }
+        // ── Strip command-prefix wrappers (path-aware): time/nohup/timeout/nice/
+        // stdbuf/env/command (matched on the basename) + builtin/noglob (raw). ──
+        loop {
+            let raw0 = match a.first() {
+                Some(s) => s.as_str(),
+                None => break,
+            };
+            let base = raw0.rsplit(['/', '\\']).next().unwrap_or(raw0);
+            let l = if matches!(
+                base,
+                "time" | "nohup" | "timeout" | "nice" | "stdbuf" | "env" | "command"
+            ) {
+                base
+            } else {
+                raw0
+            };
+            match l {
+                "time" | "nohup" => {
+                    a = &a[1..];
                 }
-                match a.get(i) {
-                    Some(dur) if !dur.is_empty() => {
-                        if timeout_duration_re().is_match(dur) {
-                            a = &a[i + 1..];
-                        } else {
-                            // a[i] exists but isn't our duration regex. GNU
-                            // timeout's xstrtod() accepts `.5`/`+5`/`inf`/… —
-                            // fail CLOSED so the wrapped cmd is still checked.
+                "timeout" => {
+                    let mut c = 1usize;
+                    while c < a.len() {
+                        let u = a[c].as_str();
+                        if u == "--foreground" || u == "--preserve-status" || u == "--verbose" {
+                            c += 1;
+                        } else if timeout_long_value_re().is_match(u) {
+                            c += 1;
+                        } else if (u == "--kill-after" || u == "--signal")
+                            && a.get(c + 1).map_or(false, |v| timeout_value_re().is_match(v))
+                        {
+                            c += 2;
+                        } else if u.starts_with("--") {
                             return SemanticCheckResult::Deny {
-                                reason: format!(
-                                    "timeout duration '{dur}' cannot be statically analyzed"
-                                ),
+                                reason: format!("timeout with {u} flag cannot be statically analyzed"),
                             };
+                        } else if u == "-v" {
+                            c += 1;
+                        } else if (u == "-k" || u == "-s")
+                            && a.get(c + 1).map_or(false, |v| timeout_value_re().is_match(v))
+                        {
+                            c += 2;
+                        } else if timeout_ks_fused_re().is_match(u) {
+                            c += 1;
+                        } else if u.starts_with('-') {
+                            return SemanticCheckResult::Deny {
+                                reason: format!("timeout with {u} flag cannot be statically analyzed"),
+                            };
+                        } else {
+                            break;
                         }
                     }
-                    _ => break 'strip, // no more args — `timeout` alone, inert
-                }
-            } else if first == Some("nice") {
-                // `nice cmd`, `nice -n N cmd`, `nice -N cmd` (legacy).
-                if a.get(1).map(String::as_str) == Some("-n")
-                    && a.get(2).map_or(false, |v| nice_n_value_re().is_match(v))
-                {
-                    a = &a[3..];
-                } else if a.get(1).map_or(false, |v| nice_legacy_re().is_match(v)) {
-                    a = &a[2..]; // `nice -10 cmd`
-                } else if a.get(1).map_or(false, |v| nice_expansion_re().is_match(v)) {
-                    // `nice $((0-5)) jq ...` — bash expands to `-5` then execs
-                    // jq; fail closed so the jq check is not skipped.
-                    return SemanticCheckResult::Deny {
-                        reason: format!(
-                            "nice argument '{}' contains expansion — cannot statically determine wrapped command",
-                            a[1]
-                        ),
-                    };
-                } else {
-                    a = &a[1..]; // bare `nice cmd`
-                }
-            } else if first == Some("env") {
-                // `env [VAR=val...] [-i] [-0] [-v] [-u NAME...] cmd args`.
-                // SECURITY: -S/-C/-P (mini-shell / altwd / altpath) and any other
-                // flag → reject (fail-closed, not fall-through to name='env').
-                let mut i = 1usize;
-                while i < a.len() {
-                    let arg = a[i].as_str();
-                    if arg.contains('=') && !arg.starts_with('-') {
-                        i += 1; // VAR=val assignment
-                    } else if arg == "-i" || arg == "-0" || arg == "-v" {
-                        i += 1; // flags with no argument
-                    } else if arg == "-u" && a.get(i + 1).map_or(false, |v| !v.is_empty()) {
-                        i += 2; // -u NAME unsets; takes one arg
-                    } else if arg.starts_with('-') {
-                        return SemanticCheckResult::Deny {
-                            reason: format!("env with {arg} flag cannot be statically analyzed"),
-                        };
-                    } else {
-                        break; // the wrapped command
+                    match a.get(c) {
+                        Some(dur) if timeout_duration_re().is_match(dur) => {
+                            a = &a[c + 1..];
+                        }
+                        Some(dur) => {
+                            return SemanticCheckResult::Deny {
+                                reason: format!("timeout duration '{dur}' cannot be statically analyzed"),
+                            };
+                        }
+                        None => break,
                     }
                 }
-                if i < a.len() {
-                    a = &a[i..];
-                } else {
-                    break 'strip; // `env` alone — inert, name='env'
-                }
-            } else if first == Some("stdbuf") {
-                // `stdbuf -o0 cmd`, `stdbuf -o 0 cmd`, multiple flags, long forms.
-                let mut i = 1usize;
-                while i < a.len() {
-                    let arg = a[i].as_str();
-                    if stdbuf_short_sep_re().is_match(arg)
-                        && a.get(i + 1).map_or(false, |v| !v.is_empty())
+                "nice" => {
+                    if a.get(1).map(String::as_str) == Some("-n")
+                        && a.get(2).map_or(false, |v| nice_n_value_re().is_match(v))
                     {
-                        i += 2; // -o MODE (space-separated)
-                    } else if stdbuf_short_fused_re().is_match(arg) {
-                        i += 1; // -o0 (fused)
-                    } else if stdbuf_long_re().is_match(arg) {
-                        i += 1; // --output=MODE (fused long)
-                    } else if arg.starts_with('-') {
-                        // --output MODE (space-separated long) or unknown flag.
+                        a = &a[3..];
+                    } else if a.get(1).map_or(false, |v| nice_legacy_re().is_match(v)) {
+                        a = &a[2..];
+                    } else if a
+                        .get(1)
+                        .map_or(false, |v| nice_expansion_re().is_match(v) || contains_any_placeholder(v))
+                    {
                         return SemanticCheckResult::Deny {
-                            reason: format!("stdbuf with {arg} flag cannot be statically analyzed"),
+                            reason: format!(
+                                "nice argument '{}' contains expansion \u{2014} cannot statically determine wrapped command",
+                                a[1]
+                            ),
                         };
                     } else {
-                        break; // the wrapped command
+                        a = &a[1..];
                     }
                 }
-                if i > 1 && i < a.len() {
-                    a = &a[i..];
-                } else {
-                    break 'strip; // `stdbuf` with no flags or no wrapped cmd — inert
+                "env" => {
+                    let mut c = 1usize;
+                    while c < a.len() {
+                        let u = a[c].as_str();
+                        if u.contains('=') && !u.starts_with('-') {
+                            c += 1;
+                        } else if u == "-i" || u == "-0" || u == "-v" {
+                            c += 1;
+                        } else if u == "-u" && a.get(c + 1).is_some() {
+                            c += 2;
+                        } else if u.starts_with('-') {
+                            return SemanticCheckResult::Deny {
+                                reason: format!("env with {u} flag cannot be statically analyzed"),
+                            };
+                        } else {
+                            break;
+                        }
+                    }
+                    if c < a.len() {
+                        a = &a[c..];
+                    } else {
+                        break;
+                    }
                 }
-            } else {
-                break 'strip;
+                "stdbuf" => {
+                    let mut c = 1usize;
+                    while c < a.len() {
+                        let u = a[c].as_str();
+                        if stdbuf_short_sep_re().is_match(u) && a.get(c + 1).is_some() {
+                            c += 2;
+                        } else if stdbuf_short_fused_re().is_match(u) {
+                            c += 1;
+                        } else if stdbuf_long_re().is_match(u) {
+                            c += 1;
+                        } else if u.starts_with('-') {
+                            return SemanticCheckResult::Deny {
+                                reason: format!("stdbuf with {u} flag cannot be statically analyzed"),
+                            };
+                        } else {
+                            break;
+                        }
+                    }
+                    if c > 1 && c < a.len() {
+                        a = &a[c..];
+                    } else {
+                        break;
+                    }
+                }
+                "command" => {
+                    let mut c = 1usize;
+                    let mut saw_v = false;
+                    while c < a.len() && a[c].starts_with('-') && a[c] != "--" {
+                        let d = a[c].as_str();
+                        if !command_pvv_re().is_match(d) {
+                            return SemanticCheckResult::Deny {
+                                reason: format!("command with {d} flag cannot be statically analyzed"),
+                            };
+                        }
+                        if d.contains('v') || d.contains('V') {
+                            saw_v = true;
+                        }
+                        c += 1;
+                    }
+                    if a.get(c).map(String::as_str) == Some("--") {
+                        c += 1;
+                    }
+                    if saw_v || c >= a.len() {
+                        break;
+                    }
+                    a = &a[c..];
+                }
+                _ => {
+                    if raw0 == "builtin" || raw0 == "noglob" {
+                        let c = if raw0 == "builtin" && a.get(1).map(String::as_str) == Some("--") {
+                            2
+                        } else {
+                            1
+                        };
+                        if c < a.len() {
+                            a = &a[c..];
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
             }
         }
 
-        let name = match a.first() {
+        // ── Command name (`o`). ──
+        let o = match a.first() {
             Some(n) => n.as_str(),
-            None => continue, // name === undefined
+            None => continue,
         };
-
-        // SECURITY: empty command name. An UNQUOTED empty expansion at command
-        // position (`V="" && $V cmd`) is a bypass — bash drops the empty field
-        // and runs `cmd` as argv[0] while name="" skips every builtin check.
-        if name.is_empty() {
+        if o.is_empty() {
             return SemanticCheckResult::Deny {
-                reason: "Empty command name — argv[0] may not reflect what bash runs".to_string(),
+                reason: "Empty command name \u{2014} argv[0] may not reflect what bash runs".to_string(),
             };
         }
-
-        // Defense-in-depth: a placeholder as command name → runtime-determined.
-        if contains_any_placeholder(name) {
+        if contains_any_placeholder(o) {
             return SemanticCheckResult::Deny {
                 reason: "Command name is runtime-determined (placeholder argv[0])".to_string(),
             };
         }
-
-        // argv[0] starts with an operator/flag: a fragment, not a command.
-        if name.starts_with('-') || name.starts_with('|') || name.starts_with('&') {
+        if o.starts_with('-') || o.starts_with('|') || o.starts_with('&') {
             return SemanticCheckResult::Deny {
                 reason: "Command appears to be an incomplete fragment".to_string(),
             };
         }
 
-        // SECURITY: builtins that re-parse a NAME operand internally. bash
-        // arithmetically evaluates `arr[EXPR]` in NAME position, running $(cmd)
-        // in the subscript even when the argv element arrived from a
-        // single-quoted raw_string. Separate (`printf -v NAME`), combined
-        // (`-ra`), and fused (`printf -vNAME`) forms.
-        if let Some(danger_flags) = SUBSCRIPT_EVAL_FLAGS
+        // ── Subscript-eval flag builtins (`uoo`). ──
+        let is_test = o == "test" || o == "[" || o == "[[";
+        if let Some(flags) = SUBSCRIPT_EVAL_FLAGS
             .iter()
-            .find(|(k, _)| *k == name)
+            .find(|(k, _)| *k == o)
             .map(|(_, v)| *v)
         {
-            for i in 1..a.len() {
-                let arg = a[i].as_str();
-                // Separate form: `-v` then NAME in the next arg.
-                if danger_flags.contains(&arg) && a.get(i + 1).map_or(false, |v| v.contains('[')) {
+            for ai in 1..a.len() {
+                let l = a[ai].as_str();
+                let c = a.get(ai + 1).map(String::as_str);
+                if flags.contains(&l)
+                    && c.map_or(false, |c| c.contains('[') || contains_any_placeholder(c))
+                {
                     return SemanticCheckResult::Deny {
                         reason: format!(
-                            "'{name} {arg}' operand contains array subscript — bash evaluates $(cmd) in subscripts"
+                            "'{o} {l}' operand contains array subscript or runtime-determined value \u{2014} bash evaluates $(cmd) in subscripts"
                         ),
                     };
                 }
-                // Combined short flags: `-ra` == `-r -a`.
-                if arg.len() > 2
-                    && arg.as_bytes()[0] == b'-'
-                    && arg.as_bytes()[1] != b'-'
-                    && !arg.contains('[')
-                {
-                    for flag in danger_flags {
-                        if flag.len() == 2
-                            && arg.contains(&flag[1..2])
-                            && a.get(i + 1).map_or(false, |v| v.contains('['))
-                        {
+                if is_test {
+                    if l == "-t" && c.map_or(false, |c| !numeric_arith_re().is_match(c)) {
+                        return SemanticCheckResult::Deny {
+                            reason: format!(
+                                "'{o} -t' operand is non-numeric \u{2014} zsh arith-evals identifiers (may run $(cmd))"
+                            ),
+                        };
+                    }
+                    continue;
+                }
+                let lb = l.as_bytes();
+                // Combined short flags (`-rv name[…]`): inspect the NEXT arg.
+                if l.len() > 2 && lb[0] == b'-' && lb[1] != b'-' && !l.contains('[') {
+                    for u in flags {
+                        if u.len() == 2 && l.contains(&u[1..2]) {
+                            if a
+                                .get(ai + 1)
+                                .map_or(false, |d| d.contains('[') || contains_any_placeholder(d))
+                            {
+                                return SemanticCheckResult::Deny {
+                                    reason: format!(
+                                        "'{o} {u}' (combined in '{l}') operand contains array subscript \u{2014} bash evaluates $(cmd) in subscripts"
+                                    ),
+                                };
+                            }
+                        }
+                    }
+                }
+                // Fused form (`-vname[…]`): inspect WITHIN the flag arg.
+                if l.len() > 2 && lb[0] == b'-' && o != "read" {
+                    for u in flags {
+                        if u.len() != 2 {
+                            continue;
+                        }
+                        let uc = &u[1..2];
+                        let d = match l[1..].find(uc) {
+                            Some(idx) => idx + 1,
+                            None => continue,
+                        };
+                        if d == l.len() - 1 {
+                            continue;
+                        }
+                        let p = &l[d + 1..];
+                        if ident_subscript_re().is_match(p) || contains_any_placeholder(p) {
                             return SemanticCheckResult::Deny {
                                 reason: format!(
-                                    "'{name} {flag}' (combined in '{arg}') operand contains array subscript — bash evaluates $(cmd) in subscripts"
+                                    "'{o} {u}' (fused in '{l}') operand contains array subscript \u{2014} bash evaluates $(cmd) in subscripts"
                                 ),
                             };
                         }
                     }
                 }
-                // Fused form: `-vNAME` in one arg.
-                for flag in danger_flags {
-                    if flag.len() == 2
-                        && arg.starts_with(flag)
-                        && arg.len() > 2
-                        && arg.contains('[')
-                    {
+            }
+        }
+
+        // ── `[[ X OP Y ]]` arithmetic comparison: operands are arith-evaluated. ──
+        if is_test {
+            for ai in 2..a.len() {
+                if !TEST_ARITH_CMP_OPS.contains(&a[ai].as_str()) {
+                    continue;
+                }
+                for nb in [a.get(ai - 1), a.get(ai + 1)] {
+                    let Some(nb) = nb else { continue };
+                    if nb.contains('[') || !numeric_arith_re().is_match(nb) {
                         return SemanticCheckResult::Deny {
                             reason: format!(
-                                "'{name} {flag}' (fused) operand contains array subscript — bash evaluates $(cmd) in subscripts"
+                                "'{o} ... {} ...' operand is non-numeric \u{2014} `[[` arithmetically evaluates identifiers/subscripts (may run $(cmd))",
+                                a[ai]
                             ),
                         };
                     }
@@ -2025,49 +2275,85 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
             }
         }
 
-        // SECURITY: `[[ ARG OP ARG ]]` arithmetic comparison evaluates BOTH
-        // operands as arithmetic, recursively expanding `arr[$(cmd)]`.
-        if name == "[[" {
-            for i in 2..a.len() {
-                if !TEST_ARITH_CMP_OPS.contains(&a[i].as_str()) {
-                    continue;
-                }
-                if a.get(i - 1).map_or(false, |v| v.contains('['))
-                    || a.get(i + 1).map_or(false, |v| v.contains('['))
-                {
-                    return SemanticCheckResult::Deny {
-                        reason: format!(
-                            "'[[ ... {} ... ]]' operand contains array subscript — bash arithmetically evaluates $(cmd) in subscripts",
-                            a[i]
-                        ),
-                    };
-                }
+        // ── `read`/`unset` NAME operands (with the zsh-aware read flag machine). ──
+        if BARE_SUBSCRIPT_NAME_BUILTINS.contains(&o) {
+            #[derive(PartialEq)]
+            enum St {
+                None,
+                Numeric,
+                Prompt,
+                Str,
             }
-        }
-
-        // SECURITY: `read`/`unset` treat EVERY bare positional as a NAME — no
-        // flag needed. Skip operands of read's data-taking flags (-p PROMPT etc.)
-        if BARE_SUBSCRIPT_NAME_BUILTINS.contains(&name) {
-            let mut skip_next = false;
-            for i in 1..a.len() {
-                let arg = a[i].as_str();
-                if skip_next {
-                    skip_next = false;
+            let mut state = St::None;
+            for li in 1..a.len() {
+                let c = a[li].as_str();
+                if state != St::None {
+                    let u = std::mem::replace(&mut state, St::None);
+                    if u == St::Numeric && !read_numeric_re().is_match(c) {
+                        return SemanticCheckResult::Deny {
+                            reason: format!(
+                                "'read {}' operand '{c}' is non-numeric \u{2014} zsh arith-evals subscripts/expressions (may run $(cmd))",
+                                a[li - 1]
+                            ),
+                        };
+                    }
+                    if u == St::Prompt
+                        && (subscripted_name_re().is_match(c)
+                            || (c.starts_with('-') && ident_subscript_re().is_match(c))
+                            || c.contains(CMDSUB_PLACEHOLDER))
+                    {
+                        return SemanticCheckResult::Deny {
+                            reason: format!(
+                                "'read {}' operand '{c}' is a subscripted NAME, dash-prefixed with a subscript, or runtime-determined \u{2014} zsh -p takes no operand; may arith-eval the subscript and run $(cmd)",
+                                a[li - 1]
+                            ),
+                        };
+                    }
                     continue;
                 }
-                if arg.starts_with('-') {
-                    if name == "read" {
-                        if READ_DATA_FLAGS.contains(&arg) {
-                            skip_next = true;
-                        } else if arg.len() > 2 && arg.as_bytes()[1] != b'-' {
-                            // Combined short flag like `-rp`: a data-flag char
-                            // consumes the next arg iff it appears LAST.
-                            let chars: Vec<char> = arg.chars().collect();
-                            for j in 1..chars.len() {
-                                let f = format!("-{}", chars[j]);
-                                if READ_DATA_FLAGS.contains(&f.as_str()) {
-                                    if j == chars.len() - 1 {
-                                        skip_next = true;
+                if c.starts_with('-') {
+                    if o == "read" {
+                        if READ_NUMERIC_DATA_FLAGS.contains(&c) {
+                            state = St::Numeric;
+                        } else if c == "-p" {
+                            state = St::Prompt;
+                        } else if READ_DATA_FLAGS.contains(&c) {
+                            state = St::Str;
+                        } else if c.len() > 2 {
+                            let cc: Vec<char> = c.chars().collect();
+                            for ui in 1..cc.len() {
+                                let d = format!("-{}", cc[ui]);
+                                let p = READ_NUMERIC_DATA_FLAGS.contains(&d.as_str());
+                                if p || READ_DATA_FLAGS.contains(&d.as_str()) {
+                                    if ui == cc.len() - 1 {
+                                        state = if p {
+                                            St::Numeric
+                                        } else if d == "-p" {
+                                            St::Prompt
+                                        } else {
+                                            St::Str
+                                        };
+                                    } else {
+                                        let rest: String = cc[ui + 1..].iter().collect();
+                                        if p && !read_numeric_re().is_match(&rest) {
+                                            return SemanticCheckResult::Deny {
+                                                reason: format!(
+                                                    "'read {d}' (fused in '{c}') operand is non-numeric \u{2014} zsh arith-evals subscripts/expressions (may run $(cmd))"
+                                                ),
+                                            };
+                                        } else if d == "-p" {
+                                            let m: String = cc[ui + 1..].iter().collect();
+                                            if ident_subscript_re().is_match(&m)
+                                                || m.contains(CMDSUB_PLACEHOLDER)
+                                            {
+                                                return SemanticCheckResult::Deny {
+                                                    reason: format!(
+                                                        "'read -p' fused remainder '{m}' contains a subscripted identifier or cmdsub \u{2014} on zsh (-p is no-arg) this may reach matheval via a following option and run $(cmd)"
+                                                    ),
+                                                };
+                                            }
+                                        }
+                                        break;
                                     }
                                     break;
                                 }
@@ -2076,54 +2362,197 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                     }
                     continue;
                 }
-                if arg.contains('[') {
+                if c.contains('[') || contains_any_placeholder(c) {
                     return SemanticCheckResult::Deny {
                         reason: format!(
-                            "'{name}' positional NAME '{arg}' contains array subscript — bash evaluates $(cmd) in subscripts"
+                            "'{o}' positional NAME '{c}' contains array subscript or runtime-determined value \u{2014} bash evaluates $(cmd) in subscripts"
                         ),
                     };
                 }
             }
         }
 
-        // SECURITY: shell reserved keywords as argv[0] indicate a tree-sitter
-        // mis-parse — they can never be legitimate command names.
-        if SHELL_KEYWORDS.contains(&name) {
+        // ── declare/typeset/local/export/readonly/private/print/set/… family. ──
+        if DECLARE_FAMILY.contains(&o) {
+            let is_dtl = o == "declare" || o == "typeset" || o == "local";
+            let is_dtler = is_dtl || o == "export" || o == "readonly";
+            for ci in 1..a.len() {
+                let u = a[ci].as_str();
+                if is_dtl && declare_niaAEF_re().is_match(u) {
+                    return SemanticCheckResult::Deny {
+                        reason: format!(
+                            "'{o}' with -n/-i/-a/-A/-E/-F flag (reached as plain command via wrapper/quote) changes assignment eval semantics"
+                        ),
+                    };
+                }
+                if ZSH_TYPESET_FAMILY.contains(&o) && declare_iEF_re().is_match(u) {
+                    return SemanticCheckResult::Deny {
+                        reason: format!(
+                            "'{o}' with -i/-E/-F flag (reached as plain command via wrapper/quote) \u{2014} zsh bin_typeset mathevals the RHS"
+                        ),
+                    };
+                }
+                if (is_dtler || o == "private") && declare_m_re().is_match(u) {
+                    return SemanticCheckResult::Deny {
+                        reason: format!(
+                            "'{o}' with -m/+m flag (reached as plain command via wrapper/quote) \u{2014} zsh pattern-assigns every matching variable"
+                        ),
+                    };
+                }
+                if ZSH_TYPESET_FAMILY.contains(&o) && declare_T_re().is_match(u) {
+                    return SemanticCheckResult::Deny {
+                        reason: format!(
+                            "'{o} -T' creates a user-defined zsh tied pair \u{2014} tracked literals for its operands are unreliable"
+                        ),
+                    };
+                }
+                let d = u.contains('[') && subscript_expansion_re().is_match(u);
+                if d || contains_any_placeholder(u) {
+                    return SemanticCheckResult::Deny {
+                        reason: if d {
+                            format!(
+                                "'{o}' operand '{}' contains array subscript with expansion \u{2014} shell arith-evals $(cmd) in subscripts",
+                                a1n_display(u)
+                            )
+                        } else {
+                            format!(
+                                "'{o}' operand '{}' is runtime-determined and may carry an array subscript \u{2014} shell arith-evals $(cmd) in subscripts",
+                                a1n_display(u)
+                            )
+                        },
+                    };
+                }
+                if (o == "float" || o == "integer") && !leading_sign_re().is_match(u) {
+                    return SemanticCheckResult::Deny {
+                        reason: format!(
+                            "zsh '{o}' operand \u{2014} implicit typeset -E/-i arithmetically evaluates the (existing or assigned) value"
+                        ),
+                    };
+                }
+            }
+        }
+
+        // ── printf: %d/%i operands are arith-evaluated on zsh. ──
+        if o == "printf" {
+            for ai in 1..a.len() {
+                let l = a[ai].as_str();
+                let c = l.contains('[') && subscript_expansion_re().is_match(l);
+                if c || contains_any_placeholder(l) {
+                    return SemanticCheckResult::Deny {
+                        reason: if c {
+                            format!(
+                                "printf operand '{}' contains array subscript with expansion \u{2014} zsh arith-evals %d/%i operands (may run $(cmd))",
+                                a1n_display(l)
+                            )
+                        } else {
+                            format!(
+                                "printf operand '{}' is runtime-determined and may carry an array subscript \u{2014} zsh arith-evals %d/%i operands (may run $(cmd))",
+                                a1n_display(l)
+                            )
+                        },
+                    };
+                }
+            }
+        }
+
+        // ── set -o/+o <opt> and set -<letter>: shell option changes. ──
+        if o == "set" {
+            let mut ai = 1usize;
+            while ai < a.len() {
+                let l = a[ai].as_str();
+                if l == "--" {
+                    break;
+                }
+                if !set_flag_re().is_match(l) {
+                    ai += 1;
+                    continue;
+                }
+                let cc: Vec<char> = l.chars().collect();
+                let mut ci = 1usize;
+                while ci < cc.len() {
+                    let u = cc[ci];
+                    if u == 'o' {
+                        let d: Option<String> = if ci < cc.len() - 1 {
+                            Some(cc[ci + 1..].iter().collect())
+                        } else {
+                            a.get(ai + 1).map(|s| s.to_string())
+                        };
+                        if let Some(d) = d.as_deref() {
+                            if !d.is_empty()
+                                && !SET_O_SAFE.contains(
+                                    &d.to_lowercase().replace(['_', '-'], "").as_str(),
+                                )
+                            {
+                                return SemanticCheckResult::Deny {
+                                    reason: format!(
+                                        "'set -o/+o {d}' changes shell parsing/globbing state \u{2014} can enable globsubst/extendedglob and defeat static analysis"
+                                    ),
+                                };
+                            }
+                        }
+                        if ci == cc.len() - 1 {
+                            ai += 1;
+                        }
+                        break;
+                    }
+                    if u == 'A' {
+                        break;
+                    }
+                    if !SET_SAFE_LETTERS.contains(&u.to_string().as_str()) {
+                        return SemanticCheckResult::Deny {
+                            reason: format!(
+                                "'set {}{u}' changes shell option state (allexport/keyword/\u{2026}) \u{2014} defeats static env-var analysis; see SET_O_SAFE_LETTERS",
+                                cc[0]
+                            ),
+                        };
+                    }
+                    ci += 1;
+                }
+                ai += 1;
+            }
+        }
+
+        // ── print -P: zsh prompt expansion evaluates $(cmd). ──
+        if o == "print" && a.iter().any(|x| print_p_flag_re().is_match(x)) {
+            for ai in 1..a.len() {
+                let l = a[ai].as_str();
+                if cmdsub_or_backtick_re().is_match(l) || contains_any_placeholder(l) {
+                    return SemanticCheckResult::Deny {
+                        reason: "'print -P' operand contains command substitution \u{2014} zsh prompt expansion evaluates $(cmd)".to_string(),
+                    };
+                }
+            }
+        }
+
+        // ── jobs -x: executes its argument. ──
+        if o == "jobs" {
+            for ai in 1..a.len() {
+                if jobs_x_re().is_match(&a[ai]) {
+                    return SemanticCheckResult::Deny {
+                        reason: "'jobs -x' executes its argument as a command \u{2014} cannot be statically analyzed".to_string(),
+                    };
+                }
+            }
+        }
+
+        // ── shell reserved keyword as command name: tree-sitter mis-parse. ──
+        if SHELL_KEYWORDS.contains(&o) {
             return SemanticCheckResult::Deny {
-                reason: format!("Shell keyword '{name}' as command name — tree-sitter mis-parse"),
+                reason: format!("Shell keyword '{o}' as command name \u{2014} tree-sitter mis-parse"),
             };
         }
 
-        // Newline followed by `#` inside a quoted argument / env value / redirect
-        // target can hide arguments from downstream path validation.
-        for arg in &cmd.argv {
-            if arg.contains('\n') && newline_hash_re().is_match(arg) {
-                return SemanticCheckResult::Deny {
-                    reason: "Newline followed by # inside a quoted argument can hide arguments from path validation".to_string(),
-                };
-            }
-        }
-        for ev in &cmd.env_vars {
-            if ev.1.contains('\n') && newline_hash_re().is_match(&ev.1) {
-                return SemanticCheckResult::Deny {
-                    reason: "Newline followed by # inside an env var value can hide arguments from path validation".to_string(),
-                };
-            }
-        }
-        for r in &cmd.redirects {
-            if r.target.contains('\n') && newline_hash_re().is_match(&r.target) {
-                return SemanticCheckResult::Deny {
-                    reason: "Newline followed by # inside a redirect target can hide arguments from path validation".to_string(),
-                };
-            }
-        }
-
-        // jq's system() executes arbitrary shell; --from-file etc. read files.
-        if name == "jq" {
+        // ── jq: system(), include/import, and code/file-reading flags. ──
+        if o == "jq" {
             for arg in a {
                 if jq_system_re().is_match(arg) {
                     return SemanticCheckResult::Deny {
                         reason: "jq command contains system() function which executes arbitrary commands".to_string(),
+                    };
+                }
+                if jq_include_re().is_match(arg) {
+                    return SemanticCheckResult::Deny {
+                        reason: "jq command contains include/import \u{2014} modules can load arbitrary .jq files via {search:\".\"} and call env or other builtins".to_string(),
                     };
                 }
             }
@@ -2134,32 +2563,71 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
             }
         }
 
-        if ZSH_DANGEROUS_BUILTINS.contains(&name) {
+        // ── find: action primaries + unquoted globs that could glob-expand. ──
+        if o == "find" {
+            if find_unquoted_glob(&cmd.text) {
+                return SemanticCheckResult::Deny {
+                    reason: "find contains unquoted glob characters \u{2014} could glob-expand to a dangerous action before find runs".to_string(),
+                };
+            }
+            let mut ai = 1usize;
+            while ai < a.len() {
+                let l = a[ai].as_str();
+                if FIND_ACTION_FLAGS.contains(&l) {
+                    return SemanticCheckResult::Deny {
+                        reason: format!(
+                            "find with '{l}' executes commands or modifies files \u{2014} cannot be auto-allowed by a Bash(find:*) prefix rule"
+                        ),
+                    };
+                }
+                if FIND_VALUE_FLAGS.contains(&l) || find_newer_re().is_match(l) {
+                    ai += 2;
+                    continue;
+                }
+                if contains_any_placeholder(l) {
+                    return SemanticCheckResult::Deny {
+                        reason: "find argument is runtime-determined \u{2014} could resolve to a dangerous action".to_string(),
+                    };
+                }
+                if find_glob_re().is_match(l) {
+                    return SemanticCheckResult::Deny {
+                        reason: format!(
+                            "find argument '{l}' contains glob characters \u{2014} could glob-expand to a dangerous action"
+                        ),
+                    };
+                }
+                ai += 1;
+            }
+        }
+
+        // ── zsh module/dangerous builtins (name-based). ──
+        if ZSH_DANGEROUS_BUILTINS.contains(&o) {
             return SemanticCheckResult::Deny {
-                reason: format!("Zsh builtin '{name}' can bypass security checks"),
+                reason: format!("Zsh builtin '{o}' can bypass security checks"),
             };
         }
 
-        if EVAL_LIKE_BUILTINS.contains(&name) {
-            if name == "command"
-                && (a.get(1).map(String::as_str) == Some("-v")
-                    || a.get(1).map(String::as_str) == Some("-V"))
-            {
-                // `command -v/-V foo` are POSIX existence checks — fall through.
-            } else if name == "fc" && !a.iter().skip(1).any(|arg| fc_exec_re().is_match(arg)) {
-                // `fc -l`/`fc -ln` list history — safe; fall through.
-            } else if name == "compgen"
-                && !a.iter().skip(1).any(|arg| compgen_exec_re().is_match(arg))
-            {
-                // `compgen -c/-f/-v` list completions — safe; fall through.
+        // ── eval-like builtins (with fc/compgen list-only carve-outs). ──
+        if EVAL_LIKE_BUILTINS.contains(&o) {
+            if o == "fc" && !a.iter().skip(1).any(|x| fc_exec_re().is_match(x)) {
+                // `fc -l` (list history) — safe.
+            } else if o == "compgen" && !a.iter().skip(1).any(|x| compgen_exec_re().is_match(x)) {
+                // `compgen -v` (list completions) — safe.
             } else {
                 return SemanticCheckResult::Deny {
-                    reason: format!("'{name}' evaluates arguments as shell code"),
+                    reason: format!("'{o}' evaluates arguments as shell code"),
                 };
             }
         }
 
-        // /proc/*/environ exposes env vars (including secrets) of other procs.
+        // ── commands that run their argument as a command (watch/flock/…). ──
+        if RUNS_ARG_COMMANDS.contains(&o) && a.len() > 1 {
+            return SemanticCheckResult::Deny {
+                reason: format!("'{o}' runs its argument as a command \u{2014} cannot be statically analyzed"),
+            };
+        }
+
+        // ── /proc/*/environ access (argv + redirect targets). ──
         for arg in &cmd.argv {
             if arg.contains("/proc/") && proc_environ_re().is_match(arg) {
                 return SemanticCheckResult::Deny {
@@ -2174,6 +2642,32 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                 };
             }
         }
+
+        // ── newline-`#` hiding (DEFERRED — only returned if nothing else denied). ──
+        for arg in &cmd.argv {
+            if arg.contains('\n') && newline_hash_re().is_match(arg) {
+                deferred.get_or_insert_with(|| {
+                    "Newline followed by # inside a quoted argument can hide arguments from path validation".to_string()
+                });
+            }
+        }
+        for ev in &cmd.env_vars {
+            if ev.1.contains('\n') && newline_hash_re().is_match(&ev.1) {
+                deferred.get_or_insert_with(|| {
+                    "Newline followed by # inside an env var value can hide arguments from path validation".to_string()
+                });
+            }
+        }
+        for r in &cmd.redirects {
+            if r.target.contains('\n') && newline_hash_re().is_match(&r.target) {
+                deferred.get_or_insert_with(|| {
+                    "Newline followed by # inside a redirect target can hide arguments from path validation".to_string()
+                });
+            }
+        }
+    }
+    if let Some(reason) = deferred {
+        return SemanticCheckResult::Deny { reason };
     }
     SemanticCheckResult::Ok
 }
@@ -2952,7 +3446,7 @@ EOF
 
     #[test]
     fn eval_like_builtins_denied_bare_and_wrapped() {
-        for name in ["eval", "source", ".", "exec", "trap", "let", "builtin"] {
+        for name in ["eval", "source", ".", "exec", "trap", "let"] {
             let reason = format!("'{name}' evaluates arguments as shell code");
             assert_deny(&[name, "id"], &reason);
             // Wrapped in each safe wrapper → the WRAPPED command is checked.
@@ -3056,9 +3550,18 @@ EOF
     fn command_v_safe_bare_unsafe() {
         assert_ok(&["command", "-v", "foo"]);
         assert_ok(&["command", "-V", "foo"]);
+        // 2.1.195: `command`/`builtin`/`noglob` are command-prefix WRAPPERS — they
+        // are stripped and the WRAPPED command is checked.
+        assert_ok(&["command", "rm", "-rf", "x"]);
+        assert_ok(&["builtin", "echo", "hi"]);
+        assert_ok(&["noglob", "echo", "hi"]);
         assert_deny(
-            &["command", "foo"],
-            "'command' evaluates arguments as shell code",
+            &["command", "eval", "x"],
+            "'eval' evaluates arguments as shell code",
+        );
+        assert_deny(
+            &["command", "-x", "foo"],
+            "command with -x flag cannot be statically analyzed",
         );
     }
 
@@ -3097,7 +3600,7 @@ EOF
         // Separate: printf -v NAME with subscript.
         assert_deny(
             &["printf", "-v", "arr[$(id)]", "x"],
-            "'printf -v' operand contains array subscript — bash evaluates $(cmd) in subscripts",
+            "'printf -v' operand contains array subscript or runtime-determined value — bash evaluates $(cmd) in subscripts",
         );
         // Combined: read -ra NAME.
         assert_deny(
@@ -3107,7 +3610,7 @@ EOF
         // Fused: printf -vNAME.
         assert_deny(
             &["printf", "-varr[0]"],
-            "'printf -v' (fused) operand contains array subscript — bash evaluates $(cmd) in subscripts",
+            "'printf -v' (fused in '-varr[0]') operand contains array subscript — bash evaluates $(cmd) in subscripts",
         );
         // printf '[%s]' x stays safe — '[' is in the format string, not after -v.
         assert_ok(&["printf", "[%s]", "x"]);
@@ -3117,12 +3620,12 @@ EOF
     fn test_arith_cmp_subscript_denied() {
         assert_deny(
             &["[[", "a[$(id)]", "-eq", "1", "]]"],
-            "'[[ ... -eq ... ]]' operand contains array subscript — bash arithmetically evaluates $(cmd) in subscripts",
+            "'[[ ... -eq ...' operand is non-numeric — `[[` arithmetically evaluates identifiers/subscripts (may run $(cmd))",
         );
         // Right operand too.
         assert_deny(
             &["[[", "1", "-lt", "a[$(id)]", "]]"],
-            "'[[ ... -lt ... ]]' operand contains array subscript — bash arithmetically evaluates $(cmd) in subscripts",
+            "'[[ ... -lt ...' operand is non-numeric — `[[` arithmetically evaluates identifiers/subscripts (may run $(cmd))",
         );
         // String comparison does NOT trigger arithmetic eval.
         assert_ok(&["[[", "a[x]", "==", "y", "]]"]);
@@ -3132,11 +3635,11 @@ EOF
     fn bare_subscript_name_builtins() {
         assert_deny(
             &["read", "a[$(id)]"],
-            "'read' positional NAME 'a[$(id)]' contains array subscript — bash evaluates $(cmd) in subscripts",
+            "'read' positional NAME 'a[$(id)]' contains array subscript or runtime-determined value — bash evaluates $(cmd) in subscripts",
         );
         assert_deny(
             &["unset", "x[$(id)]"],
-            "'unset' positional NAME 'x[$(id)]' contains array subscript — bash evaluates $(cmd) in subscripts",
+            "'unset' positional NAME 'x[$(id)]' contains array subscript or runtime-determined value — bash evaluates $(cmd) in subscripts",
         );
         // read -p '[foo] ' var — the prompt operand is skipped, var is safe.
         assert_ok(&["read", "-p", "[foo] ", "var"]);
@@ -3264,6 +3767,195 @@ EOF
                 assert_eq!(reason, "'eval' evaluates arguments as shell code")
             }
             SemanticCheckResult::Ok => panic!("eval in 2nd command not denied"),
+        }
+    }
+
+    // ── L5: superset branches reconciled from the 2.1.195 binary ──
+
+    #[test]
+    fn path_stripped_wrapper_unwraps_real_command() {
+        // Path-prefixed wrappers are basename-matched, then stripped, so the real
+        // (dangerous) command is still checked — no under-ask via `/usr/bin/…`.
+        assert_deny(
+            &["/usr/bin/nohup", "eval", "rm -rf /"],
+            "'eval' evaluates arguments as shell code",
+        );
+        assert_deny(
+            &["/bin/timeout", "5", "eval", "x"],
+            "'eval' evaluates arguments as shell code",
+        );
+    }
+
+    #[test]
+    fn find_action_flags_and_globs_denied() {
+        for f in [
+            "-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf",
+            "-fls", "-files0-from",
+        ] {
+            assert_deny(
+                &["find", ".", f, "rm", "{}", ";"],
+                &format!("find with '{f}' executes commands or modifies files — cannot be auto-allowed by a Bash(find:*) prefix rule"),
+            );
+        }
+        // Value-taking primaries skip their operand; benign find is OK.
+        assert_ok(&["find", ".", "-name", "*.txt", "-type", "f"]);
+        // A glob metachar in a non-value argument is denied.
+        assert_deny(
+            &["find", "[abc]", "-print"],
+            "find argument '[abc]' contains glob characters — could glob-expand to a dangerous action",
+        );
+        // `-newerXY` is a value-taking primary (operand skipped).
+        assert_ok(&["find", ".", "-newermt", "2020-01-01"]);
+    }
+
+    #[test]
+    fn find_unquoted_glob_in_text_denied() {
+        let cmd = SimpleCommand {
+            argv: vec!["find".into(), ".".into(), "-name".into(), "x".into()],
+            text: "find . -name x -exec*".into(),
+            ..Default::default()
+        };
+        match check_semantics(&[cmd]) {
+            SemanticCheckResult::Deny { reason } => assert_eq!(
+                reason,
+                "find contains unquoted glob characters — could glob-expand to a dangerous action before find runs"
+            ),
+            SemanticCheckResult::Ok => panic!("unquoted glob in find text not denied"),
+        }
+        // Quoted glob in text is fine.
+        assert!(!find_unquoted_glob("find . -name '*.txt'"));
+        assert!(find_unquoted_glob("find . -name *.txt"));
+        assert!(!find_unquoted_glob("find . -name x # *"));
+    }
+
+    #[test]
+    fn set_options_denied() {
+        assert_deny(
+            &["set", "-o", "extendedglob"],
+            "'set -o/+o extendedglob' changes shell parsing/globbing state — can enable globsubst/extendedglob and defeat static analysis",
+        );
+        // `functrace`/`pipefail` ARE in the safe-option set → allowed.
+        assert_ok(&["set", "-o", "functrace"]);
+        // unsafe single-letter option (`-a` allexport not in SET_SAFE_LETTERS).
+        assert_deny(
+            &["set", "-a"],
+            "'set -a' changes shell option state (allexport/keyword/…) — defeats static env-var analysis; see SET_O_SAFE_LETTERS",
+        );
+        // Safe: `set -e`, `set -x`, `set -- args`, `set -o pipefail`.
+        assert_ok(&["set", "-e"]);
+        assert_ok(&["set", "-x"]);
+        assert_ok(&["set", "--", "a", "b"]);
+        assert_ok(&["set", "-o", "pipefail"]);
+    }
+
+    #[test]
+    fn declare_family_flags_denied() {
+        assert_deny(
+            &["declare", "-n", "ref=x"],
+            "'declare' with -n/-i/-a/-A/-E/-F flag (reached as plain command via wrapper/quote) changes assignment eval semantics",
+        );
+        assert_deny(
+            &["typeset", "-i", "n=1+1"],
+            "'typeset' with -n/-i/-a/-A/-E/-F flag (reached as plain command via wrapper/quote) changes assignment eval semantics",
+        );
+        // export -i (zsh matheval) — export is not declare/typeset/local so the
+        // first branch is skipped; the zsh-typeset matheval branch catches it.
+        assert_deny(
+            &["export", "-i", "n=1"],
+            "'export' with -i/-E/-F flag (reached as plain command via wrapper/quote) — zsh bin_typeset mathevals the RHS",
+        );
+        // float/integer with no explicit sign operand.
+        assert_deny(
+            &["integer", "x"],
+            "zsh 'integer' operand — implicit typeset -E/-i arithmetically evaluates the (existing or assigned) value",
+        );
+        // Plain `declare x=1` is fine.
+        assert_ok(&["declare", "x=1"]);
+        assert_ok(&["local", "y=2"]);
+    }
+
+    #[test]
+    fn jobs_print_jq_runsarg_denied() {
+        assert_deny(
+            &["jobs", "-x", "rm", "-rf", "/"],
+            "'jobs -x' executes its argument as a command — cannot be statically analyzed",
+        );
+        assert_deny(
+            &["print", "-P", "$(id)"],
+            "'print -P' operand contains command substitution — zsh prompt expansion evaluates $(cmd)",
+        );
+        // jq include/import + combined dangerous flags (`-nf`).
+        assert_deny(
+            &["jq", "import \"foo\" as bar; .", "."],
+            "jq command contains include/import — modules can load arbitrary .jq files via {search:\".\"} and call env or other builtins",
+        );
+        assert_deny(
+            &["jq", "-nf", "evil.jq"],
+            "jq command contains dangerous flags that could execute code or read arbitrary files",
+        );
+        // runs-its-argument family.
+        for c in [
+            "watch", "ionice", "chrt", "setsid", "taskset", "strace", "ltrace", "script", "flock",
+            "unshare", "nsenter",
+        ] {
+            assert_deny(
+                &[c, "rm", "-rf", "/"],
+                &format!("'{c}' runs its argument as a command — cannot be statically analyzed"),
+            );
+        }
+    }
+
+    #[test]
+    fn zsh_dangerous_additions_denied() {
+        for b in ["setopt", "unsetopt", "shopt", "disable", "repeat", "foreach", "zcompile"] {
+            assert_deny(
+                &[b, "x"],
+                &format!("Zsh builtin '{b}' can bypass security checks"),
+            );
+        }
+    }
+
+    #[test]
+    fn arith_cmp_nonnumeric_denied() {
+        // `[[ foo -eq 5 ]]` — foo non-numeric → arith-eval risk.
+        assert_deny(
+            &["[[", "foo", "-eq", "5", "]]"],
+            "'[[ ... -eq ...' operand is non-numeric — `[[` arithmetically evaluates identifiers/subscripts (may run $(cmd))",
+        );
+        // numeric operands are fine.
+        assert_ok(&["[[", "5", "-eq", "5", "]]"]);
+        // `test -t 1` (numeric) ok; `test -t foo` denied.
+        assert_ok(&["test", "-t", "1"]);
+        assert_deny(
+            &["test", "-t", "foo"],
+            "'test -t' operand is non-numeric — zsh arith-evals identifiers (may run $(cmd))",
+        );
+    }
+
+    #[test]
+    fn newline_hash_is_deferred() {
+        // A command with a newline-# AND a hard violation returns the hard one.
+        let with_nl = SimpleCommand {
+            argv: vec!["eval".into(), "x\n#hidden".into()],
+            ..Default::default()
+        };
+        match check_semantics(&[with_nl]) {
+            SemanticCheckResult::Deny { reason } => {
+                assert_eq!(reason, "'eval' evaluates arguments as shell code")
+            }
+            SemanticCheckResult::Ok => panic!("eval not denied"),
+        }
+        // Newline-# alone (no other violation) → the deferred reason.
+        let only_nl = SimpleCommand {
+            argv: vec!["echo".into(), "x\n#hidden".into()],
+            ..Default::default()
+        };
+        match check_semantics(&[only_nl]) {
+            SemanticCheckResult::Deny { reason } => assert_eq!(
+                reason,
+                "Newline followed by # inside a quoted argument can hide arguments from path validation"
+            ),
+            SemanticCheckResult::Ok => panic!("newline-# not denied"),
         }
     }
 }

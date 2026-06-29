@@ -696,6 +696,65 @@ impl WebSearchTool {
         );
         self.ctx.bus.log_event(WEB_SEARCH_FAILED, md).await;
     }
+
+    /// Provider-agnostic client-side search path (non-Anthropic providers).
+    /// Runs the search over `ctx.http` and returns markdown result blocks.
+    async fn run_client_side(
+        &self,
+        input: &WebSearchInput,
+    ) -> Result<ToolCallResult, ToolError> {
+        use crate::web_search_client::{
+            format_results_for_model, run_client_web_search, ClientSearchProvider,
+        };
+        let invocation_id = tool_api::util::ids::ulid_or_uuid();
+        let allowed = input.allowed_domains.clone().unwrap_or_default();
+        let blocked = input.blocked_domains.clone().unwrap_or_default();
+        self.emit_started(&invocation_id, &input.query, allowed.len(), blocked.len())
+            .await;
+        let started = Instant::now();
+        let provider = ClientSearchProvider::from_env();
+        let result = run_client_web_search(
+            &self.ctx.http,
+            &provider,
+            &input.query,
+            &allowed,
+            &blocked,
+            0,
+        )
+        .await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        match result {
+            Ok(hits) => {
+                self.emit_completed(&invocation_id, hits.len() as u64, 0, 0, elapsed_ms)
+                    .await;
+                let model_content = format_results_for_model(&input.query, &hits, provider.label());
+                Ok(ToolCallResult {
+                    data: serde_json::json!({
+                        "query": input.query,
+                        "provider": provider.label(),
+                        "result_count": hits.len(),
+                    }),
+                    model_content: Some(model_content),
+                    new_messages: vec![],
+                    context_modifier: None,
+                    is_error: false,
+                    mcp_meta: None,
+                })
+            }
+            Err(msg) => {
+                self.emit_failed(&invocation_id, "client_search", None, elapsed_ms)
+                    .await;
+                Ok(ToolCallResult {
+                    data: serde_json::json!({ "query": input.query, "error": msg }),
+                    model_content: Some(msg),
+                    new_messages: vec![],
+                    context_modifier: None,
+                    is_error: true,
+                    mcp_meta: None,
+                })
+            }
+        }
+    }
 }
 
 static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
@@ -808,16 +867,12 @@ impl Tool for WebSearchTool {
         &INPUT_SCHEMA
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
-        // Provider gating — 1:1 with `WebSearchTool.isEnabled`
-        // (`WebSearchTool.ts:168-193`). The provider is inferred from the request
-        // builder's `base_url` (see [`infer_api_provider`]) since the typed
-        // `getAPIProvider()` value is not reachable from `tools/web`; the model is
-        // the session's default model. LingXi's default (`api.anthropic.com`) maps
-        // to first-party, so WebSearch stays enabled by default.
-        web_search_is_enabled(
-            infer_api_provider(&self.ctx.provider.base_url),
-            &self.ctx.default_model,
-        )
+        // Always offered: on Anthropic first-party (and Vertex/Foundry per
+        // `hosted_search_enabled`) `call` runs the hosted `web_search_20250305`
+        // tool; on every other provider it runs the provider-agnostic
+        // CLIENT-SIDE search (see `web_search_client`). The provider split lives
+        // in `call`, so the model always sees a WebSearch tool.
+        true
     }
     fn max_result_size_chars(&self) -> usize {
         tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
@@ -920,6 +975,16 @@ impl Tool for WebSearchTool {
             return Err(ToolError::InvalidInput(
                 "query must be at least 2 characters".into(),
             ));
+        }
+
+        // Provider split: Anthropic-hosted search only works on the first-party
+        // (and Vertex/Foundry) API. On every other provider, run the
+        // provider-agnostic CLIENT-SIDE search instead of the hosted tool.
+        if !web_search_is_enabled(
+            infer_api_provider(&self.ctx.provider.base_url),
+            &self.ctx.default_model,
+        ) {
+            return self.run_client_side(&parsed_input).await;
         }
 
         let invocation_id = tool_api::util::ids::ulid_or_uuid();

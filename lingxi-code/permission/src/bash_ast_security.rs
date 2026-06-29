@@ -333,10 +333,12 @@ lazy_re!(timeout_value_re, r"^[A-Za-z0-9_.+-]+$");
 // timeout fused short flag with value (ast.ts:2266): `-k5`/`-sTERM`.
 lazy_re!(timeout_ks_fused_re, r"^-[ks][A-Za-z0-9_.+-]+$");
 // timeout duration (ast.ts:2279): `5`, `5s`, `5.5`, optional `[smhd]` suffix.
-lazy_re!(timeout_duration_re, r"^\d+(?:\.\d+)?[smhd]?$");
+// `[0-9]` not `\d` — the Rust `regex` crate's `\d` is Unicode (`\p{Nd}`), but JS
+// `\d` is ASCII; a Unicode-digit duration must stay non-matching (fail-closed).
+lazy_re!(timeout_duration_re, r"^[0-9]+(?:\.[0-9]+)?[smhd]?$");
 // nice `-n N` value / legacy `-N` (ast.ts:2300,2302): signed / negative integer.
-lazy_re!(nice_n_value_re, r"^-?\d+$");
-lazy_re!(nice_legacy_re, r"^-\d+$");
+lazy_re!(nice_n_value_re, r"^-?[0-9]+$");
+lazy_re!(nice_legacy_re, r"^-[0-9]+$");
 // nice argument carrying an expansion (ast.ts:2304): `$`, `(`, or backtick.
 lazy_re!(nice_expansion_re, r"[$(`]");
 // jq dangerous flags (2.1.195 checkSemantics): combined `-nf`/`-rf` (any letters
@@ -2078,7 +2080,9 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                             c += 1;
                         } else if u == "-i" || u == "-0" || u == "-v" {
                             c += 1;
-                        } else if u == "-u" && a.get(c + 1).is_some() {
+                        } else if u == "-u" && a.get(c + 1).map_or(false, |v| !v.is_empty()) {
+                            // JS tests `r[c+1]` truthiness — an empty next arg is
+                            // falsy → fall through to the unknown-flag Deny.
                             c += 2;
                         } else if u.starts_with('-') {
                             return SemanticCheckResult::Deny {
@@ -2098,7 +2102,10 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                     let mut c = 1usize;
                     while c < a.len() {
                         let u = a[c].as_str();
-                        if stdbuf_short_sep_re().is_match(u) && a.get(c + 1).is_some() {
+                        if stdbuf_short_sep_re().is_match(u)
+                            && a.get(c + 1).map_or(false, |v| !v.is_empty())
+                        {
+                            // JS tests `r[c+1]` truthiness — empty next arg is falsy.
                             c += 2;
                         } else if stdbuf_short_fused_re().is_match(u) {
                             c += 1;
@@ -3929,6 +3936,31 @@ EOF
         assert_deny(
             &["test", "-t", "foo"],
             "'test -t' operand is non-numeric — zsh arith-evals identifiers (may run $(cmd))",
+        );
+    }
+
+    #[test]
+    fn wrapper_empty_value_and_unicode_digit_fail_closed() {
+        // env/stdbuf `-u`/`-i` with an EMPTY next arg: JS truthiness `r[c+1]` is
+        // falsy → Deny (must not strip and expose the inner command).
+        assert_deny(
+            &["env", "-u", "", "rm", "-rf", "/x"],
+            "env with -u flag cannot be statically analyzed",
+        );
+        assert_deny(
+            &["stdbuf", "-i", "", "rm", "-rf", "/x"],
+            "stdbuf with -i flag cannot be statically analyzed",
+        );
+        // Unicode-digit duration/value must NOT match the ASCII `\d` regexes —
+        // the wrapper can't be analyzed → fail closed (here: exposes `eval`).
+        assert_deny(
+            &["timeout", "\u{FF15}", "eval", "x"],
+            "timeout duration '\u{FF15}' cannot be statically analyzed",
+        );
+        // Non-empty value still strips normally.
+        assert_deny(
+            &["env", "-u", "FOO", "eval", "x"],
+            "'eval' evaluates arguments as shell code",
         );
     }
 

@@ -272,7 +272,14 @@ pub async fn exchange_copilot_token<H: CopilotHttp + ?Sized>(
 ///
 /// Requires a non-empty `token`; `expires_at` is the Unix-seconds expiry.
 fn parse_exchange_response(v: &Value) -> Result<ExchangedToken, LlmError> {
-    let token = str_field(v, "token")?;
+    let token = v
+        .get("token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| LlmError::InvalidRequest {
+            message: "copilot token-exchange response missing 'token' — \
+                      the GitHub account has no active Copilot subscription"
+                .to_string(),
+        })?;
     if token.is_empty() {
         return Err(LlmError::InvalidRequest {
             message: "copilot token-exchange response had an empty 'token'".to_string(),

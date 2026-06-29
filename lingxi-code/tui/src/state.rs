@@ -960,6 +960,12 @@ pub struct AppState {
     /// alongside `pending_oauth_login`; read by the oauth-login task, mirroring
     /// `copilot_login_domain`).
     pub oauth_login_provider: Option<String>,
+    /// (`/connect` cancel) Raised when the user Esc's a Copilot/OAuth `/connect`
+    /// screen so the main loop trips the login tasks' cancel signal — aborting an
+    /// in-flight device-code poll / browser wait so the loop returns to idle and
+    /// a SECOND `/connect` attempt fires again. Drained by
+    /// [`Self::take_pending_connect_cancel`].
+    pub pending_connect_cancel: bool,
     /// (`/color`) Session agent-color name set by the `/color <name>` command
     /// (claude-code `standaloneAgentContext.color`). `Some("cyan")` after
     /// `/color cyan`; `None` after `/color default` (reset). Maps to a render
@@ -1165,6 +1171,7 @@ impl AppState {
             oauth_connect_driver: None,
             pending_oauth_login: false,
             oauth_login_provider: None,
+            pending_connect_cancel: false,
             session_agent_color: None,
             pending_save_color: None,
             pending_permission_delete: None,
@@ -1415,6 +1422,12 @@ impl AppState {
     /// [`Self::oauth_login_provider`] for the target).
     pub fn take_pending_oauth_login(&mut self) -> bool {
         std::mem::take(&mut self.pending_oauth_login)
+    }
+
+    /// (`/connect` cancel) Take + clear [`Self::pending_connect_cancel`]. The main
+    /// loop trips the login tasks' cancel notify when this returns `true`.
+    pub fn take_pending_connect_cancel(&mut self) -> bool {
+        std::mem::take(&mut self.pending_connect_cancel)
     }
 
     /// (Plan 3c §6.3) Open the `/connect` credential screen with the given flow

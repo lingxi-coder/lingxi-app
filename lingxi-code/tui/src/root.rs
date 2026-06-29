@@ -881,7 +881,10 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                     st.pending_store_key = Some((provider_id, key));
                     st.close_screen();
                 }
-                ConnectAction::Cancel => st.close_screen(),
+                ConnectAction::Cancel => {
+                    st.pending_connect_cancel = true;
+                    st.close_screen();
+                }
                 ConnectAction::None => {}
             }
         }
@@ -3184,6 +3187,11 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
     // (T2b) Start signal for the OAuth sign-in task (Anthropic / OpenAI ChatGPT),
     // fired by the ticker right after `pump_open_connect` opens the OAuth screen.
     let oauth_login_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    // (cancel-fix) Esc on a Copilot/OAuth screen trips these so the in-flight
+    // poll/login future is dropped and the task returns to idle — letting a
+    // second `/connect` attempt fire again instead of stalling.
+    let copilot_cancel_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    let oauth_cancel_notify = std::sync::Arc::new(tokio::sync::Notify::new());
     // ---- Ticker: 100ms spinner refresh + paste idle-flush + Settings open pump
     {
         let state = state.clone();
@@ -3193,6 +3201,8 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         // `notify_one()` right after `pump_open_connect` opens the Copilot screen.
         let copilot_login_notify = copilot_login_notify.clone();
         let oauth_login_notify = oauth_login_notify.clone();
+        let copilot_cancel_notify = copilot_cancel_notify.clone();
+        let oauth_cancel_notify = oauth_cancel_notify.clone();
         // (M7-13 review) The orchestrator handle drives the async Settings open
         // pump below. `None` (resume picker / smoke gates) leaves Settings
         // unreachable, which is correct for those bridge-less mounts.
@@ -3350,6 +3360,12 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 if state.lock().await.take_pending_oauth_login() {
                     oauth_login_notify.notify_one();
                 }
+                // (cancel-fix) Esc trips both: each login task drops its in-flight
+                // future on the cancel signal and idles for the next attempt.
+                if state.lock().await.take_pending_connect_cancel() {
+                    copilot_cancel_notify.notify_one();
+                    oauth_cancel_notify.notify_one();
+                }
                 // (Plan 3c C1) `/connect` provider-key persistence pump — drains
                 // `pending_store_key` and writes the key through the bound
                 // `CredentialManager::set_provider_key`. Handle-free; no-op when
@@ -3435,10 +3451,15 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
     {
         let state = state.clone();
         let notify = copilot_login_notify.clone();
+        let cancel = copilot_cancel_notify.clone();
         let mut tick_for_copilot = tick;
         hooks.use_future(async move {
+            use futures::FutureExt;
             loop {
                 notify.notified().await;
+                // (cancel-fix) Drop any cancel permit buffered while idle so a
+                // stale Esc can't abort the new attempt before it starts.
+                cancel.notified().now_or_never();
                 let (driver, domain) = {
                     let st = state.lock().await;
                     (st.copilot_connect_driver.clone(), st.copilot_login_domain.clone())
@@ -3448,6 +3469,10 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                     // "Requesting device code…" inertly — same as before the seam.
                     continue;
                 };
+                tokio::select! {
+                    biased;
+                    () = cancel.notified() => continue,
+                    () = async {
                 match driver.begin(domain.as_deref()).await {
                     Ok(step) => {
                         if set_copilot_device_code(&state, &step.user_code, &step.verification_uri)
@@ -3519,6 +3544,8 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                         }
                     }
                 }
+                    } => {}
+                }
             }
         });
     }
@@ -3532,10 +3559,15 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
     {
         let state = state.clone();
         let notify = oauth_login_notify.clone();
+        let cancel = oauth_cancel_notify.clone();
         let mut tick_for_oauth = tick;
         hooks.use_future(async move {
+            use futures::FutureExt;
             loop {
                 notify.notified().await;
+                // (cancel-fix) Drain a stale cancel permit so an idle Esc doesn't
+                // abort the next attempt before it begins.
+                cancel.notified().now_or_never();
                 let (driver, provider) = {
                     let st = state.lock().await;
                     (st.oauth_connect_driver.clone(), st.oauth_login_provider.clone())
@@ -3545,6 +3577,10 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                     // stays at "Opening browser…" inertly.
                     continue;
                 };
+                tokio::select! {
+                    biased;
+                    () = cancel.notified() => continue,
+                    () = async {
                 match driver.login(&provider).await {
                     Ok(msg) => {
                         {
@@ -3605,6 +3641,8 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                             tick_for_oauth.set(tick_for_oauth.get().wrapping_add(1));
                         }
                     }
+                }
+                    } => {}
                 }
             }
         });

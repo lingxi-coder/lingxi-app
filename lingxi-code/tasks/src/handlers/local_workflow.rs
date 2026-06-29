@@ -1224,10 +1224,15 @@ impl Task for LocalWorkflowHandler {
             // A resume reuses the caller's id; a fresh run uses the
             // launcher-minted id (so the Workflow tool result can return it)
             // and only mints one here as a last resort (direct test spawns).
+            // Fresh-mint shape matches claude-code 2.1.195
+            // `wf_${randomUUID().slice(0,12)}` = `wf_` + 8 hex + `-` + 3 hex.
             let run_id = resume_from_run_id
                 .clone()
                 .or(provided_run_id)
-                .unwrap_or_else(|| format!("wf_{:016x}", rand::random::<u64>()));
+                .unwrap_or_else(|| {
+                    let r = rand::random::<u64>();
+                    format!("wf_{:08x}-{:03x}", (r >> 32) as u32, (r as u32) & 0xfff)
+                });
 
             // tengu_workflow_launched — oracle §7 exact payload.
             // NOTE: `workflow_run_id` is NOT present on `launched` (oracle §7 shows

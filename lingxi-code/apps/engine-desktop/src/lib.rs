@@ -778,8 +778,10 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
         }
         // Mint the run id at launch (fresh) or reuse the resume id — so it can be
         // returned in the tool result (claude-code `runId`) for `resumeFromRunId`.
-        // A clock-nanos × per-process sequence gives a unique `wf_<16hex>` (host
-        // clock use is fine — only the workflow SCRIPT is barred from the clock).
+        // A clock-nanos × per-process sequence gives a unique id (host clock use
+        // is fine — only the workflow SCRIPT is barred from the clock). The
+        // surfaced shape matches claude-code 2.1.195 `wf_${randomUUID().slice(0,12)}`
+        // = `wf_` + 8 hex + `-` + 3 hex (the first 12 chars of a v4 UUID).
         let run_id = spec.resume_from_run_id.clone().unwrap_or_else(|| {
             use std::sync::atomic::{AtomicU64, Ordering};
             static WF_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -788,7 +790,8 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0);
-            format!("wf_{:016x}", nanos ^ seq.wrapping_mul(0x9e37_79b9_7f4a_7c15))
+            let v = nanos ^ seq.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            format!("wf_{:08x}-{:03x}", (v >> 32) as u32, (v as u32) & 0xfff)
         });
         // Persist the script so it is editable + re-runnable via `scriptPath`
         // (claude-code persists every invocation's script "under the session

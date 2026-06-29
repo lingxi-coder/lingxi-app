@@ -272,6 +272,29 @@ impl Tool for WorkflowTool {
         input: &Value,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
+        // ── Schema-level `.refine()` on the `script` field (claude-code 2.1.195) ──
+        // The zod input schema is `script: A.string().max(z$).refine(UIe, hYp)`,
+        // where `UIe`/`WRa` reject any control char (code < 32 except 9/10, or
+        // 127–159). In claude-code this runs at input-parse time, BEFORE the
+        // validateInput gates below — so it is the first check here. It applies
+        // ONLY to the raw inline `script` field (not scriptPath-read content nor
+        // name-resolved scripts). Message byte-exact (`hYp`).
+        if let Some(raw_script) = input.get("script").and_then(Value::as_str) {
+            if raw_script.chars().any(|c| {
+                let code = c as u32;
+                if code == 9 || code == 10 {
+                    false
+                } else {
+                    code < 32 || (127..=159).contains(&code)
+                }
+            }) {
+                return Err(ValidationError(
+                    "script contains control characters that would be hidden in the approval dialog"
+                        .into(),
+                ));
+            }
+        }
+
         // ── Gate order mirrors claude-code v2.1.186 validateInput (offset 203004507) ──
         //
         // errorCode 7 — abort / input truncated
@@ -766,6 +789,41 @@ mod tests {
             "Dynamic workflows are disabled by managed settings (`disableWorkflows`).",
             "errorCode 5 message must be byte-exact"
         );
+    }
+
+    #[tokio::test]
+    async fn validate_script_with_control_char_rejected() {
+        // Schema `.refine(UIe, hYp)` — a control char (here NUL) in the raw inline
+        // `script` field is rejected byte-exact before any gate runs.
+        let t = tool(None);
+        let ctx = tool_api::test_support::fresh_ctx();
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
+
+        let with_ctrl = format!("{VALID_SCRIPT}\u{0}");
+        let err = t
+            .validate_input(&json!({ "script": with_ctrl }), &ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.0,
+            "script contains control characters that would be hidden in the approval dialog",
+            "control-char refine message must be byte-exact"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_script_with_tab_and_newline_allowed() {
+        // WRa excludes char codes 9 (tab) and 10 (LF) — a script with those passes.
+        let t = tool(None);
+        let ctx = tool_api::test_support::fresh_ctx();
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
+
+        let with_ws = format!("{VALID_SCRIPT}\n\tlog('ok')\n");
+        t.validate_input(&json!({ "script": with_ws }), &ctx)
+            .await
+            .expect("tab/newline must not trip the control-char refine");
     }
 
     #[tokio::test]

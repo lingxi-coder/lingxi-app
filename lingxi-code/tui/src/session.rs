@@ -101,6 +101,12 @@ pub struct Runtime {
     /// badge unconfigured providers. Empty (the default) keeps every row
     /// available — byte-identical to the historical behavior.
     provider_availability: std::collections::BTreeMap<String, bool>,
+    /// (T2a) Per-provider login-method map computed engine-side at `build()`
+    /// (`DesktopRuntime.provider_auth_methods`); threaded into the App
+    /// (`AppState::set_provider_auth_methods`) at mount so the `/connect` picker
+    /// shows each provider's REAL login method. Empty (the default) is a safe
+    /// no-op — the picker falls back to its static defaults.
+    pub provider_auth_methods: std::collections::BTreeMap<String, String>,
     /// (Plan 3c I1/I2) Authoritative `request_model -> (profile_name,
     /// provider_label)` map computed engine-side at `build()`
     /// (`DesktopRuntime.model_providers`); threaded into the App
@@ -144,6 +150,7 @@ impl Runtime {
             subscription: None,
             status_line_config: None,
             provider_availability: std::collections::BTreeMap::new(),
+            provider_auth_methods: std::collections::BTreeMap::new(),
             model_providers: std::collections::BTreeMap::new(),
             provider_key_store: None,
             copilot_connect_driver: None,
@@ -172,6 +179,7 @@ impl Runtime {
             subscription: None,
             status_line_config: None,
             provider_availability: std::collections::BTreeMap::new(),
+            provider_auth_methods: std::collections::BTreeMap::new(),
             model_providers: std::collections::BTreeMap::new(),
             provider_key_store: None,
             copilot_connect_driver: None,
@@ -301,6 +309,19 @@ impl Runtime {
         self
     }
 
+    /// (T2a) Attach the engine-computed per-provider login-method map
+    /// (`DesktopRuntime.provider_auth_methods`). Threaded into the App at init
+    /// (`AppState::set_provider_auth_methods`) so the `/connect` picker shows
+    /// each provider's REAL login method. The default (empty) is a safe no-op.
+    #[must_use]
+    pub fn with_provider_auth_methods(
+        mut self,
+        provider_auth_methods: std::collections::BTreeMap<String, String>,
+    ) -> Self {
+        self.provider_auth_methods = provider_auth_methods;
+        self
+    }
+
     /// (Plan 3c I1/I2) Attach the engine-computed `request_model -> (profile_name,
     /// provider_label)` map (`DesktopRuntime.model_providers`). Threaded into the
     /// App at init (`AppState::set_model_providers`) so the `/model` picker can
@@ -422,6 +443,7 @@ pub async fn run_tui_session(
     // default, before the engine populates them) keeps every row available +
     // grouped under its static label — byte-identical to the historical behavior.
     initial_state.set_provider_availability(std::mem::take(&mut runtime.provider_availability));
+    initial_state.set_provider_auth_methods(std::mem::take(&mut runtime.provider_auth_methods));
     initial_state.set_model_providers(std::mem::take(&mut runtime.model_providers));
     // (Plan 3c C1) Thread the shared engine credential store onto the state so
     // the `/connect` screen's `pump_store_provider_key` can persist a collected

@@ -894,6 +894,13 @@ pub struct AppState {
     /// empty map (the default, before the engine populates it) keeps every row
     /// available — byte-identical to the historical behavior.
     pub provider_availability: std::collections::BTreeMap<String, bool>,
+    /// (T2a) Per-provider login-method map, threaded from
+    /// `DesktopRuntime.provider_auth_methods` at mount (via
+    /// [`Self::set_provider_auth_methods`]). Keyed by `profile_name`; value is
+    /// one of `"api_key"`, `"copilot_device"`, or `"oauth"`. An empty map (the
+    /// default) is a safe no-op — the `/connect` picker falls back to its
+    /// static defaults until the engine populates this.
+    pub provider_auth_methods: std::collections::BTreeMap<String, String>,
     /// (Plan 3c I1/I2) Authoritative `request_model -> (profile_name,
     /// provider_label)` map, assembled engine-side from the LIVE multi-provider
     /// `ClientConfig.providers` and threaded onto the App from
@@ -1134,6 +1141,7 @@ impl AppState {
             pending_open_model: false,
             pending_switch_model: None,
             provider_availability: std::collections::BTreeMap::new(),
+            provider_auth_methods: std::collections::BTreeMap::new(),
             model_providers: std::collections::BTreeMap::new(),
             pending_connect: None,
             pending_store_key: None,
@@ -1324,6 +1332,13 @@ impl AppState {
     /// Idempotent (replaces the map); an empty map keeps every row available.
     pub fn set_provider_availability(&mut self, map: std::collections::BTreeMap<String, bool>) {
         self.provider_availability = map;
+    }
+
+    /// (T2a) Install the engine-computed per-provider login-method map
+    /// (`DesktopRuntime.provider_auth_methods`, keyed by profile_name). Threaded at
+    /// TUI init so the /connect picker shows each provider's REAL login method.
+    pub fn set_provider_auth_methods(&mut self, map: std::collections::BTreeMap<String, String>) {
+        self.provider_auth_methods = map;
     }
 
     /// (Plan 3c I1/I2) Install the engine-computed `request_model ->
@@ -2165,5 +2180,14 @@ mod tests {
         promote_next_permission(&mut st);
         assert_eq!(st.pending_permission.as_ref().unwrap().tool(), "Edit");
         assert!(st.permission_queue.is_empty());
+    }
+
+    #[test]
+    fn set_provider_auth_methods_installs_map() {
+        let mut st = AppState::default_for_tests();
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("anthropic".to_string(), "api_key".to_string());
+        st.set_provider_auth_methods(m);
+        assert_eq!(st.provider_auth_methods.get("anthropic").map(String::as_str), Some("api_key"));
     }
 }

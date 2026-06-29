@@ -294,7 +294,8 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
             if st.prompt_text.trim() == "/connect" {
                 st.prompt_text.clear();
                 st.prompt_cursor = 0;
-                let picker = crate::screens::connect_picker::ConnectPickerState::from_availability(
+                let picker = crate::screens::connect_picker::ConnectPickerState::from_connectable(
+                    &st.provider_auth_methods,
                     &st.provider_availability,
                 );
                 st.open_connect_picker(picker);

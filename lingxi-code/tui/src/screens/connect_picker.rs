@@ -193,27 +193,6 @@ impl ConnectPickerState {
         Self::new(connect_rows_from(auth_methods, availability))
     }
 
-    /// Compatibility shim — Task 5 will migrate callers to `from_connectable`.
-    /// Synthesises a fixed auth-tag map from the curated 9-provider catalog.
-    #[must_use]
-    pub fn from_availability(availability: &BTreeMap<String, bool>) -> Self {
-        let auth: BTreeMap<String, String> = [
-            ("anthropic", "api_key"),
-            ("openai", "api_key"),
-            ("openai-chatgpt", "copilot_device"),
-            ("github-copilot", "copilot_device"),
-            ("gemini", "api_key"),
-            ("deepseek", "api_key"),
-            ("openrouter", "api_key"),
-            ("zai", "api_key"),
-            ("glm-coding", "api_key"),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-        Self::from_connectable(&auth, availability)
-    }
-
     /// Whether a row matches the query (case-insensitive substring over label,
     /// description, and provider id). Empty query matches all.
     fn matches(&self, row: &ConnectRow) -> bool {
@@ -464,9 +443,17 @@ mod reducer_tests {
 mod render_tests {
     use super::*;
 
+    /// Minimal auth map covering both groups (Popular: anthropic, Providers: openrouter).
+    fn two_provider_auth() -> BTreeMap<String, String> {
+        [("anthropic", "api_key"), ("openrouter", "api_key")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
     #[test]
     fn renders_groups_headers_and_footer() {
-        let st = ConnectPickerState::from_availability(&BTreeMap::new());
+        let st = ConnectPickerState::from_connectable(&two_provider_auth(), &BTreeMap::new());
         let out = render_connect_picker_to_string(&st);
         assert!(out.starts_with(&format!("Connect a provider\n{SUB_HEADER}\nSearch: \n")), "{out}");
         assert!(out.contains("\nPopular\n"), "{out}");
@@ -482,21 +469,38 @@ mod render_tests {
     fn connected_provider_gets_check_marker() {
         let mut avail = BTreeMap::new();
         avail.insert("openrouter".to_string(), true);
-        let st = ConnectPickerState::from_availability(&avail);
+        let st = ConnectPickerState::from_connectable(&two_provider_auth(), &avail);
         let out = render_connect_picker_to_string(&st);
         // openrouter is not the highlighted row (Anthropic is), so its ✓ shows.
         assert!(out.contains("\u{2713} OpenRouter"), "{out}");
     }
 
     #[test]
-    fn empty_query_shows_all_nine() {
-        let st = ConnectPickerState::from_availability(&BTreeMap::new());
-        assert_eq!(st.rows.len(), 9);
+    fn empty_query_shows_all_rows() {
+        // Use explicit auth_methods; visible_lines must include every row (no
+        // filter applied when query is empty).
+        let auth: BTreeMap<String, String> = [
+            ("anthropic", "api_key"),
+            ("openai", "api_key"),
+            ("openai-chatgpt", "copilot_device"),
+            ("github-copilot", "copilot_device"),
+            ("gemini", "api_key"),
+            ("deepseek", "api_key"),
+            ("openrouter", "api_key"),
+            ("zai", "api_key"),
+            ("glm-coding", "api_key"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let st = ConnectPickerState::from_connectable(&auth, &BTreeMap::new());
+        let n = st.rows.len();
+        assert_eq!(n, 9);
         let items = st
             .visible_lines()
             .into_iter()
             .filter(|l| matches!(l, VisibleLine::Item(_)))
             .count();
-        assert_eq!(items, 9);
+        assert_eq!(items, n);
     }
 }

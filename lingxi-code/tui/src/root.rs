@@ -1043,7 +1043,8 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
             if ct.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
                 && ct.code == crossterm::event::KeyCode::Char('a')
             {
-                let picker = crate::screens::connect_picker::ConnectPickerState::from_availability(
+                let picker = crate::screens::connect_picker::ConnectPickerState::from_connectable(
+                    &st.provider_auth_methods,
                     &st.provider_availability,
                 );
                 st.open_connect_picker(picker);
@@ -2001,13 +2002,31 @@ pub async fn pump_switch_model(
     true
 }
 
+/// Which credential flow to open for a `/connect` target.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ConnectRoute {
+    ApiKey,
+    Copilot,
+    Unavailable,
+}
+
+/// Route a `/connect` target to its flow by the real catalog method tag. Unknown
+/// (typed `/connect foo` not in the catalog) → ApiKey, preserving today's behaviour.
+pub(crate) fn connect_route_for(_provider: &str, auth_tag: Option<&str>) -> ConnectRoute {
+    use crate::screens::connect_picker::ConnectMethod;
+    match auth_tag.map(ConnectMethod::from_tag) {
+        Some(ConnectMethod::CopilotDevice) => ConnectRoute::Copilot,
+        Some(ConnectMethod::OAuthSoon) => ConnectRoute::Unavailable,
+        _ => ConnectRoute::ApiKey, // ApiKey or unknown
+    }
+}
+
 /// (Plan 3c §6.3) Async `/connect` open pump. Consumes `AppState.pending_connect`
 /// (set by the picker's `Connect` outcome or a `/connect <provider>` intercept)
-/// under the priority guard and opens the credential screen: `github-copilot`
-/// opens the device-flow phase, every other provider opens a masked API-key
-/// field. Re-raises `pending_connect` and returns `false` if a higher-priority
-/// surface (permission prompt / another screen) is up. Returns `true` iff a
-/// screen was opened (redraw needed).
+/// under the priority guard and opens the credential screen: routes by the REAL
+/// catalog auth method (`provider_auth_methods`). Re-raises `pending_connect` and
+/// returns `false` if a higher-priority surface (permission prompt / another screen)
+/// is up. Returns `true` iff a screen was opened (redraw needed).
 pub async fn pump_open_connect(state: &Arc<Mutex<AppState>>) -> bool {
     let provider = {
         let mut st = state.lock().await;
@@ -2019,22 +2038,31 @@ pub async fn pump_open_connect(state: &Arc<Mutex<AppState>>) -> bool {
             None => return false,
         }
     };
-    let is_copilot = provider == "github-copilot";
     let mut st = state.lock().await;
     if st.pending_permission.is_some() || st.active_screen.is_some() {
         st.pending_connect = Some(provider);
         return false;
     }
-    if is_copilot {
-        // GitHub Copilot first picks the deployment type (Public vs Enterprise).
-        // The deploy screen (handle_screen_key) then opens the device-flow screen
-        // + raises `pending_copilot_login` with the resolved `copilot_login_domain`.
-        st.open_github_deployment();
-    } else {
-        // The picker carried the human label, but the flag only holds the id; the
-        // header reads "Connect <id>" (the engine `/connect` group resolves the
-        // canonical label on the registry path).
-        st.open_connect(crate::screens::connect::ConnectScreenState::api_key(&provider, &provider));
+    let tag = st.provider_auth_methods.get(&provider).cloned();
+    match connect_route_for(&provider, tag.as_deref()) {
+        ConnectRoute::Copilot => {
+            // GitHub Copilot first picks the deployment type (Public vs Enterprise).
+            // The deploy screen (handle_screen_key) then opens the device-flow screen
+            // + raises `pending_copilot_login` with the resolved `copilot_login_domain`.
+            st.open_github_deployment();
+        }
+        ConnectRoute::ApiKey => {
+            // The picker carried the human label, but the flag only holds the id; the
+            // header reads "Connect <id>" (the engine `/connect` group resolves the
+            // canonical label on the registry path).
+            st.open_connect(crate::screens::connect::ConnectScreenState::api_key(&provider, &provider));
+        }
+        ConnectRoute::Unavailable => {
+            st.open_connect(crate::screens::connect::ConnectScreenState::unavailable(
+                &provider,
+                "browser sign-in isn't available in this build yet",
+            ));
+        }
     }
     true
 }
@@ -4896,8 +4924,12 @@ mod tests {
 
         // github-copilot → GitHub deployment-type picker FIRST (Public vs
         // Enterprise); that screen then opens the device-flow Copilot screen.
+        // provider_auth_methods must include the copilot_device tag so the
+        // routing helper picks Copilot (not the ApiKey fallback).
         let mut st2 = AppState::new(crate::state::StatusSnapshot::default());
         st2.pending_connect = Some("github-copilot".to_string());
+        st2.provider_auth_methods
+            .insert("github-copilot".to_string(), "copilot_device".to_string());
         let state2 = Arc::new(Mutex::new(st2));
         assert!(pump_open_connect(&state2).await);
         {
@@ -4908,6 +4940,17 @@ mod tests {
                 st2.active_screen
             );
         }
+    }
+
+    /// (T2a Task 5) `connect_route_for` routes by the REAL catalog method tag.
+    /// Unknown provider (typed `/connect foo` not in catalog) → ApiKey fallback.
+    #[test]
+    fn connect_route_picks_flow_by_method() {
+        use crate::screens::connect_picker::ConnectMethod;
+        assert_eq!(connect_route_for("oauth_tag_provider", Some("oauth")), ConnectRoute::Unavailable);
+        assert_eq!(connect_route_for("github-copilot", Some("copilot_device")), ConnectRoute::Copilot);
+        assert_eq!(connect_route_for("anthropic", Some("api_key")), ConnectRoute::ApiKey);
+        assert_eq!(connect_route_for("typed-unknown", None), ConnectRoute::ApiKey); // fallback preserves today
     }
 
     /// `switch_profile_for` maps the picker-internal sentinel `provider_id`

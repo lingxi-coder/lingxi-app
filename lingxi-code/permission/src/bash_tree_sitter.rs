@@ -20,6 +20,22 @@ const MAX_COMMAND_LENGTH: usize = 10_000;
 /// yields a normal tree. Low risk (tree-sitter-bash is robust); a budget could be
 /// added later via the pinned parser's timeout API.
 fn parse(command: &str) -> Option<Tree> {
+    parse_raw(command)
+}
+
+/// Crate-internal `parseCommandRaw` (claude-code `parser.ts`): build a
+/// tree-sitter-bash parser and parse `command`. `None` when the command is empty
+/// / over the `MAX_COMMAND_LENGTH` cap (legacy fallback, `parser.ts:59`), the
+/// parser can't be built, or the parse fails outright; a successful-but-ERROR
+/// tree still returns `Some`. Shared by both this module and
+/// [`crate::bash_ast_security`] so there is a single `Parser::new()` /
+/// `set_language` setup. The returned [`Tree`] OWNS the parse; callers must keep
+/// it alive for as long as they borrow [`Node`]s from `tree.root_node()`.
+///
+/// Acknowledged divergence (see [`parse`]): no node/time budget, so the
+/// `PARSE_ABORTED` distinction is unreachable here.
+#[must_use]
+pub(crate) fn parse_raw(command: &str) -> Option<Tree> {
     if command.is_empty() || command.len() > MAX_COMMAND_LENGTH {
         return None;
     }

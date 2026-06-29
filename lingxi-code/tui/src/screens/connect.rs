@@ -18,6 +18,9 @@ pub enum ConnectFlow {
     },
     /// GitHub Copilot OAuth device-flow.
     Copilot,
+    /// (T2a) A login method whose flow isn't wired in this build (OAuth). Honest
+    /// terminal screen — never a dead key field. Any key returns to the REPL.
+    Unavailable { label: String, reason: String },
 }
 
 /// Terminal/in-progress state of a Copilot device-flow.
@@ -80,6 +83,13 @@ impl ConnectScreenState {
         }
     }
 
+    /// Open an Unavailable screen for a login method not wired in this build.
+    #[must_use]
+    pub fn unavailable(label: &str, reason: &str) -> Self {
+        Self { flow: ConnectFlow::Unavailable { label: label.to_string(), reason: reason.to_string() },
+               key_buffer: String::new(), copilot: CopilotPhase::Starting }
+    }
+
     /// Open the Copilot device-flow in the `Starting` phase.
     #[must_use]
     pub fn copilot_pending() -> Self {
@@ -108,6 +118,9 @@ impl ConnectScreenState {
 #[must_use]
 pub fn handle_connect_key(st: &mut ConnectScreenState, key: KeyCode) -> ConnectAction {
     if key == KeyCode::Esc {
+        return ConnectAction::Cancel;
+    }
+    if matches!(st.flow, ConnectFlow::Unavailable { .. }) {
         return ConnectAction::Cancel;
     }
     // Copilot TERMINAL phases (Done/Failed): the flow is over, so ANY key returns
@@ -139,6 +152,7 @@ pub fn handle_connect_key(st: &mut ConnectScreenState, key: KeyCode) -> ConnectA
             _ => ConnectAction::None,
         },
         ConnectFlow::Copilot => ConnectAction::None,
+        ConnectFlow::Unavailable { .. } => ConnectAction::Cancel,
     }
 }
 
@@ -152,6 +166,11 @@ pub fn render_connect_to_string(st: &ConnectScreenState) -> String {
             let mask: String = "\u{2022}".repeat(st.key_buffer.chars().count());
             out.push_str(&format!("Key: {mask}\n"));
             out.push_str("Paste your API key \u{00B7} Enter to save \u{00B7} Esc to cancel");
+        }
+        ConnectFlow::Unavailable { label, reason } => {
+            out.push_str(&format!("Connect {label}\n"));
+            out.push_str(&format!("{reason}.\n"));
+            out.push_str("Connect with an API key instead \u{00B7} press any key to go back");
         }
         ConnectFlow::Copilot => {
             out.push_str("Connect GitHub Copilot\n");
@@ -236,6 +255,18 @@ mod tests {
         st.set_failed("access_denied");
         let out = render_connect_to_string(&st);
         assert!(out.contains("Authorization failed: access_denied"));
+    }
+
+    #[test]
+    fn unavailable_renders_honest_message_and_any_key_closes() {
+        let mut st = ConnectScreenState::unavailable("OpenAI (ChatGPT)", "browser sign-in isn't available in this build yet");
+        let body = render_connect_to_string(&st);
+        assert!(body.contains("OpenAI (ChatGPT)"));
+        assert!(body.contains("isn't available in this build yet"));
+        assert!(body.contains("API key")); // tells them what DOES work
+        // Any key (and Esc) closes — never a dead field.
+        assert_eq!(handle_connect_key(&mut st, crossterm::event::KeyCode::Enter), ConnectAction::Cancel);
+        assert_eq!(handle_connect_key(&mut st, crossterm::event::KeyCode::Esc), ConnectAction::Cancel);
     }
 
     #[test]

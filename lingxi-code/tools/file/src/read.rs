@@ -48,11 +48,21 @@ pub const MAX_LINES_TO_READ: u64 = 2000;
 /// Default per-read output token budget — byte-locked to claude-code
 /// `DEFAULT_MAX_OUTPUT_TOKENS` (`FileReadTool/limits.ts:18`). A full text read
 /// whose estimated token count exceeds this errors with
-/// [`format_max_tokens_exceeded`]. LingXi has no GrowthBook / env override and
-/// `ToolUseContext` carries no `fileReadingLimits`, so the effective budget is
-/// always this default (the `tengu_amber_wren` GB override + the
-/// `LINGXI_FILE_READ_MAX_OUTPUT_TOKENS` env tier are unported — 3P default).
+/// [`format_max_tokens_exceeded`].
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 25_000;
+
+/// LingXi env tier for Claude-compatible per-call file-reading limits.
+pub const MAX_OUTPUT_TOKENS_ENV: &str = "LINGXI_FILE_READ_MAX_OUTPUT_TOKENS";
+
+/// Effective per-call token budget. Invalid, missing, or zero env values preserve
+/// the byte-locked default.
+fn effective_max_output_tokens() -> u64 {
+    std::env::var(MAX_OUTPUT_TOKENS_ENV)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
+}
 
 /// Tool name byte-lock — matches claude-code tool registry.
 pub const TOOL_NAME: &str = "Read";
@@ -1695,6 +1705,7 @@ impl Tool for FileReadTool {
             .extension()
             .and_then(|e| e.to_str())
             .map(str::to_ascii_lowercase);
+        let max_output_tokens = effective_max_output_tokens();
         if ext.as_deref() == Some("ipynb") {
             let cells = match crate::notebook_read::read_notebook(&content) {
                 Ok(c) => c,
@@ -1733,7 +1744,7 @@ impl Tool for FileReadTool {
             // byte-size check and before recording state. `ext` is `"ipynb"`
             // (bytesPerToken 4).
             if let Err(msg) =
-                validate_content_tokens(&cells_json, Some("ipynb"), DEFAULT_MAX_OUTPUT_TOKENS)
+                validate_content_tokens(&cells_json, Some("ipynb"), max_output_tokens)
             {
                 self.emit_failed(&invocation_id, "max_tokens_exceeded").await;
                 return Err(ToolError::Io(msg));
@@ -1828,8 +1839,8 @@ impl Tool for FileReadTool {
         // `<= maxTokens/4`; otherwise the offline fallback is `effectiveCount ==
         // estimate`, over budget iff `estimate > maxTokens`.
         if token_estimate != 0
-            && token_estimate > DEFAULT_MAX_OUTPUT_TOKENS / 4
-            && token_estimate > DEFAULT_MAX_OUTPUT_TOKENS
+            && token_estimate > max_output_tokens / 4
+            && token_estimate > max_output_tokens
         {
             let is_full_read = offset <= 1 && limit.is_none();
             if is_full_read {
@@ -1837,7 +1848,7 @@ impl Tool for FileReadTool {
                 let trunc = truncate_to_token_budget(
                     &slice,
                     token_estimate,
-                    DEFAULT_MAX_OUTPUT_TOKENS,
+                    max_output_tokens,
                     total_lines,
                 );
                 slice = trunc.content;
@@ -1847,7 +1858,7 @@ impl Tool for FileReadTool {
                 self.emit_failed(&invocation_id, "max_tokens_exceeded").await;
                 return Err(ToolError::Io(format_max_tokens_exceeded(
                     token_estimate,
-                    DEFAULT_MAX_OUTPUT_TOKENS,
+                    max_output_tokens,
                 )));
             }
         }
@@ -1963,6 +1974,8 @@ mod tests {
     use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
     use tool_api::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
+
+    static READ_LIMIT_ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn is_device_file_matches_claude_set() {
@@ -2093,6 +2106,29 @@ mod tests {
         // Prompt-text constant only (the "up to 2000 lines" wording); NOT a
         // runtime cap. The Read prompt below interpolates it.
         assert_eq!(MAX_LINES_TO_READ, 2000);
+    }
+
+    #[test]
+    fn default_max_output_tokens_byte_locked() {
+        let _env = READ_LIMIT_ENV_MUTEX.blocking_lock();
+        std::env::remove_var(MAX_OUTPUT_TOKENS_ENV);
+        assert_eq!(DEFAULT_MAX_OUTPUT_TOKENS, 25_000);
+        assert_eq!(effective_max_output_tokens(), DEFAULT_MAX_OUTPUT_TOKENS);
+    }
+
+    #[test]
+    fn max_output_tokens_env_override_is_per_call() {
+        let _env = READ_LIMIT_ENV_MUTEX.blocking_lock();
+        std::env::set_var(MAX_OUTPUT_TOKENS_ENV, "8");
+        assert_eq!(effective_max_output_tokens(), 8);
+
+        std::env::set_var(MAX_OUTPUT_TOKENS_ENV, "13");
+        assert_eq!(effective_max_output_tokens(), 13);
+
+        std::env::set_var(MAX_OUTPUT_TOKENS_ENV, "not-a-number");
+        assert_eq!(effective_max_output_tokens(), DEFAULT_MAX_OUTPUT_TOKENS);
+
+        std::env::remove_var(MAX_OUTPUT_TOKENS_ENV);
     }
 
     #[test]

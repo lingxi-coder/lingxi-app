@@ -15,6 +15,7 @@
 //! summarizer.
 
 use crate::autocompact::{Autocompactor, CompactionError};
+use crate::cached_microcompact::CachedMicrocompact;
 use crate::microcompact::{Microcompactor, TimeBasedMCConfig};
 use crate::snip::SnipCompactor;
 use crate::thresholds::{
@@ -33,6 +34,8 @@ pub struct IterationCompactionResult {
     pub layers_applied: Vec<CompactionLayer>,
     /// Approximate tokens freed across all layers.
     pub total_tokens_freed: u64,
+    /// Whether the microcompact result came from the same-input cache.
+    pub cache_hit: bool,
     /// Consecutive autocompact-failure count after this pass. Mirrors the
     /// `consecutiveFailures` value `autoCompactIfNeeded` threads back to the
     /// caller (`autoCompact.ts:328-349`): reset to `0` on a successful
@@ -81,6 +84,8 @@ pub struct CompactionOrchestrator {
     pub snip: SnipCompactor,
     /// Microcompact layer.
     pub micro: Microcompactor,
+    /// Same-input cache for microcompact results.
+    pub cached_micro: CachedMicrocompact,
     /// Autocompact layer.
     pub auto: Autocompactor,
     /// Token threshold above which autocompact fires.
@@ -96,6 +101,7 @@ impl CompactionOrchestrator {
             micro: Microcompactor {
                 config: TimeBasedMCConfig::default(),
             },
+            cached_micro: CachedMicrocompact::default(),
             auto: Autocompactor::new(),
             autocompact_threshold,
         }
@@ -116,6 +122,7 @@ impl CompactionOrchestrator {
             micro: Microcompactor {
                 config: TimeBasedMCConfig::default(),
             },
+            cached_micro: CachedMicrocompact::default(),
             auto,
             autocompact_threshold,
         }
@@ -183,6 +190,7 @@ impl CompactionOrchestrator {
     ) -> Result<IterationCompactionResult, CompactionError> {
         let mut layers = Vec::new();
         let mut freed = snip_tokens_freed_already;
+        let mut cache_hit = false;
         if snip_tokens_freed_already > 0 {
             layers.push(CompactionLayer::Snip);
         }
@@ -222,7 +230,13 @@ impl CompactionOrchestrator {
         // `keep_recent` count alone (the SPECS-noted fallback) rather than the
         // exact since-last-assistant idle gap.
         if self.micro.config.enabled {
-            let micro = self.micro.compact(messages, SystemTime::now());
+            let cached = self.cached_micro.compact_with(
+                messages,
+                SystemTime::now(),
+                |input, now| self.micro.compact(input, now),
+            );
+            cache_hit = cached.cache_hit;
+            let micro = cached.result;
             if micro.cleared_count > 0 {
                 layers.push(CompactionLayer::Microcompact);
                 freed = freed.saturating_add(micro.tokens_saved);
@@ -316,6 +330,7 @@ impl CompactionOrchestrator {
             messages,
             layers_applied: layers,
             total_tokens_freed: freed,
+            cache_hit,
             consecutive_failures: tracking.consecutive_failures,
             was_compacted,
             rapid_refill_breaker_tripped,
@@ -344,7 +359,8 @@ fn history_snip_enabled() -> bool {
 mod tests {
     use super::*;
     use crate::autocompact::CompactionResult;
-    use protocol::MessageId;
+    use protocol::{ContentBlock, MessageId, ToolUseId};
+    use serde_json::json;
 
     fn long_user(i: usize) -> ConversationMessage {
         // ~80 chars → ~20 tokens each, so a handful clears any small threshold.
@@ -382,6 +398,43 @@ mod tests {
     /// `was_compacted` is false and `Autocompact` is absent from the layers.
     fn order_orchestrator(threshold: u64) -> CompactionOrchestrator {
         CompactionOrchestrator::new(threshold)
+    }
+
+    fn assistant_tool_use(name: &str, id: ToolUseId) -> ConversationMessage {
+        ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolUse {
+                id,
+                name: name.into(),
+                input: json!({}),
+                provider_id: None,
+            }],
+            stop_reason: None,
+        }
+    }
+
+    fn user_tool_result(tool_use_id: ToolUseId, content: &str) -> ConversationMessage {
+        ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id,
+                content: content.into(),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+        }
+    }
+
+    fn microcompactable_messages() -> Vec<ConversationMessage> {
+        let mut msgs = Vec::new();
+        for i in 0..8 {
+            let id = ToolUseId::new();
+            msgs.push(assistant_tool_use("Read", id.clone()));
+            msgs.push(user_tool_result(id, &format!("body-{i} {}", "x".repeat(40_000))));
+        }
+        msgs
     }
 
     #[tokio::test]
@@ -492,6 +545,31 @@ mod tests {
             .expect("wrapper succeeds");
         assert!(res.was_compacted);
         assert!(res.layers_applied.contains(&CompactionLayer::Autocompact));
+    }
+
+    #[tokio::test]
+    async fn microcompact_cache_hit_is_reported_on_repeated_same_input() {
+        let mut orch = order_orchestrator(1_000_000);
+        orch.micro.config.enabled = true;
+        let msgs = microcompactable_messages();
+
+        let first = orch
+            .process_iteration_tracked(
+                msgs.clone(),
+                0,
+                &mut AutoCompactTrackingState::default(),
+            )
+            .await
+            .expect("first microcompact pass succeeds");
+        let second = orch
+            .process_iteration_tracked(msgs, 0, &mut AutoCompactTrackingState::default())
+            .await
+            .expect("second microcompact pass succeeds");
+
+        assert!(!first.cache_hit, "empty cache starts with a miss");
+        assert!(second.cache_hit, "same input should hit cached microcompact");
+        assert_eq!(first.messages, second.messages, "hit returns cached summary");
+        assert!(second.layers_applied.contains(&CompactionLayer::Microcompact));
     }
 
     // --- COMPACT.4: HISTORY_SNIP gating ---------------------------------- //

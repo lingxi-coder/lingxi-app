@@ -8,17 +8,13 @@
 //! [`Arc<dyn HttpTransport>`] handle so the whole client stays usable behind
 //! `Arc<dyn SideQueryClient>` (`MemorySelector::new` takes exactly that).
 //!
-//! ## Field-forwarding gap (documented)
+//! ## Field forwarding
 //!
-//! This client wires the request through [`DefaultLlmClient::execute`], which
-//! forwards `model`, `system`, `messages`, `max_tokens`, `tools`, and
-//! `temperature`. The remaining DTO fields — `tool_choice`, `output_format`,
-//! `stop_sequences`, `max_retries`, and `thinking_budget` — are intentionally
-//! dropped. That is sufficient for the §6.3 memory selector, which relies on
-//! JSON-shaped *text* output (decoded here into [`SideQueryResponse::structured`])
-//! rather than a server-side `response_format`. A follow-up that adds the missing
-//! body keys can forward the rest; until then they are accepted on the request
-//! and dropped.
+//! Forwards `model`, `system`, `messages`, `max_tokens`, `tools`, `temperature`,
+//! plus `tool_choice` and `stop_sequences`. `output_format` drives the
+//! structured-text decode (not a server-side `response_format`); `max_retries`
+//! and `thinking_budget` stay dropped (the model table is reasoning:false).
+//! Existing callers pass `None`/empty for the extras, so the wire is byte-identical.
 //!
 //! ## System forwarding fix
 //!
@@ -294,6 +290,12 @@ impl SideQueryClient for ProviderSideQueryClient {
             system,
             messages,
             tools,
+            // output_format drives the structured text decode (NOT
+            // response_format); max_retries is a caller-side budget; thinking
+            // stays dropped (sidequery_model_table is reasoning:false, so
+            // forwarding a budget would only UnsupportedCapability-error).
+            tool_choice: convert_tool_choice(request.tool_choice.as_ref()),
+            stop_sequences: request.stop_sequences,
             max_tokens: Some(request.max_tokens),
             temperature: request.temperature.map(f64::from),
             ..LlmRequest::default()
@@ -455,6 +457,24 @@ fn convert_tool_declarations(
     tools: Vec<serde_json::Value>,
 ) -> Result<Vec<llm_client::ToolDeclaration>, llm_client::LlmError> {
     tools.into_iter().map(convert_one_tool).collect()
+}
+
+/// Map the DTO's JSON `tool_choice` to [`llm_client::ToolChoice`]. Accepts the
+/// Anthropic wire shapes: `{"type":"auto"}`, `{"type":"any"}`,
+/// `{"type":"none"}`, `{"type":"tool","name":N}`. Unknown / absent ⇒ `None`
+/// (provider default), so the memory selector that passes `None` is unchanged.
+fn convert_tool_choice(choice: Option<&serde_json::Value>) -> Option<llm_client::ToolChoice> {
+    let ty = choice?.get("type").and_then(serde_json::Value::as_str)?;
+    match ty {
+        "auto" => Some(llm_client::ToolChoice::Auto),
+        "none" => Some(llm_client::ToolChoice::None),
+        "any" | "required" => Some(llm_client::ToolChoice::Required),
+        "tool" => choice?
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(|name| llm_client::ToolChoice::Tool { name: name.into() }),
+        _ => None,
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -765,6 +785,26 @@ mod tests {
         assert_eq!(call["input"]["q"].as_str(), Some("rust"));
         // ToolUseId serialises transparently as the bare UUID string.
         assert_eq!(call["id"].as_str(), Some(tu));
+    }
+
+    #[tokio::test]
+    async fn forwards_tool_choice_stop_sequences_and_thinking() {
+        let body = serde_json::json!({
+            "id": "msg_fwd", "model": "claude-haiku-4-5",
+            "content": [{ "type": "text", "text": "ok" }],
+            "stop_reason": "end_turn", "usage": { "input_tokens": 1, "output_tokens": 1 }
+        }).to_string();
+        let transport = Arc::new(StubTransport::new(body));
+        let client = ProviderSideQueryClient::new("sk-test", None, transport.clone());
+        let mut r = req(None);
+        r.tool_choice = Some(serde_json::json!({ "type": "any" }));
+        r.stop_sequences = vec!["STOP".into()];
+        client.query(r).await.expect("query ok");
+        let received = transport.received.lock().unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(received[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["tool_choice"]["type"].as_str(), Some("any"), "any→required");
+        assert_eq!(body["stop_sequences"][0].as_str(), Some("STOP"));
     }
 
     #[tokio::test]

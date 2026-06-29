@@ -155,6 +155,7 @@ fn errored_compactor() -> Arc<CompactionOrchestrator> {
             config: TimeBasedMCConfig::default(),
         },
         auto: Autocompactor::with_forked_runner(runner, slot),
+        cached_micro: compaction::cached_microcompact::CachedMicrocompact::default(),
         // Threshold 1 token → autocompact ALWAYS fires.
         autocompact_threshold: 1,
     };

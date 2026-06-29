@@ -71,6 +71,52 @@ fn extract_base_command(command: &str) -> String {
     command.split_whitespace().next().unwrap_or("").to_string()
 }
 
+/// Best-effort parse-only scan for files a Bash command likely WRITES, so the
+/// caller can invalidate stale read-file-state. Conservative: detects `>`/`>>`
+/// redirects, `tee [-a] FILE...`, heredoc `> FILE`, and common write tools
+/// (`cp dst`, `mv dst`, `touch`, `install`). Never executes; returns deduped
+/// path tokens. An empty result means "no write recognized", NOT "no write".
+/// Unknown-but-risky shapes are left to the caller's conservative invalidation.
+#[must_use]
+pub fn parsed_written_paths(command: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |p: &str| {
+        let t = p.trim_matches(['"', '\'']).trim();
+        if !t.is_empty() && !t.starts_with('-') && !out.iter().any(|e| e == t) {
+            out.push(t.to_string());
+        }
+    };
+    let toks: Vec<&str> = command.split_whitespace().collect();
+    for (i, tok) in toks.iter().enumerate() {
+        // `>file` / `>>file` (glued) and bare `>` / `>>` (next token is target).
+        if let Some(rest) = tok.strip_prefix(">>").or_else(|| tok.strip_prefix('>')) {
+            if rest.is_empty() {
+                if let Some(n) = toks.get(i + 1) {
+                    push(n);
+                }
+            } else {
+                push(rest);
+            }
+        }
+    }
+    // `tee [-a] FILE...` writes each non-flag arg after `tee`.
+    if let Some(p) = toks.iter().position(|t| *t == "tee") {
+        for n in &toks[p + 1..] {
+            if n.starts_with('-') {
+                continue;
+            }
+            push(n);
+        }
+    }
+    // Single-dest writers: `touch`, `cp`/`mv`/`install` final arg.
+    match toks.first().copied() {
+        Some("touch") => toks[1..].iter().for_each(|n| push(n)),
+        Some("cp" | "mv" | "install") if toks.len() >= 2 => push(toks[toks.len() - 1]),
+        _ => {}
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +185,16 @@ mod tests {
     fn zero_exit_never_errors() {
         assert!(!interpret_command_result("grep x f", 0).is_error);
         assert_eq!(interpret_command_result("grep x f", 0).message, None);
+    }
+
+    #[test]
+    fn detects_redirect_tee_and_writers() {
+        assert_eq!(parsed_written_paths("echo hi > a.txt"), vec!["a.txt"]);
+        assert_eq!(parsed_written_paths("echo hi >>log"), vec!["log"]);
+        assert_eq!(parsed_written_paths("cat <<EOF > out.md"), vec!["out.md"]);
+        assert_eq!(parsed_written_paths("foo | tee -a x y"), vec!["x", "y"]);
+        assert_eq!(parsed_written_paths("touch p q"), vec!["p", "q"]);
+        assert_eq!(parsed_written_paths("cp src dst"), vec!["dst"]);
+        assert!(parsed_written_paths("ls -la").is_empty());
     }
 }

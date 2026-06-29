@@ -300,6 +300,14 @@ fn parse_exchange_response(v: &Value) -> Result<ExchangedToken, LlmError> {
 /// fields that DID come back so the failure isn't silently mislabeled.
 fn exchange_failure_detail(v: &Value) -> String {
     if let Some(msg) = v.get("message").and_then(Value::as_str) {
+        // GitHub returns 404 "Not Found" from copilot_internal/v2/token when the
+        // account has no usable Copilot access — make that actionable.
+        if msg.eq_ignore_ascii_case("not found") {
+            return "GitHub Copilot is not available for this account: no active \
+                    Copilot subscription, or your organization hasn't authorized \
+                    this app for Copilot. Check github.com/settings/copilot."
+                .to_string();
+        }
         return format!("copilot token-exchange failed: {msg}");
     }
     let keys: Vec<&str> = v

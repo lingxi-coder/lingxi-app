@@ -107,6 +107,12 @@ pub struct Runtime {
     /// Copilot in `/connect` runs the real web sign-in (browser open + device
     /// poll + token store) instead of an inert key field.
     pub connect_copilot: std::sync::Arc<dyn command_core::CopilotConnectDriver>,
+    /// (T2b) Unified OAuth sign-in driver, projected from
+    /// [`engine_desktop::DesktopRuntime::oauth_connect_driver`]. The TUI mount
+    /// threads a clone into `tui::session::Runtime::with_oauth_connect_driver` so
+    /// picking an OAuth provider (Anthropic Pro/Max, OpenAI ChatGPT) in `/connect`
+    /// runs the real browser sign-in instead of the inert `Unavailable` screen.
+    pub oauth_connect_driver: std::sync::Arc<dyn command_core::OAuthConnectDriver>,
 }
 
 /// Build-result for the TUI startup path. (M6-03)
@@ -579,6 +585,7 @@ pub async fn build_runtime_from_config(
         structured_output_slot: rt.structured_output_slot,
         bash_runner: rt.bash_runner,
         connect_copilot: rt.connect_copilot,
+        oauth_connect_driver: rt.oauth_connect_driver,
     })
 }
 

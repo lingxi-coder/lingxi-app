@@ -1621,6 +1621,10 @@ pub struct DesktopRuntime {
     /// device-code poll + token store) instead of an inert key field. Also
     /// registered in the engine `/connect` command group (same Arc).
     pub connect_copilot: Arc<dyn command_core::CopilotConnectDriver>,
+    /// (T2b) Unified OAuth sign-in driver for the TUI `/connect` picker. Drives
+    /// the browser flow for the first-party OAuth providers (Anthropic Pro/Max,
+    /// OpenAI ChatGPT) — replacing the honest-but-inert `Unavailable` screen.
+    pub oauth_connect_driver: Arc<dyn command_core::OAuthConnectDriver>,
 }
 
 /// Errors surfaced while building a [`DesktopRuntime`].
@@ -4430,6 +4434,14 @@ pub async fn build(
             openai_oauth_client,
             credentials.clone(),
         ));
+    // Unified OAuth sign-in driver for the TUI `/connect` picker (Anthropic
+    // Pro/Max + OpenAI ChatGPT browser flows). Reuses the same backends as
+    // `/login` (the Anthropic `auth` handle) and `/connect chatgpt`
+    // (`connect_chatgpt`); built here while both are still owned (the registry
+    // call below moves `connect_chatgpt`).
+    let oauth_connect_driver: Arc<dyn command_core::OAuthConnectDriver> = Arc::new(
+        crate::connect::EngineOAuthConnect::new(auth.clone(), connect_chatgpt.clone()),
+    );
     let reg = desktop_command_registry(
         handle,
         auth.clone(),
@@ -4780,6 +4792,7 @@ pub async fn build(
         runtime_spawner: Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
         bash_runner,
         connect_copilot,
+        oauth_connect_driver,
     })
 }
 

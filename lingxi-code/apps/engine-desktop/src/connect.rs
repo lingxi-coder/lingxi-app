@@ -58,7 +58,7 @@ impl ConnectCredentialWriter for EngineCredentialWriter {
     }
 }
 
-use command_core::{ChatGptConnectDriver, CopilotConnectDriver, CopilotConnectStep};
+use command_core::{ChatGptConnectDriver, CopilotConnectDriver, CopilotConnectStep, OAuthConnectDriver};
 use llm_client::oauth::openai as openai_oauth;
 use llm_client::copilot::{CopilotHttp, CopilotLogin, DeviceCodeResponse, PollOutcome};
 use llm_client::transport::BoxFuture;
@@ -67,7 +67,7 @@ use platform_posix::PosixHttp;
 use protocol::{HttpMethod, HttpRequest};
 use serde_json::Value;
 use std::sync::Mutex as StdMutex;
-use traits::HttpTransport;
+use traits::{AuthHandle, HttpTransport};
 
 /// Credential id under which the GitHub Copilot OAuth token is stored. Matches
 /// the catalog preset's `profile_name`.
@@ -335,6 +335,85 @@ impl ChatGptConnectDriver for EngineChatGptConnect {
             .map_err(|e| ConnectError::Network(e.to_string()))?;
         let account = info.account_id.unwrap_or_else(|| "?".into());
         Ok(format!("Connected chatgpt (account {account})."))
+    }
+}
+
+/// Engine implementation of [`OAuthConnectDriver`]: dispatches the TUI `/connect`
+/// browser sign-in per provider to the existing backend — Anthropic Pro/Max via
+/// the shared [`AuthHandle`] (the same flow `/login` runs), OpenAI ChatGPT via the
+/// [`ChatGptConnectDriver`]. Those backends persist the tokens.
+pub struct EngineOAuthConnect {
+    auth: Arc<dyn AuthHandle>,
+    chatgpt: Arc<dyn ChatGptConnectDriver>,
+}
+
+impl EngineOAuthConnect {
+    /// Construct over the Anthropic auth handle + the ChatGPT connect driver.
+    #[must_use]
+    pub fn new(auth: Arc<dyn AuthHandle>, chatgpt: Arc<dyn ChatGptConnectDriver>) -> Self {
+        Self { auth, chatgpt }
+    }
+}
+
+#[async_trait]
+impl OAuthConnectDriver for EngineOAuthConnect {
+    async fn login(&self, provider_id: &str) -> Result<String, ConnectError> {
+        match provider_id {
+            "anthropic" => match self.auth.login().await {
+                Ok(info) => Ok(format!("Connected Anthropic ({}).", info.email)),
+                Err(traits::AuthError::Cancelled) => Err(ConnectError::Cancelled),
+                Err(e) => Err(ConnectError::Network(e.to_string())),
+            },
+            "openai-chatgpt" => self.chatgpt.connect().await,
+            other => Err(ConnectError::Network(format!(
+                "no browser sign-in for provider '{other}'"
+            ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod oauth_connect_tests {
+    use super::*;
+    use traits::{AuthError, AuthHandle, LoginInfo};
+
+    struct OkAuth;
+    #[async_trait]
+    impl AuthHandle for OkAuth {
+        async fn login(&self) -> Result<LoginInfo, AuthError> {
+            Ok(LoginInfo { email: "me@example.com".into(), org_id: "org_1".into() })
+        }
+        async fn logout(&self) -> Result<(), AuthError> { Ok(()) }
+        async fn current_user(&self) -> Option<LoginInfo> { None }
+    }
+    struct CancelAuth;
+    #[async_trait]
+    impl AuthHandle for CancelAuth {
+        async fn login(&self) -> Result<LoginInfo, AuthError> { Err(AuthError::Cancelled) }
+        async fn logout(&self) -> Result<(), AuthError> { Ok(()) }
+        async fn current_user(&self) -> Option<LoginInfo> { None }
+    }
+    struct OkChatGpt;
+    #[async_trait]
+    impl ChatGptConnectDriver for OkChatGpt {
+        async fn connect(&self) -> Result<String, ConnectError> {
+            Ok("Connected chatgpt (account a1).".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatches_by_provider_id() {
+        let d = EngineOAuthConnect::new(Arc::new(OkAuth), Arc::new(OkChatGpt));
+        assert!(d.login("anthropic").await.unwrap().contains("me@example.com"));
+        assert!(d.login("openai-chatgpt").await.unwrap().contains("chatgpt"));
+        // Unknown provider → a clear error, never a panic.
+        assert!(matches!(d.login("github-copilot").await, Err(ConnectError::Network(_))));
+    }
+
+    #[tokio::test]
+    async fn maps_anthropic_cancel_to_connect_cancelled() {
+        let d = EngineOAuthConnect::new(Arc::new(CancelAuth), Arc::new(OkChatGpt));
+        assert!(matches!(d.login("anthropic").await, Err(ConnectError::Cancelled)));
     }
 }
 

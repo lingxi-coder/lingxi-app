@@ -2007,6 +2007,8 @@ pub async fn pump_switch_model(
 pub(crate) enum ConnectRoute {
     ApiKey,
     Copilot,
+    /// (T2b) First-party OAuth browser sign-in (Anthropic Pro/Max, OpenAI ChatGPT).
+    OAuth,
     Unavailable,
 }
 
@@ -2016,7 +2018,8 @@ pub(crate) fn connect_route_for(_provider: &str, auth_tag: Option<&str>) -> Conn
     use crate::screens::connect_picker::ConnectMethod;
     match auth_tag.map(ConnectMethod::from_tag) {
         Some(ConnectMethod::CopilotDevice) => ConnectRoute::Copilot,
-        Some(ConnectMethod::OAuthSoon) => ConnectRoute::Unavailable,
+        // (T2b) OAuth methods now drive the real browser flow (was Unavailable).
+        Some(ConnectMethod::OAuthSoon) => ConnectRoute::OAuth,
         _ => ConnectRoute::ApiKey, // ApiKey or unknown
     }
 }
@@ -2057,6 +2060,13 @@ pub async fn pump_open_connect(state: &Arc<Mutex<AppState>>) -> bool {
             // canonical label on the registry path).
             st.open_connect(crate::screens::connect::ConnectScreenState::api_key(&provider, &provider));
         }
+        ConnectRoute::OAuth => {
+            // (T2b) Open the OAuth screen ("Opening browser…") and raise the
+            // one-shot login signal; the oauth-login task drives the real flow.
+            st.oauth_login_provider = Some(provider.clone());
+            st.pending_oauth_login = true;
+            st.open_connect(crate::screens::connect::ConnectScreenState::oauth(&provider, &provider));
+        }
         ConnectRoute::Unavailable => {
             st.open_connect(crate::screens::connect::ConnectScreenState::unavailable(
                 &provider,
@@ -2092,6 +2102,20 @@ async fn set_copilot_failed(state: &Arc<Mutex<AppState>>, error: &str) -> bool {
     let mut st = state.lock().await;
     if let Some(crate::screens::Screen::Connect(cs)) = st.active_screen.as_mut() {
         if matches!(cs.flow, crate::screens::connect::ConnectFlow::Copilot) {
+            cs.set_failed(error);
+            return true;
+        }
+    }
+    false
+}
+
+/// (T2b OAuth) If the active screen is STILL the OAuth `/connect` screen, mark it
+/// `Failed(error)` and return `true`; else a no-op (`false`) — a late completion
+/// after the user pressed Esc never corrupts an unrelated screen.
+async fn set_oauth_failed(state: &Arc<Mutex<AppState>>, error: &str) -> bool {
+    let mut st = state.lock().await;
+    if let Some(crate::screens::Screen::Connect(cs)) = st.active_screen.as_mut() {
+        if matches!(cs.flow, crate::screens::connect::ConnectFlow::OAuth { .. }) {
             cs.set_failed(error);
             return true;
         }
@@ -3104,6 +3128,9 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
     // `pump_open_connect` opens the Copilot `/connect` screen; the copilot-login
     // task (below) waits on it and drives the engine device-flow driver.
     let copilot_login_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    // (T2b) Start signal for the OAuth sign-in task (Anthropic / OpenAI ChatGPT),
+    // fired by the ticker right after `pump_open_connect` opens the OAuth screen.
+    let oauth_login_notify = std::sync::Arc::new(tokio::sync::Notify::new());
     // ---- Ticker: 100ms spinner refresh + paste idle-flush + Settings open pump
     {
         let state = state.clone();
@@ -3112,6 +3139,7 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         // (Copilot device-flow) Clone of the start signal: the ticker calls
         // `notify_one()` right after `pump_open_connect` opens the Copilot screen.
         let copilot_login_notify = copilot_login_notify.clone();
+        let oauth_login_notify = oauth_login_notify.clone();
         // (M7-13 review) The orchestrator handle drives the async Settings open
         // pump below. `None` (resume picker / smoke gates) leaves Settings
         // unreachable, which is correct for those bridge-less mounts.
@@ -3264,6 +3292,10 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 // `take_pending_copilot_login` drains the flag.
                 if state.lock().await.take_pending_copilot_login() {
                     copilot_login_notify.notify_one();
+                }
+                // (T2b) Same one-shot hand-off for the OAuth `/connect` screen.
+                if state.lock().await.take_pending_oauth_login() {
+                    oauth_login_notify.notify_one();
                 }
                 // (Plan 3c C1) `/connect` provider-key persistence pump — drains
                 // `pending_store_key` and writes the key through the bound
@@ -3431,6 +3463,78 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                     Err(e) => {
                         if set_copilot_failed(&state, &e.to_string()).await {
                             tick_for_copilot.set(tick_for_copilot.get().wrapping_add(1));
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // ---- OAuth sign-in login task (`/connect` Anthropic / OpenAI ChatGPT) ----
+    // Mirrors the copilot-login task but simpler: the OAuth flow is a single
+    // blocking `OAuthConnectDriver::login(provider)` (browser opens, blocks until
+    // the redirect). On success: reflect availability (picker badges ✓), show
+    // "Signed in ✓", then auto-return to the REPL with a confirmation. Screen
+    // mutations are guarded on the OAuth screen still being open (Esc-safe).
+    {
+        let state = state.clone();
+        let notify = oauth_login_notify.clone();
+        let mut tick_for_oauth = tick;
+        hooks.use_future(async move {
+            loop {
+                notify.notified().await;
+                let (driver, provider) = {
+                    let st = state.lock().await;
+                    (st.oauth_connect_driver.clone(), st.oauth_login_provider.clone())
+                };
+                let (Some(driver), Some(provider)) = (driver, provider) else {
+                    // No driver/provider wired (smoke gates / tests): the screen
+                    // stays at "Opening browser…" inertly.
+                    continue;
+                };
+                match driver.login(&provider).await {
+                    Ok(_msg) => {
+                        {
+                            let mut st = state.lock().await;
+                            // The driver stored the token; reflect availability so
+                            // the picker badges ✓ and routing accepts it.
+                            st.provider_availability.insert(provider.clone(), true);
+                            if let Some(crate::screens::Screen::Connect(cs)) =
+                                st.active_screen.as_mut()
+                            {
+                                if matches!(
+                                    cs.flow,
+                                    crate::screens::connect::ConnectFlow::OAuth { .. }
+                                ) {
+                                    cs.set_done();
+                                }
+                            }
+                        }
+                        tick_for_oauth.set(tick_for_oauth.get().wrapping_add(1));
+                        // Let the user SEE "Signed in ✓" briefly, then auto-return.
+                        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+                        {
+                            let mut st = state.lock().await;
+                            let on_done = matches!(
+                                st.active_screen.as_ref(),
+                                Some(crate::screens::Screen::Connect(cs))
+                                    if matches!(cs.flow, crate::screens::connect::ConnectFlow::OAuth { .. })
+                                        && matches!(cs.copilot, crate::screens::connect::CopilotPhase::Done)
+                            );
+                            if on_done {
+                                st.close_screen();
+                                st.push_message(crate::state::RenderedMessage::SystemText {
+                                    body: format!("\u{2713} Signed in to {provider}."),
+                                    timestamp: chrono::Utc::now().timestamp(),
+                                    is_error: false,
+                                });
+                            }
+                        }
+                        tick_for_oauth.set(tick_for_oauth.get().wrapping_add(1));
+                    }
+                    Err(e) => {
+                        if set_oauth_failed(&state, &e.to_string()).await {
+                            tick_for_oauth.set(tick_for_oauth.get().wrapping_add(1));
                         }
                     }
                 }
@@ -4947,7 +5051,8 @@ mod tests {
     #[test]
     fn connect_route_picks_flow_by_method() {
         use crate::screens::connect_picker::ConnectMethod;
-        assert_eq!(connect_route_for("oauth_tag_provider", Some("oauth")), ConnectRoute::Unavailable);
+        // (T2b) OAuth methods now drive the real browser flow (was Unavailable).
+        assert_eq!(connect_route_for("oauth_tag_provider", Some("oauth")), ConnectRoute::OAuth);
         assert_eq!(connect_route_for("github-copilot", Some("copilot_device")), ConnectRoute::Copilot);
         assert_eq!(connect_route_for("anthropic", Some("api_key")), ConnectRoute::ApiKey);
         assert_eq!(connect_route_for("typed-unknown", None), ConnectRoute::ApiKey); // fallback preserves today

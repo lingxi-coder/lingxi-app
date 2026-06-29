@@ -948,6 +948,18 @@ pub struct AppState {
     /// GitHub Enterprise (set by the deployment-type popup). Read by the
     /// copilot-login task when it calls `begin(domain)`.
     pub copilot_login_domain: Option<String>,
+    /// (T2b OAuth `/connect`) Engine driver for the browser OAuth sign-in
+    /// (Anthropic Pro/Max, OpenAI ChatGPT). `None` on a headless / no-driver build
+    /// — the OAuth `/connect` screen then sits inertly at "Opening browser…".
+    pub oauth_connect_driver: Option<std::sync::Arc<dyn command_core::OAuthConnectDriver>>,
+    /// (T2b OAuth `/connect`) Raised when the OAuth `/connect` screen opens so the
+    /// main loop fires the oauth-login task exactly once. Drained by
+    /// [`Self::take_pending_oauth_login`] (mirrors `pending_copilot_login`).
+    pub pending_oauth_login: bool,
+    /// (T2b OAuth `/connect`) Provider id the next oauth login runs against (set
+    /// alongside `pending_oauth_login`; read by the oauth-login task, mirroring
+    /// `copilot_login_domain`).
+    pub oauth_login_provider: Option<String>,
     /// (`/color`) Session agent-color name set by the `/color <name>` command
     /// (claude-code `standaloneAgentContext.color`). `Some("cyan")` after
     /// `/color cyan`; `None` after `/color default` (reset). Maps to a render
@@ -1150,6 +1162,9 @@ impl AppState {
             copilot_connect_driver: None,
             pending_copilot_login: false,
             copilot_login_domain: None,
+            oauth_connect_driver: None,
+            pending_oauth_login: false,
+            oauth_login_provider: None,
             session_agent_color: None,
             pending_save_color: None,
             pending_permission_delete: None,
@@ -1382,6 +1397,24 @@ impl AppState {
     /// signals the copilot-login task to run the device flow exactly once.
     pub fn take_pending_copilot_login(&mut self) -> bool {
         std::mem::take(&mut self.pending_copilot_login)
+    }
+
+    /// (T2b OAuth `/connect`) Attach the engine OAuth sign-in driver at TUI init
+    /// (mirrors [`Self::set_copilot_connect_driver`]). `None` (smoke gates / tests)
+    /// leaves the oauth-login task inert.
+    pub fn set_oauth_connect_driver(
+        &mut self,
+        driver: Option<std::sync::Arc<dyn command_core::OAuthConnectDriver>>,
+    ) {
+        self.oauth_connect_driver = driver;
+    }
+
+    /// (T2b OAuth `/connect`) Take + clear [`Self::pending_oauth_login`]. The main
+    /// loop calls this right after `pump_open_connect` and, when `true`, signals
+    /// the oauth-login task to run the browser flow exactly once (the task reads
+    /// [`Self::oauth_login_provider`] for the target).
+    pub fn take_pending_oauth_login(&mut self) -> bool {
+        std::mem::take(&mut self.pending_oauth_login)
     }
 
     /// (Plan 3c §6.3) Open the `/connect` credential screen with the given flow

@@ -18,8 +18,19 @@ pub enum ConnectFlow {
     },
     /// GitHub Copilot OAuth device-flow.
     Copilot,
-    /// (T2a) A login method whose flow isn't wired in this build (OAuth). Honest
-    /// terminal screen — never a dead key field. Any key returns to the REPL.
+    /// (T2b) First-party OAuth browser sign-in (Anthropic Pro/Max, OpenAI
+    /// ChatGPT). The host drives the blocking `OAuthConnectDriver::login`; this
+    /// screen shows progress via the shared [`CopilotPhase`] field (Starting →
+    /// Done/Failed; no device-code Polling step). Typing is inert; terminal phases
+    /// return on any key.
+    OAuth {
+        /// Provider grouping key being signed into.
+        provider_id: String,
+        /// Human provider label for the header.
+        label: String,
+    },
+    /// (T2a) A login method whose flow isn't wired in this build. Honest terminal
+    /// screen — never a dead key field. Any key returns to the REPL.
     Unavailable { label: String, reason: String },
 }
 
@@ -90,6 +101,18 @@ impl ConnectScreenState {
                key_buffer: String::new(), copilot: CopilotPhase::Starting }
     }
 
+    /// Open a first-party OAuth browser sign-in screen for `provider_id`
+    /// (header uses `label`). Starts in the `Starting` phase ("opening browser");
+    /// the host's oauth-login task advances it to `Done`/`Failed`.
+    #[must_use]
+    pub fn oauth(provider_id: &str, label: &str) -> Self {
+        Self {
+            flow: ConnectFlow::OAuth { provider_id: provider_id.to_string(), label: label.to_string() },
+            key_buffer: String::new(),
+            copilot: CopilotPhase::Starting,
+        }
+    }
+
     /// Open the Copilot device-flow in the `Starting` phase.
     #[must_use]
     pub fn copilot_pending() -> Self {
@@ -127,7 +150,7 @@ pub fn handle_connect_key(st: &mut ConnectScreenState, key: KeyCode) -> ConnectA
     // to the REPL (not just Esc). Without this the screen sat on "Authorized ✓"
     // and the only labelled action was "Esc to cancel" — which read like it would
     // UNDO the successful login.
-    if matches!(st.flow, ConnectFlow::Copilot)
+    if matches!(st.flow, ConnectFlow::Copilot | ConnectFlow::OAuth { .. })
         && matches!(st.copilot, CopilotPhase::Done | CopilotPhase::Failed { .. })
     {
         return ConnectAction::Cancel;
@@ -152,6 +175,9 @@ pub fn handle_connect_key(st: &mut ConnectScreenState, key: KeyCode) -> ConnectA
             _ => ConnectAction::None,
         },
         ConnectFlow::Copilot => ConnectAction::None,
+        // OAuth in-progress (Starting): typing is inert; the host drives the
+        // browser flow. Terminal phases already returned above; Esc at the top.
+        ConnectFlow::OAuth { .. } => ConnectAction::None,
         ConnectFlow::Unavailable { .. } => ConnectAction::Cancel,
     }
 }
@@ -166,6 +192,23 @@ pub fn render_connect_to_string(st: &ConnectScreenState) -> String {
             let mask: String = "\u{2022}".repeat(st.key_buffer.chars().count());
             out.push_str(&format!("Key: {mask}\n"));
             out.push_str("Paste your API key \u{00B7} Enter to save \u{00B7} Esc to cancel");
+        }
+        ConnectFlow::OAuth { label, .. } => {
+            out.push_str(&format!("Connect {label}\n"));
+            match &st.copilot {
+                CopilotPhase::Starting | CopilotPhase::Polling { .. } => {
+                    out.push_str("Opening your browser to sign in\u{2026}\n");
+                    out.push_str("Complete the sign-in in your browser \u{00B7} Esc to cancel");
+                }
+                CopilotPhase::Done => {
+                    out.push_str("Signed in \u{2713}\n");
+                    out.push_str("Connected \u{2014} returning to the prompt\u{2026}");
+                }
+                CopilotPhase::Failed { error } => {
+                    out.push_str(&format!("Sign-in failed: {error}\n"));
+                    out.push_str("Connect with an API key instead \u{00B7} press any key to return");
+                }
+            }
         }
         ConnectFlow::Unavailable { label, reason } => {
             out.push_str(&format!("Connect {label}\n"));
@@ -267,6 +310,34 @@ mod tests {
         // Any key (and Esc) closes — never a dead field.
         assert_eq!(handle_connect_key(&mut st, crossterm::event::KeyCode::Enter), ConnectAction::Cancel);
         assert_eq!(handle_connect_key(&mut st, crossterm::event::KeyCode::Esc), ConnectAction::Cancel);
+    }
+
+    #[test]
+    fn oauth_flow_renders_progress_and_terminal_phases_close_on_any_key() {
+        // In-progress (Starting): "Opening your browser…"; typing inert, Esc cancels.
+        let mut st = ConnectScreenState::oauth("anthropic", "Anthropic");
+        let starting = render_connect_to_string(&st);
+        assert!(starting.contains("Connect Anthropic"));
+        assert!(starting.contains("Opening your browser to sign in"));
+        assert_eq!(handle_connect_key(&mut st, KeyCode::Char('x')), ConnectAction::None);
+        assert_eq!(handle_connect_key(&mut st, KeyCode::Esc), ConnectAction::Cancel);
+
+        // Success: "Signed in ✓"; ANY key returns to the REPL (not just Esc).
+        let mut done = ConnectScreenState::oauth("openai-chatgpt", "OpenAI (ChatGPT)");
+        done.set_done();
+        let out = render_connect_to_string(&done);
+        assert!(out.contains("Signed in \u{2713}"));
+        assert!(out.contains("returning to the prompt"), "{out}");
+        assert_eq!(handle_connect_key(&mut done, KeyCode::Enter), ConnectAction::Cancel);
+        assert_eq!(handle_connect_key(&mut done, KeyCode::Char('q')), ConnectAction::Cancel);
+
+        // Failure: shows the error + offers the API-key alternative; any key returns.
+        let mut failed = ConnectScreenState::oauth("anthropic", "Anthropic");
+        failed.set_failed("user cancelled login");
+        let f = render_connect_to_string(&failed);
+        assert!(f.contains("Sign-in failed: user cancelled login"));
+        assert!(f.contains("API key"));
+        assert_eq!(handle_connect_key(&mut failed, KeyCode::Enter), ConnectAction::Cancel);
     }
 
     #[test]

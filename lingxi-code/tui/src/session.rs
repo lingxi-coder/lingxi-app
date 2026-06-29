@@ -126,6 +126,12 @@ pub struct Runtime {
     /// task can run `begin()` + `poll_to_completion()`. `None` (the default)
     /// leaves the Copilot `/connect` screen inert (smoke gates / resume picker).
     copilot_connect_driver: Option<Arc<dyn command_core::CopilotConnectDriver>>,
+    /// (T2b) Engine OAuth sign-in driver (`DesktopRuntime.oauth_connect_driver`),
+    /// threaded into the App (`AppState::set_oauth_connect_driver`) at mount so
+    /// `root`'s oauth-login task can run the browser flow for Anthropic Pro/Max +
+    /// OpenAI ChatGPT. `None` (the default) leaves the OAuth `/connect` screen
+    /// inert (smoke gates / resume picker).
+    oauth_connect_driver: Option<Arc<dyn command_core::OAuthConnectDriver>>,
     /// (TUI-PERM) Receiver for `TuiPermissionGate` exchanges, handed in by the
     /// CLI (`build_runtime_for_tui`). `None` (smoke gates / resume picker) keeps
     /// the permission pump inert. Moved into a take-once slot at mount.
@@ -155,6 +161,7 @@ impl Runtime {
             model_providers: std::collections::BTreeMap::new(),
             provider_key_store: None,
             copilot_connect_driver: None,
+            oauth_connect_driver: None,
             permission_rx: None,
         }
     }
@@ -184,6 +191,7 @@ impl Runtime {
             model_providers: std::collections::BTreeMap::new(),
             provider_key_store: None,
             copilot_connect_driver: None,
+            oauth_connect_driver: None,
             permission_rx: None,
         }
     }
@@ -366,6 +374,20 @@ impl Runtime {
         self
     }
 
+    /// (T2b) Attach the engine OAuth sign-in driver
+    /// (`DesktopRuntime.oauth_connect_driver`). Threaded onto the App at init
+    /// (`AppState::set_oauth_connect_driver`) so `root`'s oauth-login task runs the
+    /// browser flow for Anthropic Pro/Max + OpenAI ChatGPT. Without it the OAuth
+    /// `/connect` screen is inert (smoke gates / resume picker).
+    #[must_use]
+    pub fn with_oauth_connect_driver(
+        mut self,
+        driver: Arc<dyn command_core::OAuthConnectDriver>,
+    ) -> Self {
+        self.oauth_connect_driver = Some(driver);
+        self
+    }
+
     /// Seed the prior conversation a RESUMED session should replay into the
     /// TUI scrollback before the first frame. The CLI's resume branch loads the
     /// persisted transcript (`session::SessionStorage::load` /
@@ -456,6 +478,7 @@ pub async fn run_tui_session(
     // `begin()` + `poll_to_completion()` when the user picks GitHub Copilot in
     // `/connect`. `None` (smoke gates / resume picker) leaves the flow inert.
     initial_state.set_copilot_connect_driver(runtime.copilot_connect_driver.take());
+    initial_state.set_oauth_connect_driver(runtime.oauth_connect_driver.take());
     // (M7-15) Apply the stored theme preference from ~/.lingxi/settings.json
     // (best-effort; absent/unreadable → session-default `auto`). Read once at
     // startup, before the first render, so the very first frame uses the saved

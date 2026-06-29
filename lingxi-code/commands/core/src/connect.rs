@@ -51,6 +51,18 @@ pub trait ChatGptConnectDriver: Send + Sync {
     async fn connect(&self) -> Result<String, ConnectError>;
 }
 
+/// Engine seam for the TUI `/connect` OAuth flow (Anthropic Pro/Max, OpenAI
+/// ChatGPT). Unlike Copilot's device-flow (begin → display code → poll), these are
+/// a single browser/PKCE call that blocks until the redirect completes, so one
+/// method drives the whole flow. The engine dispatches per `provider_id` to the
+/// real backend (`AuthHandle::login` for Anthropic; [`ChatGptConnectDriver`] for
+/// OpenAI ChatGPT) and persists tokens. Returns a human-facing display message.
+#[async_trait]
+pub trait OAuthConnectDriver: Send + Sync {
+    /// Drive the browser OAuth sign-in for `provider_id` to completion.
+    async fn login(&self, provider_id: &str) -> Result<String, ConnectError>;
+}
+
 /// One step of the Copilot device-flow, surfaced so the tui renders the code.
 #[derive(Debug, Clone)]
 pub struct CopilotConnectStep {

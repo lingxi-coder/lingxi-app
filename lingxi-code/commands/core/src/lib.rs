@@ -61,7 +61,7 @@ pub use compact::CompactHandler;
 pub use config::ConfigHandler;
 pub use connect::{
     ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, ConnectHandler,
-    CopilotConnectDriver, CopilotConnectStep,
+    CopilotConnectDriver, CopilotConnectStep, OAuthConnectDriver,
 };
 pub use context::ContextHandler;
 pub use doctor::DoctorHandler;

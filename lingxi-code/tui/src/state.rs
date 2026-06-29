@@ -1438,6 +1438,12 @@ impl AppState {
             .map(|(pid, _)| pid.clone())
             .collect();
         state.set_configured(configured);
+        // Live path: always trim to the "latest few" — even with NOTHING
+        // configured (a no-auth session) — so the picker never dumps the full
+        // assembled catalog (~hundreds). Unconfigured providers still render
+        // (badged `[Connect]`) until at least one is configured. The test/headless
+        // path constructs `ModelScreenState` directly and leaves `curate` false.
+        state.set_curate(true);
         self.active_screen = Some(crate::screens::Screen::Model(state));
         crate::telemetry::screen_opened("model");
     }

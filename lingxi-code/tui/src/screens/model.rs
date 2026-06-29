@@ -255,6 +255,13 @@ pub struct ModelScreenState {
     /// EMPTY (the default; tests / headless) shows every group, i.e. the
     /// historical claude-code show-all-with-`[Connect]`-badges behavior.
     pub configured: std::collections::BTreeSet<String>,
+    /// (curation) Whether to trim rows to the [`is_curated_model`] "latest few"
+    /// even when `configured` is empty. The live `/model` open path sets this so a
+    /// NO-AUTH session (nothing configured yet) still shows a curated short list
+    /// per provider — badged `[Connect]` — instead of dumping the whole ~460-model
+    /// assembled catalog. Left `false` on the test/headless path so the
+    /// `build_model_entries` byte-parity show-all tests are preserved.
+    pub curate: bool,
 }
 
 /// Controller outcome after a key.
@@ -291,6 +298,7 @@ impl ModelScreenState {
             query: String::new(),
             selected: 0,
             configured: std::collections::BTreeSet::new(),
+            curate: false,
         }
     }
 
@@ -299,6 +307,12 @@ impl ModelScreenState {
     /// [`Self::configured`]. Empty leaves the show-all behavior.
     pub fn set_configured(&mut self, configured: std::collections::BTreeSet<String>) {
         self.configured = configured;
+    }
+
+    /// (curation) Enable the "latest few" trim regardless of `configured`. The
+    /// live `/model` open path sets this; see [`Self::curate`].
+    pub fn set_curate(&mut self, curate: bool) {
+        self.curate = curate;
     }
 
     /// Whether a row matches the query (case-insensitive substring over display
@@ -316,14 +330,16 @@ impl ModelScreenState {
     /// Whether a provider-group row should be shown, given the "latest few"
     /// curation. claude-code curates the picker to a hand-picked short list
     /// (`modelOptions.ts`) rather than dumping the whole catalog (~460 models);
-    /// we mirror that with [`is_curated_model`]. Curation only kicks in on the
-    /// live path (when `configured` is non-empty); the headless/test path leaves
-    /// `configured` empty → show-all, preserving the `build_model_entries`
-    /// byte-parity tests. The user's CURRENT and RECENT models are always kept
-    /// so an off-list active model stays visible/selectable.
+    /// we mirror that with [`is_curated_model`]. Curation runs on the live path —
+    /// either because the user has configured providers (`configured` non-empty)
+    /// OR because [`Self::curate`] is set (a no-auth live session, so the catalog
+    /// isn't dumped). The headless/test path leaves both unset → show-all,
+    /// preserving the `build_model_entries` byte-parity tests. The user's CURRENT
+    /// and RECENT models are always kept so an off-list active model stays
+    /// visible/selectable.
     #[must_use]
     fn is_shown_model(&self, r: &ModelRow) -> bool {
-        if self.configured.is_empty() {
+        if !self.curate && self.configured.is_empty() {
             return true;
         }
         is_curated_model(&r.provider_id, &r.request_model)
@@ -788,6 +804,57 @@ mod render_tests {
         assert!(out.contains("\u{276F} claude-opus-4-7  \u{00B7} Anthropic (current)\n"));
         assert!(out.contains("GPT-5.4 nano  \u{00B7} GitHub Copilot [Connect]\n"));
         assert!(!out.contains("GPT-5.4 nano  \u{00B7} GitHub Copilot (current)"));
+    }
+
+    fn shown_request_models(st: &ModelScreenState) -> Vec<String> {
+        st.visible_lines()
+            .iter()
+            .filter_map(|l| match l {
+                VisibleLine::Item(i) => Some(st.rows[*i].request_model.clone()),
+                VisibleLine::Header(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn live_no_auth_curates_but_keeps_all_provider_groups() {
+        use std::collections::BTreeMap;
+        use traits::orchestrator::ModelListing;
+        // No-auth live session: nothing configured, but `curate` set → trim each
+        // provider to its curated short list (no ~hundreds dump) while STILL
+        // showing every provider group (badged [Connect] via empty availability).
+        let catalog = vec![
+            ModelListing { display_model: "GPT-5.5".into(), request_model: "gpt-5.5".into(), provider_id: "openai".into(), provider_label: "OpenAI".into(), description: None },
+            ModelListing { display_model: "GPT-4o".into(), request_model: "gpt-4o".into(), provider_id: "openai".into(), provider_label: "OpenAI".into(), description: None },
+            ModelListing { display_model: "Gemini 3.5 Flash".into(), request_model: "gemini-3.5-flash".into(), provider_id: "gemini".into(), provider_label: "Google Gemini".into(), description: None },
+        ];
+        let rows = build_model_entries(vec![], catalog, &BTreeMap::new(), &BTreeMap::new());
+        let mut st = ModelScreenState::new(rows, vec![], "x".into());
+        st.set_curate(true); // live path; configured stays empty (no auth)
+
+        let shown = shown_request_models(&st);
+        assert!(shown.contains(&"gpt-5.5".to_string()), "curated kept: {shown:?}");
+        assert!(shown.contains(&"gemini-3.5-flash".to_string()), "curated kept");
+        assert!(!shown.contains(&"gpt-4o".to_string()), "non-curated trimmed despite nothing configured");
+        // Every provider group still renders (not hidden — nothing configured).
+        let headers: Vec<String> = st.visible_lines().iter().filter_map(|l| match l {
+            VisibleLine::Header(h) => Some(h.clone()),
+            VisibleLine::Item(_) => None,
+        }).collect();
+        assert!(headers.iter().any(|h| h == "OpenAI"), "{headers:?}");
+        assert!(headers.iter().any(|h| h == "Google Gemini"));
+    }
+
+    #[test]
+    fn headless_show_all_preserved_when_not_curating() {
+        use std::collections::BTreeMap;
+        use traits::orchestrator::ModelListing;
+        // Default (curate=false, nothing configured) keeps the show-all behavior
+        // the build_model_entries byte-parity tests depend on — incl. non-curated.
+        let catalog = vec![ModelListing { display_model: "GPT-4o".into(), request_model: "gpt-4o".into(), provider_id: "openai".into(), provider_label: "OpenAI".into(), description: None }];
+        let rows = build_model_entries(vec![], catalog, &BTreeMap::new(), &BTreeMap::new());
+        let st = ModelScreenState::new(rows, vec![], "x".into());
+        assert!(shown_request_models(&st).contains(&"gpt-4o".to_string()), "show-all preserved");
     }
 }
 

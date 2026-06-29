@@ -620,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn uses_opencode_client_id() {
-        assert_eq!(COPILOT_CLIENT_ID, "Ov23li8tweQw6odWQebz");
+    fn uses_vscode_copilot_client_id() {
+        assert_eq!(COPILOT_CLIENT_ID, "Iv1.b507a08c87ecfe98");
     }
 }

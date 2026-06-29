@@ -15,12 +15,13 @@ use crate::LlmError;
 /// client id (so the default reads "opencode"). Override via
 /// [`copilot_client_id`] / `LINGXI_COPILOT_CLIENT_ID`.
 ///
-/// Note: GitHub Copilot's token-exchange endpoint only accepts tokens minted by
-/// OAuth apps that are *authorized for Copilot*. A brand-new app is not
-/// automatically authorized, so this default cannot simply be swapped for an
-/// arbitrary LingXi app — a LingXi-branded app must be registered AND granted
-/// Copilot access first.
-pub const COPILOT_CLIENT_ID: &str = "Ov23li8tweQw6odWQebz";
+/// Note: GitHub Copilot's token-exchange endpoint (`copilot_internal/v2/token`)
+/// only authorizes tokens minted by the **VS Code Copilot OAuth client**. This
+/// is the shared client id every third-party Copilot integration uses (opencode,
+/// zed, copilot.vim, LiteLLM, …); a custom app is NOT Copilot-authorized and its
+/// tokens get `404 Not Found` at exchange. Override via
+/// [`copilot_client_id`] / `LINGXI_COPILOT_CLIENT_ID`.
+pub const COPILOT_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
 
 /// Resolve the GitHub OAuth App client id for the Copilot device flow. Defaults
 /// to [`COPILOT_CLIENT_ID`]; override with the `LINGXI_COPILOT_CLIENT_ID` env var

@@ -806,6 +806,66 @@ pub async fn handle_submit_line(
     SubmitDisposition::RunTyped // plain text — caller runs `orchestrator.run_turn`
 }
 
+/// Build the complete [`crate::components::picker_popup::PopupLine`] list for
+/// the `/connect` picker popup: the grouped provider list PLUS the highlighted
+/// provider's detail section (connected state, models, login methods).
+///
+/// Extracted from the `Screen::ConnectPicker` render arm so the detail-append
+/// logic has a dedicated unit-test anchor (`connect_picker_detail_tests`).
+/// The arm calls this and forwards the result to `render_picker_popup`.
+#[must_use]
+pub fn connect_picker_popup_lines(
+    c: &crate::screens::connect_picker::ConnectPickerState,
+    model_providers: &std::collections::BTreeMap<String, (String, String)>,
+    provider_availability: &std::collections::BTreeMap<String, bool>,
+    provider_auth_methods: &std::collections::BTreeMap<String, String>,
+) -> Vec<crate::components::picker_popup::PopupLine> {
+    use crate::components::picker_popup::{PopupLine, PopupMarker};
+    use crate::screens::connect_picker::{
+        provider_detail_lines, provider_label, provider_methods, VisibleLine,
+    };
+
+    let mut lines: Vec<PopupLine> = Vec::new();
+    let mut item_pos = 0usize;
+    for vl in c.visible_lines() {
+        match vl {
+            VisibleLine::Header(h) => lines.push(PopupLine::Header(h)),
+            VisibleLine::Item(idx) => {
+                let row = &c.rows[idx];
+                let selected = item_pos == c.selected;
+                item_pos += 1;
+                lines.push(PopupLine::Item {
+                    marker: if row.connected { PopupMarker::Check } else { PopupMarker::None },
+                    label: row.label.clone(),
+                    detail: row.description.clone(),
+                    badge: String::new(),
+                    selected,
+                });
+            }
+        }
+    }
+    // --- detail section for the highlighted provider ---
+    if let Some(pid) = c.highlighted_provider_id() {
+        let connected = provider_availability.get(pid).copied().unwrap_or(false);
+        let auth_tag = provider_auth_methods.get(pid).map(String::as_str);
+        let methods = provider_methods(pid, auth_tag);
+        let label = provider_label(pid);
+        let detail = provider_detail_lines(pid, &label, connected, &methods, model_providers);
+        // blank separator: Header("") renders with padding_top:1 → visual gap
+        lines.push(PopupLine::Header(String::new()));
+        for d in detail {
+            lines.push(PopupLine::Item {
+                marker: PopupMarker::None,
+                label: d,
+                detail: String::new(),
+                badge: String::new(),
+                selected: false,
+            });
+        }
+    }
+    lines
+}
+
 /// Build the full `ReplScreen` element from an `AppState` snapshot for
 /// the given viewport height. Used by the per-frame render path; tests
 /// also exercise it to verify the screen composes without panicking.
@@ -1056,32 +1116,16 @@ pub fn render_screen(
                 // renders as a centered, rounded-border popup window: a bold
                 // title + `esc`, a Search line, and the Popular/Providers groups
                 // with `✓` for connected providers + a peach highlight on the
-                // selected row. Structured rows feed the shared `picker_popup`.
-                use crate::components::picker_popup::{render_picker_popup, PopupLine, PopupMarker};
-                use crate::screens::connect_picker::VisibleLine;
-                let mut lines: Vec<PopupLine> = Vec::new();
-                let mut item_pos = 0usize;
-                for vl in c.visible_lines() {
-                    match vl {
-                        VisibleLine::Header(h) => lines.push(PopupLine::Header(h)),
-                        VisibleLine::Item(idx) => {
-                            let row = &c.rows[idx];
-                            let selected = item_pos == c.selected;
-                            item_pos += 1;
-                            lines.push(PopupLine::Item {
-                                marker: if row.connected {
-                                    PopupMarker::Check
-                                } else {
-                                    PopupMarker::None
-                                },
-                                label: row.label.clone(),
-                                detail: row.description.clone(),
-                                badge: String::new(),
-                                selected,
-                            });
-                        }
-                    }
-                }
+                // selected row. After the list, the highlighted provider's detail
+                // section (connected state, models, sign-in method) is appended
+                // via `connect_picker_popup_lines`. All in the SAME box.
+                use crate::components::picker_popup::render_picker_popup;
+                let lines = connect_picker_popup_lines(
+                    c,
+                    &state.model_providers,
+                    &state.provider_availability,
+                    &state.provider_auth_methods,
+                );
                 render_picker_popup(
                     "Connect a provider",
                     &c.query,
@@ -2453,5 +2497,123 @@ mod image_submit_tests {
             RenderedMessage::AssistantText { body, .. } if body == "Hello!"
         ));
         assert!(st.in_flight_turn.is_none());
+    }
+}
+
+/// Tests for the `connect_picker_popup_lines` helper (T2b): verifies that the
+/// detail section is appended after the provider list rows, contains the
+/// highlighted provider's models, connected state, and sign-in method(s).
+#[cfg(test)]
+mod connect_picker_detail_tests {
+    use super::*;
+    use crate::components::picker_popup::PopupLine;
+    use crate::screens::connect_picker::ConnectPickerState;
+    use std::collections::BTreeMap;
+
+    fn make_auth() -> BTreeMap<String, String> {
+        [("anthropic", "api_key"), ("openai", "api_key")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn make_model_providers() -> BTreeMap<String, (String, String)> {
+        [
+            ("claude-opus-4-8", ("anthropic", "Anthropic")),
+            ("claude-sonnet-4-6", ("anthropic", "Anthropic")),
+            ("gpt-5", ("openai", "OpenAI")),
+        ]
+        .into_iter()
+        .map(|(m, (p, l))| (m.to_string(), (p.to_string(), l.to_string())))
+        .collect()
+    }
+
+    /// Flatten popup lines into a single string for easy assertion.
+    fn text_of(lines: &[PopupLine]) -> String {
+        lines
+            .iter()
+            .map(|l| match l {
+                PopupLine::Header(h) => h.clone(),
+                PopupLine::Item { label, .. } => label.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn detail_section_present_for_highlighted_provider() {
+        let c = ConnectPickerState::from_connectable(&make_auth(), &BTreeMap::new());
+        let mp = make_model_providers();
+        let avail = BTreeMap::new();
+        let auth_methods = make_auth();
+
+        let lines = connect_picker_popup_lines(&c, &mp, &avail, &auth_methods);
+        let text = text_of(&lines);
+
+        // Detail section must appear
+        assert!(text.contains("Models:"), "missing 'Models:' in:\n{text}");
+        assert!(
+            text.contains("connected") || text.contains("not connected"),
+            "missing connection state in:\n{text}"
+        );
+        // Anthropic models only (not another provider's model)
+        assert!(
+            text.contains("claude-opus-4-8") || text.contains("claude-sonnet-4-6"),
+            "missing anthropic model in:\n{text}"
+        );
+        assert!(!text.contains("gpt-5"), "openai model should NOT appear:\n{text}");
+    }
+
+    #[test]
+    fn detail_absent_when_picker_is_empty() {
+        let c = ConnectPickerState::default(); // no rows → highlighted_provider_id() = None
+        let lines =
+            connect_picker_popup_lines(&c, &BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new());
+        assert!(lines.is_empty(), "empty picker should yield empty lines, got: {lines:?}");
+    }
+
+    #[test]
+    fn list_rows_precede_detail_section() {
+        let c = ConnectPickerState::from_connectable(&make_auth(), &BTreeMap::new());
+        let lines =
+            connect_picker_popup_lines(&c, &BTreeMap::new(), &BTreeMap::new(), &make_auth());
+
+        // At least one Header (group) + at least 2 Item rows (the two providers)
+        // before the separator Header + detail Items.
+        let headers: Vec<_> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| matches!(l, PopupLine::Header(_)))
+            .collect();
+        assert!(headers.len() >= 2, "expected ≥2 headers (group + separator): {headers:?}");
+
+        // The separator is a Header("") — it must appear after at least one Item.
+        let sep_idx = lines
+            .iter()
+            .position(|l| matches!(l, PopupLine::Header(h) if h.is_empty()))
+            .expect("blank separator Header not found");
+        let items_before_sep = lines[..sep_idx]
+            .iter()
+            .filter(|l| matches!(l, PopupLine::Item { .. }))
+            .count();
+        assert!(
+            items_before_sep >= 1,
+            "expected list items before the detail separator, got {items_before_sep}"
+        );
+    }
+
+    #[test]
+    fn anthropic_shows_both_oauth_and_api_key_sign_in() {
+        // Anthropic is a dual-method provider; the detail "Sign in:" line must
+        // mention both methods regardless of what auth_methods map says.
+        let mut auth = BTreeMap::new();
+        auth.insert("anthropic".to_string(), "api_key".to_string());
+        let c = ConnectPickerState::from_connectable(&auth, &BTreeMap::new());
+        let lines = connect_picker_popup_lines(&c, &BTreeMap::new(), &BTreeMap::new(), &auth);
+        let text = text_of(&lines);
+        assert!(
+            text.contains("Pro/Max") && text.contains("API key"),
+            "anthropic detail must list both sign-in methods:\n{text}"
+        );
     }
 }

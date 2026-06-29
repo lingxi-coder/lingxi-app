@@ -2112,10 +2112,18 @@ async fn set_copilot_failed(state: &Arc<Mutex<AppState>>, error: &str) -> bool {
 /// (T2b OAuth) If the active screen is STILL the OAuth `/connect` screen, mark it
 /// `Failed(error)` and return `true`; else a no-op (`false`) — a late completion
 /// after the user pressed Esc never corrupts an unrelated screen.
-async fn set_oauth_failed(state: &Arc<Mutex<AppState>>, error: &str) -> bool {
+async fn set_oauth_failed(state: &Arc<Mutex<AppState>>, provider: &str, error: &str) -> bool {
     let mut st = state.lock().await;
     if let Some(crate::screens::Screen::Connect(cs)) = st.active_screen.as_mut() {
-        if matches!(cs.flow, crate::screens::connect::ConnectFlow::OAuth { .. }) {
+        // Guard on the SAME provider, not just "an OAuth screen": the user may
+        // have Esc'd and started a DIFFERENT OAuth flow while this login was
+        // blocking, so a late failure must not corrupt that other screen.
+        let same = matches!(
+            &cs.flow,
+            crate::screens::connect::ConnectFlow::OAuth { provider_id, .. }
+                if provider_id.as_str() == provider
+        );
+        if same {
             cs.set_failed(error);
             return true;
         }
@@ -3502,10 +3510,15 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                             if let Some(crate::screens::Screen::Connect(cs)) =
                                 st.active_screen.as_mut()
                             {
-                                if matches!(
-                                    cs.flow,
-                                    crate::screens::connect::ConnectFlow::OAuth { .. }
-                                ) {
+                                // Only mark THIS provider's screen done — the user may
+                                // have Esc'd and opened a different OAuth flow while
+                                // `login()` was blocking.
+                                let same = matches!(
+                                    &cs.flow,
+                                    crate::screens::connect::ConnectFlow::OAuth { provider_id, .. }
+                                        if provider_id == &provider
+                                );
+                                if same {
                                     cs.set_done();
                                 }
                             }
@@ -3518,7 +3531,7 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                             let on_done = matches!(
                                 st.active_screen.as_ref(),
                                 Some(crate::screens::Screen::Connect(cs))
-                                    if matches!(cs.flow, crate::screens::connect::ConnectFlow::OAuth { .. })
+                                    if matches!(&cs.flow, crate::screens::connect::ConnectFlow::OAuth { provider_id, .. } if provider_id == &provider)
                                         && matches!(cs.copilot, crate::screens::connect::CopilotPhase::Done)
                             );
                             if on_done {
@@ -3533,7 +3546,7 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                         tick_for_oauth.set(tick_for_oauth.get().wrapping_add(1));
                     }
                     Err(e) => {
-                        if set_oauth_failed(&state, &e.to_string()).await {
+                        if set_oauth_failed(&state, &provider, &e.to_string()).await {
                             tick_for_oauth.set(tick_for_oauth.get().wrapping_add(1));
                         }
                     }

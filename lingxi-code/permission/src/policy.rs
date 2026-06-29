@@ -1114,6 +1114,41 @@ impl PermissionPolicy {
             return None;
         }
         let command = shell_command::command_from_input(input)?;
+
+        // ── AST-authoritative safety gate (claude-code 2.1.195). When the
+        // tree-sitter grammar is available, the AST verdict is authoritative:
+        //   • TooComplex      → ask (cannot be statically analyzed)
+        //   • Simple + Deny   → ask (a dangerous construct was found)
+        //   • Simple + Ok     → clean parse, no dangerous semantics → the legacy
+        //                       regex battery is intentionally SKIPPED (matching
+        //                       the binary's `astParseSucceeded` gate)
+        //   • ParseUnavailable→ fall through to the legacy battery below
+        // SAFETY: `parse_for_security` is conservative (it OVER-marks TooComplex,
+        // verified zero under-ask), and `check_semantics` is reconciled to the
+        // 2.1.195 binary superset, so `Simple+Ok ⊆ the binary's allow-set` — the
+        // flip can only ask MORE than the binary, never less.
+        #[cfg(feature = "bash-ast")]
+        {
+            use crate::bash_ast_security::{
+                check_semantics, parse_for_security, ParseForSecurityResult, SemanticCheckResult,
+            };
+            match parse_for_security(command) {
+                ParseForSecurityResult::TooComplex { reason } => {
+                    return Some(ask_bash_safety(tool_name, reason));
+                }
+                ParseForSecurityResult::Simple { commands } => {
+                    if let SemanticCheckResult::Deny { reason } = check_semantics(&commands) {
+                        return Some(ask_bash_safety(tool_name, reason));
+                    }
+                    return None;
+                }
+                ParseForSecurityResult::ParseUnavailable => {
+                    // Grammar could not parse this command — fall through to the
+                    // legacy regex battery (which never early-allows).
+                }
+            }
+        }
+
         for sub in shell_command::split_command(command) {
             let stripped = shell_command::strip_output_redirections(&sub);
             if let crate::bash_security::BashSafetyVerdict::Ask { message } =
@@ -3898,9 +3933,69 @@ mod tests {
             PermissionResult::Ask {
                 reason: PermissionDecisionReason::SafetyCheck { reason, .. },
                 ..
-            } => assert!(reason.contains("backticks"), "reason was: {reason}"),
+            } => {
+                // With bash-ast wired, the AST verdict is authoritative: a backtick
+                // command substitution is a DANGEROUS_TYPES node → TooComplex
+                // "Contains command_substitution" (byte-faithful to the 2.1.195
+                // binary's `Yg`). Without bash-ast, the legacy battery's "backticks".
+                #[cfg(feature = "bash-ast")]
+                assert!(reason.contains("command_substitution"), "reason was: {reason}");
+                #[cfg(not(feature = "bash-ast"))]
+                assert!(reason.contains("backticks"), "reason was: {reason}");
+            }
             other => panic!("expected SafetyCheck ask, got {other:?}"),
         }
+    }
+
+    /// AST-authoritative gate (bash-ast): every dangerous command must surface a
+    /// `SafetyCheck` ask — never silently Allow. Exercises the wired
+    /// parse_for_security → check_semantics path end-to-end.
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn bash_ast_gate_flags_dangerous_commands() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        for cmd in [
+            "find . -exec rm {} ;",        // Simple + check_semantics Deny (find)
+            "watch rm -rf /",              // Simple + Deny (runs-its-argument)
+            "jobs -x rm",                  // Simple + Deny (jobs -x)
+            "setopt extendedglob",         // Simple + Deny (zsh builtin)
+            "declare -n ref=x",            // Simple + Deny (declare -n)
+            "set -o extendedglob",         // Simple + Deny (set -o)
+            "echo $(whoami)",              // TooComplex (command_substitution)
+            "eval id",                     // Simple + Deny (eval-like)
+        ] {
+            match p.authorize("Bash", &bash(cmd)) {
+                PermissionResult::Ask {
+                    reason: PermissionDecisionReason::SafetyCheck { .. },
+                    ..
+                } => {}
+                other => panic!("expected SafetyCheck ask for {cmd:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// The AST safety gate overrides a permissive prefix rule: even with
+    /// `Bash(find:*)` allowed, `find … -exec …` still asks (the reason string is
+    /// literally "cannot be auto-allowed by a Bash(find:*) prefix rule").
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn bash_ast_gate_overrides_prefix_allow() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(find:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        match p.authorize("Bash", &bash("find . -exec rm {} ;")) {
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck { reason, .. },
+                ..
+            } => assert!(reason.contains("find with '-exec'"), "reason was: {reason}"),
+            other => panic!("expected SafetyCheck ask despite Bash(find:*), got {other:?}"),
+        }
+        // A benign find under the same rule is allowed (no safety ask).
+        assert!(matches!(
+            p.authorize("Bash", &bash("find . -name x -type f")),
+            PermissionResult::Allow { .. }
+        ));
     }
 
     /// IFS injection (a different validator) also asks via the safety chain.

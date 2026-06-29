@@ -276,9 +276,7 @@ fn parse_exchange_response(v: &Value) -> Result<ExchangedToken, LlmError> {
         .get("token")
         .and_then(Value::as_str)
         .ok_or_else(|| LlmError::InvalidRequest {
-            message: "copilot token-exchange response missing 'token' — \
-                      the GitHub account has no active Copilot subscription"
-                .to_string(),
+            message: exchange_failure_detail(v),
         })?;
     if token.is_empty() {
         return Err(LlmError::InvalidRequest {
@@ -295,6 +293,25 @@ fn parse_exchange_response(v: &Value) -> Result<ExchangedToken, LlmError> {
         secret: CopilotSecret::new(token),
         expires_at,
     })
+}
+
+/// Build a diagnostic message for a token-exchange body that lacks `token`.
+/// Surfaces GitHub's own `message` when present (the real cause), else lists the
+/// fields that DID come back so the failure isn't silently mislabeled.
+fn exchange_failure_detail(v: &Value) -> String {
+    if let Some(msg) = v.get("message").and_then(Value::as_str) {
+        return format!("copilot token-exchange failed: {msg}");
+    }
+    let keys: Vec<&str> = v
+        .as_object()
+        .map(|o| o.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    format!(
+        "copilot token-exchange response missing 'token' (got fields: [{}]) — \
+         likely no active Copilot subscription on this GitHub account, or the \
+         OAuth app lacks Copilot authorization",
+        keys.join(", ")
+    )
 }
 
 fn str_field(v: &Value, key: &str) -> Result<String, LlmError> {

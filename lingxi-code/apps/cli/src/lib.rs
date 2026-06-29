@@ -553,6 +553,23 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         eprintln!("{notice}");
     }
 
+    // (T3) Terminal-compatibility notice: the fullscreen alt-screen UI ghosts on
+    // Warp (non-standard alt-screen compositing — stacked frames / stray rows).
+    // Print ONCE, before the alt-screen is entered, so it lands in Warp's
+    // pre-alt-screen scrollback (Warp keeps it). Only for the interactive TUI
+    // (print/REPL/stdio don't enter alt-screen, so they never ghost) and only to a
+    // tty (no-op when stderr is piped). Standard terminals print nothing.
+    if interactive_tui {
+        use std::io::IsTerminal;
+        if std::io::stderr().is_terminal() {
+            if let Some(notice) =
+                ghosting_terminal_notice(std::env::var("TERM_PROGRAM").ok().as_deref())
+            {
+                eprintln!("{notice}");
+            }
+        }
+    }
+
     // (Item B) Permission-mode startup notice (TS `permissionModeNotification`,
     // `main.tsx:2882-2887`): set only when the bypass killswitch suppressed a
     // requested bypass (`initialPermissionModeFromCLI`). Emitted on the same
@@ -713,9 +730,35 @@ fn startup_deprecation_notice(argv: &Argv) -> Option<String> {
     engine_desktop::model_deprecation_warning(Some(&resolved_model))
 }
 
+/// (T3) One-line terminal-compatibility notice for terminals known to mis-render
+/// the fullscreen alt-screen UI. Currently only Warp (`TERM_PROGRAM=WarpTerminal`)
+/// — its non-standard alt-screen compositing ghosts (stacked frames). Standard
+/// terminals (iTerm2, Terminal.app, Alacritty, Ghostty, kitty, …) render it
+/// correctly, so they get `None`. Pure (env value injected) for unit-testing; the
+/// REAL fix for Warp is an inline (non-alt-screen) render loop — a large change
+/// the viewport math isn't built for, deferred.
+fn ghosting_terminal_notice(term_program: Option<&str>) -> Option<&'static str> {
+    match term_program {
+        Some("WarpTerminal") => Some(
+            "\u{26a0} Warp can ghost LingXi's full-screen UI (stacked frames / stray rows). \
+             For the best experience use iTerm2, Terminal.app, Alacritty, Ghostty, or kitty.",
+        ),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod startup_notice_tests {
     use super::*;
+
+    #[test]
+    fn only_warp_gets_the_ghosting_notice() {
+        assert!(ghosting_terminal_notice(Some("WarpTerminal")).is_some());
+        assert!(ghosting_terminal_notice(Some("iTerm.app")).is_none());
+        assert!(ghosting_terminal_notice(Some("Apple_Terminal")).is_none());
+        assert!(ghosting_terminal_notice(Some("ghostty")).is_none());
+        assert!(ghosting_terminal_notice(None).is_none());
+    }
 
     fn argv_with_model(model: Option<&str>) -> Argv {
         Argv {

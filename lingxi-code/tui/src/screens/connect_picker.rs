@@ -276,6 +276,64 @@ impl ConnectPickerState {
     }
 }
 
+impl ConnectPickerState {
+    /// The provider id of the currently highlighted selectable row (None if empty).
+    #[must_use]
+    pub fn highlighted_provider_id(&self) -> Option<&str> {
+        let idx = *self.selectable().get(self.selected)?;
+        Some(self.rows.get(idx)?.provider_id.as_str())
+    }
+}
+
+/// Detail lines for the highlighted provider: connected state, its models
+/// (filtered from `model_providers` by profile name), and its login method(s).
+/// Reuses the `/model` data; no engine change. Graceful on unknown/empty.
+#[must_use]
+pub fn provider_detail_lines(
+    provider_id: &str,
+    label: &str,
+    connected: bool,
+    methods: &[ConnectMethod],
+    model_providers: &std::collections::BTreeMap<String, (String, String)>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    out.push(if connected {
+        format!("{label} \u{2014} \u{2713} connected")
+    } else {
+        format!("{label} \u{2014} not connected")
+    });
+    // its models (request-model ids whose profile == provider_id), capped + elided
+    let mut models: Vec<&str> = model_providers
+        .iter()
+        .filter(|(_, (profile, _))| profile == provider_id)
+        .map(|(m, _)| m.as_str())
+        .collect();
+    models.sort_unstable();
+    if models.is_empty() {
+        out.push("Models: (no models listed)".to_string());
+    } else {
+        let shown: Vec<&str> = models.iter().take(4).copied().collect();
+        let more = models.len().saturating_sub(shown.len());
+        let mut s = format!("Models: {}", shown.join(", "));
+        if more > 0 {
+            s.push_str(&format!(", +{more} more"));
+        }
+        out.push(s);
+    }
+    // login method(s)
+    let m: Vec<&str> = methods
+        .iter()
+        .map(|x| match x {
+            ConnectMethod::Oauth => "Pro/Max sign-in",
+            ConnectMethod::ApiKey => "API key",
+            ConnectMethod::CopilotDevice => "GitHub sign-in",
+            ConnectMethod::OAuthSoon => "browser sign-in (coming soon)",
+        })
+        .collect();
+    out.push(format!("Sign in: {}", m.join(" or ")));
+    out
+}
+
 /// Reduce a key. `Up`/`Down` move over selectable items; printable chars edit
 /// the search query; Backspace deletes; Enter selects the highlighted row; Esc
 /// cancels. Mirrors `model::handle_model_key`.
@@ -505,6 +563,40 @@ mod reducer_tests {
         assert_eq!(handle_connect_picker_key(&mut st, KeyCode::Enter), ConnectPickerOutcome::Stay);
         assert_eq!(handle_connect_picker_key(&mut st, KeyCode::Down), ConnectPickerOutcome::Stay);
         assert_eq!(st.selected, 0);
+    }
+}
+
+#[cfg(test)]
+mod detail_tests {
+    use super::*;
+
+    #[test]
+    fn highlighted_provider_id_tracks_selection() {
+        let mut auth = std::collections::BTreeMap::new();
+        auth.insert("anthropic".to_string(), "api_key".to_string());
+        auth.insert("openai".to_string(), "api_key".to_string());
+        let st = ConnectPickerState::from_connectable(&auth, &std::collections::BTreeMap::new());
+        // first selectable row highlighted by default
+        assert!(st.highlighted_provider_id().is_some());
+    }
+
+    #[test]
+    fn provider_detail_lines_shows_models_state_method() {
+        let mut mp = std::collections::BTreeMap::new();
+        mp.insert("claude-opus-4-8".to_string(), ("anthropic".to_string(), "Anthropic".to_string()));
+        mp.insert("claude-sonnet-4-6".to_string(), ("anthropic".to_string(), "Anthropic".to_string()));
+        mp.insert("gpt-5.5".to_string(), ("openai".to_string(), "OpenAI".to_string()));
+        let lines = provider_detail_lines("anthropic", "Anthropic", true,
+            &[ConnectMethod::Oauth, ConnectMethod::ApiKey], &mp);
+        let joined = lines.join("\n");
+        assert!(joined.contains("Anthropic"));
+        assert!(joined.contains("connected"));         // connected state
+        assert!(joined.contains("claude-opus-4-8"));    // its model
+        assert!(!joined.contains("gpt-5.5"));           // NOT another provider's model
+        assert!(joined.contains("Pro/Max") || joined.contains("API key")); // method(s)
+        // unknown provider → graceful
+        let empty = provider_detail_lines("nope", "Nope", false, &[ConnectMethod::ApiKey], &mp);
+        assert!(empty.join("\n").to_lowercase().contains("no models"));
     }
 }
 

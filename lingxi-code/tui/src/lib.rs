@@ -44,5 +44,44 @@ pub use events::orchestrator_bridge::{BridgeOutputStream, TurnEvent};
 pub use events::{OrchestratorOutputEvent, TuiEvent};
 pub use session::{run_tui_session, Runtime};
 
+/// (T3) Whether to use iocraft's INLINE render loop instead of the fullscreen
+/// alt-screen one. Opt-in via `LINGXI_TUI_INLINE` (non-empty, not `"0"`).
+///
+/// Fullscreen (the default) enters the alt screen + draws at absolute positions,
+/// which Warp's non-standard alt-screen compositing mis-renders (ghosting).
+/// Inline mode (`render_loop()` without `.fullscreen()`) draws into the terminal's
+/// own scrollback (Ink / claude-code model) — no alt-screen, no absolute
+/// positioning — at the cost of the app's bounded-viewport scrolling (the terminal
+/// scrolls instead). EXPERIMENTAL: default OFF; cached once (env is fixed for the
+/// process lifetime).
+#[must_use]
+pub(crate) fn inline_render_mode() -> bool {
+    use std::sync::OnceLock;
+    static INLINE: OnceLock<bool> = OnceLock::new();
+    *INLINE.get_or_init(|| parse_inline_flag(std::env::var("LINGXI_TUI_INLINE").ok()))
+}
+
+/// Pure parse of the `LINGXI_TUI_INLINE` value: on iff present, non-empty, and
+/// not `"0"`. Split out so it is unit-testable (the public getter caches via a
+/// `OnceLock`, which a live env test can't reset).
+#[must_use]
+fn parse_inline_flag(value: Option<String>) -> bool {
+    matches!(value, Some(s) if !s.is_empty() && s != "0")
+}
+
+#[cfg(test)]
+mod inline_mode_tests {
+    use super::parse_inline_flag;
+
+    #[test]
+    fn inline_flag_truthiness() {
+        assert!(parse_inline_flag(Some("1".into())));
+        assert!(parse_inline_flag(Some("true".into())));
+        assert!(!parse_inline_flag(Some("0".into())));
+        assert!(!parse_inline_flag(Some(String::new())));
+        assert!(!parse_inline_flag(None));
+    }
+}
+
 // Re-export points are filled in by later tasks; the stubs above keep the
 // crate compiling task-by-task.

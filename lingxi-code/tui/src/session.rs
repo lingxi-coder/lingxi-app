@@ -549,7 +549,7 @@ pub async fn run_tui_session(
         .take()
         .map(|rx| Arc::new(std::sync::Mutex::new(Some(rx))));
 
-    let result = element! {
+    let mut root = element! {
         TuiRoot(
             state: Some(state.clone()),
             bridge_rx: Some(rx_slot),
@@ -565,15 +565,18 @@ pub async fn run_tui_session(
             dispatcher: runtime.dispatcher.clone(),
             bash_runner: runtime.bash_runner.clone(),
         )
-    }
-    .fullscreen()
-    // (claude-code parity) Don't let iocraft quit the render loop on a single
-    // Ctrl-C. With this, Ctrl-C is delivered as a key event so the app's
-    // double-press guard runs: a turn in flight is interrupted, a non-empty
-    // prompt is cleared, and an idle first press shows "Press Ctrl-C again to
-    // exit" — only a second press within the window exits.
-    .ignore_ctrl_c()
-    .await;
+    };
+    // (T3) Opt-in INLINE render mode (`LINGXI_TUI_INLINE`): iocraft's inline
+    // `render_loop()` draws into the terminal's NATIVE scrollback (no alt-screen /
+    // absolute positioning, which Warp mis-renders → ghosting). DEFAULT stays
+    // `.fullscreen()` (alt-screen). `.ignore_ctrl_c()` (claude-code parity) routes
+    // Ctrl-C to the app's double-press exit guard instead of letting iocraft quit
+    // on a single press.
+    let result = if crate::inline_render_mode() {
+        root.render_loop().ignore_ctrl_c().await
+    } else {
+        root.fullscreen().ignore_ctrl_c().await
+    };
 
     // Normal exit: iocraft's Drop has left the alt screen + shown the cursor +
     // disabled raw mode, but it never disables mouse capture — do it here so the
@@ -620,7 +623,7 @@ pub async fn run_resume_picker(
     crate::theme_detect::detect_terminal_theme();
     let state = Arc::new(Mutex::new(app));
 
-    let result = element! {
+    let mut root = element! {
         TuiRoot(
             state: Some(state.clone()),
             bridge_rx: None,
@@ -631,9 +634,13 @@ pub async fn run_resume_picker(
             // unreachable here, which is correct (the picker streams no turn).
             orchestrator: None,
         )
-    }
-    .fullscreen()
-    .await;
+    };
+    // (T3) Same opt-in inline path as `run_tui_session` (`LINGXI_TUI_INLINE`).
+    let result = if crate::inline_render_mode() {
+        root.render_loop().await
+    } else {
+        root.fullscreen().await
+    };
 
     crate::terminal::restore_terminal_modes();
 

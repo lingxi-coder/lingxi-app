@@ -741,7 +741,8 @@ fn ghosting_terminal_notice(term_program: Option<&str>) -> Option<&'static str> 
     match term_program {
         Some("WarpTerminal") => Some(
             "\u{26a0} Warp can ghost LingXi's full-screen UI (stacked frames / stray rows). \
-             For the best experience use iTerm2, Terminal.app, Alacritty, Ghostty, or kitty.",
+             Use iTerm2, Terminal.app, Alacritty, Ghostty, or kitty \u{2014} or try the \
+             experimental inline mode: LINGXI_TUI_INLINE=1.",
         ),
         _ => None,
     }

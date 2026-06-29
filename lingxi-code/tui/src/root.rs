@@ -3781,12 +3781,26 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         system.exit();
     }
 
-    // Pin the whole frame to the full terminal size. iocraft's fullscreen root
-    // sizes to its CONTENT height, so a child `height: 100%` collapses and the
-    // scrollback's `flex_grow` has no slack to absorb — leaving the prompt +
-    // footer stuck at the TOP with blank rows below. A fixed-size parent gives
-    // the column a real height, so the flex-grow scrollback expands and the
-    // input view sits at the BOTTOM (claude-code layout).
+    // (T3) Inline render mode: do NOT pin the full terminal height. The element
+    // sizes to its CONTENT so the conversation flows into the terminal's own
+    // scrollback (Ink / claude-code model); the flex-grow scrollback collapses to
+    // content height (no slack) and the input sits at the bottom OF THE CONTENT,
+    // not the screen. Pinning full height here would draw a screen-tall block
+    // inline and defeat the whole purpose.
+    if crate::inline_render_mode() {
+        return element! {
+            View(width: cols.max(1)) {
+                #(std::iter::once(element))
+            }
+        }
+        .into_any();
+    }
+    // Fullscreen (default): pin the whole frame to the full terminal size.
+    // iocraft's fullscreen root sizes to its CONTENT height, so a child
+    // `height: 100%` collapses and the scrollback's `flex_grow` has no slack to
+    // absorb — leaving the prompt + footer stuck at the TOP with blank rows below.
+    // A fixed-size parent gives the column a real height, so the flex-grow
+    // scrollback expands and the input view sits at the BOTTOM (claude-code layout).
     element! {
         View(width: cols.max(1), height: rows.max(1)) {
             #(std::iter::once(element))

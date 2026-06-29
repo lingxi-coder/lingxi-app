@@ -69,6 +69,13 @@ pub struct Runtime {
     /// into `tui::session::Runtime::with_provider_availability` so the `/model`
     /// picker can badge unconfigured providers. Empty keeps every row available.
     pub provider_availability: std::collections::BTreeMap<String, bool>,
+    /// (T2a) Per-provider login-method tag map, projected straight from
+    /// [`engine_desktop::DesktopRuntime::provider_auth_methods`] (derived at
+    /// `build()` from the real catalog auth strategy: `"api_key"` /
+    /// `"copilot_device"` / `"oauth"`). The TUI mount threads it into
+    /// `tui::session::Runtime::with_provider_auth_methods` — it IS the data-driven
+    /// `/connect` picker's provider SET, so an empty map yields an empty picker.
+    pub provider_auth_methods: std::collections::BTreeMap<String, String>,
     /// (Plan 3c I1/I2) Authoritative `request_model -> (profile_name,
     /// provider_label)` map, projected from
     /// [`engine_desktop::DesktopRuntime::model_providers`]. The TUI mount threads
@@ -566,6 +573,7 @@ pub async fn build_runtime_from_config(
         file_changed_watcher: rt.file_changed_watcher,
         subscription: rt.subscription,
         provider_availability: rt.provider_availability,
+        provider_auth_methods: rt.provider_auth_methods,
         model_providers: rt.model_providers,
         provider_key_store: rt.credentials,
         structured_output_slot: rt.structured_output_slot,

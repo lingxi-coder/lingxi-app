@@ -239,6 +239,11 @@ pub(crate) async fn build_tui_runtime(
     // default) keeps every row available — byte-identical to the historical path.
     let provider_availability = tui_build.runtime.provider_availability.clone();
     let model_providers = tui_build.runtime.model_providers.clone();
+    // (T2a) Project the engine-computed per-provider login-method map off the
+    // runtime so the data-driven `/connect` picker renders the real catalog
+    // provider set + method. Without this the map reaches `AppState` empty and
+    // `connect_rows_from` yields zero rows ("No providers available.").
+    let provider_auth_methods = tui_build.runtime.provider_auth_methods.clone();
     // (Plan 3c C1) Project the shared engine credential store off the runtime so
     // the `/connect` screen's `pump_store_provider_key` persists a collected key
     // via `CredentialManager::set_provider_key`.
@@ -259,6 +264,7 @@ pub(crate) async fn build_tui_runtime(
         .with_dispatcher(slash_dispatcher)
         .with_bash_runner(bash_runner)
         .with_provider_availability(provider_availability)
+        .with_provider_auth_methods(provider_auth_methods)
         .with_model_providers(model_providers)
         .with_provider_key_store(provider_key_store)
         .with_copilot_connect_driver(copilot_connect_driver)

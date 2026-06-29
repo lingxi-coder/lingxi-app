@@ -104,9 +104,10 @@ pub struct Runtime {
     /// (T2a) Per-provider login-method map computed engine-side at `build()`
     /// (`DesktopRuntime.provider_auth_methods`); threaded into the App
     /// (`AppState::set_provider_auth_methods`) at mount so the `/connect` picker
-    /// shows each provider's REAL login method. Empty (the default) is a safe
-    /// no-op — the picker falls back to its static defaults.
-    pub provider_auth_methods: std::collections::BTreeMap<String, String>,
+    /// shows each provider's REAL login method. This map IS the picker's provider
+    /// SET; empty (the default) yields an empty picker, so the engine wiring is
+    /// required (see `apps/cli` `mode.rs` `with_provider_auth_methods`).
+    provider_auth_methods: std::collections::BTreeMap<String, String>,
     /// (Plan 3c I1/I2) Authoritative `request_model -> (profile_name,
     /// provider_label)` map computed engine-side at `build()`
     /// (`DesktopRuntime.model_providers`); threaded into the App

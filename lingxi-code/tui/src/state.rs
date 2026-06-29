@@ -897,9 +897,10 @@ pub struct AppState {
     /// (T2a) Per-provider login-method map, threaded from
     /// `DesktopRuntime.provider_auth_methods` at mount (via
     /// [`Self::set_provider_auth_methods`]). Keyed by `profile_name`; value is
-    /// one of `"api_key"`, `"copilot_device"`, or `"oauth"`. An empty map (the
-    /// default) is a safe no-op — the `/connect` picker falls back to its
-    /// static defaults until the engine populates this.
+    /// one of `"api_key"`, `"copilot_device"`, or `"oauth"`. This map IS the
+    /// `/connect` picker's provider SET (the rows are built by iterating it), so
+    /// an empty map (the default, before the engine populates it) yields an empty
+    /// picker ("No providers available.") — the engine wiring is required.
     pub provider_auth_methods: std::collections::BTreeMap<String, String>,
     /// (Plan 3c I1/I2) Authoritative `request_model -> (profile_name,
     /// provider_label)` map, assembled engine-side from the LIVE multi-provider

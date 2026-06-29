@@ -951,6 +951,21 @@ impl Tool for WebSearchTool {
         web_search_description()
     }
     async fn prompt(&self, opts: &PromptOptions) -> String {
+        // On non-hosted providers WebSearch runs CLIENT-SIDE (see `call` /
+        // `web_search_client`), so advertise it as a plain, callable web search
+        // instead of the Anthropic-hosted framing ("automatic", "US only") that
+        // would otherwise make the model think it can't invoke it.
+        if !web_search_is_enabled(
+            infer_api_provider(&self.ctx.provider.base_url),
+            &self.ctx.default_model,
+        ) {
+            return "Search the web and return result blocks (title + URL + snippet) as \
+                    markdown links. Use this whenever you need up-to-date or real-time \
+                    information you don't already know \u{2014} current events, weather, \
+                    prices, release notes, documentation, or anything past your training \
+                    cutoff. After answering, end with a \"Sources:\" list of the URLs you used."
+                .to_string();
+        }
         // 1:1 with claude-code `async prompt({model:e}){return CNi(e)}`
         // (binary @202215633), where `CNi(model)=Dh(model)?CONCISE:VERBOSE`
         // (@~197074952). The session/subagent model is threaded via

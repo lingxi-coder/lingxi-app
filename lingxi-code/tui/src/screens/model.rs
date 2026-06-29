@@ -22,6 +22,11 @@
 //! before the engine populates them) keep every row available + grouped under
 //! their static label — byte-identical to the historical behavior.
 
+// The "latest few" curation whitelist is shared with the mobile/CLI listings —
+// it lives in `traits` so there is ONE source of truth (a stale copy here once
+// keyed GLM on its slice filename instead of the profile name and hid the group).
+use traits::is_curated_model;
+
 /// One selectable model row in the grouped picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelRow {
@@ -64,10 +69,20 @@ fn model_description(request_model: &str) -> Option<String> {
 
 /// Human header for an EXISTING (`list_available_models`) provider prefix.
 fn existing_provider_label(prefix: &str) -> String {
+    // Canonical labels — kept in sync with the orchestrator catalog's
+    // `provider_label` (provider_adapter.rs) so a `provider/model` live row and a
+    // catalog row for the same provider share one group header (visible_lines
+    // groups by label).
     match prefix {
         "anthropic" => "Anthropic",
+        "openrouter" => "OpenRouter",
+        "deepseek" => "DeepSeek",
+        "glm-coding" | "zhipuai-coding-plan" => "GLM (coding)",
+        "zai" => "Z.AI",
         "openai" => "OpenAI",
-        "gemini" => "Gemini",
+        "openai-chatgpt" => "OpenAI (ChatGPT login)",
+        "github-copilot" => "GitHub Copilot",
+        "gemini" => "Google Gemini",
         other => other,
     }
     .to_string()
@@ -97,6 +112,17 @@ pub fn build_model_entries(
     let mut rows = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let avail = |pid: &str| availability.get(pid).copied().unwrap_or(true);
+
+    // (multi-provider keying) The live list (`existing`) carries DISPLAY names
+    // (`model.name`, e.g. "GPT-5.5"), whereas the catalog and `model_providers`
+    // key by the WIRE id (`model.id`, e.g. "gpt-5.5"). A catalog provider's live
+    // row therefore misses `model_providers` and would fall through to a mis-keyed
+    // "Built-in"/available-true row — and because name != id it never dedups
+    // against the correctly-keyed catalog row, leaving a silent duplicate (and a
+    // row whose `provider_id` can't even be switched to). Pre-index the catalog's
+    // display names so the Built-in fallback can defer to the catalog row instead.
+    let catalog_display_names: std::collections::HashSet<String> =
+        catalog.iter().map(|m| m.display_model.clone()).collect();
 
     for id in existing {
         if !seen.insert(id.clone()) {
@@ -149,6 +175,13 @@ pub fn build_model_entries(
                 description,
             }
         } else {
+            // A catalog provider's live row arrives as a DISPLAY name; the catalog
+            // already carries the correctly-keyed row (real provider_id +
+            // availability gating) for it, so defer to that rather than emit a
+            // mis-keyed Built-in duplicate.
+            if catalog_display_names.contains(&id) {
+                continue;
+            }
             // Genuinely unknown bare id (no mapping): default to Built-in/true.
             ModelRow {
                 display_model: id.clone(),
@@ -162,8 +195,18 @@ pub fn build_model_entries(
         rows.push(row);
     }
 
+    // Catalog dedup: a live row already represents its model (dedup against `seen`
+    // by request_model), but the SAME wire id can be legitimately offered by
+    // MULTIPLE providers (a GitHub Copilot proxy of `gpt-5.5` vs first-party
+    // OpenAI; `glm-*` shared by `zai` and `glm-coding`). Dedup catalog rows among
+    // themselves by (provider_id, request_model) so each provider keeps its own
+    // separately-gated row instead of the first-seen provider swallowing the rest.
+    let mut seen_catalog: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
     for m in catalog {
-        if !seen.insert(m.request_model.clone()) {
+        if seen.contains(&m.request_model)
+            || !seen_catalog.insert((m.provider_id.clone(), m.request_model.clone()))
+        {
             continue;
         }
         let available = avail(&m.provider_id);
@@ -235,48 +278,6 @@ pub enum ModelOutcome {
     },
     /// Esc — cancel with no change.
     Cancel,
-}
-
-/// The curated "latest few" models surfaced per provider in the `/model` picker.
-/// claude-code hand-picks a short list (`utils/model/modelOptions.ts`) instead of
-/// dumping every catalog model; we mirror that — the raw catalog is ~460 models
-/// (338 of them OpenRouter alone), which is unusable. Keyed by `(provider_id,
-/// request_model)`; note the wire ids differ per provider (Anthropic/native use
-/// `claude-opus-4-8` dashes, the GitHub Copilot proxy uses `claude-opus-4.8`
-/// dots). Any provider/model not listed here is hidden from the live picker (the
-/// user's current + recent models are exempted by [`ModelScreenState::is_shown_model`]).
-/// OpenRouter is intentionally absent — it is an aggregator passthrough, so a
-/// connected user should pick a first-class provider for a curated set.
-#[must_use]
-fn is_curated_model(provider_id: &str, request_model: &str) -> bool {
-    match provider_id {
-        "anthropic" | "builtin" => matches!(
-            request_model,
-            "claude-sonnet-4-6" | "claude-opus-4-8" | "claude-haiku-4-5" | "claude-fable-5"
-        ),
-        "openai" => matches!(request_model, "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini"),
-        "openai-chatgpt" => matches!(request_model, "gpt-5.3-codex" | "gpt-5-codex"),
-        "deepseek" => matches!(
-            request_model,
-            "deepseek-chat" | "deepseek-reasoner" | "deepseek-v4-pro"
-        ),
-        "gemini" => matches!(
-            request_model,
-            "gemini-3.5-flash" | "gemini-3.1-pro-preview" | "gemini-3-pro-preview"
-        ),
-        "github-copilot" => matches!(
-            request_model,
-            "claude-opus-4.8"
-                | "claude-sonnet-4.6"
-                | "claude-haiku-4.5"
-                | "claude-fable-5"
-                | "gpt-5.5"
-                | "gemini-3.1-pro-preview"
-        ),
-        "zai" => matches!(request_model, "glm-5.1" | "glm-5" | "glm-5-turbo"),
-        "zhipuai-coding-plan" => matches!(request_model, "glm-5.1" | "glm-5-turbo" | "glm-4.7"),
-        _ => false,
-    }
 }
 
 impl ModelScreenState {
@@ -845,6 +846,90 @@ mod entries_tests {
         assert_eq!(rows.iter().filter(|r| r.request_model == "deepseek-chat").count(), 1);
         assert_eq!(rows[0].provider_label, "Built-in");
     }
+
+    #[test]
+    fn live_display_name_defers_to_catalog_no_builtin_duplicate() {
+        use std::collections::BTreeMap;
+        // Production reality (the multi-provider bug this guards): the live list
+        // (`list_available_models`) carries DISPLAY names (model.name, e.g.
+        // "GPT-5.5"), while the catalog keys by the wire id (model.id, e.g.
+        // "gpt-5.5"). The two must NOT produce a mis-keyed "Built-in"/available
+        // duplicate that never dedups (name != id) — the correctly-keyed catalog
+        // row (real provider + [Connect] gating) represents the model.
+        let existing = vec!["GPT-5.5".to_string(), "Gemini 3.5 Flash".to_string()];
+        let catalog = vec![
+            ModelListing {
+                display_model: "GPT-5.5".to_string(),
+                request_model: "gpt-5.5".to_string(),
+                provider_id: "openai".to_string(),
+                provider_label: "OpenAI".to_string(),
+                description: None,
+            },
+            ModelListing {
+                display_model: "Gemini 3.5 Flash".to_string(),
+                request_model: "gemini-3.5-flash".to_string(),
+                provider_id: "gemini".to_string(),
+                provider_label: "Google Gemini".to_string(),
+                description: None,
+            },
+        ];
+        let mut avail = BTreeMap::new();
+        avail.insert("openai".to_string(), true);
+        avail.insert("gemini".to_string(), false);
+        let rows = build_model_entries(existing, catalog, &avail, &BTreeMap::new());
+        // No mis-keyed Built-in rows; exactly one correctly-keyed row per model.
+        assert!(rows.iter().all(|r| r.provider_id != "builtin"), "no builtin dupes: {rows:?}");
+        assert_eq!(rows.len(), 2, "one row per model, got {rows:?}");
+        let gpt = rows.iter().find(|r| r.request_model == "gpt-5.5").unwrap();
+        assert_eq!(gpt.provider_id, "openai");
+        assert_eq!(gpt.display_model, "GPT-5.5");
+        assert!(gpt.available, "configured openai → available");
+        let gem = rows.iter().find(|r| r.request_model == "gemini-3.5-flash").unwrap();
+        assert_eq!(gem.provider_id, "gemini");
+        assert!(!gem.available, "unconfigured gemini → [Connect]");
+    }
+
+    #[test]
+    fn catalog_same_wire_id_under_different_providers_keeps_both() {
+        // A wire id offered by two providers (e.g. GitHub Copilot's proxy of
+        // gpt-5.5 vs first-party OpenAI; glm-* shared by zai + glm-coding) must
+        // keep BOTH provider rows — catalog dedup is per (provider_id,
+        // request_model), not request_model alone, so the first-seen provider does
+        // not silently swallow the rest.
+        let catalog = vec![
+            ModelListing {
+                display_model: "GPT-5.5".to_string(),
+                request_model: "gpt-5.5".to_string(),
+                provider_id: "openai".to_string(),
+                provider_label: "OpenAI".to_string(),
+                description: None,
+            },
+            ModelListing {
+                display_model: "GPT-5.5".to_string(),
+                request_model: "gpt-5.5".to_string(),
+                provider_id: "github-copilot".to_string(),
+                provider_label: "GitHub Copilot".to_string(),
+                description: None,
+            },
+        ];
+        let rows = build_model_entries(
+            vec![],
+            catalog,
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+        );
+        assert_eq!(
+            rows.iter().filter(|r| r.request_model == "gpt-5.5").count(),
+            2,
+            "both provider variants kept: {rows:?}"
+        );
+        assert!(rows.iter().any(|r| r.provider_id == "openai"));
+        assert!(rows.iter().any(|r| r.provider_id == "github-copilot"));
+    }
+
+    // NOTE: the curation whitelist (`is_curated_model`, incl. the glm-coding
+    // profile-name regression) now lives in `traits` with its own tests
+    // (`traits::curated_model_tests`) — one source of truth shared with mobile/CLI.
 
     #[test]
     fn availability_joins_by_provider_id_default_true() {

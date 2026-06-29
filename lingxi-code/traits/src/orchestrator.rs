@@ -343,6 +343,88 @@ pub fn parse_model_ref(input: &str, listings: &[ModelListing]) -> (String, Optio
     (input.to_string(), None)
 }
 
+/// The curated "latest few" models surfaced per provider in the `/model` picker
+/// and the no-arg `/model` listing. claude-code hand-picks a short list
+/// (`utils/model/modelOptions.ts`) instead of dumping the whole catalog (~460
+/// models, 338 of them OpenRouter); we mirror that. Keyed by the stable
+/// `provider_id` (the catalog profile name, e.g. `"glm-coding"`, NOT the slice
+/// filename) + the wire `request_model`. Note the wire ids differ per provider
+/// (Anthropic/native `claude-opus-4-8` dashes vs the GitHub Copilot proxy's
+/// `claude-opus-4.8` dots). Any provider/model not listed is non-curated;
+/// callers keep the user's current + recent models visible separately.
+/// OpenRouter is intentionally absent — an aggregator passthrough, so a
+/// connected user should pick a first-class provider for a curated set.
+///
+/// Shared by the TUI picker (`build_model_entries`/`is_shown_model`) and the
+/// mobile/CLI listings so the whitelist has ONE source of truth.
+#[must_use]
+pub fn is_curated_model(provider_id: &str, request_model: &str) -> bool {
+    match provider_id {
+        "anthropic" | "builtin" => matches!(
+            request_model,
+            "claude-sonnet-4-6" | "claude-opus-4-8" | "claude-haiku-4-5" | "claude-fable-5"
+        ),
+        "openai" => matches!(request_model, "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini"),
+        "openai-chatgpt" => matches!(request_model, "gpt-5.3-codex" | "gpt-5-codex"),
+        "deepseek" => matches!(
+            request_model,
+            "deepseek-chat" | "deepseek-reasoner" | "deepseek-v4-pro"
+        ),
+        "gemini" => matches!(
+            request_model,
+            "gemini-3.5-flash" | "gemini-3.1-pro-preview" | "gemini-3-pro-preview"
+        ),
+        "github-copilot" => matches!(
+            request_model,
+            "claude-opus-4.8"
+                | "claude-sonnet-4.6"
+                | "claude-haiku-4.5"
+                | "claude-fable-5"
+                | "gpt-5.5"
+                | "gemini-3.1-pro-preview"
+        ),
+        "zai" => matches!(request_model, "glm-5.1" | "glm-5" | "glm-5-turbo"),
+        // The profile name is "glm-coding" (catalog presets); "zhipuai-coding-plan"
+        // is only the vendored slice's filename.
+        "glm-coding" => matches!(request_model, "glm-5.1" | "glm-5-turbo" | "glm-4.7"),
+        _ => false,
+    }
+}
+
+/// Curate a flat list of model names for the no-arg/mobile listing surfaces
+/// (`ClientEvent::ModelList`, `/model` text command) that carry only `Vec<String>`.
+///
+/// Mobile/CLI lack the TUI's per-provider availability maps, so this can't gate
+/// `[Connect]`; instead it trims the catalog to the [`is_curated_model`] short
+/// list (display names, de-duplicated, `current` kept first so it's always
+/// selectable). When `listings` is empty (library/stub callers with no routing
+/// client / catalog) it falls back to the raw `available` list unchanged —
+/// there's nothing to curate against and the caller's prior behavior is kept.
+#[must_use]
+pub fn curated_model_names(
+    listings: &[ModelListing],
+    available: &[String],
+    current: &str,
+) -> Vec<String> {
+    if listings.is_empty() {
+        return available.to_vec();
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if !current.is_empty() {
+        seen.insert(current.to_string());
+        out.push(current.to_string());
+    }
+    for l in listings {
+        if is_curated_model(&l.provider_id, &l.request_model)
+            && seen.insert(l.display_model.clone())
+        {
+            out.push(l.display_model.clone());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod parse_model_ref_tests {
     use super::{parse_model_ref, ModelListing};
@@ -388,6 +470,53 @@ mod parse_model_ref_tests {
     fn degenerate_inputs_safe() {
         assert_eq!(parse_model_ref("", &fixture()), ("".into(), None));
         assert_eq!(parse_model_ref("/", &fixture()), ("/".into(), None));
+    }
+}
+
+#[cfg(test)]
+mod curated_model_tests {
+    use super::{curated_model_names, is_curated_model, ModelListing};
+
+    fn listing(provider_id: &str, request_model: &str, display: &str) -> ModelListing {
+        ModelListing {
+            display_model: display.to_string(),
+            request_model: request_model.to_string(),
+            provider_id: provider_id.to_string(),
+            provider_label: provider_id.to_string(),
+            description: None,
+        }
+    }
+
+    #[test]
+    fn glm_coding_keyed_on_profile_name_not_filename() {
+        assert!(is_curated_model("glm-coding", "glm-5.1"));
+        assert!(is_curated_model("glm-coding", "glm-4.7"));
+        assert!(!is_curated_model("zhipuai-coding-plan", "glm-5.1"));
+    }
+
+    #[test]
+    fn curates_catalog_to_short_list_and_keeps_current() {
+        let listings = vec![
+            listing("openai", "gpt-5.5", "GPT-5.5"),
+            listing("openai", "gpt-4o", "GPT-4o"), // not curated → dropped
+            listing("anthropic", "claude-opus-4-8", "claude-opus-4-8"),
+            listing("gemini", "gemini-3.5-flash", "Gemini 3.5 Flash"),
+        ];
+        let available = vec!["GPT-5.5".to_string(), "GPT-4o".to_string()];
+        let out = curated_model_names(&listings, &available, "claude-opus-4-8");
+        // current first, then curated catalog; non-curated GPT-4o excluded.
+        assert_eq!(out[0], "claude-opus-4-8", "current kept first");
+        assert!(out.contains(&"GPT-5.5".to_string()));
+        assert!(out.contains(&"Gemini 3.5 Flash".to_string()));
+        assert!(!out.contains(&"GPT-4o".to_string()), "non-curated dropped");
+        // current not duplicated even though it is also curated.
+        assert_eq!(out.iter().filter(|m| *m == "claude-opus-4-8").count(), 1);
+    }
+
+    #[test]
+    fn empty_listings_falls_back_to_raw_available() {
+        let available = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(curated_model_names(&[], &available, "a"), available);
     }
 }
 

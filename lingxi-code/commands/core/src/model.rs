@@ -37,15 +37,22 @@ impl BuiltinCommandHandler for ModelHandler {
         telemetry::emit_command_started(cmd_evt::MODEL_STARTED);
         let trimmed = args.raw_args.trim();
         if trimmed.is_empty() {
-            // List mode.
+            // List mode. Curate to the "latest few" per provider (the shared
+            // `traits::curated_model_names`, same whitelist as the TUI picker +
+            // mobile listing) instead of joining the full assembled catalog
+            // (~hundreds of ids — every preset is injected into the live config by
+            // `provider_config::assemble`). With no catalog wired (library/stub)
+            // the helper returns the raw list unchanged.
             let available = self.handle.list_available_models().await;
+            let listings = self.handle.list_model_listings().await;
             let snap = self.handle.get_status_snapshot().await;
+            let models = traits::curated_model_names(&listings, &available, &snap.model);
             telemetry::emit_command_completed(cmd_evt::MODEL_COMPLETED, "list");
             return CommandResult::Done {
                 display: Some(format!(
                     "Current model: {}\nAvailable: {}",
                     snap.model,
-                    available.join(", ")
+                    models.join(", ")
                 )),
             };
         }

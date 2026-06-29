@@ -261,30 +261,22 @@ impl OrchestratorHandle for ConversationOrchestrator {
         spawn_editor_on(target, "{}\n").await
     }
 
-    /// Model names shown by the no-arg `/model` display. Surfaces the real
-    /// configured profiles + aliases via the API-client seam
-    /// (`ProviderApiAdapter` → `ModelRouter::available_models`, emitting
-    /// `provider/model` ids and `@aliases`). Falls back to the static example
-    /// list when no routing client is wired (library / test callers, or the
-    /// no-streaming stub). `switch_model` still accepts any string; actual
-    /// availability depends on the profile's API key (see `docs/LLM_PROVIDERS.md`).
+    /// Model names shown by the no-arg `/model` display and the picker's "live"
+    /// column. Surfaces the real configured profiles + aliases via the API-client
+    /// seam (`ProviderApiAdapter` → `ModelRouter::available_models`, emitting
+    /// `provider/model` ids and `@aliases`).
+    ///
+    /// There is intentionally NO provider-specific fallback here. This may be
+    /// empty for library / test / no-streaming callers that wire no routing
+    /// client; the grouped picker merges it with the static catalog
+    /// (`list_model_listings`), which now enumerates EVERY provider — including
+    /// first-party Anthropic — so Claude no longer needs a hardcoded list. A real
+    /// session always has a live config (`provider_config::assemble` injects the
+    /// Anthropic profile plus every preset), so this is non-empty in production.
+    /// `switch_model` still accepts any string; actual availability depends on the
+    /// profile's credential (see `docs/LLM_PROVIDERS.md`).
     async fn list_available_models(&self) -> Vec<String> {
-        let models = self.api.available_models();
-        if !models.is_empty() {
-            return models;
-        }
-        // The latest first-party Claude line (what the curated `/model` picker
-        // surfaces under "Anthropic"). Used only when no routing client is wired
-        // and `available_models()` is empty; the live config supplies the real
-        // list (see `anthropic_model_profiles`). Catalog providers (OpenAI,
-        // Gemini, …) come through `list_model_listings`, so they're not duplicated
-        // here.
-        vec![
-            "claude-sonnet-4-6".to_string(),
-            "claude-opus-4-8".to_string(),
-            "claude-haiku-4-5".to_string(),
-            "claude-fable-5".to_string(),
-        ]
+        self.api.available_models()
     }
 
     /// Richer catalog listing for the grouped `/model` picker. Delegates to the

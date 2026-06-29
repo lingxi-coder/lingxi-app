@@ -1878,8 +1878,16 @@ impl MobileEngineHandle {
         let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
         match kind {
             ProtocolListingKind::Models => {
-                let models = handle.list_available_models().await;
+                // Curate to the "latest few" per provider instead of flooding the
+                // client with the full assembled catalog (~hundreds of ids — every
+                // preset is injected into the live config by `provider_config::assemble`).
+                // Mobile lacks the TUI's availability maps, so this trims to the
+                // shared `is_curated_model` whitelist (keeping the current model);
+                // `[Connect]` gating + grouping stays a TUI/structured-DTO concern.
+                let available = handle.list_available_models().await;
+                let listings = handle.list_model_listings().await;
                 let current = handle.get_status_snapshot().await.model;
+                let models = traits::curated_model_names(&listings, &available, &current);
                 self.event_sink
                     .emit(ClientEvent::ModelList { models, current })
                     .await;

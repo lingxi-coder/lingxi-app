@@ -209,34 +209,62 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     }
 }
 
-/// Build the grouped-picker listing from the static llm-client catalog.
+/// Build the grouped-picker listing for EVERY provider.
+///
+/// First-party Anthropic is NOT part of the models.dev preset catalog
+/// (`builtin_presets`); in a live session it enters via
+/// `anthropic_provider_profile`. We surface it here too so this seam is
+/// provider-COMPLETE on its own — it previously omitted Anthropic, which is why
+/// `list_available_models` had to carry a Claude-only hardcoded fallback. With
+/// Anthropic in the catalog that special case is gone. Anthropic is listed first
+/// to keep the picker's Claude-first ordering for catalog-only (no live config)
+/// callers.
 fn catalog_model_listings() -> Vec<traits::orchestrator::ModelListing> {
-    let catalog = llm_client::builtin_presets();
-    let Ok(registry) = llm_client::ModelRegistry::from_config(llm_client::ClientConfig {
-        providers: catalog.providers,
-    }) else {
-        return Vec::new();
+    // Build one listing, defaulting an absent description to a known per-model
+    // parity blurb for the Claude family (models.dev / the Anthropic profiles
+    // carry no such string).
+    let row = |display_model: String,
+               request_model: String,
+               label: String,
+               provider: String,
+               description: Option<String>| {
+        let description =
+            description.or_else(|| model_description(&request_model).map(str::to_string));
+        traits::orchestrator::ModelListing {
+            display_model,
+            request_model,
+            provider_label: label,
+            provider_id: provider,
+            description,
+        }
     };
-    registry
-        .available_models()
-        .into_iter()
-        .map(|m| {
-            // Prefer the catalog's own description; fall back to a known per-model
-            // parity blurb for the built-in Claude family (models.dev carries no
-            // such string for them).
-            let description = m
-                .description
-                .clone()
-                .or_else(|| model_description(&m.request_model).map(str::to_string));
-            traits::orchestrator::ModelListing {
-                display_model: m.display_model,
-                request_model: m.request_model,
-                provider_label: provider_label(&m.profile_name).to_string(),
-                provider_id: m.profile_name,
-                description,
-            }
-        })
-        .collect()
+
+    // 1. First-party Anthropic (not in the preset catalog).
+    let mut listings: Vec<traits::orchestrator::ModelListing> =
+        llm_client::anthropic_model_profiles()
+            .into_iter()
+            .map(|m| {
+                row(
+                    m.display_model,
+                    m.request_model,
+                    provider_label("anthropic").to_string(),
+                    "anthropic".to_string(),
+                    m.description,
+                )
+            })
+            .collect();
+
+    // 2. Static models.dev presets (OpenAI, Gemini, DeepSeek, …).
+    let catalog = llm_client::builtin_presets();
+    if let Ok(registry) = llm_client::ModelRegistry::from_config(llm_client::ClientConfig {
+        providers: catalog.providers,
+    }) {
+        listings.extend(registry.available_models().into_iter().map(|m| {
+            let label = provider_label(&m.profile_name).to_string();
+            row(m.display_model, m.request_model, label, m.profile_name, m.description)
+        }));
+    }
+    listings
 }
 
 /// Known one-line description for a built-in model wire id, mirroring the
@@ -261,6 +289,7 @@ pub(crate) fn model_description(request_model: &str) -> Option<&'static str> {
 /// Human provider header for a catalog profile name.
 fn provider_label(profile_name: &str) -> &str {
     match profile_name {
+        "anthropic" => "Anthropic",
         "openrouter" => "OpenRouter",
         "deepseek" => "DeepSeek",
         "glm-coding" => "GLM (coding)",
@@ -540,14 +569,15 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
         let listings = OrchestratorApiClient::list_model_listings(&adapter);
-        // The static llm-client catalog (openrouter + deepseek + glm-coding +
-        // zai + github-copilot) yields well over 100 model rows.
+        // The first-party Anthropic family plus the static llm-client catalog
+        // (openrouter + deepseek + glm-coding + zai + github-copilot) yields well
+        // over 100 model rows.
         assert!(
             listings.len() >= 100,
             "expected >=100 catalog listings, got {}",
             listings.len()
         );
-        // The four catalog providers appear with their hand-authored labels.
+        // Each provider appears with its hand-authored label.
         let label_for = |id: &str| -> Option<String> {
             listings
                 .iter()
@@ -560,6 +590,15 @@ mod tests {
         assert_eq!(
             label_for("github-copilot").as_deref(),
             Some("GitHub Copilot")
+        );
+        // First-party Anthropic is now part of the catalog (it used to live as a
+        // Claude-only hardcoded fallback in `list_available_models`).
+        assert_eq!(label_for("anthropic").as_deref(), Some("Anthropic"));
+        assert!(
+            listings
+                .iter()
+                .any(|l| l.provider_id == "anthropic" && l.request_model == "claude-opus-4-8"),
+            "expected the first-party Anthropic Claude family in the catalog"
         );
         // (model-no-row-descriptions) Claude-family ids in the catalog (e.g.
         // openrouter's `*opus*`/`*sonnet*`/`*haiku*`) pick up a built-in blurb so

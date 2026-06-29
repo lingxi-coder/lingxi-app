@@ -274,9 +274,7 @@ impl ConnectPickerState {
             })
             .collect()
     }
-}
 
-impl ConnectPickerState {
     /// The provider id of the currently highlighted selectable row (None if empty).
     #[must_use]
     pub fn highlighted_provider_id(&self) -> Option<&str> {

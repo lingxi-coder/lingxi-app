@@ -806,15 +806,6 @@ pub async fn handle_submit_line(
     SubmitDisposition::RunTyped // plain text — caller runs `orchestrator.run_turn`
 }
 
-/// Build the full `ReplScreen` element from an `AppState` snapshot for
-/// the given viewport height. Used by the per-frame render path; tests
-/// also exercise it to verify the screen composes without panicking.
-///
-/// The full reactive event-loop wiring (`use_state` hooks, key event →
-/// dispatch, re-render on terminal resize) lands in M6-03 along with
-/// the streaming spinner. M6-02 ships the pure render function so
-/// downstream tasks have a stable assembly point.
-
 /// Build the complete [`crate::components::picker_popup::PopupLine`] list for
 /// the `/connect` picker popup: the grouped provider list PLUS the highlighted
 /// provider's detail section (connected state, models, login methods).
@@ -875,6 +866,14 @@ pub fn connect_picker_popup_lines(
     lines
 }
 
+/// Build the full `ReplScreen` element from an `AppState` snapshot for
+/// the given viewport height. Used by the per-frame render path; tests
+/// also exercise it to verify the screen composes without panicking.
+///
+/// The full reactive event-loop wiring (`use_state` hooks, key event →
+/// dispatch, re-render on terminal resize) lands in M6-03 along with
+/// the streaming spinner. M6-02 ships the pure render function so
+/// downstream tasks have a stable assembly point.
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn render_screen(

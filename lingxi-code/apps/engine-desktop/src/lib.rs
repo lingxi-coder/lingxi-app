@@ -1569,6 +1569,10 @@ pub struct DesktopRuntime {
     /// picker's Connect badge (a sibling map, NOT a field on the frozen
     /// `ModelListing`). The tui joins it by provider/profile name.
     pub provider_availability: std::collections::BTreeMap<String, bool>,
+    /// (T2a) Per-provider login method tag, keyed by profile_name, derived from
+    /// the real catalog auth strategy: "api_key" | "copilot_device" | "oauth".
+    /// Threaded into the TUI so the /connect picker shows the real method.
+    pub provider_auth_methods: std::collections::BTreeMap<String, String>,
     /// Phase 2a I1/I2: authoritative `request_model -> (profile_name,
     /// provider_label)` map assembled from the LIVE multi-provider
     /// `ClientConfig.providers` (every profile's `models[].request_model`). The
@@ -4731,6 +4735,30 @@ pub async fn build(
         .entry("anthropic".to_string())
         .or_insert(has_api_key || has_oauth);
 
+    // T2a: per-profile login-method tag derived from the builtin catalog auth
+    // strategy.  AuthStrategy::None providers are not connectable → skipped.
+    let mut provider_auth_methods: std::collections::BTreeMap<String, String> =
+        llm_client::builtin_presets()
+            .providers
+            .iter()
+            .filter_map(|p| {
+                use llm_client::AuthStrategy::*;
+                let tag = match p.auth {
+                    ApiKey | Bearer => "api_key",
+                    CopilotBearer => "copilot_device",
+                    ChatGptOAuth | OAuthBearer | AwsSigV4 | GcpToken | AzureToken => "oauth",
+                    None => return Option::None,
+                };
+                Some((p.profile_name.clone(), tag.to_string()))
+            })
+            .collect();
+    // Anthropic is not in the builtin catalog presets (it is the native auth
+    // path), but the /connect picker still needs it represented with its auth
+    // method tag ("api_key") — mirror the provider_availability approach above.
+    provider_auth_methods
+        .entry("anthropic".to_string())
+        .or_insert_with(|| "api_key".to_string());
+
     Ok(DesktopRuntime {
         orchestrator: orch,
         dispatcher,
@@ -4743,6 +4771,7 @@ pub async fn build(
         file_changed_watcher,
         subscription,
         provider_availability,
+        provider_auth_methods,
         model_providers,
         provider_adapter: provider_adapter_handle,
         credentials,
@@ -5489,6 +5518,25 @@ mod tests {
             rt.model_providers.get("claude-sonnet-4-6"),
             Some(&("anthropic".to_string(), "Anthropic".to_string())),
         );
+    }
+
+    /// T2a: a default `build()` surfaces `provider_auth_methods` keyed by
+    /// `profile_name` with one of the three tag-vocabulary strings
+    /// ("api_key" | "copilot_device" | "oauth"), derived from the builtin catalog.
+    #[tokio::test]
+    async fn build_surfaces_provider_auth_methods_from_catalog() {
+        let (_tmp, cfg) = test_config(true);
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+        let m = &rt.provider_auth_methods;
+        // Catalog-derived: keys are real profile_names, values are the tag vocabulary.
+        assert_eq!(m.get("anthropic").map(String::as_str), Some("api_key"));
+        assert_eq!(m.get("github-copilot").map(String::as_str), Some("copilot_device"));
+        assert_eq!(m.get("openai-chatgpt").map(String::as_str), Some("oauth"));
+        assert!(m.values().all(|v| matches!(v.as_str(), "api_key" | "copilot_device" | "oauth")));
     }
 
     /// Phase 2a (T10 integration): a `build()` with BOTH a user-defined provider

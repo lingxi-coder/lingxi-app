@@ -17,6 +17,34 @@
 
 use std::collections::BTreeMap;
 
+/// The real login method for a provider, derived from the catalog auth tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectMethod {
+    ApiKey,
+    CopilotDevice,
+    OAuthSoon,
+}
+
+impl ConnectMethod {
+    #[must_use]
+    pub fn from_tag(tag: &str) -> Self {
+        match tag {
+            "api_key" => Self::ApiKey,
+            "copilot_device" => Self::CopilotDevice,
+            _ => Self::OAuthSoon, // "oauth" + any unknown → honest "coming soon"
+        }
+    }
+
+    /// Human suffix appended to the row description (so it reflects reality).
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::ApiKey => " \u{2014} API key",
+            Self::CopilotDevice => " \u{2014} device sign-in",
+            Self::OAuthSoon => " \u{2014} browser sign-in (coming soon)",
+        }
+    }
+}
+
 /// One selectable provider row in the grouped picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectRow {
@@ -31,6 +59,8 @@ pub struct ConnectRow {
     pub popular: bool,
     /// Whether this provider already has a usable credential (leading `✓`).
     pub connected: bool,
+    /// The real login method, derived from the catalog auth tag.
+    pub method: ConnectMethod,
 }
 
 /// A rendered line: a non-selectable group header, or a selectable row
@@ -51,82 +81,81 @@ pub const SUB_HEADER: &str =
 /// description (so the descriptions align into a second column).
 const NAME_COL: usize = 22;
 
-/// Whether ANY of `keys` resolves to a usable credential in `availability`.
-/// A missing key ⇒ not connected (best-effort; an empty map yields no `✓`s).
-fn any_connected(availability: &BTreeMap<String, bool>, keys: &[&str]) -> bool {
-    keys.iter().any(|k| availability.get(*k).copied().unwrap_or(false))
+struct DisplayMeta {
+    label: String,
+    blurb: String,
+    popular: bool,
 }
 
-/// Build the static LingXi connectable-provider catalog, joining each row's
-/// `connected` flag from `availability` (best-effort key lookup; anthropic also
-/// tries the `anthropic-api-key`/`anthropic-oauth` keychain ids). An empty map
-/// ⇒ every row unconnected (no `✓`).
+fn connect_display_meta(profile_name: &str) -> DisplayMeta {
+    // (id, label, blurb, popular) — blurb is "what it is", NOT the method (the
+    // method suffix is appended separately so descriptions can't lie).
+    let curated: &[(&str, &str, &str, bool)] = &[
+        ("anthropic", "Anthropic", "Claude models", true),
+        ("openai", "OpenAI", "GPT models", true),
+        ("openai-chatgpt", "OpenAI (ChatGPT)", "ChatGPT Plus/Pro", true),
+        ("github-copilot", "GitHub Copilot", "Your Copilot subscription", true),
+        ("gemini", "Google Gemini", "Gemini models", true),
+        ("deepseek", "DeepSeek", "Chat / Reasoner", true),
+        ("openrouter", "OpenRouter", "Unified gateway to many models", false),
+        ("zai", "Z.AI", "GLM models", false),
+        ("glm-coding", "GLM Coding Plan", "Zhipu coding-plan subscription", false),
+    ];
+    if let Some((_, label, blurb, popular)) =
+        curated.iter().find(|(id, ..)| *id == profile_name)
+    {
+        return DisplayMeta {
+            label: (*label).to_string(),
+            blurb: (*blurb).to_string(),
+            popular: *popular,
+        };
+    }
+    DisplayMeta { label: title_case(profile_name), blurb: "Provider".to_string(), popular: false }
+}
+
+/// "brand-new-provider" → "Brand New Provider" (split on '-'/'_').
+fn title_case(id: &str) -> String {
+    id.split(|c| c == '-' || c == '_')
+        .filter(|s| !s.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Build picker rows from the REAL catalog (`auth_methods` = the provider set +
+/// method) joined with availability (connected, keyed directly by profile_name).
+/// An empty availability map ⇒ every row unconnected (no `✓`s).
 #[must_use]
-pub fn default_connect_rows(availability: &BTreeMap<String, bool>) -> Vec<ConnectRow> {
-    let mk = |provider_id: &str, label: &str, description: &str, popular: bool, keys: &[&str]| {
-        ConnectRow {
-            provider_id: provider_id.to_string(),
-            label: label.to_string(),
-            description: description.to_string(),
-            popular,
-            connected: any_connected(availability, keys),
-        }
-    };
-    vec![
-        // POPULAR
-        mk(
-            "anthropic",
-            "Anthropic",
-            "Claude models \u{2014} API key or Pro/Max sign-in",
-            true,
-            &["anthropic", "anthropic-api-key", "anthropic-oauth"],
-        ),
-        mk("openai", "OpenAI", "GPT models \u{2014} API key", true, &["openai"]),
-        mk(
-            "openai-chatgpt",
-            "OpenAI (ChatGPT)",
-            "Sign in with ChatGPT Plus/Pro",
-            true,
-            &["openai-chatgpt"],
-        ),
-        mk(
-            "github-copilot",
-            "GitHub Copilot",
-            "Use your GitHub Copilot subscription",
-            true,
-            &["github-copilot"],
-        ),
-        mk("gemini", "Google Gemini", "Gemini models \u{2014} API key", true, &["gemini"]),
-        mk(
-            "deepseek",
-            "DeepSeek",
-            "DeepSeek Chat / Reasoner \u{2014} API key",
-            true,
-            &["deepseek"],
-        ),
-        // PROVIDERS
-        mk(
-            "openrouter",
-            "OpenRouter",
-            "Unified gateway to many models \u{2014} API key",
-            false,
-            &["openrouter"],
-        ),
-        mk("zai", "Z.AI", "GLM models \u{2014} API key", false, &["zai"]),
-        mk(
-            "glm-coding",
-            "GLM Coding Plan",
-            "Zhipu coding-plan subscription \u{2014} API key",
-            false,
-            &["glm-coding"],
-        ),
-    ]
+pub fn connect_rows_from(
+    auth_methods: &BTreeMap<String, String>,
+    availability: &BTreeMap<String, bool>,
+) -> Vec<ConnectRow> {
+    auth_methods
+        .iter()
+        .map(|(profile_name, tag)| {
+            let method = ConnectMethod::from_tag(tag);
+            let meta = connect_display_meta(profile_name);
+            ConnectRow {
+                provider_id: profile_name.clone(),
+                label: meta.label,
+                description: format!("{}{}", meta.blurb, method.suffix()),
+                popular: meta.popular,
+                connected: availability.get(profile_name).copied().unwrap_or(false),
+                method,
+            }
+        })
+        .collect()
 }
 
 /// Grouped `/connect` picker state. Pure; mirrors `ModelScreenState`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConnectPickerState {
-    /// All selectable rows (from [`default_connect_rows`]).
+    /// All selectable rows (from [`connect_rows_from`]).
     pub rows: Vec<ConnectRow>,
     /// Search query (printable chars typed in the picker).
     pub query: String,
@@ -155,10 +184,34 @@ impl ConnectPickerState {
         Self { rows, query: String::new(), selected: 0 }
     }
 
-    /// Build the default catalog joined against the App's `provider_availability`.
+    /// Build from `auth_methods` + `availability`; the primary data-driven constructor.
+    #[must_use]
+    pub fn from_connectable(
+        auth_methods: &BTreeMap<String, String>,
+        availability: &BTreeMap<String, bool>,
+    ) -> Self {
+        Self::new(connect_rows_from(auth_methods, availability))
+    }
+
+    /// Compatibility shim — Task 5 will migrate callers to `from_connectable`.
+    /// Synthesises a fixed auth-tag map from the curated 9-provider catalog.
     #[must_use]
     pub fn from_availability(availability: &BTreeMap<String, bool>) -> Self {
-        Self::new(default_connect_rows(availability))
+        let auth: BTreeMap<String, String> = [
+            ("anthropic", "api_key"),
+            ("openai", "api_key"),
+            ("openai-chatgpt", "copilot_device"),
+            ("github-copilot", "copilot_device"),
+            ("gemini", "api_key"),
+            ("deepseek", "api_key"),
+            ("openrouter", "api_key"),
+            ("zai", "api_key"),
+            ("glm-coding", "api_key"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        Self::from_connectable(&auth, availability)
     }
 
     /// Whether a row matches the query (case-insensitive substring over label,
@@ -293,12 +346,60 @@ pub fn render_connect_picker_to_string(state: &ConnectPickerState) -> String {
 }
 
 #[cfg(test)]
+mod t3_tests {
+    use super::*;
+
+    #[test]
+    fn method_from_tag_table() {
+        assert_eq!(ConnectMethod::from_tag("api_key"), ConnectMethod::ApiKey);
+        assert_eq!(ConnectMethod::from_tag("copilot_device"), ConnectMethod::CopilotDevice);
+        assert_eq!(ConnectMethod::from_tag("oauth"), ConnectMethod::OAuthSoon);
+        assert_eq!(ConnectMethod::from_tag("???"), ConnectMethod::OAuthSoon); // unknown → honest soon
+    }
+
+    #[test]
+    fn rows_are_data_driven_with_trustworthy_check_and_method() {
+        let mut auth = std::collections::BTreeMap::new();
+        auth.insert("anthropic".to_string(), "api_key".to_string());
+        auth.insert("github-copilot".to_string(), "copilot_device".to_string());
+        auth.insert("brand-new-provider".to_string(), "api_key".to_string()); // not in curated map
+        let mut avail = std::collections::BTreeMap::new();
+        avail.insert("anthropic".to_string(), true); // connected
+        // github-copilot absent ⇒ not connected
+        let rows = connect_rows_from(&auth, &avail);
+
+        let a = rows.iter().find(|r| r.provider_id == "anthropic").unwrap();
+        assert_eq!(a.label, "Anthropic"); // curated label
+        assert!(a.connected); // ✓ keyed by profile_name
+        assert_eq!(a.method, ConnectMethod::ApiKey);
+        assert!(a.description.ends_with("API key")); // method-derived suffix, cannot lie
+
+        let g = rows.iter().find(|r| r.provider_id == "github-copilot").unwrap();
+        assert!(!g.connected);
+        assert_eq!(g.method, ConnectMethod::CopilotDevice);
+
+        let n = rows.iter().find(|r| r.provider_id == "brand-new-provider").unwrap();
+        assert_eq!(n.label, "Brand New Provider"); // title-cased fallback — still renders
+    }
+}
+
+#[cfg(test)]
 mod reducer_tests {
     use super::*;
     use crossterm::event::KeyCode;
 
     fn rows() -> Vec<ConnectRow> {
-        default_connect_rows(&BTreeMap::new())
+        let mut auth = BTreeMap::new();
+        auth.insert("anthropic".to_string(), "api_key".to_string());
+        auth.insert("openai".to_string(), "api_key".to_string());
+        auth.insert("openai-chatgpt".to_string(), "copilot_device".to_string());
+        auth.insert("github-copilot".to_string(), "copilot_device".to_string());
+        auth.insert("gemini".to_string(), "api_key".to_string());
+        auth.insert("deepseek".to_string(), "api_key".to_string());
+        auth.insert("openrouter".to_string(), "api_key".to_string());
+        auth.insert("zai".to_string(), "api_key".to_string());
+        auth.insert("glm-coding".to_string(), "api_key".to_string());
+        connect_rows_from(&auth, &BTreeMap::new())
     }
 
     #[test]
@@ -385,15 +486,6 @@ mod render_tests {
         let out = render_connect_picker_to_string(&st);
         // openrouter is not the highlighted row (Anthropic is), so its ✓ shows.
         assert!(out.contains("\u{2713} OpenRouter"), "{out}");
-    }
-
-    #[test]
-    fn anthropic_oauth_key_counts_as_connected() {
-        let mut avail = BTreeMap::new();
-        avail.insert("anthropic-oauth".to_string(), true);
-        let rows = default_connect_rows(&avail);
-        let anthropic = rows.iter().find(|r| r.provider_id == "anthropic").unwrap();
-        assert!(anthropic.connected);
     }
 
     #[test]

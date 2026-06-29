@@ -56,6 +56,16 @@ pub const COPILOT_TOKEN_EXCHANGE_URL: &str = "https://api.github.com/copilot_int
 /// request never rides an about-to-expire token. See [`ExchangedToken::is_fresh`].
 pub const COPILOT_TOKEN_REFRESH_SKEW_SECS: u64 = 300;
 
+/// Editor-identifying headers GitHub's `copilot_internal/v2/token` endpoint
+/// validates: without a recognized `Editor-Version` + `Editor-Plugin-Version`
+/// pair it returns `404 Not Found` even for a Copilot-entitled account. Values
+/// mirror the GitHub Copilot Chat client (the set VS Code / opencode / copilot
+/// editor plugins send).
+pub const COPILOT_EDITOR_USER_AGENT: &str = "GitHubCopilotChat/0.26.7";
+pub const COPILOT_EDITOR_VERSION: &str = "vscode/1.99.3";
+pub const COPILOT_EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.26.7";
+pub const COPILOT_INTEGRATION_ID: &str = "vscode-chat";
+
 /// Minimal JSON seam for the device-flow calls + the Copilot token exchange.
 ///
 /// Host implementations MUST send `Accept: application/json` (GitHub otherwise
@@ -263,7 +273,13 @@ pub async fn exchange_copilot_token<H: CopilotHttp + ?Sized>(
     http: &H,
     oauth_token: &str,
 ) -> Result<ExchangedToken, LlmError> {
-    let headers = [("Authorization", format!("token {oauth_token}"))];
+    let headers = [
+        ("Authorization", format!("token {oauth_token}")),
+        ("Editor-Version", COPILOT_EDITOR_VERSION.to_string()),
+        ("Editor-Plugin-Version", COPILOT_EDITOR_PLUGIN_VERSION.to_string()),
+        ("Copilot-Integration-Id", COPILOT_INTEGRATION_ID.to_string()),
+        ("User-Agent", COPILOT_EDITOR_USER_AGENT.to_string()),
+    ];
     let v = http.get_json(COPILOT_TOKEN_EXCHANGE_URL, &headers).await?;
     parse_exchange_response(&v)
 }

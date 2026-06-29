@@ -128,14 +128,21 @@ impl CopilotHttp for PosixCopilotHttp {
         headers: &'a [(&'a str, String)],
     ) -> BoxFuture<'a, Result<Value, LlmError>> {
         Box::pin(async move {
-            // Base headers (Accept/User-Agent) the seam requires, plus the
-            // caller-supplied ones (e.g. `Authorization: token <oauth>` for the
-            // Copilot token exchange).
-            let mut hdrs = vec![
-                ("Accept".to_string(), "application/json".to_string()),
-                ("User-Agent".to_string(), "LingXi-Code".to_string()),
-            ];
-            hdrs.extend(headers.iter().map(|(k, v)| ((*k).to_string(), v.clone())));
+            // Caller headers win; only fill Accept/User-Agent defaults the seam
+            // requires when the caller didn't supply them — the Copilot token
+            // exchange sends its own editor `User-Agent`, which must not be
+            // shadowed by a duplicate (GitHub rejects the unrecognized one).
+            let mut hdrs: Vec<(String, String)> =
+                headers.iter().map(|(k, v)| ((*k).to_string(), v.clone())).collect();
+            fn has(hdrs: &[(String, String)], name: &str) -> bool {
+                hdrs.iter().any(|(k, _)| k.eq_ignore_ascii_case(name))
+            }
+            if !has(&hdrs, "Accept") {
+                hdrs.push(("Accept".to_string(), "application/json".to_string()));
+            }
+            if !has(&hdrs, "User-Agent") {
+                hdrs.push(("User-Agent".to_string(), "LingXi-Code".to_string()));
+            }
             let req = HttpRequest {
                 method: HttpMethod::Get,
                 url: url.to_string(),

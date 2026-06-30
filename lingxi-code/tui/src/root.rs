@@ -3931,7 +3931,7 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
     // inline and defeat the whole purpose.
     if crate::inline_render_mode() {
         return element! {
-            View(width: cols.max(1)) {
+            View(width: cols.max(1), height: (rows.saturating_sub(1)).max(1)) {
                 #(std::iter::once(element))
             }
         }
@@ -3972,7 +3972,12 @@ const FIXED_CHROME_ROWS: usize = 5;
 /// gap the scrollback against the prompt; this keeps the windowing math in
 /// lock-step with the real layout.
 fn viewport_height(rows: u16, prompt_visual_rows: usize) -> usize {
-    usize::from(rows).saturating_sub(FIXED_CHROME_ROWS + prompt_visual_rows)
+    let base_rows = if crate::inline_render_mode() {
+        rows.saturating_sub(1)
+    } else {
+        rows
+    };
+    usize::from(base_rows).saturating_sub(FIXED_CHROME_ROWS + prompt_visual_rows)
 }
 
 /// Columns available to the scrollback. The REPL reserves no horizontal
@@ -4165,7 +4170,7 @@ mod tests {
     fn viewport_height_reserves_fixed_chrome_plus_single_prompt_row() {
         // Single-line prompt (1 visual row) → reserve FIXED_CHROME_ROWS(5) + 1
         // = 6 rows. 24 rows → 18 visible; saturates to 0 below the floor.
-        assert_eq!(viewport_height(24, 1), 18);
+        assert_eq!(viewport_height(24, 1), if crate::inline_render_mode() { 17 } else { 18 });
         assert_eq!(viewport_height(6, 1), 0);
         assert_eq!(viewport_height(0, 1), 0);
     }
@@ -4195,7 +4200,7 @@ mod tests {
         // The 1-row footer + 2 input-border rows are baked into
         // FIXED_CHROME_ROWS: single-row prompt reserves
         // status(1)+spinner(1)+border(2)+footer(1)+prompt(1) = 6.
-        assert_eq!(single, usize::from(rows) - 6);
+        assert_eq!(single, usize::from(rows) - 6 - if crate::inline_render_mode() { 1 } else { 0 });
     }
 
     /// (M7-08) Build an iocraft `KeyEvent` for a printable char (Press).

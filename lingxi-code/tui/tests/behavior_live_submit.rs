@@ -378,7 +378,10 @@ mod slash_routing {
 
         // First Enter accepts the suggestion → fills `/exit `, no exit yet.
         handle_live_key(&mut st, &key(KeyCode::Enter), 24);
-        assert!(!st.should_exit, "first Enter accepts the suggestion, not submit");
+        assert!(
+            !st.should_exit,
+            "first Enter accepts the suggestion, not submit"
+        );
         assert_eq!(st.prompt_text, "/exit ");
         assert!(!st.palette.open, "the trailing space closes the palette");
 

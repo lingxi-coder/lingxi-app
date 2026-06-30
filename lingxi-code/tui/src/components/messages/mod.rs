@@ -39,8 +39,203 @@ pub mod user_text;
 pub mod user_tool_result;
 
 use crate::state::RenderedMessage;
+use crate::theme::Theme;
 use assistant_tool_use::{render_assistant_tool_use_to_string, AssistantToolUseProps};
+use iocraft::Color;
 use user_tool_result::{render_user_tool_result_to_string, UserToolResultProps};
+
+/// A styled text run for native terminal scrollback output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalSpan {
+    /// Text payload. Must not contain a newline.
+    pub text: String,
+    /// Optional foreground color.
+    pub fg: Option<Color>,
+    /// Optional background color.
+    pub bg: Option<Color>,
+    /// Bold attribute.
+    pub bold: bool,
+    /// Italic attribute.
+    pub italic: bool,
+    /// Underline attribute.
+    pub underline: bool,
+}
+
+impl TerminalSpan {
+    fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            fg: None,
+            bg: None,
+            bold: false,
+            italic: false,
+            underline: false,
+        }
+    }
+
+    fn colored(text: impl Into<String>, fg: Color) -> Self {
+        Self {
+            text: text.into(),
+            fg: terminal_color(fg),
+            bg: None,
+            bold: false,
+            italic: false,
+            underline: false,
+        }
+    }
+
+    fn from_styled_span(span: crate::render::StyledSpan) -> Self {
+        Self {
+            text: span.text,
+            fg: terminal_color(span.style.fg.to_iocraft()),
+            bg: terminal_color(span.style.bg.to_iocraft()),
+            bold: span.style.bold,
+            italic: span.style.italic,
+            underline: span.style.underline,
+        }
+    }
+}
+
+/// One terminal output line, split into styled spans.
+pub type TerminalLine = Vec<TerminalSpan>;
+
+fn terminal_color(color: Color) -> Option<Color> {
+    if color == Color::Reset {
+        None
+    } else {
+        Some(color)
+    }
+}
+
+fn plain_terminal_lines(text: &str) -> Vec<TerminalLine> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    text.split('\n')
+        .map(|line| {
+            if line.is_empty() {
+                Vec::new()
+            } else {
+                vec![TerminalSpan::plain(line)]
+            }
+        })
+        .collect()
+}
+
+fn colored_terminal_lines(text: &str, color: Color) -> Vec<TerminalLine> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    text.split('\n')
+        .map(|line| {
+            if line.is_empty() {
+                Vec::new()
+            } else {
+                vec![TerminalSpan::colored(line, color)]
+            }
+        })
+        .collect()
+}
+
+fn styled_lines_to_terminal_lines(lines: Vec<crate::render::StyledLine>) -> Vec<TerminalLine> {
+    lines
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(TerminalSpan::from_styled_span)
+                .collect()
+        })
+        .collect()
+}
+
+/// Encode one styled terminal line as ANSI bytes. The caller is responsible for
+/// emitting the line terminator separately so raw-mode LF never stair-steps.
+#[must_use]
+pub fn encode_terminal_line_ansi(line: &TerminalLine) -> String {
+    let mut out = String::new();
+    for span in line {
+        if span.text.is_empty() {
+            continue;
+        }
+        let styled =
+            span.fg.is_some() || span.bg.is_some() || span.bold || span.italic || span.underline;
+        if styled {
+            let mut codes = Vec::new();
+            if let Some(fg) = span.fg {
+                codes.push(fg_sgr(fg));
+            }
+            if let Some(bg) = span.bg {
+                codes.push(bg_sgr(bg));
+            }
+            if span.bold {
+                codes.push("1".to_string());
+            }
+            if span.italic {
+                codes.push("3".to_string());
+            }
+            if span.underline {
+                codes.push("4".to_string());
+            }
+            out.push_str("\u{1b}[");
+            out.push_str(&codes.join(";"));
+            out.push('m');
+        }
+        out.push_str(&span.text);
+        if styled {
+            out.push_str("\u{1b}[0m");
+        }
+    }
+    out
+}
+
+fn fg_sgr(color: Color) -> String {
+    match color {
+        Color::Reset => "39".to_string(),
+        Color::Black => "30".to_string(),
+        Color::DarkGrey => "90".to_string(),
+        Color::Red => "91".to_string(),
+        Color::DarkRed => "31".to_string(),
+        Color::Green => "92".to_string(),
+        Color::DarkGreen => "32".to_string(),
+        Color::Yellow => "93".to_string(),
+        Color::DarkYellow => "33".to_string(),
+        Color::Blue => "94".to_string(),
+        Color::DarkBlue => "34".to_string(),
+        Color::Magenta => "95".to_string(),
+        Color::DarkMagenta => "35".to_string(),
+        Color::Cyan => "96".to_string(),
+        Color::DarkCyan => "36".to_string(),
+        Color::White => "97".to_string(),
+        Color::Grey => "37".to_string(),
+        Color::Rgb { r, g, b } => format!("38;2;{r};{g};{b}"),
+        Color::AnsiValue(i) => format!("38;5;{i}"),
+    }
+}
+
+fn bg_sgr(color: Color) -> String {
+    match color {
+        Color::Reset => "49".to_string(),
+        Color::Black => "40".to_string(),
+        Color::DarkGrey => "100".to_string(),
+        Color::Red => "101".to_string(),
+        Color::DarkRed => "41".to_string(),
+        Color::Green => "102".to_string(),
+        Color::DarkGreen => "42".to_string(),
+        Color::Yellow => "103".to_string(),
+        Color::DarkYellow => "43".to_string(),
+        Color::Blue => "104".to_string(),
+        Color::DarkBlue => "44".to_string(),
+        Color::Magenta => "105".to_string(),
+        Color::DarkMagenta => "45".to_string(),
+        Color::Cyan => "106".to_string(),
+        Color::DarkCyan => "46".to_string(),
+        Color::White => "107".to_string(),
+        Color::Grey => "47".to_string(),
+        Color::Rgb { r, g, b } => format!("48;2;{r};{g};{b}"),
+        Color::AnsiValue(i) => format!("48;5;{i}"),
+    }
+}
 
 /// String-form dispatcher used by snapshot tests. The iocraft-component
 /// dispatcher (returns `AnyElement`) lives in `components::scrollback`;
@@ -57,7 +252,12 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
 
 #[must_use]
 #[allow(clippy::too_many_lines)]
-pub fn render_entry_to_string_at_width(entry: &RenderedMessage, focused: bool, expanded: bool, width: usize) -> String {
+pub fn render_entry_to_string_at_width(
+    entry: &RenderedMessage,
+    focused: bool,
+    expanded: bool,
+    width: usize,
+) -> String {
     match entry {
         // (RRS-08) The interrupt marker renders the InterruptedByUser line.
         RenderedMessage::UserText { body, .. } if body == user_tool_result::INTERRUPT_MESSAGE => {
@@ -302,5 +502,263 @@ pub fn render_entry_to_string_at_width(entry: &RenderedMessage, focused: bool, e
             };
             collapsed_read_search::render_collapsed_to_string(&counts, entries, expanded)
         }
+    }
+}
+
+/// Styled-line renderer for messages that are safe to commit into native
+/// terminal scrollback. Interactive message variants return `None` and must
+/// stay in the live iocraft tree so focus, expansion, and theme changes can
+/// redraw them.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn render_entry_to_terminal_lines(
+    entry: &RenderedMessage,
+    width: usize,
+    theme: Theme,
+) -> Option<Vec<TerminalLine>> {
+    if !entry.native_scrollback_safe() {
+        return None;
+    }
+
+    let lines = match entry {
+        RenderedMessage::UserText { body, .. } if text_guard::is_empty_message_text(body) => {
+            Vec::new()
+        }
+        RenderedMessage::UserText { body, .. } => plain_terminal_lines(&format!("> {body}")),
+        RenderedMessage::AssistantText { body, .. } => styled_lines_to_terminal_lines(
+            assistant_text::render_assistant_text_to_styled_lines(body, width),
+        ),
+        RenderedMessage::SystemText { body, is_error, .. } => {
+            let color = if *is_error { theme.error } else { theme.dim };
+            colored_terminal_lines(body, color)
+        }
+        RenderedMessage::CompactBoundary { .. } => colored_terminal_lines(
+            &compact_boundary::render_compact_boundary_to_string(),
+            theme.dim,
+        ),
+        RenderedMessage::SystemTextRich { body, level } => {
+            let text = system_text::render_system_text_to_string(system_text::SystemTextProps {
+                body: body.clone(),
+                level: *level,
+                theme,
+            });
+            let color = match level {
+                crate::state::SystemLevel::Info => theme.dim,
+                crate::state::SystemLevel::Warning => theme.warning,
+                crate::state::SystemLevel::Error => theme.error,
+            };
+            colored_terminal_lines(&text, color)
+        }
+        RenderedMessage::RateLimit { text, upsell } => {
+            let mut lines = Vec::new();
+            lines.push(vec![TerminalSpan::colored(
+                format!("{}{}", user_tool_result::MARKER, text),
+                theme.error,
+            )]);
+            if let Some(upsell) = upsell {
+                lines.push(vec![TerminalSpan::colored(
+                    format!("{}{}", user_tool_result::INDENT, upsell),
+                    theme.dim,
+                )]);
+            }
+            lines
+        }
+        RenderedMessage::Shutdown {
+            from,
+            reason,
+            rejected,
+        } => plain_terminal_lines(&shutdown::render_shutdown_to_string(
+            shutdown::ShutdownProps {
+                from: from.clone(),
+                reason: reason.clone(),
+                rejected: *rejected,
+                theme,
+            },
+        )),
+        RenderedMessage::TaskAssignment {
+            task_id,
+            assigned_by,
+            subject,
+            description,
+        } => plain_terminal_lines(&task_assignment::render_task_assignment_to_string(
+            task_assignment::TaskAssignmentProps {
+                task_id: task_id.clone(),
+                assigned_by: assigned_by.clone(),
+                subject: subject.clone(),
+                description: description.clone(),
+                theme,
+            },
+        )),
+        RenderedMessage::AgentNotification { summary, status } => plain_terminal_lines(
+            &user_agent_notification::render_user_agent_notification_to_string(
+                user_agent_notification::UserAgentNotificationProps {
+                    summary: summary.clone(),
+                    status: status.clone(),
+                    theme,
+                },
+            ),
+        ),
+        RenderedMessage::ChannelMessage {
+            server,
+            user,
+            content,
+        } => plain_terminal_lines(&user_channel::render_user_channel_to_string(
+            user_channel::UserChannelProps {
+                server: server.clone(),
+                user: user.clone(),
+                content: content.clone(),
+                theme,
+            },
+        )),
+        RenderedMessage::UserTeammate {
+            display_name,
+            color,
+            kind,
+        } => plain_terminal_lines(&user_teammate::render_user_teammate_to_string(
+            user_teammate::UserTeammateProps {
+                display_name: display_name.clone(),
+                color: color.clone(),
+                kind: kind.clone(),
+                theme,
+            },
+        )),
+        RenderedMessage::HookProgress {
+            event,
+            count,
+            transcript_summary,
+        } => plain_terminal_lines(&hook_progress::render_hook_progress_to_string(
+            hook_progress::HookProgressProps {
+                event: event.clone(),
+                count: *count,
+                transcript_summary: *transcript_summary,
+                theme,
+            },
+        )),
+        RenderedMessage::UserCommand {
+            command,
+            args,
+            is_skill,
+        } => plain_terminal_lines(&command::render_command_to_string(command, args, *is_skill)),
+        RenderedMessage::UserBashInput { command } => {
+            plain_terminal_lines(&bash_input::render_bash_input_to_string(command))
+        }
+        RenderedMessage::UserBashOutput { stdout, stderr } => {
+            let spans = bash_output::render_bash_output_spans(stdout, stderr);
+            let rows = crate::render::split_spans_into_line_rows(spans);
+            rows.into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(TerminalSpan::from_styled_span)
+                        .collect()
+                })
+                .collect()
+        }
+        RenderedMessage::UserLocalCommandOutput { stdout, stderr } => plain_terminal_lines(
+            &local_command_output::render_local_output_to_string(stdout, stderr),
+        ),
+        RenderedMessage::UserMemoryInput { input } => {
+            plain_terminal_lines(&memory_input::render_memory_to_string(input))
+        }
+        RenderedMessage::UserPlan { plan_content } => {
+            plain_terminal_lines(&plan::render_plan_to_string(plan_content))
+        }
+        RenderedMessage::UserPrompt { text } => {
+            plain_terminal_lines(&prompt::render_prompt_to_string(text))
+        }
+        RenderedMessage::UserResourceUpdate { updates } => {
+            let parsed: Vec<resource_update::ResourceUpdate> = updates
+                .iter()
+                .map(|(s, t, r)| resource_update::ResourceUpdate {
+                    server: s.clone(),
+                    target: t.clone(),
+                    reason: r.clone(),
+                })
+                .collect();
+            plain_terminal_lines(&resource_update::render_resource_update_to_string(&parsed))
+        }
+        RenderedMessage::UserImage { image_id, metadata } => {
+            plain_terminal_lines(&image::render_image_label(*image_id, metadata.as_deref()))
+        }
+        RenderedMessage::Attachment { attachment } => {
+            plain_terminal_lines(&attachment::render_attachment_to_string(attachment))
+        }
+        RenderedMessage::AssistantToolUse { .. }
+        | RenderedMessage::UserToolResult { .. }
+        | RenderedMessage::AssistantThinking { .. }
+        | RenderedMessage::AssistantRedactedThinking
+        | RenderedMessage::SystemApiError { .. }
+        | RenderedMessage::Advisor { .. }
+        | RenderedMessage::PlanApproval { .. }
+        | RenderedMessage::GroupedToolUse { .. }
+        | RenderedMessage::CollapsedReadSearch { .. } => return None,
+    };
+
+    Some(lines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plain_text(lines: &[TerminalLine]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.text.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn terminal_lines_preserve_assistant_markdown_style() {
+        let entry = RenderedMessage::AssistantText {
+            body: "- **天气**：小雨".to_string(),
+            timestamp: 0,
+        };
+        let lines = render_entry_to_terminal_lines(&entry, 80, Theme::dark()).unwrap();
+
+        assert_eq!(
+            plain_text(&lines),
+            format!("{}- 天气：小雨", assistant_text::MARKER)
+        );
+        let encoded = encode_terminal_line_ansi(&lines[0]);
+        assert!(
+            encoded.contains("\u{1b}[1m天气\u{1b}[0m"),
+            "encoded line should preserve bold markdown span: {encoded:?}"
+        );
+        assert!(
+            !encoded.contains('\n'),
+            "terminal line encoder must not embed raw newlines: {encoded:?}"
+        );
+    }
+
+    #[test]
+    fn terminal_lines_reject_interactive_tool_messages() {
+        let entry = RenderedMessage::AssistantToolUse {
+            id: protocol::ToolUseId::new(),
+            tool: "Read".to_string(),
+            input: serde_json::json!({"file_path": "src/lib.rs"}),
+        };
+
+        assert!(render_entry_to_terminal_lines(&entry, 80, Theme::dark()).is_none());
+    }
+
+    #[test]
+    fn terminal_lines_rate_limit_uses_active_theme() {
+        let mut theme = Theme::dark();
+        theme.error = Color::Rgb { r: 1, g: 2, b: 3 };
+        theme.dim = Color::Rgb { r: 4, g: 5, b: 6 };
+        let entry = RenderedMessage::RateLimit {
+            text: "limit".to_string(),
+            upsell: Some("upgrade".to_string()),
+        };
+
+        let lines = render_entry_to_terminal_lines(&entry, 80, theme).unwrap();
+
+        assert_eq!(lines[0][0].fg, Some(theme.error));
+        assert_eq!(lines[1][0].fg, Some(theme.dim));
     }
 }

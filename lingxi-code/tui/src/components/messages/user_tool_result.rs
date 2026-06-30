@@ -113,7 +113,9 @@ pub fn tool_result_error(result: &serde_json::Value) -> Option<String> {
 pub fn format_tool_error(raw: &str, verbose: bool) -> String {
     let extracted = extract_tag(raw, "tool_use_error").unwrap_or_else(|| raw.to_string());
     let without_sandbox = remove_sandbox_violations(&extracted);
-    let without_error_tags = without_sandbox.replace("<error>", "").replace("</error>", "");
+    let without_error_tags = without_sandbox
+        .replace("<error>", "")
+        .replace("</error>", "");
     let trimmed = without_error_tags.trim();
     if !verbose && trimmed.contains("InputValidationError: ") {
         "Invalid tool parameters".to_string()
@@ -321,11 +323,18 @@ pub fn render_edit_write_diff_lines_with_width(
 /// capitalized only when it's the sole clause (no additions).
 #[must_use]
 pub fn added_removed_header(additions: usize, removals: usize) -> Option<String> {
-    let added = (additions > 0)
-        .then(|| format!("Added {additions} {}", if additions > 1 { "lines" } else { "line" }));
+    let added = (additions > 0).then(|| {
+        format!(
+            "Added {additions} {}",
+            if additions > 1 { "lines" } else { "line" }
+        )
+    });
     let removed = (removals > 0).then(|| {
         let cap = if additions == 0 { "R" } else { "r" };
-        format!("{cap}emoved {removals} {}", if removals > 1 { "lines" } else { "line" })
+        format!(
+            "{cap}emoved {removals} {}",
+            if removals > 1 { "lines" } else { "line" }
+        )
     });
     match (added, removed) {
         (Some(a), Some(r)) => Some(format!("{a}, {r}")),
@@ -719,7 +728,10 @@ mod tests {
     #[test]
     fn marker_is_arc_gutter_bytes() {
         // "  " + U+23BF (0xE2 0x8E 0xBF) + "  " — matches MessageResponse.tsx.
-        assert_eq!(MARKER.as_bytes(), &[0x20, 0x20, 0xE2, 0x8E, 0xBF, 0x20, 0x20]);
+        assert_eq!(
+            MARKER.as_bytes(),
+            &[0x20, 0x20, 0xE2, 0x8E, 0xBF, 0x20, 0x20]
+        );
     }
 
     #[test]
@@ -729,8 +741,14 @@ mod tests {
         assert_eq!(added_removed_header(1, 0).as_deref(), Some("Added 1 line"));
         assert_eq!(added_removed_header(3, 0).as_deref(), Some("Added 3 lines"));
         // Sole removal clause -> capitalized "Removed".
-        assert_eq!(added_removed_header(0, 1).as_deref(), Some("Removed 1 line"));
-        assert_eq!(added_removed_header(0, 2).as_deref(), Some("Removed 2 lines"));
+        assert_eq!(
+            added_removed_header(0, 1).as_deref(),
+            Some("Removed 1 line")
+        );
+        assert_eq!(
+            added_removed_header(0, 2).as_deref(),
+            Some("Removed 2 lines")
+        );
         // Both present -> lowercase "removed" joined with ", ".
         assert_eq!(
             added_removed_header(2, 3).as_deref(),
@@ -894,7 +912,10 @@ mod tests {
         assert_eq!(format_tool_error("Error: already", false), "Error: already");
         assert_eq!(format_tool_error("Cancelled: x", false), "Cancelled: x");
         // `<error>` tags stripped, content kept.
-        assert_eq!(format_tool_error("<error>oops</error>", false), "Error: oops");
+        assert_eq!(
+            format_tool_error("<error>oops</error>", false),
+            "Error: oops"
+        );
         // Sandbox-violation block removed.
         assert_eq!(
             format_tool_error("nope<sandbox_violations>secret</sandbox_violations>", false),
@@ -914,7 +935,10 @@ mod tests {
     #[test]
     fn render_error_result_is_red_prefixed_and_capped() {
         // 12-line error, collapsed → first 10 lines + `… +2 lines` footer.
-        let body = (0..12).map(|i| format!("L{i}")).collect::<Vec<_>>().join("\n");
+        let body = (0..12)
+            .map(|i| format!("L{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let props = UserToolResultProps {
             id: ToolUseId::from("t"),
             tool: "Bash".into(),
@@ -927,7 +951,10 @@ mod tests {
         assert!(s.contains("Error: L0"), "got: {s}");
         // Capped at MAX_ERROR_LINES; L10/L11 dropped, footer reports +2.
         assert!(!s.contains("L11"), "got: {s}");
-        assert!(s.contains("\u{2026} +2 lines (ctrl+o to see all)"), "got: {s}");
+        assert!(
+            s.contains("\u{2026} +2 lines (ctrl+o to see all)"),
+            "got: {s}"
+        );
         assert!(s.starts_with(MARKER), "got: {s}");
     }
 
@@ -974,7 +1001,10 @@ mod tests {
             ..Default::default()
         };
         let s = render_user_tool_result_to_string(props);
-        assert_eq!(s, format!("{MARKER}Interrupted \u{00b7} What should Claude do instead?"));
+        assert_eq!(
+            s,
+            format!("{MARKER}Interrupted \u{00b7} What should Claude do instead?")
+        );
         // The verbose REJECT_MESSAGE body must NOT leak through.
         assert!(!s.contains("STOP what you are doing"), "got: {s}");
     }

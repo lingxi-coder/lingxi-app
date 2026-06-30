@@ -146,7 +146,14 @@ fn gutter_span(row: &DiffRow, gutter_w: usize, bg: StyleColor, theme: ThemeName)
         LineKind::Remove => remove_decoration(theme),
         LineKind::Context => StyleColor::Named(NamedColor::BrightBlack),
     };
-    StyledSpan::styled(text, SpanStyle { fg, bg, ..SpanStyle::default() })
+    StyledSpan::styled(
+        text,
+        SpanStyle {
+            fg,
+            bg,
+            ..SpanStyle::default()
+        },
+    )
 }
 
 /// Syntax-highlight `text` as a single line and overlay `bg` onto every
@@ -636,7 +643,10 @@ mod tests {
             .sum();
         assert_eq!(total_w, 30, "row should be padded to the full width");
         let last = add.spans.last().expect("at least one span");
-        assert!(last.text.chars().all(|c| c == ' '), "pad span is spaces: {last:?}");
+        assert!(
+            last.text.chars().all(|c| c == ' '),
+            "pad span is spaces: {last:?}"
+        );
         assert_eq!(last.style.bg, add_bg(ThemeName::Dark));
     }
 
@@ -653,7 +663,10 @@ mod tests {
             .iter()
             .map(|s| unicode_width::UnicodeWidthStr::width(s.text.as_str()))
             .sum();
-        assert!(total_w < 30, "context row must not be padded to width: {total_w}");
+        assert!(
+            total_w < 30,
+            "context row must not be padded to width: {total_w}"
+        );
     }
 
     #[test]
@@ -661,7 +674,13 @@ mod tests {
         // width=0 is render()'s exact behavior (no padding ever fires).
         let to_lines = |v: &[StyledLine]| v.iter().map(rowline).collect::<Vec<_>>();
         assert_eq!(
-            to_lines(&render_with_width("a\n", "a\nb\n", Some("x.txt"), ThemeName::Dark, 0)),
+            to_lines(&render_with_width(
+                "a\n",
+                "a\nb\n",
+                Some("x.txt"),
+                ThemeName::Dark,
+                0
+            )),
             to_lines(&render("a\n", "a\nb\n", Some("x.txt"), ThemeName::Dark)),
         );
     }

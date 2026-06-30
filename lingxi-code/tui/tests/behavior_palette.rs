@@ -147,7 +147,11 @@ fn m7_07_registers_no_new_telemetry_events() {
     // +9) → 344 (permission flow +1) → 347 (coordinator swarm +3); strict-parity
     // (2.1.195) then −3 todo_write (D1) −1 cost_recorded (D2) −2 session-resume (D3) → 341.
     // the palette still mints nothing (the contains-check below is the real guard).
-    assert_eq!(names.len(), 341, "registry at 341 (347 − strict-parity removals)");
+    assert_eq!(
+        names.len(),
+        341,
+        "registry at 341 (347 − strict-parity removals)"
+    );
     assert!(
         !names.contains(&"tengu_tui_command_palette_opened"),
         "palette telemetry is deferred to M8"

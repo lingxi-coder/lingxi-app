@@ -162,7 +162,10 @@ fn edit_tool_diff_is_wrapped_in_a_dashed_top_bottom_frame() {
     );
 
     let out = render_last_result(&st);
-    assert!(out.contains('\u{254C}'), "dashed top/bottom rule, got:\n{out}");
+    assert!(
+        out.contains('\u{254C}'),
+        "dashed top/bottom rule, got:\n{out}"
+    );
     assert!(
         !out.contains('\u{254E}'),
         "no dashed left/right side rule, got:\n{out}"

@@ -88,7 +88,10 @@ impl ConnectScreenState {
     #[must_use]
     pub fn api_key(provider_id: &str, label: &str) -> Self {
         Self {
-            flow: ConnectFlow::ApiKey { provider_id: provider_id.to_string(), label: label.to_string() },
+            flow: ConnectFlow::ApiKey {
+                provider_id: provider_id.to_string(),
+                label: label.to_string(),
+            },
             key_buffer: String::new(),
             copilot: CopilotPhase::Starting,
         }
@@ -97,8 +100,14 @@ impl ConnectScreenState {
     /// Open an Unavailable screen for a login method not wired in this build.
     #[must_use]
     pub fn unavailable(label: &str, reason: &str) -> Self {
-        Self { flow: ConnectFlow::Unavailable { label: label.to_string(), reason: reason.to_string() },
-               key_buffer: String::new(), copilot: CopilotPhase::Starting }
+        Self {
+            flow: ConnectFlow::Unavailable {
+                label: label.to_string(),
+                reason: reason.to_string(),
+            },
+            key_buffer: String::new(),
+            copilot: CopilotPhase::Starting,
+        }
     }
 
     /// Open a first-party OAuth browser sign-in screen for `provider_id`
@@ -107,7 +116,10 @@ impl ConnectScreenState {
     #[must_use]
     pub fn oauth(provider_id: &str, label: &str) -> Self {
         Self {
-            flow: ConnectFlow::OAuth { provider_id: provider_id.to_string(), label: label.to_string() },
+            flow: ConnectFlow::OAuth {
+                provider_id: provider_id.to_string(),
+                label: label.to_string(),
+            },
             key_buffer: String::new(),
             copilot: CopilotPhase::Starting,
         }
@@ -116,12 +128,19 @@ impl ConnectScreenState {
     /// Open the Copilot device-flow in the `Starting` phase.
     #[must_use]
     pub fn copilot_pending() -> Self {
-        Self { flow: ConnectFlow::Copilot, key_buffer: String::new(), copilot: CopilotPhase::Starting }
+        Self {
+            flow: ConnectFlow::Copilot,
+            key_buffer: String::new(),
+            copilot: CopilotPhase::Starting,
+        }
     }
 
     /// Host setter: device code obtained → display + spinner.
     pub fn set_device_code(&mut self, user_code: &str, verification_uri: &str) {
-        self.copilot = CopilotPhase::Polling { user_code: user_code.to_string(), verification_uri: verification_uri.to_string() };
+        self.copilot = CopilotPhase::Polling {
+            user_code: user_code.to_string(),
+            verification_uri: verification_uri.to_string(),
+        };
     }
 
     /// Host setter: authorization completed.
@@ -131,7 +150,9 @@ impl ConnectScreenState {
 
     /// Host setter: device-flow failed.
     pub fn set_failed(&mut self, error: &str) {
-        self.copilot = CopilotPhase::Failed { error: error.to_string() };
+        self.copilot = CopilotPhase::Failed {
+            error: error.to_string(),
+        };
     }
 }
 
@@ -169,7 +190,10 @@ pub fn handle_connect_key(st: &mut ConnectScreenState, key: KeyCode) -> ConnectA
                 if st.key_buffer.is_empty() {
                     ConnectAction::None
                 } else {
-                    ConnectAction::SubmitKey { provider_id: provider_id.clone(), key: st.key_buffer.clone() }
+                    ConnectAction::SubmitKey {
+                        provider_id: provider_id.clone(),
+                        key: st.key_buffer.clone(),
+                    }
                 }
             }
             _ => ConnectAction::None,
@@ -206,7 +230,9 @@ pub fn render_connect_to_string(st: &ConnectScreenState) -> String {
                 }
                 CopilotPhase::Failed { error } => {
                     out.push_str(&format!("Sign-in failed: {error}\n"));
-                    out.push_str("Connect with an API key instead \u{00B7} press any key to return");
+                    out.push_str(
+                        "Connect with an API key instead \u{00B7} press any key to return",
+                    );
                 }
             }
         }
@@ -219,22 +245,33 @@ pub fn render_connect_to_string(st: &ConnectScreenState) -> String {
             out.push_str("Connect GitHub Copilot\n");
             match &st.copilot {
                 CopilotPhase::Starting => out.push_str("Requesting device code\u{2026}\n"),
-                CopilotPhase::Polling { user_code, verification_uri } => {
+                CopilotPhase::Polling {
+                    user_code,
+                    verification_uri,
+                } => {
                     // The host has already opened the browser + copied the code to
                     // the clipboard (the screen text is not mouse-selectable — the
                     // TUI captures the mouse — so we copy it FOR the user).
-                    out.push_str(&format!("Enter code: {user_code}   (copied to clipboard)\n"));
+                    out.push_str(&format!(
+                        "Enter code: {user_code}   (copied to clipboard)\n"
+                    ));
                     out.push_str(&format!("at {verification_uri}\n"));
-                    out.push_str("A browser was opened \u{2014} paste the code (\u{2318}V) to authorize.\n");
+                    out.push_str(
+                        "A browser was opened \u{2014} paste the code (\u{2318}V) to authorize.\n",
+                    );
                     out.push_str("Waiting for authorization\u{2026}\n");
                 }
                 CopilotPhase::Done => out.push_str("Authorized \u{2713}\n"),
-                CopilotPhase::Failed { error } => out.push_str(&format!("Authorization failed: {error}\n")),
+                CopilotPhase::Failed { error } => {
+                    out.push_str(&format!("Authorization failed: {error}\n"))
+                }
             }
             // Footer: terminal phases return to the REPL on ANY key; otherwise Esc
             // cancels the in-flight flow.
             match &st.copilot {
-                CopilotPhase::Done => out.push_str("Connected \u{2014} returning to the prompt\u{2026}"),
+                CopilotPhase::Done => {
+                    out.push_str("Connected \u{2014} returning to the prompt\u{2026}")
+                }
                 CopilotPhase::Failed { .. } => out.push_str("Press any key to return"),
                 _ => out.push_str("Esc to cancel"),
             }
@@ -252,15 +289,23 @@ mod tests {
     fn api_key_field_masks_and_submits() {
         let mut st = ConnectScreenState::api_key("deepseek", "DeepSeek");
         for c in "sk-secret".chars() {
-            assert_eq!(handle_connect_key(&mut st, KeyCode::Char(c)), ConnectAction::None);
+            assert_eq!(
+                handle_connect_key(&mut st, KeyCode::Char(c)),
+                ConnectAction::None
+            );
         }
         let out = render_connect_to_string(&st);
         assert!(out.contains("Connect DeepSeek"));
-        assert!(out.contains("Key: \u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}"));
+        assert!(out.contains(
+            "Key: \u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}"
+        ));
         assert!(!out.contains("sk-secret"), "raw key must never render");
         assert_eq!(
             handle_connect_key(&mut st, KeyCode::Enter),
-            ConnectAction::SubmitKey { provider_id: "deepseek".to_string(), key: "sk-secret".to_string() }
+            ConnectAction::SubmitKey {
+                provider_id: "deepseek".to_string(),
+                key: "sk-secret".to_string()
+            }
         );
     }
 
@@ -269,13 +314,19 @@ mod tests {
         let mut st = ConnectScreenState::api_key("openrouter", "OpenRouter");
         let _ = handle_connect_key(&mut st, KeyCode::Char('a'));
         let _ = handle_connect_key(&mut st, KeyCode::Backspace);
-        assert_eq!(handle_connect_key(&mut st, KeyCode::Enter), ConnectAction::None);
+        assert_eq!(
+            handle_connect_key(&mut st, KeyCode::Enter),
+            ConnectAction::None
+        );
     }
 
     #[test]
     fn esc_cancels() {
         let mut st = ConnectScreenState::api_key("deepseek", "DeepSeek");
-        assert_eq!(handle_connect_key(&mut st, KeyCode::Esc), ConnectAction::Cancel);
+        assert_eq!(
+            handle_connect_key(&mut st, KeyCode::Esc),
+            ConnectAction::Cancel
+        );
     }
 
     #[test]
@@ -287,9 +338,18 @@ mod tests {
         assert!(out.contains("Enter code: WDJB-MJHT"));
         assert!(out.contains("at https://github.com/login/device"));
         assert!(out.contains("Waiting for authorization"));
-        assert_eq!(handle_connect_key(&mut st, KeyCode::Char('x')), ConnectAction::None);
-        assert_eq!(handle_connect_key(&mut st, KeyCode::Enter), ConnectAction::None);
-        assert_eq!(handle_connect_key(&mut st, KeyCode::Esc), ConnectAction::Cancel);
+        assert_eq!(
+            handle_connect_key(&mut st, KeyCode::Char('x')),
+            ConnectAction::None
+        );
+        assert_eq!(
+            handle_connect_key(&mut st, KeyCode::Enter),
+            ConnectAction::None
+        );
+        assert_eq!(
+            handle_connect_key(&mut st, KeyCode::Esc),
+            ConnectAction::Cancel
+        );
     }
 
     #[test]
@@ -302,14 +362,23 @@ mod tests {
 
     #[test]
     fn unavailable_renders_honest_message_and_any_key_closes() {
-        let mut st = ConnectScreenState::unavailable("OpenAI (ChatGPT)", "browser sign-in isn't available in this build yet");
+        let mut st = ConnectScreenState::unavailable(
+            "OpenAI (ChatGPT)",
+            "browser sign-in isn't available in this build yet",
+        );
         let body = render_connect_to_string(&st);
         assert!(body.contains("OpenAI (ChatGPT)"));
         assert!(body.contains("isn't available in this build yet"));
         assert!(body.contains("API key")); // tells them what DOES work
-        // Any key (and Esc) closes — never a dead field.
-        assert_eq!(handle_connect_key(&mut st, crossterm::event::KeyCode::Enter), ConnectAction::Cancel);
-        assert_eq!(handle_connect_key(&mut st, crossterm::event::KeyCode::Esc), ConnectAction::Cancel);
+                                           // Any key (and Esc) closes — never a dead field.
+        assert_eq!(
+            handle_connect_key(&mut st, crossterm::event::KeyCode::Enter),
+            ConnectAction::Cancel
+        );
+        assert_eq!(
+            handle_connect_key(&mut st, crossterm::event::KeyCode::Esc),
+            ConnectAction::Cancel
+        );
     }
 
     #[test]
@@ -319,8 +388,14 @@ mod tests {
         let starting = render_connect_to_string(&st);
         assert!(starting.contains("Connect Anthropic"));
         assert!(starting.contains("Opening your browser to sign in"));
-        assert_eq!(handle_connect_key(&mut st, KeyCode::Char('x')), ConnectAction::None);
-        assert_eq!(handle_connect_key(&mut st, KeyCode::Esc), ConnectAction::Cancel);
+        assert_eq!(
+            handle_connect_key(&mut st, KeyCode::Char('x')),
+            ConnectAction::None
+        );
+        assert_eq!(
+            handle_connect_key(&mut st, KeyCode::Esc),
+            ConnectAction::Cancel
+        );
 
         // Success: "Signed in ✓"; ANY key returns to the REPL (not just Esc).
         let mut done = ConnectScreenState::oauth("openai-chatgpt", "OpenAI (ChatGPT)");
@@ -328,8 +403,14 @@ mod tests {
         let out = render_connect_to_string(&done);
         assert!(out.contains("Signed in \u{2713}"));
         assert!(out.contains("returning to the prompt"), "{out}");
-        assert_eq!(handle_connect_key(&mut done, KeyCode::Enter), ConnectAction::Cancel);
-        assert_eq!(handle_connect_key(&mut done, KeyCode::Char('q')), ConnectAction::Cancel);
+        assert_eq!(
+            handle_connect_key(&mut done, KeyCode::Enter),
+            ConnectAction::Cancel
+        );
+        assert_eq!(
+            handle_connect_key(&mut done, KeyCode::Char('q')),
+            ConnectAction::Cancel
+        );
 
         // Failure: shows the error + offers the API-key alternative; any key returns.
         let mut failed = ConnectScreenState::oauth("anthropic", "Anthropic");
@@ -337,7 +418,10 @@ mod tests {
         let f = render_connect_to_string(&failed);
         assert!(f.contains("Sign-in failed: user cancelled login"));
         assert!(f.contains("API key"));
-        assert_eq!(handle_connect_key(&mut failed, KeyCode::Enter), ConnectAction::Cancel);
+        assert_eq!(
+            handle_connect_key(&mut failed, KeyCode::Enter),
+            ConnectAction::Cancel
+        );
     }
 
     #[test]
@@ -345,8 +429,14 @@ mod tests {
         // Done: any key (not just Esc) returns to the REPL.
         let mut done = ConnectScreenState::copilot_pending();
         done.set_done();
-        assert_eq!(handle_connect_key(&mut done, KeyCode::Enter), ConnectAction::Cancel);
-        assert_eq!(handle_connect_key(&mut done, KeyCode::Char('x')), ConnectAction::Cancel);
+        assert_eq!(
+            handle_connect_key(&mut done, KeyCode::Enter),
+            ConnectAction::Cancel
+        );
+        assert_eq!(
+            handle_connect_key(&mut done, KeyCode::Char('x')),
+            ConnectAction::Cancel
+        );
         let out = render_connect_to_string(&done);
         assert!(out.contains("Authorized \u{2713}"));
         assert!(out.contains("returning to the prompt"), "{out}");
@@ -354,13 +444,19 @@ mod tests {
         // Failed: likewise closes on any key, with a "press any key" footer.
         let mut failed = ConnectScreenState::copilot_pending();
         failed.set_failed("access_denied");
-        assert_eq!(handle_connect_key(&mut failed, KeyCode::Enter), ConnectAction::Cancel);
+        assert_eq!(
+            handle_connect_key(&mut failed, KeyCode::Enter),
+            ConnectAction::Cancel
+        );
         assert!(render_connect_to_string(&failed).contains("Press any key to return"));
 
         // Polling (non-terminal): typing stays inert; only Esc cancels.
         let mut polling = ConnectScreenState::copilot_pending();
         polling.set_device_code("WDJB-MJHT", "https://github.com/login/device");
-        assert_eq!(handle_connect_key(&mut polling, KeyCode::Char('x')), ConnectAction::None);
+        assert_eq!(
+            handle_connect_key(&mut polling, KeyCode::Char('x')),
+            ConnectAction::None
+        );
         assert!(render_connect_to_string(&polling).contains("copied to clipboard"));
     }
 }

@@ -86,7 +86,9 @@ pub fn handle_github_deploy_key(state: &mut GithubDeploymentState, key: KeyCode)
                 if *selected == 0 {
                     DeployOutcome::Public
                 } else {
-                    state.phase = DeployPhase::Host { buffer: String::new() };
+                    state.phase = DeployPhase::Host {
+                        buffer: String::new(),
+                    };
                     DeployOutcome::Stay
                 }
             }
@@ -147,10 +149,16 @@ mod tests {
     fn choose_nav_and_public() {
         let mut st = GithubDeploymentState::default();
         assert_eq!(st.phase, DeployPhase::Choose { selected: 0 });
-        assert_eq!(handle_github_deploy_key(&mut st, KeyCode::Down), DeployOutcome::Stay);
+        assert_eq!(
+            handle_github_deploy_key(&mut st, KeyCode::Down),
+            DeployOutcome::Stay
+        );
         assert_eq!(st.phase, DeployPhase::Choose { selected: 1 });
         let _ = handle_github_deploy_key(&mut st, KeyCode::Up);
-        assert_eq!(handle_github_deploy_key(&mut st, KeyCode::Enter), DeployOutcome::Public);
+        assert_eq!(
+            handle_github_deploy_key(&mut st, KeyCode::Enter),
+            DeployOutcome::Public
+        );
     }
 
     #[test]
@@ -164,22 +172,37 @@ mod tests {
         }
         assert_eq!(
             handle_github_deploy_key(&mut st, KeyCode::Enter),
-            DeployOutcome::Enterprise { domain: "company.ghe.com".to_string() }
+            DeployOutcome::Enterprise {
+                domain: "company.ghe.com".to_string()
+            }
         );
     }
 
     #[test]
     fn host_blank_enter_is_inert_and_esc_goes_back() {
-        let mut st = GithubDeploymentState { phase: DeployPhase::Host { buffer: String::new() } };
-        assert_eq!(handle_github_deploy_key(&mut st, KeyCode::Enter), DeployOutcome::Stay);
-        assert_eq!(handle_github_deploy_key(&mut st, KeyCode::Esc), DeployOutcome::Stay);
+        let mut st = GithubDeploymentState {
+            phase: DeployPhase::Host {
+                buffer: String::new(),
+            },
+        };
+        assert_eq!(
+            handle_github_deploy_key(&mut st, KeyCode::Enter),
+            DeployOutcome::Stay
+        );
+        assert_eq!(
+            handle_github_deploy_key(&mut st, KeyCode::Esc),
+            DeployOutcome::Stay
+        );
         assert_eq!(st.phase, DeployPhase::Choose { selected: 1 });
     }
 
     #[test]
     fn choose_esc_cancels() {
         let mut st = GithubDeploymentState::default();
-        assert_eq!(handle_github_deploy_key(&mut st, KeyCode::Esc), DeployOutcome::Cancel);
+        assert_eq!(
+            handle_github_deploy_key(&mut st, KeyCode::Esc),
+            DeployOutcome::Cancel
+        );
     }
 
     #[test]
@@ -189,7 +212,9 @@ mod tests {
         assert!(out.starts_with("Select GitHub deployment type"));
         assert!(out.contains("GitHub.com Public"));
         assert!(out.contains("GitHub Enterprise"));
-        let host = GithubDeploymentState { phase: DeployPhase::Host { buffer: "x".into() } };
+        let host = GithubDeploymentState {
+            phase: DeployPhase::Host { buffer: "x".into() },
+        };
         assert!(render_github_deploy_to_string(&host).contains("Host: x"));
     }
 }

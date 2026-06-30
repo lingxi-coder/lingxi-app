@@ -69,7 +69,9 @@ fn render_system_api_error_with_timeout_hint(
     // retry/backoff is governed by it.
     if let Some(ms) = api_timeout_ms {
         if !ms.is_empty() {
-            out.push_str(&format!(" \u{00B7} API_TIMEOUT_MS={ms}ms, try increasing it"));
+            out.push_str(&format!(
+                " \u{00B7} API_TIMEOUT_MS={ms}ms, try increasing it"
+            ));
         }
     }
     out

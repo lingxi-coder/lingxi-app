@@ -92,17 +92,17 @@ const WARNING_THRESHOLD: f64 = 0.7;
 /// Port of `getRateLimitMessage` (rateLimitMessages.ts:45-104), branch order
 /// preserved. Returns `None` when no message should be shown.
 #[must_use]
-pub fn compose_rate_limit(info: &RateLimitInfo, sub: &SubscriptionSnapshot) -> Option<ComposedRateLimit> {
+pub fn compose_rate_limit(
+    info: &RateLimitInfo,
+    sub: &SubscriptionSnapshot,
+) -> Option<ComposedRateLimit> {
     // TS `formatLimitReachedText` branches on `process.env.USER_TYPE ===
     // 'ant'` (rateLimitMessages.ts:339); `extraUsage.isEnabled()`
     // (commands/extra-usage/index.ts:6-17) reads
     // `DISABLE_EXTRA_USAGE_COMMAND` through `isEnvTruthy`. Both env reads
     // happen here so the core stays injectable for tests.
-    let disable_extra_usage = is_env_truthy(
-        std::env::var("DISABLE_EXTRA_USAGE_COMMAND")
-            .ok()
-            .as_deref(),
-    );
+    let disable_extra_usage =
+        is_env_truthy(std::env::var("DISABLE_EXTRA_USAGE_COMMAND").ok().as_deref());
     compose_with(
         info,
         std::env::var("USER_TYPE").as_deref() == Ok("ant"),
@@ -572,7 +572,10 @@ mod tests {
             got.text,
             format!("You've hit your session limit \u{b7} resets {}", reset(ts))
         );
-        assert!(!got.text.contains('\u{2019}'), "TS uses straight apostrophes");
+        assert!(
+            !got.text.contains('\u{2019}'),
+            "TS uses straight apostrophes"
+        );
     }
 
     #[test]
@@ -718,8 +721,13 @@ mod tests {
     fn pro_subscriber_sonnet_limit_reads_weekly_limit() {
         // "For pro and enterprise, Sonnet limit is the same as weekly" —
         // rateLimitMessages.ts:175-182.
-        let got = compose_with(&rejected(Some("seven_day_sonnet"), None), false, &pro(), false)
-            .unwrap();
+        let got = compose_with(
+            &rejected(Some("seven_day_sonnet"), None),
+            false,
+            &pro(),
+            false,
+        )
+        .unwrap();
         assert_eq!(got.text, "You've hit your weekly limit");
         // End-to-end wiring pin: a subscriber's rejected notice carries the
         // error upsell out of compose_with (TSX :36-38 — pro without the
@@ -761,7 +769,10 @@ mod tests {
     #[test]
     fn pro_error_upsell_upgrade_without_cmd() {
         // TSX :36-38: !isTeamOrEnterprise && !isExtraUsageCommandEnabled.
-        assert_eq!(error_upsell(&pro(), false).as_deref(), Some(upsell::UPGRADE));
+        assert_eq!(
+            error_upsell(&pro(), false).as_deref(),
+            Some(upsell::UPGRADE)
+        );
     }
 
     #[test]
@@ -829,7 +840,10 @@ mod tests {
         let got = compose(&warning(Some("seven_day"), Some(0.7), Some(ts)), false).unwrap();
         assert_eq!(
             got.text,
-            format!("You've used 70% of your weekly limit \u{b7} resets {}", reset(ts))
+            format!(
+                "You've used 70% of your weekly limit \u{b7} resets {}",
+                reset(ts)
+            )
         );
         assert_eq!(got.upsell, None);
     }

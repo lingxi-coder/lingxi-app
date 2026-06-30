@@ -25,7 +25,7 @@
 use iocraft::prelude::*;
 
 use crate::render::markdown::{render_with_width as render_markdown_width, MarkdownTheme};
-use crate::render::{StyleColor, StyledLine};
+use crate::render::{StyleColor, StyledLine, StyledSpan};
 use crate::theme::Theme;
 
 /// (A2) Fallback markdown width when the caller threads no terminal width
@@ -125,53 +125,77 @@ pub fn render_assistant_text_to_string(body: &str, width: usize) -> String {
     out
 }
 
+/// Styled terminal-line form used when finalized assistant text is committed to
+/// native terminal scrollback. This mirrors [`AssistantTextMessage`]'s marker
+/// cell + body column layout while preserving inline markdown style.
+#[must_use]
+pub(crate) fn render_assistant_text_to_styled_lines(body: &str, width: usize) -> Vec<StyledLine> {
+    let mut out = Vec::new();
+    let mut rendered = render_markdown_width(body, &markdown_theme(), effective_width(width))
+        .into_iter()
+        .filter(|line| !line.spans.is_empty());
+
+    if let Some(mut first) = rendered.next() {
+        first.spans.insert(0, StyledSpan::plain(MARKER));
+        out.push(first);
+    }
+
+    for mut line in rendered {
+        line.spans.insert(0, StyledSpan::plain(CONT_INDENT));
+        out.push(line);
+    }
+
+    if out.is_empty() {
+        out.push(StyledLine::plain(MARKER));
+    }
+    out
+}
+
+fn mixed_text_content(span: StyledSpan) -> MixedTextContent {
+    let weight = if span.style.bold {
+        Weight::Bold
+    } else {
+        Weight::Normal
+    };
+    let mut content = MixedTextContent::new(span.text)
+        .color(span.style.fg.to_iocraft())
+        .weight(weight);
+    if span.style.underline {
+        content = content.decoration(TextDecoration::Underline);
+    }
+    if span.style.italic {
+        content = content.italic();
+    }
+    content
+}
+
 /// iocraft component — a `Row` of [marker cell | markdown body column].
 ///
 /// The marker is drawn ONCE (theme `text` color) to the left of the body
 /// column, mirroring claude-code's `minWidth=2` sibling box. The body column
-/// is one `Row` per [`StyledLine`] from `render::markdown`; each span becomes a
-/// styled `Text` (per-span fg via [`StyleColor::to_iocraft`], plus bold /
-/// italic / underline from the span's style). This reproduces `formatToken`:
-/// bold/italic/underline per element, inline-code in the permission color,
-/// everything else terminal-default. Streaming reuses this exact path (the
-/// body just grows each frame; `render::markdown` is streaming-safe).
+/// is one [`MixedText`] per [`StyledLine`] from `render::markdown`; inline spans
+/// stay inside the same text layout object, with per-span fg via
+/// [`StyleColor::to_iocraft`] plus bold / italic / underline. This reproduces
+/// `formatToken` without making styled spans independent flex children.
+/// Each `MixedText` row is no-wrap because `render::markdown` already owns the
+/// logical row layout; allowing iocraft to wrap again reflows snapshot-width
+/// rows and can split a plain sentence into one character per terminal line.
+/// Streaming reuses this exact path (the body just grows each frame;
+/// `render::markdown` is streaming-safe).
 #[component]
 pub fn AssistantTextMessage(props: &AssistantTextMessageProps) -> impl Into<AnyElement<'static>> {
-    let lines = render_markdown_width(&props.body, &markdown_theme(), effective_width(props.width));
+    let width = effective_width(props.width);
+    let lines = render_markdown_width(&props.body, &markdown_theme(), width);
     let rows: Vec<AnyElement<'static>> = lines
         .into_iter()
         .map(|line| {
-            let span_elements: Vec<AnyElement<'static>> = line
-                .spans
-                .into_iter()
-                .map(|s| {
-                    let color = s.style.fg.to_iocraft();
-                    let weight = if s.style.bold {
-                        Weight::Bold
-                    } else {
-                        Weight::Normal
-                    };
-                    let decoration = if s.style.underline {
-                        TextDecoration::Underline
-                    } else {
-                        TextDecoration::None
-                    };
-                    element! {
-                        Text(
-                            content: s.text,
-                            color: color,
-                            weight: weight,
-                            italic: s.style.italic,
-                            decoration: decoration,
-                        )
-                    }
-                    .into_any()
-                })
-                .collect();
+            if line.spans.is_empty() {
+                return element! { View(height: 0u32) }.into_any();
+            }
+            let contents: Vec<MixedTextContent> =
+                line.spans.into_iter().map(mixed_text_content).collect();
             element! {
-                View(flex_direction: FlexDirection::Row) {
-                    #(span_elements)
-                }
+                MixedText(contents: contents, wrap: TextWrap::NoWrap)
             }
             .into_any()
         })
@@ -181,7 +205,9 @@ pub fn AssistantTextMessage(props: &AssistantTextMessageProps) -> impl Into<AnyE
     let marker_color = Theme::dark().text;
     element! {
         View(flex_direction: FlexDirection::Row) {
-            Text(content: MARKER, color: marker_color)
+            View(width: 2u32) {
+                Text(content: MARKER, color: marker_color)
+            }
             View(flex_direction: FlexDirection::Column) {
                 #(rows)
             }
@@ -239,6 +265,48 @@ mod tests {
         assert!(s.contains("- one"), "got: {s:?}");
         assert!(s.contains("- two"), "got: {s:?}");
         assert!(s.starts_with(MARKER));
+    }
+
+    #[test]
+    fn styled_markdown_list_does_not_stair_step() {
+        let body = "武汉今天天气（2026年6月30日 周二）：\n\n- **天气**：小雨\n- **气温**：27℃ ~ 30℃\n- **风力**：东风 1 级\n- **相对湿度**：80%\n- **空气质量**：54（良）\n\n出门记得带伞。";
+        let mut element = element! {
+            AssistantTextMessage(body: body.to_string(), width: 80usize)
+        };
+        let out = element.to_string();
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(
+            lines.iter().any(|line| *line == "  - 天气：小雨"),
+            "{out:?}"
+        );
+        assert!(
+            lines.iter().any(|line| *line == "  - 气温：27℃ ~ 30℃"),
+            "{out:?}"
+        );
+        assert!(
+            lines.iter().any(|line| *line == "  - 风力：东风 1 级"),
+            "{out:?}"
+        );
+        for line in lines
+            .iter()
+            .filter(|line| line.trim_start().starts_with("- "))
+        {
+            let leading_spaces = line.len() - line.trim_start_matches(' ').len();
+            assert_eq!(leading_spaces, 2, "list line drifted: {line:?}\n{out}");
+        }
+    }
+
+    #[test]
+    fn mixed_text_rows_do_not_double_wrap_at_snapshot_width_one() {
+        let mut element = element! {
+            AssistantTextMessage(body: "Hello!".to_string(), width: 1usize)
+        };
+        let out = element.to_string();
+        assert!(out.lines().any(|line| line == format!("{MARKER}Hello!")));
+        assert!(
+            !out.lines().any(|line| line == "  e"),
+            "assistant text was wrapped one character per row:\n{out}"
+        );
     }
 
     #[test]

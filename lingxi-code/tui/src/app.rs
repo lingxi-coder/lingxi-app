@@ -1398,13 +1398,12 @@ pub fn render_screen(
     // cache is stale vs. the width/length we're asked to render at — the
     // cache can therefore never be stale relative to `viewport_width`.
     let vp_width = viewport_width.max(1);
-    let cache = if state.height_cache.width() == vp_width
-        && state.height_cache.len() == messages.len()
-    {
-        state.height_cache.clone()
-    } else {
-        crate::components::virtual_message_list::HeightCache::build(&messages, vp_width)
-    };
+    let cache =
+        if state.height_cache.width() == vp_width && state.height_cache.len() == messages.len() {
+            state.height_cache.clone()
+        } else {
+            crate::components::virtual_message_list::HeightCache::build(&messages, vp_width)
+        };
     element! {
         ReplScreen(
             status: status,

@@ -29,7 +29,8 @@ pub const SPINNER_FRAMES: &[&str] = &["·", "✢", "✳", "✶", "✻", "✽", "
 
 /// (SS-09) `TERM=xterm-ghostty` substitutes the 6th glyph `✽`→`*` (renders
 /// slightly offset in Ghostty otherwise).
-const SPINNER_FRAMES_GHOSTTY: &[&str] = &["·", "✢", "✳", "✶", "✻", "*", "*", "✻", "✶", "✳", "✢", "·"];
+const SPINNER_FRAMES_GHOSTTY: &[&str] =
+    &["·", "✢", "✳", "✶", "✻", "*", "*", "✻", "✶", "✳", "✢", "·"];
 
 /// (SS-09) Non-macOS, non-Ghostty (claude-code's `else` branch, covering
 /// Linux) substitutes the 3rd glyph `✳`→`*`.
@@ -374,7 +375,10 @@ pub const VERB_ROTATE_MS: u64 = 4000;
 #[inline]
 #[must_use]
 pub fn frame_at_index(tick: usize) -> &'static str {
-    let frames = spinner_frames_for(std::env::var("TERM").ok().as_deref(), cfg!(target_os = "macos"));
+    let frames = spinner_frames_for(
+        std::env::var("TERM").ok().as_deref(),
+        cfg!(target_os = "macos"),
+    );
     frames[tick % frames.len()]
 }
 
@@ -507,7 +511,11 @@ pub fn SpinnerWithVerb(
     let line = format!("{} {}…", frame_at_index(frame.get()), verb_text);
     // Default fallback = dark-theme Claude accent rgb(215,119,87); the live
     // REPL passes the active `theme.claude` so the spinner recolors per theme.
-    let color = props.color.unwrap_or(Color::Rgb { r: 215, g: 119, b: 87 });
+    let color = props.color.unwrap_or(Color::Rgb {
+        r: 215,
+        g: 119,
+        b: 87,
+    });
     element! {
         // (SS-05) One blank row above the spinner (claude-code `marginTop={1}`).
         View(flex_direction: FlexDirection::Row, margin_top: 1) {
@@ -546,9 +554,15 @@ mod tests {
         // (SS-09) Parameterized — no env reading, so no environment coupling.
         assert_eq!(spinner_frames_for(None, true), SPINNER_FRAMES); // macOS
         assert_eq!(spinner_frames_for(None, false), SPINNER_FRAMES_OTHER); // Linux
-        // Ghostty wins regardless of platform.
-        assert_eq!(spinner_frames_for(Some("xterm-ghostty"), true), SPINNER_FRAMES_GHOSTTY);
-        assert_eq!(spinner_frames_for(Some("xterm-ghostty"), false), SPINNER_FRAMES_GHOSTTY);
+                                                                           // Ghostty wins regardless of platform.
+        assert_eq!(
+            spinner_frames_for(Some("xterm-ghostty"), true),
+            SPINNER_FRAMES_GHOSTTY
+        );
+        assert_eq!(
+            spinner_frames_for(Some("xterm-ghostty"), false),
+            SPINNER_FRAMES_GHOSTTY
+        );
         assert_eq!(
             SPINNER_FRAMES_GHOSTTY,
             &["·", "✢", "✳", "✶", "✻", "*", "*", "✻", "✶", "✳", "✢", "·"]
@@ -727,7 +741,10 @@ mod tests {
             subject: "Running tests".to_string(),
             active_form: None,
         };
-        assert_eq!(todo_leader_verb(Some(&todo)).as_deref(), Some("Running tests"));
+        assert_eq!(
+            todo_leader_verb(Some(&todo)).as_deref(),
+            Some("Running tests")
+        );
     }
 
     #[test]
@@ -737,7 +754,10 @@ mod tests {
             subject: "Running tests".to_string(),
             active_form: Some(String::new()),
         };
-        assert_eq!(todo_leader_verb(Some(&todo)).as_deref(), Some("Running tests"));
+        assert_eq!(
+            todo_leader_verb(Some(&todo)).as_deref(),
+            Some("Running tests")
+        );
     }
 
     #[test]
@@ -764,7 +784,10 @@ mod tests {
         assert_eq!(verb, "Squeaking the wheels");
         assert!(!SPINNER_VERBS.contains(&verb.as_str()));
         // Rendered line uses it verbatim with the horizontal ellipsis.
-        assert_eq!(format!("{} {}…", frame_at_index(0), verb), "· Squeaking the wheels…");
+        assert_eq!(
+            format!("{} {}…", frame_at_index(0), verb),
+            "· Squeaking the wheels…"
+        );
     }
 
     #[test]

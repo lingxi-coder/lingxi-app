@@ -177,12 +177,12 @@ pub fn load_skill_sections(cwd: &Path, lingxi_home: &Path) -> Vec<SkillSection> 
         .into_iter()
         .map(|section| SkillSection {
             title: section.title,
-            subtitle: section
-                .path
-                .map(|p| crate::components::messages::assistant_tool_use::get_display_path(
+            subtitle: section.path.map(|p| {
+                crate::components::messages::assistant_tool_use::get_display_path(
                     &p.to_string_lossy(),
                     cwd,
-                )),
+                )
+            }),
             rows: section
                 .rows
                 .into_iter()
@@ -574,7 +574,10 @@ mod tests {
         std::fs::create_dir_all(cwd.join(".lingxi").join("skills").join("alpha"))
             .expect("mkdir alpha");
         std::fs::write(
-            cwd.join(".lingxi").join("skills").join("alpha").join("SKILL.md"),
+            cwd.join(".lingxi")
+                .join("skills")
+                .join("alpha")
+                .join("SKILL.md"),
             "---\nname: alpha\ndescription: d\n---\nBody.\n",
         )
         .expect("write SKILL.md");

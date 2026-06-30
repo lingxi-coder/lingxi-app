@@ -39,7 +39,10 @@ async fn compaction_completed_event_appends_marker_to_scrollback() {
     // The rendered line is the locked boundary string (no counts), with a
     // (compact-boundary-marginy) blank line above and below.
     let rendered = tui::components::messages::render_entry_to_string(last, false, false);
-    assert_eq!(rendered, "\n✻ Conversation compacted (ctrl+o for history)\n");
+    assert_eq!(
+        rendered,
+        "\n✻ Conversation compacted (ctrl+o for history)\n"
+    );
 }
 
 #[tokio::test]

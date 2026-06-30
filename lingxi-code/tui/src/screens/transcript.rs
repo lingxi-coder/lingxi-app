@@ -104,7 +104,10 @@ pub enum TranscriptOutcome {
 /// close (`q` mirrors the sibling read-only viewers `help.rs`/`skills.rs`).
 /// Everything else is inert. Pure — the caller owns closing + telemetry.
 #[must_use]
-pub fn handle_transcript_key(state: &mut TranscriptScreenState, key: KeyEvent) -> TranscriptOutcome {
+pub fn handle_transcript_key(
+    state: &mut TranscriptScreenState,
+    key: KeyEvent,
+) -> TranscriptOutcome {
     // Ctrl+O toggles the transcript OFF (the same chord that opened it).
     if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return TranscriptOutcome::Close;

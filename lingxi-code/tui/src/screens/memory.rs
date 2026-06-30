@@ -392,7 +392,10 @@ mod tests {
                 .clone()
         };
         // No `.git` anywhere under the fresh tempdir → "Saved in".
-        assert_eq!(proj_desc(&memory_tiers(&cwd, &home)), "Saved in ./LINGXI.md");
+        assert_eq!(
+            proj_desc(&memory_tiers(&cwd, &home)),
+            "Saved in ./LINGXI.md"
+        );
         // Add a `.git` dir at cwd → "Checked in at".
         fs::create_dir_all(cwd.join(".git")).unwrap();
         assert_eq!(

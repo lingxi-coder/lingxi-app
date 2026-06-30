@@ -29,7 +29,10 @@ fn current_todo_from_todowrite_input(input: &serde_json::Value) -> Option<Curren
         // matching the `!==` semantics of the TS predicate.
         !matches!(status, Some("pending" | "completed"))
     })?;
-    let subject = item.get("content").and_then(serde_json::Value::as_str)?.to_string();
+    let subject = item
+        .get("content")
+        .and_then(serde_json::Value::as_str)?
+        .to_string();
     let active_form = item
         .get("activeForm")
         .and_then(serde_json::Value::as_str)
@@ -55,7 +58,10 @@ fn current_todo_from_todowrite_input(input: &serde_json::Value) -> Option<Curren
 ///
 /// After mutation, calls `notify.notify_one()`. The render loop is
 /// expected to debounce these to ~30fps.
-#[allow(clippy::too_many_lines, reason = "flat per-TurnEvent match dispatcher; one arm per variant")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "flat per-TurnEvent match dispatcher; one arm per variant"
+)]
 pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
     match ev {
         TurnEvent::TurnStarted => {
@@ -248,13 +254,14 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
             // (last-write-wins) for the statusline command input's
             // `rate_limits` field (StatusLine.tsx:50-65). No transcript
             // message — this track is statusline-only, unlike RateLimit.
-            state.raw_utilization =
-                Some(crate::components::status_line_command::RawUtilizationSnapshot {
+            state.raw_utilization = Some(
+                crate::components::status_line_command::RawUtilizationSnapshot {
                     five_hour_utilization,
                     five_hour_resets_at,
                     seven_day_utilization,
                     seven_day_resets_at,
-                });
+                },
+            );
         }
     }
     notify.notify_one();
@@ -440,9 +447,7 @@ mod tests {
     #[test]
     fn todowrite_input_missing_or_empty_todos_is_none() {
         assert!(current_todo_from_todowrite_input(&serde_json::json!({})).is_none());
-        assert!(
-            current_todo_from_todowrite_input(&serde_json::json!({ "todos": [] })).is_none()
-        );
+        assert!(current_todo_from_todowrite_input(&serde_json::json!({ "todos": [] })).is_none());
     }
 
     #[test]
@@ -488,7 +493,10 @@ mod tests {
             &n,
         );
         // A non-TodoWrite tool must not clobber the active todo.
-        assert_eq!(s.current_todo.as_ref().map(|t| t.subject.as_str()), Some("kept"));
+        assert_eq!(
+            s.current_todo.as_ref().map(|t| t.subject.as_str()),
+            Some("kept")
+        );
     }
 
     #[test]
@@ -502,8 +510,15 @@ mod tests {
             subject: "Build project".into(),
             active_form: Some("Compiling".into()),
         });
-        apply_event(&mut s, TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn), &n);
-        assert!(s.current_todo.is_none(), "TurnEnded must clear current_todo");
+        apply_event(
+            &mut s,
+            TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn),
+            &n,
+        );
+        assert!(
+            s.current_todo.is_none(),
+            "TurnEnded must clear current_todo"
+        );
     }
 
     #[test]
@@ -564,10 +579,7 @@ mod tests {
         let mut s = new_state();
         let n = Notify::new();
         apply_event(&mut s, rate_limit_event("five_hour"), &n);
-        assert_eq!(
-            rate_limit_texts(&s),
-            vec!["You've hit your session limit"]
-        );
+        assert_eq!(rate_limit_texts(&s), vec!["You've hit your session limit"]);
         assert_eq!(
             s.last_rate_limit_text.as_deref(),
             Some("You've hit your session limit")

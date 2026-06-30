@@ -125,9 +125,7 @@ impl PermTab {
     pub fn subtitle(self) -> &'static str {
         match self {
             PermTab::Allow => "LingXi won't ask before using allowed tools.",
-            PermTab::Ask => {
-                "LingXi will always ask for confirmation before using these tools."
-            }
+            PermTab::Ask => "LingXi will always ask for confirmation before using these tools.",
             PermTab::Deny => "LingXi will always reject requests to use denied tools.",
             PermTab::Workspace => {
                 "LingXi can read and write files in these directories without asking."
@@ -471,7 +469,11 @@ pub fn render_permissions_to_string(state: &PermissionsScreenState) -> String {
                     out.push_str("No workspace directories configured.\n");
                 } else {
                     for (i, dir) in state.workspace_dirs.iter().enumerate() {
-                        let marker = if i == state.selected { "\u{276F} " } else { "  " };
+                        let marker = if i == state.selected {
+                            "\u{276F} "
+                        } else {
+                            "  "
+                        };
                         out.push_str(marker);
                         out.push_str(dir);
                         out.push('\n');
@@ -483,11 +485,18 @@ pub fn render_permissions_to_string(state: &PermissionsScreenState) -> String {
             }
             let rows = state.tab_rows();
             if rows.is_empty() {
-                out.push_str(&format!("No {} rules configured.", state.tab.title().to_lowercase()));
+                out.push_str(&format!(
+                    "No {} rules configured.",
+                    state.tab.title().to_lowercase()
+                ));
                 out.push('\n');
             } else {
                 for (i, row) in rows.iter().enumerate() {
-                    let marker = if i == state.selected { "\u{276F} " } else { "  " };
+                    let marker = if i == state.selected {
+                        "\u{276F} "
+                    } else {
+                        "  "
+                    };
                     out.push_str(marker);
                     // The behavior is the active tab, so the row shows just the rule.
                     out.push_str(&row.rule);
@@ -506,8 +515,12 @@ pub fn render_permissions_to_string(state: &PermissionsScreenState) -> String {
                 None => "Permissions\n(directory no longer available)".to_string(),
             }
         }
-        PermissionsDialogMode::ConfirmDelete => match state.tab_rows().get(state.selected).copied() {
-            Some(row) => format!("Delete rule {}?\ny to delete \u{00B7} n to cancel", row.rule),
+        PermissionsDialogMode::ConfirmDelete => match state.tab_rows().get(state.selected).copied()
+        {
+            Some(row) => format!(
+                "Delete rule {}?\ny to delete \u{00B7} n to cancel",
+                row.rule
+            ),
             None => "Permissions\n(rule no longer available)".to_string(),
         },
         // (PERM-1 Workspace tab) New-directory input.
@@ -686,7 +699,10 @@ mod tests {
         // (PERM-1) `a` opens the input; typing builds the rule; Enter emits
         // AddRule with the active tab's behavior + Local source.
         let mut s = PermissionsScreenState::default(); // Allow tab.
-        assert_eq!(handle_permissions_key(&mut s, KeyCode::Char('a')), PermissionsOutcome::Stay);
+        assert_eq!(
+            handle_permissions_key(&mut s, KeyCode::Char('a')),
+            PermissionsOutcome::Stay
+        );
         assert_eq!(s.dialog_mode, PermissionsDialogMode::AddInput);
         for c in "Bash(ls)".chars() {
             let _ = handle_permissions_key(&mut s, KeyCode::Char(c));
@@ -709,7 +725,10 @@ mod tests {
         assert_eq!(s.dialog_mode, PermissionsDialogMode::List);
         // Empty input + Enter is a no-op (Stay, back to list).
         let _ = handle_permissions_key(&mut s, KeyCode::Char('a'));
-        assert_eq!(handle_permissions_key(&mut s, KeyCode::Enter), PermissionsOutcome::Stay);
+        assert_eq!(
+            handle_permissions_key(&mut s, KeyCode::Enter),
+            PermissionsOutcome::Stay
+        );
         assert_eq!(s.dialog_mode, PermissionsDialogMode::List);
     }
 
@@ -721,7 +740,10 @@ mod tests {
             rows: vec![row("Allow", "Bash(npm test:*)", "Local")],
             ..PermissionsScreenState::default()
         };
-        assert_eq!(handle_permissions_key(&mut s, KeyCode::Char('d')), PermissionsOutcome::Stay);
+        assert_eq!(
+            handle_permissions_key(&mut s, KeyCode::Char('d')),
+            PermissionsOutcome::Stay
+        );
         assert_eq!(s.dialog_mode, PermissionsDialogMode::ConfirmDelete);
         assert!(render_permissions_to_string(&s).contains("Delete rule Bash(npm test:*)?"));
         match handle_permissions_key(&mut s, KeyCode::Char('y')) {
@@ -732,7 +754,10 @@ mod tests {
 
         // `n` cancels.
         let _ = handle_permissions_key(&mut s, KeyCode::Char('d'));
-        assert_eq!(handle_permissions_key(&mut s, KeyCode::Char('n')), PermissionsOutcome::Stay);
+        assert_eq!(
+            handle_permissions_key(&mut s, KeyCode::Char('n')),
+            PermissionsOutcome::Stay
+        );
         assert_eq!(s.dialog_mode, PermissionsDialogMode::List);
     }
 
@@ -786,7 +811,10 @@ mod tests {
         assert!(out.contains("Workspace"), "subtitle present");
 
         // `a` opens the directory input; typing + Enter emits AddWorkspaceDir.
-        assert_eq!(handle_permissions_key(&mut s, KeyCode::Char('a')), PermissionsOutcome::Stay);
+        assert_eq!(
+            handle_permissions_key(&mut s, KeyCode::Char('a')),
+            PermissionsOutcome::Stay
+        );
         assert_eq!(s.dialog_mode, PermissionsDialogMode::AddInput);
         assert!(render_permissions_to_string(&s).starts_with("Add workspace directory:\n"));
         for c in "/work/c".chars() {
@@ -799,7 +827,10 @@ mod tests {
 
         // `d` + `y` on the selected directory emits RemoveWorkspaceDir.
         s.selected = 1;
-        assert_eq!(handle_permissions_key(&mut s, KeyCode::Char('d')), PermissionsOutcome::Stay);
+        assert_eq!(
+            handle_permissions_key(&mut s, KeyCode::Char('d')),
+            PermissionsOutcome::Stay
+        );
         assert_eq!(s.dialog_mode, PermissionsDialogMode::ConfirmDelete);
         assert!(render_permissions_to_string(&s).contains("Remove workspace directory /work/b?"));
         match handle_permissions_key(&mut s, KeyCode::Char('y')) {
@@ -818,7 +849,11 @@ mod tests {
         };
         assert!(render_permissions_to_string(&s).contains("No workspace directories configured."));
         let _ = handle_permissions_key(&mut s, KeyCode::Enter);
-        assert_eq!(s.dialog_mode, PermissionsDialogMode::List, "Enter inert on Workspace");
+        assert_eq!(
+            s.dialog_mode,
+            PermissionsDialogMode::List,
+            "Enter inert on Workspace"
+        );
     }
 
     #[test]
@@ -859,9 +894,15 @@ mod tests {
             rule_description("Bash(ls -la)").as_deref(),
             Some("The Bash command ls -la")
         );
-        assert_eq!(rule_description("Bash").as_deref(), Some("Any Bash command"));
+        assert_eq!(
+            rule_description("Bash").as_deref(),
+            Some("Any Bash command")
+        );
         // Other tool, no content → "Any use of the {tool} tool".
-        assert_eq!(rule_description("Read").as_deref(), Some("Any use of the Read tool"));
+        assert_eq!(
+            rule_description("Read").as_deref(),
+            Some("Any use of the Read tool")
+        );
         // Other tool WITH content → no description.
         assert_eq!(rule_description("Read(./s/**)"), None);
     }

@@ -54,7 +54,10 @@ fn tool_use_confirm_worker_name_renders_inline_on_title_row() {
         .lines()
         .find(|l| l.contains("Tool use"))
         .expect("a title line");
-    assert!(title_line.contains("\u{00B7} @alice"), "got: {title_line:?}");
+    assert!(
+        title_line.contains("\u{00B7} @alice"),
+        "got: {title_line:?}"
+    );
 }
 
 #[test]
@@ -99,7 +102,10 @@ fn snapshot_exit_plan_mode_with_5_line_plan() {
     assert!(frame.contains("Ready to code?"), "got: {frame}");
     assert!(frame.contains("1. Read foo.rs"));
     assert!(frame.contains("5. Commit"));
-    assert!(frame.contains("> Yes, manually approve edits"), "got: {frame}");
+    assert!(
+        frame.contains("> Yes, manually approve edits"),
+        "got: {frame}"
+    );
     assert!(frame.contains("Yes, auto-accept edits"), "got: {frame}");
     assert!(frame.contains("No, keep planning"), "got: {frame}");
 }

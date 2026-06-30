@@ -209,10 +209,17 @@ fn draw_dialog(state: TrustDialogState, cwd: &Path) -> std::io::Result<()> {
     }
     // Blank spacer row before the two options.
     row += 1;
-    for (choice, label) in [(TrustChoice::Accept, accept), (TrustChoice::Decline, decline)] {
+    for (choice, label) in [
+        (TrustChoice::Accept, accept),
+        (TrustChoice::Decline, decline),
+    ] {
         execute!(out, MoveTo(0, row))?;
         // (TRUST-2) figures.pointer `❯ ` on the highlighted row (CustomSelect).
-        let marker = if state.selected == choice { "\u{276F} " } else { "  " };
+        let marker = if state.selected == choice {
+            "\u{276F} "
+        } else {
+            "  "
+        };
         write!(out, "{marker}{label}")?;
         row += 1;
     }
@@ -292,7 +299,10 @@ mod tests {
             lines[3],
             "LingXi'll be able to read, edit, and execute files here."
         );
-        assert_eq!(lines[4], "Security guide: https://code.claude.com/docs/en/security");
+        assert_eq!(
+            lines[4],
+            "Security guide: https://code.claude.com/docs/en/security"
+        );
         assert_eq!(lines[5], "Yes, I trust this folder");
         assert_eq!(lines[6], "No, exit");
         // (TRUST-1) dimmed footer hint.

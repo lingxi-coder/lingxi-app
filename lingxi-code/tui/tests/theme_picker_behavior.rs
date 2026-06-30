@@ -112,12 +112,20 @@ fn ctrl_t_toggles_syntax_highlighting_disabled() {
 
     let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
     let out = theme_picker_handle_key(&mut st, &mut app, ctrl_t);
-    assert_eq!(out, ThemePickerOutcome::Stay, "Ctrl+T keeps the picker open");
+    assert_eq!(
+        out,
+        ThemePickerOutcome::Stay,
+        "Ctrl+T keeps the picker open"
+    );
     assert!(st.syntax_disabled, "picker state flipped");
     assert!(app.syntax_highlighting_disabled, "AppState flipped");
 
     // Toggling again restores it.
-    theme_picker_handle_key(&mut st, &mut app, KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    theme_picker_handle_key(
+        &mut st,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+    );
     assert!(!st.syntax_disabled);
     assert!(!app.syntax_highlighting_disabled);
 }

@@ -23,7 +23,12 @@ pub struct ConnectMethodState {
 impl ConnectMethodState {
     #[must_use]
     pub fn new(provider_id: String, label: String, options: Vec<ConnectMethod>) -> Self {
-        Self { provider_id, label, options, selected: 0 }
+        Self {
+            provider_id,
+            label,
+            options,
+            selected: 0,
+        }
     }
 }
 
@@ -44,10 +49,7 @@ pub enum MethodChoiceOutcome {
 /// Reduce a key. Up/Down move (clamped); Enter picks the highlighted method;
 /// Esc cancels. Mirrors `github_deploy::handle_github_deploy_key`.
 #[must_use]
-pub fn handle_connect_method_key(
-    st: &mut ConnectMethodState,
-    key: KeyCode,
-) -> MethodChoiceOutcome {
+pub fn handle_connect_method_key(st: &mut ConnectMethodState, key: KeyCode) -> MethodChoiceOutcome {
     let n = st.options.len();
     match key {
         KeyCode::Up => {
@@ -101,7 +103,10 @@ mod tests {
         let mut st = anthropic();
         assert_eq!(st.selected, 0);
         // Up at top stays.
-        assert_eq!(handle_connect_method_key(&mut st, KeyCode::Up), MethodChoiceOutcome::Stay);
+        assert_eq!(
+            handle_connect_method_key(&mut st, KeyCode::Up),
+            MethodChoiceOutcome::Stay
+        );
         assert_eq!(st.selected, 0);
         // Down moves to 1.
         let _ = handle_connect_method_key(&mut st, KeyCode::Down);
@@ -116,19 +121,26 @@ mod tests {
         let mut st = anthropic();
         assert_eq!(
             handle_connect_method_key(&mut st, KeyCode::Enter),
-            MethodChoiceOutcome::Pick { method: ConnectMethod::Oauth }
+            MethodChoiceOutcome::Pick {
+                method: ConnectMethod::Oauth
+            }
         );
         let _ = handle_connect_method_key(&mut st, KeyCode::Down);
         assert_eq!(
             handle_connect_method_key(&mut st, KeyCode::Enter),
-            MethodChoiceOutcome::Pick { method: ConnectMethod::ApiKey }
+            MethodChoiceOutcome::Pick {
+                method: ConnectMethod::ApiKey
+            }
         );
     }
 
     #[test]
     fn esc_cancels() {
         let mut st = anthropic();
-        assert_eq!(handle_connect_method_key(&mut st, KeyCode::Esc), MethodChoiceOutcome::Cancel);
+        assert_eq!(
+            handle_connect_method_key(&mut st, KeyCode::Esc),
+            MethodChoiceOutcome::Cancel
+        );
     }
 
     #[test]
@@ -138,6 +150,9 @@ mod tests {
         assert!(out.contains("Sign in with Claude Pro/Max"), "{out}");
         assert!(out.contains("Use an API key"), "{out}");
         // Highlighted (idx 0) row carries the ❯ marker.
-        assert!(out.contains("\u{276F} Sign in with Claude Pro/Max"), "{out}");
+        assert!(
+            out.contains("\u{276F} Sign in with Claude Pro/Max"),
+            "{out}"
+        );
     }
 }

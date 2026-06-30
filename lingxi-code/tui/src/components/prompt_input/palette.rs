@@ -46,8 +46,10 @@ pub struct PaletteRow {
 /// `94` count). `/connect` is a LingXi addition (opencode-style provider
 /// sign-in / API-key entry) and is surfaced in the `/` palette like any builtin
 /// so it is discoverable. `(name, description)`.
-const LINGXI_EXTRA_COMMANDS: &[(&str, &str)] =
-    &[("connect", "Connect a provider \u{2014} sign in or add an API key")];
+const LINGXI_EXTRA_COMMANDS: &[(&str, &str)] = &[(
+    "connect",
+    "Connect a provider \u{2014} sign in or add an API key",
+)];
 
 /// Description for a palette row: LingXi extras first, else the byte-locked
 /// `core_description`.
@@ -274,7 +276,10 @@ pub struct PaletteOverlayProps {
 /// The command name as it's displayed (with a leading `/` and, when matched
 /// via a typed alias, ` (<alias>)` — cp-03).
 fn display_text_for(row: &PaletteRow) -> String {
-    let alias = row.matched_alias.map(|a| format!(" ({a})")).unwrap_or_default();
+    let alias = row
+        .matched_alias
+        .map(|a| format!(" ({a})"))
+        .unwrap_or_default();
     format!("/{}{}", row.name, alias)
 }
 
@@ -304,7 +309,11 @@ fn format_palette_row(row: &PaletteRow, all_rows: &[PaletteRow], columns: usize)
     let pad = display_text_width.saturating_sub(UnicodeWidthStr::width(name.as_str()));
     let padded_name = format!("{name}{}", " ".repeat(pad));
     let description_width = columns.saturating_sub(display_text_width).saturating_sub(4);
-    let collapsed_desc = row.description.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed_desc = row
+        .description
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let desc = truncate_to_width_ellipsis(&collapsed_desc, description_width);
     format!("{padded_name}{desc}")
 }
@@ -371,7 +380,10 @@ mod tests {
         let all = p.rows().len();
         // 94 builtins minus the 26 hidden/disabled commands = 68 visible, plus
         // the 1 LingXi extra (`/connect`) = 69.
-        assert_eq!(all, 69, "bare slash lists every VISIBLE command + LingXi /connect");
+        assert_eq!(
+            all, 69,
+            "bare slash lists every VISIBLE command + LingXi /connect"
+        );
         assert!(
             p.rows().iter().any(|r| r.name == "connect"),
             "/connect must appear in the palette"
@@ -446,7 +458,14 @@ mod tests {
         let mut p = PaletteState::default();
         p.sync_from_prompt("/");
         let rows = p.rows();
-        for name in ["btw", "x402", "reload-plugins", "install-slack-app", "mobile", "desktop"] {
+        for name in [
+            "btw",
+            "x402",
+            "reload-plugins",
+            "install-slack-app",
+            "mobile",
+            "desktop",
+        ] {
             assert!(
                 rows.iter().any(|r| r.name == name),
                 "/{name} is visible in claude-code and must appear in the palette"

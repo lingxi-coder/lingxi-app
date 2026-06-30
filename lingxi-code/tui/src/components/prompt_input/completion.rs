@@ -491,7 +491,10 @@ mod tests {
         // for the caller's re-sync (drill-down), instead of committing.
         let mut c = CompletionState::default();
         c.sync("@s", 2, &cands());
-        assert_eq!(c.rows(), vec!["src/lib.rs".to_string(), "src/main.rs".to_string()]);
+        assert_eq!(
+            c.rows(),
+            vec!["src/lib.rs".to_string(), "src/main.rs".to_string()]
+        );
         let outcome = c.handle_key_with_prompt(KeyCode::Tab, "@s", 2);
         match outcome {
             CompletionKeyOutcome::Accept {
@@ -521,7 +524,11 @@ mod tests {
         c.sync("@README", 7, &cands());
         assert_eq!(c.rows(), vec!["README.md".to_string()]);
         let outcome = c.handle_key_with_prompt(KeyCode::Tab, "@README", 7);
-        let CompletionKeyOutcome::Accept { new_prompt, new_cursor } = outcome else {
+        let CompletionKeyOutcome::Accept {
+            new_prompt,
+            new_cursor,
+        } = outcome
+        else {
             panic!("expected Accept, got {outcome:?}");
         };
         assert_eq!(new_prompt, "@README.md");
@@ -536,7 +543,10 @@ mod tests {
         let outcome2 = c.handle_key_with_prompt(KeyCode::Tab, &new_prompt, new_cursor);
         match outcome2 {
             CompletionKeyOutcome::Accept { new_prompt, .. } => {
-                assert_eq!(new_prompt, "@README.md ", "second Tab commits with trailing space");
+                assert_eq!(
+                    new_prompt, "@README.md ",
+                    "second Tab commits with trailing space"
+                );
             }
             other => panic!("expected Accept, got {other:?}"),
         }
@@ -586,7 +596,10 @@ mod tests {
         let paths = list_project_paths(dir.path());
         assert!(paths.contains(&"src/".to_string()), "{paths:?}");
         assert!(paths.contains(&"src/nested/".to_string()), "{paths:?}");
-        assert!(paths.contains(&"src/nested/deep.rs".to_string()), "{paths:?}");
+        assert!(
+            paths.contains(&"src/nested/deep.rs".to_string()),
+            "{paths:?}"
+        );
         assert!(paths.contains(&"top.txt".to_string()), "{paths:?}");
     }
 

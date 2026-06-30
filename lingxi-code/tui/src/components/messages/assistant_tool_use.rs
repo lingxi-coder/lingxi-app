@@ -107,7 +107,10 @@ pub fn render_tool_use_message(
             let pattern = s("pattern")?;
             Some(match s("path") {
                 Some(path) => {
-                    format!("pattern: \"{pattern}\", path: \"{}\"", get_display_path(path, cwd))
+                    format!(
+                        "pattern: \"{pattern}\", path: \"{}\"",
+                        get_display_path(path, cwd)
+                    )
                 }
                 None => format!("pattern: \"{pattern}\""),
             })
@@ -228,9 +231,9 @@ pub fn AssistantToolUseMessage(props: &AssistantToolUseProps) -> impl Into<AnyEl
         Some(s) => Some(s),
         None => Some(single_line_json_preview(&props.input)),
     };
-    let pretty = props
-        .expanded
-        .then(|| serde_json::to_string_pretty(&props.input).unwrap_or_else(|_| props.input.to_string()));
+    let pretty = props.expanded.then(|| {
+        serde_json::to_string_pretty(&props.input).unwrap_or_else(|_| props.input.to_string())
+    });
     element! {
         View(flex_direction: FlexDirection::Column) {
             View(flex_direction: FlexDirection::Row) {
@@ -287,18 +290,34 @@ mod tests {
     fn per_tool_previews_match_claude_code() {
         let cwd = Path::new("/p");
         let m = |t: &str, v: serde_json::Value| render_tool_use_message(t, &v, cwd);
-        assert_eq!(m("Read", serde_json::json!({"file_path": "/p/a.rs"})).unwrap(), "a.rs");
-        assert_eq!(m("Edit", serde_json::json!({"file_path": "/p/b.rs"})).unwrap(), "b.rs");
-        assert_eq!(m("Bash", serde_json::json!({"command": "ls -la"})).unwrap(), "ls -la");
+        assert_eq!(
+            m("Read", serde_json::json!({"file_path": "/p/a.rs"})).unwrap(),
+            "a.rs"
+        );
+        assert_eq!(
+            m("Edit", serde_json::json!({"file_path": "/p/b.rs"})).unwrap(),
+            "b.rs"
+        );
+        assert_eq!(
+            m("Bash", serde_json::json!({"command": "ls -la"})).unwrap(),
+            "ls -la"
+        );
         assert_eq!(
             m("Grep", serde_json::json!({"pattern": "foo"})).unwrap(),
             "pattern: \"foo\""
         );
         assert_eq!(
-            m("Glob", serde_json::json!({"pattern": "*.rs", "path": "/p/src"})).unwrap(),
+            m(
+                "Glob",
+                serde_json::json!({"pattern": "*.rs", "path": "/p/src"})
+            )
+            .unwrap(),
             "pattern: \"*.rs\", path: \"src\""
         );
-        assert_eq!(m("WebFetch", serde_json::json!({"url": "https://x.y"})).unwrap(), "https://x.y");
+        assert_eq!(
+            m("WebFetch", serde_json::json!({"url": "https://x.y"})).unwrap(),
+            "https://x.y"
+        );
         // Unknown tool → None (caller uses JSON fallback).
         assert!(m("SomeMcpTool", serde_json::json!({"a": 1})).is_none());
     }

@@ -36,7 +36,11 @@ pub(crate) fn parse_osc11_rgb(reply: &str) -> Option<(f64, f64, f64)> {
 /// Parse one hex channel (1..=4 hex digits), trimming any trailing
 /// non-hex bytes (the OSC terminator). `None` if there is no leading hex.
 fn parse_channel(s: &str) -> Option<f64> {
-    let hex: String = s.trim().chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+    let hex: String = s
+        .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_hexdigit())
+        .collect();
     if hex.is_empty() {
         return None;
     }
@@ -69,8 +73,7 @@ pub(crate) fn detect_with_io<R: Read, W: Write>(mut reader: R, mut writer: W) ->
             Ok(0) | Err(_) => break,
             Ok(n) => {
                 buf.extend_from_slice(&chunk[..n]);
-                let terminated = buf.contains(&0x07)
-                    || buf.windows(2).any(|w| w == [0x1b, 0x5c]);
+                let terminated = buf.contains(&0x07) || buf.windows(2).any(|w| w == [0x1b, 0x5c]);
                 if terminated || buf.len() > 1024 {
                     break;
                 }
@@ -104,7 +107,10 @@ impl Read for TimedStdin {
         let ms = (self.deadline - now).as_millis().min(i32::MAX as u128) as i32;
         let stdin = std::io::stdin();
         let fd = stdin.as_fd();
-        let mut fds = [rustix::event::PollFd::new(&fd, rustix::event::PollFlags::IN)];
+        let mut fds = [rustix::event::PollFd::new(
+            &fd,
+            rustix::event::PollFlags::IN,
+        )];
         match rustix::event::poll(&mut fds, ms) {
             Ok(0) | Err(_) => return Ok(0), // timeout or poll error → behave like EOF
             Ok(_) => {}

@@ -432,7 +432,10 @@ mod tests {
         }];
         let out = rebuild_messages(&h);
         assert_eq!(out.len(), 1);
-        assert!(matches!(&out[0], RenderedMessage::AssistantRedactedThinking));
+        assert!(matches!(
+            &out[0],
+            RenderedMessage::AssistantRedactedThinking
+        ));
     }
 
     #[test]
@@ -448,7 +451,10 @@ mod tests {
         }];
         let out = rebuild_messages(&h);
         assert_eq!(out.len(), 1);
-        assert!(matches!(&out[0], RenderedMessage::AssistantRedactedThinking));
+        assert!(matches!(
+            &out[0],
+            RenderedMessage::AssistantRedactedThinking
+        ));
     }
 
     #[test]

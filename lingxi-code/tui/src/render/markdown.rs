@@ -612,7 +612,10 @@ mod tests {
             .iter()
             .find(|s| s.text == "docs")
             .expect("the link text span");
-        assert_eq!(link_span.style.fg, StyleColor::Named(crate::render::NamedColor::Blue));
+        assert_eq!(
+            link_span.style.fg,
+            StyleColor::Named(crate::render::NamedColor::Blue)
+        );
     }
 
     #[test]
@@ -627,7 +630,10 @@ mod tests {
             .iter()
             .find(|s| s.text == "https://x.io")
             .expect("the URL span");
-        assert_eq!(link_span.style.fg, StyleColor::Named(crate::render::NamedColor::Blue));
+        assert_eq!(
+            link_span.style.fg,
+            StyleColor::Named(crate::render::NamedColor::Blue)
+        );
     }
 
     #[test]
@@ -714,7 +720,9 @@ mod tests {
             "depth2 letter: {joined:?}"
         );
         assert!(
-            texts.iter().any(|t| t.trim_start().starts_with("i. deeper")),
+            texts
+                .iter()
+                .any(|t| t.trim_start().starts_with("i. deeper")),
             "depth3 roman: {joined:?}"
         );
     }

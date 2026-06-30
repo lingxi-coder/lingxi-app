@@ -379,7 +379,11 @@ mod tests {
             !rendered.contains("claude-sonnet-4.5"),
             "built-in status row must not render when no custom statusLine is set: {rendered:?}"
         );
-        assert_eq!(rendered.trim(), "", "expected an empty status row, got: {rendered:?}");
+        assert_eq!(
+            rendered.trim(),
+            "",
+            "expected an empty status row, got: {rendered:?}"
+        );
     }
 
     #[test]

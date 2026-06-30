@@ -71,7 +71,9 @@ impl ConnectMethod {
 pub fn provider_methods(profile_name: &str, tag: Option<&str>) -> Vec<ConnectMethod> {
     match profile_name {
         "anthropic" => vec![ConnectMethod::Oauth, ConnectMethod::ApiKey],
-        _ => vec![tag.map(ConnectMethod::from_tag).unwrap_or(ConnectMethod::ApiKey)],
+        _ => vec![tag
+            .map(ConnectMethod::from_tag)
+            .unwrap_or(ConnectMethod::ApiKey)],
     }
 }
 
@@ -131,24 +133,46 @@ fn connect_display_meta(profile_name: &str) -> DisplayMeta {
     let curated: &[(&str, &str, &str, bool)] = &[
         ("anthropic", "Anthropic", "Claude models", true),
         ("openai", "OpenAI", "GPT models", true),
-        ("openai-chatgpt", "OpenAI (ChatGPT)", "ChatGPT Plus/Pro", true),
-        ("github-copilot", "GitHub Copilot", "Your Copilot subscription", true),
+        (
+            "openai-chatgpt",
+            "OpenAI (ChatGPT)",
+            "ChatGPT Plus/Pro",
+            true,
+        ),
+        (
+            "github-copilot",
+            "GitHub Copilot",
+            "Your Copilot subscription",
+            true,
+        ),
         ("gemini", "Google Gemini", "Gemini models", true),
         ("deepseek", "DeepSeek", "Chat / Reasoner", true),
-        ("openrouter", "OpenRouter", "Unified gateway to many models", false),
+        (
+            "openrouter",
+            "OpenRouter",
+            "Unified gateway to many models",
+            false,
+        ),
         ("zai", "Z.AI", "GLM models", false),
-        ("glm-coding", "GLM Coding Plan", "Zhipu coding-plan subscription", false),
+        (
+            "glm-coding",
+            "GLM Coding Plan",
+            "Zhipu coding-plan subscription",
+            false,
+        ),
     ];
-    if let Some((_, label, blurb, popular)) =
-        curated.iter().find(|(id, ..)| *id == profile_name)
-    {
+    if let Some((_, label, blurb, popular)) = curated.iter().find(|(id, ..)| *id == profile_name) {
         return DisplayMeta {
             label: (*label).to_string(),
             blurb: (*blurb).to_string(),
             popular: *popular,
         };
     }
-    DisplayMeta { label: title_case(profile_name), blurb: "Provider".to_string(), popular: false }
+    DisplayMeta {
+        label: title_case(profile_name),
+        blurb: "Provider".to_string(),
+        popular: false,
+    }
 }
 
 /// "brand-new-provider" → "Brand New Provider" (split on '-'/'_').
@@ -219,7 +243,11 @@ impl ConnectPickerState {
     /// Build from a pre-built row list.
     #[must_use]
     pub fn new(rows: Vec<ConnectRow>) -> Self {
-        Self { rows, query: String::new(), selected: 0 }
+        Self {
+            rows,
+            query: String::new(),
+            selected: 0,
+        }
     }
 
     /// Build from `auth_methods` + `availability`; the primary data-driven constructor.
@@ -425,7 +453,10 @@ mod t3_tests {
     #[test]
     fn method_from_tag_table() {
         assert_eq!(ConnectMethod::from_tag("api_key"), ConnectMethod::ApiKey);
-        assert_eq!(ConnectMethod::from_tag("copilot_device"), ConnectMethod::CopilotDevice);
+        assert_eq!(
+            ConnectMethod::from_tag("copilot_device"),
+            ConnectMethod::CopilotDevice
+        );
         assert_eq!(ConnectMethod::from_tag("oauth"), ConnectMethod::OAuthSoon);
         assert_eq!(ConnectMethod::from_tag("???"), ConnectMethod::OAuthSoon); // unknown → honest soon
     }
@@ -439,7 +470,10 @@ mod t3_tests {
             vec![ConnectMethod::Oauth, ConnectMethod::ApiKey]
         );
         // Single-method providers yield exactly their catalog tag's method.
-        assert_eq!(provider_methods("openai", Some("api_key")), vec![ConnectMethod::ApiKey]);
+        assert_eq!(
+            provider_methods("openai", Some("api_key")),
+            vec![ConnectMethod::ApiKey]
+        );
         assert_eq!(
             provider_methods("openai-chatgpt", Some("oauth")),
             vec![ConnectMethod::OAuthSoon]
@@ -449,14 +483,23 @@ mod t3_tests {
             vec![ConnectMethod::CopilotDevice]
         );
         // Typed-unknown (no tag) falls back to ApiKey, preserving today's behaviour.
-        assert_eq!(provider_methods("typed-unknown", None), vec![ConnectMethod::ApiKey]);
+        assert_eq!(
+            provider_methods("typed-unknown", None),
+            vec![ConnectMethod::ApiKey]
+        );
     }
 
     #[test]
     fn choice_label_and_provider_label_values() {
-        assert_eq!(ConnectMethod::Oauth.choice_label(), "Sign in with Claude Pro/Max");
+        assert_eq!(
+            ConnectMethod::Oauth.choice_label(),
+            "Sign in with Claude Pro/Max"
+        );
         assert_eq!(ConnectMethod::ApiKey.choice_label(), "Use an API key");
-        assert_eq!(ConnectMethod::CopilotDevice.choice_label(), "Sign in with GitHub");
+        assert_eq!(
+            ConnectMethod::CopilotDevice.choice_label(),
+            "Sign in with GitHub"
+        );
         assert_eq!(provider_label("anthropic"), "Anthropic");
         assert_eq!(provider_label("brand-new-provider"), "Brand New Provider");
     }
@@ -469,7 +512,7 @@ mod t3_tests {
         auth.insert("brand-new-provider".to_string(), "api_key".to_string()); // not in curated map
         let mut avail = std::collections::BTreeMap::new();
         avail.insert("anthropic".to_string(), true); // connected
-        // github-copilot absent ⇒ not connected
+                                                     // github-copilot absent ⇒ not connected
         let rows = connect_rows_from(&auth, &avail);
 
         let a = rows.iter().find(|r| r.provider_id == "anthropic").unwrap();
@@ -478,11 +521,17 @@ mod t3_tests {
         assert_eq!(a.method, ConnectMethod::ApiKey);
         assert!(a.description.ends_with("API key")); // method-derived suffix, cannot lie
 
-        let g = rows.iter().find(|r| r.provider_id == "github-copilot").unwrap();
+        let g = rows
+            .iter()
+            .find(|r| r.provider_id == "github-copilot")
+            .unwrap();
         assert!(!g.connected);
         assert_eq!(g.method, ConnectMethod::CopilotDevice);
 
-        let n = rows.iter().find(|r| r.provider_id == "brand-new-provider").unwrap();
+        let n = rows
+            .iter()
+            .find(|r| r.provider_id == "brand-new-provider")
+            .unwrap();
         assert_eq!(n.label, "Brand New Provider"); // title-cased fallback — still renders
     }
 }
@@ -510,7 +559,10 @@ mod reducer_tests {
     fn nav_moves_highlight_over_selectables() {
         let mut st = ConnectPickerState::new(rows());
         assert_eq!(st.selected, 0);
-        assert_eq!(handle_connect_picker_key(&mut st, KeyCode::Down), ConnectPickerOutcome::Stay);
+        assert_eq!(
+            handle_connect_picker_key(&mut st, KeyCode::Down),
+            ConnectPickerOutcome::Stay
+        );
         assert_eq!(st.selected, 1);
         let _ = handle_connect_picker_key(&mut st, KeyCode::Up);
         assert_eq!(st.selected, 0);
@@ -545,21 +597,32 @@ mod reducer_tests {
         }
         assert_eq!(
             handle_connect_picker_key(&mut st, KeyCode::Enter),
-            ConnectPickerOutcome::Select { provider_id: "openrouter".to_string() }
+            ConnectPickerOutcome::Select {
+                provider_id: "openrouter".to_string()
+            }
         );
     }
 
     #[test]
     fn esc_cancels() {
         let mut st = ConnectPickerState::new(rows());
-        assert_eq!(handle_connect_picker_key(&mut st, KeyCode::Esc), ConnectPickerOutcome::Cancel);
+        assert_eq!(
+            handle_connect_picker_key(&mut st, KeyCode::Esc),
+            ConnectPickerOutcome::Cancel
+        );
     }
 
     #[test]
     fn empty_is_inert() {
         let mut st = ConnectPickerState::default();
-        assert_eq!(handle_connect_picker_key(&mut st, KeyCode::Enter), ConnectPickerOutcome::Stay);
-        assert_eq!(handle_connect_picker_key(&mut st, KeyCode::Down), ConnectPickerOutcome::Stay);
+        assert_eq!(
+            handle_connect_picker_key(&mut st, KeyCode::Enter),
+            ConnectPickerOutcome::Stay
+        );
+        assert_eq!(
+            handle_connect_picker_key(&mut st, KeyCode::Down),
+            ConnectPickerOutcome::Stay
+        );
         assert_eq!(st.selected, 0);
     }
 }
@@ -581,18 +644,32 @@ mod detail_tests {
     #[test]
     fn provider_detail_lines_shows_models_state_method() {
         let mut mp = std::collections::BTreeMap::new();
-        mp.insert("claude-opus-4-8".to_string(), ("anthropic".to_string(), "Anthropic".to_string()));
-        mp.insert("claude-sonnet-4-6".to_string(), ("anthropic".to_string(), "Anthropic".to_string()));
-        mp.insert("gpt-5.5".to_string(), ("openai".to_string(), "OpenAI".to_string()));
-        let lines = provider_detail_lines("anthropic", "Anthropic", true,
-            &[ConnectMethod::Oauth, ConnectMethod::ApiKey], &mp);
+        mp.insert(
+            "claude-opus-4-8".to_string(),
+            ("anthropic".to_string(), "Anthropic".to_string()),
+        );
+        mp.insert(
+            "claude-sonnet-4-6".to_string(),
+            ("anthropic".to_string(), "Anthropic".to_string()),
+        );
+        mp.insert(
+            "gpt-5.5".to_string(),
+            ("openai".to_string(), "OpenAI".to_string()),
+        );
+        let lines = provider_detail_lines(
+            "anthropic",
+            "Anthropic",
+            true,
+            &[ConnectMethod::Oauth, ConnectMethod::ApiKey],
+            &mp,
+        );
         let joined = lines.join("\n");
         assert!(joined.contains("Anthropic"));
-        assert!(joined.contains("connected"));         // connected state
-        assert!(joined.contains("claude-opus-4-8"));    // its model
-        assert!(!joined.contains("gpt-5.5"));           // NOT another provider's model
+        assert!(joined.contains("connected")); // connected state
+        assert!(joined.contains("claude-opus-4-8")); // its model
+        assert!(!joined.contains("gpt-5.5")); // NOT another provider's model
         assert!(joined.contains("Pro/Max") || joined.contains("API key")); // method(s)
-        // unknown provider → graceful
+                                                                           // unknown provider → graceful
         let empty = provider_detail_lines("nope", "Nope", false, &[ConnectMethod::ApiKey], &mp);
         assert!(empty.join("\n").to_lowercase().contains("no models"));
     }
@@ -614,7 +691,10 @@ mod render_tests {
     fn renders_groups_headers_and_footer() {
         let st = ConnectPickerState::from_connectable(&two_provider_auth(), &BTreeMap::new());
         let out = render_connect_picker_to_string(&st);
-        assert!(out.starts_with(&format!("Connect a provider\n{SUB_HEADER}\nSearch: \n")), "{out}");
+        assert!(
+            out.starts_with(&format!("Connect a provider\n{SUB_HEADER}\nSearch: \n")),
+            "{out}"
+        );
         assert!(out.contains("\nPopular\n"), "{out}");
         assert!(out.contains("\nProviders\n"), "{out}");
         // First row is highlighted with the ❯ marker.

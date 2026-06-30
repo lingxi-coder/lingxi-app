@@ -358,7 +358,10 @@ mod tests {
 
     #[test]
     fn truncate_to_width_ellipsis_truncates_long_text() {
-        assert_eq!(truncate_to_width_ellipsis("hello world", 6), "hello\u{2026}");
+        assert_eq!(
+            truncate_to_width_ellipsis("hello world", 6),
+            "hello\u{2026}"
+        );
     }
 
     #[test]

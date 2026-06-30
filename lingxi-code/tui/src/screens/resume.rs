@@ -253,9 +253,7 @@ pub fn handle_resume_key(state: &mut ResumeState, key: KeyEvent) -> ResumeOutcom
         // (resume-old-form-vs-logselector) `/` activates the search box when in
         // list mode (claude-code `enterSearchMode`); inside search mode it is a
         // literal character typed into the query like any other printable char.
-        KeyCode::Char('/')
-            if !state.in_search_mode && key.modifiers == KeyModifiers::NONE =>
-        {
+        KeyCode::Char('/') if !state.in_search_mode && key.modifiers == KeyModifiers::NONE => {
             state.in_search_mode = true;
             ResumeOutcome::Stay
         }
@@ -448,7 +446,10 @@ mod tests {
         ]);
         // Type "alph" → filters to the two "alph…" titles.
         for c in "alph".chars() {
-            assert_eq!(handle_resume_key(&mut st, k(KeyCode::Char(c))), ResumeOutcome::Stay);
+            assert_eq!(
+                handle_resume_key(&mut st, k(KeyCode::Char(c))),
+                ResumeOutcome::Stay
+            );
         }
         assert_eq!(st.query, "alph");
         assert_eq!(st.filtered().len(), 2);
@@ -456,10 +457,16 @@ mod tests {
         let _ = handle_resume_key(&mut st, k(KeyCode::Backspace));
         assert_eq!(st.query, "alp");
         // Esc clears the query first (Stay), then a second Esc cancels.
-        assert_eq!(handle_resume_key(&mut st, k(KeyCode::Esc)), ResumeOutcome::Stay);
+        assert_eq!(
+            handle_resume_key(&mut st, k(KeyCode::Esc)),
+            ResumeOutcome::Stay
+        );
         assert!(st.query.is_empty());
         assert_eq!(st.filtered().len(), 3);
-        assert_eq!(handle_resume_key(&mut st, k(KeyCode::Esc)), ResumeOutcome::Cancel);
+        assert_eq!(
+            handle_resume_key(&mut st, k(KeyCode::Esc)),
+            ResumeOutcome::Cancel
+        );
     }
 
     #[test]
@@ -564,7 +571,10 @@ mod tests {
         let frame = el.to_string();
         assert!(frame.contains("Search: s1"), "got: {frame}");
         // In search mode the overflow counter is suppressed.
-        assert!(!frame.contains(" of "), "no counter in search mode, got: {frame}");
+        assert!(
+            !frame.contains(" of "),
+            "no counter in search mode, got: {frame}"
+        );
         // Search-mode footer wording.
         assert!(frame.contains("Type to Search"), "got: {frame}");
         assert!(frame.contains("Esc clear"), "got: {frame}");
@@ -575,8 +585,14 @@ mod tests {
         let st = ResumeState::new(vec![ResumeRow::from_meta(&meta("a", 0, 1))]);
         let mut el = element! { ResumeScreen(state: st) };
         let frame = el.to_string();
-        assert!(!frame.contains("Search:"), "no search box in list mode, got: {frame}");
-        assert!(frame.contains("Type to search \u{00b7} Esc cancel"), "got: {frame}");
+        assert!(
+            !frame.contains("Search:"),
+            "no search box in list mode, got: {frame}"
+        );
+        assert!(
+            frame.contains("Type to search \u{00b7} Esc cancel"),
+            "got: {frame}"
+        );
     }
 
     #[test]
@@ -683,7 +699,10 @@ mod tests {
         assert!(frame.contains("Resume Session"), "got: {frame}");
         assert!(frame.contains("first session"), "got: {frame}");
         // (resume-metadata) Dim metadata line: "<relative> · <N> messages".
-        assert!(frame.contains("5 minutes ago \u{00b7} 3 messages"), "got: {frame}");
+        assert!(
+            frame.contains("5 minutes ago \u{00b7} 3 messages"),
+            "got: {frame}"
+        );
         assert!(frame.contains("1 message"), "got: {frame}");
         // Selected (row 0) prefixed "> ", unselected "  ".
         assert!(frame.contains("> first session"), "got: {frame}");

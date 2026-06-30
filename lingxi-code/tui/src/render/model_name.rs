@@ -75,7 +75,10 @@ mod tests {
         assert_eq!(render_model_name("claude-opus-4-8-20260115"), "Opus 4.8");
         assert_eq!(render_model_name("claude-opus-4-5-20251101-v1"), "Opus 4.5");
         assert_eq!(render_model_name("claude-sonnet-4-6"), "Sonnet 4.6");
-        assert_eq!(render_model_name("claude-sonnet-4-5-20250929"), "Sonnet 4.5");
+        assert_eq!(
+            render_model_name("claude-sonnet-4-5-20250929"),
+            "Sonnet 4.5"
+        );
         assert_eq!(render_model_name("claude-haiku-4-5"), "Haiku 4.5");
         // bare opus 4 (any date) → "Opus 4".
         assert_eq!(render_model_name("claude-opus-4-20250514"), "Opus 4");
@@ -84,8 +87,14 @@ mod tests {
 
     #[test]
     fn one_m_suffix_appends_context_label() {
-        assert_eq!(render_model_name("claude-opus-4-6[1m]"), "Opus 4.6 (1M context)");
-        assert_eq!(render_model_name("claude-sonnet-4-5[1M]"), "Sonnet 4.5 (1M context)");
+        assert_eq!(
+            render_model_name("claude-opus-4-6[1m]"),
+            "Opus 4.6 (1M context)"
+        );
+        assert_eq!(
+            render_model_name("claude-sonnet-4-5[1M]"),
+            "Sonnet 4.5 (1M context)"
+        );
     }
 
     #[test]

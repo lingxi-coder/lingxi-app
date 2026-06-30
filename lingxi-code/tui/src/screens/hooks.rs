@@ -43,7 +43,10 @@ pub const HOOK_EVENT_SUMMARY: &[(&str, &str)] = &[
     ("PreToolUse", "Before tool execution"),
     ("PostToolUse", "After tool execution"),
     ("PostToolUseFailure", "After tool execution fails"),
-    ("PermissionDenied", "After auto mode classifier denies a tool call"),
+    (
+        "PermissionDenied",
+        "After auto mode classifier denies a tool call",
+    ),
     ("PermissionRequest", "When a permission dialog is displayed"),
     ("Notification", "When notifications are sent"),
     ("UserPromptSubmit", "When the user submits a prompt"),
@@ -51,7 +54,10 @@ pub const HOOK_EVENT_SUMMARY: &[(&str, &str)] = &[
     ("SessionEnd", "When a session is ending"),
     ("Stop", "Right before Claude concludes its response"),
     ("StopFailure", "When the turn ends due to an API error"),
-    ("SubagentStart", "When a subagent (Agent tool call) is started"),
+    (
+        "SubagentStart",
+        "When a subagent (Agent tool call) is started",
+    ),
     ("SubagentStop", "When a subagent (Agent tool call) stops"),
     ("PreCompact", "Before conversation compaction"),
     ("PostCompact", "After conversation compaction"),
@@ -108,8 +114,7 @@ impl HooksScreenState {
     #[must_use]
     pub fn events(&self) -> Vec<(String, usize)> {
         let mut order: Vec<String> = Vec::new();
-        let mut counts: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for row in &self.rows {
             if !counts.contains_key(&row.event) {
                 order.push(row.event.clone());
@@ -240,7 +245,11 @@ pub fn render_hooks_to_string(state: &HooksScreenState) -> String {
             );
             // (hooks-events-first) one row per event: `{Event} ({count}) — {summary}`.
             for (i, (event, count)) in state.events().iter().enumerate() {
-                let marker = if i == state.selected { "\u{276F} " } else { "  " };
+                let marker = if i == state.selected {
+                    "\u{276F} "
+                } else {
+                    "  "
+                };
                 out.push_str(marker);
                 out.push_str(&format!("{event} ({count})"));
                 let summary = event_summary(event);
@@ -265,7 +274,11 @@ pub fn render_hooks_to_string(state: &HooksScreenState) -> String {
                 out.push_str(&format!("{summary}\n"));
             }
             for (i, row) in hooks.iter().enumerate() {
-                let marker = if i == state.selected { "\u{276F} " } else { "  " };
+                let marker = if i == state.selected {
+                    "\u{276F} "
+                } else {
+                    "  "
+                };
                 let matcher = row.matcher.as_deref().unwrap_or("(all)");
                 out.push_str(&format!("{marker}{} \u{00B7} {matcher}\n", row.name));
             }

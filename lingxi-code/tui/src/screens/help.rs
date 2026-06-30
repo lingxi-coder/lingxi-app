@@ -101,24 +101,114 @@ pub struct ShortcutRow {
 /// `default_bindings`: e.g. `app:toggleTranscript`/`Global` (`ctrl+o`),
 /// `chat:cycleMode`/`Chat` (`shift+tab`), `chat:modelPicker`/`Chat` (`meta+p`).
 pub const SHORTCUTS: &[ShortcutRow] = &[
-    ShortcutRow { action: None, context: "Global", fallback: "!", label: "for bash mode" },
-    ShortcutRow { action: None, context: "Global", fallback: "/", label: "for commands" },
-    ShortcutRow { action: None, context: "Global", fallback: "@", label: "for file paths" },
-    ShortcutRow { action: None, context: "Global", fallback: "&", label: "for background" },
-    ShortcutRow { action: None, context: "Global", fallback: "/btw", label: "for side question" },
-    ShortcutRow { action: Some("app:toggleTranscript"), context: "Global", fallback: "ctrl + o", label: "for verbose output" },
-    ShortcutRow { action: Some("app:toggleTodos"), context: "Global", fallback: "ctrl + t", label: "to toggle tasks" },
-    ShortcutRow { action: None, context: "Chat", fallback: "shift + \u{23CE}", label: "for newline" },
-    ShortcutRow { action: Some("chat:cycleMode"), context: "Chat", fallback: "shift + tab", label: "to auto-accept edits" },
-    ShortcutRow { action: Some("chat:undo"), context: "Chat", fallback: "ctrl + _", label: "to undo" },
-    ShortcutRow { action: Some("chat:stash"), context: "Chat", fallback: "ctrl + s", label: "to stash prompt" },
-    ShortcutRow { action: Some("chat:imagePaste"), context: "Chat", fallback: "ctrl + v", label: "to paste images" },
-    ShortcutRow { action: Some("chat:externalEditor"), context: "Chat", fallback: "ctrl + g", label: "to edit in $EDITOR" },
-    ShortcutRow { action: None, context: "Global", fallback: "ctrl + z", label: "to suspend" },
-    ShortcutRow { action: Some("chat:modelPicker"), context: "Chat", fallback: "meta + p", label: "to switch model" },
-    ShortcutRow { action: Some("chat:fastMode"), context: "Chat", fallback: "meta + o", label: "to toggle fast mode" },
-    ShortcutRow { action: None, context: "Global", fallback: "double tap esc", label: "to clear input" },
-    ShortcutRow { action: None, context: "Global", fallback: "/keybindings", label: "to customize" },
+    ShortcutRow {
+        action: None,
+        context: "Global",
+        fallback: "!",
+        label: "for bash mode",
+    },
+    ShortcutRow {
+        action: None,
+        context: "Global",
+        fallback: "/",
+        label: "for commands",
+    },
+    ShortcutRow {
+        action: None,
+        context: "Global",
+        fallback: "@",
+        label: "for file paths",
+    },
+    ShortcutRow {
+        action: None,
+        context: "Global",
+        fallback: "&",
+        label: "for background",
+    },
+    ShortcutRow {
+        action: None,
+        context: "Global",
+        fallback: "/btw",
+        label: "for side question",
+    },
+    ShortcutRow {
+        action: Some("app:toggleTranscript"),
+        context: "Global",
+        fallback: "ctrl + o",
+        label: "for verbose output",
+    },
+    ShortcutRow {
+        action: Some("app:toggleTodos"),
+        context: "Global",
+        fallback: "ctrl + t",
+        label: "to toggle tasks",
+    },
+    ShortcutRow {
+        action: None,
+        context: "Chat",
+        fallback: "shift + \u{23CE}",
+        label: "for newline",
+    },
+    ShortcutRow {
+        action: Some("chat:cycleMode"),
+        context: "Chat",
+        fallback: "shift + tab",
+        label: "to auto-accept edits",
+    },
+    ShortcutRow {
+        action: Some("chat:undo"),
+        context: "Chat",
+        fallback: "ctrl + _",
+        label: "to undo",
+    },
+    ShortcutRow {
+        action: Some("chat:stash"),
+        context: "Chat",
+        fallback: "ctrl + s",
+        label: "to stash prompt",
+    },
+    ShortcutRow {
+        action: Some("chat:imagePaste"),
+        context: "Chat",
+        fallback: "ctrl + v",
+        label: "to paste images",
+    },
+    ShortcutRow {
+        action: Some("chat:externalEditor"),
+        context: "Chat",
+        fallback: "ctrl + g",
+        label: "to edit in $EDITOR",
+    },
+    ShortcutRow {
+        action: None,
+        context: "Global",
+        fallback: "ctrl + z",
+        label: "to suspend",
+    },
+    ShortcutRow {
+        action: Some("chat:modelPicker"),
+        context: "Chat",
+        fallback: "meta + p",
+        label: "to switch model",
+    },
+    ShortcutRow {
+        action: Some("chat:fastMode"),
+        context: "Chat",
+        fallback: "meta + o",
+        label: "to toggle fast mode",
+    },
+    ShortcutRow {
+        action: None,
+        context: "Global",
+        fallback: "double tap esc",
+        label: "to clear input",
+    },
+    ShortcutRow {
+        action: None,
+        context: "Global",
+        fallback: "/keybindings",
+        label: "to customize",
+    },
 ];
 
 /// Resolve one [`ShortcutRow`]'s display chord against the live keymap bindings.
@@ -566,7 +656,12 @@ mod tests {
         let bindings = default_bindings();
         let chord = |action: &'static str, ctx: &'static str| -> String {
             row_chord(
-                &ShortcutRow { action: Some(action), context: ctx, fallback: "X", label: "" },
+                &ShortcutRow {
+                    action: Some(action),
+                    context: ctx,
+                    fallback: "X",
+                    label: "",
+                },
                 &bindings,
             )
         };

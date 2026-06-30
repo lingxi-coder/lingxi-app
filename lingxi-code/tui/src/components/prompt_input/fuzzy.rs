@@ -54,7 +54,11 @@ pub fn filtered_ranked<'a>(needle: &str, candidates: &'a [String]) -> Vec<&'a st
         // alphabetically, case-insensitive — claude-code's `localeCompare`
         // ordering — NOT by name length.
         let mut all: Vec<&'a str> = candidates.iter().map(String::as_str).collect();
-        all.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| a.cmp(b)));
+        all.sort_by(|a, b| {
+            a.to_lowercase()
+                .cmp(&b.to_lowercase())
+                .then_with(|| a.cmp(b))
+        });
         return all;
     }
     let mut scored: Vec<(i32, &'a str)> = candidates

@@ -122,13 +122,14 @@ impl PermissionGate for TuiPermissionGate {
         // identity so the dialog attributes it (claude-code's `● @name` badge).
         // `color` seeds the multiagent color (`agent_color_from_name`); the
         // wired ToolUseConfirm badge renders only the name.
-        let worker_info = worker.map(|w| {
-            crate::components::permissions::worker::WorkerPermissionInfo {
-                color: w.name.clone(),
-                name: w.name,
-                team: w.team,
-            }
-        });
+        let worker_info =
+            worker.map(
+                |w| crate::components::permissions::worker::WorkerPermissionInfo {
+                    color: w.name.clone(),
+                    name: w.name,
+                    team: w.team,
+                },
+            );
         let (tx, rx) = oneshot::channel();
         let exchange = PermissionExchange {
             request,
@@ -324,8 +325,7 @@ mod tests {
 
         let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(4);
         let rules = Arc::new(Mutex::new(Vec::new()));
-        let inner: Arc<dyn PermissionGate> =
-            Arc::new(TuiPermissionGate::new(event_tx, rules));
+        let inner: Arc<dyn PermissionGate> = Arc::new(TuiPermissionGate::new(event_tx, rules));
         let policy = Arc::new(PermissionPolicy::new(PermissionMode::Default));
         let gate = permission::PolicyPermissionGate::new(policy, inner);
 

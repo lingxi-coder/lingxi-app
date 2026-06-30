@@ -1740,11 +1740,12 @@ mod tests {
 
     #[test]
     fn app_state_carries_theme_and_set_theme_applies() {
-        use crate::theme::{Theme, ThemeName, ThemeSetting};
+        use crate::theme::{theme_for, Theme, ThemeName, ThemeSetting};
         let mut s = AppState::new(fake_status());
-        // Default: auto → resolves dark.
+        // Default: auto resolves through the same terminal/background path as
+        // production, so this remains stable across truecolor and ANSI terminals.
         assert_eq!(s.theme_setting, ThemeSetting::Auto);
-        assert_eq!(s.theme, Theme::dark());
+        assert_eq!(s.theme, theme_for(s.theme_setting.resolve()));
         // Switching applies both fields.
         s.set_theme(ThemeSetting::Named(ThemeName::Light));
         assert_eq!(s.theme_setting, ThemeSetting::Named(ThemeName::Light));
@@ -2265,9 +2266,83 @@ mod tests {
 impl RenderedMessage {
     pub fn tool_id(&self) -> Option<&protocol::ToolUseId> {
         match self {
-            RenderedMessage::AssistantToolUse { id, .. } |
-            RenderedMessage::UserToolResult { id, .. } => Some(id),
+            RenderedMessage::AssistantToolUse { id, .. }
+            | RenderedMessage::UserToolResult { id, .. } => Some(id),
             _ => None,
         }
+    }
+
+    /// Whether this message can be converted to immutable native terminal
+    /// scrollback without losing later interaction state. Messages whose
+    /// rendering depends on focus, expansion, retry countdowns, or other live
+    /// state must stay in the iocraft tree.
+    #[must_use]
+    pub fn native_scrollback_safe(&self) -> bool {
+        match self {
+            RenderedMessage::AssistantToolUse { .. }
+            | RenderedMessage::UserToolResult { .. }
+            | RenderedMessage::AssistantThinking { .. }
+            | RenderedMessage::AssistantRedactedThinking
+            | RenderedMessage::SystemApiError { .. }
+            | RenderedMessage::Advisor { .. }
+            | RenderedMessage::PlanApproval { .. }
+            | RenderedMessage::GroupedToolUse { .. }
+            | RenderedMessage::CollapsedReadSearch { .. } => false,
+            RenderedMessage::HookProgress {
+                transcript_summary, ..
+            } => *transcript_summary,
+            RenderedMessage::UserText { .. }
+            | RenderedMessage::AssistantText { .. }
+            | RenderedMessage::SystemText { .. }
+            | RenderedMessage::CompactBoundary { .. }
+            | RenderedMessage::SystemTextRich { .. }
+            | RenderedMessage::RateLimit { .. }
+            | RenderedMessage::Shutdown { .. }
+            | RenderedMessage::TaskAssignment { .. }
+            | RenderedMessage::AgentNotification { .. }
+            | RenderedMessage::ChannelMessage { .. }
+            | RenderedMessage::UserTeammate { .. }
+            | RenderedMessage::UserCommand { .. }
+            | RenderedMessage::UserBashInput { .. }
+            | RenderedMessage::UserBashOutput { .. }
+            | RenderedMessage::UserLocalCommandOutput { .. }
+            | RenderedMessage::UserMemoryInput { .. }
+            | RenderedMessage::UserPlan { .. }
+            | RenderedMessage::UserPrompt { .. }
+            | RenderedMessage::UserResourceUpdate { .. }
+            | RenderedMessage::UserImage { .. }
+            | RenderedMessage::Attachment { .. } => true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod rendered_message_tests {
+    use super::*;
+
+    #[test]
+    fn native_scrollback_safe_keeps_expandable_tool_messages_live() {
+        let id = protocol::ToolUseId::new();
+        let tool_use = RenderedMessage::AssistantToolUse {
+            id: id.clone(),
+            tool: "Read".to_string(),
+            input: serde_json::json!({"file_path": "src/lib.rs"}),
+        };
+        let tool_result = RenderedMessage::UserToolResult {
+            id,
+            tool: "Read".to_string(),
+            result: serde_json::json!({"content": "hello"}),
+            old_string: None,
+            new_string: None,
+            file_path: None,
+        };
+        let plain = RenderedMessage::AssistantText {
+            body: "hello".to_string(),
+            timestamp: 0,
+        };
+
+        assert!(!tool_use.native_scrollback_safe());
+        assert!(!tool_result.native_scrollback_safe());
+        assert!(plain.native_scrollback_safe());
     }
 }

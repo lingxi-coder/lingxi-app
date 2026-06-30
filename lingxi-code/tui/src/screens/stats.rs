@@ -399,8 +399,9 @@ pub fn aggregate(contribs: &[SessionContribution]) -> StatsData {
                     let slot = day.entry(model.clone()).or_default();
                     slot.input_tokens = slot.input_tokens.saturating_add(usage.input_tokens);
                     slot.output_tokens = slot.output_tokens.saturating_add(usage.output_tokens);
-                    slot.cache_read_tokens =
-                        slot.cache_read_tokens.saturating_add(usage.cache_read_tokens);
+                    slot.cache_read_tokens = slot
+                        .cache_read_tokens
+                        .saturating_add(usage.cache_read_tokens);
                 }
             }
         }
@@ -472,8 +473,9 @@ impl StatsData {
                 let agg = out.model_usage.entry(model.clone()).or_default();
                 agg.input_tokens = agg.input_tokens.saturating_add(usage.input_tokens);
                 agg.output_tokens = agg.output_tokens.saturating_add(usage.output_tokens);
-                agg.cache_read_tokens =
-                    agg.cache_read_tokens.saturating_add(usage.cache_read_tokens);
+                agg.cache_read_tokens = agg
+                    .cache_read_tokens
+                    .saturating_add(usage.cache_read_tokens);
                 let total = usage.input_tokens.saturating_add(usage.output_tokens);
                 if total > 0 {
                     let slot = day_chart.entry(model.clone()).or_default();
@@ -602,7 +604,9 @@ pub fn generate_factoids(total_tokens: u64, longest_session_ms: u64) -> Vec<Stri
         for (name, minutes) in TIME_COMPARISONS.iter() {
             let ratio = session_minutes / minutes;
             if ratio >= 2 {
-                out.push(format!("Your longest session is ~{ratio}x longer than {name}"));
+                out.push(format!(
+                    "Your longest session is ~{ratio}x longer than {name}"
+                ));
             }
         }
     }
@@ -1229,7 +1233,12 @@ fn asciichart_plot(series: &[&[u64]]) -> Vec<String> {
         let label_len = label.chars().count();
         let label_col = offset.saturating_sub(label_len);
         set(&mut grid, row, label_col, &label);
-        set(&mut grid, row, offset - 1, if y == 0 { SYM[0] } else { SYM[1] });
+        set(
+            &mut grid,
+            row,
+            offset - 1,
+            if y == 0 { SYM[0] } else { SYM[1] },
+        );
     }
 
     // Plot each series.
@@ -1253,8 +1262,18 @@ fn asciichart_plot(series: &[&[u64]]) -> Vec<String> {
             if ya == yb {
                 set(&mut grid, row_of(ya), col, SYM[4]);
             } else {
-                set(&mut grid, row_of(yb), col, if ya > yb { SYM[5] } else { SYM[6] });
-                set(&mut grid, row_of(ya), col, if ya > yb { SYM[7] } else { SYM[8] });
+                set(
+                    &mut grid,
+                    row_of(yb),
+                    col,
+                    if ya > yb { SYM[5] } else { SYM[6] },
+                );
+                set(
+                    &mut grid,
+                    row_of(ya),
+                    col,
+                    if ya > yb { SYM[7] } else { SYM[8] },
+                );
                 let (from, to) = (ya.min(yb), ya.max(yb));
                 for y in (from + 1)..to {
                     set(&mut grid, row_of(y), col, SYM[9]);
@@ -1509,7 +1528,10 @@ fn overview_lines(data: &StatsData) -> Vec<String> {
     }
     if let Some(fav) = data.favorite_model() {
         // (stats-model-name-raw) friendly display name (renderModelName).
-        out.push(format!("Favorite model: {}", crate::render::model_name::render_model_name(fav)));
+        out.push(format!(
+            "Favorite model: {}",
+            crate::render::model_name::render_model_name(fav)
+        ));
     }
     out.push(format!(
         "Total tokens: {}",
@@ -1528,7 +1550,11 @@ fn overview_lines(data: &StatsData) -> Vec<String> {
     };
     out.push(format!("Longest session: {longest}"));
     // (stats-overview-missing-fields) Active days `/rangeDays` + streaks.
-    out.push(format!("Active days: {}/{}", data.active_days(), data.range_days()));
+    out.push(format!(
+        "Active days: {}/{}",
+        data.active_days(),
+        data.range_days()
+    ));
     let (longest, current) = streaks(&data.daily_messages, chrono::Local::now().date_naive());
     let plural = |n: u64| if n == 1 { "day" } else { "days" };
     out.push(format!("Longest streak: {longest} {}", plural(longest)));
@@ -1881,7 +1907,13 @@ mod tests {
     fn streaks_longest_and_current() {
         let mut daily = BTreeMap::new();
         // A 3-day run, a gap, then a 2-day run ending on the 10th.
-        for d in ["2026-06-01", "2026-06-02", "2026-06-03", "2026-06-09", "2026-06-10"] {
+        for d in [
+            "2026-06-01",
+            "2026-06-02",
+            "2026-06-03",
+            "2026-06-09",
+            "2026-06-10",
+        ] {
             daily.insert(d.to_string(), 1u64);
         }
         // today = 2026-06-10 → current streak = 2 (09, 10); longest = 3.
@@ -2057,9 +2089,7 @@ mod tests {
 
     #[test]
     fn generate_x_axis_labels_evenly_spaced_dates() {
-        let dates: Vec<String> = (1..=30)
-            .map(|d| format!("2026-06-{d:02}"))
-            .collect();
+        let dates: Vec<String> = (1..=30).map(|d| format!("2026-06-{d:02}")).collect();
         let line = generate_x_axis_labels(&dates, CHART_Y_AXIS_WIDTH);
         // Leading 7-space y-axis gutter.
         assert!(line.starts_with("       "), "gutter: {line:?}");
@@ -2115,13 +2145,26 @@ mod tests {
         // 8-row asciichart → 9 rows.
         assert_eq!(chart.chart_rows.len(), 9);
         // Legend: top-3 bullets joined by ' · '.
-        assert_eq!(chart.legend.matches('\u{25CF}').count(), 3, "legend: {}", chart.legend);
+        assert_eq!(
+            chart.legend.matches('\u{25CF}').count(),
+            3,
+            "legend: {}",
+            chart.legend
+        );
         assert!(chart.legend.contains("model-a"), "legend: {}", chart.legend);
         assert!(chart.legend.contains("model-c"), "legend: {}", chart.legend);
         // model-d/e are below top-3 → not in legend.
-        assert!(!chart.legend.contains("model-d"), "legend: {}", chart.legend);
+        assert!(
+            !chart.legend.contains("model-d"),
+            "legend: {}",
+            chart.legend
+        );
         // x-axis line carries a 'Mon D' date.
-        assert!(chart.x_axis_labels.contains("Jun "), "xaxis: {}", chart.x_axis_labels);
+        assert!(
+            chart.x_axis_labels.contains("Jun "),
+            "xaxis: {}",
+            chart.x_axis_labels
+        );
     }
 
     #[test]
@@ -2144,7 +2187,11 @@ mod tests {
         }
         // Top label is the max value (4000 → "4k"), bottom is the min (200).
         assert!(rows[0].starts_with("    4k"), "top: {:?}", rows[0]);
-        assert!(rows[rows.len() - 1].starts_with("   200"), "bottom: {:?}", rows[rows.len() - 1]);
+        assert!(
+            rows[rows.len() - 1].starts_with("   200"),
+            "bottom: {:?}",
+            rows[rows.len() - 1]
+        );
     }
 
     #[test]
@@ -2174,7 +2221,10 @@ mod tests {
             .expect("legend line");
         assert!(legend_line.contains("claude-opus"), "legend: {legend_line}");
         // Model rows still follow.
-        assert!(body.contains("claude-opus (") || body.contains("Opus"), "body: {body}");
+        assert!(
+            body.contains("claude-opus (") || body.contains("Opus"),
+            "body: {body}"
+        );
         // The old single-line sparkline (8 contiguous block bars, no y-axis
         // label) is gone: no line is composed purely of sparkline bars.
         let spark_bars: &[char] = &[
@@ -2203,9 +2253,15 @@ mod tests {
         assert!(rows[2].starts_with("Mon"), "Mon label: {}", rows[2]);
         assert!(rows[4].starts_with("Wed"), "Wed label: {}", rows[4]);
         assert!(rows[6].starts_with("Fri"), "Fri label: {}", rows[6]);
-        assert!(rows[1].starts_with("   "), "Sun has blank label: {}", rows[1]);
+        assert!(
+            rows[1].starts_with("   "),
+            "Sun has blank label: {}",
+            rows[1]
+        );
         // Each weekday row's grid is `width` glyphs (52 weeks at terminalWidth=80).
-        let valid: &[char] = &[' ', '\u{00B7}', '\u{2591}', '\u{2592}', '\u{2593}', '\u{2588}'];
+        let valid: &[char] = &[
+            ' ', '\u{00B7}', '\u{2591}', '\u{2592}', '\u{2593}', '\u{2588}',
+        ];
         let grid: String = rows[2].chars().skip(4).collect();
         assert_eq!(grid.chars().count(), 52, "Mon row grid width");
         assert!(grid.chars().all(|c| valid.contains(&c)), "glyphs: {grid}");
@@ -2381,8 +2437,11 @@ mod tests {
     fn session_duration_from_iso_timestamps() {
         let d = session_duration_ms("2026-05-25T14:00:00.000Z", "2026-05-25T15:30:00.000Z");
         assert_eq!(d, 90 * 60 * 1000); // 1h30m
-        // Negative / unparseable → 0.
-        assert_eq!(session_duration_ms("2026-05-25T15:00:00Z", "2026-05-25T14:00:00Z"), 0);
+                                       // Negative / unparseable → 0.
+        assert_eq!(
+            session_duration_ms("2026-05-25T15:00:00Z", "2026-05-25T14:00:00Z"),
+            0
+        );
         assert_eq!(session_duration_ms("bad", "also-bad"), 0);
     }
 
@@ -2391,19 +2450,22 @@ mod tests {
         // 250k tokens ≥ several books; ~11x The Little Prince (22k).
         let f = generate_factoids(250_000, 0);
         assert!(
-            f.iter().any(|s| s == "You've used ~11x more tokens than The Little Prince"),
+            f.iter()
+                .any(|s| s == "You've used ~11x more tokens than The Little Prince"),
             "got: {f:?}"
         );
         // A book just under 2x → "same number of tokens as".
         let f2 = generate_factoids(40_000, 0);
         assert!(
-            f2.iter().any(|s| s == "You've used the same number of tokens as Animal Farm"),
+            f2.iter()
+                .any(|s| s == "You've used the same number of tokens as Animal Farm"),
             "got: {f2:?}"
         );
         // 60-minute session is ~3x a TED talk (18m), ~2x an Office episode (22m).
         let f3 = generate_factoids(0, 60 * 60 * 1000);
         assert!(
-            f3.iter().any(|s| s == "Your longest session is ~3x longer than a TED talk"),
+            f3.iter()
+                .any(|s| s == "Your longest session is ~3x longer than a TED talk"),
             "got: {f3:?}"
         );
         // No tokens, no session → empty.
@@ -2487,11 +2549,17 @@ mod tests {
         ]
         .join("\n");
         let contrib = parse_session(&content, false);
-        assert_eq!(contrib.first_ts.as_deref(), Some("2026-05-25T10:00:00.000Z"));
+        assert_eq!(
+            contrib.first_ts.as_deref(),
+            Some("2026-05-25T10:00:00.000Z")
+        );
         assert_eq!(contrib.last_ts.as_deref(), Some("2026-05-25T12:00:00.000Z"));
         let data = aggregate(&[contrib]);
         assert_eq!(data.longest_session_ms, 2 * 60 * 60 * 1000);
         let overview = overview_lines(&data).join("\n");
-        assert!(overview.contains("Longest session: 2h 0m 0s"), "got: {overview}");
+        assert!(
+            overview.contains("Longest session: 2h 0m 0s"),
+            "got: {overview}"
+        );
     }
 }

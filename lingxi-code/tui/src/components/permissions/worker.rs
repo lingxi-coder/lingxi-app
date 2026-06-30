@@ -131,7 +131,10 @@ mod tests {
         assert_eq!(BADGE_CIRCLE.as_bytes(), &[0xE2, 0x8F, 0xBA, 0x20]); // ⏺ + space
         #[cfg(not(target_os = "macos"))]
         assert_eq!(BADGE_CIRCLE.as_bytes(), &[0xE2, 0x97, 0x8F, 0x20]); // ● + space
-        assert_eq!(render_worker_badge("alice"), format!("{BADGE_CIRCLE}@alice"));
+        assert_eq!(
+            render_worker_badge("alice"),
+            format!("{BADGE_CIRCLE}@alice")
+        );
     }
 
     #[test]

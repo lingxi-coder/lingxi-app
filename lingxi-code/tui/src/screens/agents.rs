@@ -234,7 +234,10 @@ fn render_agent_detail(row: &AgentRow) -> String {
     // (agents-04) Always render the Model line (claude-code `getAgentModelDisplay`):
     // unset → "Inherit from parent (default)", "inherit" → "Inherit from parent",
     // else the capitalized model string.
-    out.push_str(&format!("\nModel: {}", agent_model_display(row.model.as_deref())));
+    out.push_str(&format!(
+        "\nModel: {}",
+        agent_model_display(row.model.as_deref())
+    ));
     if let Some(pm) = &row.permission_mode {
         out.push_str(&format!("\nPermission mode: {pm}"));
     }
@@ -372,7 +375,10 @@ mod tests {
             mode: AgentsDialogMode::List,
         };
         let out = render_agents_to_string(&s);
-        assert!(out.starts_with("Agents\n2 agents\n\u{276F} a\n  b\n"), "got: {out}");
+        assert!(
+            out.starts_with("Agents\n2 agents\n\u{276F} a\n  b\n"),
+            "got: {out}"
+        );
     }
 
     fn grouped(name: &str, group: &str) -> AgentRow {
@@ -428,7 +434,10 @@ mod tests {
     fn detail_model_always_shown_with_inherit_defaults() {
         // (agents-04) Unset model → "Inherit from parent (default)".
         let out = render_agent_detail(&row("x"));
-        assert!(out.ends_with("\nModel: Inherit from parent (default)"), "got: {out}");
+        assert!(
+            out.ends_with("\nModel: Inherit from parent (default)"),
+            "got: {out}"
+        );
         // "inherit" → "Inherit from parent" (no "(default)" suffix).
         let mut r = row("x");
         r.model = Some("inherit".into());
@@ -456,9 +465,15 @@ mod tests {
             rows: vec![row("a"), row("b")],
             ..AgentsScreenState::default()
         };
-        assert_eq!(handle_agents_key(&mut s, KeyCode::Char('j')), AgentsOutcome::Stay);
+        assert_eq!(
+            handle_agents_key(&mut s, KeyCode::Char('j')),
+            AgentsOutcome::Stay
+        );
         assert_eq!(s.selected, 0, "j must not move the selection");
-        assert_eq!(handle_agents_key(&mut s, KeyCode::Char('q')), AgentsOutcome::Stay);
+        assert_eq!(
+            handle_agents_key(&mut s, KeyCode::Char('q')),
+            AgentsOutcome::Stay
+        );
         // q does not close.
     }
 }

@@ -89,6 +89,9 @@ mod tests {
         };
         let out = el.to_string();
         assert!(out.contains(INTERRUPTED_LINE), "got: {out}");
-        assert!(!out.contains("> ["), "must not use the plain \"> \" prefix: {out}");
+        assert!(
+            !out.contains("> ["),
+            "must not use the plain \"> \" prefix: {out}"
+        );
     }
 }

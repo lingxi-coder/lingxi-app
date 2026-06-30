@@ -123,7 +123,9 @@ pub fn render_mcp_to_string(state: &McpScreenState) -> String {
                 out.push_str(&format!(" \u{00B7} {icon} {}", row.status));
                 out.push('\n');
             }
-            out.push_str("\u{2191}\u{2193} to navigate \u{00B7} Enter to confirm \u{00B7} Esc to cancel");
+            out.push_str(
+                "\u{2191}\u{2193} to navigate \u{00B7} Enter to confirm \u{00B7} Esc to cancel",
+            );
             out
         }
         McpDialogMode::Detail => match state.rows.get(state.selected) {

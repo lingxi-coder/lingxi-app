@@ -3876,33 +3876,37 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         let viewport = viewport_height(rows, prompt_rows);
         // (M7-03) Refresh the line-height cache to the live width before
         // rendering so windowing + scroll clamp math agree on `total_lines`.
-        
+
         if st.pending_clear_scrollback {
             stdout.print("\u{1b}[3J\u{1b}[H\u{1b}[2J");
             st.pending_clear_scrollback = false;
         }
 
-        // (Stage 1) Commit finalized messages to scrollback.
-        if st.streaming.is_none() && st.committed_count < st.messages.len() {
-            for i in st.committed_count..st.messages.len() {
+        // (Stage 1) Commit finalized, immutable messages to native scrollback.
+        // Interactive messages remain in the live iocraft tree so focus,
+        // expansion, and theme changes can still redraw them.
+        let commit_end = next_native_scrollback_commit_end(&st.messages, st.committed_count);
+        if st.streaming.is_none() && st.committed_count < commit_end {
+            for i in st.committed_count..commit_end {
                 let msg = &st.messages[i];
-                let focused = st.focused_tool_id.as_ref() == msg.tool_id();
-                let expanded = msg.tool_id().map_or(false, |id| st.expanded.get(id).copied().unwrap_or(false));
-                let s = crate::components::messages::render_entry_to_string_at_width(msg, focused, expanded, vp_width as usize);
-                if !s.is_empty() {
+                if let Some(lines) = crate::components::messages::render_entry_to_terminal_lines(
+                    msg, vp_width, st.theme,
+                ) {
                     // Commit line-by-line: iocraft's `use_output` only appends a
                     // line terminator at the END of each `println`, so a bare
                     // `\n` INSIDE a multi-line string stays a raw LF. In raw mode
                     // an LF moves down WITHOUT a carriage return, so each
                     // continuation line drifts one column right (staircase
-                    // indentation). Splitting on `\n` makes `use_output` emit a
-                    // proper `\r\n` after every line, resetting the column.
-                    for line in s.split('\n') {
-                        stdout.println(line);
+                    // indentation). The terminal-line renderer therefore returns
+                    // already-split lines, and `println` emits a proper line end
+                    // after every row while preserving ANSI span styling.
+                    for line in lines {
+                        let encoded = crate::components::messages::encode_terminal_line_ansi(&line);
+                        stdout.println(encoded);
                     }
                 }
             }
-            st.committed_count = st.messages.len();
+            st.committed_count = commit_end;
         }
 
         st.refresh_height_cache(vp_width);
@@ -3993,6 +3997,18 @@ fn viewport_height(rows: u16, prompt_visual_rows: usize) -> usize {
 /// chrome today, so this is the full terminal width (min 1).
 fn viewport_width(cols: u16) -> usize {
     (cols as usize).max(1)
+}
+
+fn next_native_scrollback_commit_end(
+    messages: &[crate::state::RenderedMessage],
+    committed_count: usize,
+) -> usize {
+    let start = committed_count.min(messages.len());
+    start
+        + messages[start..]
+            .iter()
+            .take_while(|message| message.native_scrollback_safe())
+            .count()
 }
 
 #[cfg(test)]
@@ -4179,7 +4195,10 @@ mod tests {
     fn viewport_height_reserves_fixed_chrome_plus_single_prompt_row() {
         // Single-line prompt (1 visual row) → reserve FIXED_CHROME_ROWS(5) + 1
         // = 6 rows. 24 rows → 18 visible; saturates to 0 below the floor.
-        assert_eq!(viewport_height(24, 1), if crate::inline_render_mode() { 17 } else { 18 });
+        assert_eq!(
+            viewport_height(24, 1),
+            if crate::inline_render_mode() { 17 } else { 18 }
+        );
         assert_eq!(viewport_height(6, 1), 0);
         assert_eq!(viewport_height(0, 1), 0);
     }
@@ -4209,7 +4228,33 @@ mod tests {
         // The 1-row footer + 2 input-border rows are baked into
         // FIXED_CHROME_ROWS: single-row prompt reserves
         // status(1)+spinner(1)+border(2)+footer(1)+prompt(1) = 6.
-        assert_eq!(single, usize::from(rows) - 6 - if crate::inline_render_mode() { 1 } else { 0 });
+        assert_eq!(
+            single,
+            usize::from(rows) - 6 - if crate::inline_render_mode() { 1 } else { 0 }
+        );
+    }
+
+    #[test]
+    fn native_scrollback_commit_end_stops_at_first_interactive_message() {
+        let safe_before = crate::state::RenderedMessage::SystemText {
+            body: "ready".to_string(),
+            timestamp: 0,
+            is_error: false,
+        };
+        let interactive = crate::state::RenderedMessage::AssistantToolUse {
+            id: protocol::ToolUseId::new(),
+            tool: "Read".to_string(),
+            input: serde_json::json!({"file_path": "src/lib.rs"}),
+        };
+        let safe_after = crate::state::RenderedMessage::AssistantText {
+            body: "done".to_string(),
+            timestamp: 0,
+        };
+        let messages = vec![safe_before, interactive, safe_after];
+
+        assert_eq!(next_native_scrollback_commit_end(&messages, 0), 1);
+        assert_eq!(next_native_scrollback_commit_end(&messages, 1), 1);
+        assert_eq!(next_native_scrollback_commit_end(&messages, 2), 3);
     }
 
     /// (M7-08) Build an iocraft `KeyEvent` for a printable char (Press).

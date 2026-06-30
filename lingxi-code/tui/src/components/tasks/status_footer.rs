@@ -108,7 +108,10 @@ mod tests {
         );
         // Mixed types → generic `{n} background tasks`.
         let two = vec![row("local_bash"), row("local_agent")];
-        assert_eq!(render_task_footer(&two).as_deref(), Some("2 background tasks"));
+        assert_eq!(
+            render_task_footer(&two).as_deref(),
+            Some("2 background tasks")
+        );
     }
 
     #[test]

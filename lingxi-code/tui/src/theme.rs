@@ -515,10 +515,19 @@ mod tests {
 
     #[test]
     fn color_depth_detection() {
-        assert_eq!(color_depth_from(Some("truecolor"), None), ColorDepth::Truecolor);
+        assert_eq!(
+            color_depth_from(Some("truecolor"), None),
+            ColorDepth::Truecolor
+        );
         assert_eq!(color_depth_from(Some("24bit"), None), ColorDepth::Truecolor);
-        assert_eq!(color_depth_from(None, Some("xterm-direct")), ColorDepth::Truecolor);
-        assert_eq!(color_depth_from(None, Some("xterm-256color")), ColorDepth::Low);
+        assert_eq!(
+            color_depth_from(None, Some("xterm-direct")),
+            ColorDepth::Truecolor
+        );
+        assert_eq!(
+            color_depth_from(None, Some("xterm-256color")),
+            ColorDepth::Low
+        );
         assert_eq!(color_depth_from(None, Some("screen")), ColorDepth::Low);
         assert_eq!(color_depth_from(None, None), ColorDepth::Low);
     }
@@ -559,11 +568,17 @@ mod tests {
             ThemeName::Light
         );
         // No detection → COLORFGBG light (bg index 15) wins over the Dark default.
-        assert_eq!(resolve_auto(None, Some("0;15"), Truecolor), ThemeName::Light);
+        assert_eq!(
+            resolve_auto(None, Some("0;15"), Truecolor),
+            ThemeName::Light
+        );
         // No detection, no COLORFGBG → Dark.
         assert_eq!(resolve_auto(None, None, Truecolor), ThemeName::Dark);
         // Low color depth degrades to the -ansi theme.
-        assert_eq!(resolve_auto(None, None, ColorDepth::Low), ThemeName::DarkAnsi);
+        assert_eq!(
+            resolve_auto(None, None, ColorDepth::Low),
+            ThemeName::DarkAnsi
+        );
     }
 
     #[test]

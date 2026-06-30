@@ -56,7 +56,9 @@ pub fn RateLimitMessage(props: &RateLimitProps) -> impl Into<AnyElement<'static>
     let upsell: Vec<AnyElement<'static>> = props
         .upsell
         .clone()
-        .map(|u| element! { Text(content: format!("{INDENT}{u}"), color: TuiTheme::DIM) }.into_any())
+        .map(|u| {
+            element! { Text(content: format!("{INDENT}{u}"), color: TuiTheme::DIM) }.into_any()
+        })
         .into_iter()
         .collect();
     element! {

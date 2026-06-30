@@ -44,7 +44,6 @@ pub enum PopupLine {
     },
 }
 
-
 /// Render the popup. `title` is bold top-left, `esc` sits top-right; `search` is
 /// the live query (dim placeholder when empty); `lines` are the grouped rows;
 /// `footer` is an optional dim hint line (e.g. "Connect provider ctrl+a").
@@ -99,9 +98,13 @@ pub fn render_picker_popup(
                 }
                 .into_any()
             }
-            PopupLine::Item { marker, label, detail, badge, selected } => {
-                render_item(*marker, label, detail, badge, *selected, theme)
-            }
+            PopupLine::Item {
+                marker,
+                label,
+                detail,
+                badge,
+                selected,
+            } => render_item(*marker, label, detail, badge, *selected, theme),
         })
         .collect();
 

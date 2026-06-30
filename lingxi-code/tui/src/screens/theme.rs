@@ -151,7 +151,11 @@ pub fn theme_picker_handle_key(
         }
         // (theme-syntax-toggle) Ctrl+T toggles syntax highlighting
         // (claude-code `theme:toggleSyntaxHighlighting`, default ctrl+t).
-        KeyCode::Char('t') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+        KeyCode::Char('t')
+            if key
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL) =>
+        {
             let next = !state.syntax_disabled;
             state.syntax_disabled = next;
             app.syntax_highlighting_disabled = next;
@@ -190,7 +194,12 @@ pub fn render_theme_picker_to_string(state: &ThemePickerState) -> String {
     // in the component; the oracle keeps the text for layout regressions).
     // (theme-syntax-toggle) When syntax is disabled, the preview uses no path →
     // no language → plain code (the same gate the component applies).
-    let preview = diff::render(PREVIEW_OLD, PREVIEW_NEW, preview_path(state), ThemeName::Dark);
+    let preview = diff::render(
+        PREVIEW_OLD,
+        PREVIEW_NEW,
+        preview_path(state),
+        ThemeName::Dark,
+    );
     for line in preview {
         out.push_str(&line.plain_text());
         out.push('\n');
@@ -260,7 +269,12 @@ pub fn ThemePickerScreen(props: &ThemePickerScreenProps) -> impl Into<AnyElement
     // code recolors live with the highlighted theme. (theme-syntax-toggle) When
     // syntax highlighting is toggled off, the preview drops the path → no
     // language → plain code.
-    let preview = diff::render(PREVIEW_OLD, PREVIEW_NEW, preview_path(&state), props.theme_name);
+    let preview = diff::render(
+        PREVIEW_OLD,
+        PREVIEW_NEW,
+        preview_path(&state),
+        props.theme_name,
+    );
     let preview_rows: Vec<AnyElement<'static>> = preview
         .into_iter()
         .map(|line| {

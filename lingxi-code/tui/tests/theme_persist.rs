@@ -101,5 +101,8 @@ fn prefers_reduced_motion_loads_and_defaults_to_none() {
     );
     let absent = dir.path().join("absent.json");
     std::fs::write(&absent, "{\"theme\":\"dark\"}\n").unwrap();
-    assert_eq!(theme_persist::load_prefers_reduced_motion_from(&absent), None);
+    assert_eq!(
+        theme_persist::load_prefers_reduced_motion_from(&absent),
+        None
+    );
 }

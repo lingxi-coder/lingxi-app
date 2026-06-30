@@ -176,15 +176,27 @@ fn running_count_subtitle(tasks: &[TaskRow]) -> String {
         .count();
     let mut parts = Vec::new();
     if teammate_running > 0 {
-        let noun = if teammate_running == 1 { "agent" } else { "agents" };
+        let noun = if teammate_running == 1 {
+            "agent"
+        } else {
+            "agents"
+        };
         parts.push(format!("{teammate_running} {noun}"));
     }
     if bash_running > 0 {
-        let noun = if bash_running == 1 { "active shell" } else { "active shells" };
+        let noun = if bash_running == 1 {
+            "active shell"
+        } else {
+            "active shells"
+        };
         parts.push(format!("{bash_running} {noun}"));
     }
     if agent_running > 0 {
-        let noun = if agent_running == 1 { "active agent" } else { "active agents" };
+        let noun = if agent_running == 1 {
+            "active agent"
+        } else {
+            "active agents"
+        };
         parts.push(format!("{agent_running} {noun}"));
     }
     parts.join(" \u{00B7} ")
@@ -212,12 +224,27 @@ pub fn render_background_tasks_to_string(
                 out.push_str(&subtitle);
                 out.push('\n');
             }
-            let teammate_n = tasks.iter().filter(|t| t.task_type == "in_process_teammate").count();
+            let teammate_n = tasks
+                .iter()
+                .filter(|t| t.task_type == "in_process_teammate")
+                .count();
             let shells_n = tasks.iter().filter(|t| t.task_type == "local_bash").count();
-            let monitors_n = tasks.iter().filter(|t| t.task_type == "monitor_mcp").count();
-            let remote_n = tasks.iter().filter(|t| t.task_type == "remote_agent").count();
-            let local_agent_n = tasks.iter().filter(|t| t.task_type == "local_agent").count();
-            let workflow_n = tasks.iter().filter(|t| t.task_type == "local_workflow").count();
+            let monitors_n = tasks
+                .iter()
+                .filter(|t| t.task_type == "monitor_mcp")
+                .count();
+            let remote_n = tasks
+                .iter()
+                .filter(|t| t.task_type == "remote_agent")
+                .count();
+            let local_agent_n = tasks
+                .iter()
+                .filter(|t| t.task_type == "local_agent")
+                .count();
+            let workflow_n = tasks
+                .iter()
+                .filter(|t| t.task_type == "local_workflow")
+                .count();
 
             let ordered = display_order(tasks);
             let mut last_type: Option<&str> = None;
@@ -255,7 +282,11 @@ pub fn render_background_tasks_to_string(
                 }
                 // (TASKS-DIALOG-SELECTION-MARKER) figures.pointer `❯ ` on the
                 // selected row, matching the other LingXi list screens.
-                let marker = if i == state.selected { "\u{276F} " } else { "  " };
+                let marker = if i == state.selected {
+                    "\u{276F} "
+                } else {
+                    "  "
+                };
                 out.push_str(marker);
                 out.push_str(&render_task_row(row, max_activity_width));
                 out.push('\n');
@@ -263,7 +294,9 @@ pub fn render_background_tasks_to_string(
             // (TASKS-DIALOG-KEYHINTS/BGTASK-3) `↑/↓ select · Enter view ·
             // [x stop] · ←/Esc close` — `x stop` only when the selected row
             // is a running task (claude-code's killable-gate).
-            let running = ordered.get(state.selected).is_some_and(|t| t.status == "running");
+            let running = ordered
+                .get(state.selected)
+                .is_some_and(|t| t.status == "running");
             out.push_str("\u{2191}/\u{2193} select \u{00B7} Enter view \u{00B7} ");
             if running {
                 out.push_str("x stop \u{00B7} ");
@@ -278,7 +311,11 @@ pub fn render_background_tasks_to_string(
                 .and_then(|id| tasks.iter().find(|t| &t.task_id == id));
             match row {
                 Some(r) => {
-                    let stop_hint = if r.status == "running" { "x stop \u{00B7} " } else { "" };
+                    let stop_hint = if r.status == "running" {
+                        "x stop \u{00B7} "
+                    } else {
+                        ""
+                    };
                     format!(
                         "{}\n{stop_hint}\u{2190} back \u{00B7} esc close",
                         render_task_detail(r, &state.tail)
@@ -371,7 +408,10 @@ mod tests {
             task("a2", "local_agent", "running"),
             task("d1", "dream", "running"),
         ];
-        let order: Vec<&str> = display_order(&tasks).into_iter().map(|t| t.task_id.as_str()).collect();
+        let order: Vec<&str> = display_order(&tasks)
+            .into_iter()
+            .map(|t| t.task_id.as_str())
+            .collect();
         // Shells (b2 running, then b1 completed), Local agents (a2 running,
         // then a1 completed), Workflows (w1), dream last.
         assert_eq!(order, vec!["b2", "b1", "a2", "a1", "w1", "d1"]);
@@ -396,7 +436,10 @@ mod tests {
         // (TASKS-DIALOG-FLAT-LIST-NO-SECTIONS) Literal claude-code quirk:
         // Shells' header is gated on teammates/remote/local-agent being
         // present; with only shells in the list, no header is shown.
-        let tasks = vec![task("b1", "local_bash", "running"), task("b2", "local_bash", "completed")];
+        let tasks = vec![
+            task("b1", "local_bash", "running"),
+            task("b2", "local_bash", "completed"),
+        ];
         let s = BackgroundTasksState::default();
         let out = render_background_tasks_to_string(&s, &tasks, 200);
         assert!(!out.contains("Shells"), "{out}");
@@ -449,7 +492,10 @@ mod tests {
     #[test]
     fn list_footer_shows_x_stop_only_for_a_running_selection() {
         // (BGTASK-3/TASKS-DIALOG-KEYHINTS)
-        let tasks = vec![task("b1", "local_bash", "running"), task("b2", "local_agent", "completed")];
+        let tasks = vec![
+            task("b1", "local_bash", "running"),
+            task("b2", "local_agent", "completed"),
+        ];
         let running_selected = BackgroundTasksState {
             selected: 0,
             ..Default::default()

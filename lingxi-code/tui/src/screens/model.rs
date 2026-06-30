@@ -212,7 +212,9 @@ pub fn build_model_entries(
         let available = avail(&m.provider_id);
         // Prefer the catalog-carried description; fall back to the built-in
         // family blurb keyed on the wire id.
-        let description = m.description.or_else(|| model_description(&m.request_model));
+        let description = m
+            .description
+            .or_else(|| model_description(&m.request_model));
         rows.push(ModelRow {
             display_model: m.display_model,
             request_model: m.request_model,
@@ -386,7 +388,9 @@ impl ModelScreenState {
                 .rows
                 .iter()
                 .enumerate()
-                .filter(|(_, r)| r.provider_label == label && self.matches(r) && self.is_shown_model(r))
+                .filter(|(_, r)| {
+                    r.provider_label == label && self.matches(r) && self.is_shown_model(r)
+                })
                 .map(|(i, _)| i)
                 .collect();
             if items.is_empty() {
@@ -545,9 +549,7 @@ pub fn render_model_to_string(state: &ModelScreenState) -> String {
     // dim Byline of shortcut hints (Enter/confirm + Esc/exit), not a full
     // sentence. LingXi keeps the search feature, so `type to search` stays;
     // the `Press`/`to navigate`/`go back` wording is dropped.
-    out.push_str(
-        "type to search \u{00B7} Enter to select \u{00B7} Esc to cancel",
-    );
+    out.push_str("type to search \u{00B7} Enter to select \u{00B7} Esc to cancel");
     out
 }
 
@@ -597,7 +599,10 @@ mod reducer_tests {
     fn search_filters_and_resets_selection() {
         let mut st = ModelScreenState::new(rows(), vec![], "x".to_string());
         for c in "deep".chars() {
-            assert_eq!(handle_model_key(&mut st, KeyCode::Char(c)), ModelOutcome::Stay);
+            assert_eq!(
+                handle_model_key(&mut st, KeyCode::Char(c)),
+                ModelOutcome::Stay
+            );
         }
         let sel = st.selectable();
         assert_eq!(sel.len(), 1);
@@ -619,13 +624,19 @@ mod reducer_tests {
                 request_model: "deepseek-chat".to_string()
             }
         );
-        assert_eq!(handle_model_key(&mut st, KeyCode::Esc), ModelOutcome::Cancel);
+        assert_eq!(
+            handle_model_key(&mut st, KeyCode::Esc),
+            ModelOutcome::Cancel
+        );
     }
 
     #[test]
     fn nav_clamps_and_empty_is_inert() {
         let mut st = ModelScreenState::default();
-        assert_eq!(handle_model_key(&mut st, KeyCode::Enter), ModelOutcome::Stay);
+        assert_eq!(
+            handle_model_key(&mut st, KeyCode::Enter),
+            ModelOutcome::Stay
+        );
         assert_eq!(handle_model_key(&mut st, KeyCode::Down), ModelOutcome::Stay);
         assert_eq!(st.selected, 0);
     }
@@ -684,7 +695,10 @@ mod render_tests {
     #[test]
     fn renders_groups_headers_and_current_badge() {
         let out = render_model_to_string(&st());
-        assert!(out.starts_with(&format!("Select model\n{SUB_HEADER}\nSearch: \n")), "{out}");
+        assert!(
+            out.starts_with(&format!("Select model\n{SUB_HEADER}\nSearch: \n")),
+            "{out}"
+        );
         // claude-* bare ids now group under Anthropic (gate on the anthropic credential).
         assert!(out.contains("\nAnthropic\n"));
         assert!(out.contains("\nDeepSeek\n"));
@@ -739,9 +753,15 @@ mod render_tests {
         let out = render_model_to_string(&ModelScreenState::new(rows, vec![], "x".to_string()));
         // Explicit catalog description (the first row is highlighted, so it carries
         // the `❯ ` marker; the description sub-line follows directly below).
-        assert!(out.contains("DeepSeek Chat  \u{00B7} DeepSeek\n  Fast and cheap\n"), "{out}");
+        assert!(
+            out.contains("DeepSeek Chat  \u{00B7} DeepSeek\n  Fast and cheap\n"),
+            "{out}"
+        );
         // Fallback blurb for a sonnet id with no catalog description.
-        assert!(out.contains("  Sonnet  \u{00B7} Anthropic\n  Best for everyday tasks\n"), "{out}");
+        assert!(
+            out.contains("  Sonnet  \u{00B7} Anthropic\n  Best for everyday tasks\n"),
+            "{out}"
+        );
         // Unknown id, no description ⇒ no sub-line (the line after the row is NOT a
         // 2-space-indented description; it's the next row/header/blank line).
         assert!(out.contains("  Mystery  \u{00B7} DeepSeek\n"), "{out}");
@@ -765,8 +785,14 @@ mod render_tests {
             &std::collections::BTreeMap::new(),
         );
         let out = render_model_to_string(&ModelScreenState::new(rows, vec![], "x".to_string()));
-        assert!(out.contains("\n  First line\n"), "first line only, got: {out}");
-        assert!(!out.contains("Second line"), "second line dropped, got: {out}");
+        assert!(
+            out.contains("\n  First line\n"),
+            "first line only, got: {out}"
+        );
+        assert!(
+            !out.contains("Second line"),
+            "second line dropped, got: {out}"
+        );
     }
 
     #[test]
@@ -824,23 +850,54 @@ mod render_tests {
         // provider to its curated short list (no ~hundreds dump) while STILL
         // showing every provider group (badged [Connect] via empty availability).
         let catalog = vec![
-            ModelListing { display_model: "GPT-5.5".into(), request_model: "gpt-5.5".into(), provider_id: "openai".into(), provider_label: "OpenAI".into(), description: None },
-            ModelListing { display_model: "GPT-4o".into(), request_model: "gpt-4o".into(), provider_id: "openai".into(), provider_label: "OpenAI".into(), description: None },
-            ModelListing { display_model: "Gemini 3.5 Flash".into(), request_model: "gemini-3.5-flash".into(), provider_id: "gemini".into(), provider_label: "Google Gemini".into(), description: None },
+            ModelListing {
+                display_model: "GPT-5.5".into(),
+                request_model: "gpt-5.5".into(),
+                provider_id: "openai".into(),
+                provider_label: "OpenAI".into(),
+                description: None,
+            },
+            ModelListing {
+                display_model: "GPT-4o".into(),
+                request_model: "gpt-4o".into(),
+                provider_id: "openai".into(),
+                provider_label: "OpenAI".into(),
+                description: None,
+            },
+            ModelListing {
+                display_model: "Gemini 3.5 Flash".into(),
+                request_model: "gemini-3.5-flash".into(),
+                provider_id: "gemini".into(),
+                provider_label: "Google Gemini".into(),
+                description: None,
+            },
         ];
         let rows = build_model_entries(vec![], catalog, &BTreeMap::new(), &BTreeMap::new());
         let mut st = ModelScreenState::new(rows, vec![], "x".into());
         st.set_curate(true); // live path; configured stays empty (no auth)
 
         let shown = shown_request_models(&st);
-        assert!(shown.contains(&"gpt-5.5".to_string()), "curated kept: {shown:?}");
-        assert!(shown.contains(&"gemini-3.5-flash".to_string()), "curated kept");
-        assert!(!shown.contains(&"gpt-4o".to_string()), "non-curated trimmed despite nothing configured");
+        assert!(
+            shown.contains(&"gpt-5.5".to_string()),
+            "curated kept: {shown:?}"
+        );
+        assert!(
+            shown.contains(&"gemini-3.5-flash".to_string()),
+            "curated kept"
+        );
+        assert!(
+            !shown.contains(&"gpt-4o".to_string()),
+            "non-curated trimmed despite nothing configured"
+        );
         // Every provider group still renders (not hidden — nothing configured).
-        let headers: Vec<String> = st.visible_lines().iter().filter_map(|l| match l {
-            VisibleLine::Header(h) => Some(h.clone()),
-            VisibleLine::Item(_) => None,
-        }).collect();
+        let headers: Vec<String> = st
+            .visible_lines()
+            .iter()
+            .filter_map(|l| match l {
+                VisibleLine::Header(h) => Some(h.clone()),
+                VisibleLine::Item(_) => None,
+            })
+            .collect();
         assert!(headers.iter().any(|h| h == "OpenAI"), "{headers:?}");
         assert!(headers.iter().any(|h| h == "Google Gemini"));
     }
@@ -851,10 +908,19 @@ mod render_tests {
         use traits::orchestrator::ModelListing;
         // Default (curate=false, nothing configured) keeps the show-all behavior
         // the build_model_entries byte-parity tests depend on — incl. non-curated.
-        let catalog = vec![ModelListing { display_model: "GPT-4o".into(), request_model: "gpt-4o".into(), provider_id: "openai".into(), provider_label: "OpenAI".into(), description: None }];
+        let catalog = vec![ModelListing {
+            display_model: "GPT-4o".into(),
+            request_model: "gpt-4o".into(),
+            provider_id: "openai".into(),
+            provider_label: "OpenAI".into(),
+            description: None,
+        }];
         let rows = build_model_entries(vec![], catalog, &BTreeMap::new(), &BTreeMap::new());
         let st = ModelScreenState::new(rows, vec![], "x".into());
-        assert!(shown_request_models(&st).contains(&"gpt-4o".to_string()), "show-all preserved");
+        assert!(
+            shown_request_models(&st).contains(&"gpt-4o".to_string()),
+            "show-all preserved"
+        );
     }
 }
 
@@ -884,14 +950,23 @@ mod entries_tests {
             &std::collections::BTreeMap::new(),
         );
 
-        let opus = rows.iter().find(|r| r.request_model == "claude-opus-4-7").unwrap();
+        let opus = rows
+            .iter()
+            .find(|r| r.request_model == "claude-opus-4-7")
+            .unwrap();
         assert_eq!(opus.provider_label, "Anthropic");
-        let gpt = rows.iter().find(|r| r.request_model == "openai/gpt-4o").unwrap();
+        let gpt = rows
+            .iter()
+            .find(|r| r.request_model == "openai/gpt-4o")
+            .unwrap();
         assert_eq!(gpt.display_model, "gpt-4o");
         assert_eq!(gpt.provider_label, "OpenAI");
         let alias = rows.iter().find(|r| r.request_model == "@fast").unwrap();
         assert_eq!(alias.provider_label, "Aliases");
-        let ds = rows.iter().find(|r| r.request_model == "deepseek-chat").unwrap();
+        let ds = rows
+            .iter()
+            .find(|r| r.request_model == "deepseek-chat")
+            .unwrap();
         assert_eq!(ds.display_model, "DeepSeek Chat");
         assert_eq!(ds.provider_label, "DeepSeek");
     }
@@ -910,7 +985,12 @@ mod entries_tests {
             &std::collections::BTreeMap::new(),
             &std::collections::BTreeMap::new(),
         );
-        assert_eq!(rows.iter().filter(|r| r.request_model == "deepseek-chat").count(), 1);
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r.request_model == "deepseek-chat")
+                .count(),
+            1
+        );
         assert_eq!(rows[0].provider_label, "Built-in");
     }
 
@@ -945,13 +1025,19 @@ mod entries_tests {
         avail.insert("gemini".to_string(), false);
         let rows = build_model_entries(existing, catalog, &avail, &BTreeMap::new());
         // No mis-keyed Built-in rows; exactly one correctly-keyed row per model.
-        assert!(rows.iter().all(|r| r.provider_id != "builtin"), "no builtin dupes: {rows:?}");
+        assert!(
+            rows.iter().all(|r| r.provider_id != "builtin"),
+            "no builtin dupes: {rows:?}"
+        );
         assert_eq!(rows.len(), 2, "one row per model, got {rows:?}");
         let gpt = rows.iter().find(|r| r.request_model == "gpt-5.5").unwrap();
         assert_eq!(gpt.provider_id, "openai");
         assert_eq!(gpt.display_model, "GPT-5.5");
         assert!(gpt.available, "configured openai → available");
-        let gem = rows.iter().find(|r| r.request_model == "gemini-3.5-flash").unwrap();
+        let gem = rows
+            .iter()
+            .find(|r| r.request_model == "gemini-3.5-flash")
+            .unwrap();
         assert_eq!(gem.provider_id, "gemini");
         assert!(!gem.available, "unconfigured gemini → [Connect]");
     }
@@ -1022,13 +1108,32 @@ mod entries_tests {
         let mut avail = BTreeMap::new();
         avail.insert("deepseek".to_string(), true);
         avail.insert("github-copilot".to_string(), false);
-        let rows = build_model_entries(existing, catalog, &avail, &std::collections::BTreeMap::new());
+        let rows = build_model_entries(
+            existing,
+            catalog,
+            &avail,
+            &std::collections::BTreeMap::new(),
+        );
         assert!(
-            rows.iter().find(|r| r.request_model == "claude-opus-4-7").unwrap().available,
+            rows.iter()
+                .find(|r| r.request_model == "claude-opus-4-7")
+                .unwrap()
+                .available,
             "absent provider defaults available"
         );
-        assert!(rows.iter().find(|r| r.request_model == "deepseek-chat").unwrap().available);
-        assert!(!rows.iter().find(|r| r.request_model == "gpt-5.4-nano").unwrap().available);
+        assert!(
+            rows.iter()
+                .find(|r| r.request_model == "deepseek-chat")
+                .unwrap()
+                .available
+        );
+        assert!(
+            !rows
+                .iter()
+                .find(|r| r.request_model == "gpt-5.4-nano")
+                .unwrap()
+                .available
+        );
     }
 
     #[test]
@@ -1047,7 +1152,10 @@ mod entries_tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
         );
-        assert!(rows.iter().all(|r| r.available), "empty map → all available");
+        assert!(
+            rows.iter().all(|r| r.available),
+            "empty map → all available"
+        );
     }
 
     #[test]
@@ -1059,20 +1167,31 @@ mod entries_tests {
         let existing = vec!["mystery-model-9".to_string(), "llama-3.3-70b".to_string()];
         let catalog: Vec<traits::orchestrator::ModelListing> = vec![];
         let mut model_providers: BTreeMap<String, (String, String)> = BTreeMap::new();
-        model_providers
-            .insert("llama-3.3-70b".to_string(), ("groq".to_string(), "Groq".to_string()));
+        model_providers.insert(
+            "llama-3.3-70b".to_string(),
+            ("groq".to_string(), "Groq".to_string()),
+        );
 
         // Unconfigured: `groq:false` → row keyed to `groq`, available == false
         // (so it badges + selecting routes to ModelOutcome::Connect).
         let mut avail = BTreeMap::new();
         avail.insert("groq".to_string(), false);
         let rows = build_model_entries(existing.clone(), catalog.clone(), &avail, &model_providers);
-        let llama = rows.iter().find(|r| r.request_model == "llama-3.3-70b").unwrap();
+        let llama = rows
+            .iter()
+            .find(|r| r.request_model == "llama-3.3-70b")
+            .unwrap();
         assert_eq!(llama.provider_id, "groq", "user provider id, not 'builtin'");
         assert_eq!(llama.provider_label, "Groq");
-        assert!(!llama.available, "unconfigured groq → not available (badges + Connect)");
+        assert!(
+            !llama.available,
+            "unconfigured groq → not available (badges + Connect)"
+        );
         // A genuinely-unmapped non-claude id still groups under Built-in and stays available.
-        let other = rows.iter().find(|r| r.request_model == "mystery-model-9").unwrap();
+        let other = rows
+            .iter()
+            .find(|r| r.request_model == "mystery-model-9")
+            .unwrap();
         assert_eq!(other.provider_id, "builtin");
         assert_eq!(other.provider_label, "Built-in");
         assert!(other.available);
@@ -1081,7 +1200,10 @@ mod entries_tests {
         let mut avail_ok = BTreeMap::new();
         avail_ok.insert("groq".to_string(), true);
         let rows_ok = build_model_entries(existing, catalog, &avail_ok, &model_providers);
-        let llama_ok = rows_ok.iter().find(|r| r.request_model == "llama-3.3-70b").unwrap();
+        let llama_ok = rows_ok
+            .iter()
+            .find(|r| r.request_model == "llama-3.3-70b")
+            .unwrap();
         assert_eq!(llama_ok.provider_id, "groq");
         assert!(llama_ok.available, "configured groq → available");
     }
@@ -1097,7 +1219,10 @@ mod entries_tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
         );
-        let m = rows.iter().find(|r| r.request_model == "mystery-model-9").unwrap();
+        let m = rows
+            .iter()
+            .find(|r| r.request_model == "mystery-model-9")
+            .unwrap();
         assert_eq!(m.provider_id, "builtin");
         assert_eq!(m.provider_label, "Built-in");
         assert!(m.available);
@@ -1130,16 +1255,34 @@ mod entries_tests {
             &std::collections::BTreeMap::new(),
         );
         // Existing opus → family fallback.
-        let opus = rows.iter().find(|r| r.request_model == "claude-opus-4-7").unwrap();
-        assert_eq!(opus.description.as_deref(), Some("Most capable for complex work"));
+        let opus = rows
+            .iter()
+            .find(|r| r.request_model == "claude-opus-4-7")
+            .unwrap();
+        assert_eq!(
+            opus.description.as_deref(),
+            Some("Most capable for complex work")
+        );
         // Non-family existing id → no description.
-        let gpt = rows.iter().find(|r| r.request_model == "openai/gpt-4o").unwrap();
+        let gpt = rows
+            .iter()
+            .find(|r| r.request_model == "openai/gpt-4o")
+            .unwrap();
         assert_eq!(gpt.description, None);
         // Catalog row with explicit description wins.
-        let ds = rows.iter().find(|r| r.request_model == "deepseek-chat").unwrap();
+        let ds = rows
+            .iter()
+            .find(|r| r.request_model == "deepseek-chat")
+            .unwrap();
         assert_eq!(ds.description.as_deref(), Some("Fast and cheap"));
         // Catalog row, no description, haiku family → fallback blurb.
-        let haiku = rows.iter().find(|r| r.request_model == "claude-haiku-4-5").unwrap();
-        assert_eq!(haiku.description.as_deref(), Some("Fastest for quick answers"));
+        let haiku = rows
+            .iter()
+            .find(|r| r.request_model == "claude-haiku-4-5")
+            .unwrap();
+        assert_eq!(
+            haiku.description.as_deref(),
+            Some("Fastest for quick answers")
+        );
     }
 }

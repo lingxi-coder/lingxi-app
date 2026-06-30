@@ -1463,6 +1463,26 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
     resync_overlays(st);
 }
 
+/// Route a live fullscreen mouse event into scrollback state. Only wheel events
+/// are consumed here; click/drag selection is deliberately ignored so terminal
+/// native text selection remains the owner when the backend allows it.
+pub fn handle_live_mouse(st: &mut AppState, m: &FullscreenMouseEvent, viewport: usize) {
+    let overlay_active = st.pending_permission.is_some()
+        || st.active_screen.is_some()
+        || st.history_search.is_some()
+        || st.message_selector.open
+        || st.palette.open
+        || st.completion.open;
+    if overlay_active {
+        return;
+    }
+    match m.kind {
+        MouseEventKind::ScrollUp => scroll_with_viewport(st, ScrollDir::LineUp, viewport),
+        MouseEventKind::ScrollDown => scroll_with_viewport(st, ScrollDir::LineDown, viewport),
+        _ => {}
+    }
+}
+
 /// Re-sync the `/` palette and `@` completion overlays against the current
 /// prompt text/cursor after an edit (typed char or pasted block). Mirrors the
 /// edit-tail logic so paste and typing drive the overlays identically.
@@ -3778,6 +3798,19 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                     apply_block(&mut st, &block);
                 }
                 handle_live_key(&mut st, &k, viewport);
+                drop(st);
+                tick_for_keys.set(tick_for_keys.get().wrapping_add(1));
+            }
+            TerminalEvent::FullscreenMouse(m) => {
+                let Ok(mut st) = state.try_lock() else {
+                    return;
+                };
+                let prompt_rows = crate::components::prompt_input::visual_row_count(
+                    &st.prompt_text,
+                    viewport_width(key_cols),
+                );
+                let viewport = viewport_height(key_rows, prompt_rows);
+                handle_live_mouse(&mut st, &m, viewport);
                 drop(st);
                 tick_for_keys.set(tick_for_keys.get().wrapping_add(1));
             }

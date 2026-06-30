@@ -33,7 +33,7 @@ use iocraft::prelude::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use permission::gate::{PermissionRequest, PromptDefault};
 use serde_json::json;
 use tui::components::prompt_input::VimMode;
-use tui::root::handle_live_key;
+use tui::root::{handle_live_key, handle_live_mouse};
 use tui::screens::Screen;
 use tui::state::{AppState, PendingPermission, RenderedMessage, StatusSnapshot};
 
@@ -109,6 +109,37 @@ fn live_pageup_uses_viewport_height_for_scrollback() {
     let mut st = long_scrollback(120);
     handle_live_key(&mut st, &key(KeyCode::PageUp), 20);
     assert_eq!(st.scroll_offset, 10, "root path must use live viewport/2, not dispatch fallback height=1");
+}
+
+#[test]
+fn mouse_wheel_scrolls_scrollback_without_prompt_focus_change() {
+    let mut st = long_scrollback(120);
+    st.prompt_text = "typing".into();
+    st.prompt_cursor = st.prompt_text.len();
+
+    let wheel = iocraft::prelude::FullscreenMouseEvent::new(
+        iocraft::prelude::MouseEventKind::ScrollUp,
+        0,
+        0,
+    );
+    handle_live_mouse(&mut st, &wheel, 10);
+
+    assert_eq!(st.scroll_offset, 1);
+    assert_eq!(st.prompt_text, "typing");
+    assert_eq!(st.prompt_cursor, "typing".len());
+}
+
+#[test]
+fn mouse_wheel_does_not_scroll_under_palette() {
+    let mut st = long_scrollback(120);
+    st.palette.open = true;
+    let wheel = iocraft::prelude::FullscreenMouseEvent::new(
+        iocraft::prelude::MouseEventKind::ScrollUp,
+        0,
+        0,
+    );
+    handle_live_mouse(&mut st, &wheel, 10);
+    assert_eq!(st.scroll_offset, 0);
 }
 
 /// SEAM 1b (priority 1 > 3): a permission wins over an open overlay too. With

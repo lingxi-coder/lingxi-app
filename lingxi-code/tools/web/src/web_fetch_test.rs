@@ -370,6 +370,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: Some("claude-opus-4-8".into()),
+                model_profile: None,
             })
             .await;
         assert!(

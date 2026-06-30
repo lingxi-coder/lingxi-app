@@ -286,6 +286,7 @@ pub async fn resolve_subagent_tools(
         &PromptOptions {
             include_examples: true,
             model,
+            model_profile: None,
         },
     )
     .await;

@@ -10,10 +10,11 @@ use crate::copilot::auth::CopilotSecret;
 use crate::transport::BoxFuture;
 use crate::LlmError;
 
-/// GitHub OAuth App client id (opencode's public Copilot app). This is the
-/// DEFAULT; the GitHub consent page shows the NAME of whichever app owns the
-/// client id (so the default reads "opencode"). Override via
-/// [`copilot_client_id`] / `LINGXI_COPILOT_CLIENT_ID`.
+/// GitHub OAuth client id for the VS Code Copilot extension. This is the
+/// DEFAULT because GitHub's Copilot token-exchange endpoint only authorizes
+/// tokens minted by the VS Code Copilot OAuth client. Override via
+/// [`copilot_client_id`] / `LINGXI_COPILOT_CLIENT_ID` only if you have a
+/// Copilot-authorized replacement app.
 ///
 /// Note: GitHub Copilot's token-exchange endpoint (`copilot_internal/v2/token`)
 /// only authorizes tokens minted by the **VS Code Copilot OAuth client**. This
@@ -474,7 +475,7 @@ mod tests {
 
     struct GetMock {
         body: Value,
-        seen_auth: std::sync::Mutex<Option<String>>,
+        seen_headers: std::sync::Mutex<Vec<(String, String)>>,
     }
     impl CopilotHttp for GetMock {
         fn post_json<'a>(
@@ -489,10 +490,10 @@ mod tests {
             _url: &'a str,
             headers: &'a [(&'a str, String)],
         ) -> BoxFuture<'a, Result<Value, LlmError>> {
-            *self.seen_auth.lock().unwrap() = headers
+            *self.seen_headers.lock().unwrap() = headers
                 .iter()
-                .find(|(k, _)| *k == "Authorization")
-                .map(|(_, v)| v.clone());
+                .map(|(k, v)| ((*k).to_string(), v.clone()))
+                .collect();
             let v = self.body.clone();
             Box::pin(async move { Ok(v) })
         }
@@ -502,16 +503,30 @@ mod tests {
     async fn exchange_sends_token_auth_header_and_parses() {
         let mock = GetMock {
             body: json!({ "token": "copilot-bearer", "expires_at": 1_900_000_000_u64 }),
-            seen_auth: std::sync::Mutex::new(None),
+            seen_headers: std::sync::Mutex::new(Vec::new()),
         };
         let exchanged = exchange_copilot_token(&mock, "ght_oauth").await.expect("ok");
         assert_eq!(exchanged.expires_at, 1_900_000_000);
         assert_eq!(exchanged.secret().token_for_storage(), "copilot-bearer");
         // Auth header is the GitHub `token <oauth>` scheme, not `Bearer`.
+        let headers = mock.seen_headers.lock().unwrap().clone();
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(header("Authorization"), Some("token ght_oauth"));
+        assert_eq!(header("Editor-Version"), Some(COPILOT_EDITOR_VERSION));
         assert_eq!(
-            mock.seen_auth.lock().unwrap().as_deref(),
-            Some("token ght_oauth")
+            header("Editor-Plugin-Version"),
+            Some(COPILOT_EDITOR_PLUGIN_VERSION)
         );
+        assert_eq!(
+            header("Copilot-Integration-Id"),
+            Some(COPILOT_INTEGRATION_ID)
+        );
+        assert_eq!(header("User-Agent"), Some(COPILOT_EDITOR_USER_AGENT));
     }
 
     #[tokio::test]

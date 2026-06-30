@@ -2176,15 +2176,16 @@ pub(crate) async fn dispatch_tool_uses_tracked(
 
         // Synthesize a minimal ToolUseContext — needed by the validate_input
         // gate below and reused by the eventual `tool_handle.call()`.
-        let messages = {
+        let (messages, model_profile) = {
             let s = orch.session.lock().await;
-            s.history.clone()
+            (s.history.clone(), s.model_profile.clone())
         };
         let ctx = ToolUseContext {
             options: ToolUseOptions {
                 debug: false,
                 verbose: false,
                 main_loop_model: orch.config.model.clone(),
+                model_profile,
                 max_budget_nano_usd: None,
                 mcp_clients: Vec::new(),
                 // FIX 3: claude-code's main REPL builds `getToolUseContext` with
@@ -3363,5 +3364,4 @@ fn tool_result_to_model_text(data: &serde_json::Value) -> String {
             std::string::ToString::to_string,
         )
 }
-
 

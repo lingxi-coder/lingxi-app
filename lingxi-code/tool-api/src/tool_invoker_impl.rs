@@ -124,6 +124,7 @@ impl ToolInvoker for RegistryToolInvoker {
                 debug: false,
                 verbose: false,
                 main_loop_model: "subagent".into(),
+                model_profile: None,
                 max_budget_nano_usd: None,
                 mcp_clients: vec![],
                 // claude-code `runAgent` (runAgent.ts:668-672): an ASYNC

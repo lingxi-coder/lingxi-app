@@ -144,6 +144,18 @@ pub fn web_search_is_enabled(provider: ApiProvider, model: &str) -> bool {
     }
 }
 
+fn hosted_web_search_enabled(
+    model_profile: Option<&str>,
+    fallback_provider: ApiProvider,
+    model: &str,
+) -> bool {
+    match model_profile {
+        Some("anthropic") => true,
+        Some(_) => false,
+        None => web_search_is_enabled(fallback_provider, model),
+    }
+}
+
 /// Input schema for `WebSearchTool`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebSearchInput {
@@ -955,7 +967,8 @@ impl Tool for WebSearchTool {
         // `web_search_client`), so advertise it as a plain, callable web search
         // instead of the Anthropic-hosted framing ("automatic", "US only") that
         // would otherwise make the model think it can't invoke it.
-        if !web_search_is_enabled(
+        if !hosted_web_search_enabled(
+            opts.model_profile.as_deref(),
             infer_api_provider(&self.ctx.provider.base_url),
             &self.ctx.default_model,
         ) {
@@ -995,7 +1008,8 @@ impl Tool for WebSearchTool {
         // Provider split: Anthropic-hosted search only works on the first-party
         // (and Vertex/Foundry) API. On every other provider, run the
         // provider-agnostic CLIENT-SIDE search instead of the hosted tool.
-        if !web_search_is_enabled(
+        if !hosted_web_search_enabled(
+            ctx.options.model_profile.as_deref(),
             infer_api_provider(&self.ctx.provider.base_url),
             &self.ctx.default_model,
         ) {
@@ -1373,6 +1387,7 @@ mod tests {
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: Some("claude-opus-4-8".into()),
+                model_profile: None,
             })
             .await;
         assert_eq!(concise, web_search_description_concise());
@@ -2279,6 +2294,37 @@ mod tests {
             http.received_requests().len(),
             1,
             "successful stream must issue exactly one request (no self-retry)"
+        );
+    }
+
+    #[tokio::test]
+    async fn copilot_session_uses_client_side_search_even_when_tool_provider_is_anthropic() {
+        let http = Arc::new(StreamingMockHttp::new());
+        http.enqueue_blocking(ok_blocking(
+            200,
+            r#"<a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fweather.example%2Fnow" class="result-link">Weather Now</a><td class="result-snippet">Sunny</td>"#,
+        ));
+        let (ctx, _sink) = make_streaming_ctx(http.clone());
+        let tool = WebSearchTool::new(ctx);
+        let mut use_ctx = fresh_ctx();
+        use_ctx.options.model_profile = Some("github-copilot".to_string());
+        let (tx, _rx) = progress_channel();
+
+        let result = tool
+            .call(json!({ "query": "weather now" }), use_ctx, tx)
+            .await
+            .expect("client-side search succeeds");
+
+        let requests = http.received_requests();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].url.starts_with("https://lite.duckduckgo.com/lite/"),
+            "Copilot sessions must use client-side search, got {}",
+            requests[0].url
+        );
+        assert!(
+            result.model_content.unwrap().contains("Weather Now"),
+            "client-side results must be returned to the model"
         );
     }
 }

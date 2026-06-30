@@ -345,6 +345,12 @@ fn host_of(u: &str) -> Option<String> {
     url::Url::parse(u).ok().and_then(|p| p.host_str().map(|h| h.trim_start_matches("www.").to_string()))
 }
 
+fn domain_matches(host: &str, domain: &str) -> bool {
+    let host = host.trim_start_matches("www.").to_ascii_lowercase();
+    let domain = domain.trim_start_matches("www.").to_ascii_lowercase();
+    host == domain || host.ends_with(&format!(".{domain}"))
+}
+
 /// Apply allow/block domain filters (substring match on the host, matching the
 /// hosted tool's `allowed_domains`/`blocked_domains` semantics).
 #[must_use]
@@ -352,8 +358,8 @@ pub fn apply_domain_filter(hits: Vec<SearchHit>, allowed: &[String], blocked: &[
     hits.into_iter()
         .filter(|h| {
             let host = host_of(&h.url).unwrap_or_default();
-            let allow_ok = allowed.is_empty() || allowed.iter().any(|d| host.contains(d.trim_start_matches("www.")));
-            let block_ok = blocked.iter().all(|d| !host.contains(d.trim_start_matches("www.")));
+            let allow_ok = allowed.is_empty() || allowed.iter().any(|d| domain_matches(&host, d));
+            let block_ok = blocked.iter().all(|d| !domain_matches(&host, d));
             allow_ok && block_ok
         })
         .collect()
@@ -430,6 +436,21 @@ mod tests {
         let blocked = apply_domain_filter(hits, &[], &["bad.com".into()]);
         assert_eq!(blocked.len(), 1);
         assert_eq!(blocked[0].url, "https://good.com/x");
+    }
+
+    #[test]
+    fn domain_filter_matches_domain_boundaries_not_substrings() {
+        let hits = vec![
+            SearchHit { title: "real".into(), url: "https://weather.com/today".into(), snippet: String::new() },
+            SearchHit { title: "fake".into(), url: "https://fakeweather.com/today".into(), snippet: String::new() },
+            SearchHit { title: "sub".into(), url: "https://news.weather.com/today".into(), snippet: String::new() },
+        ];
+
+        let allowed = apply_domain_filter(hits.clone(), &["weather.com".into()], &[]);
+        assert_eq!(allowed.iter().map(|h| h.title.as_str()).collect::<Vec<_>>(), vec!["real", "sub"]);
+
+        let blocked = apply_domain_filter(hits, &[], &["weather.com".into()]);
+        assert_eq!(blocked.iter().map(|h| h.title.as_str()).collect::<Vec<_>>(), vec!["fake"]);
     }
 
     #[test]

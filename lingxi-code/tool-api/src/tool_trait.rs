@@ -238,6 +238,10 @@ pub struct PromptOptions {
     /// turn-loop / subagent build sites so new models (e.g. `claude-opus-4-8`,
     /// which is outside `UWu`'s classic list) correctly pick `FWd`.
     pub model: Option<String>,
+    /// Active provider profile for [`Self::model`] (e.g. `github-copilot`).
+    /// Tool prompts that need provider-specific wording should use this instead
+    /// of request-builder internals.
+    pub model_profile: Option<String>,
 }
 
 /// Information returned by [`Tool::is_search_or_read`] describing how an

@@ -101,6 +101,7 @@ impl ToolUseContext {
                 debug: false,
                 verbose: false,
                 main_loop_model,
+                model_profile: None,
                 max_budget_nano_usd: None,
                 mcp_clients: Vec::new(),
                 is_non_interactive_session: true,
@@ -146,6 +147,10 @@ pub struct ToolUseOptions {
     pub verbose: bool,
     /// Identifier of the model driving the main agent loop.
     pub main_loop_model: String,
+    /// Active provider profile for [`Self::main_loop_model`], when pinned
+    /// (e.g. `github-copilot`). Tools that need provider-aware behavior should
+    /// use this instead of unrelated host-specific request builders.
+    pub model_profile: Option<String>,
     /// Optional cost budget for this call, in nano-USD.
     pub max_budget_nano_usd: Option<u64>,
     /// MCP server connections available for this call.

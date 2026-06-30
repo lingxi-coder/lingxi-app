@@ -1757,6 +1757,7 @@ impl ConversationOrchestrator {
                 debug: false,
                 verbose: false,
                 main_loop_model: model.to_string(),
+                model_profile: None,
                 max_budget_nano_usd: None,
                 mcp_clients: Vec::new(),
                 is_non_interactive_session: false,
@@ -7356,12 +7357,16 @@ As you answer the user's questions, you can use the following context:\n\
         // claude-code builds the wire `tools` array with `prompt({model})`; the
         // session model gates model-dependent tool prompts (TodoWrite's
         // `Xla(model)=Dh(model)?FWd:UWd`). Snapshot it from the live session.
-        let model = self.session.lock().await.model.clone();
+        let (model, model_profile) = {
+            let s = self.session.lock().await;
+            (s.model.clone(), s.model_profile.clone())
+        };
         tool_api::wire::tools_to_wire(
             &tools,
             &PromptOptions {
                 include_examples: true,
                 model: Some(model),
+                model_profile,
             },
         )
         .await

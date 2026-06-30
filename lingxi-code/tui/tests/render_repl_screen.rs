@@ -171,3 +171,54 @@ fn repl_screen_no_context_pressure_banner_when_none() {
         "expected NO TokenWarning banner when context_pressure is None; got:\n{out}"
     );
 }
+
+#[test]
+fn repl_screen_shows_scroll_indicator_only_when_scrolled_up() {
+    let mut scrolled = element! {
+        ReplScreen(
+            status: status(),
+            messages: Vec::<RenderedMessage>::new(),
+            cache: HeightCache::default(),
+            prompt_text: String::new(),
+            prompt_cursor: 0_usize,
+            prompt_width: 80_usize,
+            scroll_offset: 42_usize,
+            viewport_height: 5_usize,
+        )
+    };
+    let out = scrolled.to_string();
+    assert!(out.contains("Scrolled 42 lines"), "expected scroll indicator; got:\n{out}");
+
+    let mut bottom = element! {
+        ReplScreen(
+            status: status(),
+            messages: Vec::<RenderedMessage>::new(),
+            cache: HeightCache::default(),
+            prompt_text: String::new(),
+            prompt_cursor: 0_usize,
+            prompt_width: 80_usize,
+            scroll_offset: 0_usize,
+            viewport_height: 5_usize,
+        )
+    };
+    let out = bottom.to_string();
+    assert!(!out.contains("Scrolled"), "indicator should hide at bottom; got:\n{out}");
+}
+
+#[test]
+fn repl_screen_renders_prompt_cursor_when_focused() {
+    let mut element = element! {
+        ReplScreen(
+            status: status(),
+            messages: Vec::<RenderedMessage>::new(),
+            cache: HeightCache::default(),
+            prompt_text: "abc".to_string(),
+            prompt_cursor: 3_usize,
+            prompt_width: 80_usize,
+            scroll_offset: 0_usize,
+            viewport_height: 5_usize,
+        )
+    };
+    let out = element.to_string();
+    assert!(out.contains("❯ abc "), "expected visible cursor cell after prompt text; got:\n{out}");
+}

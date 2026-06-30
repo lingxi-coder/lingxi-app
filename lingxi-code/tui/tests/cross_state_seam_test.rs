@@ -33,9 +33,9 @@ use iocraft::prelude::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use permission::gate::{PermissionRequest, PromptDefault};
 use serde_json::json;
 use tui::components::prompt_input::VimMode;
-use tui::root::handle_live_key;
+use tui::root::{handle_live_key, handle_live_mouse};
 use tui::screens::Screen;
-use tui::state::{AppState, PendingPermission, StatusSnapshot};
+use tui::state::{AppState, PendingPermission, RenderedMessage, StatusSnapshot};
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(KeyEventKind::Press, code)
@@ -49,6 +49,18 @@ fn key_mods(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
 
 fn fresh() -> AppState {
     AppState::new(StatusSnapshot::default())
+}
+
+fn long_scrollback(lines: usize) -> AppState {
+    let mut st = fresh();
+    for i in 0..lines {
+        st.push_message(RenderedMessage::AssistantText {
+            body: format!("line {i}"),
+            timestamp: 0,
+        });
+    }
+    st.refresh_height_cache(80);
+    st
 }
 
 fn arm_permission(st: &mut AppState) {
@@ -90,6 +102,44 @@ fn permission_wins_over_open_screen() {
         matches!(st.active_screen, Some(Screen::Doctor(_))),
         "the Doctor screen is intact — the permission key did not close it"
     );
+}
+
+#[test]
+fn live_pageup_uses_viewport_height_for_scrollback() {
+    let mut st = long_scrollback(120);
+    handle_live_key(&mut st, &key(KeyCode::PageUp), 20);
+    assert_eq!(st.scroll_offset, 10, "root path must use live viewport/2, not dispatch fallback height=1");
+}
+
+#[test]
+fn mouse_wheel_scrolls_scrollback_without_prompt_focus_change() {
+    let mut st = long_scrollback(120);
+    st.prompt_text = "typing".into();
+    st.prompt_cursor = st.prompt_text.len();
+
+    let wheel = iocraft::prelude::FullscreenMouseEvent::new(
+        iocraft::prelude::MouseEventKind::ScrollUp,
+        0,
+        0,
+    );
+    handle_live_mouse(&mut st, &wheel, 10);
+
+    assert_eq!(st.scroll_offset, 1);
+    assert_eq!(st.prompt_text, "typing");
+    assert_eq!(st.prompt_cursor, "typing".len());
+}
+
+#[test]
+fn mouse_wheel_does_not_scroll_under_palette() {
+    let mut st = long_scrollback(120);
+    st.palette.open = true;
+    let wheel = iocraft::prelude::FullscreenMouseEvent::new(
+        iocraft::prelude::MouseEventKind::ScrollUp,
+        0,
+        0,
+    );
+    handle_live_mouse(&mut st, &wheel, 10);
+    assert_eq!(st.scroll_offset, 0);
 }
 
 /// SEAM 1b (priority 1 > 3): a permission wins over an open overlay too. With

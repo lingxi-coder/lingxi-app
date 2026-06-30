@@ -50,3 +50,30 @@ fn ctrl_g_jumps_top_then_shift_g_returns_bottom() {
     scroll_with_viewport(&mut st, ScrollDir::Bottom, vh);
     assert_eq!(st.scroll_offset, 0);
 }
+
+fn buf_120() -> AppState {
+    let mut st = AppState::new(fake_status());
+    for i in 0..120 {
+        st.push_message(RenderedMessage::AssistantText {
+            body: format!("a{i}"),
+            timestamp: 0,
+        });
+    }
+    st.refresh_height_cache(80);
+    st
+}
+
+#[test]
+fn page_home_end_scroll_the_main_scrollback() {
+    let mut st = buf_120();
+    let vh = 10;
+
+    scroll_with_viewport(&mut st, ScrollDir::PageUp, vh);
+    assert_eq!(st.scroll_offset, 5);
+
+    scroll_with_viewport(&mut st, ScrollDir::Top, vh);
+    assert!(st.scroll_offset > 0);
+
+    scroll_with_viewport(&mut st, ScrollDir::Bottom, vh);
+    assert_eq!(st.scroll_offset, 0);
+}

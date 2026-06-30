@@ -35,6 +35,7 @@ memory = { path = "../memory" }
 # host threads its shared `Arc<CredentialManager>` onto the App, mirroring the
 # `provider_availability` seam.
 secret = { path = "../secret" }
+tool-web = { path = "../tools/web" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # (theme-detect) rustix::event::poll + rustix::io::read for the non-blocking TTY
 # pre-flight in `TimedStdin` — safe wrappers around poll(2)/read(2) that require

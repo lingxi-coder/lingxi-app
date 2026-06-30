@@ -35,7 +35,7 @@ use serde_json::json;
 use tui::components::prompt_input::VimMode;
 use tui::root::handle_live_key;
 use tui::screens::Screen;
-use tui::state::{AppState, PendingPermission, StatusSnapshot};
+use tui::state::{AppState, PendingPermission, RenderedMessage, StatusSnapshot};
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(KeyEventKind::Press, code)
@@ -49,6 +49,18 @@ fn key_mods(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
 
 fn fresh() -> AppState {
     AppState::new(StatusSnapshot::default())
+}
+
+fn long_scrollback(lines: usize) -> AppState {
+    let mut st = fresh();
+    for i in 0..lines {
+        st.push_message(RenderedMessage::AssistantText {
+            body: format!("line {i}"),
+            timestamp: 0,
+        });
+    }
+    st.refresh_height_cache(80);
+    st
 }
 
 fn arm_permission(st: &mut AppState) {
@@ -90,6 +102,13 @@ fn permission_wins_over_open_screen() {
         matches!(st.active_screen, Some(Screen::Doctor(_))),
         "the Doctor screen is intact — the permission key did not close it"
     );
+}
+
+#[test]
+fn live_pageup_uses_viewport_height_for_scrollback() {
+    let mut st = long_scrollback(120);
+    handle_live_key(&mut st, &key(KeyCode::PageUp), 20);
+    assert_eq!(st.scroll_offset, 10, "root path must use live viewport/2, not dispatch fallback height=1");
 }
 
 /// SEAM 1b (priority 1 > 3): a permission wins over an open overlay too. With

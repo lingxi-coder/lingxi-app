@@ -65,7 +65,7 @@ impl WebSearchConfig {
         let searxng_url = web_search
             .get("searxngUrl")
             .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
+            .and_then(normalize_searxng_url);
 
         Self { provider, searxng_url }
     }
@@ -84,7 +84,11 @@ impl WebSearchConfig {
 
         match &self.searxng_url {
             Some(url) => {
-                web_search_obj.insert("searxngUrl".to_string(), Value::String(url.clone()));
+                if let Some(normalized) = normalize_searxng_url(url) {
+                    web_search_obj.insert("searxngUrl".to_string(), Value::String(normalized));
+                } else {
+                    web_search_obj.remove("searxngUrl");
+                }
             }
             None => {
                 web_search_obj.remove("searxngUrl");
@@ -98,6 +102,11 @@ fn ensure_object(v: &mut Value) -> &mut Map<String, Value> {
         *v = Value::Object(Map::new());
     }
     v.as_object_mut().expect("value set to object")
+}
+
+fn normalize_searxng_url(url: &str) -> Option<String> {
+    let trimmed = url.trim().trim_end_matches('/').trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 #[cfg(test)]
@@ -118,6 +127,35 @@ mod tests {
         let cfg = WebSearchConfig::from_settings_json(&v);
         assert_eq!(cfg.provider, WebSearchProvider::Brave);
         assert_eq!(cfg.searxng_url.as_deref(), Some("https://search.local"));
+    }
+
+    #[test]
+    fn invalid_provider_falls_back_to_default_auto() {
+        let v = json!({ "webSearch": { "provider": "not-a-real-provider" } });
+        let cfg = WebSearchConfig::from_settings_json(&v);
+        assert_eq!(cfg, WebSearchConfig::default());
+    }
+
+    #[test]
+    fn searxng_url_none_removes_field_on_write() {
+        let mut v = json!({ "theme": "dark", "webSearch": { "provider": "searxng", "searxngUrl": "https://old.example/" } });
+        WebSearchConfig { provider: WebSearchProvider::Auto, searxng_url: None }
+            .write_settings_json(&mut v);
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(v["webSearch"]["provider"], "auto");
+        assert!(v["webSearch"].get("searxngUrl").is_none());
+    }
+
+    #[test]
+    fn searxng_url_round_trips_trimmed_and_without_trailing_slash() {
+        let v = json!({ "webSearch": { "provider": "searxng", "searxngUrl": "  https://search.local/  " } });
+        let cfg = WebSearchConfig::from_settings_json(&v);
+        assert_eq!(cfg.provider, WebSearchProvider::Searxng);
+        assert_eq!(cfg.searxng_url.as_deref(), Some("https://search.local"));
+
+        let mut out = json!({});
+        cfg.write_settings_json(&mut out);
+        assert_eq!(out["webSearch"]["searxngUrl"], "https://search.local");
     }
 
     #[test]

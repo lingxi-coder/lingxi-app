@@ -34,8 +34,8 @@ pub mod state;
 pub mod streaming;
 pub mod telemetry;
 pub(crate) mod terminal;
-pub(crate) mod theme_detect;
 pub mod theme;
+pub(crate) mod theme_detect;
 pub mod theme_persist;
 
 pub use app::TuiApp;
@@ -45,28 +45,25 @@ pub use events::{OrchestratorOutputEvent, TuiEvent};
 pub use session::{run_tui_session, Runtime};
 
 /// (T3) Whether to use iocraft's INLINE render loop instead of the fullscreen
-/// alt-screen one. Opt-in via `LINGXI_TUI_INLINE` (non-empty, not `"0"`).
+/// alt-screen one. Default ON. Opt-out via `LINGXI_TUI_FULLSCREEN` (non-empty, not `"0"`).
 ///
-/// Fullscreen (the default) enters the alt screen + draws at absolute positions,
-/// which Warp's non-standard alt-screen compositing mis-renders (ghosting).
 /// Inline mode (`render_loop()` without `.fullscreen()`) draws into the terminal's
 /// own scrollback (Ink / claude-code model) — no alt-screen, no absolute
-/// positioning — at the cost of the app's bounded-viewport scrolling (the terminal
-/// scrolls instead). EXPERIMENTAL: default OFF; cached once (env is fixed for the
-/// process lifetime).
+/// positioning. This solves ghosting in Warp and standard scrollback retention.
+/// Fullscreen enters the alt screen + draws at absolute positions.
 #[must_use]
 pub(crate) fn inline_render_mode() -> bool {
     use std::sync::OnceLock;
     static INLINE: OnceLock<bool> = OnceLock::new();
-    *INLINE.get_or_init(|| parse_inline_flag(std::env::var("LINGXI_TUI_INLINE").ok()))
+    *INLINE.get_or_init(|| parse_inline_flag(std::env::var("LINGXI_TUI_FULLSCREEN").ok()))
 }
 
-/// Pure parse of the `LINGXI_TUI_INLINE` value: on iff present, non-empty, and
-/// not `"0"`. Split out so it is unit-testable (the public getter caches via a
-/// `OnceLock`, which a live env test can't reset).
+/// Pure parse of the `LINGXI_TUI_FULLSCREEN` value and inverts it: inline mode is on
+/// UNLESS the fullscreen flag is present, non-empty, and not `"0"`.
 #[must_use]
-fn parse_inline_flag(value: Option<String>) -> bool {
-    matches!(value, Some(s) if !s.is_empty() && s != "0")
+fn parse_inline_flag(fullscreen_val: Option<String>) -> bool {
+    let is_fullscreen = matches!(fullscreen_val, Some(s) if !s.is_empty() && s != "0");
+    !is_fullscreen
 }
 
 #[cfg(test)]
@@ -75,11 +72,13 @@ mod inline_mode_tests {
 
     #[test]
     fn inline_flag_truthiness() {
-        assert!(parse_inline_flag(Some("1".into())));
-        assert!(parse_inline_flag(Some("true".into())));
-        assert!(!parse_inline_flag(Some("0".into())));
-        assert!(!parse_inline_flag(Some(String::new())));
-        assert!(!parse_inline_flag(None));
+        // If FULLSCREEN is truthy, inline is false
+        assert!(!parse_inline_flag(Some("1".into())));
+        assert!(!parse_inline_flag(Some("true".into())));
+        // If FULLSCREEN is false/empty/none, inline is true
+        assert!(parse_inline_flag(Some("0".into())));
+        assert!(parse_inline_flag(Some(String::new())));
+        assert!(parse_inline_flag(None));
     }
 }
 

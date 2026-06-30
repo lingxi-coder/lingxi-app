@@ -52,7 +52,9 @@ pub type MultiAgentRxSlot =
 /// (TUI-PERM) Take-once slot for the `TuiPermissionGate` receiver, mirroring
 /// [`BridgeRxSlot`]. The permission pump `take()`s it once on first render.
 pub type PermissionRxSlot = Arc<
-    std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<crate::permission_bridge::PermissionExchange>>>,
+    std::sync::Mutex<
+        Option<tokio::sync::mpsc::Receiver<crate::permission_bridge::PermissionExchange>>,
+    >,
 >;
 
 /// Props for the iocraft root component.
@@ -436,14 +438,22 @@ fn action_to_screen_keycode(action: &str) -> Option<KeyCode> {
         "select:next" | "messageSelector:down" | "footer:down" | "diff:nextFile" => KeyCode::Down,
         "select:previous" | "messageSelector:up" | "footer:up" | "diff:previousFile" => KeyCode::Up,
         // Accept / commit a selection.
-        "select:accept" | "settings:close" | "confirm:yes" | "footer:openSelected"
-        | "messageSelector:select" | "diff:viewDetails" => KeyCode::Enter,
+        "select:accept"
+        | "settings:close"
+        | "confirm:yes"
+        | "footer:openSelected"
+        | "messageSelector:select"
+        | "diff:viewDetails" => KeyCode::Enter,
         // Cancel / dismiss / close. Every screen's legacy reducer treats Esc as
         // its close/back key, so a rebound cancel chord still closes.
-        "select:cancel" | "confirm:no" | "help:dismiss" | "settings:search"
-        | "transcript:exit" | "diff:dismiss" | "attachments:exit" | "footer:clearSelection" => {
-            KeyCode::Esc
-        }
+        "select:cancel"
+        | "confirm:no"
+        | "help:dismiss"
+        | "settings:search"
+        | "transcript:exit"
+        | "diff:dismiss"
+        | "attachments:exit"
+        | "footer:clearSelection" => KeyCode::Esc,
         // Tab navigation (Settings tabs / Stats tabs).
         "tabs:next" | "confirm:nextField" => KeyCode::Tab,
         "tabs:previous" | "confirm:cycleMode" => KeyCode::BackTab,
@@ -518,7 +528,10 @@ fn resolve_screen_key(st: &mut AppState, k: &KeyEvent, screen_contexts: &[&str])
 ///   `settings::apply_settings_key` reducer.
 ///
 /// M7-14 adds a further `match` arm here for its screen.
-#[allow(clippy::too_many_lines, reason = "flat per-screen match dispatcher; one arm per Screen variant")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "flat per-screen match dispatcher; one arm per Screen variant"
+)]
 #[allow(
     clippy::match_same_arms,
     reason = "the empty-context arms (Memory-editing / Connect / Doctor) are kept distinct for their differing rationale comments"
@@ -757,7 +770,10 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
             // uses — both must call `display_order` so the highlighted row
             // and Enter's target stay in sync with what's drawn.
             let ordered: Vec<crate::multiagent::state::TaskRow> =
-                display_order(&st.multiagent.tasks).into_iter().cloned().collect();
+                display_order(&st.multiagent.tasks)
+                    .into_iter()
+                    .cloned()
+                    .collect();
             let ct = iocraft_to_crossterm028_key(k);
             match handle_background_tasks_key(state, &ordered, ct.code) {
                 TaskDialogOutcome::Close => st.close_screen(),
@@ -843,7 +859,10 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
             use crate::screens::model::{handle_model_key, ModelOutcome};
             let ct_key = iocraft_to_crossterm028_key(k);
             match handle_model_key(state, ct_key.code) {
-                ModelOutcome::Commit { provider_id, request_model } => {
+                ModelOutcome::Commit {
+                    provider_id,
+                    request_model,
+                } => {
                     // Record the selection in the persisted recents (catalog
                     // Phase 3-B) so it surfaces in the picker's Recent group on
                     // the next open; best-effort, never load-bearing. Then raise
@@ -1063,7 +1082,9 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
         // before delegating, to avoid the `active_screen` borrow in the arm.
         if matches!(st.active_screen, Some(crate::screens::Screen::Model(_))) {
             let ct = iocraft_to_crossterm028_key(k);
-            if ct.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+            if ct
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL)
                 && ct.code == crossterm::event::KeyCode::Char('a')
             {
                 let picker = crate::screens::connect_picker::ConnectPickerState::from_connectable(
@@ -1302,8 +1323,7 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
             // a SystemText line; UserTextMessage special-cases it to render
             // the InterruptedByUser line. Mirrors the Ctrl+C branch (app.rs).
             st.push_message(crate::state::RenderedMessage::UserText {
-                body: crate::components::messages::user_tool_result::INTERRUPT_MESSAGE
-                    .to_string(),
+                body: crate::components::messages::user_tool_result::INTERRUPT_MESSAGE.to_string(),
                 timestamp: chrono::Utc::now().timestamp(),
             });
             return;
@@ -1626,10 +1646,7 @@ pub async fn pump_turn(
         if st.pending_turn.is_none() {
             return false;
         }
-        if st.pending_permission.is_some()
-            || st.active_screen.is_some()
-            || st.streaming.is_some()
-        {
+        if st.pending_permission.is_some() || st.active_screen.is_some() || st.streaming.is_some() {
             // Priority 1/2 own the surface, or a turn is already in flight:
             // leave the flag set and retry on a later tick.
             return false;
@@ -1681,10 +1698,7 @@ pub async fn pump_slash(
         if st.pending_slash.is_none() {
             return false;
         }
-        if st.pending_permission.is_some()
-            || st.active_screen.is_some()
-            || st.streaming.is_some()
-        {
+        if st.pending_permission.is_some() || st.active_screen.is_some() || st.streaming.is_some() {
             return false;
         }
         st.pending_slash.take().expect("checked is_some")
@@ -1700,8 +1714,7 @@ pub async fn pump_slash(
     // 3) Dispatch OUTSIDE the lock (it may resolve + expand a bundled skill).
     match disp.dispatch(&line).await {
         traits::SlashDispatchResult::RunAsTurn { prompt } => {
-            let cancel =
-                spawn_streaming_turn(handle.clone(), prompt, Vec::new(), turn_tx.clone());
+            let cancel = spawn_streaming_turn(handle.clone(), prompt, Vec::new(), turn_tx.clone());
             state.lock().await.cancel_token = Some(cancel);
         }
         traits::SlashDispatchResult::Handled { display }
@@ -1750,10 +1763,7 @@ pub async fn pump_bash(
         if st.pending_bash.is_none() {
             return false;
         }
-        if st.pending_permission.is_some()
-            || st.active_screen.is_some()
-            || st.streaming.is_some()
-        {
+        if st.pending_permission.is_some() || st.active_screen.is_some() || st.streaming.is_some() {
             return false;
         }
         st.pending_bash.take().expect("checked is_some")
@@ -1946,12 +1956,12 @@ pub async fn pump_open_model(
             // "anthropic" profile they were recorded under "builtin". Without this
             // remap an existing Claude recent no longer matches its row's
             // provider_id, so it would silently drop out of the Recent group.
-            let provider_id = if r.provider_id == "builtin" && r.request_model.starts_with("claude-")
-            {
-                "anthropic".to_string()
-            } else {
-                r.provider_id
-            };
+            let provider_id =
+                if r.provider_id == "builtin" && r.request_model.starts_with("claude-") {
+                    "anthropic".to_string()
+                } else {
+                    r.provider_id
+                };
             (provider_id, r.request_model)
         })
         .collect();
@@ -2067,12 +2077,16 @@ fn open_connect_route(st: &mut AppState, route: ConnectRoute, provider: &str) {
     match route {
         ConnectRoute::Copilot => st.open_github_deployment(),
         ConnectRoute::ApiKey => {
-            st.open_connect(crate::screens::connect::ConnectScreenState::api_key(provider, &label));
+            st.open_connect(crate::screens::connect::ConnectScreenState::api_key(
+                provider, &label,
+            ));
         }
         ConnectRoute::OAuth => {
             st.oauth_login_provider = Some(provider.to_string());
             st.pending_oauth_login = true;
-            st.open_connect(crate::screens::connect::ConnectScreenState::oauth(provider, &label));
+            st.open_connect(crate::screens::connect::ConnectScreenState::oauth(
+                provider, &label,
+            ));
         }
         ConnectRoute::Unavailable => {
             st.open_connect(crate::screens::connect::ConnectScreenState::unavailable(
@@ -2249,10 +2263,7 @@ pub async fn pump_compact(
         if !st.pending_compact {
             return false;
         }
-        if st.pending_permission.is_some()
-            || st.active_screen.is_some()
-            || st.streaming.is_some()
-        {
+        if st.pending_permission.is_some() || st.active_screen.is_some() || st.streaming.is_some() {
             // Priority 1/2 own the surface, or a turn is already in flight:
             // leave the flag set and retry on a later tick.
             return false;
@@ -2445,7 +2456,10 @@ fn lingxi_home_dir() -> std::path::PathBuf {
     if let Ok(explicit) = std::env::var(branding::CONFIG_DIR_ENV) {
         return std::path::PathBuf::from(explicit);
     }
-    dirs::home_dir().map_or_else(|| std::path::PathBuf::from("."), |h| h.join(branding::DOT_DIR))
+    dirs::home_dir().map_or_else(
+        || std::path::PathBuf::from("."),
+        |h| h.join(branding::DOT_DIR),
+    )
 }
 
 /// (M9-10) Walk every `*.jsonl` transcript under `<lingxi_home>/projects/`
@@ -2479,7 +2493,12 @@ fn stats_cache_path() -> std::path::PathBuf {
 /// case. This is the optional/secondary layer — the disk-cache behaviour does
 /// not depend on it (claude-code's process-lifetime cache analogue).
 static STATS_MEM_CACHE: std::sync::OnceLock<
-    std::sync::Mutex<Option<(crate::screens::stats::HistoryFingerprint, crate::screens::stats::StatsData)>>,
+    std::sync::Mutex<
+        Option<(
+            crate::screens::stats::HistoryFingerprint,
+            crate::screens::stats::StatsData,
+        )>,
+    >,
 > = std::sync::OnceLock::new();
 
 /// Collect every `*.jsonl` transcript path under `projects_dir` as
@@ -2513,7 +2532,8 @@ fn collect_jsonl_paths(projects_dir: &std::path::Path) -> Vec<(std::path::PathBu
                     for s in sub.flatten() {
                         let sp = s.path();
                         let name = sp.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                        if name.starts_with("agent-") && sp.extension().is_some_and(|e| e == "jsonl")
+                        if name.starts_with("agent-")
+                            && sp.extension().is_some_and(|e| e == "jsonl")
                         {
                             paths.push((sp, true));
                         }
@@ -2536,7 +2556,9 @@ fn collect_jsonl_paths(projects_dir: &std::path::Path) -> Vec<(std::path::PathBu
 /// read contributes a zeroed `(mtime_ns=0, size=0)` entry — still keyed by path,
 /// so its later appearance/disappearance still moves the fingerprint. The impure
 /// `fs::metadata` reads live here (not in the pure `stats` module).
-fn fingerprint_paths(paths: &[(std::path::PathBuf, bool)]) -> crate::screens::stats::HistoryFingerprint {
+fn fingerprint_paths(
+    paths: &[(std::path::PathBuf, bool)],
+) -> crate::screens::stats::HistoryFingerprint {
     use crate::screens::stats::{FileFingerprint, HistoryFingerprint};
     use std::time::UNIX_EPOCH;
 
@@ -2650,7 +2672,12 @@ fn aggregate_stats_at(
 /// A poisoned lock is silently ignored (the cache is a best-effort optimization,
 /// never a correctness dependency).
 fn update_stats_mem_cache(
-    mem: &std::sync::Mutex<Option<(crate::screens::stats::HistoryFingerprint, crate::screens::stats::StatsData)>>,
+    mem: &std::sync::Mutex<
+        Option<(
+            crate::screens::stats::HistoryFingerprint,
+            crate::screens::stats::StatsData,
+        )>,
+    >,
     fingerprint: &crate::screens::stats::HistoryFingerprint,
     data: &crate::screens::stats::StatsData,
 ) {
@@ -3021,6 +3048,7 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
     // or flip `quit`. Also: `prev_streaming` lets us emit the streaming
     // render telemetry transitions exactly once.
     let tick = hooks.use_state(|| 0u64);
+    let (stdout, _stderr) = hooks.use_output();
     let quit = hooks.use_state(|| false);
     let mut first_render = hooks.use_state(|| false);
     let mut prev_streaming = hooks.use_state(|| false);
@@ -3848,7 +3876,28 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         let viewport = viewport_height(rows, prompt_rows);
         // (M7-03) Refresh the line-height cache to the live width before
         // rendering so windowing + scroll clamp math agree on `total_lines`.
+        
+        if st.pending_clear_scrollback {
+            stdout.print("\u{1b}[3J\u{1b}[H\u{1b}[2J");
+            st.pending_clear_scrollback = false;
+        }
+
+        // (Stage 1) Commit finalized messages to scrollback.
+        if st.streaming.is_none() && st.committed_count < st.messages.len() {
+            for i in st.committed_count..st.messages.len() {
+                let msg = &st.messages[i];
+                let focused = st.focused_tool_id.as_ref() == msg.tool_id();
+                let expanded = msg.tool_id().map_or(false, |id| st.expanded.get(id).copied().unwrap_or(false));
+                let s = crate::components::messages::render_entry_to_string_at_width(msg, focused, expanded, vp_width as usize);
+                if !s.is_empty() {
+                    stdout.println(s);
+                }
+            }
+            st.committed_count = st.messages.len();
+        }
+
         st.refresh_height_cache(vp_width);
+
         let element = crate::app::render_screen(&st, viewport, vp_width);
         (element, should_quit)
     });
@@ -3973,11 +4022,15 @@ mod tests {
         // TurnStarted — exactly like a plain-prompt submit.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TurnEvent>();
         // Hold the concrete type for readback; pass a coerced clone into the pump.
-        let canned = Arc::new(CannedDispatcher::new(traits::SlashDispatchResult::RunAsTurn {
-            prompt: "EXPANDED LOOP PROMPT".to_string(),
-        }));
+        let canned = Arc::new(CannedDispatcher::new(
+            traits::SlashDispatchResult::RunAsTurn {
+                prompt: "EXPANDED LOOP PROMPT".to_string(),
+            },
+        ));
         let disp: Arc<dyn traits::SlashCommandDispatcher> = canned.clone();
-        let st = Arc::new(Mutex::new(AppState::new(crate::state::StatusSnapshot::default())));
+        let st = Arc::new(Mutex::new(AppState::new(
+            crate::state::StatusSnapshot::default(),
+        )));
         st.lock().await.pending_slash = Some("/loop 5m /foo".to_string());
 
         let acted = pump_slash(&st, &mock_handle(), Some(&disp), &tx).await;
@@ -3985,7 +4038,10 @@ mod tests {
         assert!(acted, "pump_slash must act when a slash command is pending");
         let g = st.lock().await;
         assert!(g.pending_slash.is_none(), "flag consumed (no double-spawn)");
-        assert!(g.cancel_token.is_some(), "a turn was spawned → cancel token set");
+        assert!(
+            g.cancel_token.is_some(),
+            "a turn was spawned → cancel token set"
+        );
         drop(g);
         // The dispatcher was consulted with the TYPED line (proves it expands
         // rather than sending the raw text); its RunAsTurn prompt is what runs.
@@ -4003,12 +4059,15 @@ mod tests {
         // An unknown / display-only command surfaces its text and does NOT spawn
         // a turn (no cancel token, no TurnStarted) — builtins stay display-only.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TurnEvent>();
-        let disp: Arc<dyn traits::SlashCommandDispatcher> =
-            Arc::new(CannedDispatcher::new(traits::SlashDispatchResult::Unknown {
+        let disp: Arc<dyn traits::SlashCommandDispatcher> = Arc::new(CannedDispatcher::new(
+            traits::SlashDispatchResult::Unknown {
                 name: "nope".to_string(),
                 display: "Unknown command: /nope".to_string(),
-            }));
-        let st = Arc::new(Mutex::new(AppState::new(crate::state::StatusSnapshot::default())));
+            },
+        ));
+        let st = Arc::new(Mutex::new(AppState::new(
+            crate::state::StatusSnapshot::default(),
+        )));
         st.lock().await.pending_slash = Some("/nope".to_string());
 
         let acted = pump_slash(&st, &mock_handle(), Some(&disp), &tx).await;
@@ -4016,7 +4075,10 @@ mod tests {
         assert!(acted);
         let g = st.lock().await;
         assert!(g.pending_slash.is_none());
-        assert!(g.cancel_token.is_none(), "display-only command must NOT spawn a turn");
+        assert!(
+            g.cancel_token.is_none(),
+            "display-only command must NOT spawn a turn"
+        );
         assert!(
             matches!(
                 g.messages.last(),
@@ -4026,7 +4088,10 @@ mod tests {
             "the display text must be surfaced as a SystemText row"
         );
         drop(g);
-        assert!(rx.try_recv().is_err(), "no TurnStarted for a display-only command");
+        assert!(
+            rx.try_recv().is_err(),
+            "no TurnStarted for a display-only command"
+        );
     }
 
     // ---- pump_bash: the `!` bash-mode submit path ----
@@ -4057,14 +4122,19 @@ mod tests {
             },
         });
         let runner: Arc<dyn crate::bash_runner::BashRunner> = canned.clone();
-        let st = Arc::new(Mutex::new(AppState::new(crate::state::StatusSnapshot::default())));
+        let st = Arc::new(Mutex::new(AppState::new(
+            crate::state::StatusSnapshot::default(),
+        )));
         st.lock().await.pending_bash = Some("echo hi".to_string());
 
         let acted = pump_bash(&st, &runner).await;
 
         assert!(acted, "pump_bash must act when a bash command is pending");
         // The runner ran the exact command (no `!` prefix).
-        assert_eq!(canned.got.lock().unwrap().clone(), Some("echo hi".to_string()));
+        assert_eq!(
+            canned.got.lock().unwrap().clone(),
+            Some("echo hi".to_string())
+        );
         let g = st.lock().await;
         assert!(g.pending_bash.is_none(), "flag consumed (no double-run)");
         assert!(
@@ -4083,7 +4153,9 @@ mod tests {
             got: std::sync::Mutex::new(None),
             out: crate::bash_runner::BashRunOutput::default(),
         });
-        let st = Arc::new(Mutex::new(AppState::new(crate::state::StatusSnapshot::default())));
+        let st = Arc::new(Mutex::new(AppState::new(
+            crate::state::StatusSnapshot::default(),
+        )));
         // No pending_bash → pump is a no-op.
         let acted = pump_bash(&st, &runner).await;
         assert!(!acted, "pump_bash must be a no-op with no pending command");
@@ -4249,10 +4321,8 @@ mod tests {
         use std::io::Write;
 
         let json = r#"{ "bindings": [ { "context": "Select", "bindings": { "ctrl+n": "select:next" } } ] }"#;
-        let path = std::env::temp_dir().join(format!(
-            "lingxi-tui-screen-kb-{}.json",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("lingxi-tui-screen-kb-{}.json", std::process::id()));
         std::fs::File::create(&path)
             .unwrap()
             .write_all(json.as_bytes())
@@ -4261,12 +4331,23 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let rows = vec![
-            McpRow { name: "a".into(), status: "connected".into(), transport: "stdio".into() },
-            McpRow { name: "b".into(), status: "connected".into(), transport: "stdio".into() },
+            McpRow {
+                name: "a".into(),
+                status: "connected".into(),
+                transport: "stdio".into(),
+            },
+            McpRow {
+                name: "b".into(),
+                status: "connected".into(),
+                transport: "stdio".into(),
+            },
         ];
         let mut st = AppState::new(crate::state::StatusSnapshot::default());
         st.set_keymap(km);
-        st.active_screen = Some(Screen::Mcp(McpScreenState { rows, ..Default::default() }));
+        st.active_screen = Some(Screen::Mcp(McpScreenState {
+            rows,
+            ..Default::default()
+        }));
 
         // ctrl+n is NOT a default Select chord, but the override binds it to
         // select:next → lowered to Down → advances the selection.
@@ -4305,12 +4386,23 @@ mod tests {
         use crate::screens::mcp::{McpRow, McpScreenState};
         use crate::screens::Screen;
         let rows = vec![
-            McpRow { name: "a".into(), status: "x".into(), transport: "stdio".into() },
-            McpRow { name: "b".into(), status: "x".into(), transport: "stdio".into() },
+            McpRow {
+                name: "a".into(),
+                status: "x".into(),
+                transport: "stdio".into(),
+            },
+            McpRow {
+                name: "b".into(),
+                status: "x".into(),
+                transport: "stdio".into(),
+            },
         ];
         let mut st = AppState::new(crate::state::StatusSnapshot::default());
         // Default keymap (no override).
-        st.active_screen = Some(Screen::Mcp(McpScreenState { rows, ..Default::default() }));
+        st.active_screen = Some(Screen::Mcp(McpScreenState {
+            rows,
+            ..Default::default()
+        }));
         let down = KeyEvent::new(KeyEventKind::Press, KeyCode::Down);
         handle_screen_key(&mut st, &down);
         match &st.active_screen {
@@ -4426,10 +4518,16 @@ mod tests {
         use command_core::keybindings::{load_keybindings, Keymap};
         use std::io::Write;
 
-        let json = r#"{ "bindings": [ { "context": "Tabs", "bindings": { "ctrl+l": "tabs:next" } } ] }"#;
-        let path = std::env::temp_dir()
-            .join(format!("lingxi-tui-settings-kb-{}.json", std::process::id()));
-        std::fs::File::create(&path).unwrap().write_all(json.as_bytes()).unwrap();
+        let json =
+            r#"{ "bindings": [ { "context": "Tabs", "bindings": { "ctrl+l": "tabs:next" } } ] }"#;
+        let path = std::env::temp_dir().join(format!(
+            "lingxi-tui-settings-kb-{}.json",
+            std::process::id()
+        ));
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(json.as_bytes())
+            .unwrap();
         let km = Keymap::from_load_result(load_keybindings(true, &path, false));
         let _ = std::fs::remove_file(&path);
 
@@ -4451,7 +4549,10 @@ mod tests {
         // Esc (unspecified by the override) falls back → closes.
         let esc = KeyEvent::new(KeyEventKind::Press, KeyCode::Esc);
         handle_screen_key(&mut st, &esc);
-        assert!(st.active_screen.is_none(), "Esc closes the Settings screen (fallback)");
+        assert!(
+            st.active_screen.is_none(),
+            "Esc closes the Settings screen (fallback)"
+        );
     }
 
     /// (RRS-02) Esc interrupts a streaming turn — claude-code
@@ -4462,12 +4563,18 @@ mod tests {
     fn esc_interrupts_in_flight_turn() {
         let mut st = AppState::new(crate::state::StatusSnapshot::default());
         let token = tokio_util::sync::CancellationToken::new();
-        st.in_flight_turn = Some(crate::state::TurnInFlight { turn_id: 1, cancel: token.clone() });
+        st.in_flight_turn = Some(crate::state::TurnInFlight {
+            turn_id: 1,
+            cancel: token.clone(),
+        });
 
         let esc = KeyEvent::new(KeyEventKind::Press, KeyCode::Esc);
         handle_live_key(&mut st, &esc, 24);
 
-        assert!(token.is_cancelled(), "Esc must cancel the in-flight turn token");
+        assert!(
+            token.is_cancelled(),
+            "Esc must cancel the in-flight turn token"
+        );
         assert!(
             st.messages.iter().any(|m| matches!(
                 m,
@@ -4625,10 +4732,18 @@ mod tests {
         for i in 0..12 {
             model_usage.insert(
                 format!("model-{i:02}"),
-                ModelUsage { input_tokens: 1000 + i, output_tokens: 500 + i, cache_read_tokens: 0 },
+                ModelUsage {
+                    input_tokens: 1000 + i,
+                    output_tokens: 500 + i,
+                    cache_read_tokens: 0,
+                },
             );
         }
-        let data = StatsData { model_usage, total_sessions: 3, ..StatsData::default() };
+        let data = StatsData {
+            model_usage,
+            total_sessions: 3,
+            ..StatsData::default()
+        };
         let mut st = AppState::new(crate::state::StatusSnapshot::default());
         st.active_screen = Some(Screen::Stats(StatsState::new(data)));
         // Toggle to Models via Tab so the embedded scroll window is sized to the
@@ -4649,7 +4764,11 @@ mod tests {
         handle_screen_key(&mut st, &j);
         match &st.active_screen {
             Some(Screen::Stats(s)) => {
-                assert_eq!(s.scroll.offset(), at_models_top, "`j` must stay inert (no scroll)");
+                assert_eq!(
+                    s.scroll.offset(),
+                    at_models_top,
+                    "`j` must stay inert (no scroll)"
+                );
             }
             other => panic!("expected Stats screen, got {other:?}"),
         }
@@ -4659,7 +4778,11 @@ mod tests {
         handle_screen_key(&mut st, &k);
         match &st.active_screen {
             Some(Screen::Stats(s)) => {
-                assert_eq!(s.scroll.offset(), at_models_top, "`k` must stay inert (no scroll)");
+                assert_eq!(
+                    s.scroll.offset(),
+                    at_models_top,
+                    "`k` must stay inert (no scroll)"
+                );
             }
             other => panic!("expected Stats screen, got {other:?}"),
         }
@@ -4670,7 +4793,10 @@ mod tests {
         handle_screen_key(&mut st, &down);
         match &st.active_screen {
             Some(Screen::Stats(s)) => {
-                assert!(s.scroll.offset() > at_models_top, "Down still scrolls the body");
+                assert!(
+                    s.scroll.offset() > at_models_top,
+                    "Down still scrolls the body"
+                );
             }
             other => panic!("expected Stats screen, got {other:?}"),
         }
@@ -4855,33 +4981,55 @@ mod tests {
         // A second project file so the walk crosses ≥2 files.
         let repo_b = projects.join("repo2");
         fs::create_dir_all(&repo_b).expect("mkdir project 2");
-        fs::write(repo_b.join("session-b.jsonl"), format!("{}\n", line("2026-05-02", 10, 5)))
-            .expect("write session b");
+        fs::write(
+            repo_b.join("session-b.jsonl"),
+            format!("{}\n", line("2026-05-02", 10, 5)),
+        )
+        .expect("write session b");
 
         // First aggregate: MISS → full walk → writes the cache.
         let first = aggregate_once(&projects, &cache);
         assert_eq!(first.total_sessions, 2);
         assert_eq!(first.total_tokens(), 165);
-        assert!(cache.exists(), "stats-cache.json must exist after the first aggregate");
+        assert!(
+            cache.exists(),
+            "stats-cache.json must exist after the first aggregate"
+        );
         // No leftover tmp sibling (atomic write completed). The tmp name is
         // PID-suffixed so it cannot collide with a concurrent process's tmp.
-        assert!(!cache.with_extension(format!("json.{}.lingxi-tmp", std::process::id())).exists());
+        assert!(!cache
+            .with_extension(format!("json.{}.lingxi-tmp", std::process::id()))
+            .exists());
 
         // Second aggregate with NO file change: HIT → identical data.
         let second = aggregate_once(&projects, &cache);
-        assert_eq!(second, first, "unchanged history must return the cached StatsData");
+        assert_eq!(
+            second, first,
+            "unchanged history must return the cached StatsData"
+        );
 
         // Mutate one transcript (append a line → size grows → fingerprint
         // changes), then re-aggregate: the cache is invalidated and the new
         // tokens are reflected.
         fs::write(
             &sess,
-            format!("{}\n{}\n", line("2026-05-01", 100, 50), line("2026-05-01", 7, 3)),
+            format!(
+                "{}\n{}\n",
+                line("2026-05-01", 100, 50),
+                line("2026-05-01", 7, 3)
+            ),
         )
         .expect("rewrite session a");
         let third = aggregate_once(&projects, &cache);
-        assert_ne!(third, first, "a changed transcript must re-walk, not serve stale data");
-        assert_eq!(third.total_tokens(), 165 + 10, "new tokens reflected after invalidation");
+        assert_ne!(
+            third, first,
+            "a changed transcript must re-walk, not serve stale data"
+        );
+        assert_eq!(
+            third.total_tokens(),
+            165 + 10,
+            "new tokens reflected after invalidation"
+        );
     }
 
     // ── Plan 3c `/connect` provider-key persistence pump (C1) ────────────────
@@ -5023,7 +5171,10 @@ mod tests {
         let state = Arc::new(Mutex::new(st));
 
         let stored = pump_store_provider_key(&state).await;
-        assert!(!stored, "no store bound ⇒ pump stores nothing and returns false");
+        assert!(
+            !stored,
+            "no store bound ⇒ pump stores nothing and returns false"
+        );
         assert!(state.lock().await.pending_store_key.is_none());
     }
 
@@ -5073,7 +5224,9 @@ mod tests {
             }
         }
 
-        let state = Arc::new(Mutex::new(AppState::new(crate::state::StatusSnapshot::default())));
+        let state = Arc::new(Mutex::new(AppState::new(
+            crate::state::StatusSnapshot::default(),
+        )));
         let stopped = pump_task_stop(&state, &PanicsIfCalled).await;
         assert!(!stopped);
     }
@@ -5103,8 +5256,7 @@ mod tests {
         assert!(wrote, "pump must report a successful write");
 
         // settings.local.json now carries the directory.
-        let body =
-            std::fs::read_to_string(tmp.join("proj/.lingxi/settings.local.json")).unwrap();
+        let body = std::fs::read_to_string(tmp.join("proj/.lingxi/settings.local.json")).unwrap();
         assert!(body.contains("/work/added"), "persisted to disk: {body}");
 
         let g = state.lock().await;
@@ -5218,7 +5370,10 @@ mod tests {
             })) => assert_eq!(provider_id, "anthropic"),
             other => panic!("expected OAuth connect screen, got {other:?}"),
         }
-        assert!(st.pending_oauth_login, "OAuth pick raises pending_oauth_login");
+        assert!(
+            st.pending_oauth_login,
+            "OAuth pick raises pending_oauth_login"
+        );
         assert_eq!(st.oauth_login_provider.as_deref(), Some("anthropic"));
 
         // Pick API key (idx 1): Down then Enter → masked key field.
@@ -5238,7 +5393,10 @@ mod tests {
             })) => assert_eq!(provider_id, "anthropic"),
             other => panic!("expected api-key connect screen, got {other:?}"),
         }
-        assert!(!st.pending_oauth_login, "API-key pick does not raise OAuth signal");
+        assert!(
+            !st.pending_oauth_login,
+            "API-key pick does not raise OAuth signal"
+        );
 
         // Esc cancels the whole flow (back to REPL).
         let mut st = AppState::new(crate::state::StatusSnapshot::default());
@@ -5248,7 +5406,10 @@ mod tests {
             methods,
         )));
         handle_screen_key(&mut st, &KeyEvent::new(KeyEventKind::Press, KeyCode::Esc));
-        assert!(st.active_screen.is_none(), "Esc closes the method-choice screen");
+        assert!(
+            st.active_screen.is_none(),
+            "Esc closes the method-choice screen"
+        );
     }
 
     /// (T2a Task 5) `connect_route_for` routes by the REAL catalog method tag.
@@ -5257,10 +5418,22 @@ mod tests {
     fn connect_route_picks_flow_by_method() {
         use crate::screens::connect_picker::ConnectMethod;
         // (T2b) OAuth methods now drive the real browser flow (was Unavailable).
-        assert_eq!(connect_route_for("oauth_tag_provider", Some("oauth")), ConnectRoute::OAuth);
-        assert_eq!(connect_route_for("github-copilot", Some("copilot_device")), ConnectRoute::Copilot);
-        assert_eq!(connect_route_for("anthropic", Some("api_key")), ConnectRoute::ApiKey);
-        assert_eq!(connect_route_for("typed-unknown", None), ConnectRoute::ApiKey); // fallback preserves today
+        assert_eq!(
+            connect_route_for("oauth_tag_provider", Some("oauth")),
+            ConnectRoute::OAuth
+        );
+        assert_eq!(
+            connect_route_for("github-copilot", Some("copilot_device")),
+            ConnectRoute::Copilot
+        );
+        assert_eq!(
+            connect_route_for("anthropic", Some("api_key")),
+            ConnectRoute::ApiKey
+        );
+        assert_eq!(
+            connect_route_for("typed-unknown", None),
+            ConnectRoute::ApiKey
+        ); // fallback preserves today
     }
 
     /// `switch_profile_for` maps the picker-internal sentinel `provider_id`

@@ -597,6 +597,10 @@ pub struct AppState {
     /// Scrollback buffer. (M7-03) Full log retained — no eviction; the
     /// `VirtualMessageList` windows the viewport.
     pub messages: Vec<RenderedMessage>,
+    /// How many leading messages have been committed to native scrollback.
+    pub committed_count: usize,
+    /// Pending request to clear the native terminal scrollback (e.g. from `/clear`).
+    pub pending_clear_scrollback: bool,
     /// Reserved for M6-05 (permission dialogs). Set on
     /// `TurnEvent::PermissionRequest` (M6-03) but not yet rendered.
     pub pending_permission: Option<PendingPermission>,
@@ -1098,6 +1102,8 @@ impl AppState {
     pub fn new(status: StatusSnapshot) -> Self {
         Self {
             messages: Vec::new(),
+            committed_count: 0,
+            pending_clear_scrollback: false,
             pending_permission: None,
             streaming: None,
             cancel_token: None,
@@ -1341,10 +1347,7 @@ impl AppState {
 
     /// Open the `/permissions` viewer with the loaded state. Called by
     /// `root::pump_open_permissions` after the off-disk settings read.
-    pub fn open_permissions(
-        &mut self,
-        state: crate::screens::permissions::PermissionsScreenState,
-    ) {
+    pub fn open_permissions(&mut self, state: crate::screens::permissions::PermissionsScreenState) {
         self.active_screen = Some(crate::screens::Screen::Permissions(state));
         crate::telemetry::screen_opened("permissions");
     }
@@ -1673,9 +1676,10 @@ impl AppState {
     /// (M7-03) Rebuild the height cache if the log or `width` changed.
     /// Idempotent: a no-op when nothing changed (cheap len + width check).
     pub fn refresh_height_cache(&mut self, width: usize) {
-        let stale = self.viewport_width != width || self.height_cache.len() != self.messages.len();
+        let live_slice = &self.messages[self.committed_count.min(self.messages.len())..];
+        let stale = self.viewport_width != width || self.height_cache.len() != live_slice.len();
         if stale {
-            self.height_cache.recompute(&self.messages, width);
+            self.height_cache.recompute(live_slice, width);
             self.viewport_width = width;
         }
     }
@@ -1793,13 +1797,12 @@ mod tests {
     fn app_state_subscription_defaults_none_and_snapshot_reads_through() {
         let mut st = AppState::new(StatusSnapshot::default());
         assert!(st.subscription_snapshot().is_none());
-        let slot: traits::subscription::SharedSubscription =
-            std::sync::Arc::new(std::sync::RwLock::new(Some(
-                traits::subscription::SubscriptionSnapshot {
-                    is_subscriber: true,
-                    ..Default::default()
-                },
-            )));
+        let slot: traits::subscription::SharedSubscription = std::sync::Arc::new(
+            std::sync::RwLock::new(Some(traits::subscription::SubscriptionSnapshot {
+                is_subscriber: true,
+                ..Default::default()
+            })),
+        );
         st.subscription = Some(slot);
         assert!(st.subscription_snapshot().expect("snap").is_subscriber);
     }
@@ -2250,6 +2253,21 @@ mod tests {
         let mut m = std::collections::BTreeMap::new();
         m.insert("anthropic".to_string(), "api_key".to_string());
         st.set_provider_auth_methods(m);
-        assert_eq!(st.provider_auth_methods.get("anthropic").map(String::as_str), Some("api_key"));
+        assert_eq!(
+            st.provider_auth_methods
+                .get("anthropic")
+                .map(String::as_str),
+            Some("api_key")
+        );
+    }
+}
+
+impl RenderedMessage {
+    pub fn tool_id(&self) -> Option<&protocol::ToolUseId> {
+        match self {
+            RenderedMessage::AssistantToolUse { id, .. } |
+            RenderedMessage::UserToolResult { id, .. } => Some(id),
+            _ => None,
+        }
     }
 }

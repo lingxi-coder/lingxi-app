@@ -52,10 +52,20 @@ use user_tool_result::{render_user_tool_result_to_string, UserToolResultProps};
 #[must_use]
 #[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (28 variants)
 pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: bool) -> String {
+    render_entry_to_string_at_width(entry, focused, expanded, 0)
+}
+
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn render_entry_to_string_at_width(entry: &RenderedMessage, focused: bool, expanded: bool, width: usize) -> String {
     match entry {
         // (RRS-08) The interrupt marker renders the InterruptedByUser line.
         RenderedMessage::UserText { body, .. } if body == user_tool_result::INTERRUPT_MESSAGE => {
-            format!("{}{}", user_tool_result::MARKER, user_tool_result::INTERRUPTED_LINE)
+            format!(
+                "{}{}",
+                user_tool_result::MARKER,
+                user_tool_result::INTERRUPTED_LINE
+            )
         }
         // §A4 empty-message guard: a body that is only stripped prompt-XML
         // tags (or `(no content)`) is suppressed entirely — the component
@@ -70,7 +80,7 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
         RenderedMessage::AssistantText { body, .. } => {
             // (A2) Default markdown width (0 → 80); this string dispatcher has
             // no terminal width, matching the prior behavior.
-            assistant_text::render_assistant_text_to_string(body, 0)
+            assistant_text::render_assistant_text_to_string(body, width)
         }
         RenderedMessage::SystemText { body, .. } => body.clone(),
         RenderedMessage::AssistantToolUse { id, tool, input } => {
@@ -107,7 +117,7 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
             theme_name: crate::theme::ThemeName::default(),
             // (diff-03) No terminal width in the string oracle — 0 disables
             // padding, matching the prior behavior.
-            width: 0,
+            width,
         }),
         RenderedMessage::AssistantThinking { thinking, expanded } => {
             thinking::render_thinking_to_string(thinking::ThinkingProps {

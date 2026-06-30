@@ -417,6 +417,8 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 st.prompt_cursor = 0;
                 st.messages.clear();
                 st.scroll_offset = 0;
+                st.committed_count = 0;
+                st.pending_clear_scrollback = true;
                 // The rate-limit dedupe slot must reset with the scrollback: a
                 // suppressed identical notice would otherwise never reappear in
                 // the now-empty transcript.
@@ -766,6 +768,8 @@ pub async fn handle_submit_line(
             "clear" => {
                 st.messages.clear();
                 st.scroll_offset = 0;
+                st.committed_count = 0;
+                st.pending_clear_scrollback = true;
                 // Same rationale as the sync `/clear` intercept above: the
                 // rate-limit dedupe slot resets with the scrollback
                 // (`has_shown_overage_notification` deliberately NOT reset —
@@ -835,7 +839,11 @@ pub fn connect_picker_popup_lines(
                 let selected = item_pos == c.selected;
                 item_pos += 1;
                 lines.push(PopupLine::Item {
-                    marker: if row.connected { PopupMarker::Check } else { PopupMarker::None },
+                    marker: if row.connected {
+                        PopupMarker::Check
+                    } else {
+                        PopupMarker::None
+                    },
                     label: row.label.clone(),
                     detail: row.description.clone(),
                     badge: String::new(),
@@ -1059,7 +1067,9 @@ pub fn render_screen(
                 // line, a `Recent` group (rows mixing providers → provider shown
                 // dim), then one group per provider. The current model gets a `●`
                 // marker; an unconfigured provider's rows badge `[Connect]`.
-                use crate::components::picker_popup::{render_picker_popup, PopupLine, PopupMarker};
+                use crate::components::picker_popup::{
+                    render_picker_popup, PopupLine, PopupMarker,
+                };
                 use crate::screens::model::VisibleLine;
                 let mut lines: Vec<PopupLine> = Vec::new();
                 let mut item_pos = 0usize;
@@ -1140,7 +1150,9 @@ pub fn render_screen(
                 // (GitHub Copilot Enterprise) The deployment-type sub-flow, in the
                 // same popup: Choose phase = a 2-row menu (Public / Enterprise);
                 // Host phase = the Enterprise host typed into the search slot.
-                use crate::components::picker_popup::{render_picker_popup, PopupLine, PopupMarker};
+                use crate::components::picker_popup::{
+                    render_picker_popup, PopupLine, PopupMarker,
+                };
                 use crate::screens::github_deploy::DeployPhase;
                 match &g.phase {
                     DeployPhase::Choose { selected } => {
@@ -1184,7 +1196,9 @@ pub fn render_screen(
             Screen::ConnectMethod(m) => {
                 // (T2b) The login-method choice (multi-method providers, e.g.
                 // Anthropic): a menu of `choice_label`s in the shared popup.
-                use crate::components::picker_popup::{render_picker_popup, PopupLine, PopupMarker};
+                use crate::components::picker_popup::{
+                    render_picker_popup, PopupLine, PopupMarker,
+                };
                 let lines: Vec<PopupLine> = m
                     .options
                     .iter()
@@ -1261,7 +1275,9 @@ pub fn render_screen(
                 // `render_stats_to_string` body (tab header + active-tab body +
                 // sparkline/heatmap, snapshot-tested) line-by-line in a column
                 // View. Mirrors the Skills/Agents arms.
-                use crate::screens::stats::{render_stats_to_string, EMPTY_LINE, MODELS_EMPTY_LINE};
+                use crate::screens::stats::{
+                    render_stats_to_string, EMPTY_LINE, MODELS_EMPTY_LINE,
+                };
                 use crate::theme::TuiTheme;
                 let body = render_stats_to_string(sts);
                 let lines: Vec<String> = body.lines().map(str::to_string).collect();
@@ -1350,7 +1366,8 @@ pub fn render_screen(
         .into_any();
     }
     let status = state.status.clone();
-    let messages = state.messages.clone();
+    let slice_start = state.committed_count.min(state.messages.len());
+    let messages = state.messages[slice_start..].to_vec();
     let prompt_text = state.prompt_text.clone();
     let prompt_cursor = state.prompt_cursor;
     let scroll_offset = state.scroll_offset;
@@ -1382,11 +1399,11 @@ pub fn render_screen(
     // cache can therefore never be stale relative to `viewport_width`.
     let vp_width = viewport_width.max(1);
     let cache = if state.height_cache.width() == vp_width
-        && state.height_cache.len() == state.messages.len()
+        && state.height_cache.len() == messages.len()
     {
         state.height_cache.clone()
     } else {
-        crate::components::virtual_message_list::HeightCache::build(&state.messages, vp_width)
+        crate::components::virtual_message_list::HeightCache::build(&messages, vp_width)
     };
     element! {
         ReplScreen(
@@ -1806,8 +1823,14 @@ mod dispatch_tests {
         assert!(acted);
         assert_eq!(st.prompt_text, "");
         assert_eq!(st.pending_bash.as_deref(), Some("echo hi"));
-        assert!(st.pending_turn.is_none(), "a `!` line must NOT raise a turn");
-        assert!(st.pending_slash.is_none(), "a `!` line must NOT raise a slash");
+        assert!(
+            st.pending_turn.is_none(),
+            "a `!` line must NOT raise a turn"
+        );
+        assert!(
+            st.pending_slash.is_none(),
+            "a `!` line must NOT raise a slash"
+        );
         assert!(
             matches!(
                 st.messages.last(),
@@ -1825,7 +1848,10 @@ mod dispatch_tests {
         dispatch(KeyAction::InsertChar('!'), &mut st);
         let acted = dispatch(KeyAction::Submit, &mut st);
         assert!(acted);
-        assert!(st.pending_bash.is_none(), "bare `!` must NOT raise pending_bash");
+        assert!(
+            st.pending_bash.is_none(),
+            "bare `!` must NOT raise pending_bash"
+        );
         assert_eq!(st.pending_turn.as_deref(), Some("!"));
     }
 
@@ -1863,9 +1889,15 @@ mod dispatch_tests {
     fn ctrl_c_interrupts_in_flight_turn_with_claude_code_marker() {
         let mut st = s();
         let token = tokio_util::sync::CancellationToken::new();
-        st.in_flight_turn = Some(crate::state::TurnInFlight { turn_id: 1, cancel: token.clone() });
+        st.in_flight_turn = Some(crate::state::TurnInFlight {
+            turn_id: 1,
+            cancel: token.clone(),
+        });
         dispatch(KeyAction::Cancel, &mut st);
-        assert!(token.is_cancelled(), "Ctrl+C must cancel the in-flight turn token");
+        assert!(
+            token.is_cancelled(),
+            "Ctrl+C must cancel the in-flight turn token"
+        );
         assert!(
             st.messages.iter().any(|m| matches!(
                 m,
@@ -2561,7 +2593,10 @@ mod connect_picker_detail_tests {
             text.contains("claude-opus-4-8") || text.contains("claude-sonnet-4-6"),
             "missing anthropic model in:\n{text}"
         );
-        assert!(!text.contains("gpt-5"), "openai model should NOT appear:\n{text}");
+        assert!(
+            !text.contains("gpt-5"),
+            "openai model should NOT appear:\n{text}"
+        );
     }
 
     #[test]
@@ -2569,7 +2604,10 @@ mod connect_picker_detail_tests {
         let c = ConnectPickerState::default(); // no rows → highlighted_provider_id() = None
         let lines =
             connect_picker_popup_lines(&c, &BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new());
-        assert!(lines.is_empty(), "empty picker should yield empty lines, got: {lines:?}");
+        assert!(
+            lines.is_empty(),
+            "empty picker should yield empty lines, got: {lines:?}"
+        );
     }
 
     #[test]
@@ -2585,7 +2623,10 @@ mod connect_picker_detail_tests {
             .enumerate()
             .filter(|(_, l)| matches!(l, PopupLine::Header(_)))
             .collect();
-        assert!(headers.len() >= 2, "expected ≥2 headers (group + separator): {headers:?}");
+        assert!(
+            headers.len() >= 2,
+            "expected ≥2 headers (group + separator): {headers:?}"
+        );
 
         // The separator is a Header("") — it must appear after at least one Item.
         let sep_idx = lines

@@ -260,10 +260,7 @@ impl Runtime {
     /// and runs it as a turn. `None` leaves `root::pump_slash` running a typed
     /// slash line raw — the pre-dispatch behavior for bridge-less mounts.
     #[must_use]
-    pub fn with_dispatcher(
-        mut self,
-        dispatcher: Arc<dyn traits::SlashCommandDispatcher>,
-    ) -> Self {
+    pub fn with_dispatcher(mut self, dispatcher: Arc<dyn traits::SlashCommandDispatcher>) -> Self {
         self.dispatcher = Some(dispatcher);
         self
     }
@@ -700,8 +697,8 @@ mod tests {
             &serde_json::json!({"type": "command", "command": "echo hi"}),
         )
         .expect("command config parses");
-        let mut runtime = Runtime::new(protocol::SessionId::new())
-            .with_status_line_config(Some(cfg.clone()));
+        let mut runtime =
+            Runtime::new(protocol::SessionId::new()).with_status_line_config(Some(cfg.clone()));
         assert_eq!(runtime.status_line_config.as_ref(), Some(&cfg));
 
         // Replicate `run_tui_session`'s init-application step: lift the config

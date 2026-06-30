@@ -3890,7 +3890,16 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 let expanded = msg.tool_id().map_or(false, |id| st.expanded.get(id).copied().unwrap_or(false));
                 let s = crate::components::messages::render_entry_to_string_at_width(msg, focused, expanded, vp_width as usize);
                 if !s.is_empty() {
-                    stdout.println(s);
+                    // Commit line-by-line: iocraft's `use_output` only appends a
+                    // line terminator at the END of each `println`, so a bare
+                    // `\n` INSIDE a multi-line string stays a raw LF. In raw mode
+                    // an LF moves down WITHOUT a carriage return, so each
+                    // continuation line drifts one column right (staircase
+                    // indentation). Splitting on `\n` makes `use_output` emit a
+                    // proper `\r\n` after every line, resetting the column.
+                    for line in s.split('\n') {
+                        stdout.println(line);
+                    }
                 }
             }
             st.committed_count = st.messages.len();

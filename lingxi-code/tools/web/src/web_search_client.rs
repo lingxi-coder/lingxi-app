@@ -120,7 +120,8 @@ pub fn resolve_client_search_provider(
     resolve_client_search_provider_with_credentials(cfg, &secure, &env)
 }
 
-fn resolve_client_search_provider_with_credentials(
+#[must_use]
+pub fn resolve_client_search_provider_with_credentials(
     cfg: &WebSearchConfig,
     secure: &ResolvedWebCredentials,
     env: &EnvSearchConfig,

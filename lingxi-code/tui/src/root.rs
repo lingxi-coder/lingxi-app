@@ -541,6 +541,7 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
         // context: nav/Enter/Esc resolve the same way, and printable keys fall
         // through to the reducer so type-to-search works.
         Some(Screen::ConnectPicker(_)) => &["ModelPicker"],
+        Some(Screen::WebPicker(_)) => &["ModelPicker"],
         // The GitHub deployment-type sub-flow shares the picker keymap (nav/
         // Enter/Esc + printable keys fall through to its reducer for the host input).
         Some(Screen::GithubDeployment(_)) => &["ModelPicker"],
@@ -579,7 +580,7 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
         // the key buffer, so it must NOT consult `Confirmation` (whose `y`/`n`
         // would hijack typing). Its only control key (Esc-cancel) is owned
         // unconditionally by the reducer, so no consult context is needed.
-        Some(Screen::Connect(_)) => &[],
+        Some(Screen::Connect(_) | Screen::WebConfig(_)) => &[],
         // (GAP D fix) Stats is a TAB NAVIGATOR (Overview/Models via Tab) + a
         // keyboard SCROLL pager — NOT a select-list. The OLD `Select` mapping
         // lowered `j`/`k`→select:next/previous→Down/Up and SCROLLED the body
@@ -903,6 +904,43 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                 }
                 ConnectPickerOutcome::Cancel => st.close_screen(),
                 ConnectPickerOutcome::Stay => {}
+            }
+        }
+        Some(Screen::WebPicker(state)) => {
+            use crate::screens::web_picker::{handle_web_picker_key, WebPickerOutcome};
+            let ct_key = iocraft_to_crossterm028_key(k);
+            match handle_web_picker_key(state, ct_key.code) {
+                WebPickerOutcome::Select(provider) => {
+                    let snapshot = state.snapshot.clone();
+                    st.open_web_config(crate::screens::web_config::WebConfigState::new(
+                        provider, snapshot,
+                    ));
+                }
+                WebPickerOutcome::Test(provider) => {
+                    st.pending_web_test = Some(provider);
+                }
+                WebPickerOutcome::Cancel => st.close_screen(),
+                WebPickerOutcome::Stay => {}
+            }
+        }
+        Some(Screen::WebConfig(state)) => {
+            use crate::screens::web_config::{handle_web_config_key, WebConfigOutcome};
+            let ct_key = iocraft_to_crossterm028_key(k);
+            match handle_web_config_key(state, ct_key.code) {
+                WebConfigOutcome::SaveSecret { provider, secret } => {
+                    st.pending_web_secret = Some((provider, secret));
+                }
+                WebConfigOutcome::SaveSettings { provider, searxng_url } => {
+                    st.pending_web_settings = Some(tool_web::web_search_config::WebSearchConfig {
+                        provider,
+                        searxng_url,
+                    });
+                }
+                WebConfigOutcome::Test(provider) => {
+                    st.pending_web_test = Some(provider);
+                }
+                WebConfigOutcome::Close => st.close_screen(),
+                WebConfigOutcome::Stay => {}
             }
         }
         Some(Screen::GithubDeployment(state)) => {
@@ -2215,6 +2253,164 @@ pub async fn pump_store_provider_key(state: &Arc<Mutex<AppState>>) -> bool {
     }
 }
 
+fn web_credential_id(provider: tool_web::web_search_config::WebSearchProvider) -> Option<&'static str> {
+    match provider {
+        tool_web::web_search_config::WebSearchProvider::Tavily => Some("web:tavily"),
+        tool_web::web_search_config::WebSearchProvider::Brave => Some("web:brave"),
+        _ => None,
+    }
+}
+
+fn web_settings_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| memory::lingxi_md::user_config_dir(&h).join("settings.json"))
+}
+
+fn save_web_settings_to(
+    path: &std::path::Path,
+    cfg: &tool_web::web_search_config::WebSearchConfig,
+) -> std::io::Result<()> {
+    let mut value: serde_json::Value = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    cfg.write_settings_json(&mut value);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut body = serde_json::to_string_pretty(&value)?;
+    body.push('\n');
+    std::fs::write(path, body)
+}
+
+pub async fn pump_save_web_secret(state: &Arc<Mutex<AppState>>) -> bool {
+    let (pending, store) = {
+        let mut st = state.lock().await;
+        (st.pending_web_secret.take(), st.provider_key_store.clone())
+    };
+    let Some((provider, secret)) = pending else { return false };
+    let Some(id) = web_credential_id(provider) else { return false };
+    let Some(store) = store else { return false };
+    match store.set_provider_key(id, &secret).await {
+        Ok(()) => {
+            let mut st = state.lock().await;
+            match provider {
+                tool_web::web_search_config::WebSearchProvider::Tavily => st.web_config_snapshot.tavily_key = true,
+                tool_web::web_search_config::WebSearchProvider::Brave => st.web_config_snapshot.brave_key = true,
+                _ => {}
+            }
+            st.web_config_snapshot.active = provider;
+            let cfg = tool_web::web_search_config::WebSearchConfig {
+                provider,
+                searxng_url: st.web_config_snapshot.searxng_url.clone(),
+            };
+            if let Some(path) = web_settings_path() {
+                let _ = save_web_settings_to(&path, &cfg);
+            }
+            let snapshot = st.web_config_snapshot.clone();
+            if let Some(crate::screens::Screen::WebConfig(w)) = st.active_screen.as_mut() {
+                w.snapshot = snapshot;
+            }
+            true
+        }
+        Err(e) => {
+            let mut st = state.lock().await;
+            if let Some(crate::screens::Screen::WebConfig(w)) = st.active_screen.as_mut() {
+                w.test_status = crate::screens::web_config::WebTestStatus::Failed(e.to_string());
+            }
+            false
+        }
+    }
+}
+
+pub async fn pump_save_web_settings(state: &Arc<Mutex<AppState>>) -> bool {
+    let pending = {
+        let mut st = state.lock().await;
+        st.pending_web_settings.take()
+    };
+    let Some(cfg) = pending else { return false };
+    let ok = web_settings_path()
+        .map(|p| save_web_settings_to(&p, &cfg).is_ok())
+        .unwrap_or(false);
+    let mut st = state.lock().await;
+    if ok {
+        st.web_config_snapshot.active = cfg.provider;
+        st.web_config_snapshot.searxng_url = cfg.searxng_url.clone();
+        true
+    } else {
+        if let Some(crate::screens::Screen::WebConfig(w)) = st.active_screen.as_mut() {
+            w.test_status = crate::screens::web_config::WebTestStatus::Failed("Failed to save web settings".to_string());
+        }
+        false
+    }
+}
+
+pub async fn pump_test_web_search(state: &Arc<Mutex<AppState>>) -> bool {
+    let (provider, snapshot, http, store) = {
+        let mut st = state.lock().await;
+        (
+            st.pending_web_test.take(),
+            st.web_config_snapshot.clone(),
+            st.web_search_http.clone(),
+            st.provider_key_store.clone(),
+        )
+    };
+    let Some(provider) = provider else { return false };
+    let Some(http) = http else { return false };
+    let cfg = tool_web::web_search_config::WebSearchConfig { provider, searxng_url: snapshot.searxng_url.clone() };
+    let mut creds = tool_web::web_search_client::ResolvedWebCredentials::empty();
+    if let Some(store) = store {
+        if let Ok(Some(secret)) = store.get_provider_key("web:tavily").await {
+            creds.tavily_key = Some(secret.expose_secret().clone());
+        }
+        if let Ok(Some(secret)) = store.get_provider_key("web:brave").await {
+            creds.brave_key = Some(secret.expose_secret().clone());
+        }
+    }
+    let env = tool_web::web_search_client::EnvSearchConfig::from_env();
+    let result = match tool_web::web_search_client::resolve_client_search_provider_with_credentials(&cfg, &creds, &env) {
+        Ok(resolved) => tool_web::web_search_client::run_client_web_search(
+            &http,
+            &resolved,
+            "current weather Beijing",
+            &[],
+            &[],
+            3,
+        ).await.map(|hits| (resolved, hits)),
+        Err(e) => Err(e),
+    };
+    let mut st = state.lock().await;
+    let (summary, success_status) = match result {
+        Ok((resolved, hits)) => {
+            let count = hits.len();
+            let top_title = hits.first().map(|h| h.title.clone()).unwrap_or_default();
+            let top_url = hits.first().map(|h| h.url.clone()).unwrap_or_default();
+            (
+                crate::screens::web_picker::WebTestSummary {
+                    provider,
+                    ok: true,
+                    message: format!(
+                        "{}: {count} results{}",
+                        resolved.label(),
+                        if top_title.is_empty() { String::new() } else { format!(" · {top_title}") }
+                    ),
+                },
+                Some(crate::screens::web_config::WebTestStatus::Success { provider, count, top_title, top_url }),
+            )
+        }
+        Err(e) => (
+            crate::screens::web_picker::WebTestSummary { provider, ok: false, message: e.clone() },
+            Some(crate::screens::web_config::WebTestStatus::Failed(e)),
+        ),
+    };
+    st.web_config_snapshot.last_test = Some(summary.clone());
+    if let Some(crate::screens::Screen::WebConfig(w)) = st.active_screen.as_mut() {
+        if let Some(status) = success_status {
+            w.test_status = status;
+        }
+    }
+    true
+}
+
 /// (`/compact`) Async forced-compaction pump.
 ///
 /// Mirrors `pump_switch_model` (handle-backed, pushes a result message): the
@@ -3371,6 +3567,15 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 // `CredentialManager::set_provider_key`. Handle-free; no-op when
                 // nothing is pending or no store is bound.
                 if pump_store_provider_key(&state).await {
+                    needs_redraw = true;
+                }
+                if pump_save_web_secret(&state).await {
+                    needs_redraw = true;
+                }
+                if pump_save_web_settings(&state).await {
+                    needs_redraw = true;
+                }
+                if pump_test_web_search(&state).await {
                     needs_redraw = true;
                 }
                 // (`/color`) Agent-color persistence pump. Runs UNCONDITIONALLY
@@ -4976,6 +5181,28 @@ mod tests {
         }
     }
 
+    struct SearchHttp;
+    #[async_trait::async_trait]
+    impl traits::HttpTransport for SearchHttp {
+        async fn request(
+            &self,
+            req: protocol::HttpRequest,
+        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+            assert!(req.url.starts_with("https://lite.duckduckgo.com/lite/"));
+            Ok(protocol::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: r#"<a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fweather.example%2Fnow" class="result-link">Weather Now</a><td class="result-snippet">Sunny</td>"#.to_string(),
+            })
+        }
+        async fn stream_sse(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<traits::http::SseStream, traits::HttpError> {
+            panic!("web test-search pump must not use SSE");
+        }
+    }
+
     /// (Plan 3c C1, regression) The `/connect` screen collects a key and raises
     /// `pending_store_key`; the pump MUST persist it via the bound credential
     /// store (`set_provider_key`), not drop it. Wires an in-memory
@@ -5025,6 +5252,77 @@ mod tests {
         let stored = pump_store_provider_key(&state).await;
         assert!(!stored, "no store bound ⇒ pump stores nothing and returns false");
         assert!(state.lock().await.pending_store_key.is_none());
+    }
+
+    #[tokio::test]
+    async fn pump_save_web_secret_persists_key_and_updates_snapshot() {
+        use secret::CredentialManager;
+        use tool_web::web_search_config::WebSearchProvider;
+
+        let storage = Arc::new(MemStorage::default());
+        let cm = Arc::new(CredentialManager::new(
+            storage as Arc<dyn traits::SecureStorage>,
+            Arc::new(FixedClock),
+            Arc::new(NoHttp),
+        ));
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.set_provider_key_store(Some(cm.clone()));
+        st.pending_web_secret = Some((WebSearchProvider::Tavily, "tvly-secret".into()));
+        let state = Arc::new(Mutex::new(st));
+
+        assert!(pump_save_web_secret(&state).await);
+
+        assert!(state.lock().await.pending_web_secret.is_none());
+        assert!(state.lock().await.web_config_snapshot.tavily_key);
+        assert_eq!(state.lock().await.web_config_snapshot.active, WebSearchProvider::Tavily);
+        let got = cm.get_provider_key("web:tavily").await.expect("get").expect("present");
+        assert_eq!(got.expose_secret(), "tvly-secret");
+    }
+
+    #[test]
+    fn save_web_settings_to_preserves_other_keys() {
+        use tool_web::web_search_config::{WebSearchConfig, WebSearchProvider};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"theme":"dark"}"#).expect("seed");
+
+        save_web_settings_to(
+            &path,
+            &WebSearchConfig {
+                provider: WebSearchProvider::Searxng,
+                searxng_url: Some("https://s.example".into()),
+            },
+        )
+        .expect("save");
+
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(v["webSearch"]["provider"], "searxng");
+        assert_eq!(v["webSearch"]["searxngUrl"], "https://s.example");
+    }
+
+    #[tokio::test]
+    async fn pump_test_web_search_updates_active_screen_status() {
+        use tool_web::web_search_config::WebSearchProvider;
+
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.set_web_search_http(Some(Arc::new(SearchHttp)));
+        st.pending_web_test = Some(WebSearchProvider::DuckDuckGo);
+        let snapshot = crate::screens::web_picker::WebConfigSnapshot::default();
+        st.open_web_config(crate::screens::web_config::WebConfigState::new(
+            WebSearchProvider::DuckDuckGo,
+            snapshot,
+        ));
+        let state = Arc::new(Mutex::new(st));
+
+        assert!(pump_test_web_search(&state).await);
+
+        let st = state.lock().await;
+        assert!(matches!(
+            &st.active_screen,
+            Some(crate::screens::Screen::WebConfig(cfg))
+                if matches!(cfg.test_status, crate::screens::web_config::WebTestStatus::Success { count: 1, .. })
+        ));
     }
 
     /// (BGTASK-3) `pump_task_stop` drains `pending_task_stop` and calls the

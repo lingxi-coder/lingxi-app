@@ -120,6 +120,8 @@ pub struct Runtime {
     /// `/connect` screen's `pump_store_provider_key` persists a collected key.
     /// `None` (the default) leaves the pump a no-op (smoke gates / resume picker).
     provider_key_store: Option<Arc<secret::CredentialManager>>,
+    /// HTTP transport used by `/web` test search.
+    web_search_http: Option<Arc<dyn traits::HttpTransport>>,
     /// (`/connect` Copilot device-flow) Engine GitHub-Copilot OAuth device-flow
     /// driver (`DesktopRuntime.connect_copilot`), threaded into the App
     /// (`AppState::set_copilot_connect_driver`) at mount so `root`'s copilot-login
@@ -160,6 +162,7 @@ impl Runtime {
             provider_auth_methods: std::collections::BTreeMap::new(),
             model_providers: std::collections::BTreeMap::new(),
             provider_key_store: None,
+            web_search_http: None,
             copilot_connect_driver: None,
             oauth_connect_driver: None,
             permission_rx: None,
@@ -190,6 +193,7 @@ impl Runtime {
             provider_auth_methods: std::collections::BTreeMap::new(),
             model_providers: std::collections::BTreeMap::new(),
             provider_key_store: None,
+            web_search_http: None,
             copilot_connect_driver: None,
             oauth_connect_driver: None,
             permission_rx: None,
@@ -359,6 +363,13 @@ impl Runtime {
         self
     }
 
+    /// Attach the HTTP transport used by `/web` test search.
+    #[must_use]
+    pub fn with_web_search_http(mut self, http: Arc<dyn traits::HttpTransport>) -> Self {
+        self.web_search_http = Some(http);
+        self
+    }
+
     /// (`/connect` Copilot device-flow) Attach the engine GitHub-Copilot OAuth
     /// device-flow driver (`DesktopRuntime.connect_copilot`). Threaded onto the
     /// App at init (`AppState::set_copilot_connect_driver`) so `root`'s
@@ -473,6 +484,7 @@ pub async fn run_tui_session(
     // key via `CredentialManager::set_provider_key`. `None` (smoke gates / resume
     // picker) leaves the pump a no-op — byte-identical to the pre-seam behavior.
     initial_state.set_provider_key_store(runtime.provider_key_store.take());
+    initial_state.set_web_search_http(runtime.web_search_http.take());
     // (`/connect` Copilot device-flow) Thread the engine GitHub-Copilot OAuth
     // device-flow driver onto the state so `root`'s copilot-login task can run
     // `begin()` + `poll_to_completion()` when the user picks GitHub Copilot in

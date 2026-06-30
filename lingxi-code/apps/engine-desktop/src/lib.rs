@@ -1593,6 +1593,8 @@ pub struct DesktopRuntime {
     /// persists a collected key (`CredentialManager::set_provider_key`). Same
     /// `Arc` the orchestrator already holds — no second store is constructed.
     pub credentials: Arc<secret::CredentialManager>,
+    /// Shared HTTP transport for TUI-owned client-side WebSearch test runs.
+    pub http: Arc<dyn traits::HttpTransport>,
     /// Structured-output capture slot — `Some` only when `--json-schema` is set
     /// (`DesktopConfig.json_schema`). The forced `StructuredOutput` tool writes
     /// the model's result here; the print path reads it after each turn to
@@ -4790,6 +4792,7 @@ pub async fn build(
         model_providers,
         provider_adapter: provider_adapter_handle,
         credentials,
+        http: http.clone() as Arc<dyn traits::HttpTransport>,
         structured_output_slot,
         wakeup_scheduler_cell,
         runtime_spawner: Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,

@@ -966,6 +966,16 @@ pub struct AppState {
     /// a SECOND `/connect` attempt fires again. Drained by
     /// [`Self::take_pending_connect_cancel`].
     pub pending_connect_cancel: bool,
+    /// (`/web`) Snapshot used by the Web provider picker/config screens.
+    pub web_config_snapshot: crate::screens::web_picker::WebConfigSnapshot,
+    /// (`/web`) Pending secure key write: `(provider, secret)`.
+    pub pending_web_secret: Option<(tool_web::web_search_config::WebSearchProvider, String)>,
+    /// (`/web`) Pending non-secret settings write.
+    pub pending_web_settings: Option<tool_web::web_search_config::WebSearchConfig>,
+    /// (`/web`) Pending provider test search.
+    pub pending_web_test: Option<tool_web::web_search_config::WebSearchProvider>,
+    /// HTTP transport used by `/web` test search.
+    pub web_search_http: Option<std::sync::Arc<dyn traits::HttpTransport>>,
     /// (`/color`) Session agent-color name set by the `/color <name>` command
     /// (claude-code `standaloneAgentContext.color`). `Some("cyan")` after
     /// `/color cyan`; `None` after `/color default` (reset). Maps to a render
@@ -1172,6 +1182,11 @@ impl AppState {
             pending_oauth_login: false,
             oauth_login_provider: None,
             pending_connect_cancel: false,
+            web_config_snapshot: crate::screens::web_picker::WebConfigSnapshot::default(),
+            pending_web_secret: None,
+            pending_web_settings: None,
+            pending_web_test: None,
+            web_search_http: None,
             session_agent_color: None,
             pending_save_color: None,
             pending_permission_delete: None,
@@ -1467,6 +1482,23 @@ impl AppState {
     ) {
         self.active_screen = Some(crate::screens::Screen::ConnectPicker(state));
         crate::telemetry::screen_opened("connect_picker");
+    }
+
+    /// Open the `/web` provider picker.
+    pub fn open_web_picker(&mut self, state: crate::screens::web_picker::WebPickerState) {
+        self.active_screen = Some(crate::screens::Screen::WebPicker(state));
+        crate::telemetry::screen_opened("web_picker");
+    }
+
+    /// Open the `/web` provider config screen.
+    pub fn open_web_config(&mut self, state: crate::screens::web_config::WebConfigState) {
+        self.active_screen = Some(crate::screens::Screen::WebConfig(state));
+        crate::telemetry::screen_opened("web_config");
+    }
+
+    /// Attach the HTTP transport used by `/web` test search.
+    pub fn set_web_search_http(&mut self, http: Option<std::sync::Arc<dyn traits::HttpTransport>>) {
+        self.web_search_http = http;
     }
 
     /// Open the grouped `/model` picker with the merged rows + recent keys + the

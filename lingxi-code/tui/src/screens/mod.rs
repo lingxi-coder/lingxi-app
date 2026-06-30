@@ -190,6 +190,10 @@ pub enum Screen {
     /// `AppState.pending_connect` + closes; `root::pump_open_connect` then
     /// opens the EXISTING key-entry `Connect` screen for that provider.
     ConnectPicker(connect_picker::ConnectPickerState),
+    /// The bare `/web` provider picker for client-side WebSearch configuration.
+    WebPicker(web_picker::WebPickerState),
+    /// Provider-specific `/web` configuration screen.
+    WebConfig(web_config::WebConfigState),
     /// (GitHub Copilot Enterprise) The deployment-type sub-flow shown when
     /// connecting GitHub Copilot: pick GitHub.com Public vs GitHub Enterprise
     /// (then enter the host). Resolving opens the device-flow `Connect` screen

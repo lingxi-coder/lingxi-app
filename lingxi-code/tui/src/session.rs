@@ -569,13 +569,15 @@ pub async fn run_tui_session(
     // (T3) Opt-in INLINE render mode (`LINGXI_TUI_INLINE`): iocraft's inline
     // `render_loop()` draws into the terminal's NATIVE scrollback (no alt-screen /
     // absolute positioning, which Warp mis-renders → ghosting). DEFAULT stays
-    // `.fullscreen()` (alt-screen). `.ignore_ctrl_c()` (claude-code parity) routes
-    // Ctrl-C to the app's double-press exit guard instead of letting iocraft quit
-    // on a single press.
+    // `.fullscreen()` (alt-screen). We opt OUT of iocraft's default fullscreen
+    // mouse capture so terminal-native drag selection/copy keeps working; wheel
+    // scrolling is best-effort and keyboard scrolling is guaranteed.
+    // `.ignore_ctrl_c()` (claude-code parity) routes Ctrl-C to the app's
+    // double-press exit guard instead of letting iocraft quit on a single press.
     let result = if crate::inline_render_mode() {
         root.render_loop().ignore_ctrl_c().await
     } else {
-        root.fullscreen().ignore_ctrl_c().await
+        root.fullscreen().disable_mouse_capture().ignore_ctrl_c().await
     };
 
     // Normal exit: iocraft's Drop has left the alt screen + shown the cursor +
@@ -639,7 +641,7 @@ pub async fn run_resume_picker(
     let result = if crate::inline_render_mode() {
         root.render_loop().await
     } else {
-        root.fullscreen().await
+        root.fullscreen().disable_mouse_capture().await
     };
 
     crate::terminal::restore_terminal_modes();

@@ -56,6 +56,7 @@ pub mod team_spawn;
 pub mod tool_invoker;
 pub mod tts;
 pub mod voice;
+pub mod web_search;
 pub mod worktree;
 
 pub use auth::{AuthError, AuthHandle, LoginInfo};
@@ -118,6 +119,7 @@ pub use team_spawn::{TeamSpawnError, TeamSpawnSeam};
 pub use tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 pub use tts::{TextToSpeech, TtsAudio, TtsError, TtsOpts};
 pub use voice::{VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts};
+pub use web_search::{WebSearchConfigProvider, WebSearchRuntimeConfig};
 #[allow(unused_imports)]
 pub use worktree::*;
 pub use worktree::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};

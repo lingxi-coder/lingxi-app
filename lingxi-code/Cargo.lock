@@ -5703,6 +5703,7 @@ dependencies = [
  "traits",
  "unicode-segmentation",
  "unicode-width",
+ "url",
  "uuid",
 ]
 

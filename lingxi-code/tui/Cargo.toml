@@ -75,6 +75,7 @@ unicode-segmentation = "=1.12.0"
 # a direct dep of bridge/cli/orchestrator at the same major (5.0.1 in the
 # workspace lockfile) — no new major introduced.
 dirs = "5"
+url = "2"
 # (cp-05) Gitignore-aware recursive walk fallback for `@`-completion when
 # `dir` isn't a git repo (the in-process equivalent of claude-code's `rg
 # --hidden` fallback). Already a workspace dep (permission/orchestrator).

@@ -25,9 +25,9 @@
 //! `AdvisorToolResult` — so resume/replay bytes stay intact when those betas are
 //! active. (`ImageUrl` is decode-only on the inbound side.)
 
-use base64::Engine as _;
 use crate::{ContentBlock as LlmBlock, LlmError, Message, ToolDeclaration};
-use protocol::{ContentBlock as ProtoBlock, ConversationMessage, ImageSource, DocumentSource};
+use base64::Engine as _;
+use protocol::{ContentBlock as ProtoBlock, ConversationMessage, DocumentSource, ImageSource};
 use serde_json::Value;
 
 /// Convert a `Vec<ConversationMessage>` into `Vec<llm_client::Message>`.
@@ -38,9 +38,7 @@ use serde_json::Value;
 ///
 /// Returns `Err(LlmError::InvalidRequest)` if any content block cannot be
 /// converted (e.g. bad base64).
-pub fn to_llm_messages(
-    messages: Vec<ConversationMessage>,
-) -> Result<Vec<Message>, LlmError> {
+pub fn to_llm_messages(messages: Vec<ConversationMessage>) -> Result<Vec<Message>, LlmError> {
     messages.into_iter().map(convert_message).collect()
 }
 
@@ -79,10 +77,11 @@ pub fn to_llm_messages(
 ///   attachment-typed or virtual `ConversationMessage`; the protocol has only
 ///   `User`/`Assistant`/`System` (`protocol/src/messages.rs:168`). Attachments
 ///   are already plain `User` content blocks inserted in position by the caller.
-/// * `progress` / `system(non-local-command)` / synthetic-api-error filtering —
-///   N/A: no `progress`, `synthetic_api_error`, or `local_command` message
-///   types exist; `System` is *rejected* at [`convert_message`], never
-///   filtered-to-user.
+/// * `progress` / synthetic-api-error filtering — N/A: no `progress` or
+///   `synthetic_api_error` message types exist. `System` messages (the
+///   transcript-only `Conversation compacted` boundary marker) ARE filtered
+///   here — dropped before the wire, claude-code `isVisibleInTranscriptOnly` —
+///   since `convert_message` rejects any `System` left in the messages vec.
 /// * `stripTargets` error-block stripping (PDF/image/request-too-large → strip
 ///   `document`/`image` from the preceding `isMeta` user) — N/A: requires an
 ///   `isMeta` flag and `isSyntheticApiErrorMessage` markers; the protocol has
@@ -97,9 +96,7 @@ pub fn to_llm_messages(
 ///   and pass through unmodified (`tools/plan/src/plan_mode.rs:150,466`).
 ///   Stripping a model-authored field would corrupt faithful round-trips.
 #[must_use]
-pub fn normalize_messages_for_api(
-    messages: Vec<ConversationMessage>,
-) -> Vec<ConversationMessage> {
+pub fn normalize_messages_for_api(messages: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
     let mut out: Vec<ConversationMessage> = Vec::with_capacity(messages.len());
     for mut msg in messages {
         // `stripAdvisorBlocks` (claude-code `claude.ts:1305`): drop
@@ -118,7 +115,13 @@ pub fn normalize_messages_for_api(
                     )
                 });
             }
-            ConversationMessage::System { .. } => {}
+            // Transcript-only markers (the `Conversation compacted` boundary,
+            // `compaction/src/boundary.rs`) stay in `session.history` for JSONL
+            // + TUI but MUST NOT reach the wire — the real system prompt rides
+            // the `system` parameter and `convert_message` rejects any `System`
+            // here. claude-code `isVisibleInTranscriptOnly`. Dropping pre-merge
+            // also lets the surrounding same-role messages collapse below.
+            ConversationMessage::System { .. } => continue,
         }
         match (out.last_mut(), msg) {
             (
@@ -213,9 +216,7 @@ fn hoist_tool_results(content: &mut [ProtoBlock]) {
 ///   `[Tool result missing due to internal error]`; an orphaned/duplicate
 ///   `tool_result` is stripped.
 #[must_use]
-pub fn ensure_tool_result_pairing(
-    messages: Vec<ConversationMessage>,
-) -> Vec<ConversationMessage> {
+pub fn ensure_tool_result_pairing(messages: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
     use protocol::ContentBlock as B;
     use std::collections::HashSet;
     const SYNTH: &str = "[Tool result missing due to internal error]";
@@ -232,7 +233,12 @@ pub fn ensure_tool_result_pairing(
             stop_reason,
         } = msg
         else {
-            if let ConversationMessage::User { id, content, is_meta } = msg {
+            if let ConversationMessage::User {
+                id,
+                content,
+                is_meta,
+            } = msg
+            {
                 let prev_is_assistant =
                     matches!(result.last(), Some(ConversationMessage::Assistant { .. }));
                 if !prev_is_assistant && content.iter().any(|b| matches!(b, B::ToolResult { .. })) {
@@ -340,7 +346,12 @@ pub fn ensure_tool_result_pairing(
             })
             .collect();
 
-        if let Some(ConversationMessage::User { id: uid, content, is_meta }) = next {
+        if let Some(ConversationMessage::User {
+            id: uid,
+            content,
+            is_meta,
+        }) = next
+        {
             let mut c = content.clone();
             if !orphaned.is_empty() || has_dup_tr {
                 let mut seen: HashSet<String> = HashSet::new();
@@ -368,7 +379,9 @@ pub fn ensure_tool_result_pairing(
                 // isMeta: true).
                 result.push(ConversationMessage::User {
                     id: protocol::MessageId::new(),
-                    content: vec![B::Text { text: NO_CONTENT.to_string() }],
+                    content: vec![B::Text {
+                        text: NO_CONTENT.to_string(),
+                    }],
                     is_meta: true,
                 });
             }
@@ -395,9 +408,7 @@ pub fn ensure_tool_result_pairing(
 /// Each value must have string fields `name` and `description` and a
 /// non-null `input_schema`; missing or wrong-typed fields produce
 /// `Err(LlmError::InvalidRequest)` naming the offending field.
-pub fn to_tool_declarations(
-    tools: Vec<Value>,
-) -> Result<Vec<ToolDeclaration>, LlmError> {
+pub fn to_tool_declarations(tools: Vec<Value>) -> Result<Vec<ToolDeclaration>, LlmError> {
     tools.into_iter().map(convert_tool_declaration).collect()
 }
 
@@ -456,13 +467,15 @@ fn convert_block(block: ProtoBlock) -> Result<LlmBlock, LlmError> {
             tool_call_id: provider_tool_use_id.unwrap_or_else(|| tool_use_id.to_string()),
             // A structured content-block array (MCP image/resource) rides as the
             // `Value::Array` output (emitted verbatim); plain text stays a String.
-            output: content_blocks
-                .map_or_else(|| Value::String(content), Value::Array),
+            output: content_blocks.map_or_else(|| Value::String(content), Value::Array),
             is_error,
             cache_control: None,
             cache_reference: None,
         }),
-        ProtoBlock::Thinking { thinking, signature } => Ok(LlmBlock::Reasoning {
+        ProtoBlock::Thinking {
+            thinking,
+            signature,
+        } => Ok(LlmBlock::Reasoning {
             text: thinking,
             signature,
         }),

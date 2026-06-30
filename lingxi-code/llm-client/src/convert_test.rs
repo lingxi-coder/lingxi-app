@@ -13,7 +13,9 @@ mod tests {
     fn text_block_maps_to_llm_text_with_no_cache_control() {
         let msg = ConversationMessage::User {
             id: MessageId::new(),
-            content: vec![ProtoBlock::Text { text: "hello".to_string() }],
+            content: vec![ProtoBlock::Text {
+                text: "hello".to_string(),
+            }],
             is_meta: false,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
@@ -179,7 +181,9 @@ mod tests {
         let msg = ConversationMessage::User {
             id: MessageId::new(),
             content: vec![ProtoBlock::Image {
-                source: ImageSource::Url { url: "https://example.com/img.png".to_string() },
+                source: ImageSource::Url {
+                    url: "https://example.com/img.png".to_string(),
+                },
             }],
             is_meta: false,
         };
@@ -262,7 +266,9 @@ mod tests {
         let msg = ConversationMessage::Assistant {
             id: MessageId::new(),
             content: vec![
-                ProtoBlock::Text { text: "sure".to_string() },
+                ProtoBlock::Text {
+                    text: "sure".to_string(),
+                },
                 ProtoBlock::ToolUse {
                     id,
                     name: "Read".to_string(),
@@ -325,12 +331,16 @@ mod tests {
     fn user_and_assistant_roles_mapped_correctly() {
         let user = ConversationMessage::User {
             id: MessageId::new(),
-            content: vec![ProtoBlock::Text { text: "hi".to_string() }],
+            content: vec![ProtoBlock::Text {
+                text: "hi".to_string(),
+            }],
             is_meta: false,
         };
         let assistant = ConversationMessage::Assistant {
             id: MessageId::new(),
-            content: vec![ProtoBlock::Text { text: "hello".to_string() }],
+            content: vec![ProtoBlock::Text {
+                text: "hello".to_string(),
+            }],
             stop_reason: Some("end_turn".to_string()),
         };
         let result = to_llm_messages(vec![user, assistant]).unwrap();
@@ -371,7 +381,9 @@ mod tests {
             "input_schema": {"type": "object"}
         })];
         let err = to_tool_declarations(tools).unwrap_err();
-        assert!(matches!(err, LlmError::InvalidRequest { message } if message.contains("description")));
+        assert!(
+            matches!(err, LlmError::InvalidRequest { message } if message.contains("description"))
+        );
     }
 
     #[test]
@@ -381,7 +393,9 @@ mod tests {
             "description": "Read a file"
         })];
         let err = to_tool_declarations(tools).unwrap_err();
-        assert!(matches!(err, LlmError::InvalidRequest { message } if message.contains("input_schema")));
+        assert!(
+            matches!(err, LlmError::InvalidRequest { message } if message.contains("input_schema"))
+        );
     }
 
     #[test]
@@ -392,7 +406,9 @@ mod tests {
             "input_schema": null
         })];
         let err = to_tool_declarations(tools).unwrap_err();
-        assert!(matches!(err, LlmError::InvalidRequest { message } if message.contains("input_schema")));
+        assert!(
+            matches!(err, LlmError::InvalidRequest { message } if message.contains("input_schema"))
+        );
     }
 
     #[test]
@@ -416,7 +432,9 @@ mod tests {
     fn user(id: MessageId, text: &str) -> ConversationMessage {
         ConversationMessage::User {
             id,
-            content: vec![ProtoBlock::Text { text: text.to_string() }],
+            content: vec![ProtoBlock::Text {
+                text: text.to_string(),
+            }],
             is_meta: false,
         }
     }
@@ -424,7 +442,9 @@ mod tests {
     fn assistant(text: &str) -> ConversationMessage {
         ConversationMessage::Assistant {
             id: MessageId::new(),
-            content: vec![ProtoBlock::Text { text: text.to_string() }],
+            content: vec![ProtoBlock::Text {
+                text: text.to_string(),
+            }],
             stop_reason: None,
         }
     }
@@ -442,10 +462,8 @@ mod tests {
     #[test]
     fn two_consecutive_users_merge_into_one_keeping_first_id_and_order() {
         let first_id = MessageId::new();
-        let out = normalize_messages_for_api(vec![
-            user(first_id, "a"),
-            user(MessageId::new(), "b"),
-        ]);
+        let out =
+            normalize_messages_for_api(vec![user(first_id, "a"), user(MessageId::new(), "b")]);
         assert_eq!(out.len(), 1);
         match &out[0] {
             ConversationMessage::User { id, content, .. } => {
@@ -471,12 +489,35 @@ mod tests {
     }
 
     #[test]
+    fn system_marker_is_dropped_and_lets_surrounding_users_merge() {
+        let first_id = MessageId::new();
+        let out = normalize_messages_for_api(vec![
+            user(first_id, "a"),
+            ConversationMessage::System {
+                id: MessageId::new(),
+                content: "Conversation compacted".to_string(),
+            },
+            user(MessageId::new(), "b"),
+        ]);
+        assert_eq!(out.len(), 1, "System marker dropped, two users collapse");
+        match &out[0] {
+            ConversationMessage::User { id, content, .. } => {
+                assert_eq!(id, &first_id);
+                assert_eq!(text_of(content), vec!["a\n", "b"]);
+            }
+            other => panic!("expected merged User, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn single_user_is_unchanged() {
         let id = MessageId::new();
         let out = normalize_messages_for_api(vec![user(id, "solo")]);
         assert_eq!(out.len(), 1);
         match &out[0] {
-            ConversationMessage::User { id: got, content, .. } => {
+            ConversationMessage::User {
+                id: got, content, ..
+            } => {
                 assert_eq!(got, &id);
                 assert_eq!(text_of(content), vec!["solo"]);
             }
@@ -527,7 +568,11 @@ mod tests {
     // ── hoistToolResults + joinTextAtSeam (mergeUserMessages pipeline) ────────
 
     fn user_blocks(id: MessageId, content: Vec<ProtoBlock>) -> ConversationMessage {
-        ConversationMessage::User { id, content, is_meta: false }
+        ConversationMessage::User {
+            id,
+            content,
+            is_meta: false,
+        }
     }
 
     fn tool_result(content: &str) -> ProtoBlock {
@@ -542,7 +587,9 @@ mod tests {
 
     fn image() -> ProtoBlock {
         ProtoBlock::Image {
-            source: ImageSource::Url { url: "https://example.com/i.png".to_string() },
+            source: ImageSource::Url {
+                url: "https://example.com/i.png".to_string(),
+            },
         }
     }
 
@@ -577,10 +624,20 @@ mod tests {
         // [User[Text"hi"], User[ToolResult, Text"after"]] → tool_result leads.
         let id = MessageId::new();
         let out = normalize_messages_for_api(vec![
-            user_blocks(id, vec![ProtoBlock::Text { text: "hi".to_string() }]),
+            user_blocks(
+                id,
+                vec![ProtoBlock::Text {
+                    text: "hi".to_string(),
+                }],
+            ),
             user_blocks(
                 MessageId::new(),
-                vec![tool_result("r"), ProtoBlock::Text { text: "after".to_string() }],
+                vec![
+                    tool_result("r"),
+                    ProtoBlock::Text {
+                        text: "after".to_string(),
+                    },
+                ],
             ),
         ]);
         assert_eq!(out.len(), 1);
@@ -620,11 +677,21 @@ mod tests {
         let out = normalize_messages_for_api(vec![
             user_blocks(
                 id,
-                vec![tool_result("tr1"), ProtoBlock::Text { text: "X".to_string() }],
+                vec![
+                    tool_result("tr1"),
+                    ProtoBlock::Text {
+                        text: "X".to_string(),
+                    },
+                ],
             ),
             user_blocks(
                 MessageId::new(),
-                vec![tool_result("tr2"), ProtoBlock::Text { text: "Y".to_string() }],
+                vec![
+                    tool_result("tr2"),
+                    ProtoBlock::Text {
+                        text: "Y".to_string(),
+                    },
+                ],
             ),
         ]);
         assert_eq!(out.len(), 1);
@@ -656,7 +723,12 @@ mod tests {
         // [User[Text"a"], User[ToolResult]] → hoist runs, no seam `\n`.
         let id = MessageId::new();
         let out = normalize_messages_for_api(vec![
-            user_blocks(id, vec![ProtoBlock::Text { text: "a".to_string() }]),
+            user_blocks(
+                id,
+                vec![ProtoBlock::Text {
+                    text: "a".to_string(),
+                }],
+            ),
             user_blocks(MessageId::new(), vec![tool_result("r")]),
         ]);
         assert_eq!(out.len(), 1);
@@ -713,7 +785,9 @@ mod tests {
             usr_blocks(vec![tr("toolu_a")]),
         ]);
         assert_eq!(out.len(), 3);
-        assert!(matches!(&out[1], ConversationMessage::Assistant { content, .. } if content.len() == 1));
+        assert!(
+            matches!(&out[1], ConversationMessage::Assistant { content, .. } if content.len() == 1)
+        );
         assert!(matches!(&out[2], ConversationMessage::User { content, .. }
             if content.len() == 1 && matches!(content[0], ProtoBlock::ToolResult { .. })));
     }
@@ -723,13 +797,20 @@ mod tests {
     fn pairing_missing_result_synthesizes_error() {
         let out = ensure_tool_result_pairing(vec![
             asst_blocks(vec![tu("toolu_x")]),
-            usr_blocks(vec![ProtoBlock::Text { text: "next".into() }]),
+            usr_blocks(vec![ProtoBlock::Text {
+                text: "next".into(),
+            }]),
         ]);
         let ConversationMessage::User { content, .. } = &out[1] else {
             panic!("expected user");
         };
         match &content[0] {
-            ProtoBlock::ToolResult { tool_use_id, content, is_error, .. } => {
+            ProtoBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                ..
+            } => {
                 assert_eq!(tool_use_id.as_str(), "toolu_x");
                 assert!(*is_error);
                 assert_eq!(content, "[Tool result missing due to internal error]");

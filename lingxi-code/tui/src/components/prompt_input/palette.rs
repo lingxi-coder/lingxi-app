@@ -46,10 +46,16 @@ pub struct PaletteRow {
 /// `94` count). `/connect` is a LingXi addition (opencode-style provider
 /// sign-in / API-key entry) and is surfaced in the `/` palette like any builtin
 /// so it is discoverable. `(name, description)`.
-const LINGXI_EXTRA_COMMANDS: &[(&str, &str)] = &[(
-    "connect",
-    "Connect a provider \u{2014} sign in or add an API key",
-)];
+const LINGXI_EXTRA_COMMANDS: &[(&str, &str)] = &[
+    (
+        "connect",
+        "Connect a provider \u{2014} sign in or add an API key",
+    ),
+    (
+        "web",
+        "Configure web search \u{2014} providers and API keys",
+    ),
+];
 
 /// Description for a palette row: LingXi extras first, else the byte-locked
 /// `core_description`.
@@ -379,14 +385,18 @@ mod tests {
         p.sync_from_prompt("/");
         let all = p.rows().len();
         // 94 builtins minus the 26 hidden/disabled commands = 68 visible, plus
-        // the 1 LingXi extra (`/connect`) = 69.
+        // the 2 LingXi extras (`/connect`, `/web`) = 70.
         assert_eq!(
-            all, 69,
-            "bare slash lists every VISIBLE command + LingXi /connect"
+            all, 70,
+            "bare slash lists every VISIBLE command + LingXi /connect + /web"
         );
         assert!(
             p.rows().iter().any(|r| r.name == "connect"),
             "/connect must appear in the palette"
+        );
+        assert!(
+            p.rows().iter().any(|r| r.name == "web"),
+            "/web must appear in the palette"
         );
         p.sync_from_prompt("/comp");
         let narrowed = p.rows();

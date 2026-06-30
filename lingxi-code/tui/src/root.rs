@@ -936,7 +936,7 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                     ));
                 }
                 WebPickerOutcome::Test(provider) => {
-                    st.pending_web_test = Some(provider);
+                    st.pending_web_test = Some((provider, None));
                 }
                 WebPickerOutcome::Cancel => st.close_screen(),
                 WebPickerOutcome::Stay => {}
@@ -945,6 +945,7 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
         Some(Screen::WebConfig(state)) => {
             use crate::screens::web_config::{handle_web_config_key, WebConfigOutcome};
             let ct_key = iocraft_to_crossterm028_key(k);
+            let typed_key = state.input.trim().to_string();
             match handle_web_config_key(state, ct_key.code) {
                 WebConfigOutcome::SaveSecret { provider, secret } => {
                     st.pending_web_secret = Some((provider, secret));
@@ -956,7 +957,8 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                     });
                 }
                 WebConfigOutcome::Test(provider) => {
-                    st.pending_web_test = Some(provider);
+                    let key = (!typed_key.is_empty()).then_some(typed_key);
+                    st.pending_web_test = Some((provider, key));
                 }
                 WebConfigOutcome::Close => st.close_screen(),
                 WebConfigOutcome::Stay => {}
@@ -2340,10 +2342,10 @@ pub async fn pump_save_web_secret(state: &Arc<Mutex<AppState>>) -> bool {
             if let Some(path) = web_settings_path() {
                 let _ = save_web_settings_to(&path, &cfg);
             }
-            let snapshot = st.web_config_snapshot.clone();
-            if let Some(crate::screens::Screen::WebConfig(w)) = st.active_screen.as_mut() {
-                w.snapshot = snapshot;
-            }
+            // A successful key save returns to the picker (claude-code
+            // closes the credential screen on save). Leaving it open made
+            // Enter look like a no-op.
+            st.close_screen();
             true
         }
         Err(e) => {
@@ -2379,7 +2381,7 @@ pub async fn pump_save_web_settings(state: &Arc<Mutex<AppState>>) -> bool {
 }
 
 pub async fn pump_test_web_search(state: &Arc<Mutex<AppState>>) -> bool {
-    let (provider, snapshot, http, store) = {
+    let (pending, snapshot, http, store) = {
         let mut st = state.lock().await;
         (
             st.pending_web_test.take(),
@@ -2388,16 +2390,25 @@ pub async fn pump_test_web_search(state: &Arc<Mutex<AppState>>) -> bool {
             st.provider_key_store.clone(),
         )
     };
-    let Some(provider) = provider else { return false };
+    let Some((provider, typed_key)) = pending else { return false };
     let Some(http) = http else { return false };
     let cfg = tool_web::web_search_config::WebSearchConfig { provider, searxng_url: snapshot.searxng_url.clone() };
     let mut creds = tool_web::web_search_client::ResolvedWebCredentials::empty();
-    if let Some(store) = store {
-        if let Ok(Some(secret)) = store.get_provider_key("web:tavily").await {
-            creds.tavily_key = Some(secret.expose_secret().clone());
-        }
-        if let Ok(Some(secret)) = store.get_provider_key("web:brave").await {
-            creds.brave_key = Some(secret.expose_secret().clone());
+    // Prefer the key the user just typed (so a test validates exactly what is
+    // on screen, before any save); fall back to the saved store key when the
+    // input is empty (e.g. testing an already-configured provider).
+    match (provider, typed_key) {
+        (tool_web::web_search_config::WebSearchProvider::Tavily, Some(k)) => creds.tavily_key = Some(k),
+        (tool_web::web_search_config::WebSearchProvider::Brave, Some(k)) => creds.brave_key = Some(k),
+        _ => {
+            if let Some(store) = store {
+                if let Ok(Some(secret)) = store.get_provider_key("web:tavily").await {
+                    creds.tavily_key = Some(secret.expose_secret().clone());
+                }
+                if let Ok(Some(secret)) = store.get_provider_key("web:brave").await {
+                    creds.brave_key = Some(secret.expose_secret().clone());
+                }
+            }
         }
     }
     let env = tool_web::web_search_client::EnvSearchConfig::from_env();
@@ -3924,11 +3935,29 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         let mut coalescer = paste_coalescer;
         hooks.use_terminal_events(move |ev| match ev {
             TerminalEvent::Key(k) if k.kind != KeyEventKind::Release => {
-                // Lock briefly to route the key. `try_lock` because we're in
-                // iocraft's synchronous event callback and the mutex is only
-                // held momentarily by the bridge pump.
-                let Ok(mut st) = state.try_lock() else {
-                    return;
+                // Route the key under the AppState lock. We're in iocraft's
+                // synchronous event callback, so we can't `.await` a tokio
+                // Mutex — we `try_lock`. Previously a single failed `try_lock`
+                // DROPPED the keystroke, which silently truncated fast pasted
+                // input (e.g. an API key in `/web`) whenever a ~100ms ticker
+                // pump held the lock for that instant → corrupted key → 401.
+                // The runtime is multi-threaded (apps/cli/src/main.rs) and the
+                // holders only lock briefly (they grab data, unlock, then do
+                // async work), so the lock frees within microseconds — briefly
+                // retry, yielding the worker thread, instead of dropping.
+                let mut st = {
+                    let mut acquired = None;
+                    for _ in 0..50_000 {
+                        if let Ok(g) = state.try_lock() {
+                            acquired = Some(g);
+                            break;
+                        }
+                        std::thread::yield_now();
+                    }
+                    match acquired {
+                        Some(g) => g,
+                        None => return,
+                    }
                 };
                 // (M7-11 review) Publish the LIVE terminal size onto the status
                 // snapshot BEFORE routing the key, so when `/doctor`'s Submit
@@ -5550,7 +5579,7 @@ mod tests {
 
         let mut st = AppState::new(crate::state::StatusSnapshot::default());
         st.set_web_search_http(Some(Arc::new(SearchHttp)));
-        st.pending_web_test = Some(WebSearchProvider::DuckDuckGo);
+        st.pending_web_test = Some((WebSearchProvider::DuckDuckGo, None));
         let snapshot = crate::screens::web_picker::WebConfigSnapshot::default();
         st.open_web_config(crate::screens::web_config::WebConfigState::new(
             WebSearchProvider::DuckDuckGo,

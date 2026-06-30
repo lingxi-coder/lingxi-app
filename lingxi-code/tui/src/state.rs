@@ -977,7 +977,7 @@ pub struct AppState {
     /// (`/web`) Pending non-secret settings write.
     pub pending_web_settings: Option<tool_web::web_search_config::WebSearchConfig>,
     /// (`/web`) Pending provider test search.
-    pub pending_web_test: Option<tool_web::web_search_config::WebSearchProvider>,
+    pub pending_web_test: Option<(tool_web::web_search_config::WebSearchProvider, Option<String>)>,
     /// HTTP transport used by `/web` test search.
     pub web_search_http: Option<std::sync::Arc<dyn traits::HttpTransport>>,
     /// (`/color`) Session agent-color name set by the `/color <name>` command

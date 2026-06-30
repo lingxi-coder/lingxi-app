@@ -176,10 +176,18 @@ pub async fn run_client_web_search(
     blocked_domains: &[String],
     max_results: usize,
 ) -> Result<Vec<SearchHit>, String> {
-    let max_results = if max_results == 0 { DEFAULT_MAX_RESULTS } else { max_results };
+    let max_results = if max_results == 0 {
+        DEFAULT_MAX_RESULTS
+    } else {
+        max_results
+    };
     let (req, parse): (HttpRequest, fn(&str) -> Vec<SearchHit>) = match provider {
-        ClientSearchProvider::Tavily(key) => (tavily_request(key, query, max_results), parse_tavily_body),
-        ClientSearchProvider::Brave(key) => (brave_request(key, query, max_results), parse_brave_body),
+        ClientSearchProvider::Tavily(key) => {
+            (tavily_request(key, query, max_results), parse_tavily_body)
+        }
+        ClientSearchProvider::Brave(key) => {
+            (brave_request(key, query, max_results), parse_brave_body)
+        }
         ClientSearchProvider::Searxng(base) => (searxng_request(base, query), parse_searxng_body),
         ClientSearchProvider::DuckDuckGo => (ddg_lite_request(query), parse_ddg_lite_html),
     };
@@ -188,10 +196,20 @@ pub async fn run_client_web_search(
         .await
         .map_err(|e| format!("web search transport error ({}): {e}", provider.label()))?;
     if resp.status >= 400 {
+        // Surface the provider's response body (e.g. Tavily returns
+        // `{"detail":{"error":"Unauthorized: missing or invalid API key"}}`)
+        // so an auth failure is distinguishable from a wrong-key failure.
+        let detail = resp.body.trim();
+        let detail = detail.chars().take(200).collect::<String>();
         return Err(format!(
-            "web search failed ({}): HTTP {}",
+            "web search failed ({}): HTTP {}{}",
             provider.label(),
-            resp.status
+            resp.status,
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" — {detail}")
+            }
         ));
     }
     let mut hits = parse(&resp.body);
@@ -217,8 +235,10 @@ fn env_trimmed(key: &str) -> Option<String> {
 // ── request builders ────────────────────────────────────────────────────────
 
 fn tavily_request(key: &str, query: &str, max_results: usize) -> HttpRequest {
+    // Tavily authenticates via an `Authorization: Bearer <key>` header (its
+    // OpenAPI `bearerAuth` security scheme). The legacy body `api_key` field is
+    // no longer accepted and returns HTTP 401.
     let body = json!({
-        "api_key": key,
         "query": query,
         "max_results": max_results,
         "search_depth": "basic",
@@ -226,7 +246,10 @@ fn tavily_request(key: &str, query: &str, max_results: usize) -> HttpRequest {
     HttpRequest {
         method: HttpMethod::Post,
         url: "https://api.tavily.com/search".to_string(),
-        headers: vec![("content-type".into(), "application/json".into())],
+        headers: vec![
+            ("content-type".into(), "application/json".into()),
+            ("authorization".into(), format!("Bearer {key}")),
+        ],
         body: Some(body.to_string()),
         body_bytes: None,
         timeout: Some(CLIENT_SEARCH_TIMEOUT),
@@ -266,7 +289,10 @@ fn ddg_lite_request(query: &str) -> HttpRequest {
         method: HttpMethod::Get,
         url: format!("https://lite.duckduckgo.com/lite/?q={}", enc(query)),
         headers: vec![
-            ("user-agent".into(), "Mozilla/5.0 (compatible; LingXi-Code)".into()),
+            (
+                "user-agent".into(),
+                "Mozilla/5.0 (compatible; LingXi-Code)".into(),
+            ),
             ("accept".into(), "text/html".into()),
         ],
         body: None,
@@ -278,7 +304,9 @@ fn ddg_lite_request(query: &str) -> HttpRequest {
 // ── response parsers (pure, unit-tested) ─────────────────────────────────────
 
 fn parse_tavily_body(body: &str) -> Vec<SearchHit> {
-    let Ok(v) = serde_json::from_str::<Value>(body) else { return vec![] };
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return vec![];
+    };
     v.get("results")
         .and_then(Value::as_array)
         .map(|arr| {
@@ -286,9 +314,17 @@ fn parse_tavily_body(body: &str) -> Vec<SearchHit> {
                 .filter_map(|r| {
                     let url = r.get("url").and_then(Value::as_str)?.to_string();
                     Some(SearchHit {
-                        title: r.get("title").and_then(Value::as_str).unwrap_or("").to_string(),
+                        title: r
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
                         url,
-                        snippet: r.get("content").and_then(Value::as_str).unwrap_or("").to_string(),
+                        snippet: r
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
                     })
                 })
                 .collect()
@@ -297,7 +333,9 @@ fn parse_tavily_body(body: &str) -> Vec<SearchHit> {
 }
 
 fn parse_brave_body(body: &str) -> Vec<SearchHit> {
-    let Ok(v) = serde_json::from_str::<Value>(body) else { return vec![] };
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return vec![];
+    };
     v.get("web")
         .and_then(|w| w.get("results"))
         .and_then(Value::as_array)
@@ -306,9 +344,17 @@ fn parse_brave_body(body: &str) -> Vec<SearchHit> {
                 .filter_map(|r| {
                     let url = r.get("url").and_then(Value::as_str)?.to_string();
                     Some(SearchHit {
-                        title: r.get("title").and_then(Value::as_str).unwrap_or("").to_string(),
+                        title: r
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
                         url,
-                        snippet: r.get("description").and_then(Value::as_str).unwrap_or("").to_string(),
+                        snippet: r
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
                     })
                 })
                 .collect()
@@ -317,7 +363,9 @@ fn parse_brave_body(body: &str) -> Vec<SearchHit> {
 }
 
 fn parse_searxng_body(body: &str) -> Vec<SearchHit> {
-    let Ok(v) = serde_json::from_str::<Value>(body) else { return vec![] };
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return vec![];
+    };
     v.get("results")
         .and_then(Value::as_array)
         .map(|arr| {
@@ -325,9 +373,17 @@ fn parse_searxng_body(body: &str) -> Vec<SearchHit> {
                 .filter_map(|r| {
                     let url = r.get("url").and_then(Value::as_str)?.to_string();
                     Some(SearchHit {
-                        title: r.get("title").and_then(Value::as_str).unwrap_or("").to_string(),
+                        title: r
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
                         url,
-                        snippet: r.get("content").and_then(Value::as_str).unwrap_or("").to_string(),
+                        snippet: r
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
                     })
                 })
                 .collect()
@@ -345,14 +401,18 @@ fn parse_ddg_lite_html(html: &str) -> Vec<SearchHit> {
     let mut search_from = 0usize;
     while let Some(rel) = html[search_from..].find("<a ") {
         let tag_start = search_from + rel;
-        let Some(gt_rel) = html[tag_start..].find('>') else { break };
+        let Some(gt_rel) = html[tag_start..].find('>') else {
+            break;
+        };
         let tag_end = tag_start + gt_rel;
         let open_tag = &html[tag_start..tag_end]; // `<a ... `
         search_from = tag_end + 1;
         if !open_tag.contains("result-link") {
             continue;
         }
-        let Some(href) = attr_value(open_tag, "href") else { continue };
+        let Some(href) = attr_value(open_tag, "href") else {
+            continue;
+        };
         let url = unwrap_ddg_redirect(&href);
         if url.is_empty() {
             continue;
@@ -369,8 +429,11 @@ fn parse_ddg_lite_html(html: &str) -> Vec<SearchHit> {
             .find("result-snippet")
             .and_then(|s| {
                 let seg = &after[s..next_link];
-                seg.find('>')
-                    .and_then(|gt| seg[gt + 1..].find("</td>").map(|e| strip_tags(&seg[gt + 1..gt + 1 + e])))
+                seg.find('>').and_then(|gt| {
+                    seg[gt + 1..]
+                        .find("</td>")
+                        .map(|e| strip_tags(&seg[gt + 1..gt + 1 + e]))
+                })
             })
             .unwrap_or_default();
         hits.push(SearchHit {
@@ -445,7 +508,10 @@ fn decode_entities(s: &str) -> String {
 // ── filtering + formatting ───────────────────────────────────────────────────
 
 fn host_of(u: &str) -> Option<String> {
-    url::Url::parse(u).ok().and_then(|p| p.host_str().map(|h| h.trim_start_matches("www.").to_string()))
+    url::Url::parse(u).ok().and_then(|p| {
+        p.host_str()
+            .map(|h| h.trim_start_matches("www.").to_string())
+    })
 }
 
 fn domain_matches(host: &str, domain: &str) -> bool {
@@ -457,7 +523,11 @@ fn domain_matches(host: &str, domain: &str) -> bool {
 /// Apply allow/block domain filters (substring match on the host, matching the
 /// hosted tool's `allowed_domains`/`blocked_domains` semantics).
 #[must_use]
-pub fn apply_domain_filter(hits: Vec<SearchHit>, allowed: &[String], blocked: &[String]) -> Vec<SearchHit> {
+pub fn apply_domain_filter(
+    hits: Vec<SearchHit>,
+    allowed: &[String],
+    blocked: &[String],
+) -> Vec<SearchHit> {
     hits.into_iter()
         .filter(|h| {
             let host = host_of(&h.url).unwrap_or_default();
@@ -527,7 +597,14 @@ mod tests {
         let body = r#"{"results":[{"title":"T1","url":"https://a.com","content":"snip1"},{"title":"T2","url":"https://b.com","content":"snip2"}]}"#;
         let hits = parse_tavily_body(body);
         assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0], SearchHit { title: "T1".into(), url: "https://a.com".into(), snippet: "snip1".into() });
+        assert_eq!(
+            hits[0],
+            SearchHit {
+                title: "T1".into(),
+                url: "https://a.com".into(),
+                snippet: "snip1".into()
+            }
+        );
     }
 
     #[test]
@@ -560,8 +637,16 @@ mod tests {
     #[test]
     fn domain_filter_allow_and_block() {
         let hits = vec![
-            SearchHit { title: "a".into(), url: "https://good.com/x".into(), snippet: String::new() },
-            SearchHit { title: "b".into(), url: "https://bad.com/y".into(), snippet: String::new() },
+            SearchHit {
+                title: "a".into(),
+                url: "https://good.com/x".into(),
+                snippet: String::new(),
+            },
+            SearchHit {
+                title: "b".into(),
+                url: "https://bad.com/y".into(),
+                snippet: String::new(),
+            },
         ];
         let allowed = apply_domain_filter(hits.clone(), &["good.com".into()], &[]);
         assert_eq!(allowed.len(), 1);
@@ -574,21 +659,43 @@ mod tests {
     #[test]
     fn domain_filter_matches_domain_boundaries_not_substrings() {
         let hits = vec![
-            SearchHit { title: "real".into(), url: "https://weather.com/today".into(), snippet: String::new() },
-            SearchHit { title: "fake".into(), url: "https://fakeweather.com/today".into(), snippet: String::new() },
-            SearchHit { title: "sub".into(), url: "https://news.weather.com/today".into(), snippet: String::new() },
+            SearchHit {
+                title: "real".into(),
+                url: "https://weather.com/today".into(),
+                snippet: String::new(),
+            },
+            SearchHit {
+                title: "fake".into(),
+                url: "https://fakeweather.com/today".into(),
+                snippet: String::new(),
+            },
+            SearchHit {
+                title: "sub".into(),
+                url: "https://news.weather.com/today".into(),
+                snippet: String::new(),
+            },
         ];
 
         let allowed = apply_domain_filter(hits.clone(), &["weather.com".into()], &[]);
-        assert_eq!(allowed.iter().map(|h| h.title.as_str()).collect::<Vec<_>>(), vec!["real", "sub"]);
+        assert_eq!(
+            allowed.iter().map(|h| h.title.as_str()).collect::<Vec<_>>(),
+            vec!["real", "sub"]
+        );
 
         let blocked = apply_domain_filter(hits, &[], &["weather.com".into()]);
-        assert_eq!(blocked.iter().map(|h| h.title.as_str()).collect::<Vec<_>>(), vec!["fake"]);
+        assert_eq!(
+            blocked.iter().map(|h| h.title.as_str()).collect::<Vec<_>>(),
+            vec!["fake"]
+        );
     }
 
     #[test]
     fn format_includes_links_and_sources() {
-        let hits = vec![SearchHit { title: "T".into(), url: "https://u.com".into(), snippet: "s".into() }];
+        let hits = vec![SearchHit {
+            title: "T".into(),
+            url: "https://u.com".into(),
+            snippet: "s".into(),
+        }];
         let out = format_results_for_model("q", &hits, "Tavily");
         assert!(out.contains("[T](https://u.com)"));
         assert!(out.contains("Sources:"));

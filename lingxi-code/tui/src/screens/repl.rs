@@ -256,6 +256,15 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 theme: theme,
                 theme_name: theme_name,
             )
+            #(if scroll_offset > 0 {
+                element! {
+                    View(flex_direction: FlexDirection::Row) {
+                        Text(content: format!("Scrolled {scroll_offset} lines"), color: dim)
+                    }
+                }.into_any()
+            } else {
+                element!(View).into_any()
+            })
             #(if show_spinner {
                 // Glyph + verb render in the active theme's Claude accent
                 // (claude-code `Spinner` `defaultColor='claude'`).

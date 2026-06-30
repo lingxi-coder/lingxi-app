@@ -89,6 +89,8 @@ pub struct Runtime {
     /// `/connect` screen's `pump_store_provider_key` persists a collected
     /// provider key via `CredentialManager::set_provider_key`.
     pub provider_key_store: std::sync::Arc<secret::CredentialManager>,
+    /// Shared HTTP transport for TUI-owned `/web` test-search requests.
+    pub http: std::sync::Arc<dyn traits::HttpTransport>,
     /// Structured-output capture slot, projected from
     /// [`engine_desktop::DesktopRuntime::structured_output_slot`]. `Some` only
     /// under `--json-schema`; the print path reads it after each turn to validate
@@ -582,6 +584,7 @@ pub async fn build_runtime_from_config(
         provider_auth_methods: rt.provider_auth_methods,
         model_providers: rt.model_providers,
         provider_key_store: rt.credentials,
+        http: rt.http,
         structured_output_slot: rt.structured_output_slot,
         bash_runner: rt.bash_runner,
         connect_copilot: rt.connect_copilot,

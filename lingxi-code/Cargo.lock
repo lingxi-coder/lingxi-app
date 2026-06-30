@@ -5698,10 +5698,12 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tool-web",
  "tracing",
  "traits",
  "unicode-segmentation",
  "unicode-width",
+ "url",
  "uuid",
 ]
 

@@ -716,15 +716,35 @@ impl WebSearchTool {
         input: &WebSearchInput,
     ) -> Result<ToolCallResult, ToolError> {
         use crate::web_search_client::{
-            format_results_for_model, run_client_web_search, ClientSearchProvider,
+            format_results_for_model, resolve_client_search_provider_with_credentials,
+            run_client_web_search, ClientSearchProvider, EnvSearchConfig, ResolvedWebCredentials,
         };
+        use crate::web_search_config::WebSearchConfig;
         let invocation_id = tool_api::util::ids::ulid_or_uuid();
         let allowed = input.allowed_domains.clone().unwrap_or_default();
         let blocked = input.blocked_domains.clone().unwrap_or_default();
         self.emit_started(&invocation_id, &input.query, allowed.len(), blocked.len())
             .await;
         let started = Instant::now();
-        let provider = ClientSearchProvider::from_env();
+        let provider = if let Some(loader) = &self.ctx.web_search_config {
+            let cfg = loader.load_web_search_config().await;
+            let web_cfg = WebSearchConfig {
+                provider: cfg
+                    .provider
+                    .as_deref()
+                    .and_then(crate::web_search_config::WebSearchProvider::parse)
+                    .unwrap_or(crate::web_search_config::WebSearchProvider::Auto),
+                searxng_url: cfg.searxng_url,
+            };
+            let creds = ResolvedWebCredentials {
+                tavily_key: cfg.tavily_key,
+                brave_key: cfg.brave_key,
+            };
+            resolve_client_search_provider_with_credentials(&web_cfg, &creds, &EnvSearchConfig::from_env())
+                .unwrap_or_else(|_| ClientSearchProvider::DuckDuckGo)
+        } else {
+            ClientSearchProvider::from_env()
+        };
         let result = run_client_web_search(
             &self.ctx.http,
             &provider,

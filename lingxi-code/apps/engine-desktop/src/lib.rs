@@ -66,6 +66,43 @@ use tokio::sync::RwLock;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 use traits::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
 
+struct DesktopWebSearchConfigProvider {
+    lingxi_home: std::path::PathBuf,
+    credentials: Arc<secret::CredentialManager>,
+}
+
+#[async_trait::async_trait]
+impl traits::WebSearchConfigProvider for DesktopWebSearchConfigProvider {
+    async fn load_web_search_config(&self) -> traits::WebSearchRuntimeConfig {
+        let settings_path = self.lingxi_home.join("settings.json");
+        let parsed = std::fs::read_to_string(&settings_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .map(|v| tool_web::web_search_config::WebSearchConfig::from_settings_json(&v))
+            .unwrap_or_default();
+        let tavily_key = self
+            .credentials
+            .get_provider_key("web:tavily")
+            .await
+            .ok()
+            .flatten()
+            .map(|s| s.expose_secret().clone());
+        let brave_key = self
+            .credentials
+            .get_provider_key("web:brave")
+            .await
+            .ok()
+            .flatten()
+            .map(|s| s.expose_secret().clone());
+        traits::WebSearchRuntimeConfig {
+            provider: Some(parsed.provider.as_str().to_string()),
+            searxng_url: parsed.searxng_url,
+            tavily_key,
+            brave_key,
+        }
+    }
+}
+
 /// API provider, mirroring `APIProvider` (`utils/model/providers.ts:4`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ApiProvider {
@@ -1593,6 +1630,8 @@ pub struct DesktopRuntime {
     /// persists a collected key (`CredentialManager::set_provider_key`). Same
     /// `Arc` the orchestrator already holds — no second store is constructed.
     pub credentials: Arc<secret::CredentialManager>,
+    /// Shared HTTP transport for TUI-owned client-side WebSearch test runs.
+    pub http: Arc<dyn traits::HttpTransport>,
     /// Structured-output capture slot — `Some` only when `--json-schema` is set
     /// (`DesktopConfig.json_schema`). The forced `StructuredOutput` tool writes
     /// the model's result here; the print path reads it after each turn to
@@ -3892,6 +3931,10 @@ pub async fn build(
         http: http.clone(),
         provider: tool_provider,
         default_model: orch_cfg.model.clone(),
+        web_search_config: Some(Arc::new(DesktopWebSearchConfigProvider {
+            lingxi_home: cfg.lingxi_home.clone(),
+            credentials: credentials.clone(),
+        })),
         worktree: Arc::new(PosixWorktreeManager::new(cwd.clone())),
         subagent_spawner: Some(subagent_spawner.clone()),
         task_registry: Some(
@@ -4790,6 +4833,7 @@ pub async fn build(
         model_providers,
         provider_adapter: provider_adapter_handle,
         credentials,
+        http: http.clone() as Arc<dyn traits::HttpTransport>,
         structured_output_slot,
         wakeup_scheduler_cell,
         runtime_spawner: Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,

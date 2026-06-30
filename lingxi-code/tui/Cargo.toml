@@ -35,6 +35,7 @@ memory = { path = "../memory" }
 # host threads its shared `Arc<CredentialManager>` onto the App, mirroring the
 # `provider_availability` seam.
 secret = { path = "../secret" }
+tool-web = { path = "../tools/web" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # (theme-detect) rustix::event::poll + rustix::io::read for the non-blocking TTY
 # pre-flight in `TimedStdin` — safe wrappers around poll(2)/read(2) that require
@@ -74,6 +75,7 @@ unicode-segmentation = "=1.12.0"
 # a direct dep of bridge/cli/orchestrator at the same major (5.0.1 in the
 # workspace lockfile) — no new major introduced.
 dirs = "5"
+url = "2"
 # (cp-05) Gitignore-aware recursive walk fallback for `@`-completion when
 # `dir` isn't a git repo (the in-process equivalent of claude-code's `rg
 # --hidden` fallback). Already a workspace dep (permission/orchestrator).

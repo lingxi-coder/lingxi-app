@@ -301,6 +301,15 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 st.open_connect_picker(picker);
                 return false;
             }
+            if st.prompt_text.trim() == "/web" {
+                st.prompt_text.clear();
+                st.prompt_cursor = 0;
+                let picker = crate::screens::web_picker::WebPickerState::from_snapshot(
+                    st.web_config_snapshot.clone(),
+                );
+                st.open_web_picker(picker);
+                return false;
+            }
             // `/vim` toggles the editor's vim keybindings (claude-code
             // `commands/vim/vim.ts`). An IMMEDIATE command (not a screen): flip
             // the existing `vim_enabled` — mirroring the Ctrl-Alt-V `ToggleVim`
@@ -874,6 +883,39 @@ pub fn connect_picker_popup_lines(
     lines
 }
 
+#[must_use]
+pub fn web_picker_popup_lines(
+    w: &crate::screens::web_picker::WebPickerState,
+) -> Vec<crate::components::picker_popup::PopupLine> {
+    use crate::components::picker_popup::{PopupLine, PopupMarker};
+
+    let mut lines = Vec::new();
+    let visible = w.visible_indices();
+    for (pos, idx) in visible.into_iter().enumerate() {
+        let row = &w.rows[idx];
+        lines.push(PopupLine::Item {
+            marker: if row.active { PopupMarker::Check } else { PopupMarker::None },
+            label: row.label.to_string(),
+            detail: row.description.to_string(),
+            badge: String::new(),
+            selected: pos == w.selected,
+        });
+    }
+    if let Some(provider) = w.highlighted_provider() {
+        lines.push(PopupLine::Header(String::new()));
+        for d in crate::screens::web_picker::web_provider_detail_lines(provider, &w.snapshot) {
+            lines.push(PopupLine::Item {
+                marker: PopupMarker::None,
+                label: d,
+                detail: String::new(),
+                badge: String::new(),
+                selected: false,
+            });
+        }
+    }
+    lines
+}
+
 /// Build the full `ReplScreen` element from an `AppState` snapshot for
 /// the given viewport height. Used by the per-frame render path; tests
 /// also exercise it to verify the screen composes without panicking.
@@ -1145,6 +1187,29 @@ pub fn render_screen(
                     viewport_height,
                     &state.theme,
                 )
+            }
+            Screen::WebPicker(w) => {
+                use crate::components::picker_popup::render_picker_popup;
+                let lines = web_picker_popup_lines(w);
+                render_picker_popup(
+                    "Configure web search",
+                    &w.query,
+                    &lines,
+                    None,
+                    viewport_width,
+                    viewport_height,
+                    &state.theme,
+                )
+            }
+            Screen::WebConfig(w) => {
+                let body = crate::screens::web_config::render_web_config_to_string(w);
+                let lines: Vec<String> = body.lines().map(str::to_string).collect();
+                element! {
+                    View(flex_direction: FlexDirection::Column, padding: 1) {
+                        #(lines.into_iter().map(|line| element! { Text(content: line) }))
+                    }
+                }
+                .into_any()
             }
             Screen::GithubDeployment(g) => {
                 // (GitHub Copilot Enterprise) The deployment-type sub-flow, in the
@@ -1837,6 +1902,19 @@ mod dispatch_tests {
             ),
             "the command must be echoed as a UserBashInput row"
         );
+    }
+
+    #[test]
+    fn submit_web_opens_picker() {
+        let mut st = s();
+        st.prompt_text = "/web".into();
+        st.prompt_cursor = st.prompt_text.len();
+
+        let should_run = dispatch(KeyAction::Submit, &mut st);
+
+        assert!(!should_run, "/web is handled by the TUI");
+        assert_eq!(st.prompt_text, "");
+        assert!(matches!(st.active_screen, Some(crate::screens::Screen::WebPicker(_))));
     }
 
     /// A BARE `!` (no command after the prefix) is just the composer's bash-mode

@@ -1,9 +1,12 @@
-//! `/permissions` viewer (claude-code `commands/permissions` → the
-//! `PermissionRuleList` UI): a read-only list↔detail view of the configured
-//! permission rules (behavior · rule · source) plus the active permission mode.
-//! Pure reducer over a selected index + a dialog mode, mirroring `hooks.rs` /
-//! `mcp.rs`. The rows are loaded OFF-DISK (like `skills.rs`) from the three
-//! persistable settings tiers via [`load_permission_sections`].
+//! `/permissions` manager (claude-code `commands/permissions` → the
+//! `PermissionRuleList` UI): an interactive Allow/Ask/Deny/Workspace tabbed
+//! view of the configured permission rules (behavior · rule · source) plus the
+//! active permission mode, with add / delete / workspace-directory management.
+//! Pure reducer over a selected index + a dialog mode + the active tab,
+//! mirroring `hooks.rs` / `mcp.rs`. The rows are loaded OFF-DISK (like
+//! `skills.rs`) from the three persistable settings tiers via
+//! [`load_permission_sections`]; mutations are emitted as [`PermissionsOutcome`]
+//! variants that the caller persists + reloads.
 //!
 //! ## Data source
 //! Reads the SAME three settings files the enforcement loader reads
@@ -16,10 +19,16 @@
 //! persisted — a documented limitation, not a parity gap.
 //!
 //! ## Scope
-//! Read-only VIEWER. claude-code's full `/permissions` is an interactive MANAGER
-//! (add/remove a rule, switch mode → settings write). Adding rules already has
-//! the persistence mechanism (3c `persist_permission_update`); wiring an
-//! interactive add/remove into this screen is a deferred follow-up.
+//! Interactive MANAGER (matches claude-code's `PermissionRuleList`): four tabs
+//! (Allow / Ask / Deny / Workspace), `a` to add a rule / workspace directory,
+//! `d` to delete behind a y/n confirmation, and Enter for the per-rule detail.
+//! Adds/deletes emit [`PermissionsOutcome`] variants that the root pumps
+//! (`pump_permission_add` / `pump_permission_delete` / `pump_workspace_dir`)
+//! persist to settings.json via `persist_permission_update` /
+//! `remove_permission_update` / `persist_workspace_directory`, then reload.
+//! Residual vs claude-code (deferred, low-priority chrome): the styled Dialog
+//! frame, the Recently-denied tab, rule-input autocomplete, and switching the
+//! permission mode from this screen.
 
 use permission::{
     PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue,

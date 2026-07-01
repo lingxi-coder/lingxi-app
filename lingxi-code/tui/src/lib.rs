@@ -24,6 +24,7 @@ pub mod permission_bridge;
 pub mod rate_limit_messages;
 pub mod recent_models;
 pub mod render;
+pub mod render_iocraft;
 pub mod replay;
 pub mod root;
 pub mod screens;
@@ -47,9 +48,11 @@ pub use session::{run_tui_session, Runtime};
 /// (T3) Whether to use iocraft's INLINE render loop instead of the fullscreen
 /// alt-screen one. Default ON. Opt-out via `LINGXI_TUI_FULLSCREEN` (non-empty, not `"0"`).
 ///
-/// Inline mode (`render_loop()` without `.fullscreen()`) draws into the terminal's
-/// own scrollback (Ink / claude-code model) — no alt-screen, no absolute
-/// positioning. This solves ghosting in Warp and standard scrollback retention.
+/// Inline mode (`render_loop()` without `.fullscreen()`) keeps the UI in the
+/// normal terminal buffer — no alt-screen. The live transcript itself stays in
+/// the fixed TUI frame so the prompt/footer remain bottom-pinned; the old
+/// native-scrollback transcript commit path is opt-in via
+/// `LINGXI_TUI_NATIVE_SCROLLBACK=1`.
 /// Fullscreen enters the alt screen + draws at absolute positions.
 #[must_use]
 pub(crate) fn inline_render_mode() -> bool {

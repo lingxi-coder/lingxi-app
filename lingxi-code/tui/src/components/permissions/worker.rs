@@ -8,6 +8,7 @@ use iocraft::prelude::*;
 
 use crate::multiagent::style::agent_color_from_name;
 use crate::theme::Theme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// `BLACK_CIRCLE` + ` ` (claude-code `figures.ts`): `⏺` (U+23FA) on macOS,
 /// `●` (U+25CF) elsewhere.
@@ -17,16 +18,10 @@ pub const BADGE_CIRCLE: &str = if cfg!(target_os = "macos") {
     "\u{25CF} "
 };
 
-/// Worker identity carried on a pending permission (TUI-side; not on the wire).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct WorkerPermissionInfo {
-    /// Worker display name (rendered `@name`).
-    pub name: String,
-    /// Worker color name (→ `agent_color_from_name`).
-    pub color: String,
-    /// Optional team name (for the "sent to team … leader" line).
-    pub team: Option<String>,
-}
+/// Worker identity carried on a pending permission. Moved to `tui-core`
+/// (`tui_core::permission_bridge::WorkerPermissionInfo`) during the iocraft →
+/// ratatui migration; re-exported so existing paths keep resolving.
+pub use tui_core::permission_bridge::WorkerPermissionInfo;
 
 /// `{BADGE_CIRCLE}@{name}` (claude-code `WorkerBadge`). Color applied by the
 /// component.
@@ -112,10 +107,10 @@ pub fn WorkerPendingPermission(props: &WorkerPendingProps) -> impl Into<AnyEleme
         View(
             flex_direction: FlexDirection::Column,
             border_style: BorderStyle::Round,
-            border_color: theme.warning,
+            border_color: theme.warning.to_iocraft(),
         ) {
-            Text(content: header, color: theme.warning, weight: Weight::Bold)
-            Text(content: rest, color: theme.text)
+            Text(content: header, color: theme.warning.to_iocraft(), weight: Weight::Bold)
+            Text(content: rest, color: theme.text.to_iocraft())
         }
     }
 }

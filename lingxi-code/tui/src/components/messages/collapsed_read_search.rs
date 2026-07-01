@@ -16,6 +16,7 @@
 use iocraft::prelude::*;
 
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Dim gutter for the summary + each expanded entry row (2 spaces + U+23BF +
 /// 2 spaces).
@@ -152,7 +153,7 @@ pub fn CollapsedReadSearchContent(
     let body = render_collapsed_to_string(&props.counts, &props.entries, props.expanded);
     element! {
         View(flex_direction: FlexDirection::Column) {
-            Text(content: body, color: TuiTheme::DIM)
+            Text(content: body, color: TuiTheme::DIM.to_iocraft())
         }
     }
 }

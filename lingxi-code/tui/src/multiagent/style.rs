@@ -6,6 +6,7 @@
 //! - `AgentColor` + `agent_color` — per-agent color (equivalent-look parity;
 //!   exact RGB is a non-goal per the M9 design).
 
+use crate::render_iocraft::StyleColorIocraftExt;
 use crate::theme::Theme;
 use iocraft::Color;
 
@@ -27,10 +28,10 @@ pub fn task_status_icon(status: &str) -> char {
 #[must_use]
 pub fn task_status_color(status: &str, theme: &Theme) -> Color {
     match status {
-        "completed" => theme.success,
-        "failed" => theme.error,
-        "killed" => theme.warning,
-        _ => theme.dim, // running, pending, unknown → background/inactive
+        "completed" => theme.success.to_iocraft(),
+        "failed" => theme.error.to_iocraft(),
+        "killed" => theme.warning.to_iocraft(),
+        _ => theme.dim.to_iocraft(), // running, pending, unknown → background/inactive
     }
 }
 
@@ -135,12 +136,12 @@ mod tests {
     #[test]
     fn status_colors_map_to_theme_semantics() {
         let t = Theme::dark();
-        assert_eq!(task_status_color("completed", &t), t.success);
-        assert_eq!(task_status_color("failed", &t), t.error);
-        assert_eq!(task_status_color("killed", &t), t.warning);
-        assert_eq!(task_status_color("running", &t), t.dim);
-        assert_eq!(task_status_color("pending", &t), t.dim);
-        assert_eq!(task_status_color("unknown", &t), t.dim);
+        assert_eq!(task_status_color("completed", &t), t.success.to_iocraft());
+        assert_eq!(task_status_color("failed", &t), t.error.to_iocraft());
+        assert_eq!(task_status_color("killed", &t), t.warning.to_iocraft());
+        assert_eq!(task_status_color("running", &t), t.dim.to_iocraft());
+        assert_eq!(task_status_color("pending", &t), t.dim.to_iocraft());
+        assert_eq!(task_status_color("unknown", &t), t.dim.to_iocraft());
     }
 
     #[test]

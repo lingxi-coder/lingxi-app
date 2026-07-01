@@ -950,7 +950,10 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                 WebConfigOutcome::SaveSecret { provider, secret } => {
                     st.pending_web_secret = Some((provider, secret));
                 }
-                WebConfigOutcome::SaveSettings { provider, searxng_url } => {
+                WebConfigOutcome::SaveSettings {
+                    provider,
+                    searxng_url,
+                } => {
                     st.pending_web_settings = Some(tool_web::web_search_config::WebSearchConfig {
                         provider,
                         searxng_url,
@@ -1524,8 +1527,7 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
 }
 
 /// Route a live fullscreen mouse event into scrollback state. Only wheel events
-/// are consumed here; click/drag selection is deliberately ignored so terminal
-/// native text selection remains the owner when the backend allows it.
+/// are consumed here; click/drag events are deliberately ignored.
 pub fn handle_live_mouse(st: &mut AppState, m: &FullscreenMouseEvent, viewport: usize) {
     let overlay_active = st.pending_permission.is_some()
         || st.active_screen.is_some()
@@ -2289,7 +2291,9 @@ pub async fn pump_store_provider_key(state: &Arc<Mutex<AppState>>) -> bool {
     }
 }
 
-fn web_credential_id(provider: tool_web::web_search_config::WebSearchProvider) -> Option<&'static str> {
+fn web_credential_id(
+    provider: tool_web::web_search_config::WebSearchProvider,
+) -> Option<&'static str> {
     match provider {
         tool_web::web_search_config::WebSearchProvider::Tavily => Some("web:tavily"),
         tool_web::web_search_config::WebSearchProvider::Brave => Some("web:brave"),
@@ -2323,15 +2327,23 @@ pub async fn pump_save_web_secret(state: &Arc<Mutex<AppState>>) -> bool {
         let mut st = state.lock().await;
         (st.pending_web_secret.take(), st.provider_key_store.clone())
     };
-    let Some((provider, secret)) = pending else { return false };
-    let Some(id) = web_credential_id(provider) else { return false };
+    let Some((provider, secret)) = pending else {
+        return false;
+    };
+    let Some(id) = web_credential_id(provider) else {
+        return false;
+    };
     let Some(store) = store else { return false };
     match store.set_provider_key(id, &secret).await {
         Ok(()) => {
             let mut st = state.lock().await;
             match provider {
-                tool_web::web_search_config::WebSearchProvider::Tavily => st.web_config_snapshot.tavily_key = true,
-                tool_web::web_search_config::WebSearchProvider::Brave => st.web_config_snapshot.brave_key = true,
+                tool_web::web_search_config::WebSearchProvider::Tavily => {
+                    st.web_config_snapshot.tavily_key = true
+                }
+                tool_web::web_search_config::WebSearchProvider::Brave => {
+                    st.web_config_snapshot.brave_key = true
+                }
                 _ => {}
             }
             st.web_config_snapshot.active = provider;
@@ -2374,7 +2386,9 @@ pub async fn pump_save_web_settings(state: &Arc<Mutex<AppState>>) -> bool {
         true
     } else {
         if let Some(crate::screens::Screen::WebConfig(w)) = st.active_screen.as_mut() {
-            w.test_status = crate::screens::web_config::WebTestStatus::Failed("Failed to save web settings".to_string());
+            w.test_status = crate::screens::web_config::WebTestStatus::Failed(
+                "Failed to save web settings".to_string(),
+            );
         }
         false
     }
@@ -2390,16 +2404,25 @@ pub async fn pump_test_web_search(state: &Arc<Mutex<AppState>>) -> bool {
             st.provider_key_store.clone(),
         )
     };
-    let Some((provider, typed_key)) = pending else { return false };
+    let Some((provider, typed_key)) = pending else {
+        return false;
+    };
     let Some(http) = http else { return false };
-    let cfg = tool_web::web_search_config::WebSearchConfig { provider, searxng_url: snapshot.searxng_url.clone() };
+    let cfg = tool_web::web_search_config::WebSearchConfig {
+        provider,
+        searxng_url: snapshot.searxng_url.clone(),
+    };
     let mut creds = tool_web::web_search_client::ResolvedWebCredentials::empty();
     // Prefer the key the user just typed (so a test validates exactly what is
     // on screen, before any save); fall back to the saved store key when the
     // input is empty (e.g. testing an already-configured provider).
     match (provider, typed_key) {
-        (tool_web::web_search_config::WebSearchProvider::Tavily, Some(k)) => creds.tavily_key = Some(k),
-        (tool_web::web_search_config::WebSearchProvider::Brave, Some(k)) => creds.brave_key = Some(k),
+        (tool_web::web_search_config::WebSearchProvider::Tavily, Some(k)) => {
+            creds.tavily_key = Some(k)
+        }
+        (tool_web::web_search_config::WebSearchProvider::Brave, Some(k)) => {
+            creds.brave_key = Some(k)
+        }
         _ => {
             if let Some(store) = store {
                 if let Ok(Some(secret)) = store.get_provider_key("web:tavily").await {
@@ -2412,7 +2435,9 @@ pub async fn pump_test_web_search(state: &Arc<Mutex<AppState>>) -> bool {
         }
     }
     let env = tool_web::web_search_client::EnvSearchConfig::from_env();
-    let result = match tool_web::web_search_client::resolve_client_search_provider_with_credentials(&cfg, &creds, &env) {
+    let result = match tool_web::web_search_client::resolve_client_search_provider_with_credentials(
+        &cfg, &creds, &env,
+    ) {
         Ok(resolved) => tool_web::web_search_client::run_client_web_search(
             &http,
             &resolved,
@@ -2420,7 +2445,9 @@ pub async fn pump_test_web_search(state: &Arc<Mutex<AppState>>) -> bool {
             &[],
             &[],
             3,
-        ).await.map(|hits| (resolved, hits)),
+        )
+        .await
+        .map(|hits| (resolved, hits)),
         Err(e) => Err(e),
     };
     let mut st = state.lock().await;
@@ -2436,14 +2463,27 @@ pub async fn pump_test_web_search(state: &Arc<Mutex<AppState>>) -> bool {
                     message: format!(
                         "{}: {count} results{}",
                         resolved.label(),
-                        if top_title.is_empty() { String::new() } else { format!(" · {top_title}") }
+                        if top_title.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · {top_title}")
+                        }
                     ),
                 },
-                Some(crate::screens::web_config::WebTestStatus::Success { provider, count, top_title, top_url }),
+                Some(crate::screens::web_config::WebTestStatus::Success {
+                    provider,
+                    count,
+                    top_title,
+                    top_url,
+                }),
             )
         }
         Err(e) => (
-            crate::screens::web_picker::WebTestSummary { provider, ok: false, message: e.clone() },
+            crate::screens::web_picker::WebTestSummary {
+                provider,
+                ok: false,
+                message: e.clone(),
+            },
             Some(crate::screens::web_config::WebTestStatus::Failed(e)),
         ),
     };
@@ -4111,76 +4151,95 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
     // `try_lock` here: we're in iocraft's synchronous render path, and the
     // mutex is only held briefly by the bridge / key handlers. If somehow
     // contended, fall back to an empty frame for this tick.
-    let snapshot = state.try_lock().map(|mut st| {
-        let cur_streaming = st.streaming.is_some();
-        let prev = prev_streaming.get();
-        if cur_streaming != prev {
-            if let Some(sid) = session_id {
-                if cur_streaming {
-                    tracing::info!(
-                        event = STREAMING_RENDER_STARTED,
-                        session_id = %sid,
-                    );
-                } else {
-                    tracing::info!(
-                        event = STREAMING_RENDER_ENDED,
-                        session_id = %sid,
-                    );
-                }
-            }
-            prev_streaming.set(cur_streaming);
-        }
-        let should_quit = st.should_exit;
-        let vp_width = viewport_width(cols);
-        // (M7-06) The scrollback viewport shrinks as the prompt grows: the
-        // prompt zone is content-driven (1 → N rows) and a 2-row footer sits
-        // below it, so reserve `FIXED_CHROME_ROWS + prompt rows`. Computing
-        // `viewport` from the SAME `visual_row_count` the `PromptInput`
-        // component uses keeps M7-03's `render_window` clamp in lock-step with
-        // the real layout (no scrollback/prompt overlap or gap).
-        let prompt_rows =
-            crate::components::prompt_input::visual_row_count(&st.prompt_text, vp_width);
-        let viewport = viewport_height(rows, prompt_rows);
-        // (M7-03) Refresh the line-height cache to the live width before
-        // rendering so windowing + scroll clamp math agree on `total_lines`.
-
-        if st.pending_clear_scrollback {
-            stdout.print("\u{1b}[3J\u{1b}[H\u{1b}[2J");
-            st.pending_clear_scrollback = false;
-        }
-
-        // (Stage 1) Commit finalized, immutable messages to native scrollback.
-        // Interactive messages remain in the live iocraft tree so focus,
-        // expansion, and theme changes can still redraw them.
-        let commit_end = next_native_scrollback_commit_end(&st.messages, st.committed_count);
-        if st.streaming.is_none() && st.committed_count < commit_end {
-            for i in st.committed_count..commit_end {
-                let msg = &st.messages[i];
-                if let Some(lines) = crate::components::messages::render_entry_to_terminal_lines(
-                    msg, vp_width, st.theme,
-                ) {
-                    // Commit line-by-line: iocraft's `use_output` only appends a
-                    // line terminator at the END of each `println`, so a bare
-                    // `\n` INSIDE a multi-line string stays a raw LF. In raw mode
-                    // an LF moves down WITHOUT a carriage return, so each
-                    // continuation line drifts one column right (staircase
-                    // indentation). The terminal-line renderer therefore returns
-                    // already-split lines, and `println` emits a proper line end
-                    // after every row while preserving ANSI span styling.
-                    for line in lines {
-                        let encoded = crate::components::messages::encode_terminal_line_ansi(&line);
-                        stdout.println(encoded);
+    let snapshot =
+        state.try_lock().map(|mut st| {
+            let cur_streaming = st.streaming.is_some();
+            let prev = prev_streaming.get();
+            if cur_streaming != prev {
+                if let Some(sid) = session_id {
+                    if cur_streaming {
+                        tracing::info!(
+                            event = STREAMING_RENDER_STARTED,
+                            session_id = %sid,
+                        );
+                    } else {
+                        tracing::info!(
+                            event = STREAMING_RENDER_ENDED,
+                            session_id = %sid,
+                        );
                     }
                 }
+                prev_streaming.set(cur_streaming);
             }
-            st.committed_count = commit_end;
-        }
+            let should_quit = st.should_exit;
+            let vp_width = viewport_width(cols);
+            // (M7-06) The scrollback viewport shrinks as the prompt grows: the
+            // prompt zone is content-driven (1 → N rows) and a 2-row footer sits
+            // below it, so reserve `FIXED_CHROME_ROWS + prompt rows`. Computing
+            // `viewport` from the SAME `visual_row_count` the `PromptInput`
+            // component uses keeps M7-03's `render_window` clamp in lock-step with
+            // the real layout (no scrollback/prompt overlap or gap).
+            let prompt_rows =
+                crate::components::prompt_input::visual_row_count(&st.prompt_text, vp_width);
+            let viewport = viewport_height(rows, prompt_rows);
+            // (M7-03) Refresh the line-height cache to the live width before
+            // rendering so windowing + scroll clamp math agree on `total_lines`.
 
-        st.refresh_height_cache(vp_width);
+            if st.pending_clear_scrollback {
+                stdout.print("\u{1b}[3J\u{1b}[H\u{1b}[2J");
+                st.pending_clear_scrollback = false;
+            }
 
-        let element = crate::app::render_screen(&st, viewport, vp_width);
-        (element, should_quit)
-    });
+            // Keep the live transcript inside the fixed TUI frame by default.
+            //
+            // The earlier native-scrollback commit path appended finalized messages
+            // with `use_output().println()` and then rendered a full-height inline
+            // canvas. That makes the terminal scroll by "new message rows + live
+            // frame rows", so the input/footer visibly travel with content and old
+            // live-frame rows can appear above the current prompt. Claude-code's
+            // bottom input behaves like fixed chrome; LingXi's default path should
+            // therefore keep all messages in `VirtualMessageList` and let that
+            // bounded viewport scroll internally.
+            if native_scrollback_commit_mode() {
+                // Opt-in compatibility path for debugging the old native scrollback
+                // behaviour. Interactive messages remain in the live iocraft tree
+                // so focus, expansion, and theme changes can still redraw them.
+                let keep_last_live = st.streaming.is_some()
+                    && matches!(
+                        st.messages.last(),
+                        Some(crate::state::RenderedMessage::AssistantText { .. })
+                    );
+                let commit_end = if keep_last_live {
+                    st.messages.len().saturating_sub(1)
+                } else {
+                    st.messages.len()
+                };
+                if st.committed_count < commit_end {
+                    for i in st.committed_count..commit_end {
+                        let msg = &st.messages[i];
+                        if let Some(lines) =
+                            crate::components::messages::render_entry_to_terminal_lines(
+                                msg, vp_width, st.theme,
+                            )
+                        {
+                            for line in lines {
+                                let encoded =
+                                    crate::components::messages::encode_terminal_line_ansi(&line);
+                                stdout.println(encoded);
+                            }
+                        }
+                    }
+                    st.committed_count = commit_end;
+                }
+            } else {
+                st.committed_count = 0;
+            }
+
+            st.refresh_height_cache(vp_width);
+
+            let element = crate::app::render_screen(&st, viewport, vp_width);
+            (element, should_quit)
+        });
 
     let (element, should_quit) = match snapshot {
         Ok((el, q)) => (el, q),
@@ -4203,15 +4262,16 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         system.exit();
     }
 
-    // (T3) Inline render mode: do NOT pin the full terminal height. The element
-    // sizes to its CONTENT so the conversation flows into the terminal's own
-    // scrollback (Ink / claude-code model); the flex-grow scrollback collapses to
-    // content height (no slack) and the input sits at the bottom OF THE CONTENT,
-    // not the screen. Pinning full height here would draw a screen-tall block
-    // inline and defeat the whole purpose.
+    // (T3) Inline render mode still needs a fixed live frame height. Without it,
+    // iocraft sizes the element to its content, the flex-grow scrollback has no
+    // slack to absorb, and the prompt stops directly below the latest message
+    // with blank terminal rows underneath. Pinning the inline live frame to the
+    // terminal rows below the shell command keeps the input at the terminal
+    // bottom while transcript rows are clipped by the bounded message viewport.
     if crate::inline_render_mode() {
+        let inline_rows = rows.saturating_sub(1).max(1);
         return element! {
-            View(width: cols.max(1), height: (rows.saturating_sub(1)).max(1)) {
+            View(width: cols.max(1), height: inline_rows) {
                 #(std::iter::once(element))
             }
         }
@@ -4266,16 +4326,16 @@ fn viewport_width(cols: u16) -> usize {
     (cols as usize).max(1)
 }
 
-fn next_native_scrollback_commit_end(
-    messages: &[crate::state::RenderedMessage],
-    committed_count: usize,
-) -> usize {
-    let start = committed_count.min(messages.len());
-    start
-        + messages[start..]
-            .iter()
-            .take_while(|message| message.native_scrollback_safe())
-            .count()
+fn native_scrollback_commit_mode() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        parse_native_scrollback_commit_flag(std::env::var("LINGXI_TUI_NATIVE_SCROLLBACK").ok())
+    })
+}
+
+fn parse_native_scrollback_commit_flag(val: Option<String>) -> bool {
+    matches!(val, Some(s) if !s.is_empty() && s != "0")
 }
 
 #[cfg(test)]
@@ -4502,26 +4562,18 @@ mod tests {
     }
 
     #[test]
-    fn native_scrollback_commit_end_stops_at_first_interactive_message() {
-        let safe_before = crate::state::RenderedMessage::SystemText {
-            body: "ready".to_string(),
-            timestamp: 0,
-            is_error: false,
-        };
-        let interactive = crate::state::RenderedMessage::AssistantToolUse {
-            id: protocol::ToolUseId::new(),
-            tool: "Read".to_string(),
-            input: serde_json::json!({"file_path": "src/lib.rs"}),
-        };
-        let safe_after = crate::state::RenderedMessage::AssistantText {
-            body: "done".to_string(),
-            timestamp: 0,
-        };
-        let messages = vec![safe_before, interactive, safe_after];
+    fn native_scrollback_commit_flag_defaults_off() {
+        assert!(!parse_native_scrollback_commit_flag(None));
+        assert!(!parse_native_scrollback_commit_flag(Some(String::new())));
+        assert!(!parse_native_scrollback_commit_flag(Some("0".to_string())));
+    }
 
-        assert_eq!(next_native_scrollback_commit_end(&messages, 0), 1);
-        assert_eq!(next_native_scrollback_commit_end(&messages, 1), 1);
-        assert_eq!(next_native_scrollback_commit_end(&messages, 2), 3);
+    #[test]
+    fn native_scrollback_commit_flag_is_explicit_opt_in() {
+        assert!(parse_native_scrollback_commit_flag(Some("1".to_string())));
+        assert!(parse_native_scrollback_commit_flag(Some(
+            "true".to_string()
+        )));
     }
 
     /// (M7-08) Build an iocraft `KeyEvent` for a printable char (Press).
@@ -5546,8 +5598,15 @@ mod tests {
 
         assert!(state.lock().await.pending_web_secret.is_none());
         assert!(state.lock().await.web_config_snapshot.tavily_key);
-        assert_eq!(state.lock().await.web_config_snapshot.active, WebSearchProvider::Tavily);
-        let got = cm.get_provider_key("web:tavily").await.expect("get").expect("present");
+        assert_eq!(
+            state.lock().await.web_config_snapshot.active,
+            WebSearchProvider::Tavily
+        );
+        let got = cm
+            .get_provider_key("web:tavily")
+            .await
+            .expect("get")
+            .expect("present");
         assert_eq!(got.expose_secret(), "tvly-secret");
     }
 
@@ -5567,7 +5626,8 @@ mod tests {
         )
         .expect("save");
 
-        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(v["theme"], "dark");
         assert_eq!(v["webSearch"]["provider"], "searxng");
         assert_eq!(v["webSearch"]["searxngUrl"], "https://s.example");

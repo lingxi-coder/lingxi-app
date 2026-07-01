@@ -11,6 +11,7 @@
 use iocraft::prelude::*;
 
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Hard cap on displayed prompt text.
 pub const MAX_DISPLAY_CHARS: usize = 10_000;
@@ -56,7 +57,7 @@ pub fn UserPromptMessage(props: &UserPromptProps) -> impl Into<AnyElement<'stati
     let content = render_prompt_to_string(&props.text);
     element! {
         View(flex_direction: FlexDirection::Column) {
-            Text(content: content, color: TuiTheme::USER)
+            Text(content: content, color: TuiTheme::USER.to_iocraft())
         }
     }
 }

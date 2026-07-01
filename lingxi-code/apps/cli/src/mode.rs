@@ -164,6 +164,14 @@ pub async fn dispatch(
             // empty `resumed_messages` vec is byte-identical to the pre-refactor
             // inline assembly — `Runtime::with_resumed_messages([])` is a no-op
             // and `run_tui_session` skips the seed when the vec is empty.
+            // (iocraft → ratatui migration) The ratatui backend is now the
+            // DEFAULT (iocraft is opt-out via `LINGXI_TUI_BACKEND=iocraft`). It
+            // drives the live orchestrator directly via `tui_build`'s bridge
+            // channel, so it MUST branch before `build_tui_runtime` moves
+            // `tui_build` into the iocraft runtime.
+            if use_ratatui_backend() {
+                return run_ratatui(tui_build).await;
+            }
             let tui_runtime = build_tui_runtime(tui_build, argv, Vec::new()).await;
             mount_tui_runtime(tui_runtime).await
         }
@@ -298,6 +306,154 @@ pub(crate) async fn mount_tui_runtime(tui_runtime: tui::session::Runtime) -> i32
     }
 }
 
+/// (iocraft → ratatui migration) Launch the `tui-rata` interactive chat wired
+/// to the live orchestrator: the bridge receiver streams `TurnEvent`s into the
+/// app, and each submit emits `TurnStarted` + spawns a streaming turn on the
+/// same channel. The blocking ratatui loop runs on a `spawn_blocking` thread;
+/// turns are spawned back onto the async runtime via the captured handle.
+async fn run_ratatui(tui_build: crate::init::TuiBuild) -> i32 {
+    let orchestrator: Arc<dyn OrchestratorHandle> = tui_build.runtime.orchestrator.clone();
+    let bridge_rx = tui_build.bridge_rx;
+    let permission_rx = tui_build.permission_rx;
+    let turn_tx = tui_build.turn_tx;
+    let session = build_session_info(orchestrator.as_ref()).await;
+    let handle = tokio::runtime::Handle::current();
+    let switch_orch = orchestrator.clone();
+    let switch_handle = handle.clone();
+    let welcome = vec![tui_rata::RenderedMessage::SystemText {
+        body: "LingXi — ratatui TUI. Type a message, Enter to send, Esc to quit. \
+               (Set LINGXI_TUI_BACKEND=iocraft for the legacy UI.)"
+            .to_string(),
+        timestamp: 0,
+        is_error: false,
+    }];
+    let on_submit = move |prompt: String, cancel: CancellationToken| {
+        let _ = turn_tx.send(tui_rata::TurnEvent::TurnStarted);
+        let orch = orchestrator.clone();
+        handle.spawn(async move {
+            let _ = orch.run_turn_streaming_with_cancel(&prompt, cancel).await;
+        });
+    };
+    let on_switch_model = move |model: String, profile: Option<String>| {
+        let orch = switch_orch.clone();
+        switch_handle.spawn(async move {
+            let _ = orch.switch_model(&model, profile.as_deref()).await;
+        });
+    };
+    match tokio::task::spawn_blocking(move || {
+        tui_rata::app::run_app(
+            welcome,
+            session,
+            bridge_rx,
+            permission_rx,
+            on_submit,
+            on_switch_model,
+        )
+    })
+    .await
+    {
+        Ok(Ok(())) => exit_codes::SUCCESS,
+        Ok(Err(e)) => {
+            eprintln!("lingxi-cli: tui-rata session failed: {e}");
+            exit_codes::RUNTIME_ERROR
+        }
+        Err(e) => {
+            eprintln!("lingxi-cli: tui-rata task join failed: {e}");
+            exit_codes::RUNTIME_ERROR
+        }
+    }
+}
+
+/// Snapshot the orchestrator's MCP/hooks/agents/model listings into a
+/// `tui_rata::session::SessionInfo` for the full-page screens (`/mcp`,
+/// `/hooks`, `/agents`, `/doctor`, `/model`). Awaited once before the blocking
+/// TUI loop starts, mirroring the iocraft screens' capture-at-open contract.
+async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui_rata::session::SessionInfo {
+    use tui_rata::session::{DoctorInfo, InfoRow, ModelRow, SessionInfo};
+
+    let servers = orch.list_mcp_servers().await;
+    let mcp_connected = u32::try_from(
+        servers
+            .iter()
+            .filter(|s| matches!(s.status, traits::orchestrator::McpStatus::Connected))
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+    let mcp_configured = u32::try_from(servers.len()).unwrap_or(u32::MAX);
+    let mcp = servers
+        .into_iter()
+        .map(|s| {
+            let status = match &s.status {
+                traits::orchestrator::McpStatus::Connected => "connected".to_string(),
+                traits::orchestrator::McpStatus::Disconnected => "disconnected".to_string(),
+                traits::orchestrator::McpStatus::Error(e) => format!("error: {e}"),
+            };
+            InfoRow::new(s.name, Some(format!("{} · {status}", s.transport)))
+        })
+        .collect();
+
+    let hooks = orch
+        .list_hooks()
+        .await
+        .into_iter()
+        .map(|h| {
+            InfoRow::new(
+                format!("{} ({})", h.name, h.event),
+                Some(format!("{} · {}", h.hook_type, h.source)),
+            )
+        })
+        .collect();
+
+    let agents = orch
+        .list_agents()
+        .await
+        .into_iter()
+        .map(|a| {
+            let detail = if a.description.is_empty() {
+                a.source_group
+            } else {
+                a.description
+            };
+            InfoRow::new(a.name, (!detail.is_empty()).then_some(detail))
+        })
+        .collect();
+
+    let current_model = orch.get_status_snapshot().await.model;
+    let models = orch
+        .list_model_listings()
+        .await
+        .into_iter()
+        .map(|m| ModelRow {
+            is_current: m.request_model == current_model,
+            display: m.display_model,
+            request_model: m.request_model,
+            profile: (!m.provider_id.is_empty()).then_some(m.provider_id),
+            provider_label: m.provider_label,
+        })
+        .collect();
+
+    SessionInfo {
+        doctor: DoctorInfo::capture(mcp_configured, mcp_connected),
+        mcp,
+        hooks,
+        agents,
+        models,
+    }
+}
+
+/// Whether the ratatui backend is used. It is now the DEFAULT; set
+/// `LINGXI_TUI_BACKEND=iocraft` (case-insensitive) to opt back into the legacy
+/// iocraft TUI during the migration. Any other value (or unset) uses ratatui.
+fn use_ratatui_backend() -> bool {
+    ratatui_selected(std::env::var("LINGXI_TUI_BACKEND").ok().as_deref())
+}
+
+/// Pure backend selection over the raw `LINGXI_TUI_BACKEND` value (testable
+/// without touching process env): only an explicit `iocraft` opts out.
+fn ratatui_selected(value: Option<&str>) -> bool {
+    !matches!(value, Some(v) if v.eq_ignore_ascii_case("iocraft"))
+}
+
 /// Resolve `(lingxi_home, project_dir)` the settings reader/writer address.
 ///
 /// `lingxi_home = ~/.claude` (the user settings root; `/dev/null` when no home
@@ -306,8 +462,7 @@ pub(crate) async fn mount_tui_runtime(tui_runtime: tui::session::Runtime) -> i32
 /// `--cwd`. These feed `migrations::settings_update::settings_path`.
 fn settings_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
     let lingxi_home = crate::run::lingxi_home_dir();
-    let project_dir =
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     (lingxi_home, project_dir)
 }
 
@@ -371,16 +526,18 @@ fn read_status_line_config() -> Option<tui::components::status_line_command::Sta
 fn read_skip_dangerous_prompt() -> bool {
     use migrations::settings_update::{read_settings_map, settings_path, SettingsSource};
     let (lingxi_home, project_dir) = settings_dirs();
-    [SettingsSource::User, SettingsSource::Local].iter().any(|s| {
-        let p = settings_path(*s, &lingxi_home, &project_dir);
-        read_settings_map(&p)
-            .ok()
-            .and_then(|m| {
-                m.get("skipDangerousModePermissionPrompt")
-                    .map(migrations::context::js_truthy)
-            })
-            .unwrap_or(false)
-    })
+    [SettingsSource::User, SettingsSource::Local]
+        .iter()
+        .any(|s| {
+            let p = settings_path(*s, &lingxi_home, &project_dir);
+            read_settings_map(&p)
+                .ok()
+                .and_then(|m| {
+                    m.get("skipDangerousModePermissionPrompt")
+                        .map(migrations::context::js_truthy)
+                })
+                .unwrap_or(false)
+        })
 }
 
 /// Persist `skipDangerousModePermissionPrompt = true` to the USER
@@ -422,10 +579,7 @@ enum TrustGateOutcome {
 /// `run_tui_session`, can't be driven headless). Mirrors
 /// `TrustDialog.tsx:199-202` — `if (hasTrustDialogAccepted) { onDone() }` skips
 /// the dialog.
-fn trust_gate_should_prompt(
-    cwd: &std::path::Path,
-    config_path: Option<&std::path::Path>,
-) -> bool {
+fn trust_gate_should_prompt(cwd: &std::path::Path, config_path: Option<&std::path::Path>) -> bool {
     match config_path {
         // No config path to consult/persist ⇒ proceed without prompting
         // (no-home degrade, same as `init::resolve_desktop_config`).
@@ -485,6 +639,17 @@ mod tests {
     fn prompt_routes_to_print() {
         let a = argv(Some("fix it"), false);
         assert_eq!(decide_mode_with(&a, true), Mode::Print("fix it".into()));
+    }
+
+    #[test]
+    fn ratatui_is_default_and_iocraft_opts_out() {
+        // Unset or any non-iocraft value → ratatui (the new default).
+        assert!(ratatui_selected(None));
+        assert!(ratatui_selected(Some("ratatui")));
+        assert!(ratatui_selected(Some("anything")));
+        // Only an explicit iocraft (case-insensitive) opts back out.
+        assert!(!ratatui_selected(Some("iocraft")));
+        assert!(!ratatui_selected(Some("IOCRAFT")));
     }
 
     #[test]

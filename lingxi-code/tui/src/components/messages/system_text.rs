@@ -10,6 +10,7 @@ use iocraft::prelude::*;
 
 use crate::state::SystemLevel;
 use crate::theme::Theme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// `BLACK_CIRCLE` marker (ma-03): `⏺ ` (U+23FA) on macOS, `● ` (U+25CF)
 /// elsewhere — followed by an ASCII space.
@@ -51,7 +52,7 @@ pub fn SystemTextMessage(props: &SystemTextProps) -> impl Into<AnyElement<'stati
     };
     element! {
         View(flex_direction: FlexDirection::Column) {
-            Text(content: body, color: color)
+            Text(content: body, color: color.to_iocraft())
         }
     }
 }

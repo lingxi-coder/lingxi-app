@@ -14,6 +14,7 @@
 #![allow(clippy::doc_markdown, clippy::doc_lazy_continuation)]
 
 use iocraft::prelude::*;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 use crate::render::ansi::parse_ansi;
 use crate::render::{split_spans_into_line_rows, StyledSpan};

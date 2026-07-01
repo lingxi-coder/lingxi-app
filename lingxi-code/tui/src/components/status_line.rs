@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 
 use iocraft::prelude::*;
+use crate::render_iocraft::StyleColorIocraftExt;
 use permission::PermissionMode;
 use unicode_width::UnicodeWidthStr;
 
@@ -228,7 +229,7 @@ fn render_custom(
         // the whole row reads dim (matching `<Text dimColor>`). Explicit ANSI
         // colors from the command override.
         let color = match span.style.fg {
-            crate::render::StyleColor::Default => theme.dim,
+            crate::render::StyleColor::Default => theme.dim.to_iocraft(),
             other => other.to_iocraft(),
         };
         let weight = if span.style.bold {
@@ -243,9 +244,9 @@ fn render_custom(
     let pad = " ".repeat(padding_x);
     element! {
         View(flex_direction: FlexDirection::Row, height: 1) {
-            Text(content: pad.clone(), color: theme.dim)
+            Text(content: pad.clone(), color: theme.dim.to_iocraft())
             #(span_elements)
-            Text(content: pad, color: theme.dim)
+            Text(content: pad, color: theme.dim.to_iocraft())
         }
     }
     .into_any()

@@ -19,6 +19,7 @@
 use iocraft::prelude::*;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 pub mod banner;
 pub use banner::{render_session_color_banner, SessionColorBanner, SessionColorBannerProps};
@@ -492,7 +493,7 @@ pub fn PromptInput(props: &PromptInputProps) -> impl Into<AnyElement<'static>> {
                             }
                         }))
                         #(line_hint.map(|hint| element! {
-                            Text(content: hint, color: crate::theme::TuiTheme::DIM)
+                            Text(content: hint, color: crate::theme::TuiTheme::DIM.to_iocraft())
                         }))
                     }
                 }

@@ -28,22 +28,10 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// One in-flight permission round-trip between the orchestrator and TUI.
 ///
-/// Constructed by [`TuiPermissionGate::check`] and sent over the mpsc to
-/// the TUI app. The TUI fills `resp_tx` when the user resolves the
-/// dialog. Dropping `resp_tx` without sending counts as cancellation
-/// (the gate maps it to `Deny { reason: "TUI permission response dropped" }`).
-#[derive(Debug)]
-pub struct PermissionExchange {
-    /// What we're asking permission for.
-    pub request: PermissionRequest,
-    /// One-shot reply channel — TUI sends back when the user resolves.
-    pub resp_tx: oneshot::Sender<PermissionResponse>,
-    /// Worker identity when the call originates from a subagent/teammate
-    /// (claude-code 2.1.186 worker permission attribution). `None` for a
-    /// main-thread tool call. Populated into `PendingPermission.worker` so the
-    /// dialog renders the `● @name` badge.
-    pub worker: Option<crate::components::permissions::worker::WorkerPermissionInfo>,
-}
+/// Moved to `tui-core` (`tui_core::permission_bridge::PermissionExchange`)
+/// during the iocraft → ratatui migration; re-exported so `crate::permission_bridge::PermissionExchange`
+/// keeps resolving. `TuiPermissionGate` (below) still constructs it.
+pub use tui_core::permission_bridge::PermissionExchange;
 
 /// Orchestrator-side permission gate that forwards each `check` call to
 /// the TUI over an mpsc channel and awaits a oneshot reply.

@@ -9,6 +9,7 @@ use iocraft::prelude::*;
 
 use crate::screens::settings::SettingsData;
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Camel-case wire keys surfaced in the provenance table, in display order.
 /// These are the JSON keys (NOT the Rust `snake_case` names) that
@@ -59,7 +60,7 @@ pub fn SettingsTabView(props: &SettingsTabProps) -> impl Into<AnyElement<'static
         .map_or_else(String::new, render_settings_to_string);
     element! {
         View(flex_direction: FlexDirection::Column) {
-            Text(content: body, color: TuiTheme::DIM)
+            Text(content: body, color: TuiTheme::DIM.to_iocraft())
         }
     }
 }

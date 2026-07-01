@@ -22,6 +22,7 @@ use iocraft::prelude::*;
 use crate::components::messages::text_guard::is_empty_message_text;
 use crate::components::messages::user_tool_result::{INTERRUPTED_LINE, INTERRUPT_MESSAGE, MARKER};
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Props for `UserTextMessage`.
 #[derive(Default, Props)]
@@ -43,7 +44,7 @@ pub fn UserTextMessage(props: &UserTextMessageProps) -> impl Into<AnyElement<'st
         let content = format!("{MARKER}{INTERRUPTED_LINE}");
         return element! {
             View(flex_direction: FlexDirection::Row) {
-                Text(content: content, color: TuiTheme::DIM)
+                Text(content: content, color: TuiTheme::DIM.to_iocraft())
             }
         };
     }
@@ -55,7 +56,7 @@ pub fn UserTextMessage(props: &UserTextMessageProps) -> impl Into<AnyElement<'st
     let content = format!("> {}", props.body);
     element! {
         View(flex_direction: FlexDirection::Row) {
-            Text(content: content, color: TuiTheme::USER)
+            Text(content: content, color: TuiTheme::USER.to_iocraft())
         }
     }
 }

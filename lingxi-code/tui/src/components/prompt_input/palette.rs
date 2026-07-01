@@ -24,6 +24,7 @@ use iocraft::prelude::*;
 use super::fuzzy::filtered_ranked;
 use crate::render::truncate_to_width_ellipsis;
 use crate::theme::Theme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Max dropdown rows shown at once (claude-code `OVERLAY_MAX_ITEMS`).
 pub const OVERLAY_MAX_ITEMS: usize = 5;
@@ -343,7 +344,7 @@ pub fn PaletteOverlay(props: &PaletteOverlayProps) -> impl Into<AnyElement<'stat
                 let color = if i == selected { theme.suggestion } else { theme.dim };
                 element! {
                     View(height: 1) {
-                        Text(content: line, color: color)
+                        Text(content: line, color: color.to_iocraft())
                     }
                 }
             }))

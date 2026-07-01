@@ -12,6 +12,7 @@ use iocraft::prelude::*;
 
 use super::fuzzy::filtered_ranked;
 use crate::theme::Theme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Max dropdown rows (shared with the palette; claude-code `OVERLAY_MAX_ITEMS`).
 pub const OVERLAY_MAX_ITEMS: usize = 5;
@@ -367,7 +368,7 @@ pub fn CompletionOverlay(props: &CompletionOverlayProps) -> impl Into<AnyElement
                 // accent, the rest dim.
                 let color = if i == selected { theme.suggestion } else { theme.dim };
                 element! {
-                    View(height: 1) { Text(content: line, color: color) }
+                    View(height: 1) { Text(content: line, color: color.to_iocraft()) }
                 }
             }))
         }

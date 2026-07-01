@@ -25,8 +25,8 @@ pub mod skills;
 pub mod stats;
 pub mod theme;
 pub mod transcript;
-pub mod web_picker;
 pub mod web_config;
+pub mod web_picker;
 
 /// Which full-page screen currently overlays the REPL. `None` ⇒ REPL is live.
 /// Established by M7-11; M7-12/13/14 add `Resume`/`Settings`/`Memory`.

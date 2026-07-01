@@ -14,6 +14,7 @@
 use iocraft::prelude::*;
 
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Refresh-arrow glyph (U+21BB, claude-code `REFRESH_ARROW`).
 pub const REFRESH_ARROW: &str = "\u{21BB}";
@@ -88,7 +89,7 @@ pub fn UserResourceUpdateMessage(
     let body = render_resource_update_to_string(&updates);
     element! {
         View(flex_direction: FlexDirection::Column) {
-            Text(content: body, color: TuiTheme::DIM)
+            Text(content: body, color: TuiTheme::DIM.to_iocraft())
         }
     }
 }

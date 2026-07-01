@@ -39,6 +39,7 @@ use iocraft::prelude::*;
 use traits::{CostSnapshot, OrchestratorHandle, StatusSnapshot};
 
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 pub mod config;
 // (M7-13) The "Settings" tab module is intentionally named `settings` inside
@@ -249,7 +250,7 @@ pub fn SettingsScreen(props: &SettingsScreenProps) -> impl Into<AnyElement<'stat
     };
     element! {
         View(flex_direction: FlexDirection::Column, padding: 1) {
-            Text(content: strip, color: TuiTheme::ASSISTANT)
+            Text(content: strip, color: TuiTheme::ASSISTANT.to_iocraft())
             View(margin_top: 1) {
                 #(body)
             }

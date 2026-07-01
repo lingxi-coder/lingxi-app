@@ -12,6 +12,7 @@
 
 use iocraft::prelude::*;
 
+use crate::render_iocraft::StyleColorIocraftExt;
 use crate::state::PlanApprovalKind;
 use crate::theme::Theme;
 
@@ -93,10 +94,10 @@ pub fn PlanApprovalMessage(props: &PlanApprovalProps) -> impl Into<AnyElement<'s
         View(
             flex_direction: FlexDirection::Column,
             border_style: BorderStyle::Round,
-            border_color: accent,
+            border_color: accent.to_iocraft(),
         ) {
-            Text(content: header, color: accent, weight: Weight::Bold)
-            Text(content: body_text, color: accent)
+            Text(content: header, color: accent.to_iocraft(), weight: Weight::Bold)
+            Text(content: body_text, color: accent.to_iocraft())
         }
     }
 }

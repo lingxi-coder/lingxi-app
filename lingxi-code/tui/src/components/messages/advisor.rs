@@ -21,6 +21,7 @@ use crate::render::markdown::{render as render_markdown, MarkdownTheme};
 use crate::render::StyleColor;
 use crate::state::AdvisorKind;
 use crate::theme::Theme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// `figures.tick`. U+2714 (0xE2 0x9C 0x94).
 pub const TICK: &str = "\u{2714}";
@@ -108,10 +109,10 @@ pub fn AdvisorMessage(props: &AdvisorProps) -> impl Into<AnyElement<'static>> {
                     // (shared with the tool-use marker).
                     Text(
                         content: format!("{} ", crate::components::messages::assistant_tool_use::MARKER),
-                        color: theme.dim,
+                        color: theme.dim.to_iocraft(),
                     )
-                    Text(content: "Advising".to_string(), color: theme.text, weight: Weight::Bold)
-                    Text(content: descriptor, color: theme.dim)
+                    Text(content: "Advising".to_string(), color: theme.text.to_iocraft(), weight: Weight::Bold)
+                    Text(content: descriptor, color: theme.dim.to_iocraft())
                 }
             }
         }
@@ -123,7 +124,7 @@ pub fn AdvisorMessage(props: &AdvisorProps) -> impl Into<AnyElement<'static>> {
     };
     element! {
         View(flex_direction: FlexDirection::Column) {
-            Text(content: body, color: color)
+            Text(content: body, color: color.to_iocraft())
         }
     }
     .into_any()

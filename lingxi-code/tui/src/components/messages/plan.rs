@@ -11,6 +11,7 @@ use iocraft::prelude::*;
 
 use crate::render::markdown::{render as render_markdown, MarkdownTheme};
 use crate::render::{StyleColor, StyledLine};
+use crate::render_iocraft::StyleColorIocraftExt;
 use crate::theme::Theme;
 
 /// Exact header literal.
@@ -76,10 +77,10 @@ pub fn UserPlanMessage(props: &UserPlanProps) -> impl Into<AnyElement<'static>> 
         View(
             flex_direction: FlexDirection::Column,
             border_style: BorderStyle::Round,
-            border_color: accent,
+            border_color: accent.to_iocraft(),
             gap: 1,
         ) {
-            Text(content: HEADER, color: accent, weight: Weight::Bold)
+            Text(content: HEADER, color: accent.to_iocraft(), weight: Weight::Bold)
             Text(content: body_text, color: Color::Reset)
         }
     }

@@ -10,6 +10,7 @@
 use iocraft::prelude::*;
 
 use crate::theme::Theme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Locked tail line for rejected shutdowns.
 pub const REJECTED_TAIL: &str =
@@ -59,7 +60,7 @@ pub fn ShutdownMessage(props: &ShutdownProps) -> impl Into<AnyElement<'static>> 
     if props.rejected {
         element! {
             View(flex_direction: FlexDirection::Column) {
-                Text(content: body, color: theme.dim)
+                Text(content: body, color: theme.dim.to_iocraft())
             }
         }
         .into_any()
@@ -69,9 +70,9 @@ pub fn ShutdownMessage(props: &ShutdownProps) -> impl Into<AnyElement<'static>> 
             View(
                 flex_direction: FlexDirection::Column,
                 border_style: BorderStyle::Round,
-                border_color: theme.warning,
+                border_color: theme.warning.to_iocraft(),
             ) {
-                Text(content: body, color: theme.warning)
+                Text(content: body, color: theme.warning.to_iocraft())
             }
         }
         .into_any()

@@ -22,6 +22,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use iocraft::prelude::*;
 use session::jsonl::loader::{format_rfc3339_seconds, SessionMetadata};
 use uuid::Uuid;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// One display row derived from a [`SessionMetadata`]. Terminal-free.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -350,7 +351,7 @@ pub fn ResumeScreen(props: &ResumeScreenProps) -> impl Into<AnyElement<'static>>
     element! {
         View(flex_direction: FlexDirection::Column, padding: 1) {
             View(flex_direction: FlexDirection::Row) {
-                Text(content: "Resume Session".to_string(), weight: Weight::Bold, color: theme.suggestion)
+                Text(content: "Resume Session".to_string(), weight: Weight::Bold, color: theme.suggestion.to_iocraft())
                 #(counter.map(|c| element! {
                     Text(content: c, color: Color::DarkGrey)
                 }))

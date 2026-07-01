@@ -575,18 +575,20 @@ pub async fn run_tui_session(
             bash_runner: runtime.bash_runner.clone(),
         )
     };
-    // (T3) Opt-in INLINE render mode (`LINGXI_TUI_INLINE`): iocraft's inline
-    // `render_loop()` draws into the terminal's NATIVE scrollback (no alt-screen /
-    // absolute positioning, which Warp mis-renders → ghosting). DEFAULT stays
-    // `.fullscreen()` (alt-screen). We opt OUT of iocraft's default fullscreen
-    // mouse capture so terminal-native drag selection/copy keeps working; wheel
-    // scrolling is best-effort and keyboard scrolling is guaranteed.
+    // (T3) Default inline render mode stays in the normal terminal buffer (no
+    // alt-screen). The transcript itself is clipped inside the live TUI frame so
+    // the input/footer stay fixed, which means wheel events must be captured and
+    // routed to the internal scrollback instead of relying on terminal-native
+    // scrollback rows.
     // `.ignore_ctrl_c()` (claude-code parity) routes Ctrl-C to the app's
     // double-press exit guard instead of letting iocraft quit on a single press.
     let result = if crate::inline_render_mode() {
-        root.render_loop().ignore_ctrl_c().await
+        root.render_loop()
+            .enable_mouse_capture()
+            .ignore_ctrl_c()
+            .await
     } else {
-        root.fullscreen().disable_mouse_capture().ignore_ctrl_c().await
+        root.fullscreen().ignore_ctrl_c().await
     };
 
     // Normal exit: iocraft's Drop has left the alt screen + shown the cursor +
@@ -646,11 +648,12 @@ pub async fn run_resume_picker(
             orchestrator: None,
         )
     };
-    // (T3) Same opt-in inline path as `run_tui_session` (`LINGXI_TUI_INLINE`).
+    // (T3) Same default-inline path as `run_tui_session`
+    // (`LINGXI_TUI_FULLSCREEN=1` opts into alt-screen fullscreen).
     let result = if crate::inline_render_mode() {
-        root.render_loop().await
+        root.render_loop().enable_mouse_capture().await
     } else {
-        root.fullscreen().disable_mouse_capture().await
+        root.fullscreen().await
     };
 
     crate::terminal::restore_terminal_modes();

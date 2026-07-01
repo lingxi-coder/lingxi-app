@@ -15,6 +15,7 @@ use iocraft::prelude::*;
 
 use crate::screens::settings::SettingsData;
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Dim placeholder for the empty session name (claude-code Status.tsx literal).
 pub const SESSION_NAME_PLACEHOLDER: &str = "/rename to add a name";
@@ -83,7 +84,7 @@ pub fn StatusTab(props: &StatusTabProps) -> impl Into<AnyElement<'static>> {
             Some(("Session name", value)) => element! {
                 View(flex_direction: FlexDirection::Row, gap: 1) {
                     Text(content: "Session name:", weight: Weight::Bold)
-                    Text(content: value.to_string(), color: TuiTheme::DIM)
+                    Text(content: value.to_string(), color: TuiTheme::DIM.to_iocraft())
                 }
             }
             .into_any(),

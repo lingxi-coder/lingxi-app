@@ -1,0 +1,2 @@
+{"run_id":"1782267583-443597000","line":25,"new":{"module_name":"render_user_tool_result","snapshot_name":"short_5_line_result_renders_full","metadata":{"source":"tui/tests/render_user_tool_result.rs","assertion_line":25,"expression":"s"},"snapshot":"⎿  line1\n   line2\n   line3\n   line4\n   line5"},"old":{"module_name":"render_user_tool_result","metadata":{},"snapshot":"└ line1\n  line2\n  line3\n  line4\n  line5"}}
+{"run_id":"1782269387-56460000","line":25,"new":null,"old":null}

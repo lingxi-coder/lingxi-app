@@ -41,201 +41,13 @@ pub mod user_tool_result;
 use crate::state::RenderedMessage;
 use crate::theme::Theme;
 use assistant_tool_use::{render_assistant_tool_use_to_string, AssistantToolUseProps};
-use iocraft::Color;
+use crate::render::StyleColor;
 use user_tool_result::{render_user_tool_result_to_string, UserToolResultProps};
 
-/// A styled text run for native terminal scrollback output.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TerminalSpan {
-    /// Text payload. Must not contain a newline.
-    pub text: String,
-    /// Optional foreground color.
-    pub fg: Option<Color>,
-    /// Optional background color.
-    pub bg: Option<Color>,
-    /// Bold attribute.
-    pub bold: bool,
-    /// Italic attribute.
-    pub italic: bool,
-    /// Underline attribute.
-    pub underline: bool,
-}
-
-impl TerminalSpan {
-    fn plain(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            fg: None,
-            bg: None,
-            bold: false,
-            italic: false,
-            underline: false,
-        }
-    }
-
-    fn colored(text: impl Into<String>, fg: Color) -> Self {
-        Self {
-            text: text.into(),
-            fg: terminal_color(fg),
-            bg: None,
-            bold: false,
-            italic: false,
-            underline: false,
-        }
-    }
-
-    fn from_styled_span(span: crate::render::StyledSpan) -> Self {
-        Self {
-            text: span.text,
-            fg: terminal_color(span.style.fg.to_iocraft()),
-            bg: terminal_color(span.style.bg.to_iocraft()),
-            bold: span.style.bold,
-            italic: span.style.italic,
-            underline: span.style.underline,
-        }
-    }
-}
-
-/// One terminal output line, split into styled spans.
-pub type TerminalLine = Vec<TerminalSpan>;
-
-fn terminal_color(color: Color) -> Option<Color> {
-    if color == Color::Reset {
-        None
-    } else {
-        Some(color)
-    }
-}
-
-fn plain_terminal_lines(text: &str) -> Vec<TerminalLine> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    text.split('\n')
-        .map(|line| {
-            if line.is_empty() {
-                Vec::new()
-            } else {
-                vec![TerminalSpan::plain(line)]
-            }
-        })
-        .collect()
-}
-
-fn colored_terminal_lines(text: &str, color: Color) -> Vec<TerminalLine> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    text.split('\n')
-        .map(|line| {
-            if line.is_empty() {
-                Vec::new()
-            } else {
-                vec![TerminalSpan::colored(line, color)]
-            }
-        })
-        .collect()
-}
-
-fn styled_lines_to_terminal_lines(lines: Vec<crate::render::StyledLine>) -> Vec<TerminalLine> {
-    lines
-        .into_iter()
-        .map(|line| {
-            line.spans
-                .into_iter()
-                .map(TerminalSpan::from_styled_span)
-                .collect()
-        })
-        .collect()
-}
-
-/// Encode one styled terminal line as ANSI bytes. The caller is responsible for
-/// emitting the line terminator separately so raw-mode LF never stair-steps.
-#[must_use]
-pub fn encode_terminal_line_ansi(line: &TerminalLine) -> String {
-    let mut out = String::new();
-    for span in line {
-        if span.text.is_empty() {
-            continue;
-        }
-        let styled =
-            span.fg.is_some() || span.bg.is_some() || span.bold || span.italic || span.underline;
-        if styled {
-            let mut codes = Vec::new();
-            if let Some(fg) = span.fg {
-                codes.push(fg_sgr(fg));
-            }
-            if let Some(bg) = span.bg {
-                codes.push(bg_sgr(bg));
-            }
-            if span.bold {
-                codes.push("1".to_string());
-            }
-            if span.italic {
-                codes.push("3".to_string());
-            }
-            if span.underline {
-                codes.push("4".to_string());
-            }
-            out.push_str("\u{1b}[");
-            out.push_str(&codes.join(";"));
-            out.push('m');
-        }
-        out.push_str(&span.text);
-        if styled {
-            out.push_str("\u{1b}[0m");
-        }
-    }
-    out
-}
-
-fn fg_sgr(color: Color) -> String {
-    match color {
-        Color::Reset => "39".to_string(),
-        Color::Black => "30".to_string(),
-        Color::DarkGrey => "90".to_string(),
-        Color::Red => "91".to_string(),
-        Color::DarkRed => "31".to_string(),
-        Color::Green => "92".to_string(),
-        Color::DarkGreen => "32".to_string(),
-        Color::Yellow => "93".to_string(),
-        Color::DarkYellow => "33".to_string(),
-        Color::Blue => "94".to_string(),
-        Color::DarkBlue => "34".to_string(),
-        Color::Magenta => "95".to_string(),
-        Color::DarkMagenta => "35".to_string(),
-        Color::Cyan => "96".to_string(),
-        Color::DarkCyan => "36".to_string(),
-        Color::White => "97".to_string(),
-        Color::Grey => "37".to_string(),
-        Color::Rgb { r, g, b } => format!("38;2;{r};{g};{b}"),
-        Color::AnsiValue(i) => format!("38;5;{i}"),
-    }
-}
-
-fn bg_sgr(color: Color) -> String {
-    match color {
-        Color::Reset => "49".to_string(),
-        Color::Black => "40".to_string(),
-        Color::DarkGrey => "100".to_string(),
-        Color::Red => "101".to_string(),
-        Color::DarkRed => "41".to_string(),
-        Color::Green => "102".to_string(),
-        Color::DarkGreen => "42".to_string(),
-        Color::Yellow => "103".to_string(),
-        Color::DarkYellow => "43".to_string(),
-        Color::Blue => "104".to_string(),
-        Color::DarkBlue => "44".to_string(),
-        Color::Magenta => "105".to_string(),
-        Color::DarkMagenta => "45".to_string(),
-        Color::Cyan => "106".to_string(),
-        Color::DarkCyan => "46".to_string(),
-        Color::White => "107".to_string(),
-        Color::Grey => "47".to_string(),
-        Color::Rgb { r, g, b } => format!("48;2;{r};{g};{b}"),
-        Color::AnsiValue(i) => format!("48;5;{i}"),
-    }
-}
+pub use tui_core::message_render::{
+    colored_terminal_lines, encode_terminal_line_ansi, plain_terminal_lines,
+    styled_lines_to_terminal_lines, TerminalLine, TerminalSpan,
+};
 
 /// String-form dispatcher used by snapshot tests. The iocraft-component
 /// dispatcher (returns `AnyElement`) lives in `components::scrollback`;
@@ -469,7 +281,7 @@ pub fn render_entry_to_string_at_width(
                 .collect();
             resource_update::render_resource_update_to_string(&parsed)
         }
-        RenderedMessage::UserImage { image_id, metadata } => {
+        RenderedMessage::UserImage { image_id, metadata, .. } => {
             image::render_image_label(*image_id, metadata.as_deref())
         }
         RenderedMessage::Attachment { attachment } => {
@@ -516,10 +328,6 @@ pub fn render_entry_to_terminal_lines(
     width: usize,
     theme: Theme,
 ) -> Option<Vec<TerminalLine>> {
-    if !entry.native_scrollback_safe() {
-        return None;
-    }
-
     let lines = match entry {
         RenderedMessage::UserText { body, .. } if text_guard::is_empty_message_text(body) => {
             Vec::new()
@@ -676,7 +484,7 @@ pub fn render_entry_to_terminal_lines(
                 .collect();
             plain_terminal_lines(&resource_update::render_resource_update_to_string(&parsed))
         }
-        RenderedMessage::UserImage { image_id, metadata } => {
+        RenderedMessage::UserImage { image_id, metadata, .. } => {
             plain_terminal_lines(&image::render_image_label(*image_id, metadata.as_deref()))
         }
         RenderedMessage::Attachment { attachment } => {
@@ -690,7 +498,14 @@ pub fn render_entry_to_terminal_lines(
         | RenderedMessage::Advisor { .. }
         | RenderedMessage::PlanApproval { .. }
         | RenderedMessage::GroupedToolUse { .. }
-        | RenderedMessage::CollapsedReadSearch { .. } => return None,
+        | RenderedMessage::CollapsedReadSearch { .. } => {
+            // Interactive/expandable messages (tool calls + results) commit to
+            // native scrollback in their COLLAPSED, line/byte-capped string form
+            // (the same shape shown live, `expanded = false`). Keeping them in
+            // the live pane let a single huge tool result (e.g. raw JSON) exceed
+            // the terminal height and push the input view off-screen.
+            plain_terminal_lines(&render_entry_to_string_at_width(entry, false, false, width))
+        }
     };
 
     Some(lines)
@@ -736,21 +551,24 @@ mod tests {
     }
 
     #[test]
-    fn terminal_lines_reject_interactive_tool_messages() {
+    fn terminal_lines_commit_interactive_tool_messages_collapsed() {
         let entry = RenderedMessage::AssistantToolUse {
             id: protocol::ToolUseId::new(),
             tool: "Read".to_string(),
             input: serde_json::json!({"file_path": "src/lib.rs"}),
         };
 
-        assert!(render_entry_to_terminal_lines(&entry, 80, Theme::dark()).is_none());
+        // Tool messages now commit to native scrollback (collapsed form) rather
+        // than staying live, so a huge result can't overflow the live pane.
+        let lines = render_entry_to_terminal_lines(&entry, 80, Theme::dark());
+        assert!(lines.is_some(), "tool messages must render terminal lines");
     }
 
     #[test]
     fn terminal_lines_rate_limit_uses_active_theme() {
         let mut theme = Theme::dark();
-        theme.error = Color::Rgb { r: 1, g: 2, b: 3 };
-        theme.dim = Color::Rgb { r: 4, g: 5, b: 6 };
+        theme.error = StyleColor::Rgb(1, 2, 3);
+        theme.dim = StyleColor::Rgb(4, 5, 6);
         let entry = RenderedMessage::RateLimit {
             text: "limit".to_string(),
             upsell: Some("upgrade".to_string()),

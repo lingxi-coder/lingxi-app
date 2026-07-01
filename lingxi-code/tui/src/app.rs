@@ -21,6 +21,7 @@
 use std::time::Instant;
 
 use iocraft::prelude::*;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 use crate::components::prompt_input::{
     apply_backspace, apply_insert, apply_move, apply_newline, CursorMove as PiCursor,
@@ -894,7 +895,11 @@ pub fn web_picker_popup_lines(
     for (pos, idx) in visible.into_iter().enumerate() {
         let row = &w.rows[idx];
         lines.push(PopupLine::Item {
-            marker: if row.active { PopupMarker::Check } else { PopupMarker::None },
+            marker: if row.active {
+                PopupMarker::Check
+            } else {
+                PopupMarker::None
+            },
             label: row.label.to_string(),
             detail: row.description.to_string(),
             badge: String::new(),
@@ -1354,7 +1359,7 @@ pub fn render_screen(
                         // classification this plain-line render can't do yet.
                         #(lines.into_iter().map(|line| {
                             let is_empty_state = line == EMPTY_LINE || line == MODELS_EMPTY_LINE;
-                            let color = if is_empty_state { TuiTheme::WARNING } else { Color::Reset };
+                            let color = if is_empty_state { TuiTheme::WARNING.to_iocraft() } else { Color::Reset };
                             element! {
                                 Text(content: line, color: color)
                             }
@@ -1914,7 +1919,10 @@ mod dispatch_tests {
 
         assert!(!should_run, "/web is handled by the TUI");
         assert_eq!(st.prompt_text, "");
-        assert!(matches!(st.active_screen, Some(crate::screens::Screen::WebPicker(_))));
+        assert!(matches!(
+            st.active_screen,
+            Some(crate::screens::Screen::WebPicker(_))
+        ));
     }
 
     /// A BARE `!` (no command after the prefix) is just the composer's bash-mode
@@ -2216,10 +2224,15 @@ mod dispatch_tests {
         // (ma-03) marker glyph is platform-conditional (⏺ macOS / ● else).
         let marker = crate::components::messages::assistant_text::MARKER;
         assert!(rendered.contains(&format!("{marker}hi")), "got: {rendered}");
-        // (SS-01) No built-in status row renders without a custom statusLine
-        // command, so the model id no longer appears in the chrome.
+        // (SS-01) No built-in top status row renders without a custom
+        // statusLine command. The active model is allowed in the bottom prompt
+        // footer, but the old `model cwd cost` chrome must not reappear.
         assert!(
-            !rendered.contains("claude-sonnet-4.5"),
+            rendered.contains("claude-sonnet-4.5"),
+            "active model should render in the prompt footer: {rendered}"
+        );
+        assert!(
+            !rendered.contains("/a/b") && !rendered.contains("$0.0000"),
             "built-in status row must not render: {rendered}"
         );
     }

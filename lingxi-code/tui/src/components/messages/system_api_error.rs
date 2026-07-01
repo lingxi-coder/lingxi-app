@@ -11,6 +11,7 @@
 use iocraft::prelude::*;
 
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Truncation hint surface (`CtrlOToExpand`, renders `(ctrl+o to expand)`).
 pub const EXPAND_HINT: &str = "(ctrl+o to expand)";
@@ -94,8 +95,8 @@ pub fn SystemApiErrorMessage(props: &SystemApiErrorProps) -> impl Into<AnyElemen
     let footer = footer.to_string();
     element! {
         View(flex_direction: FlexDirection::Column) {
-            Text(content: body, color: TuiTheme::ERROR)
-            Text(content: footer, color: TuiTheme::DIM)
+            Text(content: body, color: TuiTheme::ERROR.to_iocraft())
+            Text(content: footer, color: TuiTheme::DIM.to_iocraft())
         }
     }
 }

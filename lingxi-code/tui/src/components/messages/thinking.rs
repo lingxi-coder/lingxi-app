@@ -13,6 +13,7 @@ use iocraft::prelude::*;
 use crate::render::markdown::{render as render_markdown, MarkdownTheme};
 use crate::render::StyleColor;
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// `∴ ` marker. U+2234 (0xE2 0x88 0xB4) + ASCII space. dim+italic.
 pub const THINKING_MARKER: &str = "\u{2234} ";
@@ -81,7 +82,7 @@ pub fn AssistantThinkingMessage(props: &ThinkingProps) -> impl Into<AnyElement<'
         let header = format!("{THINKING_MARKER}Thinking {EXPAND_HINT}");
         return element! {
             View(flex_direction: FlexDirection::Column) {
-                Text(content: header, color: TuiTheme::DIM, italic: true)
+                Text(content: header, color: TuiTheme::DIM.to_iocraft(), italic: true)
             }
         }
         .into_any();
@@ -97,8 +98,8 @@ pub fn AssistantThinkingMessage(props: &ThinkingProps) -> impl Into<AnyElement<'
     element! {
         // gap=1 inserts the blank row between the header and the body.
         View(flex_direction: FlexDirection::Column, gap: 1) {
-            Text(content: header, color: TuiTheme::DIM, italic: true)
-            Text(content: body, color: TuiTheme::DIM)
+            Text(content: header, color: TuiTheme::DIM.to_iocraft(), italic: true)
+            Text(content: body, color: TuiTheme::DIM.to_iocraft())
         }
     }
     .into_any()

@@ -15,6 +15,7 @@ use iocraft::prelude::*;
 use crate::render::markdown::{render as render_markdown, MarkdownTheme};
 use crate::render::{StyleColor, StyledLine};
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Dim gutter prepended to each indented content block (2 spaces + U+23BF +
 /// 2 spaces).
@@ -97,7 +98,7 @@ pub fn UserLocalCommandOutputMessage(
     let body = render_local_output_to_string(&props.stdout, &props.stderr);
     element! {
         View(flex_direction: FlexDirection::Column) {
-            Text(content: body, color: TuiTheme::DIM)
+            Text(content: body, color: TuiTheme::DIM.to_iocraft())
         }
     }
 }

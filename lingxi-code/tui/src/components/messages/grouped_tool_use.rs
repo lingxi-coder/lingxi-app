@@ -23,6 +23,7 @@ use crate::components::messages::user_tool_result::{
     render_user_tool_result_to_string, UserToolResultProps,
 };
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Dot marker prefix (matches `assistant_text.rs` `● `).
 pub const MARKER: &str = "\u{25CF} ";
@@ -90,7 +91,7 @@ pub fn GroupedToolUseContent(props: &GroupedToolUseProps) -> impl Into<AnyElemen
     let body = render_grouped_to_string(&props.tool, &props.entries, props.expanded);
     element! {
         View(flex_direction: FlexDirection::Column) {
-            Text(content: body, color: TuiTheme::ASSISTANT)
+            Text(content: body, color: TuiTheme::ASSISTANT.to_iocraft())
         }
     }
 }

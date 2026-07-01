@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use iocraft::prelude::*;
+use crate::render_iocraft::StyleColorIocraftExt;
 use protocol::ToolUseId;
 
 use crate::theme::TuiTheme;
@@ -208,9 +209,9 @@ pub(crate) fn single_line_json_preview(input: &serde_json::Value) -> String {
 #[must_use]
 pub fn resolution_dot_color(resolution: Option<bool>) -> Color {
     match resolution {
-        None => TuiTheme::DIM,
-        Some(false) => TuiTheme::SUCCESS,
-        Some(true) => TuiTheme::ERROR,
+        None => TuiTheme::DIM.to_iocraft(),
+        Some(false) => TuiTheme::SUCCESS.to_iocraft(),
+        Some(true) => TuiTheme::ERROR.to_iocraft(),
     }
 }
 
@@ -238,13 +239,13 @@ pub fn AssistantToolUseMessage(props: &AssistantToolUseProps) -> impl Into<AnyEl
         View(flex_direction: FlexDirection::Column) {
             View(flex_direction: FlexDirection::Row) {
                 #((!prefix.is_empty()).then(|| element! {
-                    Text(content: prefix.to_string(), color: TuiTheme::DIM)
+                    Text(content: prefix.to_string(), color: TuiTheme::DIM.to_iocraft())
                 }))
                 Text(content: MARKER.to_string(), color: dot_color)
                 Text(content: format!(" {name}"), weight: Weight::Bold)
                 #(preview.map(|p| element! { Text(content: format!("({p})")) }))
             }
-            #(pretty.map(|p| element! { Text(content: p, color: TuiTheme::DIM) }))
+            #(pretty.map(|p| element! { Text(content: p, color: TuiTheme::DIM.to_iocraft()) }))
         }
     }
 }
@@ -354,8 +355,8 @@ mod tests {
     fn resolution_maps_to_dot_color() {
         // (ma-02) claude-code `ToolUseLoader`: dim unresolved / green success /
         // red error. The three states map to three distinct theme colors.
-        assert_eq!(resolution_dot_color(None), TuiTheme::DIM);
-        assert_eq!(resolution_dot_color(Some(false)), TuiTheme::SUCCESS);
-        assert_eq!(resolution_dot_color(Some(true)), TuiTheme::ERROR);
+        assert_eq!(resolution_dot_color(None), TuiTheme::DIM.to_iocraft());
+        assert_eq!(resolution_dot_color(Some(false)), TuiTheme::SUCCESS.to_iocraft());
+        assert_eq!(resolution_dot_color(Some(true)), TuiTheme::ERROR.to_iocraft());
     }
 }

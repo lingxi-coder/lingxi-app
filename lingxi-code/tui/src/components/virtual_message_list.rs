@@ -342,7 +342,7 @@ fn render_text_for_measure(msg: &RenderedMessage, width: usize) -> String {
                 .collect();
             crate::components::messages::resource_update::render_resource_update_to_string(&parsed)
         }
-        RenderedMessage::UserImage { image_id, metadata } => {
+        RenderedMessage::UserImage { image_id, metadata, .. } => {
             crate::components::messages::image::render_image_label(*image_id, metadata.as_deref())
         }
         RenderedMessage::Attachment { attachment } => {
@@ -771,7 +771,7 @@ pub fn VirtualMessageList(props: &VirtualMessageListProps) -> impl Into<AnyEleme
             .collect()
     };
     element! {
-        View(flex_direction: FlexDirection::Column, flex_grow: 1.0) {
+        View(flex_direction: FlexDirection::Column, flex_grow: 1.0, overflow: Overflow::Hidden) {
             #(rendered)
         }
     }

@@ -13,6 +13,7 @@
 use iocraft::prelude::*;
 
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// `! ` prefix glyph + space (color `bashBorder` in claude-code).
 pub const PREFIX: &str = "! ";
@@ -39,8 +40,8 @@ pub fn UserBashInputMessage(props: &UserBashInputProps) -> impl Into<AnyElement<
     let command = props.command.clone();
     element! {
         View(flex_direction: FlexDirection::Row) {
-            Text(content: PREFIX, color: TuiTheme::DIM)
-            Text(content: command, color: TuiTheme::USER)
+            Text(content: PREFIX, color: TuiTheme::DIM.to_iocraft())
+            Text(content: command, color: TuiTheme::USER.to_iocraft())
         }
     }
 }

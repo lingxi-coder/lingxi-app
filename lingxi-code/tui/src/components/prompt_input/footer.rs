@@ -14,6 +14,7 @@
 
 use iocraft::prelude::*;
 use permission::PermissionMode;
+use unicode_width::UnicodeWidthStr;
 
 /// Footer permission-mode indicator (claude-code `ModeIndicator`):
 /// `{symbol} {title-lowercased} on (shift+tab to cycle)` for NON-default modes;
@@ -38,7 +39,9 @@ pub fn perm_mode_label(mode: PermissionMode) -> Option<String> {
 }
 
 use crate::components::prompt_input::{mode_indicator, VimMode};
+use crate::render::truncate_to_width_ellipsis;
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// The mode-indicator label for the footer. `None` when vim is disabled
 /// (M6/default footer shows no mode line).
@@ -126,6 +129,15 @@ pub struct PromptInputFooterProps {
     /// (mode indicator, hint, search box) with `"Press {key} again to
     /// exit"` — this overrides every other row here the same way.
     pub exit_hint: Option<&'static str>,
+    /// Current model label shown on the right side of the bottom footer row.
+    /// Claude Code keeps the active model visible at the bottom even after the
+    /// built-in top status row is hidden; `None` preserves standalone footer
+    /// snapshots and callers that do not have session status.
+    pub active_model: Option<String>,
+    /// Footer width in display columns. When set, the right-side model is
+    /// truncated to the space left after the footer-left text, keeping the
+    /// bottom chrome single-line on narrow terminals.
+    pub width: Option<usize>,
 }
 
 impl Default for PromptInputFooterProps {
@@ -140,8 +152,27 @@ impl Default for PromptInputFooterProps {
             permission_mode: PermissionMode::Default,
             is_loading: false,
             exit_hint: None,
+            active_model: None,
+            width: None,
         }
     }
+}
+
+fn right_model_label(active_model: &str, left_text: &str, width: Option<usize>) -> Option<String> {
+    let active_model = active_model.trim();
+    if active_model.is_empty() {
+        return None;
+    }
+    let Some(width) = width else {
+        return Some(active_model.to_string());
+    };
+    let left_width = UnicodeWidthStr::width(left_text);
+    let gap_width = usize::from(!left_text.is_empty());
+    let available = width.saturating_sub(left_width.saturating_add(gap_width));
+    if available == 0 {
+        return None;
+    }
+    Some(truncate_to_width_ellipsis(active_model, available))
 }
 
 /// Render the footer: an optional `-- MODE --` row (vim), the
@@ -149,14 +180,20 @@ impl Default for PromptInputFooterProps {
 /// mode-indicator is shown — a dim `? for shortcuts` hint row.
 #[component]
 pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement<'static>> {
+    let active_model = props.active_model.clone().unwrap_or_default();
     // (RRS-08) claude-code's `exitMessage.show` early-return — replaces the
     // ENTIRE footer-left (mode indicator, hint, search box) with the
-    // double-press exit confirmation.
+    // double-press exit confirmation. The right-side model remains visible.
     if let Some(key) = props.exit_hint {
+        let left_text = format!("Press {key} again to exit");
+        let right_model = right_model_label(&active_model, &left_text, props.width);
         return element! {
             View(flex_direction: FlexDirection::Column) {
-                View(flex_direction: FlexDirection::Row) {
-                    Text(content: format!("Press {key} again to exit"), color: TuiTheme::DIM)
+                View(flex_direction: FlexDirection::Row, width: 100pct, justify_content: JustifyContent::SpaceBetween, gap: 1) {
+                    Text(content: left_text, color: TuiTheme::DIM.to_iocraft())
+                    #(right_model.map(|model| element! {
+                        Text(content: model, color: TuiTheme::DIM.to_iocraft(), wrap: TextWrap::NoWrap)
+                    }))
                 }
             }
         }
@@ -194,22 +231,24 @@ pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement
     } else {
         "? for shortcuts"
     };
+    let left_hint = if show_hint { hint_text } else { "" };
+    let right_model = right_model_label(&active_model, left_hint, props.width);
     element! {
         View(flex_direction: FlexDirection::Column) {
             #(mode_label.map(|label| element! {
                 View(flex_direction: FlexDirection::Row) {
-                    Text(content: label, color: TuiTheme::DIM)
+                    Text(content: label, color: TuiTheme::DIM.to_iocraft())
                 }
             }))
             #(has_placeholder.then(|| element! {
                 View(flex_direction: FlexDirection::Row) {
-                    Text(content: glyph, color: TuiTheme::DIM)
-                    Text(content: placeholder, color: TuiTheme::DIM)
+                    Text(content: glyph, color: TuiTheme::DIM.to_iocraft())
+                    Text(content: placeholder, color: TuiTheme::DIM.to_iocraft())
                 }
             }))
             #(perm_part.map(|p| element! {
                 View(flex_direction: FlexDirection::Row) {
-                    Text(content: p, color: TuiTheme::DIM)
+                    Text(content: p, color: TuiTheme::DIM.to_iocraft())
                 }
             }))
             // ALWAYS reserve the hint row (blank when the hint is hidden) so the
@@ -217,11 +256,14 @@ pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement
             // moment the buffer becomes non-empty, shrinking the bottom-pinned
             // input zone by one row — which makes the border lines bracketing
             // the input jump up a row on the first keystroke.
-            View(flex_direction: FlexDirection::Row) {
+            View(flex_direction: FlexDirection::Row, width: 100pct, justify_content: JustifyContent::SpaceBetween, gap: 1) {
                 Text(
-                    content: if show_hint { hint_text.to_string() } else { String::new() },
-                    color: TuiTheme::DIM,
+                    content: left_hint.to_string(),
+                    color: TuiTheme::DIM.to_iocraft(),
                 )
+                #(right_model.map(|model| element! {
+                    Text(content: model, color: TuiTheme::DIM.to_iocraft(), wrap: TextWrap::NoWrap)
+                }))
             }
         }
     }

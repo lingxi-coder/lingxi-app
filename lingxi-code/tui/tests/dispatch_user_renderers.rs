@@ -90,7 +90,8 @@ fn dispatch_image() {
     assert_eq!(
         s(&RenderedMessage::UserImage {
             image_id: Some(2),
-            metadata: None
+            metadata: None,
+            source_path: None,
         }),
         "[Image #2]"
     );

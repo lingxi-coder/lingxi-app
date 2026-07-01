@@ -7,6 +7,7 @@
 use iocraft::prelude::*;
 
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Locked boundary line. `✻` = U+273B.
 pub const BOUNDARY_LINE: &str = "\u{273B} Conversation compacted (ctrl+o for history)";
@@ -28,7 +29,7 @@ pub fn CompactBoundaryMessage() -> impl Into<AnyElement<'static>> {
     element! {
         View(flex_direction: FlexDirection::Column) {
             View(height: 1)
-            Text(content: BOUNDARY_LINE, color: TuiTheme::DIM)
+            Text(content: BOUNDARY_LINE, color: TuiTheme::DIM.to_iocraft())
             View(height: 1)
         }
     }

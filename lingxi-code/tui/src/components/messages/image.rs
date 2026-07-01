@@ -11,6 +11,7 @@
 use iocraft::prelude::*;
 
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Build the placeholder label (+ optional metadata suffix).
 #[must_use]
@@ -40,7 +41,7 @@ pub fn UserImageMessage(props: &UserImageProps) -> impl Into<AnyElement<'static>
     let label = render_image_label(props.image_id, props.metadata.as_deref());
     element! {
         View(flex_direction: FlexDirection::Row) {
-            Text(content: label, color: TuiTheme::USER)
+            Text(content: label, color: TuiTheme::USER.to_iocraft())
         }
     }
 }

@@ -187,7 +187,10 @@ fn repl_screen_shows_scroll_indicator_only_when_scrolled_up() {
         )
     };
     let out = scrolled.to_string();
-    assert!(out.contains("Scrolled 42 lines"), "expected scroll indicator; got:\n{out}");
+    assert!(
+        out.contains("Scrolled 42 lines"),
+        "expected scroll indicator; got:\n{out}"
+    );
 
     let mut bottom = element! {
         ReplScreen(
@@ -202,7 +205,10 @@ fn repl_screen_shows_scroll_indicator_only_when_scrolled_up() {
         )
     };
     let out = bottom.to_string();
-    assert!(!out.contains("Scrolled"), "indicator should hide at bottom; got:\n{out}");
+    assert!(
+        !out.contains("Scrolled"),
+        "indicator should hide at bottom; got:\n{out}"
+    );
 }
 
 #[test]
@@ -220,5 +226,104 @@ fn repl_screen_renders_prompt_cursor_when_focused() {
         )
     };
     let out = element.to_string();
-    assert!(out.contains("❯ abc "), "expected visible cursor cell after prompt text; got:\n{out}");
+    assert!(
+        out.contains("❯ abc "),
+        "expected visible cursor cell after prompt text; got:\n{out}"
+    );
+}
+
+#[test]
+fn repl_screen_footer_shows_active_model() {
+    let mut element = element! {
+        ReplScreen(
+            status: status(),
+            messages: Vec::<RenderedMessage>::new(),
+            cache: HeightCache::default(),
+            prompt_text: String::new(),
+            prompt_cursor: 0_usize,
+            prompt_width: 80_usize,
+            scroll_offset: 0_usize,
+            viewport_height: 5_usize,
+        )
+    };
+    let out = element.to_string();
+    assert!(
+        out.contains("claude-sonnet-4.5"),
+        "expected bottom footer to show active model; got:\n{out}"
+    );
+}
+
+#[test]
+fn repl_screen_pins_prompt_to_bottom_of_fixed_parent() {
+    let mut element = element! {
+        View(width: 80, height: 12) {
+            ReplScreen(
+                status: status(),
+                messages: Vec::<RenderedMessage>::new(),
+                cache: HeightCache::default(),
+                prompt_text: String::new(),
+                prompt_cursor: 0_usize,
+                prompt_width: 80_usize,
+                scroll_offset: 0_usize,
+                viewport_height: 6_usize,
+            )
+        }
+    };
+    let out = element.to_string();
+    let lines: Vec<&str> = out.lines().collect();
+    let prompt_row = lines
+        .iter()
+        .position(|line| line.contains('\u{276f}'))
+        .expect("prompt row should render");
+    assert!(
+        prompt_row >= 8,
+        "expected prompt to be pushed into the bottom zone of a 12-row frame; row={prompt_row}, frame:\n{out}"
+    );
+    assert!(
+        lines
+            .last()
+            .is_some_and(|line| line.contains("claude-sonnet-4.5")),
+        "expected the active model on the bottom footer row; got:\n{out}"
+    );
+}
+
+#[test]
+fn repl_screen_keeps_footer_fixed_with_tall_scrollback() {
+    let messages: Vec<RenderedMessage> = (0..30)
+        .map(|i| RenderedMessage::AssistantText {
+            body: format!("line {i}"),
+            timestamp: 0,
+        })
+        .collect();
+    let cache = HeightCache::build(&messages, 80);
+    let mut element = element! {
+        View(width: 80, height: 12) {
+            ReplScreen(
+                status: status(),
+                messages: messages,
+                cache: cache,
+                prompt_text: String::new(),
+                prompt_cursor: 0_usize,
+                prompt_width: 80_usize,
+                scroll_offset: 0_usize,
+                viewport_height: 6_usize,
+            )
+        }
+    };
+    let out = element.to_string();
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(
+        lines
+            .last()
+            .is_some_and(|line| line.contains("claude-sonnet-4.5")),
+        "expected footer/model to remain on the bottom row with tall content; got:\n{out}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .rev()
+            .take_while(|line| !line.contains("claude-sonnet-4.5"))
+            .any(|line| line.contains("line ")),
+        "scrollback content must not render below the footer; got:\n{out}"
+    );
 }

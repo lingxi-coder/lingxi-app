@@ -10,6 +10,7 @@
 use iocraft::prelude::*;
 
 use crate::theme::Theme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// `← ` inbound-channel arrow (U+2190 + space).
 pub const ARROW: &str = "\u{2190} ";
@@ -76,9 +77,9 @@ pub fn UserChannelMessage(props: &UserChannelProps) -> impl Into<AnyElement<'sta
     let body = truncate_chars(&collapse_ws(&props.content), 60);
     element! {
         View(flex_direction: FlexDirection::Row) {
-            Text(content: ARROW, color: props.theme.suggestion)
-            Text(content: mid, color: props.theme.dim)
-            Text(content: body, color: props.theme.text)
+            Text(content: ARROW, color: props.theme.suggestion.to_iocraft())
+            Text(content: mid, color: props.theme.dim.to_iocraft())
+            Text(content: body, color: props.theme.text.to_iocraft())
         }
     }
 }

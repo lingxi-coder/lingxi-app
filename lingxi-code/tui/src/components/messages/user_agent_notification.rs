@@ -10,6 +10,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use iocraft::prelude::*;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 use crate::theme::Theme;
 
@@ -36,10 +37,10 @@ pub struct UserAgentNotificationProps {
 #[must_use]
 pub fn status_color(status: Option<&str>, theme: &Theme) -> Color {
     match status {
-        Some("completed") => theme.success,
-        Some("failed") => theme.error,
-        Some("killed") => theme.warning,
-        _ => theme.text,
+        Some("completed") => theme.success.to_iocraft(),
+        Some("failed") => theme.error.to_iocraft(),
+        Some("killed") => theme.warning.to_iocraft(),
+        _ => theme.text.to_iocraft(),
     }
 }
 
@@ -65,7 +66,7 @@ pub fn UserAgentNotificationMessage(
     element! {
         View(flex_direction: FlexDirection::Row) {
             Text(content: MARKER, color: marker_color)
-            Text(content: summary, color: props.theme.text)
+            Text(content: summary, color: props.theme.text.to_iocraft())
         }
     }
     .into_any()
@@ -109,10 +110,10 @@ mod tests {
     #[test]
     fn status_color_map() {
         let t = Theme::dark();
-        assert_eq!(status_color(Some("completed"), &t), t.success);
-        assert_eq!(status_color(Some("failed"), &t), t.error);
-        assert_eq!(status_color(Some("killed"), &t), t.warning);
-        assert_eq!(status_color(Some("other"), &t), t.text);
-        assert_eq!(status_color(None, &t), t.text);
+        assert_eq!(status_color(Some("completed"), &t), t.success.to_iocraft());
+        assert_eq!(status_color(Some("failed"), &t), t.error.to_iocraft());
+        assert_eq!(status_color(Some("killed"), &t), t.warning.to_iocraft());
+        assert_eq!(status_color(Some("other"), &t), t.text.to_iocraft());
+        assert_eq!(status_color(None, &t), t.text.to_iocraft());
     }
 }

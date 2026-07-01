@@ -67,6 +67,61 @@ fn footer_exit_hint_replaces_everything_else() {
 }
 
 #[test]
+fn footer_model_renders_on_reserved_hint_row() {
+    let mut el = element! {
+        View(width: 60) {
+            PromptInputFooter(
+                mode: FooterMode::Prompt,
+                is_empty: true,
+                active_model: Some("claude-sonnet-4.5".to_string()),
+            )
+        }
+    };
+    let frame = el.to_string();
+    assert!(frame.contains("? for shortcuts"), "{frame}");
+    assert!(frame.contains("claude-sonnet-4.5"), "{frame}");
+}
+
+#[test]
+fn footer_exit_hint_keeps_right_side_model() {
+    let mut el = element! {
+        View(width: 72) {
+            PromptInputFooter(
+                mode: FooterMode::Prompt,
+                is_empty: true,
+                exit_hint: Some("Ctrl-C"),
+                active_model: Some("claude-sonnet-4.5".to_string()),
+            )
+        }
+    };
+    let frame = el.to_string();
+    assert!(frame.contains("Press Ctrl-C again to exit"), "{frame}");
+    assert!(frame.contains("claude-sonnet-4.5"), "{frame}");
+}
+
+#[test]
+fn footer_model_truncates_instead_of_wrapping_when_narrow() {
+    let mut el = element! {
+        View(width: 32) {
+            PromptInputFooter(
+                mode: FooterMode::Prompt,
+                is_empty: true,
+                width: Some(32_usize),
+                active_model: Some("claude-sonnet-4.5".to_string()),
+            )
+        }
+    };
+    let frame = el.to_string();
+    assert_eq!(
+        frame.lines().count(),
+        1,
+        "model must stay on the reserved footer row, never wrap:\n{frame}"
+    );
+    assert!(frame.contains("? for shortcuts"), "{frame}");
+    assert!(frame.contains('\u{2026}'), "{frame}");
+}
+
+#[test]
 fn input_three_lines() {
     let mut el = element! {
         PromptInput(text: "first\nsecond\nthird".to_string(), cursor: 0usize, width: 40usize)

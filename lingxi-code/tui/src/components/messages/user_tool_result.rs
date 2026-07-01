@@ -17,6 +17,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use iocraft::prelude::*;
+use crate::render_iocraft::StyleColorIocraftExt;
 use protocol::ToolUseId;
 
 use crate::render::ansi::parse_ansi;
@@ -520,8 +521,8 @@ pub fn UserToolResultMessage(props: &UserToolResultProps) -> impl Into<AnyElemen
         let prefix = if props.focused { FOCUS_PREFIX } else { "" };
         return element! {
             View(flex_direction: FlexDirection::Row) {
-                Text(content: format!("{prefix}{MARKER}"), color: TuiTheme::DIM)
-                Text(content: INTERRUPTED_LINE.to_string(), color: TuiTheme::DIM)
+                Text(content: format!("{prefix}{MARKER}"), color: TuiTheme::DIM.to_iocraft())
+                Text(content: INTERRUPTED_LINE.to_string(), color: TuiTheme::DIM.to_iocraft())
             }
         };
     }
@@ -552,8 +553,8 @@ pub fn UserToolResultMessage(props: &UserToolResultProps) -> impl Into<AnyElemen
                 };
                 element! {
                     View(flex_direction: FlexDirection::Row) {
-                        Text(content: lead, color: TuiTheme::DIM)
-                        Text(content: line, color: TuiTheme::ERROR)
+                        Text(content: lead, color: TuiTheme::DIM.to_iocraft())
+                        Text(content: line, color: TuiTheme::ERROR.to_iocraft())
                     }
                 }
                 .into_any()
@@ -563,10 +564,10 @@ pub fn UserToolResultMessage(props: &UserToolResultProps) -> impl Into<AnyElemen
             let unit = if plus == 1 { "line" } else { "lines" };
             element! {
                 View(flex_direction: FlexDirection::Row) {
-                    Text(content: INDENT.to_string(), color: TuiTheme::DIM)
+                    Text(content: INDENT.to_string(), color: TuiTheme::DIM.to_iocraft())
                     Text(
                         content: format!("\u{2026} +{plus} {unit} (ctrl+o to see all)"),
-                        color: TuiTheme::DIM,
+                        color: TuiTheme::DIM.to_iocraft(),
                     )
                 }
             }
@@ -642,7 +643,7 @@ pub fn UserToolResultMessage(props: &UserToolResultProps) -> impl Into<AnyElemen
         // `theme.dim` is the closest existing mapping.
         return element! {
             View(flex_direction: FlexDirection::Column) {
-                Text(content: header, color: TuiTheme::DIM)
+                Text(content: header, color: TuiTheme::DIM.to_iocraft())
                 View(
                     flex_direction: FlexDirection::Column,
                     border_style: BorderStyle::Custom(BorderCharacters {
@@ -656,7 +657,7 @@ pub fn UserToolResultMessage(props: &UserToolResultProps) -> impl Into<AnyElemen
                         bottom_right: ' ',
                     }),
                     border_edges: Edges::Top | Edges::Bottom,
-                    border_color: TuiTheme::DIM,
+                    border_color: TuiTheme::DIM.to_iocraft(),
                 ) {
                     #(row_elements)
                 }
@@ -708,7 +709,7 @@ pub fn UserToolResultMessage(props: &UserToolResultProps) -> impl Into<AnyElemen
             .collect();
         return element! {
             View(flex_direction: FlexDirection::Column) {
-                Text(content: header, color: TuiTheme::DIM)
+                Text(content: header, color: TuiTheme::DIM.to_iocraft())
                 #(body_rows)
             }
         };
@@ -716,7 +717,7 @@ pub fn UserToolResultMessage(props: &UserToolResultProps) -> impl Into<AnyElemen
     let body = render_user_tool_result_to_string(props.clone());
     element! {
         View(flex_direction: FlexDirection::Column) {
-            Text(content: body, color: TuiTheme::DIM)
+            Text(content: body, color: TuiTheme::DIM.to_iocraft())
         }
     }
 }

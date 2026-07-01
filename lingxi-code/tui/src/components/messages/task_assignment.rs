@@ -9,6 +9,7 @@ use iocraft::prelude::*;
 
 use crate::multiagent::style::{agent_color, AgentColor};
 use crate::theme::Theme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Props for [`TaskAssignmentMessage`].
 #[derive(Debug, Clone, Default, Props)]
@@ -58,7 +59,7 @@ pub fn TaskAssignmentMessage(props: &TaskAssignmentProps) -> impl Into<AnyElemen
             Text(content: header, color: cyan, weight: Weight::Bold)
             Text(content: subject, weight: Weight::Bold)
             #(description.map(|d| element! {
-                Text(content: d, color: dim)
+                Text(content: d, color: dim.to_iocraft())
             }))
         }
     }

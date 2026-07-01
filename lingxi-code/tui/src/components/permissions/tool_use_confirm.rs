@@ -21,6 +21,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 use iocraft::prelude::*;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 use super::{DialogFocus, DialogResolution};
 use crate::theme::TuiTheme;
@@ -173,15 +174,15 @@ pub fn ToolUseConfirm(props: &ToolUseConfirmProps) -> impl Into<AnyElement<'stat
         View(
             flex_direction: FlexDirection::Column,
             border_style: BorderStyle::Round,
-            border_color: accent,
+            border_color: accent.to_iocraft(),
             border_edges: Edges::Top,
             padding_left: 1,
             padding_right: 1,
         ) {
             View(flex_direction: FlexDirection::Row, gap: 1) {
-                Text(content: "Tool use".to_string(), weight: Weight::Bold, color: accent)
+                Text(content: "Tool use".to_string(), weight: Weight::Bold, color: accent.to_iocraft())
                 #(worker_name.as_deref().map(|n| element! {
-                    Text(content: format!("\u{00B7} @{n}"), color: TuiTheme::DIM)
+                    Text(content: format!("\u{00B7} @{n}"), color: TuiTheme::DIM.to_iocraft())
                 }))
             }
             Text(content: body)

@@ -10,6 +10,7 @@ use iocraft::prelude::*;
 
 use crate::screens::settings::SettingsData;
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// The documented M8 per-model gap line — kept verbatim as the divergence marker.
 pub const M8_GAP_LINE: &str = "Per-model cost breakdown is not available yet (M8).";
@@ -51,7 +52,7 @@ pub fn UsageTab(props: &UsageTabProps) -> impl Into<AnyElement<'static>> {
         .map_or_else(String::new, render_usage_to_string);
     element! {
         View(flex_direction: FlexDirection::Column) {
-            Text(content: body, color: TuiTheme::DIM)
+            Text(content: body, color: TuiTheme::DIM.to_iocraft())
         }
     }
 }

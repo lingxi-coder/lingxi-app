@@ -64,7 +64,12 @@ impl WebPickerState {
                 active: id == snapshot.active,
             })
             .collect();
-        Self { rows, query: String::new(), selected: 0, snapshot }
+        Self {
+            rows,
+            query: String::new(),
+            selected: 0,
+            snapshot,
+        }
     }
 
     #[must_use]
@@ -131,21 +136,31 @@ pub fn web_provider_detail_lines(
     snapshot: &WebConfigSnapshot,
 ) -> Vec<String> {
     let mut out = Vec::new();
-    let active = if provider == snapshot.active { "active" } else { "inactive" };
+    let active = if provider == snapshot.active {
+        "active"
+    } else {
+        "inactive"
+    };
     out.push(format!("{} — {active}", provider_label(provider)));
     out.push(match provider {
         WebSearchProvider::Auto => "Status: uses Tavily → Brave → SearXNG → DuckDuckGo".to_string(),
         WebSearchProvider::DuckDuckGo => "Status: keyless (always available)".to_string(),
-        WebSearchProvider::Tavily => {
-            if snapshot.tavily_key { "Status: Configured" } else { "Status: Missing API key" }.to_string()
+        WebSearchProvider::Tavily => if snapshot.tavily_key {
+            "Status: Configured"
+        } else {
+            "Status: Missing API key"
         }
-        WebSearchProvider::Brave => {
-            if snapshot.brave_key { "Status: Configured" } else { "Status: Missing API key" }.to_string()
+        .to_string(),
+        WebSearchProvider::Brave => if snapshot.brave_key {
+            "Status: Configured"
+        } else {
+            "Status: Missing API key"
         }
-        WebSearchProvider::Searxng => snapshot
-            .searxng_url
-            .as_ref()
-            .map_or_else(|| "Status: Missing SearXNG URL".to_string(), |url| format!("Status: Configured ({url})")),
+        .to_string(),
+        WebSearchProvider::Searxng => snapshot.searxng_url.as_ref().map_or_else(
+            || "Status: Missing SearXNG URL".to_string(),
+            |url| format!("Status: Configured ({url})"),
+        ),
     });
     out.push(format!("Backend: {}", provider_description(provider)));
     if let Some(test) = &snapshot.last_test {
@@ -176,7 +191,9 @@ pub fn handle_web_picker_key(
             }
             WebPickerOutcome::Stay
         }
-        KeyCode::Char('t') => state.highlighted_provider().map_or(WebPickerOutcome::Stay, WebPickerOutcome::Test),
+        KeyCode::Char('t') => state
+            .highlighted_provider()
+            .map_or(WebPickerOutcome::Stay, WebPickerOutcome::Test),
         KeyCode::Char(c) => {
             state.query.push(c);
             state.selected = 0;
@@ -187,7 +204,9 @@ pub fn handle_web_picker_key(
             state.selected = 0;
             WebPickerOutcome::Stay
         }
-        KeyCode::Enter => state.highlighted_provider().map_or(WebPickerOutcome::Stay, WebPickerOutcome::Select),
+        KeyCode::Enter => state
+            .highlighted_provider()
+            .map_or(WebPickerOutcome::Stay, WebPickerOutcome::Select),
         KeyCode::Esc => WebPickerOutcome::Cancel,
         _ => WebPickerOutcome::Stay,
     }
@@ -204,7 +223,13 @@ pub fn render_web_picker_to_string(state: &WebPickerState) -> String {
     }
     for (pos, idx) in visible.into_iter().enumerate() {
         let row = &state.rows[idx];
-        let marker = if pos == state.selected { "❯ " } else if row.active { "✓ " } else { "  " };
+        let marker = if pos == state.selected {
+            "❯ "
+        } else if row.active {
+            "✓ "
+        } else {
+            "  "
+        };
         out.push_str(marker);
         out.push_str(&format!("{:<12}{}\n", row.label, row.description));
     }
@@ -257,8 +282,14 @@ mod tests {
     #[test]
     fn reducer_down_enter_test_and_esc() {
         let mut st = WebPickerState::from_snapshot(WebConfigSnapshot::default());
-        assert_eq!(handle_web_picker_key(&mut st, crossterm::event::KeyCode::Down), WebPickerOutcome::Stay);
-        assert_eq!(st.highlighted_provider(), Some(WebSearchProvider::DuckDuckGo));
+        assert_eq!(
+            handle_web_picker_key(&mut st, crossterm::event::KeyCode::Down),
+            WebPickerOutcome::Stay
+        );
+        assert_eq!(
+            st.highlighted_provider(),
+            Some(WebSearchProvider::DuckDuckGo)
+        );
         assert_eq!(
             handle_web_picker_key(&mut st, crossterm::event::KeyCode::Char('t')),
             WebPickerOutcome::Test(WebSearchProvider::DuckDuckGo)
@@ -267,6 +298,9 @@ mod tests {
             handle_web_picker_key(&mut st, crossterm::event::KeyCode::Enter),
             WebPickerOutcome::Select(WebSearchProvider::DuckDuckGo)
         );
-        assert_eq!(handle_web_picker_key(&mut st, crossterm::event::KeyCode::Esc), WebPickerOutcome::Cancel);
+        assert_eq!(
+            handle_web_picker_key(&mut st, crossterm::event::KeyCode::Esc),
+            WebPickerOutcome::Cancel
+        );
     }
 }

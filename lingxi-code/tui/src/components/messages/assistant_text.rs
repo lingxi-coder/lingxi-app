@@ -23,6 +23,7 @@
 #![allow(clippy::doc_markdown, clippy::doc_lazy_continuation)]
 
 use iocraft::prelude::*;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 use crate::render::markdown::{render_with_width as render_markdown_width, MarkdownTheme};
 use crate::render::{StyleColor, StyledLine, StyledSpan};
@@ -206,7 +207,7 @@ pub fn AssistantTextMessage(props: &AssistantTextMessageProps) -> impl Into<AnyE
     element! {
         View(flex_direction: FlexDirection::Row) {
             View(width: 2u32) {
-                Text(content: MARKER, color: marker_color)
+                Text(content: MARKER, color: marker_color.to_iocraft())
             }
             View(flex_direction: FlexDirection::Column) {
                 #(rows)

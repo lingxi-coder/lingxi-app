@@ -15,6 +15,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 use iocraft::prelude::*;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 use crate::render::diff;
 use crate::state::AppState;
@@ -303,15 +304,15 @@ pub fn ThemePickerScreen(props: &ThemePickerScreenProps) -> impl Into<AnyElement
 
     element! {
         View(flex_direction: FlexDirection::Column, padding: 1) {
-            Text(content: HEADER, color: theme.permission, weight: Weight::Bold)
+            Text(content: HEADER, color: theme.permission.to_iocraft(), weight: Weight::Bold)
             // (theme-subheader-dimmed) Bold, full-brightness (NOT dim) sub-header.
-            Text(content: SUB_HEADER, color: theme.text, weight: Weight::Bold)
+            Text(content: SUB_HEADER, color: theme.text.to_iocraft(), weight: Weight::Bold)
             View(flex_direction: FlexDirection::Column, padding_top: 1) {
                 #(rows.into_iter().map(|(line, sel)| {
                     // (theme-unselected-rows-dimmed) Only the highlighted row is
                     // accented; unselected rows stay in the default foreground.
                     let color = if sel { theme.suggestion } else { theme.text };
-                    element! { Text(content: line, color: color) }
+                    element! { Text(content: line, color: color.to_iocraft()) }
                 }))
             }
             // (theme-preview-border-round-vs-dashed) claude-code's
@@ -332,20 +333,20 @@ pub fn ThemePickerScreen(props: &ThemePickerScreenProps) -> impl Into<AnyElement
                     bottom_right: ' ',
                 }),
                 border_edges: Edges::Top | Edges::Bottom,
-                border_color: theme.dim,
+                border_color: theme.dim.to_iocraft(),
                 padding: 1,
                 margin_top: 1,
             ) {
                 #(preview_rows)
             }
             // (theme-syntax-status-line) dim syntax-status line below the preview.
-            Text(content: syntax_status_line(state.syntax_disabled), color: theme.dim)
+            Text(content: syntax_status_line(state.syntax_disabled), color: theme.dim.to_iocraft())
             // (theme-footer-wording) claude-code's dim italic Byline:
             // `KeyboardShortcutHint`s joined by " · " — "Enter to select" (not
             // "apply"), no "Up/Down" hint (claude-code's ThemePicker footer
             // never mentions the arrow keys).
             View(margin_top: 1) {
-                Text(content: "Enter to select \u{00B7} Esc to cancel".to_string(), color: theme.dim, italic: true)
+                Text(content: "Enter to select \u{00B7} Esc to cancel".to_string(), color: theme.dim.to_iocraft(), italic: true)
             }
         }
     }

@@ -21,6 +21,7 @@ use crate::components::spinner::SpinnerWithVerb;
 use crate::components::status_line::StatusLine;
 use crate::components::virtual_message_list::{HeightCache, VirtualMessageList};
 use crate::state::{AppState, RenderedMessage, StatusSnapshot};
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Predicate exposed for tests + the renderer's conditional mount.
 /// Returns `true` iff the spinner should be visible (a turn is streaming).
@@ -193,6 +194,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let exit_hint = props.exit_hint;
     let reduced_motion = props.reduced_motion;
     let current_todo = props.current_todo.clone();
+    let footer_model = (!model.trim().is_empty()).then_some(model.clone());
     // (A6) Custom status-line text + padding + width-for-truncation.
     let status_line_text = props.status_line_text.clone();
     // (TokenWarning) The live context-pressure banner, rendered above the prompt.
@@ -244,7 +246,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
             // teammate is being viewed. Hidden (no row) in normal mode.
             #(viewing_teammate.as_ref().map(|name| {
                 let header = crate::components::coordinator::teammate_view_header::render_teammate_view_header(name, "");
-                element! { View(flex_direction: FlexDirection::Column) { Text(content: header, color: theme.claude) } }
+                element! { View(flex_direction: FlexDirection::Column) { Text(content: header, color: theme.claude.to_iocraft()) } }
             }))
             VirtualMessageList(
                 messages: messages,
@@ -259,7 +261,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
             #(if scroll_offset > 0 {
                 element! {
                     View(flex_direction: FlexDirection::Row) {
-                        Text(content: format!("Scrolled {scroll_offset} lines"), color: dim)
+                        Text(content: format!("Scrolled {scroll_offset} lines"), color: dim.to_iocraft())
                     }
                 }.into_any()
             } else {
@@ -268,7 +270,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
             #(if show_spinner {
                 // Glyph + verb render in the active theme's Claude accent
                 // (claude-code `Spinner` `defaultColor='claude'`).
-                element!(SpinnerWithVerb(color: Some(theme.claude), reduced_motion: reduced_motion, current_todo: current_todo.clone())).into_any()
+                element!(SpinnerWithVerb(color: theme.claude.to_iocraft(), reduced_motion: reduced_motion, current_todo: current_todo.clone())).into_any()
             } else {
                 element!(View).into_any()
             })
@@ -320,7 +322,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 };
                 element! {
                     View(flex_direction: FlexDirection::Row) {
-                        Text(content: text, color: color)
+                        Text(content: text, color: color.to_iocraft())
                     }
                 }
             }))
@@ -345,7 +347,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
             // changed (palette open/close, wrap, hint toggle).
             View(
                 border_style: BorderStyle::Round,
-                border_color: theme.dim,
+                border_color: theme.dim.to_iocraft(),
                 border_edges: Edges::Top | Edges::Bottom,
                 width: 100pct,
             ) {
@@ -373,19 +375,21 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 // (RRS-08) Replaces the whole footer-left with "Press {key}
                 // again to exit" while the double-press window is armed.
                 exit_hint: exit_hint,
+                active_model: footer_model,
+                width: Some(prompt_width),
             )
             // (M9-05) Background-task footer pill, drawn bottom-most when present
             // (claude-code `BackgroundTaskStatus`). Hidden (no row) when `None`.
             #(task_footer.map(|line| element! {
                 View(flex_direction: FlexDirection::Row) {
-                    Text(content: line, color: dim)
+                    Text(content: line, color: dim.to_iocraft())
                 }
             }))
             // (M9-06) Team-status footer pill (claude-code `TeamStatus`).
             // Hidden (no row) when `None` (no teammates / only `team-lead`).
             #(team_footer.map(|line| element! {
                 View(flex_direction: FlexDirection::Row) {
-                    Text(content: line, color: dim)
+                    Text(content: line, color: dim.to_iocraft())
                 }
             }))
         }

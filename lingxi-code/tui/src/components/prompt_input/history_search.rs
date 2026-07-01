@@ -13,6 +13,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use iocraft::prelude::*;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Search-overlay state. `Some(_)` in `AppState.history_search` means the
 /// overlay owns all keys.
@@ -176,7 +177,7 @@ pub fn HistorySearchOverlay(props: &HistorySearchOverlayProps) -> impl Into<AnyE
     let chunks = render_line_with_cursor(&props.query, Some(cursor_col));
     element! {
         View(flex_direction: FlexDirection::Row, height: 1) {
-            Text(content: format!("{label} "), color: crate::theme::TuiTheme::DIM)
+            Text(content: format!("{label} "), color: crate::theme::TuiTheme::DIM.to_iocraft())
             #(chunks.into_iter().map(|(seg, is_cursor)| {
                 if is_cursor {
                     element! {
@@ -185,7 +186,7 @@ pub fn HistorySearchOverlay(props: &HistorySearchOverlayProps) -> impl Into<AnyE
                         }
                     }.into_any()
                 } else {
-                    element! { Text(content: seg, color: crate::theme::TuiTheme::DIM) }.into_any()
+                    element! { Text(content: seg, color: crate::theme::TuiTheme::DIM.to_iocraft()) }.into_any()
                 }
             }))
         }

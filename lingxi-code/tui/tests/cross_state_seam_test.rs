@@ -108,7 +108,10 @@ fn permission_wins_over_open_screen() {
 fn live_pageup_uses_viewport_height_for_scrollback() {
     let mut st = long_scrollback(120);
     handle_live_key(&mut st, &key(KeyCode::PageUp), 20);
-    assert_eq!(st.scroll_offset, 10, "root path must use live viewport/2, not dispatch fallback height=1");
+    assert_eq!(
+        st.scroll_offset, 10,
+        "root path must use live viewport/2, not dispatch fallback height=1"
+    );
 }
 
 #[test]

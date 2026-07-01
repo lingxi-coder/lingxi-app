@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 branding = { workspace = true }
+tui-core = { path = "../tui-core" }
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 orchestrator = { path = "../orchestrator" }

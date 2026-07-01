@@ -15,6 +15,7 @@ use iocraft::prelude::*;
 use crate::multiagent::style::agent_color_from_name;
 use crate::state::UserTeammateKind;
 use crate::theme::Theme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// `❯` teammate-header pointer (U+276F).
 pub const POINTER: &str = "\u{276F}";
@@ -111,11 +112,11 @@ pub fn UserTeammateMessage(props: &UserTeammateProps) -> impl Into<AnyElement<'s
                 View(flex_direction: FlexDirection::Column) {
                     Text(content: header.clone(), color: accent)
                     View(flex_direction: FlexDirection::Row) {
-                        Text(content: GUTTER, color: theme.dim)
-                        Text(content: CHECK, color: theme.success)
-                        Text(content: completed, color: theme.text)
+                        Text(content: GUTTER, color: theme.dim.to_iocraft())
+                        Text(content: CHECK, color: theme.success.to_iocraft())
+                        Text(content: completed, color: theme.text.to_iocraft())
                         #(subject.map(|s| element! {
-                            Text(content: s, color: theme.dim)
+                            Text(content: s, color: theme.dim.to_iocraft())
                         }))
                     }
                 }
@@ -145,7 +146,7 @@ pub fn UserTeammateMessage(props: &UserTeammateProps) -> impl Into<AnyElement<'s
                 View(flex_direction: FlexDirection::Column) {
                     Text(content: head, color: accent)
                     #(body.map(|b| element! {
-                        Text(content: b, color: theme.text)
+                        Text(content: b, color: theme.text.to_iocraft())
                     }))
                 }
             }

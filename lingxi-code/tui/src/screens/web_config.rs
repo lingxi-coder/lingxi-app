@@ -15,7 +15,12 @@ pub enum WebTestStatus {
     /// A root pump is currently running the test search.
     Running,
     /// Test completed successfully.
-    Success { provider: WebSearchProvider, count: usize, top_title: String, top_url: String },
+    Success {
+        provider: WebSearchProvider,
+        count: usize,
+        top_title: String,
+        top_url: String,
+    },
     /// Test/save validation failed with a user-facing message.
     Failed(String),
 }
@@ -41,9 +46,15 @@ pub enum WebConfigOutcome {
     /// Close back to the REPL.
     Close,
     /// Persist a secret key through the secure credential store.
-    SaveSecret { provider: WebSearchProvider, secret: String },
+    SaveSecret {
+        provider: WebSearchProvider,
+        secret: String,
+    },
     /// Persist non-secret settings (`provider`, optional SearXNG URL).
-    SaveSettings { provider: WebSearchProvider, searxng_url: Option<String> },
+    SaveSettings {
+        provider: WebSearchProvider,
+        searxng_url: Option<String>,
+    },
     /// Run a test search for the selected provider.
     Test(WebSearchProvider),
 }
@@ -56,7 +67,12 @@ impl WebConfigState {
             WebSearchProvider::Searxng => snapshot.searxng_url.clone().unwrap_or_default(),
             _ => String::new(),
         };
-        Self { provider, snapshot, input, test_status: WebTestStatus::Idle }
+        Self {
+            provider,
+            snapshot,
+            input,
+            test_status: WebTestStatus::Idle,
+        }
     }
 
     /// Current user-facing status line for render/tests.
@@ -65,7 +81,12 @@ impl WebConfigState {
         match &self.test_status {
             WebTestStatus::Idle => status_for_provider(self.provider, &self.snapshot),
             WebTestStatus::Running => "Testing…".to_string(),
-            WebTestStatus::Success { provider, count, top_title, top_url } => format!(
+            WebTestStatus::Success {
+                provider,
+                count,
+                top_title,
+                top_url,
+            } => format!(
                 "{} test passed: {count} results · {top_title} ({top_url})",
                 crate::screens::web_picker::provider_label(*provider)
             ),
@@ -78,18 +99,26 @@ impl WebConfigState {
 #[must_use]
 pub fn status_for_provider(provider: WebSearchProvider, snapshot: &WebConfigSnapshot) -> String {
     match provider {
-        WebSearchProvider::Auto => "Auto fallback: Tavily → Brave → SearXNG → DuckDuckGo".to_string(),
+        WebSearchProvider::Auto => {
+            "Auto fallback: Tavily → Brave → SearXNG → DuckDuckGo".to_string()
+        }
         WebSearchProvider::DuckDuckGo => "DuckDuckGo is keyless and always available".to_string(),
-        WebSearchProvider::Tavily => {
-            if snapshot.tavily_key { "Tavily API key configured" } else { "Paste Tavily API key" }.to_string()
+        WebSearchProvider::Tavily => if snapshot.tavily_key {
+            "Tavily API key configured"
+        } else {
+            "Paste Tavily API key"
         }
-        WebSearchProvider::Brave => {
-            if snapshot.brave_key { "Brave API key configured" } else { "Paste Brave API key" }.to_string()
+        .to_string(),
+        WebSearchProvider::Brave => if snapshot.brave_key {
+            "Brave API key configured"
+        } else {
+            "Paste Brave API key"
         }
-        WebSearchProvider::Searxng => snapshot
-            .searxng_url
-            .as_ref()
-            .map_or_else(|| "Enter SearXNG URL".to_string(), |url| format!("SearXNG URL: {url}")),
+        .to_string(),
+        WebSearchProvider::Searxng => snapshot.searxng_url.as_ref().map_or_else(
+            || "Enter SearXNG URL".to_string(),
+            |url| format!("SearXNG URL: {url}"),
+        ),
     }
 }
 
@@ -102,7 +131,6 @@ pub fn handle_web_config_key(
     use crossterm::event::KeyCode;
     match key {
         KeyCode::Esc => WebConfigOutcome::Close,
-        KeyCode::Char('t') => WebConfigOutcome::Test(state.provider),
         KeyCode::Backspace => {
             state.input.pop();
             WebConfigOutcome::Stay
@@ -110,8 +138,12 @@ pub fn handle_web_config_key(
         KeyCode::Char(c) => {
             if requires_input(state.provider) {
                 state.input.push(c);
+                WebConfigOutcome::Stay
+            } else if c == 't' {
+                WebConfigOutcome::Test(state.provider)
+            } else {
+                WebConfigOutcome::Stay
             }
-            WebConfigOutcome::Stay
         }
         KeyCode::Enter => save_outcome(state),
         _ => WebConfigOutcome::Stay,
@@ -119,7 +151,10 @@ pub fn handle_web_config_key(
 }
 
 fn requires_input(provider: WebSearchProvider) -> bool {
-    matches!(provider, WebSearchProvider::Tavily | WebSearchProvider::Brave | WebSearchProvider::Searxng)
+    matches!(
+        provider,
+        WebSearchProvider::Tavily | WebSearchProvider::Brave | WebSearchProvider::Searxng
+    )
 }
 
 fn save_outcome(state: &mut WebConfigState) -> WebConfigOutcome {
@@ -130,7 +165,10 @@ fn save_outcome(state: &mut WebConfigState) -> WebConfigOutcome {
                 state.test_status = WebTestStatus::Failed("API key cannot be empty".to_string());
                 WebConfigOutcome::Stay
             } else {
-                WebConfigOutcome::SaveSecret { provider: state.provider, secret }
+                WebConfigOutcome::SaveSecret {
+                    provider: state.provider,
+                    secret,
+                }
             }
         }
         WebSearchProvider::Searxng => {
@@ -139,17 +177,22 @@ fn save_outcome(state: &mut WebConfigState) -> WebConfigOutcome {
                 state.test_status = WebTestStatus::Failed("Invalid URL".to_string());
                 WebConfigOutcome::Stay
             } else {
-                WebConfigOutcome::SaveSettings { provider: state.provider, searxng_url: Some(url) }
+                WebConfigOutcome::SaveSettings {
+                    provider: state.provider,
+                    searxng_url: Some(url),
+                }
             }
         }
-        WebSearchProvider::Auto | WebSearchProvider::DuckDuckGo => {
-            WebConfigOutcome::SaveSettings { provider: state.provider, searxng_url: state.snapshot.searxng_url.clone() }
-        }
+        WebSearchProvider::Auto | WebSearchProvider::DuckDuckGo => WebConfigOutcome::SaveSettings {
+            provider: state.provider,
+            searxng_url: state.snapshot.searxng_url.clone(),
+        },
     }
 }
 
 fn is_http_url(s: &str) -> bool {
-    url::Url::parse(s).is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some())
+    url::Url::parse(s)
+        .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some())
 }
 
 /// Render a plain-text oracle for snapshot/unit tests.
@@ -158,14 +201,21 @@ pub fn render_web_config_to_string(state: &WebConfigState) -> String {
     let label = crate::screens::web_picker::provider_label(state.provider);
     let mut out = format!("Configure {label}\n{}\n", state.status_text());
     if requires_input(state.provider) {
-        let shown = if matches!(state.provider, WebSearchProvider::Tavily | WebSearchProvider::Brave) {
+        let shown = if matches!(
+            state.provider,
+            WebSearchProvider::Tavily | WebSearchProvider::Brave
+        ) {
             "*".repeat(state.input.chars().count())
         } else {
             state.input.clone()
         };
         out.push_str(&format!("Input: {shown}\n"));
     }
-    out.push_str("Enter save · t test · Esc cancel");
+    if requires_input(state.provider) {
+        out.push_str("Enter save · Esc cancel");
+    } else {
+        out.push_str("Enter save · t test · Esc cancel");
+    }
     out
 }
 
@@ -174,21 +224,61 @@ mod tests {
     use super::*;
     use crossterm::event::KeyCode;
 
-    fn key_char(c: char) -> KeyCode { KeyCode::Char(c) }
-    fn key_enter() -> KeyCode { KeyCode::Enter }
+    fn key_char(c: char) -> KeyCode {
+        KeyCode::Char(c)
+    }
+    fn key_enter() -> KeyCode {
+        KeyCode::Enter
+    }
 
     #[test]
     fn tavily_key_buffer_edits_and_save_returns_secret_action() {
         let mut st = WebConfigState::new(WebSearchProvider::Tavily, WebConfigSnapshot::default());
-        assert_eq!(handle_web_config_key(&mut st, key_char('a')), WebConfigOutcome::Stay);
-        assert_eq!(handle_web_config_key(&mut st, key_enter()), WebConfigOutcome::SaveSecret { provider: WebSearchProvider::Tavily, secret: "a".into() });
+        for ch in "tvly-secret".chars() {
+            assert_eq!(
+                handle_web_config_key(&mut st, key_char(ch)),
+                WebConfigOutcome::Stay
+            );
+        }
+        assert_eq!(
+            handle_web_config_key(&mut st, key_enter()),
+            WebConfigOutcome::SaveSecret {
+                provider: WebSearchProvider::Tavily,
+                secret: "tvly-secret".into()
+            }
+        );
+    }
+
+    #[test]
+    fn tavily_t_is_text_not_test_shortcut() {
+        let mut st = WebConfigState::new(WebSearchProvider::Tavily, WebConfigSnapshot::default());
+        assert_eq!(
+            handle_web_config_key(&mut st, key_char('t')),
+            WebConfigOutcome::Stay
+        );
+        assert_eq!(st.input, "t");
+    }
+
+    #[test]
+    fn keyless_provider_keeps_t_test_shortcut() {
+        let mut st =
+            WebConfigState::new(WebSearchProvider::DuckDuckGo, WebConfigSnapshot::default());
+        assert_eq!(
+            handle_web_config_key(&mut st, key_char('t')),
+            WebConfigOutcome::Test(WebSearchProvider::DuckDuckGo)
+        );
     }
 
     #[test]
     fn searxng_url_validates_before_save() {
         let mut st = WebConfigState::new(WebSearchProvider::Searxng, WebConfigSnapshot::default());
-        for ch in "not a url".chars() { let _ = handle_web_config_key(&mut st, key_char(ch)); }
-        assert_eq!(handle_web_config_key(&mut st, key_enter()), WebConfigOutcome::Stay);
+        for ch in "not a url".chars() {
+            let _ = handle_web_config_key(&mut st, key_char(ch));
+        }
+        assert_eq!(
+            handle_web_config_key(&mut st, key_enter()),
+            WebConfigOutcome::Stay
+        );
         assert!(st.status_text().contains("Invalid URL"));
     }
 }

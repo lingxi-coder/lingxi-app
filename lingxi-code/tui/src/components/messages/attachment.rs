@@ -15,71 +15,13 @@
 use iocraft::prelude::*;
 
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// `⧉` selected-lines glyph (U+29C9).
 pub const SELECTED_GLYPH: &str = "\u{29C9}";
 
 /// A solo-user attachment kind.
-#[derive(Debug, Clone)]
-pub enum Attachment {
-    /// Directory listing.
-    Directory {
-        /// Display path of the listed directory.
-        display_path: String,
-    },
-    /// File read.
-    File {
-        /// Display path of the read file.
-        display_path: String,
-        /// Number of lines read.
-        num_lines: u64,
-        /// `true` → file was truncated (append `+`).
-        truncated: bool,
-    },
-    /// Compact file reference.
-    CompactFileReference {
-        /// Display path of the referenced file.
-        display_path: String,
-    },
-    /// PDF reference.
-    PdfReference {
-        /// Display path of the referenced PDF.
-        display_path: String,
-        /// Number of pages.
-        page_count: u64,
-    },
-    /// IDE-selected lines.
-    SelectedLines {
-        /// Number of selected lines.
-        count: u64,
-        /// Display path of the file.
-        display_path: String,
-        /// IDE name.
-        ide_name: String,
-    },
-    /// Nested memory file loaded.
-    NestedMemory {
-        /// Display path of the loaded memory file.
-        display_path: String,
-    },
-    /// MCP resource read.
-    McpResource {
-        /// Resource name.
-        name: String,
-        /// MCP server name.
-        server: String,
-    },
-    /// Plan file referenced.
-    PlanFileReference {
-        /// Plan file path.
-        plan_file_path: String,
-    },
-    /// Skills restored.
-    InvokedSkills {
-        /// Comma-joined skill names.
-        skill_names: Vec<String>,
-    },
-}
+pub use tui_core::message::Attachment;
 
 /// Pure string renderer for one attachment line.
 #[must_use]
@@ -142,7 +84,7 @@ pub fn AttachmentMessage(props: &AttachmentProps) -> impl Into<AnyElement<'stati
     let line = render_attachment_to_string(&props.attachment);
     element! {
         View(flex_direction: FlexDirection::Row) {
-            Text(content: line, color: TuiTheme::DIM)
+            Text(content: line, color: TuiTheme::DIM.to_iocraft())
         }
     }
 }

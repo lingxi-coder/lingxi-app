@@ -555,6 +555,7 @@ mod tests {
         let m = RenderedMessage::UserImage {
             image_id: Some(3),
             metadata: None,
+            source_path: None,
         };
         assert_eq!(measured_height(&m, 80), 1);
     }

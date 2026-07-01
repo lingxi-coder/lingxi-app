@@ -12,6 +12,7 @@ use iocraft::prelude::*;
 
 use crate::components::messages::user_tool_result::MARKER;
 use crate::theme::Theme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Props for [`HookProgressMessage`].
 #[derive(Debug, Clone, Default, Props)]
@@ -59,7 +60,7 @@ pub fn HookProgressMessage(props: &HookProgressProps) -> impl Into<AnyElement<'s
     let body = render_hook_progress_to_string(props.clone());
     element! {
         View(flex_direction: FlexDirection::Column) {
-            Text(content: body, color: props.theme.dim)
+            Text(content: body, color: props.theme.dim.to_iocraft())
         }
     }
 }

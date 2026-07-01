@@ -11,6 +11,7 @@
 use iocraft::prelude::*;
 
 use crate::theme::Theme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Leading marker glyph for a row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,13 +75,13 @@ pub fn render_picker_popup(
     let title_row = element! {
         View(width: 100pct, flex_direction: FlexDirection::Row, justify_content: JustifyContent::SpaceBetween) {
             Text(content: title_owned, weight: Weight::Bold)
-            Text(content: "esc".to_string(), color: theme.dim)
+            Text(content: "esc".to_string(), color: theme.dim.to_iocraft())
         }
     };
 
     // Search row: dim "Search" placeholder, or the typed query in the default fg.
     let search_row: AnyElement<'static> = if search.is_empty() {
-        element! { Text(content: "Search".to_string(), color: theme.dim) }.into_any()
+        element! { Text(content: "Search".to_string(), color: theme.dim.to_iocraft()) }.into_any()
     } else {
         element! { Text(content: search.to_string()) }.into_any()
     };
@@ -112,7 +113,7 @@ pub fn render_picker_popup(
         let f = f.to_string();
         element! {
             View(flex_direction: FlexDirection::Column, padding_top: 1) {
-                Text(content: f, color: theme.dim)
+                Text(content: f, color: theme.dim.to_iocraft())
             }
         }
         .into_any()
@@ -129,7 +130,7 @@ pub fn render_picker_popup(
             View(
                 width: box_w as u16,
                 border_style: BorderStyle::Round,
-                border_color: theme.dim,
+                border_color: theme.dim.to_iocraft(),
                 flex_direction: FlexDirection::Column,
                 padding_left: 2,
                 padding_right: 2,
@@ -195,7 +196,7 @@ fn render_item(
     // explicit color), so labels stay visible on light terminals (claude-code
     // `ListItem` renders unfocused rows with `color={undefined}`).
     let label_el: AnyElement<'static> = if selected {
-        element! { Text(content: label_owned, color: theme.suggestion) }.into_any()
+        element! { Text(content: label_owned, color: theme.suggestion.to_iocraft()) }.into_any()
     } else {
         element! { Text(content: label_owned) }.into_any()
     };
@@ -209,12 +210,12 @@ fn render_item(
     element! {
         View(width: 100pct, flex_direction: FlexDirection::Row, justify_content: JustifyContent::SpaceBetween) {
             View(flex_direction: FlexDirection::Row) {
-                Text(content: pointer, color: theme.suggestion)
-                Text(content: glyph, color: marker_color)
+                Text(content: pointer, color: theme.suggestion.to_iocraft())
+                Text(content: glyph, color: marker_color.to_iocraft())
                 #(std::iter::once(label_el))
-                #((!detail_owned.is_empty()).then(|| element! { Text(content: detail_owned.clone(), color: theme.dim) }))
+                #((!detail_owned.is_empty()).then(|| element! { Text(content: detail_owned.clone(), color: theme.dim.to_iocraft()) }))
             }
-            #(has_badge.then(|| element! { Text(content: badge_owned.clone(), color: theme.suggestion) }))
+            #(has_badge.then(|| element! { Text(content: badge_owned.clone(), color: theme.suggestion.to_iocraft()) }))
         }
     }
     .into_any()

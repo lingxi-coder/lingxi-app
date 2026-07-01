@@ -18,6 +18,7 @@
 use iocraft::prelude::*;
 
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Pinned saving-acknowledgement line (first of claude-code's sample set
 /// `['Got it.', 'Good to know.', 'Noted.']`; pinned for snapshot determinism).
@@ -45,8 +46,8 @@ pub fn UserMemoryInputMessage(props: &UserMemoryInputProps) -> impl Into<AnyElem
     let head = format!("# {}", props.input);
     element! {
         View(flex_direction: FlexDirection::Column) {
-            Text(content: head, color: TuiTheme::USER)
-            Text(content: SAVING_MESSAGE, color: TuiTheme::DIM)
+            Text(content: head, color: TuiTheme::USER.to_iocraft())
+            Text(content: SAVING_MESSAGE, color: TuiTheme::DIM.to_iocraft())
         }
     }
 }

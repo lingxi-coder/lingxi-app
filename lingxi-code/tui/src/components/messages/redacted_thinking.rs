@@ -5,6 +5,7 @@
 use iocraft::prelude::*;
 
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// `✻ ` marker. U+273B (0xE2 0x9C 0xBB) + ASCII space.
 pub const REDACTED_MARKER: &str = "\u{273B} ";
@@ -21,7 +22,7 @@ pub fn AssistantRedactedThinkingMessage() -> impl Into<AnyElement<'static>> {
     let body = render_redacted_thinking_to_string();
     element! {
         View(flex_direction: FlexDirection::Column) {
-            Text(content: body, color: TuiTheme::DIM, italic: true)
+            Text(content: body, color: TuiTheme::DIM.to_iocraft(), italic: true)
         }
     }
 }

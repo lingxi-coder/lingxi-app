@@ -14,6 +14,7 @@
 use iocraft::prelude::*;
 
 use crate::theme::TuiTheme;
+use crate::render_iocraft::StyleColorIocraftExt;
 
 /// `❯ ` pointer prefix + space (figures.pointer U+276F, color `subtle`).
 pub const PREFIX: &str = "\u{276F} ";
@@ -53,7 +54,7 @@ pub fn UserCommandMessage(props: &UserCommandProps) -> impl Into<AnyElement<'sta
     let content = render_command_to_string(&props.command, &props.args, props.is_skill);
     element! {
         View(flex_direction: FlexDirection::Row) {
-            Text(content: content, color: TuiTheme::USER)
+            Text(content: content, color: TuiTheme::USER.to_iocraft())
         }
     }
 }

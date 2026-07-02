@@ -154,6 +154,24 @@ pub struct JobState {
     /// Job detail line (may reference a PR — surfaced in the agent view).
     #[serde(default)]
     pub detail: Option<String>,
+    /// What a `blocked` job needs from the user (the question text, or the
+    /// binary's fresh-session sentinel `"send a prompt to start"`). Feeds the
+    /// `agent_needs_input` Notification message (binary `$1f` @222691698).
+    #[serde(default)]
+    pub needs: Option<String>,
+    /// Dispatch template name (`"bg"`, `"exec"`, an agent name, …). Binary
+    /// `ISe` (@209973132) excludes `exec` one-shots from notifications.
+    #[serde(default)]
+    pub template: Option<String>,
+    /// Job backend (`"daemon"` for locally daemon-backed workers). The
+    /// notification watcher only observes daemon-backed jobs (binary FleetView
+    /// filter `lt.state.backend==="daemon"` @222750113).
+    #[serde(default)]
+    pub backend: Option<String>,
+    /// Flags a respawn re-applies. Part of the `ISe` exec-one-shot test
+    /// (`template==="exec" && respawnFlags.length===0`).
+    #[serde(rename = "respawnFlags", default)]
+    pub respawn_flags: Vec<String>,
 }
 
 /// `dXc` — sanitize a display name: strip C0/C1 control chars
@@ -511,8 +529,20 @@ pub fn read_jobs(dir: &Path) -> Vec<(String, JobState)> {
 /// swallowed (a session must never die for lack of a registry write), and a
 /// failed unlink leaves a stale record the next reader reaps via the
 /// liveness probe.
+///
+/// (M8 cc2.1.198) Live status refreshes: [`Self::update_status`] rewrites the
+/// record when the session's status changes (idle ↔ busy ↔ waiting), porting
+/// the binary's `mvn` (@222989611 caller): the patch always bumps `updatedAt`
+/// and — because the status key is always present in the patch — also
+/// `statusUpdatedAt`. The record + path live behind a `Mutex` so the async
+/// forwarders in `mode.rs` can share one registration via `Arc`.
 pub struct SessionRegistration {
+    inner: std::sync::Mutex<RegistrationInner>,
+}
+
+struct RegistrationInner {
     path: Option<PathBuf>,
+    record: Option<LiveSessionRecord>,
 }
 
 impl SessionRegistration {
@@ -550,16 +580,68 @@ impl SessionRegistration {
                 .ok()
                 .is_some_and(|s| std::fs::write(&path, s).is_ok());
         Self {
-            path: ok.then_some(path),
+            inner: std::sync::Mutex::new(RegistrationInner {
+                path: ok.then_some(path),
+                record: ok.then_some(record),
+            }),
+        }
+    }
+
+    /// Rewrite this session's registry record with a new live `status` (+
+    /// `waitingFor`) — the binary's `mvn` (`{...patch, updatedAt: now,
+    /// statusUpdatedAt: now}`; the caller's `useEffect` deps mean it only
+    /// fires when the `(status, waitingFor)` pair actually changed, mirrored
+    /// by the no-op guard here). Best-effort: a write failure leaves the old
+    /// record; a registration that never landed is a no-op.
+    ///
+    /// `status` is the raw live status (`"idle"`/`"busy"`/`"waiting"`);
+    /// `waiting_for` is the binary's waiting reason taxonomy
+    /// (`"permission prompt"` / `"worker request"` / `"sandbox request"` /
+    /// `"dialog open"` / `"input needed"`), `None` unless `status ==
+    /// "waiting"` (binary: `Pb = Za!=="waiting" ? void 0 : …`).
+    pub fn update_status(&self, status: &str, waiting_for: Option<&str>) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        let RegistrationInner {
+            path: Some(path),
+            record: Some(record),
+        } = &mut *inner
+        else {
+            return;
+        };
+        if record.status.as_deref() == Some(status)
+            && record.waiting_for.as_deref() == waiting_for
+        {
+            return;
+        }
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        record.status = Some(status.to_string());
+        record.waiting_for = waiting_for.map(str::to_string);
+        record.updated_at = Some(now_ms);
+        record.status_updated_at = Some(now_ms);
+        if let Ok(s) = serde_json::to_string(record) {
+            let _ = std::fs::write(path, s);
+        }
+    }
+
+    /// Remove the registry record NOW (idempotent; `Drop` calls the same).
+    /// The `mode.rs` mount calls this explicitly when the TUI returns, so the
+    /// unlink never waits on a status-forwarder task that still holds an
+    /// `Arc` clone. Subsequent [`Self::update_status`] calls are no-ops.
+    pub fn deregister(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if let Some(path) = inner.path.take() {
+                let _ = std::fs::remove_file(path);
+            }
+            inner.record = None;
         }
     }
 }
 
 impl Drop for SessionRegistration {
     fn drop(&mut self) {
-        if let Some(path) = self.path.take() {
-            let _ = std::fs::remove_file(path);
-        }
+        self.deregister();
     }
 }
 
@@ -797,6 +879,55 @@ mod tests {
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].session_id.as_deref(), Some("sid-1"));
         assert_eq!(recs[0].kind, "interactive");
+        drop(reg);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn update_status_rewrites_record_and_bumps_both_timestamps() {
+        // Binary `mvn` (@222989611): patch always carries `updatedAt`; the
+        // status key is always present in the patch so `statusUpdatedAt`
+        // bumps too — but only on a real (status, waitingFor) change (the
+        // caller's useEffect deps), mirrored by the no-op guard.
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = SessionRegistration::register(tmp.path(), Some("sid-1"), Some("proj"));
+        let path = sessions_dir(tmp.path()).join(format!("{}.json", std::process::id()));
+        let read = || {
+            serde_json::from_str::<LiveSessionRecord>(
+                &std::fs::read_to_string(&path).unwrap(),
+            )
+            .unwrap()
+        };
+        let before = read();
+        assert_eq!(before.status.as_deref(), Some("idle"));
+
+        reg.update_status("busy", None);
+        let busy = read();
+        assert_eq!(busy.status.as_deref(), Some("busy"));
+        assert!(busy.status_updated_at >= before.status_updated_at);
+
+        // waiting carries the binary's waitingFor reason.
+        reg.update_status("waiting", Some("permission prompt"));
+        let waiting = read();
+        assert_eq!(waiting.status.as_deref(), Some("waiting"));
+        assert_eq!(waiting.waiting_for.as_deref(), Some("permission prompt"));
+
+        // Leaving waiting clears waitingFor.
+        reg.update_status("idle", None);
+        let idle = read();
+        assert_eq!(idle.status.as_deref(), Some("idle"));
+        assert_eq!(idle.waiting_for, None);
+
+        // No-op guard: same (status, waitingFor) pair leaves the file bytes
+        // (and timestamps) untouched.
+        let stamped = read();
+        reg.update_status("idle", None);
+        let unchanged = read();
+        assert_eq!(
+            unchanged.status_updated_at,
+            stamped.status_updated_at
+        );
+        assert_eq!(unchanged.updated_at, stamped.updated_at);
         drop(reg);
         assert!(!path.exists());
     }

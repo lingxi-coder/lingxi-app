@@ -390,7 +390,8 @@ async fn build_context_without_default_model_leaves_model_raw() {
 // `with_default_model(resolve_user_specified_model(orch_cfg.model))` — the
 // RESOLVED main-loop id (Sonnet for an opusplan install). To stay FAITHFUL to
 // production these tests derive the parent the SAME way: feed
-// `resolve_user_specified_model("opusplan")` (= "claude-sonnet-4-6") as
+// `resolve_user_specified_model("opusplan")` (= "claude-sonnet-5" since the
+// 2.1.197 sonnet-family default flip, M1) as
 // `with_default_model`, not a hand-picked literal the wired path never emits.
 // These three together drive `resolve_agent_model`'s `getRuntimeMainLoopModel`
 // branch (model.ts:145-167), proving the wired path end-to-end: an
@@ -431,7 +432,7 @@ async fn build_context_opusplan_default_mode_returns_resolved_parent() {
     // resolver, exactly as the composition root produces it.
     let _g = OpusEnvGuard::clear_providers();
     let parent = agent::model_resolution::resolve_user_specified_model("opusplan");
-    assert_eq!(parent, "claude-sonnet-4-6", "opusplan resolves to Sonnet outside plan mode");
+    assert_eq!(parent, "claude-sonnet-5", "opusplan resolves to Sonnet outside plan mode");
     let handler = model_test_handler(Some(&parent))
         .with_permission_mode(PermissionMode::Default)
         .with_model_setting("opusplan");
@@ -442,7 +443,7 @@ async fn build_context_opusplan_default_mode_returns_resolved_parent() {
         .build_context(protocol::AgentId::new(), "lead", "", "", def)
         .await;
     assert!(
-        matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-sonnet-4-6"),
+        matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-sonnet-5"),
         "opusplan outside plan mode must keep the resolved parent (Sonnet), got {:?}",
         ctx.agent_definition.model
     );

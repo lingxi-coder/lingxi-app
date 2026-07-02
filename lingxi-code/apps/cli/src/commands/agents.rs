@@ -182,7 +182,134 @@ pub async fn run(cli: &Cli) -> i32 {
         }
     }
 
-    run_agents_view(cli)
+    // (M8 cc2.1.198) The view fires the user's `Notification` hook on
+    // background-agent band transitions (`agent_needs_input` /
+    // `agent_completed`) — the binary's FleetView `hFc` diff (@222750113).
+    // Built here (async context) so the sync view loop can fire through the
+    // captured runtime handle.
+    let watcher = NotificationWatcher::new(&crate::run::lingxi_home_dir()).await;
+    run_agents_view(cli, watcher)
+}
+
+/// Fires the `Notification` hook for background-agent band transitions —
+/// lingxi's counterpart of the binary's FleetView notification pipeline
+/// (`hFc`/`$1f` @222691698 diff + `TQ` @219455460 hook fire).
+///
+/// The standalone agents view has no orchestrator, so the watcher loads the
+/// settings-file hooks itself (user then project tier, project last so it
+/// wins — the same standalone loader engine-desktop's composition root uses)
+/// and executes them through a minimal `HookExecutorImpl`. When no
+/// `Notification` hook is registered the watcher is INERT (`executor: None`)
+/// — no polling work, mirroring the orchestrator's `has_notification_hook`
+/// gate.
+///
+/// Depth note: the binary ALSO shows an OS notification (`QQ` → iTerm2 /
+/// kitty / bell per `preferredNotifChannel`); lingxi has no OS-notifier port
+/// yet, so only the hook side fires (the changelog surface for 2.1.198 is
+/// the hook reasons).
+pub(crate) struct NotificationWatcher {
+    executor: Option<std::sync::Arc<hooks::HookExecutorImpl>>,
+    prev: std::collections::HashMap<String, crate::agents_notify::AgentBand>,
+    handle: Option<tokio::runtime::Handle>,
+    home: PathBuf,
+}
+
+impl NotificationWatcher {
+    /// Load settings hooks and arm the watcher when a `Notification` hook
+    /// exists. Best-effort: malformed settings tiers are skipped exactly like
+    /// the composition root's loader.
+    pub(crate) async fn new(home: &Path) -> Self {
+        use std::sync::Arc;
+
+        let mut registry = hooks::HookRegistry::new();
+        let user_settings = home.join("settings.json");
+        let project_settings = std::env::current_dir()
+            .unwrap_or_default()
+            .join(branding::DOT_DIR)
+            .join("settings.json");
+        for (path, source) in [
+            (user_settings, hooks::definition::HookSource::User),
+            (project_settings, hooks::definition::HookSource::Project),
+        ] {
+            if let Ok(raw) = std::fs::read_to_string(&path) {
+                if let Ok(defs) = hooks::parse_hooks_from_settings_json(&raw, source) {
+                    for h in defs {
+                        registry.register(h);
+                    }
+                }
+            }
+        }
+        let armed = registry.has_hooks_for(&hooks::events::HookEventType::Notification);
+        let executor = armed.then(|| {
+            Arc::new(
+                hooks::HookExecutorImpl::new(
+                    Arc::new(tokio::sync::RwLock::new(registry)),
+                    Arc::new(platform_posix::PosixHttp::new()) as Arc<dyn traits::HttpTransport>,
+                    Arc::new(platform_posix::PosixRuntime::new())
+                        as Arc<dyn traits::RuntimeSpawner>,
+                )
+                .with_process_runner(
+                    Arc::new(platform_posix::PosixProcess::new())
+                        as Arc<dyn traits::ProcessRunner>,
+                    Arc::new(platform_posix::PosixSandbox::new()) as Arc<dyn traits::Sandbox>,
+                ),
+            )
+        });
+        Self {
+            executor,
+            prev: std::collections::HashMap::new(),
+            handle: tokio::runtime::Handle::try_current().ok(),
+            home: home.to_path_buf(),
+        }
+    }
+
+    /// One observation: re-read the job store, diff bands, fire the hook for
+    /// each raised notification. Called from the view's refresh tick and
+    /// after each attach-remount.
+    pub(crate) fn observe(&mut self) {
+        let Some(executor) = &self.executor else {
+            return;
+        };
+        let Some(handle) = &self.handle else {
+            return;
+        };
+        use crate::agents_registry as reg;
+        let jobs = reg::read_jobs(&reg::jobs_dir(&self.home));
+        // `current_job_id = None`: the standalone view process is not itself
+        // a background job (binary `t` = the CURRENT session's job id).
+        let rows = crate::agents_notify::notify_rows(&jobs, None);
+        let (next, notifications) =
+            crate::agents_notify::detect_transitions(&self.prev, &rows);
+        self.prev = next;
+        for n in notifications {
+            // `TQ`: `{...base, hook_event_name: "Notification", message,
+            // title, notification_type}` with matchQuery = notification_type.
+            // Best-effort fire-and-forget — a failing hook never disturbs the
+            // view loop (the binary discards the aggregate too).
+            let executor = executor.clone();
+            let cwd = std::env::current_dir().unwrap_or_default();
+            handle.spawn(async move {
+                let _ = executor
+                    .execute(
+                        hooks::events::HookEvent::Notification {
+                            message: n.message,
+                            kind: n.notification_type.to_string(),
+                        },
+                        hooks::HookContext {
+                            cwd,
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+            });
+        }
+    }
+
+    /// Whether the watcher has a subscriber (drives the view's poll tick —
+    /// no hook ⇒ pure blocking-read loop, zero idle wakeups).
+    pub(crate) fn armed(&self) -> bool {
+        self.executor.is_some() && self.handle.is_some()
+    }
 }
 
 /// Resolve the `--cwd` filter root: absolutize against the process cwd, then
@@ -313,12 +440,27 @@ fn attach_args(cli: &Cli, session_id: &str) -> Vec<String> {
 /// completion, view remounts with FRESH registry rows — the 2.1.198 "return
 /// to agent view, not shell" behavior); `q`/`Esc`/`Ctrl-C` exits.
 ///
+/// (M8 cc2.1.198) When a `Notification` hook is registered, the loop runs a
+/// periodic refresh tick: registry rows reload and the watcher diffs bands to
+/// fire `agent_needs_input` / `agent_completed` (binary: the FleetView jobs
+/// poll re-renders and `hFc` diffs per render; the 1s cadence here is the
+/// host loop's choice, not a binary constant). With no hook the loop stays a
+/// pure blocking read (zero idle wakeups — the M7 behavior, byte-identical).
+///
 /// Terminal IO only — every decision lives in the unit-tested
-/// [`tui_rata::agents_screen::AgentsScreenState`]. Errors restore the
-/// terminal and report on stderr.
-fn run_agents_view(cli: &Cli) -> i32 {
+/// [`tui_rata::agents_screen::AgentsScreenState`] +
+/// [`crate::agents_notify::detect_transitions`]. Errors restore the terminal
+/// and report on stderr.
+fn run_agents_view(cli: &Cli, mut watcher: NotificationWatcher) -> i32 {
     use tui_rata::agents_screen::{AgentsOutcome, AgentsScreenState};
 
+    // Seed the band map BEFORE the first render so a view opened onto an
+    // already-blocked job stays quiet ($1f: first observation records, never
+    // notifies) — then observe on every refresh.
+    watcher.observe();
+    let tick = watcher
+        .armed()
+        .then(|| std::time::Duration::from_millis(1000));
     let mut state = AgentsScreenState::new(load_view_rows(cli));
     loop {
         let mut terminal = match tui_rata::setup_terminal() {
@@ -328,7 +470,15 @@ fn run_agents_view(cli: &Cli) -> i32 {
                 return crate::exit_codes::RUNTIME_ERROR;
             }
         };
-        let outcome = tui_rata::agents_screen::run_view_loop(&mut state, &mut terminal);
+        let outcome = tui_rata::agents_screen::run_view_loop_with_tick(
+            &mut state,
+            &mut terminal,
+            tick,
+            &mut |view| {
+                watcher.observe();
+                view.reload(load_view_rows(cli));
+            },
+        );
         let _ = tui_rata::restore_terminal(&mut terminal);
         drop(terminal);
         match outcome {
@@ -345,6 +495,7 @@ fn run_agents_view(cli: &Cli) -> i32 {
                     eprintln!("lingxi-cli agents: attach failed: {e}");
                     return crate::exit_codes::RUNTIME_ERROR;
                 }
+                watcher.observe();
                 state.reload(load_view_rows(cli));
             }
             Ok(AgentsOutcome::Stay) => unreachable!("view_loop only returns terminal outcomes"),

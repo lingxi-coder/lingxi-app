@@ -330,9 +330,33 @@ pub fn run_view_loop(
     state: &mut AgentsScreenState,
     terminal: &mut crate::RataTerminal,
 ) -> std::io::Result<AgentsOutcome> {
+    run_view_loop_with_tick(state, terminal, None, &mut |_| {})
+}
+
+/// [`run_view_loop`] with a periodic refresh tick (M8 cc2.1.198): every
+/// `tick` (when `Some`), `on_tick` runs with the state so the caller can
+/// reload the registry rows and diff bands for the `agent_needs_input` /
+/// `agent_completed` notifications (the binary FleetView re-renders on its
+/// jobs poll and runs the `$1f` diff hook `hFc` per render, @222750113).
+/// `tick == None` degrades to the pure blocking-read loop.
+///
+/// # Errors
+/// Propagates the first draw/poll/read IO error.
+pub fn run_view_loop_with_tick(
+    state: &mut AgentsScreenState,
+    terminal: &mut crate::RataTerminal,
+    tick: Option<std::time::Duration>,
+    on_tick: &mut dyn FnMut(&mut AgentsScreenState),
+) -> std::io::Result<AgentsOutcome> {
     use crossterm::event::{Event, KeyEventKind};
     loop {
         terminal.draw(|f| state.render(f))?;
+        if let Some(interval) = tick {
+            if !crossterm::event::poll(interval)? {
+                on_tick(state);
+                continue;
+            }
+        }
         match crossterm::event::read()? {
             Event::Key(key) if key.kind != KeyEventKind::Release => match state.on_key(key) {
                 AgentsOutcome::Stay => {}

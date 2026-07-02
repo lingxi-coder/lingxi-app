@@ -75,6 +75,15 @@ permission = { path = "../../permission" }
 # direct CLI deps.
 mcp = { path = "../../mcp" }
 plugin = { path = "../../plugin" }
+# (M8 cc2.1.198) The standalone `agents` view fires the user's `Notification`
+# hook (`agent_needs_input`/`agent_completed`) directly — the view runs
+# WITHOUT an orchestrator, so it loads settings hooks and executes them via
+# the hooks crate (the same standalone loader engine-desktop's composition
+# root uses).
+hooks = { path = "../../hooks" }
+# (M8 cc2.1.198) Display-column clamp for the `Pon` job-label port
+# (`agents_notify::job_label`); same pin as tui-core.
+unicode-width = "=0.1.14"
 
 # clap 4.6+ requires edition2024; pin to a release compatible with Rust 1.82.
 clap = { version = "=4.5.20", features = ["derive", "env"] }

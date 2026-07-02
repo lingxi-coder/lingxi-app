@@ -3721,11 +3721,20 @@ pub async fn build(
     // before the registry is shared. Both depend only on platform traits we
     // already build here; agent/teammate/workflow/remote/dream handlers register
     // once their production pools are wired (M9+).
+    //
+    // (M8 cc2.1.198 "Task panels: no stuck Running") The bash worker's
+    // terminal status + exit code now write THROUGH to the registry via a
+    // deferred `RegistryStatusSink` (bound at (5.46f) once the registry `Arc`
+    // exists — the same cycle-break as the LocalAgent sink). Pre-fix the
+    // handler defaulted to `NoopStatusSink`, so a finished background bash
+    // task's stored status stayed `Running` forever.
+    let bash_status_sink = Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
     tasks::registry::register_self_contained_handlers(
         &mut task_registry_inner,
         Arc::new(PosixProcess::new()),
         Arc::new(PosixSandbox::new()),
         mcp_registry.clone(),
+        bash_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>,
     );
 
     // (5.46) M10 (T13): construct the per-session coordinator subsystem — one
@@ -3979,6 +3988,11 @@ pub async fn build(
     //         now reach `task_registry`, so terminal + per-rest notifications
     //         surface through `take_pending_task_notifications`.
     local_agent_status_sink
+        .bind(task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
+    // (M8 cc2.1.198) Bind the deferred LocalBash sink too: the bash worker's
+    // terminal `set_status` / `set_exit_code` now reach `task_registry`, so a
+    // finished background command flips its panel row off `Running`.
+    bash_status_sink
         .bind(task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
 
     // (5.48) Cron: construct, load the single persisted tasks file, and start the

@@ -16,6 +16,8 @@
 
 pub mod app;
 pub mod bottom_pane;
+pub mod chat_widget;
+pub mod command;
 pub mod composer;
 pub mod files;
 pub mod history_cell;

@@ -1,15 +1,16 @@
-//! Interactive `tui-rata` chat app: state + event loop.
+//! Interactive `tui-rata` chat app: the runtime event loop around
+//! [`ChatWidget`].
 //!
-//! Holds the scrollback message list + composer buffer + scroll position,
-//! renders the 3-zone layout (scrollback / status / composer), processes key
-//! events (type, backspace, submit, scroll, cancel, quit), and drains
-//! streaming `TurnEvent`s from the orchestrator bridge to grow the in-flight
-//! assistant reply live.
+//! `RataApp` owns loop plumbing only: the terminal session/draw boundary,
+//! channel draining (turn events + permission requests), viewport sizing,
+//! and the submit/switch-model callbacks to the embedding CLI. All
+//! conversation state — transcript, bottom pane, session snapshot, per-turn
+//! state — lives in [`ChatWidget`] (plan Phase 6).
 //!
 //! The app is decoupled from orchestrator construction: `run_app` takes a
 //! `TurnEvent` receiver (drained each tick) and an `on_submit` callback that
 //! receives the prompt + a per-turn `CancellationToken` (the caller spawns the
-//! real turn; the app cancels it on Ctrl-C).
+//! real turn; the widget cancels it on Ctrl-C).
 
 use std::io;
 use std::io::Write;
@@ -22,69 +23,26 @@ use tokio_util::sync::CancellationToken;
 use tui_core::message::RenderedMessage;
 use tui_core::orchestrator_bridge::TurnEvent;
 use tui_core::permission_bridge::PermissionExchange;
-use tui_core::theme::Theme;
 
-use crate::bottom_pane::permission_view::PermissionView;
-use crate::bottom_pane::screen_view::ScreenView;
-use crate::bottom_pane::{BottomPane, BottomPaneOutcome, BottomPaneStatus, CommandAction};
-use crate::history_cell::MessageHistoryCell;
-use crate::renderable::Renderable;
+use crate::chat_widget::{ChatOutcome, ChatWidget};
 use crate::session::SessionInfo;
 use crate::terminal::TerminalSession;
-use crate::transcript::Transcript;
 use crate::RataTerminal;
 
-/// What a key press means to the event loop.
-enum KeyOutcome {
-    /// Keep looping.
-    Continue,
-    /// Exit the app.
-    Quit,
-    /// The user submitted `prompt`; the caller should drive a turn for it,
-    /// honoring the paired [`CancellationToken`] (the app cancels it on Ctrl-C).
-    Submit(String, CancellationToken),
-    /// The user picked a model in `/model`; the caller should switch to
-    /// `(request_model, profile)` via `OrchestratorHandle::switch_model`.
-    SwitchModel(String, Option<String>),
-}
-
-/// Interactive chat state.
+/// Interactive chat runtime: the event-loop shell around [`ChatWidget`].
 pub struct RataApp {
-    /// Conversation history: committed cells + the active streaming cell +
-    /// the native-scrollback commit cursor + verbose/render mode.
-    transcript: Transcript,
-    /// The interactive footer: composer + completion + vim + status hints +
-    /// the transient view stack (plan Phase 5). The pane routes local input;
-    /// process-level intents come back as [`BottomPaneOutcome`]s.
-    bottom_pane: BottomPane,
-    theme: Theme,
-    /// Cancellation token for the in-flight turn, if any.
-    current_turn: Option<CancellationToken>,
-    /// Wall-clock start, used to advance the streaming spinner animation.
-    start: std::time::Instant,
-    /// When the in-flight turn began, for the spinner's elapsed-seconds counter.
-    turn_started_at: Option<std::time::Instant>,
-    /// Human label for what the turn is currently doing (e.g. `Running Bash`),
-    /// set from `ToolUseStart` and shown by the spinner instead of a bare verb.
-    activity: Option<String>,
-    /// Startup snapshot the read-only screens render from.
-    session: SessionInfo,
+    /// The chat surface: transcript + bottom pane + session snapshot +
+    /// per-turn state (plan Phase 6). The app keeps only loop plumbing
+    /// around it (reduced fully in plan Phase 7).
+    chat_widget: ChatWidget,
 }
 
 impl RataApp {
     /// Build an app seeded with an initial conversation (may be empty).
     #[must_use]
     pub fn new(messages: Vec<RenderedMessage>) -> Self {
-        let theme = Theme::dark();
         Self {
-            transcript: Transcript::from_messages(messages),
-            bottom_pane: BottomPane::new(theme),
-            theme,
-            current_turn: None,
-            start: std::time::Instant::now(),
-            turn_started_at: None,
-            activity: None,
-            session: SessionInfo::default(),
+            chat_widget: ChatWidget::new(messages, SessionInfo::default()),
         }
     }
 
@@ -92,347 +50,68 @@ impl RataApp {
     /// from (builder; the default is an empty session).
     #[must_use]
     pub fn with_session(mut self, session: SessionInfo) -> Self {
-        self.session = session;
+        self.chat_widget.set_session(session);
         self
     }
 
-    /// The pane's task-status input, recomputed from the app's turn state
-    /// (the pane holds no turn state of its own — plan Phase 5 boundary).
-    fn pane_status(&self) -> BottomPaneStatus {
-        BottomPaneStatus {
-            running: self.current_turn.is_some(),
-            text: self.spinner_text(),
-        }
+    /// Route one key press into the chat widget.
+    fn on_key(&mut self, key: KeyEvent) -> ChatOutcome {
+        self.chat_widget.handle_key(key)
     }
 
-    fn on_key(&mut self, key: KeyEvent) -> KeyOutcome {
-        // Feed the pane the current turn status (Ctrl-C routing depends on
-        // it), then route the key through the pane's layered input handling:
-        // active view first, then completion, then vim, then the composer.
-        self.bottom_pane.set_task_running(self.pane_status());
-        let outcome = self.bottom_pane.handle_key(key);
-        self.on_pane_outcome(outcome)
+    /// Route a bracketed paste into the chat widget.
+    fn on_paste(&mut self, text: &str) -> ChatOutcome {
+        self.chat_widget.handle_paste(text)
     }
 
-    /// Execute the app-level intent the pane returned from a key or paste.
-    fn on_pane_outcome(&mut self, outcome: BottomPaneOutcome) -> KeyOutcome {
-        match outcome {
-            BottomPaneOutcome::Consumed => KeyOutcome::Continue,
-            BottomPaneOutcome::Quit => KeyOutcome::Quit,
-            BottomPaneOutcome::Interrupt => {
-                if let Some(token) = self.current_turn.take() {
-                    token.cancel();
-                }
-                self.turn_started_at = None;
-                self.activity = None;
-                KeyOutcome::Continue
-            }
-            BottomPaneOutcome::ToggleVerbose => {
-                self.transcript.toggle_verbose();
-                self.bottom_pane.set_verbose(self.transcript.verbose());
-                KeyOutcome::Continue
-            }
-            BottomPaneOutcome::Submitted(text) => {
-                if let Some(outcome) = self.handle_slash(&text) {
-                    return outcome;
-                }
-                self.submit_prompt(text)
-            }
-            BottomPaneOutcome::SubmitPrompt(prompt) => self.submit_prompt(prompt),
-            BottomPaneOutcome::SwitchModel {
-                request_model,
-                profile,
-            } => {
-                self.transcript.push_message(RenderedMessage::SystemText {
-                    body: format!("Switching model to {request_model}…"),
-                    timestamp: 0,
-                    is_error: false,
-                });
-                KeyOutcome::SwitchModel(request_model, profile)
-            }
-            BottomPaneOutcome::RunCommand(action) => self.run_command(action),
-            BottomPaneOutcome::PastedImage(path) => {
-                let name = std::path::Path::new(&path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(String::from);
-                self.transcript.push_message(RenderedMessage::UserImage {
-                    image_id: None,
-                    metadata: name,
-                    source_path: Some(path),
-                });
-                KeyOutcome::Continue
-            }
-        }
-    }
-
-    /// Record `text` as the user's prompt and hand it to the caller with a
-    /// fresh per-turn cancellation token. Shared by the composer submit path
-    /// and [`BottomPaneOutcome::SubmitPrompt`].
-    fn submit_prompt(&mut self, text: String) -> KeyOutcome {
-        self.transcript.push_message(RenderedMessage::UserText {
-            body: text.clone(),
-            timestamp: 0,
-        });
-        let token = CancellationToken::new();
-        self.current_turn = Some(token.clone());
-        KeyOutcome::Submit(text, token)
-    }
-
-    /// Execute a command effect a view requested via
-    /// [`BottomPaneOutcome::RunCommand`].
-    fn run_command(&mut self, action: CommandAction) -> KeyOutcome {
-        match action {
-            CommandAction::ClearTranscript => {
-                self.transcript.clear();
-                KeyOutcome::Continue
-            }
-            CommandAction::Quit => KeyOutcome::Quit,
-        }
-    }
-
-    /// Handle a bracketed paste by routing it through the pane (active view
-    /// first, then image-path detection, then composer insertion).
-    fn on_paste(&mut self, text: &str) -> KeyOutcome {
-        let outcome = self.bottom_pane.handle_paste(text);
-        self.on_pane_outcome(outcome)
-    }
-
-    /// Fold one streaming event from the orchestrator bridge into the
-    /// transcript: `TurnStarted` opens an empty active assistant cell,
-    /// `TextDelta` mutates it in place, `TurnEnded` finalizes it (moves it to
-    /// the committed history) and clears the in-flight cancel token; other
-    /// variants are ignored for now.
+    /// Fold one streaming event from the orchestrator bridge into the chat
+    /// widget's transcript/turn state (see [`ChatWidget::apply_turn_event`]).
     pub fn apply_turn_event(&mut self, event: TurnEvent) {
-        match event {
-            TurnEvent::TurnStarted => {
-                self.turn_started_at = Some(std::time::Instant::now());
-                self.activity = None;
-                // A straggler active cell (missed TurnEnded) is finalized, not
-                // dropped, before the new streaming reply opens.
-                self.transcript.flush_active();
-                self.transcript.set_active(Box::new(MessageHistoryCell::new(
-                    RenderedMessage::AssistantText {
-                        body: String::new(),
-                        timestamp: 0,
-                    },
-                )));
-            }
-            TurnEvent::TextDelta(delta) => {
-                let appended = self
-                    .transcript
-                    .mutate_active(|cell| {
-                        if let Some(RenderedMessage::AssistantText { body, .. }) = cell
-                            .as_any_mut()
-                            .downcast_mut::<MessageHistoryCell>()
-                            .map(MessageHistoryCell::message_mut)
-                        {
-                            body.push_str(&delta);
-                            true
-                        } else {
-                            false
-                        }
-                    })
-                    .unwrap_or(false);
-                if !appended {
-                    self.transcript.flush_active();
-                    self.transcript.set_active(Box::new(MessageHistoryCell::new(
-                        RenderedMessage::AssistantText {
-                            body: delta,
-                            timestamp: 0,
-                        },
-                    )));
-                }
-            }
-            TurnEvent::ToolUseStart { tool, .. } => {
-                self.activity = Some(activity_label(&tool));
-            }
-            TurnEvent::ToolUseResult { .. } => {
-                self.activity = None;
-            }
-            TurnEvent::TurnEnded(_) => {
-                self.transcript.flush_active();
-                self.current_turn = None;
-                self.turn_started_at = None;
-                self.activity = None;
-            }
-            _ => {}
-        }
+        self.chat_widget.apply_turn_event(event);
     }
 
-    /// Open a permission prompt for `exchange` by pushing a
-    /// [`PermissionView`]: it owns the keyboard until the user resolves it
-    /// (Enter/1-3 approve or deny, Esc denies) and delivers the response
-    /// through the exchange's one-shot channel exactly once.
+    /// Open a permission prompt for `exchange` — or queue it when one is
+    /// already open; prompts are serialized inside the widget (see
+    /// [`ChatWidget::open_permission`]).
     pub fn open_permission(&mut self, exchange: PermissionExchange) {
-        self.bottom_pane.show_permission(exchange);
+        self.chat_widget.open_permission(exchange);
     }
 
-    /// Whether a permission prompt is anywhere on the view stack (the event
-    /// loop defers further permission requests until it resolves).
-    fn has_open_permission(&self) -> bool {
-        self.bottom_pane.view_stack().contains::<PermissionView>()
+    /// Whether a permission prompt is currently open (queued exchanges wait
+    /// inside the widget until it resolves).
+    #[must_use]
+    pub fn has_open_permission(&self) -> bool {
+        self.chat_widget.has_open_permission()
     }
 
-    /// Route a recognized slash command. Returns `Some(outcome)` when the input
-    /// is a handled command (screen open, clear, exit), or `None` to fall
-    /// through and send the input as a normal prompt.
-    fn handle_slash(&mut self, input: &str) -> Option<KeyOutcome> {
-        let trimmed = input.trim();
-        // `/image <path>` pushes an image message + selects it so a graphics
-        // terminal shows the real pixels in the preview pane.
-        if let Some(path) = trimmed.strip_prefix("/image ") {
-            let path = path.trim().to_string();
-            let name = std::path::Path::new(&path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(String::from);
-            self.transcript.push_message(RenderedMessage::UserImage {
-                image_id: None,
-                metadata: name,
-                source_path: Some(path),
-            });
-            return Some(KeyOutcome::Continue);
-        }
-        match trimmed {
-            "/help" => {
-                self.bottom_pane.show_view(Box::new(ScreenView::help()));
-                Some(KeyOutcome::Continue)
-            }
-            "/doctor" => {
-                self.bottom_pane
-                    .show_view(Box::new(ScreenView::doctor(&self.session.doctor)));
-                Some(KeyOutcome::Continue)
-            }
-            "/mcp" => {
-                self.bottom_pane.show_view(Box::new(ScreenView::from_rows(
-                    "MCP servers",
-                    "MCP servers",
-                    &self.session.mcp,
-                    "No MCP servers configured.",
-                )));
-                Some(KeyOutcome::Continue)
-            }
-            "/hooks" => {
-                self.bottom_pane.show_view(Box::new(ScreenView::from_rows(
-                    "Hooks",
-                    "Hooks",
-                    &self.session.hooks,
-                    "No hooks configured.",
-                )));
-                Some(KeyOutcome::Continue)
-            }
-            "/agents" => {
-                self.bottom_pane.show_view(Box::new(ScreenView::from_rows(
-                    "Agents",
-                    "Agents",
-                    &self.session.agents,
-                    "No agents configured.",
-                )));
-                Some(KeyOutcome::Continue)
-            }
-            "/clear" => {
-                self.transcript.clear();
-                Some(KeyOutcome::Continue)
-            }
-            "/model" => {
-                if self.session.models.is_empty() {
-                    self.transcript.push_message(RenderedMessage::SystemText {
-                        body: "No models available.".to_string(),
-                        timestamp: 0,
-                        is_error: false,
-                    });
-                } else {
-                    self.bottom_pane
-                        .show_model_picker(self.session.models.clone());
-                }
-                Some(KeyOutcome::Continue)
-            }
-            "/exit" | "/quit" => Some(KeyOutcome::Quit),
-            "/vim" => {
-                let now_on = self.bottom_pane.toggle_vim();
-                self.transcript.push_message(RenderedMessage::SystemText {
-                    body: format!("Vim mode {}.", if now_on { "enabled" } else { "disabled" }),
-                    timestamp: 0,
-                    is_error: false,
-                });
-                Some(KeyOutcome::Continue)
-            }
-            _ => None,
-        }
-    }
-
-    /// Desired inline-viewport height at `width` columns: the pane reports
-    /// its own height (status + composer, grown to fit the active stacked
-    /// view or the completion popup); the app applies the viewport clamp.
+    /// Desired inline-viewport height at `width` columns: the widget reports
+    /// its own height ([`ChatWidget::desired_height`]); the 4/20 clamp is
+    /// deliberately app-side viewport policy.
     fn viewport_height(&self, width: u16) -> u16 {
-        self.bottom_pane.desired_height(width).clamp(4, 20)
+        self.chat_widget.desired_height(width).clamp(4, 20)
     }
 
-    /// Commit finalized transcript cells into the terminal's native scrollback
-    /// via [`crate::terminal::Terminal::insert_history_lines`] (written ABOVE
-    /// the bottom viewport), delegating to
-    /// [`Transcript::flush_to_native_scrollback`]. The actively-streaming cell
-    /// is never committed here (it still grows in place); it commits once as a
-    /// whole when `TurnEnded` finalizes it.
-    ///
-    /// Generic over the backend so tests can drive it with a test backend; the
-    /// runtime passes [`RataTerminal`].
+    /// Commit finalized transcript cells into the terminal's native
+    /// scrollback (see [`ChatWidget::flush_scrollback`]).
     fn flush_scrollback<B: Backend + Write>(
         &mut self,
         terminal: &mut crate::terminal::Terminal<B>,
     ) -> io::Result<()> {
-        let width = terminal.size()?.width.max(1);
-        self.transcript
-            .flush_to_native_scrollback(terminal, width, &self.theme)
+        self.chat_widget.flush_scrollback(terminal)
     }
 
-    /// The current streaming-spinner text: an animated Claude-accent glyph, the
-    /// live activity (`Running Bash` from `ToolUseStart`, else `Working`), and an
-    /// elapsed-seconds counter with an interrupt hint — claude-code status parity.
-    fn spinner_text(&self) -> String {
-        const FRAMES: &[&str] = &["·", "✢", "✳", "✶", "✻", "✽", "✽", "✻", "✶", "✳", "✢", "·"];
-        let idx =
-            usize::try_from(self.start.elapsed().as_millis() / 120).unwrap_or(0) % FRAMES.len();
-        let verb = self.activity.as_deref().unwrap_or("Working");
-        let secs = self.turn_started_at.map_or(0, |t| t.elapsed().as_secs());
-        format!("{} {verb}… ({secs}s · esc to interrupt)", FRAMES[idx])
-    }
-
-    /// Draw the bottom viewport (history lives in the terminal's native
-    /// scrollback via [`Self::flush_scrollback`]): the [`BottomPane`] renders
-    /// the status line + composer box + overlays through the `(Rect, &mut
-    /// Buffer)` [`Renderable`] contract.
-    ///
-    /// The [`crate::terminal::Frame`] is only the terminal draw BOUNDARY: the
-    /// pane draws into the frame's buffer, and the pane's cursor claim
-    /// (composer cursor, or a full-frame view's) is copied back onto the
-    /// frame at the end (no claim → cursor hidden).
+    /// Draw the bottom viewport through the chat widget's render contract —
+    /// the thin frame wrapper codex's `App::render_chat_widget_frame` keeps
+    /// at the terminal draw boundary: the widget renders into the frame's
+    /// buffer, then its cursor claim is copied onto the frame (no claim →
+    /// cursor hidden).
     fn render_viewport(&mut self, frame: &mut crate::terminal::Frame) {
-        // Refresh the pane's status input so the spinner text/animation
-        // reflect this tick's turn state.
-        self.bottom_pane.set_task_running(self.pane_status());
         let area = frame.area();
-        self.bottom_pane.render(area, frame.buffer_mut());
-        if let Some(pos) = self.bottom_pane.cursor_pos(area) {
+        self.chat_widget.render(area, frame.buffer_mut());
+        if let Some(pos) = self.chat_widget.cursor_pos(area) {
             frame.set_cursor_position(pos);
-            frame.set_cursor_style(self.bottom_pane.cursor_style(area));
+            frame.set_cursor_style(self.chat_widget.cursor_style(area));
         }
-    }
-}
-
-/// Human label shown in the spinner for an in-flight tool call, mapping the
-/// tool name to a claude-code-style gerund (`Bash` → `Running Bash`).
-fn activity_label(tool: &str) -> String {
-    match tool {
-        "Bash" | "BashOutput" => "Running Bash".to_string(),
-        "Read" => "Reading".to_string(),
-        "Write" => "Writing".to_string(),
-        "Edit" | "MultiEdit" => "Editing".to_string(),
-        "Grep" | "Glob" => "Searching".to_string(),
-        "WebFetch" | "WebSearch" => "Browsing".to_string(),
-        "Task" => "Delegating".to_string(),
-        other => format!("Running {other}"),
     }
 }
 
@@ -484,11 +163,11 @@ fn app_loop(
         while let Ok(event) = events_rx.try_recv() {
             app.apply_turn_event(event);
         }
-        // Take a new permission request only when none is currently shown.
-        if !app.has_open_permission() {
-            if let Ok(exchange) = permission_rx.try_recv() {
-                app.open_permission(exchange);
-            }
+        // Drain permission requests into the widget: it serializes prompts
+        // (one owns the keyboard; later arrivals queue) — plan Phase 6 moved
+        // the one-at-a-time gate out of this loop.
+        while let Ok(exchange) = permission_rx.try_recv() {
+            app.open_permission(exchange);
         }
         // Size the absolute bottom viewport for this tick, THEN commit
         // finalized history above it (insertion wraps at the viewport width).
@@ -500,13 +179,13 @@ fn app_loop(
             let outcome = match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
                 Event::Paste(text) => app.on_paste(&text),
-                _ => KeyOutcome::Continue,
+                _ => ChatOutcome::Continue,
             };
             match outcome {
-                KeyOutcome::Quit => return Ok(()),
-                KeyOutcome::Submit(prompt, token) => on_submit(prompt, token),
-                KeyOutcome::SwitchModel(model, profile) => on_switch_model(model, profile),
-                KeyOutcome::Continue => {}
+                ChatOutcome::Quit => return Ok(()),
+                ChatOutcome::Submit(prompt, token) => on_submit(prompt, token),
+                ChatOutcome::SwitchModel(model, profile) => on_switch_model(model, profile),
+                ChatOutcome::Continue => {}
             }
         }
     }
@@ -520,6 +199,8 @@ mod tests {
 
     use super::*;
     use crate::bottom_pane::model_picker_view::ModelPickerView;
+    use crate::bottom_pane::screen_view::ScreenView;
+    use crate::history_cell::MessageHistoryCell;
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -551,12 +232,13 @@ mod tests {
                 .clone()
         };
         let mut out: Vec<RenderedMessage> = app
-            .transcript
+            .chat_widget
+            .transcript()
             .committed_cells()
             .iter()
             .map(|cell| cell_message(cell.as_ref()))
             .collect();
-        out.extend(app.transcript.active_cell().map(cell_message));
+        out.extend(app.chat_widget.transcript().active_cell().map(cell_message));
         out
     }
 
@@ -566,13 +248,16 @@ mod tests {
         typ(&mut app, "line one");
         // Alt+Enter adds a newline instead of submitting.
         let outcome = app.on_key(alt(KeyCode::Enter));
-        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert!(matches!(outcome, ChatOutcome::Continue));
         typ(&mut app, "line two");
-        assert_eq!(app.bottom_pane.composer().text(), "line one\nline two");
+        assert_eq!(
+            app.chat_widget.bottom_pane().composer().text(),
+            "line one\nline two"
+        );
         // Plain Enter submits the full multi-line buffer.
         let outcome = app.on_key(press(KeyCode::Enter));
-        assert!(matches!(outcome, KeyOutcome::Submit(ref p, _) if p == "line one\nline two"));
-        assert_eq!(app.bottom_pane.composer().text(), "");
+        assert!(matches!(outcome, ChatOutcome::Submit(ref p, _) if p == "line one\nline two"));
+        assert_eq!(app.chat_widget.bottom_pane().composer().text(), "");
     }
 
     #[test]
@@ -584,9 +269,15 @@ mod tests {
         app.on_key(press(KeyCode::Enter));
         // Composer is empty; Up walks newest → oldest.
         app.on_key(press(KeyCode::Up));
-        assert_eq!(app.bottom_pane.composer().text(), "second prompt");
+        assert_eq!(
+            app.chat_widget.bottom_pane().composer().text(),
+            "second prompt"
+        );
         app.on_key(press(KeyCode::Up));
-        assert_eq!(app.bottom_pane.composer().text(), "first prompt");
+        assert_eq!(
+            app.chat_widget.bottom_pane().composer().text(),
+            "first prompt"
+        );
     }
 
     #[test]
@@ -595,7 +286,7 @@ mod tests {
         typ(&mut app, "ac");
         app.on_key(press(KeyCode::Left)); // between a|c
         app.on_key(press(KeyCode::Char('b')));
-        assert_eq!(app.bottom_pane.composer().text(), "abc");
+        assert_eq!(app.chat_widget.bottom_pane().composer().text(), "abc");
     }
 
     #[test]
@@ -604,11 +295,11 @@ mod tests {
         for c in "hi".chars() {
             app.on_key(press(KeyCode::Char(c)));
         }
-        assert_eq!(app.bottom_pane.composer().text(), "hi");
+        assert_eq!(app.chat_widget.bottom_pane().composer().text(), "hi");
         let outcome = app.on_key(press(KeyCode::Enter));
-        assert!(matches!(outcome, KeyOutcome::Submit(ref p, _) if p == "hi"));
-        assert_eq!(app.bottom_pane.composer().text(), "");
-        assert!(app.current_turn.is_some());
+        assert!(matches!(outcome, ChatOutcome::Submit(ref p, _) if p == "hi"));
+        assert_eq!(app.chat_widget.bottom_pane().composer().text(), "");
+        assert!(app.chat_widget.turn_running());
         let msgs = messages(&app);
         assert_eq!(msgs.len(), 1);
         assert!(matches!(msgs[0], RenderedMessage::UserText { .. }));
@@ -619,7 +310,7 @@ mod tests {
         let mut app = RataApp::new(Vec::new());
         assert!(matches!(
             app.on_key(press(KeyCode::Enter)),
-            KeyOutcome::Continue
+            ChatOutcome::Continue
         ));
         assert!(messages(&app).is_empty());
     }
@@ -629,7 +320,7 @@ mod tests {
         let mut app = RataApp::new(Vec::new());
         app.on_key(press(KeyCode::Char('x')));
         app.on_key(press(KeyCode::Enter));
-        assert!(app.current_turn.is_some());
+        assert!(app.chat_widget.turn_running());
         app.apply_turn_event(TurnEvent::TurnStarted);
         app.apply_turn_event(TurnEvent::TextDelta("Hel".to_string()));
         app.apply_turn_event(TurnEvent::TextDelta("lo".to_string()));
@@ -638,33 +329,34 @@ mod tests {
             other => panic!("expected assistant text, got {other:?}"),
         }
         app.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
-        assert!(app.current_turn.is_none());
+        assert!(!app.chat_widget.turn_running());
     }
 
     #[test]
     fn ctrl_c_cancels_turn_then_needs_two_presses_to_quit() {
         let mut app = RataApp::new(Vec::new());
         app.on_key(press(KeyCode::Char('x')));
-        app.on_key(press(KeyCode::Enter));
-        let token = app.current_turn.clone().unwrap();
+        let ChatOutcome::Submit(_, token) = app.on_key(press(KeyCode::Enter)) else {
+            panic!("expected submit");
+        };
         assert!(!token.is_cancelled());
         // Ctrl-C during a turn interrupts it (does NOT quit) and clears activity.
         assert!(matches!(
             app.on_key(ctrl(KeyCode::Char('c'))),
-            KeyOutcome::Continue
+            ChatOutcome::Continue
         ));
         assert!(token.is_cancelled());
-        assert!(app.current_turn.is_none());
+        assert!(!app.chat_widget.turn_running());
         // First idle Ctrl-C only arms the exit; it does not quit.
         assert!(matches!(
             app.on_key(ctrl(KeyCode::Char('c'))),
-            KeyOutcome::Continue
+            ChatOutcome::Continue
         ));
-        assert!(app.bottom_pane.ctrl_c_armed());
+        assert!(app.chat_widget.bottom_pane().ctrl_c_armed());
         // Second idle Ctrl-C within the window quits.
         assert!(matches!(
             app.on_key(ctrl(KeyCode::Char('c'))),
-            KeyOutcome::Quit
+            ChatOutcome::Quit
         ));
     }
 
@@ -674,12 +366,12 @@ mod tests {
         // Arm the exit with an idle Ctrl-C, then type: the arm must reset so a
         // later single Ctrl-C does not quit unexpectedly.
         app.on_key(ctrl(KeyCode::Char('c')));
-        assert!(app.bottom_pane.ctrl_c_armed());
+        assert!(app.chat_widget.bottom_pane().ctrl_c_armed());
         app.on_key(press(KeyCode::Char('h')));
-        assert!(!app.bottom_pane.ctrl_c_armed());
+        assert!(!app.chat_widget.bottom_pane().ctrl_c_armed());
         assert!(matches!(
             app.on_key(ctrl(KeyCode::Char('c'))),
-            KeyOutcome::Continue
+            ChatOutcome::Continue
         ));
     }
 
@@ -689,25 +381,31 @@ mod tests {
         typ(&mut app, "foo bar");
         // Bare Home/End move the composer cursor (not scrollback).
         app.on_key(press(KeyCode::Home));
-        assert_eq!(app.bottom_pane.composer().cursor_row_col(), (0, 0));
+        assert_eq!(
+            app.chat_widget.bottom_pane().composer().cursor_row_col(),
+            (0, 0)
+        );
         app.on_key(press(KeyCode::End));
-        assert_eq!(app.bottom_pane.composer().cursor_row_col(), (0, 7));
+        assert_eq!(
+            app.chat_widget.bottom_pane().composer().cursor_row_col(),
+            (0, 7)
+        );
         // Ctrl+W deletes the previous word.
         app.on_key(ctrl(KeyCode::Char('w')));
-        assert_eq!(app.bottom_pane.composer().text(), "foo ");
+        assert_eq!(app.chat_widget.bottom_pane().composer().text(), "foo ");
         // Ctrl+U kills to line start.
         app.on_key(ctrl(KeyCode::Char('u')));
-        assert_eq!(app.bottom_pane.composer().text(), "");
+        assert_eq!(app.chat_widget.bottom_pane().composer().text(), "");
     }
 
     #[test]
     fn ctrl_o_toggles_verbose() {
         let mut app = RataApp::new(Vec::new());
-        assert!(!app.transcript.verbose());
+        assert!(!app.chat_widget.transcript().verbose());
         app.on_key(ctrl(KeyCode::Char('o')));
-        assert!(app.transcript.verbose());
+        assert!(app.chat_widget.transcript().verbose());
         app.on_key(ctrl(KeyCode::Char('o')));
-        assert!(!app.transcript.verbose());
+        assert!(!app.chat_widget.transcript().verbose());
     }
 
     #[test]
@@ -716,7 +414,7 @@ mod tests {
         let base = app.viewport_height(80);
         // Opening the completion popup grows the viewport.
         typ(&mut app, "/");
-        assert!(app.bottom_pane.completion().is_some());
+        assert!(app.chat_widget.bottom_pane().completion().is_some());
         assert!(app.viewport_height(80) > base);
     }
 
@@ -725,7 +423,10 @@ mod tests {
         let mut app = RataApp::new(Vec::new());
         typ(&mut app, "pre ");
         app.on_paste("hello world");
-        assert_eq!(app.bottom_pane.composer().text(), "pre hello world");
+        assert_eq!(
+            app.chat_widget.bottom_pane().composer().text(),
+            "pre hello world"
+        );
         // A non-existent image path is treated as text, not an image message.
         app.on_paste(" /no/such/file.png ");
         assert!(messages(&app).is_empty());
@@ -735,7 +436,7 @@ mod tests {
     fn slash_image_pushes_image_message() {
         let mut app = RataApp::new(Vec::new());
         let outcome = submit_command(&mut app, "/image /tmp/pic.png");
-        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert!(matches!(outcome, ChatOutcome::Continue));
         let msgs = messages(&app);
         assert_eq!(msgs.len(), 1);
         match &msgs[0] {
@@ -754,11 +455,11 @@ mod tests {
     #[test]
     fn slash_vim_toggles_vim_mode() {
         let mut app = RataApp::new(Vec::new());
-        assert!(!app.bottom_pane.vim_enabled());
+        assert!(!app.chat_widget.bottom_pane().vim_enabled());
         submit_command(&mut app, "/vim");
-        assert!(app.bottom_pane.vim_enabled());
+        assert!(app.chat_widget.bottom_pane().vim_enabled());
         submit_command(&mut app, "/vim");
-        assert!(!app.bottom_pane.vim_enabled());
+        assert!(!app.chat_widget.bottom_pane().vim_enabled());
     }
 
     #[test]
@@ -768,15 +469,15 @@ mod tests {
         typ(&mut app, "hello");
         // Esc → Normal mode (does NOT quit the app).
         let outcome = app.on_key(press(KeyCode::Esc));
-        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert!(matches!(outcome, ChatOutcome::Continue));
         // In Normal mode, `0` moves to line start and `x` deletes — not typed.
         app.on_key(press(KeyCode::Char('0')));
         app.on_key(press(KeyCode::Char('x')));
-        assert_eq!(app.bottom_pane.composer().text(), "ello");
+        assert_eq!(app.chat_widget.bottom_pane().composer().text(), "ello");
         // `i` returns to Insert; typing inserts again.
         app.on_key(press(KeyCode::Char('i')));
         typ(&mut app, "H");
-        assert_eq!(app.bottom_pane.composer().text(), "Hello");
+        assert_eq!(app.chat_widget.bottom_pane().composer().text(), "Hello");
     }
 
     #[test]
@@ -786,7 +487,7 @@ mod tests {
         typ(&mut app, "hi");
         app.on_key(press(KeyCode::Esc)); // → Normal
         let outcome = app.on_key(press(KeyCode::Enter));
-        assert!(matches!(outcome, KeyOutcome::Submit(ref p, _) if p == "hi"));
+        assert!(matches!(outcome, ChatOutcome::Submit(ref p, _) if p == "hi"));
     }
 
     #[test]
@@ -794,31 +495,37 @@ mod tests {
         let mut app = RataApp::new(Vec::new());
         typ(&mut app, "alpha beta");
         app.on_key(ctrl(KeyCode::Left)); // to start of "beta"
-        assert_eq!(app.bottom_pane.composer().cursor_row_col(), (0, 6));
+        assert_eq!(
+            app.chat_widget.bottom_pane().composer().cursor_row_col(),
+            (0, 6)
+        );
         app.on_key(ctrl(KeyCode::Left)); // to start of "alpha"
-        assert_eq!(app.bottom_pane.composer().cursor_row_col(), (0, 0));
+        assert_eq!(
+            app.chat_widget.bottom_pane().composer().cursor_row_col(),
+            (0, 0)
+        );
     }
 
     #[test]
     fn typing_slash_opens_and_filters_command_palette() {
         let mut app = RataApp::new(Vec::new());
         app.on_key(press(KeyCode::Char('/')));
-        assert!(app.bottom_pane.completion().is_some());
+        assert!(app.chat_widget.bottom_pane().completion().is_some());
         typ(&mut app, "m"); // "/m" narrows to /model + /mcp
-        let p = app.bottom_pane.completion().unwrap();
+        let p = app.chat_widget.bottom_pane().completion().unwrap();
         assert_eq!(p.selected_insert(), "/model");
         // A space ends the command token and closes the popup.
         typ(&mut app, " x");
-        assert!(app.bottom_pane.completion().is_none());
+        assert!(app.chat_widget.bottom_pane().completion().is_none());
     }
 
     #[test]
     fn tab_completes_selected_command_into_composer() {
         let mut app = RataApp::new(Vec::new());
         typ(&mut app, "/mc");
-        assert!(app.bottom_pane.completion().is_some());
+        assert!(app.chat_widget.bottom_pane().completion().is_some());
         app.on_key(press(KeyCode::Tab));
-        assert_eq!(app.bottom_pane.composer().text(), "/mcp");
+        assert_eq!(app.chat_widget.bottom_pane().composer().text(), "/mcp");
     }
 
     #[test]
@@ -827,10 +534,10 @@ mod tests {
         typ(&mut app, "/");
         app.on_key(press(KeyCode::Down)); // navigate the popup, not history
         let outcome = app.on_key(press(KeyCode::Esc));
-        assert!(matches!(outcome, KeyOutcome::Continue));
-        assert!(app.bottom_pane.completion().is_none());
+        assert!(matches!(outcome, ChatOutcome::Continue));
+        assert!(app.chat_widget.bottom_pane().completion().is_none());
         // Composer text is untouched by the dismiss.
-        assert_eq!(app.bottom_pane.composer().text(), "/");
+        assert_eq!(app.chat_widget.bottom_pane().composer().text(), "/");
     }
 
     #[test]
@@ -839,25 +546,26 @@ mod tests {
         // `@Carg` should match Cargo.toml in the tui-rata crate cwd.
         typ(&mut app, "see @Carg");
         assert!(
-            app.bottom_pane.completion().is_some(),
+            app.chat_widget.bottom_pane().completion().is_some(),
             "@ token opens file completion"
         );
         app.on_key(press(KeyCode::Tab));
         // The @token is replaced in place, leaving the prefix intact.
         assert!(
-            app.bottom_pane
+            app.chat_widget
+                .bottom_pane()
                 .composer()
                 .text()
                 .starts_with("see @Cargo.toml"),
             "got: {}",
-            app.bottom_pane.composer().text()
+            app.chat_widget.bottom_pane().composer().text()
         );
     }
 
     #[test]
     fn esc_quits() {
         let mut app = RataApp::new(Vec::new());
-        assert!(matches!(app.on_key(press(KeyCode::Esc)), KeyOutcome::Quit));
+        assert!(matches!(app.on_key(press(KeyCode::Esc)), ChatOutcome::Quit));
     }
 
     fn tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
@@ -887,11 +595,11 @@ mod tests {
         // While a prompt is open, normal keys are swallowed by the dialog and
         // never reach the composer.
         app.on_key(press(KeyCode::Char('x')));
-        assert_eq!(app.bottom_pane.composer().text(), "");
+        assert_eq!(app.chat_widget.bottom_pane().composer().text(), "");
 
         // Enter selects the highlighted option (index 0 = AllowOnce).
         let outcome = app.on_key(press(KeyCode::Enter));
-        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert!(matches!(outcome, ChatOutcome::Continue));
         assert!(!app.has_open_permission());
         assert_eq!(
             resp_rx.blocking_recv().unwrap(),
@@ -905,7 +613,7 @@ mod tests {
         let (exchange, resp_rx) = tool_exchange();
         app.open_permission(exchange);
         let outcome = app.on_key(press(KeyCode::Esc));
-        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert!(matches!(outcome, ChatOutcome::Continue));
         assert!(!app.has_open_permission());
         assert_eq!(resp_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
     }
@@ -930,25 +638,34 @@ mod tests {
         let outcome = app.on_key(press(KeyCode::Enter));
         // Recognized command: no Submit; a focused ScreenView opens instead
         // of dumping text into scrollback (plan Phase 4 view-stack routing).
-        assert!(matches!(outcome, KeyOutcome::Continue));
-        assert_eq!(app.bottom_pane.composer().text(), "");
-        assert!(app.bottom_pane.view_stack().contains::<ScreenView>());
+        assert!(matches!(outcome, ChatOutcome::Continue));
+        assert_eq!(app.chat_widget.bottom_pane().composer().text(), "");
+        assert!(app
+            .chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ScreenView>());
         assert!(messages(&app).is_empty(), "no scrollback dump");
-        assert!(app.current_turn.is_none());
+        assert!(!app.chat_widget.turn_running());
     }
 
     #[test]
     fn screen_view_owns_keys_scrolls_and_esc_closes_without_quitting() {
         let mut app = RataApp::new(Vec::new());
         submit_command(&mut app, "/help");
-        assert!(app.bottom_pane.view_stack().contains::<ScreenView>());
+        assert!(app
+            .chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ScreenView>());
         // Keys go to the view, not the composer.
         app.on_key(press(KeyCode::Char('x')));
-        assert_eq!(app.bottom_pane.composer().text(), "");
+        assert_eq!(app.chat_widget.bottom_pane().composer().text(), "");
         // Down scrolls the screen body.
         app.on_key(press(KeyCode::Down));
         let scroll = app
-            .bottom_pane
+            .chat_widget
+            .bottom_pane()
             .view_stack()
             .active()
             .and_then(|v| v.as_any().downcast_ref::<ScreenView>())
@@ -957,10 +674,10 @@ mod tests {
         assert_eq!(scroll, 1);
         // Esc closes the view (does NOT quit the app) and returns the keys.
         let outcome = app.on_key(press(KeyCode::Esc));
-        assert!(matches!(outcome, KeyOutcome::Continue));
-        assert!(app.bottom_pane.view_stack().is_empty());
+        assert!(matches!(outcome, ChatOutcome::Continue));
+        assert!(app.chat_widget.bottom_pane().view_stack().is_empty());
         app.on_key(press(KeyCode::Char('h')));
-        assert_eq!(app.bottom_pane.composer().text(), "h");
+        assert_eq!(app.chat_widget.bottom_pane().composer().text(), "h");
     }
 
     #[test]
@@ -968,8 +685,8 @@ mod tests {
         let mut app = RataApp::new(Vec::new());
         submit_command(&mut app, "/help");
         let outcome = app.on_key(press(KeyCode::Char('q')));
-        assert!(matches!(outcome, KeyOutcome::Continue));
-        assert!(app.bottom_pane.view_stack().is_empty());
+        assert!(matches!(outcome, ChatOutcome::Continue));
+        assert!(app.chat_widget.bottom_pane().view_stack().is_empty());
     }
 
     #[test]
@@ -980,11 +697,11 @@ mod tests {
         }
         let outcome = app.on_key(press(KeyCode::Enter));
         // Unrecognized slash command falls through as a normal prompt.
-        assert!(matches!(outcome, KeyOutcome::Submit(ref p, _) if p == "/frobnicate"));
+        assert!(matches!(outcome, ChatOutcome::Submit(ref p, _) if p == "/frobnicate"));
         assert_eq!(messages(&app).len(), 1);
     }
 
-    fn submit_command(app: &mut RataApp, cmd: &str) -> KeyOutcome {
+    fn submit_command(app: &mut RataApp, cmd: &str) -> ChatOutcome {
         for c in cmd.chars() {
             app.on_key(press(KeyCode::Char(c)));
         }
@@ -999,9 +716,9 @@ mod tests {
             is_error: false,
         }]);
         let outcome = submit_command(&mut app, "/clear");
-        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert!(matches!(outcome, ChatOutcome::Continue));
         assert!(messages(&app).is_empty());
-        assert_eq!(app.transcript.committed_to_terminal(), 0);
+        assert_eq!(app.chat_widget.transcript().committed_to_terminal(), 0);
     }
 
     #[test]
@@ -1009,7 +726,7 @@ mod tests {
         let mut app = RataApp::new(Vec::new());
         assert!(matches!(
             submit_command(&mut app, "/exit"),
-            KeyOutcome::Quit
+            ChatOutcome::Quit
         ));
     }
 
@@ -1018,19 +735,27 @@ mod tests {
         let mut app = RataApp::new(Vec::new());
         assert!(matches!(
             submit_command(&mut app, "/doctor"),
-            KeyOutcome::Continue
+            ChatOutcome::Continue
         ));
-        assert!(app.bottom_pane.view_stack().contains::<ScreenView>());
+        assert!(app
+            .chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ScreenView>());
         app.on_key(press(KeyCode::Esc)); // close /doctor
-        assert!(app.bottom_pane.view_stack().is_empty());
+        assert!(app.chat_widget.bottom_pane().view_stack().is_empty());
         assert!(matches!(
             submit_command(&mut app, "/mcp"),
-            KeyOutcome::Continue
+            ChatOutcome::Continue
         ));
-        assert!(app.bottom_pane.view_stack().contains::<ScreenView>());
+        assert!(app
+            .chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ScreenView>());
         // Focused views, not scrollback dumps; and no prompt turn started.
         assert!(messages(&app).is_empty());
-        assert!(app.current_turn.is_none());
+        assert!(!app.chat_widget.turn_running());
     }
 
     fn app_with_models() -> RataApp {
@@ -1060,9 +785,13 @@ mod tests {
         let mut app = RataApp::new(Vec::new());
         assert!(matches!(
             submit_command(&mut app, "/model"),
-            KeyOutcome::Continue
+            ChatOutcome::Continue
         ));
-        assert!(!app.bottom_pane.view_stack().contains::<ModelPickerView>());
+        assert!(!app
+            .chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ModelPickerView>());
         assert_eq!(messages(&app).len(), 1);
     }
 
@@ -1071,110 +800,81 @@ mod tests {
         let mut app = app_with_models();
         assert!(matches!(
             submit_command(&mut app, "/model"),
-            KeyOutcome::Continue
+            ChatOutcome::Continue
         ));
-        assert!(app.bottom_pane.view_stack().contains::<ModelPickerView>());
+        assert!(app
+            .chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ModelPickerView>());
         // Picker owns the keyboard: move up to the first (Opus) row and confirm.
         app.on_key(press(KeyCode::Up));
         let outcome = app.on_key(press(KeyCode::Enter));
         assert!(matches!(
             outcome,
-            KeyOutcome::SwitchModel(ref m, ref p)
+            ChatOutcome::SwitchModel(ref m, ref p)
                 if m == "claude-opus" && p.as_deref() == Some("anthropic")
         ));
-        assert!(!app.bottom_pane.view_stack().contains::<ModelPickerView>());
+        assert!(!app
+            .chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ModelPickerView>());
     }
 
     #[test]
     fn model_picker_esc_cancels_without_switching() {
         let mut app = app_with_models();
         submit_command(&mut app, "/model");
-        assert!(app.bottom_pane.view_stack().contains::<ModelPickerView>());
+        assert!(app
+            .chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ModelPickerView>());
         let outcome = app.on_key(press(KeyCode::Esc));
-        assert!(matches!(outcome, KeyOutcome::Continue));
-        assert!(!app.bottom_pane.view_stack().contains::<ModelPickerView>());
+        assert!(matches!(outcome, ChatOutcome::Continue));
+        assert!(!app
+            .chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ModelPickerView>());
     }
 
     #[test]
     fn permission_stacks_over_picker_and_returns_keys_to_it() {
         let mut app = app_with_models();
         submit_command(&mut app, "/model");
-        assert!(app.bottom_pane.view_stack().contains::<ModelPickerView>());
+        assert!(app
+            .chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ModelPickerView>());
         // A permission request arriving while the picker is open stacks on
         // top and owns the keyboard.
         let (exchange, resp_rx) = tool_exchange();
         app.open_permission(exchange);
-        assert_eq!(app.bottom_pane.view_stack().len(), 2);
+        assert_eq!(app.chat_widget.bottom_pane().view_stack().len(), 2);
         let outcome = app.on_key(press(KeyCode::Enter)); // resolves permission
-        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert!(matches!(outcome, ChatOutcome::Continue));
         assert_eq!(
             resp_rx.blocking_recv().unwrap(),
             PermissionResponse::AllowOnce
         );
         // The picker beneath survives and gets the keyboard back.
-        assert!(app.bottom_pane.view_stack().contains::<ModelPickerView>());
+        assert!(app
+            .chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ModelPickerView>());
         app.on_key(press(KeyCode::Up));
         let outcome = app.on_key(press(KeyCode::Enter));
-        assert!(matches!(outcome, KeyOutcome::SwitchModel(ref m, _) if m == "claude-opus"));
+        assert!(matches!(outcome, ChatOutcome::SwitchModel(ref m, _) if m == "claude-opus"));
     }
 
-    #[test]
-    fn view_run_command_outcomes_dispatch_to_the_app() {
-        use std::any::Any;
-
-        use ratatui::buffer::Buffer;
-        use ratatui::layout::Rect;
-
-        /// A stub view that returns a scripted command on Enter.
-        struct CommandStub(Option<CommandAction>);
-
-        impl Renderable for CommandStub {
-            fn render(&self, _area: Rect, _buf: &mut Buffer) {}
-            fn desired_height(&self, _width: u16) -> u16 {
-                1
-            }
-        }
-
-        impl crate::bottom_pane::BottomPaneView for CommandStub {
-            fn handle_key(&mut self, _key: KeyEvent) -> crate::bottom_pane::ViewOutcome {
-                self.0.take().map_or(
-                    crate::bottom_pane::ViewOutcome::Pending,
-                    crate::bottom_pane::ViewOutcome::RunCommand,
-                )
-            }
-
-            fn as_any(&self) -> &dyn Any {
-                self
-            }
-        }
-
-        // ClearTranscript empties the transcript.
-        let mut app = RataApp::new(vec![RenderedMessage::SystemText {
-            body: "old".to_string(),
-            timestamp: 0,
-            is_error: false,
-        }]);
-        app.bottom_pane
-            .show_view(Box::new(CommandStub(Some(CommandAction::ClearTranscript))));
-        assert!(matches!(
-            app.on_key(press(KeyCode::Enter)),
-            KeyOutcome::Continue
-        ));
-        assert!(messages(&app).is_empty());
-        assert!(
-            app.bottom_pane.view_stack().is_empty(),
-            "completed view popped"
-        );
-
-        // Quit surfaces as KeyOutcome::Quit.
-        let mut app = RataApp::new(Vec::new());
-        app.bottom_pane
-            .show_view(Box::new(CommandStub(Some(CommandAction::Quit))));
-        assert!(matches!(
-            app.on_key(press(KeyCode::Enter)),
-            KeyOutcome::Quit
-        ));
-    }
+    // NOTE (plan Phase 6): `view_run_command_outcomes_dispatch_to_the_app`
+    // moved to `chat_widget::tests::view_run_command_outcomes_dispatch_to_the_widget`
+    // verbatim — RunCommand dispatch ownership moved into ChatWidget and the
+    // stub view needs mutable pane access the app no longer exposes.
 
     // ===== Phase 0 behavior locks (codex-ui-structure plan) =====
     // These tests freeze RataApp's CURRENT behavior before the ChatWidget /
@@ -1228,7 +928,7 @@ mod tests {
         let mut app = RataApp::new(Vec::new());
         typ(&mut app, "  hi there  ");
         let outcome = app.on_key(press(KeyCode::Enter));
-        assert!(matches!(outcome, KeyOutcome::Submit(ref p, _) if p == "hi there"));
+        assert!(matches!(outcome, ChatOutcome::Submit(ref p, _) if p == "hi there"));
         match &messages(&app)[0] {
             RenderedMessage::UserText { body, .. } => assert_eq!(body, "hi there"),
             other => panic!("expected user text, got {other:?}"),
@@ -1241,10 +941,10 @@ mod tests {
         typ(&mut app, "   ");
         assert!(matches!(
             app.on_key(press(KeyCode::Enter)),
-            KeyOutcome::Continue
+            ChatOutcome::Continue
         ));
         assert!(messages(&app).is_empty());
-        assert!(app.current_turn.is_none());
+        assert!(!app.chat_widget.turn_running());
     }
 
     #[test]
@@ -1252,21 +952,32 @@ mod tests {
         let mut app = RataApp::new(Vec::new());
         assert!(matches!(
             submit_command(&mut app, "/hooks"),
-            KeyOutcome::Continue
+            ChatOutcome::Continue
         ));
-        assert!(app.bottom_pane.view_stack().contains::<ScreenView>());
+        assert!(app
+            .chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ScreenView>());
         app.on_key(press(KeyCode::Esc)); // close /hooks
         assert!(matches!(
             submit_command(&mut app, "/agents"),
-            KeyOutcome::Continue
+            ChatOutcome::Continue
         ));
-        assert!(app.bottom_pane.view_stack().contains::<ScreenView>());
+        assert!(app
+            .chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ScreenView>());
         app.on_key(press(KeyCode::Esc)); // close /agents
         assert!(messages(&app).is_empty(), "views, not scrollback dumps");
-        assert!(app.current_turn.is_none(), "no prompt turn for commands");
+        assert!(
+            !app.chat_widget.turn_running(),
+            "no prompt turn for commands"
+        );
         assert!(matches!(
             submit_command(&mut app, "/quit"),
-            KeyOutcome::Quit
+            ChatOutcome::Quit
         ));
     }
 
@@ -1277,7 +988,7 @@ mod tests {
         app.open_permission(exchange);
         app.on_key(press(KeyCode::Down)); // highlight "Yes, allow always"
         let outcome = app.on_key(press(KeyCode::Enter));
-        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert!(matches!(outcome, ChatOutcome::Continue));
         assert!(!app.has_open_permission());
         assert_eq!(
             resp_rx.blocking_recv().unwrap(),
@@ -1300,10 +1011,10 @@ mod tests {
         // …after which the keyboard belongs to the composer again; further keys
         // cannot re-resolve the consumed exchange (its sender is gone).
         app.on_key(press(KeyCode::Char('x')));
-        assert_eq!(app.bottom_pane.composer().text(), "x");
+        assert_eq!(app.chat_widget.bottom_pane().composer().text(), "x");
         assert!(matches!(
             app.on_key(press(KeyCode::Enter)),
-            KeyOutcome::Submit(ref p, _) if p == "x"
+            ChatOutcome::Submit(ref p, _) if p == "x"
         ));
     }
 
@@ -1317,7 +1028,7 @@ mod tests {
         app.on_paste(&format!(" {} ", path.display()));
         std::fs::remove_file(&path).ok();
         assert_eq!(
-            app.bottom_pane.composer().text(),
+            app.chat_widget.bottom_pane().composer().text(),
             "",
             "image paste must not touch composer"
         );
@@ -1347,18 +1058,18 @@ mod tests {
         let mut terminal = inline_test_terminal(4);
         app.flush_scrollback(&mut terminal).unwrap();
         // The finalized user message commits; the streaming reply is held back.
-        assert_eq!(app.transcript.committed_to_terminal(), 1);
+        assert_eq!(app.chat_widget.transcript().committed_to_terminal(), 1);
         app.apply_turn_event(TurnEvent::TextDelta("lo".to_string()));
         app.flush_scrollback(&mut terminal).unwrap();
         assert_eq!(
-            app.transcript.committed_to_terminal(),
+            app.chat_widget.transcript().committed_to_terminal(),
             1,
             "still streaming: tail stays held back"
         );
         app.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
         app.flush_scrollback(&mut terminal).unwrap();
         assert_eq!(
-            app.transcript.committed_to_terminal(),
+            app.chat_widget.transcript().committed_to_terminal(),
             2,
             "turn ended: reply commits as a whole"
         );
@@ -1380,7 +1091,7 @@ mod tests {
         ]);
         let mut terminal = inline_test_terminal(4);
         app.flush_scrollback(&mut terminal).unwrap();
-        assert_eq!(app.transcript.committed_to_terminal(), 2);
+        assert_eq!(app.chat_widget.transcript().committed_to_terminal(), 2);
     }
 
     #[test]
@@ -1437,8 +1148,37 @@ mod tests {
         app.apply_turn_event(TurnEvent::TurnStarted);
         let terminal = draw_viewport(&mut app);
         let rows = buffer_rows(&terminal);
-        assert!(rows[0].contains("esc to interrupt"), "status: {}", rows[0]);
-        assert!(rows[0].contains("Ctrl-C: cancel"), "status: {}", rows[0]);
+        // The live tail (the just-opened active cell's 1-row marker) renders
+        // above the pane since plan Phase 6, so the status row moved to row 1.
+        assert!(rows[1].contains("esc to interrupt"), "status: {}", rows[1]);
+        assert!(rows[1].contains("Ctrl-C: cancel"), "status: {}", rows[1]);
+    }
+
+    #[test]
+    fn layout_streaming_tail_is_visible_above_the_pane_before_turn_ends() {
+        let mut app = RataApp::new(Vec::new());
+        typ(&mut app, "go");
+        app.on_key(press(KeyCode::Enter));
+        app.apply_turn_event(TurnEvent::TurnStarted);
+        app.apply_turn_event(TurnEvent::TextDelta("streamed reply words".to_string()));
+        // The viewport grows for the tail: idle pane (4) + one tail row.
+        assert_eq!(app.viewport_height(80), 5, "tail grows the viewport");
+        let terminal = draw_viewport(&mut app);
+        let rows = buffer_rows(&terminal);
+        // The mid-turn delta is visible in the drawn frame BEFORE TurnEnded,
+        // above the running-status row (acceptance criterion 12).
+        let text_row = rows
+            .iter()
+            .position(|row| row.contains("streamed reply words"))
+            .unwrap_or_else(|| panic!("mid-turn delta not visible:\n{}", rows.join("\n")));
+        let status_row = rows
+            .iter()
+            .position(|row| row.contains("esc to interrupt"))
+            .expect("running status row");
+        assert!(
+            text_row < status_row,
+            "tail above the pane: text row {text_row}, status row {status_row}"
+        );
     }
 
     #[test]
@@ -1458,7 +1198,7 @@ mod tests {
     fn layout_completion_popup_grows_viewport_and_draws_over_it() {
         let mut app = RataApp::new(Vec::new());
         typ(&mut app, "/");
-        assert!(app.bottom_pane.completion().is_some());
+        assert!(app.chat_widget.bottom_pane().completion().is_some());
         assert_eq!(app.viewport_height(80), 12, "completion viewport height");
         let terminal = draw_viewport(&mut app);
         let all = buffer_rows(&terminal).join("\n");

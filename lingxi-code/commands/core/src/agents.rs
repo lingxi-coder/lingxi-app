@@ -1,31 +1,58 @@
-//! `/agents` — list registered subagents.
+//! `/agents` — removed-wizard guidance (cc 2.1.198 M4).
 //!
-//! Locked display template (`LingXi` UX, M5-11 T0 step 2 L8):
-//!   `"Agents ({count}):\n  {name}  {description}\n…"`
-//! Description is truncated to 80 chars + `…` if longer (per `char_indices`).
-//! Failure prefix: `"Could not list agents: "` (currently unreachable —
-//! `list_agents` is infallible).
+//! claude-code 2.1.198 REMOVED the `/agents` wizard (changelog "Removed
+//! /agents wizard"). The command object is now (binary `Ltf` @ the `Hrc`
+//! module): `{type:"local", name:"agents", description:"(removed) Ask Claude
+//! to create/manage subagents, or edit .claude/agents/",
+//! supportsNonInteractive:!0, load:()=>Promise.resolve({call:Otf})}`, where
+//! `Otf` returns a static `{type:"text"}` guidance message (extracted verbatim
+//! from the binary — see [`AGENTS_REMOVED_MESSAGE`]).
+//!
+//! lingxi previously rendered a list of registered subagents here; that list
+//! surface is replaced by the binary's guidance text. BRANDING: the two
+//! `agents/` paths are branded via [`branding::DOT_DIR`] (`.lingxi/agents/`)
+//! because they point users at the dirs lingxi ACTUALLY loads
+//! (`engine-desktop` (5.3) scans `<cwd>/.lingxi/agents` +
+//! `<lingxi_home>/agents`); the docs URL stays verbatim. The command
+//! DESCRIPTION stays byte-verbatim per the `core_description` convention
+//! (command help strings are 1:1 with the oracle).
 
 use async_trait::async_trait;
-use command_api::builtin_support::list_render::render_list;
 use command_api::builtin_support::names::core_description;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
-use traits::{AgentInfo, OrchestratorHandle};
+use traits::OrchestratorHandle;
 
-/// `/agents` handler — list mode.
-#[derive(Clone)]
-pub struct AgentsHandler {
-    handle: Arc<dyn OrchestratorHandle>,
+/// The `Otf` guidance text (binary 2.1.198, verbatim except the two branded
+/// `agents/` paths — `.claude` → [`branding::DOT_DIR`]). The `\u{2022}`
+/// bullets and column padding match the binary byte-for-byte.
+fn agents_removed_message() -> String {
+    format!(
+        "The /agents wizard has been removed.\n\n\
+         Ask Claude to create or update subagents for you (e.g. \"create a code-reviewer subagent that ...\"),\n\
+         or edit the files directly:\n  \
+         \u{2022} {dot}/agents/       (this project)\n  \
+         \u{2022} ~/{dot}/agents/     (all projects)\n\n\
+         Docs: https://code.claude.com/docs/en/sub-agents",
+        dot = branding::DOT_DIR
+    )
 }
 
+/// `/agents` handler — removed-wizard guidance (`supportsNonInteractive`, so
+/// the same text serves the TUI and print/SDK paths).
+#[derive(Clone)]
+pub struct AgentsHandler;
+
 impl AgentsHandler {
-    /// Construct an `AgentsHandler` bound to the given orchestrator handle.
+    /// Construct an `AgentsHandler`. The orchestrator handle is no longer
+    /// consulted (the 2.1.198 command is a static text response), but the
+    /// parameter is kept so the registration site (`register_core_batch_1`)
+    /// stays signature-stable.
     #[must_use]
-    pub fn new(handle: Arc<dyn OrchestratorHandle>) -> Self {
-        Self { handle }
+    pub fn new(_handle: Arc<dyn OrchestratorHandle>) -> Self {
+        Self
     }
 }
 
@@ -33,9 +60,7 @@ impl AgentsHandler {
 impl BuiltinCommandHandler for AgentsHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
         telemetry::emit_command_started(cmd_evt::AGENTS_STARTED);
-        let agents = self.handle.list_agents().await;
-        let rows: Vec<String> = agents.iter().map(format_row).collect();
-        let s = render_list("Agents", rows, "No subagents configured");
+        let s = agents_removed_message();
         telemetry::emit_command_completed(cmd_evt::AGENTS_COMPLETED, "");
         CommandResult::Done { display: Some(s) }
     }
@@ -44,28 +69,6 @@ impl BuiltinCommandHandler for AgentsHandler {
     }
     fn description(&self) -> &str {
         core_description("agents")
-    }
-}
-
-fn format_row(a: &AgentInfo) -> String {
-    let desc = truncate_with_ellipsis(&a.description, 80);
-    format!("{}  {}", a.name, desc)
-}
-
-/// Truncate `s` to `max_chars` Unicode code points; append `…` if any
-/// characters were dropped. Multibyte-safe.
-fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
-    let mut byte_idx = s.len();
-    for (count, (i, _)) in s.char_indices().enumerate() {
-        if count == max_chars {
-            byte_idx = i;
-            break;
-        }
-    }
-    if byte_idx == s.len() {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..byte_idx])
     }
 }
 
@@ -82,67 +85,48 @@ mod tests {
         }
     }
 
+    /// The 2.1.198 guidance text, byte-locked (binary `Otf`, `.lingxi`-branded
+    /// paths per the module doc).
     #[tokio::test]
-    async fn empty_list() {
-        let mock = Arc::new(MockOrchestratorHandle::new());
-        let h = AgentsHandler::new(mock);
+    async fn returns_removed_wizard_guidance() {
+        let h = AgentsHandler::new(Arc::new(MockOrchestratorHandle::new()));
+        let locked = "The /agents wizard has been removed.\n\nAsk Claude to create or update subagents for you (e.g. \"create a code-reviewer subagent that ...\"),\nor edit the files directly:\n  \u{2022} .lingxi/agents/       (this project)\n  \u{2022} ~/.lingxi/agents/     (all projects)\n\nDocs: https://code.claude.com/docs/en/sub-agents";
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
-            assert_eq!(s, "No subagents configured\n");
+            assert_eq!(s, locked);
         } else {
-            panic!();
+            panic!("expected Done with display text");
         }
     }
 
+    /// Args are ignored — the binary's `Otf` takes none into account.
     #[tokio::test]
-    async fn one_agent_short_description() {
-        let mock = Arc::new(MockOrchestratorHandle::new());
-        mock.set_agents(vec![AgentInfo {
-            name: "reviewer".into(),
-            description: "review code".into(),
-            tools_allowed: vec![],
-            wildcard_tools: false,
-            ..AgentInfo::default()
-        }]);
-        let h = AgentsHandler::new(mock);
-        if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
-            assert_eq!(s, "Agents (1):\n  reviewer  review code\n");
-        } else {
-            panic!();
+    async fn args_are_ignored() {
+        let h = AgentsHandler::new(Arc::new(MockOrchestratorHandle::new()));
+        let with_args = ParsedSlashCommand {
+            name: "agents".into(),
+            raw_args: "reviewer --verbose".into(),
+            positional_args: vec!["reviewer".into(), "--verbose".into()],
+        };
+        let a = h.handle(&args()).await;
+        let b = h.handle(&with_args).await;
+        match (a, b) {
+            (
+                CommandResult::Done { display: Some(x) },
+                CommandResult::Done { display: Some(y) },
+            ) => assert_eq!(x, y),
+            _ => panic!("expected Done for both"),
         }
     }
 
-    #[tokio::test]
-    async fn description_truncated_at_80_chars() {
-        let mock = Arc::new(MockOrchestratorHandle::new());
-        let long: String = "a".repeat(100);
-        mock.set_agents(vec![AgentInfo {
-            name: "x".into(),
-            description: long,
-            tools_allowed: vec![],
-            wildcard_tools: false,
-            ..AgentInfo::default()
-        }]);
-        let h = AgentsHandler::new(mock);
-        if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
-            let expected = format!("Agents (1):\n  x  {}…\n", "a".repeat(80));
-            assert_eq!(s, expected);
-        } else {
-            panic!();
-        }
-    }
-
-    #[test]
-    fn truncate_handles_multibyte_correctly() {
-        let s = "中".repeat(85);
-        let t = truncate_with_ellipsis(&s, 80);
-        assert_eq!(t.chars().count(), 81); // 80 中 + 1 …
-    }
-
+    /// Name + the byte-verbatim 2.1.198 description (oracle: `(removed) Ask
+    /// Claude to create/manage subagents, or edit .claude/agents/`).
     #[tokio::test]
     async fn name_and_description() {
-        let mock = Arc::new(MockOrchestratorHandle::new());
-        let h = AgentsHandler::new(mock);
+        let h = AgentsHandler::new(Arc::new(MockOrchestratorHandle::new()));
         assert_eq!(h.name(), "agents");
-        assert_eq!(h.description(), "Manage agent configurations");
+        assert_eq!(
+            h.description(),
+            "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/"
+        );
     }
 }

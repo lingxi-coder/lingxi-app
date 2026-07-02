@@ -1,8 +1,8 @@
 //! Top-level subcommand layer — byte-parity with claude-code 2.1.191.
 //!
 //! claude-code registers `mcp`, `auth`, `agents`, `auto-mode`, `doctor`,
-//! `install`, `plugin|plugins`, `project`, `setup-token`, `ultrareview`, and
-//! `update|upgrade` as commander subcommands. lingxi-cli historically had NO
+//! `gateway` (2.1.198), `install`, `plugin|plugins`, `project`, `setup-token`,
+//! `ultrareview`, and `update|upgrade` as commander subcommands. lingxi-cli historically had NO
 //! subcommand layer (flat clap struct), so a bare token like `mcp`/`auth` was
 //! swallowed as a chat prompt and started a (billable) LLM turn, while a
 //! two-token form like `mcp serve` hard-errored.
@@ -23,6 +23,7 @@ pub mod agents;
 pub mod auth;
 pub mod auto_mode;
 pub mod doctor;
+pub mod gateway;
 pub mod install;
 pub mod mcp;
 pub mod plugin;
@@ -47,6 +48,8 @@ pub enum Commands {
     /// trust dialog is skipped and stdio servers from .mcp.json are spawned for
     /// health checks. Only use this command in directories you trust.
     Doctor(doctor::Cli),
+    /// Run the enterprise auth/telemetry gateway
+    Gateway(gateway::Cli),
     /// Install LingXi native build. Use [target] to specify version
     /// (stable, latest, or specific version)
     Install(install::Cli),
@@ -76,6 +79,7 @@ impl Commands {
             Commands::Auth(c) => auth::run(c).await,
             Commands::AutoMode(c) => auto_mode::run(c).await,
             Commands::Doctor(c) => doctor::run(c).await,
+            Commands::Gateway(c) => gateway::run(c).await,
             Commands::Install(c) => install::run(c).await,
             Commands::Plugin(c) => plugin::run(c).await,
             Commands::Project(c) => project::run(c).await,

@@ -259,6 +259,12 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         customization_gates: engine_desktop::CustomizationGates::default(),
         // The Electron bridge has no --no-session-persistence flag; persist.
         session_persistence: true,
+        // (M4 cc2.1.198) The Electron bridge exposes none of --agents /
+        // --agent / --plugin-dir / --effort (CLI session flags).
+        cli_agents_json: None,
+        cli_agent: None,
+        cli_plugin_dirs: Vec::new(),
+        initial_effort: None,
     }
 }
 
@@ -594,6 +600,10 @@ mod tests {
             setting_source_scope: (true, true),
             customization_gates: engine_desktop::CustomizationGates::default(),
             session_persistence: true,
+            cli_agents_json: None,
+            cli_agent: None,
+            cli_plugin_dirs: Vec::new(),
+            initial_effort: None,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.

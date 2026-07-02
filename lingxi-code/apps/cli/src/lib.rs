@@ -300,6 +300,17 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         return exit_codes::ARGV_ERROR;
     }
 
+    // (M4 cc2.1.198) `--effort` argParser warning. The binary validates INSIDE
+    // commander's argParser (`u4i` — so the warning prints during argv parse,
+    // before any dispatch) and continues with the flag ignored:
+    // `process.stderr.write(`Warning: ${l}\n`)`. Verified live: stderr
+    // `Warning: Unknown --effort value 'banana' — ignoring it and using the
+    // default effort. Valid values: low, medium, high, xhigh, max.`, run
+    // continues. The normalized level threads via `resolve_desktop_config`.
+    if let (_, Some(warning)) = parsed.normalized_effort() {
+        eprintln!("{warning}");
+    }
+
     // (M3 cc2.1.198) `--bare` exports `LINGXI_SIMPLE=1` for this process +
     // children (binary top dispatcher @224048363: `if((l===-1?t:t.slice(0,l))
     // .includes("--bare"))process.env.CLAUDE_CODE_SIMPLE="1"` — pre-`--`
@@ -411,6 +422,15 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // P3 cross-flag validation for --input-format=stream-json and
     // --replay-user-messages (§4.1 SPEC-inferred.md, exact error strings).
     if let Err(msg) = parsed.validate_stream_json_input_args() {
+        eprintln!("Error: {msg}");
+        return exit_codes::ARGV_ERROR;
+    }
+
+    // (M4 cc2.1.198) A truthy `--prompt-suggestions` requires --print +
+    // --output-format=stream-json. Binary order: this `Es(...)` gate runs
+    // IMMEDIATELY BEFORE the include-partial-messages gate (same statement
+    // chain in the main action). Byte-exact message + exit 1 (verified live).
+    if let Err(msg) = parsed.validate_prompt_suggestions_args() {
         eprintln!("Error: {msg}");
         return exit_codes::ARGV_ERROR;
     }
@@ -675,6 +695,15 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     //   (none) + --no-tui → M5-08 stdio picker (unchanged fallback)
     if parsed.resume.is_some() {
         return run::run_resume(&parsed, &runtime, sink.as_ref()).await;
+    }
+
+    // (M4 cc2.1.198) `--from-pr [value]` — the binary opens the SAME resume
+    // picker with `filterByPr: rt` (bare flag → only PR-linked sessions; a
+    // parseable PR number/URL → `prNumber === n`; an unparseable value applies
+    // no narrowing). `--resume` wins when both are given (its branch runs
+    // first in the binary's session-source resolution too).
+    if parsed.from_pr.is_some() {
+        return run::run_from_pr(&parsed, sink.as_ref()).await;
     }
 
     let chosen = mode::decide_mode(&parsed);

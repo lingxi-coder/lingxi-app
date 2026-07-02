@@ -82,7 +82,13 @@ const CHECKLIST: &[Entry] = &[
     Entry { version: "2.1.198", item: "Retry UX: error reason after 2nd attempt; status page link when overloaded", disposition: Mission("M12") },
     Entry { version: "2.1.198", item: "/login opens sign-in dialog from claude agents view", disposition: Mission("M7") },
     Entry { version: "2.1.198", item: "Launcher-agent messages are task direction, never user approval", disposition: Mission("M10") },
-    Entry { version: "2.1.198", item: "Removed /agents wizard", disposition: Mission("M4") },
+    // M4 landed: `/agents` now returns the binary's removed-wizard guidance
+    // (`Otf` text, `.lingxi`-branded paths) with the verbatim `(removed) …`
+    // description (`commands/core/src/agents.rs`, `core_description`, /help
+    // golden re-locked). M4 also wired --agents/--agent/--plugin-dir/
+    // --from-pr/--prompt-suggestions/--effort + the `gateway` subcommand
+    // surface and locked `ultrareview`'s unsupported exit.
+    Entry { version: "2.1.198", item: "Removed /agents wizard", disposition: Disposition::Implemented },
     // ── 2.1.197 ────────────────────────────────────────────────────────────
     Entry { version: "2.1.197", item: "Sonnet 5 default model, native 1M context, promo $2/$10 per Mtok through 2026-08-31", disposition: Mission("M1") },
     // ── 2.1.196 ────────────────────────────────────────────────────────────

@@ -203,7 +203,9 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/help", "Show keyboard shortcuts and commands"),
     ("/clear", "Clear the conversation history"),
     ("/exit", "Exit LingXi"),
-    ("/agents", "Manage agent configurations"),
+    // (M4 cc2.1.198) The /agents wizard was removed; surface the same
+    // removed-wizard description the command registry carries.
+    ("/agents", "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/"),
     ("/mcp", "Show configured MCP servers"),
     ("/hooks", "Show configured hooks"),
     ("/model", "Set the active model"),

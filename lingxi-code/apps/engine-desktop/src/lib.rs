@@ -1329,6 +1329,41 @@ pub struct DesktopConfig {
     /// (claude-code "Disable session persistence - sessions will not be saved
     /// to disk and cannot be resumed"). `true` (the default) ⟶ unchanged.
     pub session_persistence: bool,
+    /// (M4 cc2.1.198) CLI `--agents <json>` raw payload ("JSON object defining
+    /// custom agents"). `build()` parses it with the strict flag-record schema
+    /// (`agent::parse_agents_from_flag_json`, the `QXt` port) and merges the
+    /// result into the agent catalog with `flagSettings` precedence — flag
+    /// agents OVERRIDE same-named user/project dir agents (binary `XXt`
+    /// tier order `[built-in, plugin, userSettings, projectSettings,
+    /// flagSettings, policySettings]`, later wins). Ignored (warn) in safe
+    /// mode; SURVIVES bare (`Hc("agents",{explicitlyRequested:!0})`
+    /// @223080769). `None` (the default) ⟶ unchanged.
+    pub cli_agents_json: Option<String>,
+    /// (M4 cc2.1.198) CLI `--agent <agent>` ("Agent for the current session.
+    /// Overrides the 'agent' setting."). `build()` resolves it against the
+    /// final catalog with the `dts` lookup (exact `agentType`, else FQN
+    /// `…:{name}` suffix) and logs the binary's `Warning: agent "X" not
+    /// found …` line when absent. RESIDUAL seam: lingxi has no main-thread
+    /// agent runtime (`xz` → `mainThreadAgentType` re-skins the MAIN session's
+    /// system prompt/tools), so a resolved agent is not yet applied.
+    pub cli_agent: Option<String>,
+    /// (M4 cc2.1.198) CLI `--plugin-dir <path>` entries ("Load a plugin from a
+    /// directory or .zip for this session only", repeatable). Each entry feeds
+    /// the plugin bootstrap AFTER the marketplace-installed discovery, like the
+    /// binary's inline-plugin load (`EBm`): a missing path warns
+    /// (`Plugin path does not exist: … , skipping`) without failing boot; a
+    /// `.zip` is extracted to a temp dir (wrapper-dir detection like `Yor`)
+    /// before the normal dir load. Empty (the default) ⟶ none.
+    pub cli_plugin_dirs: Vec<std::path::PathBuf>,
+    /// (M4 cc2.1.198) CLI `--effort <level>` — the session's initial effort
+    /// level, already validated/normalized by the CLI (`u4i` argParser port:
+    /// trim+lowercase, `med`→`medium`, must be one of low/medium/high/xhigh/
+    /// max; an invalid value warned on stderr and arrives here as `None`).
+    /// `build()` threads it to the main-loop `ProviderApiAdapter` so every
+    /// main-session request carries `output_config.effort` (+ the
+    /// `effort-2025-11-24` beta the service adds when the body has effort).
+    /// `None` (the default) ⟶ requests unchanged (no effort field).
+    pub initial_effort: Option<String>,
 }
 
 /// `--safe-mode` / `--bare` reduced-mode customization gates (M3, cc 2.1.198).
@@ -1483,6 +1518,10 @@ impl std::fmt::Debug for DesktopConfig {
             )
             .field("customization_gates", &self.customization_gates)
             .field("session_persistence", &self.session_persistence)
+            .field("cli_agents_json", &self.cli_agents_json)
+            .field("cli_agent", &self.cli_agent)
+            .field("cli_plugin_dirs", &self.cli_plugin_dirs)
+            .field("initial_effort", &self.initial_effort)
             .finish()
     }
 }
@@ -1522,6 +1561,12 @@ impl Default for DesktopConfig {
             customization_gates: CustomizationGates::default(),
             // Default: persist the session JSONL (absent --no-session-persistence).
             session_persistence: true,
+            // (M4 cc2.1.198) Defaults: no --agents payload, no --agent
+            // selection, no --plugin-dir entries, no --effort level.
+            cli_agents_json: None,
+            cli_agent: None,
+            cli_plugin_dirs: Vec::new(),
+            initial_effort: None,
         }
     }
 }
@@ -2021,6 +2066,38 @@ fn load_merged_output_style(project_dir: &std::path::Path) -> Option<String> {
     engine::settings::Settings::load(inputs)
         .ok()
         .and_then(|eff| eff.settings.output_style)
+}
+
+/// (M4 cc2.1.198) Merge the `--agents <json>` flag agents into the dir-loaded
+/// catalog. The flag payload is an EXPLICIT request: it survives `--bare` but
+/// not safe mode (binary @223080769 `if(r&&!Hc("agents",{explicitlyRequested:
+/// !0}))try{let g=Ba(r);if(g)m=QXt(g,"flagSettings")}catch(g){De(g)}else
+/// if(r)C("--agents: ignored in safe mode (user-supplied custom agents are
+/// disabled)",{level:"warn"})`). Merge precedence per `XXt`'s tier map
+/// `[built-in, plugin, userSettings, projectSettings, flagSettings,
+/// policySettings]` (later wins): a flag agent REPLACES a same-named
+/// user/project dir agent, else appends. Parse failures inside
+/// [`agent::parse_agents_from_flag_json`] log and contribute no agents —
+/// the flag never aborts boot.
+fn merge_cli_flag_agents(
+    agents: &mut Vec<agent::AgentDefinition>,
+    cli_agents_json: Option<&str>,
+    safe_mode: bool,
+) {
+    let Some(raw) = cli_agents_json else { return };
+    if safe_mode {
+        tracing::warn!(
+            "--agents: ignored in safe mode (user-supplied custom agents are disabled)"
+        );
+        return;
+    }
+    for a in agent::parse_agents_from_flag_json(raw) {
+        if let Some(slot) = agents.iter_mut().find(|e| e.agent_type == a.agent_type) {
+            *slot = a;
+        } else {
+            agents.push(a);
+        }
+    }
 }
 
 /// Read the merged `settings.enabledPlugins` allowlist (`plugin@marketplace` →
@@ -2771,7 +2848,16 @@ pub async fn build(
     } else {
         service_built
     };
-    let provider_adapter = Arc::new(ProviderApiAdapter::new(Arc::new(service_built)));
+    // (M4 cc2.1.198) `--effort <level>` — the CLI-validated initial effort
+    // rides the MAIN loop's requests as `output_config.effort` (binary session
+    // state `thinkingConfig: SF(a.effort)`); `None` keeps bodies unchanged.
+    let provider_adapter = Arc::new(
+        ProviderApiAdapter::new(Arc::new(service_built)).with_initial_effort(
+            cfg.initial_effort
+                .clone()
+                .map(serde_json::Value::String),
+        ),
+    );
     let provider_adapter_handle = provider_adapter.clone();
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     // The SAME `ProviderApiAdapter` drives the streaming turn path: it impls both
@@ -3540,7 +3626,7 @@ pub async fn build(
     let user_agents_dir = cfg.lingxi_home.join("agents");
     // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom agent definitions
     // (`V5d.agents:!0`, `K5d.agents:!1`) — skip the dir scan, empty catalog.
-    let agents = if cfg.customization_gates.disables_custom_agents() {
+    let mut agents = if cfg.customization_gates.disables_custom_agents() {
         Vec::new()
     } else {
         agent::load_agents_from_dirs(&[
@@ -3549,6 +3635,13 @@ pub async fn build(
         ])
         .await
     };
+    // (M4 cc2.1.198) `--agents <json>` flag agents — see
+    // [`merge_cli_flag_agents`].
+    merge_cli_flag_agents(
+        &mut agents,
+        cfg.cli_agents_json.as_deref(),
+        cfg.customization_gates.safe_mode,
+    );
     let agent_catalog = Arc::new(tokio::sync::RwLock::new(agents));
 
     // (5.4) Real compaction. Threshold 150_000 tokens (M3 design lock for the
@@ -4733,12 +4826,19 @@ pub async fn build(
     //       isolated LSP/skill/output-style/tool registry so `enable()` is
     //       non-panicking while only commands + hooks reach the engine's live
     //       registries.
-    //       (M3 cc2.1.198) `--safe-mode` / `--bare` skip the whole bootstrap
+    //       (M3 cc2.1.198) `--safe-mode` / `--bare` skip the AMBIENT bootstrap
     //       (`K5d.plugins:!1` / `V5d.plugins:!0`; safe-mode log "Skipping
     //       plugin hooks - safe mode disables plugins"). This also skips
     //       plugin LSP servers — lingxi's only LSP-server source — matching
     //       `Hc("lspServers")` gating `initializeLspServerManager`.
-    if !cfg.customization_gates.disables_plugins() {
+    //       (M4 cc2.1.198) `--plugin-dir` session-only plugins are an EXPLICIT
+    //       request that survives `--bare` (its help text: "Explicitly provide
+    //       context via: … --plugin-dir") but not safe mode; they load AFTER
+    //       the marketplace-installed discovery through the SAME `pm.enable`
+    //       materialisation path (binary `EBm` → the shared plugin merge).
+    let ambient_plugins = !cfg.customization_gates.disables_plugins();
+    let inline_plugins = !cfg.cli_plugin_dirs.is_empty() && !cfg.customization_gates.safe_mode;
+    if ambient_plugins || inline_plugins {
         let plugins_dir = std::env::var_os("LINGXI_PLUGIN_CACHE_DIR").map_or_else(
             || cfg.lingxi_home.join("plugins"),
             std::path::PathBuf::from,
@@ -4749,14 +4849,27 @@ pub async fn build(
         // `loadAllPluginsCacheOnly` (`pluginLoader.ts:1888`) consumes a real
         // `~/.lingxi/plugins`. Read `enabledPlugins` from the user then project
         // settings (project wins), mirroring `getSettings_DEPRECATED()`.
-        let enabled = load_enabled_plugins(&cfg.lingxi_home, &cwd_for_plugins).await;
-        let mut discovered = plugin::discover_enabled_plugins(&plugins_dir, &enabled).await;
-        // Fallback: when no allowlist resolves anything (e.g. a flat directory
-        // of pre-fetched plugin dirs supplied directly, as with `--add-dir`),
-        // flat-walk for direct `.lingxi-plugin/plugin.json` children. This is
-        // NOT the real cache layout but keeps local/dev plugin dirs loadable.
-        if discovered.is_empty() {
-            discovered = plugin::discover_installed_plugins(&plugins_dir).await;
+        let mut discovered = if ambient_plugins {
+            let enabled = load_enabled_plugins(&cfg.lingxi_home, &cwd_for_plugins).await;
+            let mut d = plugin::discover_enabled_plugins(&plugins_dir, &enabled).await;
+            // Fallback: when no allowlist resolves anything (e.g. a flat
+            // directory of pre-fetched plugin dirs supplied directly, as with
+            // `--add-dir`), flat-walk for direct `.lingxi-plugin/plugin.json`
+            // children. This is NOT the real cache layout but keeps local/dev
+            // plugin dirs loadable.
+            if d.is_empty() {
+                d = plugin::discover_installed_plugins(&plugins_dir).await;
+            }
+            d
+        } else {
+            Vec::new()
+        };
+        // (M4 cc2.1.198) `--plugin-dir <path>` entries (dir or .zip), loaded
+        // like the binary's inline plugins (`EBm` path arm): a bad path warns
+        // and is skipped; loaded ones enable through the same manager path as
+        // marketplace-installed plugins below.
+        if inline_plugins {
+            discovered.extend(plugin::discover_cli_plugin_dirs(&cfg.cli_plugin_dirs).await);
         }
         if !discovered.is_empty() {
             // Live registries the manager materialises plugin components into:
@@ -4828,6 +4941,42 @@ pub async fn build(
                     );
                 }
             }
+        }
+    }
+
+    // (M4 cc2.1.198) `--agent <agent>` — resolve the session agent against the
+    // FINAL catalog (dir + `--agents` flag + plugin agents), the binary's `dts`
+    // lookup: exact `agentType` match, else FQN `…:{name}` suffix; a miss logs
+    // `Warning: agent "X" not found. Available agents: …. Using default
+    // behavior.` and the session proceeds with default behavior.
+    // RESIDUAL seam: the binary then applies the hit via `xz(h?.agentType)` →
+    // `mainThreadAgentType` (the MAIN session adopts the agent's system
+    // prompt / tools / hooks). lingxi has no main-thread-agent runtime yet, so
+    // a successful resolution is logged but not applied — porting
+    // `mainThreadAgentType` consumption is the follow-up seam. (Built-in agent
+    // defs live in the subagent spawner, not this catalog, so their names are
+    // absent from the miss warning's "Available agents" list — residual.)
+    if let Some(wanted) = cfg.cli_agent.as_deref() {
+        let cat = plugin_agent_catalog.read().await;
+        let hit = cat
+            .iter()
+            .find(|a| a.agent_type == wanted)
+            .or_else(|| {
+                let suffix = format!(":{wanted}");
+                cat.iter().find(|a| a.agent_type.ends_with(&suffix))
+            });
+        match hit {
+            Some(a) => tracing::debug!(
+                agent = %a.agent_type,
+                "--agent resolved (main-thread agent application is a pending seam)"
+            ),
+            None => tracing::warn!(
+                "Warning: agent \"{wanted}\" not found. Available agents: {}. Using default behavior.",
+                cat.iter()
+                    .map(|a| a.agent_type.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 
@@ -5501,6 +5650,50 @@ mod tests {
         );
     }
 
+    /// (M4 cc2.1.198) `--agents` flag agents merge with `flagSettings`
+    /// precedence (`XXt`: flag REPLACES a same-named user/project agent, else
+    /// appends) and are IGNORED in safe mode (warn — the `--agents: ignored in
+    /// safe mode` branch).
+    #[test]
+    fn merge_cli_flag_agents_precedence_and_safe_mode() {
+        fn dir_agent(name: &str) -> agent::AgentDefinition {
+            agent::parse_agent_from_json(
+                name,
+                &serde_json::json!({"description": "from dir", "prompt": "p"}),
+                agent::AgentSource::Project,
+            )
+            .expect("valid dir agent")
+        }
+        let raw = r#"{"reviewer": {"description": "from flag", "prompt": "p"},
+                      "extra": {"description": "new", "prompt": "p"}}"#;
+
+        // Normal: same-named `reviewer` replaced (source Flag), `extra` appended.
+        let mut agents = vec![dir_agent("reviewer"), dir_agent("keeper")];
+        super::merge_cli_flag_agents(&mut agents, Some(raw), false);
+        assert_eq!(agents.len(), 3);
+        let reviewer = agents.iter().find(|a| a.agent_type == "reviewer").unwrap();
+        assert_eq!(reviewer.when_to_use, "from flag");
+        assert_eq!(reviewer.source, agent::AgentSource::Flag);
+        assert!(agents.iter().any(|a| a.agent_type == "extra"));
+        assert!(agents.iter().any(|a| a.agent_type == "keeper"));
+
+        // Safe mode: the payload is ignored outright.
+        let mut safe = vec![dir_agent("reviewer")];
+        super::merge_cli_flag_agents(&mut safe, Some(raw), true);
+        assert_eq!(safe.len(), 1);
+        assert_eq!(safe[0].when_to_use, "from dir");
+
+        // No flag: untouched.
+        let mut none = vec![dir_agent("reviewer")];
+        super::merge_cli_flag_agents(&mut none, None, false);
+        assert_eq!(none.len(), 1);
+
+        // Invalid JSON: logged, no agents contributed, no abort.
+        let mut bad = vec![dir_agent("reviewer")];
+        super::merge_cli_flag_agents(&mut bad, Some("{nope"), false);
+        assert_eq!(bad.len(), 1);
+    }
+
     #[test]
     fn oauth_subscriber_flag_gating() {
         let inference = vec!["user:inference".to_string(), "user:profile".to_string()];
@@ -5569,6 +5762,10 @@ mod tests {
             setting_source_scope: (true, true),
             customization_gates: super::CustomizationGates::default(),
             session_persistence: true,
+            cli_agents_json: None,
+            cli_agent: None,
+            cli_plugin_dirs: Vec::new(),
+            initial_effort: None,
         };
         (tmp, cfg)
     }

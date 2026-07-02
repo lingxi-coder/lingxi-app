@@ -568,6 +568,22 @@ pub(crate) fn resolve_desktop_config(
         // already enforced that, this guard keeps direct/test callers faithful).
         // `false` ⟶ `build()` wires no session `JsonlWriter`.
         session_persistence: !(argv.print && argv.no_session_persistence),
+        // (M4 cc2.1.198) `--agents <json>`: raw payload; `build()` parses with
+        // the strict flag-record schema and merges (flagSettings precedence);
+        // safe-mode ignore (warn) also lives in `build()` so bridge hosts get
+        // the same gate.
+        cli_agents_json: argv.agents.clone(),
+        // (M4 cc2.1.198) `--agent <agent>`: resolved against the final catalog
+        // in `build()` (`dts` lookup + miss warning); main-thread application
+        // is a pending seam there.
+        cli_agent: argv.agent.clone(),
+        // (M4 cc2.1.198) `--plugin-dir <path>` (repeatable): session-only
+        // plugins loaded via the inline-plugin path in `build()`.
+        cli_plugin_dirs: argv.plugin_dir.clone(),
+        // (M4 cc2.1.198) `--effort <level>`: the argParser-normalized level
+        // (`u4i` port; an invalid value already warned on stderr in `run_cli`
+        // and normalizes to `None` here) → main-loop `output_config.effort`.
+        initial_effort: argv.normalized_effort().0,
     }
     // NOTE: claude-code's `--add-dir` is "Additional directories to allow TOOL
     // ACCESS to" (NOT LINGXI.md search — an earlier comment here misread it). It

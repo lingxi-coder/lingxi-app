@@ -25,6 +25,11 @@ pub use llm_client::SubscriberState;
 /// provider drive loop) that implements the orchestrator's seam traits.
 pub struct ProviderApiAdapter {
     service: Arc<llm_client::ApiService>,
+    /// (M4 cc2.1.198) The session's initial effort level from CLI `--effort`
+    /// (binary: session state `thinkingConfig: SF(a.effort)` → request
+    /// `output_config.effort`). `None` (the default) keeps main-loop request
+    /// bodies byte-identical to before this field existed.
+    initial_effort: Option<serde_json::Value>,
 }
 
 impl ProviderApiAdapter {
@@ -33,7 +38,22 @@ impl ProviderApiAdapter {
     /// `Arc` here; every trait method delegates 1:1 to it.
     #[must_use]
     pub fn new(service: Arc<llm_client::ApiService>) -> Self {
-        Self { service }
+        Self {
+            service,
+            initial_effort: None,
+        }
+    }
+
+    /// (M4 cc2.1.198) Set the session's initial effort (CLI `--effort`,
+    /// already validated/normalized by the CLI to one of
+    /// low/medium/high/xhigh/max). The MAIN-loop [`StreamingApiClient::stream`]
+    /// impl then carries it as `output_config.effort` (the service adds the
+    /// `effort-2025-11-24` beta whenever the body has effort). Subagent calls
+    /// keep their own per-spawn effort resolution and are unaffected.
+    #[must_use]
+    pub fn with_initial_effort(mut self, effort: Option<serde_json::Value>) -> Self {
+        self.initial_effort = effort;
+        self
     }
 
     /// Return the most recently observed rate-limit header snapshot (the internal
@@ -406,10 +426,18 @@ impl StreamingApiClient for ProviderApiAdapter {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        // `StreamingApiClient::stream` carries no effort hint (effort is a
-        // subagent-only concept), so pass `None`.
+        // (M4 cc2.1.198) The MAIN loop carries the session's initial effort
+        // (CLI `--effort` → `output_config.effort`); `None` (no flag) keeps
+        // the pre-M4 body byte-identical.
         self.service
-            .stream(model, profile, system, messages, tools, None)
+            .stream(
+                model,
+                profile,
+                system,
+                messages,
+                tools,
+                self.initial_effort.clone(),
+            )
             .await
     }
 

@@ -154,3 +154,64 @@ async fn a_dir_without_a_manifest_is_skipped() {
         "directories without a manifest are not plugins"
     );
 }
+
+// ── (M4 cc2.1.198) `--plugin-dir` inline discovery (`EBm` path arm port) ────
+
+/// A plugin DIRECTORY passed via `--plugin-dir` loads like an installed one.
+#[tokio::test]
+async fn cli_plugin_dir_loads_a_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_fixture_plugin(tmp.path(), "myplugin");
+    let discovered = plugin::discover_cli_plugin_dirs(&[tmp.path().join("myplugin")]).await;
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(discovered[0].1.name, "myplugin");
+}
+
+/// A missing path is a warn + skip (binary `Plugin path does not exist: …,
+/// skipping`), never an error; other entries still load.
+#[tokio::test]
+async fn cli_plugin_dir_skips_missing_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_fixture_plugin(tmp.path(), "myplugin");
+    let discovered = plugin::discover_cli_plugin_dirs(&[
+        tmp.path().join("no-such-dir"),
+        tmp.path().join("myplugin"),
+    ])
+    .await;
+    assert_eq!(discovered.len(), 1, "missing path skipped, real one loads");
+    assert_eq!(discovered[0].1.name, "myplugin");
+}
+
+/// A `.zip` passed via `--plugin-dir` is extracted (guarded) and loaded; a
+/// single wrapper directory is unwrapped (`Yor` port).
+#[tokio::test]
+async fn cli_plugin_dir_loads_a_zip_with_wrapper_dir() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    // Build myplugin.zip containing wrapper/<plugin tree>.
+    write_fixture_plugin(tmp.path(), "wrapper");
+    let mut buf = Vec::new();
+    {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let opts = zip::write::SimpleFileOptions::default();
+        for rel in [
+            "wrapper/.lingxi-plugin/plugin.json",
+            "wrapper/commands/hello.md",
+            "wrapper/agents/helper.md",
+            "wrapper/hooks/hooks.json",
+        ] {
+            w.start_file(rel, opts).unwrap();
+            let on_disk = tmp.path().join(rel);
+            w.write_all(&fs::read(on_disk).unwrap()).unwrap();
+        }
+        w.finish().unwrap();
+    }
+    let zip_path = tmp.path().join("myplugin.zip");
+    fs::write(&zip_path, &buf).unwrap();
+
+    let discovered = plugin::discover_cli_plugin_dirs(&[zip_path]).await;
+    assert_eq!(discovered.len(), 1, "zip extracts + wrapper unwraps + loads");
+    assert_eq!(discovered[0].1.name, "myplugin");
+    // The returned dir is the UNWRAPPED plugin root (holds the manifest dir).
+    assert!(discovered[0].2.join(".lingxi-plugin").is_dir());
+}

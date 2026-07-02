@@ -990,6 +990,62 @@ pub fn parse_agents_from_json(
         .collect()
 }
 
+/// Parse the `--agents <json>` CLI flag payload (claude 2.1.198 `QXt(e,
+/// "flagSettings")` @223080769: `DBm().parse(e)` where `DBm = A.record(
+/// A.string(), r2l())`, then per-entry `s2l(name, def, "flagSettings")`).
+///
+/// STRICTER than [`parse_agents_from_json`] (the `parseAgentsFromJson` file
+/// loader, which filters bad entries): the flag path validates the WHOLE
+/// record with a throwing zod schema, so ANY invalid agent definition drops
+/// ALL flag agents (`catch` → `C(\`Error parsing agents from JSON: ${msg}\`,
+/// {level:"error"})` → `[]`). The only per-entry drop that survives the
+/// record parse is `s2l`'s leading-`-` name check (`Agent '${name}' has an
+/// invalid name: names must not start with '-'` → that agent only).
+///
+/// A JSON *syntax* error is caught one frame up in the binary (`try{let g=
+/// Ba(r); …}catch(g){De(g)}` — logged, non-fatal); mirrored here so callers
+/// hand us the raw flag string. Every failure path returns `[]` and logs —
+/// the flag NEVER aborts startup.
+#[must_use]
+pub fn parse_agents_from_flag_json(raw: &str) -> Vec<AgentDefinition> {
+    // `Ba(r)` — JSON.parse of the flag string; a syntax error is logged
+    // (`De(g)`) and yields no agents.
+    let value: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("Error parsing agents from JSON: {e}");
+            return Vec::new();
+        }
+    };
+    // `DBm().parse` — the top level must be a record (object).
+    let Some(obj) = value.as_object() else {
+        tracing::error!("Error parsing agents from JSON: expected an object of agent definitions");
+        return Vec::new();
+    };
+    // All-or-nothing record validation: every entry must parse (zod record
+    // schema throws on the first invalid definition → [] overall).
+    let mut out = Vec::with_capacity(obj.len());
+    for (name, def) in obj {
+        // `s2l` name guard — drops ONLY this agent (post-record-parse check).
+        if name.starts_with('-') {
+            tracing::error!(
+                "Agent '{name}' has an invalid name: names must not start with '-'"
+            );
+            continue;
+        }
+        match parse_agent_from_json(name, def, AgentSource::Flag) {
+            Some(a) => out.push(a),
+            None => {
+                tracing::error!(
+                    "Error parsing agents from JSON: invalid definition for agent '{name}'"
+                );
+                return Vec::new();
+            }
+        }
+    }
+    out
+}
+
 /// Read a JSON value as a string only when it is a JSON string.
 fn json_as_string(v: &serde_json::Value) -> Option<String> {
     v.as_str().map(str::to_string)
@@ -1725,5 +1781,51 @@ mod tests {
         let s = serde_json::to_string(&def).unwrap();
         let def2: AgentDefinition = serde_json::from_str(&s).unwrap();
         assert_eq!(def2.agent_type, "legacy");
+    }
+
+    // ── `--agents <json>` flag parser (`QXt`, cc 2.1.198 M4) ────────────────
+
+    #[test]
+    fn flag_json_valid_agents_parse_with_flag_source() {
+        // The binary's own help example.
+        let raw = r#"{"reviewer": {"description": "Reviews code", "prompt": "You are a code reviewer"}}"#;
+        let out = parse_agents_from_flag_json(raw);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].agent_type, "reviewer");
+        assert_eq!(out[0].when_to_use, "Reviews code");
+        assert_eq!(out[0].system_prompt.as_deref(), Some("You are a code reviewer"));
+        assert_eq!(out[0].source, AgentSource::Flag);
+    }
+
+    #[test]
+    fn flag_json_syntax_error_yields_no_agents() {
+        // `Ba(r)` throws → `De(g)` (logged), no agents, no abort.
+        assert!(parse_agents_from_flag_json("{not json").is_empty());
+    }
+
+    #[test]
+    fn flag_json_non_object_yields_no_agents() {
+        // `DBm()` is a record schema — arrays/scalars fail the record parse.
+        assert!(parse_agents_from_flag_json("[1,2]").is_empty());
+        assert!(parse_agents_from_flag_json("\"x\"").is_empty());
+    }
+
+    #[test]
+    fn flag_json_one_invalid_agent_drops_all() {
+        // Record-level zod parse is all-or-nothing (unlike the per-entry
+        // filtering of `parseAgentsFromJson`): `good` is dropped too.
+        let raw = r#"{"good": {"description": "d", "prompt": "p"},
+                      "bad": {"description": "", "prompt": "p"}}"#;
+        assert!(parse_agents_from_flag_json(raw).is_empty());
+    }
+
+    #[test]
+    fn flag_json_dash_name_drops_only_that_agent() {
+        // `s2l`'s leading-`-` name guard is per-entry (post-record-parse).
+        let raw = r#"{"-bad": {"description": "d", "prompt": "p"},
+                      "good": {"description": "d", "prompt": "p"}}"#;
+        let out = parse_agents_from_flag_json(raw);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].agent_type, "good");
     }
 }

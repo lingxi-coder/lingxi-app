@@ -30,7 +30,8 @@ pub mod trust;
 pub use agent_validation::{validate_plugin_agent_frontmatter, AgentValidationError};
 pub use blocklist::PluginBlocklist;
 pub use discovery::{
-    discover_enabled_plugins, discover_installed_plugins, discover_recorded_plugins,
+    discover_cli_plugin_dirs, discover_enabled_plugins, discover_installed_plugins,
+    discover_recorded_plugins,
 };
 pub use lifecycle::PluginState;
 pub use loader::{resolve_user_config, LoaderError};

@@ -78,6 +78,15 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
                 });
             }
         }
+        TurnEvent::ThinkingDelta(thinking) => {
+            // (M5, 2.1.198 live-streaming parity) One completed thinking block
+            // per event (`emit_thinking` fires per block, not per delta) —
+            // push it collapsed, exactly like the tui-core `ActiveTurn` fold.
+            state.messages.push(RenderedMessage::AssistantThinking {
+                thinking,
+                expanded: false,
+            });
+        }
         TurnEvent::ToolUseStart { id, tool, input } => {
             // M6-04: rich tool-use block. Per-id expanded state lives in
             // `state.expanded` (default false → collapsed header).

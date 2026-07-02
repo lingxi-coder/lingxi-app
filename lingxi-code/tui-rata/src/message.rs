@@ -275,6 +275,16 @@ fn tool_use_lines(
     out
 }
 
+/// The live "running" row shown under a tool-use block whose result hasn't
+/// arrived yet (M5 live streaming): a dim `  ⎿ Running…` placeholder, replaced
+/// by the real `UserToolResult` row when the tool returns.
+#[must_use]
+pub fn running_indicator_line(theme: &Theme) -> StyledLine {
+    StyledLine {
+        spans: vec![dim_span("  ⎿ Running…".to_string(), theme)],
+    }
+}
+
 /// A tool result: `⎿ {summary}` — the string content when present, else compact JSON.
 fn tool_result_lines(result: &serde_json::Value, theme: &Theme) -> Vec<StyledLine> {
     let summary = if let Some(s) = result.as_str() {

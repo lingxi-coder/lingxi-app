@@ -27,8 +27,10 @@ use permission::gate::{PermissionRequest, PermissionResponse};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
+use tui_core::active_turn::ActiveTurn;
 use tui_core::message::RenderedMessage;
 use tui_core::orchestrator_bridge::TurnEvent;
+use tui_core::render::StyledLine;
 use tui_core::permission_bridge::PermissionExchange;
 use tui_core::render::{NamedColor, SpanStyle, StyleColor, StyledSpan};
 use tui_core::theme::Theme;
@@ -68,6 +70,28 @@ struct PendingPermission {
     resp_tx: oneshot::Sender<PermissionResponse>,
 }
 
+/// Per-message rendered-line cache entry (M5, 2.1.196 parity: skip no-op
+/// subtree walks during streaming). Validated against `(width, verbose,
+/// fingerprint)` each frame — only messages that actually changed (the growing
+/// in-flight `AssistantText`) re-run the markdown/syntax render walk.
+struct CachedLines {
+    width: usize,
+    verbose: bool,
+    fingerprint: u64,
+    lines: Vec<StyledLine>,
+}
+
+/// Cheap per-message content revision. Messages are append-only in this app;
+/// the only in-place mutation is `TextDelta` growing an `AssistantText` body,
+/// so its length is a sufficient fingerprint (everything else is immutable
+/// once pushed → constant 0).
+fn message_fingerprint(m: &RenderedMessage) -> u64 {
+    match m {
+        RenderedMessage::AssistantText { body, .. } => body.len() as u64,
+        _ => 0,
+    }
+}
+
 /// Interactive chat state.
 pub struct RataApp {
     messages: Vec<RenderedMessage>,
@@ -104,6 +128,17 @@ pub struct RataApp {
     image_previews: HashMap<usize, StatefulProtocol>,
     /// Startup snapshot the full-page screens render from.
     session: SessionInfo,
+    /// In-flight turn state (live text block, running tools, thinking) folded
+    /// from bridge `TurnEvent`s — the backend-neutral model in `tui_core`.
+    active: ActiveTurn,
+    /// Per-message rendered-line cache (see [`CachedLines`]).
+    line_cache: HashMap<usize, CachedLines>,
+    /// `max_scroll` from the previous frame — the baseline the scroll anchor
+    /// uses to detect content growth while the user is scrolled up.
+    last_max_scroll: u16,
+    /// Scrollback width from the previous frame; a change re-wraps everything,
+    /// so the anchor adjustment is skipped for that frame.
+    last_width: usize,
 }
 
 impl RataApp {
@@ -127,6 +162,10 @@ impl RataApp {
             picker: None,
             image_previews: HashMap::new(),
             session: SessionInfo::default(),
+            active: ActiveTurn::new(),
+            line_cache: HashMap::new(),
+            last_max_scroll: 0,
+            last_width: 0,
         }
     }
 
@@ -319,32 +358,18 @@ impl RataApp {
     }
 
     /// Fold one streaming event from the orchestrator bridge into the message
-    /// list: `TurnStarted` opens an empty assistant reply, `TextDelta` appends
-    /// to it, `TurnEnded` clears the in-flight cancel token, and other variants
-    /// are ignored for now.
+    /// list via the backend-neutral [`ActiveTurn`] model (M5 live streaming):
+    /// `TextDelta` grows the in-flight assistant block live, `ToolUseStart`
+    /// pushes a tool row immediately (rendered with a running indicator until
+    /// its result arrives), `ToolUseResult` pushes the paired result row,
+    /// `ThinkingDelta` pushes a collapsed thinking block, and `TurnEnded`
+    /// clears the in-flight cancel token + all per-turn state. Completed rows
+    /// stay in the same scrollback list they always did.
     pub fn apply_turn_event(&mut self, event: TurnEvent) {
-        match event {
-            TurnEvent::TurnStarted => {
-                self.messages.push(RenderedMessage::AssistantText {
-                    body: String::new(),
-                    timestamp: 0,
-                });
-            }
-            TurnEvent::TextDelta(delta) => {
-                if let Some(RenderedMessage::AssistantText { body, .. }) = self.messages.last_mut() {
-                    body.push_str(&delta);
-                } else {
-                    self.messages.push(RenderedMessage::AssistantText {
-                        body: delta,
-                        timestamp: 0,
-                    });
-                }
-            }
-            TurnEvent::TurnEnded(_) => {
-                self.current_turn = None;
-            }
-            _ => {}
+        if matches!(event, TurnEvent::TurnEnded(_)) {
+            self.current_turn = None;
         }
+        self.active.apply(event, &mut self.messages);
     }
 
     /// Open a permission prompt for `exchange`; it owns the keyboard until the
@@ -468,6 +493,9 @@ impl RataApp {
             }
             "/clear" => {
                 self.messages.clear();
+                // Indices restart at 0 — stale cache entries must not serve
+                // the old conversation's lines for new messages.
+                self.line_cache.clear();
                 self.scroll_up = 0;
                 Some(KeyOutcome::Continue)
             }
@@ -612,15 +640,47 @@ impl RataApp {
         KeyOutcome::Continue
     }
 
-    fn scrollback_lines(&self, width: usize) -> Vec<Line<'static>> {
+    fn scrollback_lines(&mut self, width: usize) -> Vec<Line<'static>> {
         let mut out = Vec::new();
-        for (i, m) in self.messages.iter().enumerate() {
+        for i in 0..self.messages.len() {
             let verbose = self.verbose || self.expanded_msgs.contains(&i);
-            let mut lines = crate::message::render_message(m, width, &self.theme, verbose);
-            if Some(i) == self.selected_msg {
-                mark_selected(&mut lines);
+            let fingerprint = message_fingerprint(&self.messages[i]);
+            // (M5 / 2.1.196 parity) Skip the markdown/syntax render walk for
+            // messages that didn't change since the last frame — during
+            // streaming only the growing in-flight block misses.
+            let cached_ok = self.line_cache.get(&i).is_some_and(|c| {
+                c.width == width && c.verbose == verbose && c.fingerprint == fingerprint
+            });
+            if !cached_ok {
+                let lines =
+                    crate::message::render_message(&self.messages[i], width, &self.theme, verbose);
+                self.line_cache.insert(
+                    i,
+                    CachedLines {
+                        width,
+                        verbose,
+                        fingerprint,
+                        lines,
+                    },
+                );
             }
-            out.extend(lines.iter().map(render::styled_line_to_ratatui));
+            let cached = &self.line_cache[&i];
+            if Some(i) == self.selected_msg {
+                let mut lines = cached.lines.clone();
+                mark_selected(&mut lines);
+                out.extend(lines.iter().map(render::styled_line_to_ratatui));
+            } else {
+                out.extend(cached.lines.iter().map(render::styled_line_to_ratatui));
+            }
+            // A tool-use row still awaiting its result gets a live `⎿ Running…`
+            // row beneath it (replaced by the real result row on completion).
+            if let RenderedMessage::AssistantToolUse { id, .. } = &self.messages[i] {
+                if self.active.is_tool_running(id) {
+                    out.push(render::styled_line_to_ratatui(
+                        &crate::message::running_indicator_line(&self.theme),
+                    ));
+                }
+            }
         }
         out
     }
@@ -685,6 +745,20 @@ impl RataApp {
         let lines = self.scrollback_lines(width.max(1));
         let view_h = zones[0].height as usize;
         let max_scroll = u16::try_from(lines.len().saturating_sub(view_h)).unwrap_or(u16::MAX);
+        // Scroll anchoring (2.1.191/196 parity): when the user has scrolled
+        // up, content growth (streaming deltas / tool rows) must NOT yank the
+        // viewport to the bottom — grow the offset by the same amount so the
+        // visible lines stay put. Only when pinned to the bottom
+        // (`scroll_up == 0`) does the view auto-follow new output. A width
+        // change re-wraps everything, so skip the adjustment that frame.
+        if self.scroll_up > 0 && width == self.last_width && max_scroll > self.last_max_scroll {
+            self.scroll_up = self
+                .scroll_up
+                .saturating_add(max_scroll - self.last_max_scroll);
+        }
+        self.scroll_up = self.scroll_up.min(max_scroll);
+        self.last_max_scroll = max_scroll;
+        self.last_width = width;
         let scroll = max_scroll.saturating_sub(self.scroll_up);
         frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), zones[0]);
 
@@ -931,6 +1005,163 @@ mod tests {
         }
         app.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
         assert!(app.current_turn.is_none());
+    }
+
+    // ---- M5 live-streaming render + scroll-anchor tests (TestBackend) ----
+
+    fn test_terminal(w: u16, h: u16) -> ratatui::Terminal<ratatui::backend::TestBackend> {
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap()
+    }
+
+    fn draw(app: &mut RataApp, term: &mut ratatui::Terminal<ratatui::backend::TestBackend>) {
+        term.draw(|f| app.render(f)).unwrap();
+    }
+
+    fn row_text(term: &ratatui::Terminal<ratatui::backend::TestBackend>, y: u16) -> String {
+        let buf = term.backend().buffer();
+        (0..buf.area.width)
+            .map(|x| buf.cell((x, y)).map_or(" ".to_string(), |c| c.symbol().to_string()))
+            .collect()
+    }
+
+    fn screen_text(term: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+        let buf = term.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| row_text(term, y))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn in_flight_text_and_running_tool_render_live() {
+        let mut app = RataApp::new(Vec::new());
+        app.apply_turn_event(TurnEvent::TurnStarted);
+        app.apply_turn_event(TurnEvent::TextDelta("Hello from the stream".to_string()));
+        app.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::new(),
+            tool: "Read".to_string(),
+            input: serde_json::json!({"file_path": "/tmp/x"}),
+        });
+        let mut term = test_terminal(60, 16);
+        draw(&mut app, &mut term);
+        let screen = screen_text(&term);
+        // Mid-turn: the partial assistant text and the just-started tool are
+        // both visible, with a live running indicator under the tool row.
+        assert!(screen.contains("Hello from the stream"), "screen: {screen}");
+        assert!(screen.contains("Read"), "screen: {screen}");
+        assert!(screen.contains("Running…"), "screen: {screen}");
+    }
+
+    #[test]
+    fn thinking_block_renders_during_turn() {
+        let mut app = RataApp::new(Vec::new());
+        app.apply_turn_event(TurnEvent::TurnStarted);
+        app.apply_turn_event(TurnEvent::ThinkingDelta("pondering the plan".to_string()));
+        let mut term = test_terminal(60, 12);
+        draw(&mut app, &mut term);
+        let screen = screen_text(&term);
+        assert!(screen.contains("Thinking"), "screen: {screen}");
+        // Collapsed by default; Ctrl-O (verbose) reveals the body.
+        assert!(!screen.contains("pondering the plan"), "screen: {screen}");
+        app.on_key(ctrl(KeyCode::Char('o')));
+        draw(&mut app, &mut term);
+        assert!(screen_text(&term).contains("pondering the plan"));
+    }
+
+    #[test]
+    fn tool_result_replaces_running_row_and_turn_end_clears_active() {
+        let mut app = RataApp::new(Vec::new());
+        typ(&mut app, "go");
+        app.on_key(press(KeyCode::Enter));
+        let id = protocol::ToolUseId::new();
+        app.apply_turn_event(TurnEvent::TurnStarted);
+        app.apply_turn_event(TurnEvent::ToolUseStart {
+            id: id.clone(),
+            tool: "Bash".to_string(),
+            input: serde_json::json!({"command": "ls"}),
+        });
+        let mut term = test_terminal(60, 16);
+        draw(&mut app, &mut term);
+        assert!(screen_text(&term).contains("Running…"));
+
+        app.apply_turn_event(TurnEvent::ToolUseResult {
+            id,
+            tool: "Bash".to_string(),
+            result: serde_json::json!({"content": "file-one"}),
+        });
+        app.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        draw(&mut app, &mut term);
+        let screen = screen_text(&term);
+        // The running placeholder is gone, the real result row renders, and
+        // the completed rows STAY in scrollback (no active region left).
+        assert!(!screen.contains("Running…"), "screen: {screen}");
+        assert!(screen.contains("file-one"), "screen: {screen}");
+        assert!(app.current_turn.is_none());
+        assert!(!app.active.is_streaming());
+        assert!(!app.active.has_running_tools());
+        assert_eq!(app.messages.len(), 3, "user + tool use + tool result");
+    }
+
+    fn scrolled_app_and_term() -> (RataApp, ratatui::Terminal<ratatui::backend::TestBackend>) {
+        // 30 one-line messages in a 40x12 terminal: scrollback zone is 8 rows
+        // (12 - 1 status - 3 composer), so max_scroll = 22.
+        let mut app = app_with_messages(30);
+        let mut term = test_terminal(40, 12);
+        draw(&mut app, &mut term);
+        (app, term)
+    }
+
+    #[test]
+    fn streaming_while_scrolled_up_keeps_viewport_anchored() {
+        let (mut app, mut term) = scrolled_app_and_term();
+        app.on_key(press(KeyCode::PageUp));
+        draw(&mut app, &mut term);
+        assert_eq!(app.scroll_up, PAGE);
+        let anchored_top = row_text(&term, 0);
+        assert!(anchored_top.contains("msg"), "top row: {anchored_top}");
+
+        // A streaming delta lands while the user is scrolled up.
+        app.apply_turn_event(TurnEvent::TurnStarted);
+        app.apply_turn_event(TurnEvent::TextDelta("live delta".to_string()));
+        draw(&mut app, &mut term);
+
+        // The viewport did NOT get yanked: the same content is at the top,
+        // and the offset grew by exactly the one appended line.
+        assert_eq!(row_text(&term, 0), anchored_top);
+        assert_eq!(app.scroll_up, PAGE + 1);
+        assert!(!screen_text(&term).contains("live delta"));
+    }
+
+    #[test]
+    fn pinned_bottom_auto_follows_new_output() {
+        let (mut app, mut term) = scrolled_app_and_term();
+        assert_eq!(app.scroll_up, 0);
+        app.apply_turn_event(TurnEvent::TurnStarted);
+        app.apply_turn_event(TurnEvent::TextDelta("fresh tail".to_string()));
+        draw(&mut app, &mut term);
+        // Pinned to the bottom → the view follows the newest line.
+        assert_eq!(app.scroll_up, 0);
+        assert!(row_text(&term, 7).contains("fresh tail"));
+    }
+
+    #[test]
+    fn growing_assistant_text_invalidates_line_cache() {
+        let mut app = RataApp::new(Vec::new());
+        app.apply_turn_event(TurnEvent::TurnStarted);
+        app.apply_turn_event(TurnEvent::TextDelta("abc".to_string()));
+        let lines = app.scrollback_lines(80);
+        assert!(line_text(lines.last().unwrap()).contains("abc"));
+        // Same width + a grown body → the cache entry is refreshed, not reused.
+        app.apply_turn_event(TurnEvent::TextDelta("def".to_string()));
+        let lines = app.scrollback_lines(80);
+        assert!(line_text(lines.last().unwrap()).contains("abcdef"));
+        // A width change also invalidates (different wrap).
+        let lines = app.scrollback_lines(20);
+        assert!(line_text(lines.last().unwrap()).contains("abcdef"));
     }
 
     #[test]

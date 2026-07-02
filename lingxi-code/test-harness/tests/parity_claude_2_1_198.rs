@@ -115,7 +115,7 @@ const CHECKLIST: &[Entry] = &[
     Entry { version: "2.1.196", item: "Background sessions survive process stop/restart/update (incl. Windows handoff)", disposition: Mission("M8") },
     Entry { version: "2.1.196", item: "Workers killed by daemon restart auto-resume when agents view opens", disposition: Mission("M8") },
     Entry { version: "2.1.196", item: "/code-review workflow: five cleanup finders merged into one (-25% tokens)", disposition: Divergence("bundled workflow content, not core behavior") },
-    Entry { version: "2.1.196", item: "Per-frame rendering skips no-op subtree walks during streaming", disposition: Mission("M5") },
+    Entry { version: "2.1.196", item: "Per-frame rendering skips no-op subtree walks during streaming", disposition: Disposition::Implemented },
     Entry { version: "2.1.196", item: "Streaming idle watchdog on by default (5 min, env kill-switch)", disposition: Mission("M12") },
     Entry { version: "2.1.196", item: "Remote Control disabled when ANTHROPIC_BASE_URL is non-Anthropic", disposition: Mission("M13") },
     Entry { version: "2.1.196", item: "Agents view opens with single ← from foreground sessions", disposition: Mission("M7") },

@@ -75,6 +75,9 @@ fn active_screen_name(st: &AppState) -> Option<&'static str> {
         Some(Screen::Connect(_)) => Some("connect"),
         Some(Screen::ConnectPicker(_)) => Some("connect_picker"),
         Some(Screen::GithubDeployment(_)) => Some("github_deployment"),
+        Some(Screen::ConnectMethod(_)) => Some("connect_method"),
+        Some(Screen::WebPicker(_)) => Some("web_picker"),
+        Some(Screen::WebConfig(_)) => Some("web_config"),
         Some(Screen::Transcript(_)) => Some("transcript"),
         None => None,
     }

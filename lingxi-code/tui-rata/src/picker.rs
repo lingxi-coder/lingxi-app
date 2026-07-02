@@ -80,10 +80,12 @@ impl ModelPicker {
                 self.follow();
                 PickerOutcome::Pending
             }
-            KeyCode::Enter => self.rows.get(self.selected).map_or(
-                PickerOutcome::Cancelled,
-                |r| PickerOutcome::Selected(r.request_model.clone(), r.profile.clone()),
-            ),
+            KeyCode::Enter => self
+                .rows
+                .get(self.selected)
+                .map_or(PickerOutcome::Cancelled, |r| {
+                    PickerOutcome::Selected(r.request_model.clone(), r.profile.clone())
+                }),
             KeyCode::Esc => PickerOutcome::Cancelled,
             _ => PickerOutcome::Pending,
         }
@@ -132,7 +134,10 @@ impl ModelPicker {
             } else {
                 Style::default()
             };
-            lines.push(Line::from(Span::styled(format!("{caret}{marker}{label}"), style)));
+            lines.push(Line::from(Span::styled(
+                format!("{caret}{marker}{label}"),
+                style,
+            )));
         }
         lines.push(Line::from(Span::styled(
             "↑/↓ select · Enter switch · Esc cancel",

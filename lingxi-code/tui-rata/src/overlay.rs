@@ -97,9 +97,7 @@ impl Dialog {
         let rect = centered_rect(width, height, area);
 
         frame.render_widget(Clear, rect);
-        let block = Block::new()
-            .borders(Borders::ALL)
-            .title(self.title.clone());
+        let block = Block::new().borders(Borders::ALL).title(self.title.clone());
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
 
@@ -167,7 +165,10 @@ mod tests {
     fn enter_confirms_highlight() {
         let mut d = dialog();
         d.on_key(KeyCode::Down);
-        assert!(matches!(d.on_key(KeyCode::Enter), DialogOutcome::Selected(1)));
+        assert!(matches!(
+            d.on_key(KeyCode::Enter),
+            DialogOutcome::Selected(1)
+        ));
     }
 
     #[test]

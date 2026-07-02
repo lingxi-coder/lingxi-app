@@ -282,9 +282,15 @@ mod tests {
         let mut vim = VimState::new();
         let mut c = typed("abc");
         assert_eq!(vim.mode, VimMode::Insert);
-        assert_eq!(handle_key(&mut vim, &mut c, press(KeyCode::Esc)), VimOutcome::Consumed);
+        assert_eq!(
+            handle_key(&mut vim, &mut c, press(KeyCode::Esc)),
+            VimOutcome::Consumed
+        );
         assert_eq!(vim.mode, VimMode::Normal);
-        assert_eq!(handle_key(&mut vim, &mut c, press(KeyCode::Char('i'))), VimOutcome::Consumed);
+        assert_eq!(
+            handle_key(&mut vim, &mut c, press(KeyCode::Char('i'))),
+            VimOutcome::Consumed
+        );
         assert_eq!(vim.mode, VimMode::Insert);
     }
 
@@ -374,7 +380,10 @@ mod tests {
     fn normal_enter_signals_submit() {
         let mut vim = normal();
         let mut c = typed("hi");
-        assert_eq!(handle_key(&mut vim, &mut c, press(KeyCode::Enter)), VimOutcome::Submit);
+        assert_eq!(
+            handle_key(&mut vim, &mut c, press(KeyCode::Enter)),
+            VimOutcome::Submit
+        );
     }
 
     #[test]
@@ -382,8 +391,14 @@ mod tests {
         let mut vim = VimState::new();
         let mut c = typed("");
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(handle_key(&mut vim, &mut c, ctrl_c), VimOutcome::Passthrough);
+        assert_eq!(
+            handle_key(&mut vim, &mut c, ctrl_c),
+            VimOutcome::Passthrough
+        );
         vim.mode = VimMode::Normal;
-        assert_eq!(handle_key(&mut vim, &mut c, ctrl_c), VimOutcome::Passthrough);
+        assert_eq!(
+            handle_key(&mut vim, &mut c, ctrl_c),
+            VimOutcome::Passthrough
+        );
     }
 }

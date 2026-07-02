@@ -41,7 +41,11 @@ pub struct FullScreen {
 impl FullScreen {
     /// Build a screen from a title, pre-styled body lines, and a footer hint.
     #[must_use]
-    pub fn new(title: impl Into<String>, lines: Vec<Line<'static>>, footer: impl Into<String>) -> Self {
+    pub fn new(
+        title: impl Into<String>,
+        lines: Vec<Line<'static>>,
+        footer: impl Into<String>,
+    ) -> Self {
         Self {
             title: title.into(),
             lines,
@@ -241,7 +245,10 @@ fn doctor_lines(d: &DoctorInfo) -> Vec<Line<'static>> {
     } else if d.mcp_connected == 0 {
         format!("{} configured, not connected", d.mcp_configured)
     } else {
-        format!("{} configured, {} connected", d.mcp_configured, d.mcp_connected)
+        format!(
+            "{} configured, {} connected",
+            d.mcp_configured, d.mcp_connected
+        )
     };
     vec![
         header("Diagnostics"),
@@ -261,7 +268,8 @@ fn doctor_lines(d: &DoctorInfo) -> Vec<Line<'static>> {
 }
 
 fn help_lines() -> Vec<Line<'static>> {
-    let mut out: Vec<Line<'static>> = Vec::with_capacity(SHORTCUTS.len() + SLASH_COMMANDS.len() + 4);
+    let mut out: Vec<Line<'static>> =
+        Vec::with_capacity(SHORTCUTS.len() + SLASH_COMMANDS.len() + 4);
     out.push(Line::from(
         "Claude understands your codebase, makes edits with your permission, \
          and executes commands — right from your terminal.",

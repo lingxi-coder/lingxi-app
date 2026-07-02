@@ -171,8 +171,14 @@ mod tests {
             detect_from(Some("xterm-256color"), None, Some("1")),
             ImageProtocol::Kitty
         );
-        assert_eq!(detect_from(Some("xterm-kitty"), None, None), ImageProtocol::Kitty);
-        assert_eq!(detect_from(None, Some("WezTerm"), None), ImageProtocol::Kitty);
+        assert_eq!(
+            detect_from(Some("xterm-kitty"), None, None),
+            ImageProtocol::Kitty
+        );
+        assert_eq!(
+            detect_from(None, Some("WezTerm"), None),
+            ImageProtocol::Kitty
+        );
     }
 
     #[test]
@@ -185,7 +191,10 @@ mod tests {
 
     #[test]
     fn sixel_detected_from_term() {
-        assert_eq!(detect_from(Some("mlterm"), None, None), ImageProtocol::Sixel);
+        assert_eq!(
+            detect_from(Some("mlterm"), None, None),
+            ImageProtocol::Sixel
+        );
         assert_eq!(
             detect_from(Some("xterm-sixel"), None, None),
             ImageProtocol::Sixel
@@ -236,7 +245,7 @@ mod tests {
         assert!(esc.contains("\x1b_Gm=1;")); // a middle continuation chunk
         assert!(esc.ends_with("\x1b\\"));
         assert!(esc.contains("m=0;")); // the final chunk clears the flag
-        // A small payload is a single m=0 chunk.
+                                       // A small payload is a single m=0 chunk.
         let small = encode_kitty(b"hi");
         assert!(small.starts_with("\x1b_Ga=T,f=100,m=0;"));
     }
@@ -250,6 +259,10 @@ mod tests {
         assert!(render_inline_image(&path, ImageProtocol::None).is_none());
         let _ = std::fs::remove_file(&path);
         // A missing file yields None.
-        assert!(render_inline_image(std::path::Path::new("/no/such/img.png"), ImageProtocol::Kitty).is_none());
+        assert!(render_inline_image(
+            std::path::Path::new("/no/such/img.png"),
+            ImageProtocol::Kitty
+        )
+        .is_none());
     }
 }

@@ -74,7 +74,10 @@ pub fn setup_terminal(viewport_height: u16) -> io::Result<RataTerminal> {
 /// Returns any terminal IO error from restoring cursor/paste state.
 pub fn restore_terminal(terminal: &mut RataTerminal) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), crossterm::event::DisableBracketedPaste)?;
+    execute!(
+        terminal.backend_mut(),
+        crossterm::event::DisableBracketedPaste
+    )?;
     terminal.show_cursor()
 }
 

@@ -6,7 +6,9 @@
 //! common variants are rendered directly here in ratatui-land; the iocraft
 //! component renderers (for the interactive/expandable variants) stay in `tui`.
 
-use tui_core::message::{AdvisorKind, PlanApprovalKind, RenderedMessage, SystemLevel, UserTeammateKind};
+use tui_core::message::{
+    AdvisorKind, PlanApprovalKind, RenderedMessage, SystemLevel, UserTeammateKind,
+};
 use tui_core::render::markdown::{render_with_width, MarkdownTheme};
 use tui_core::render::{agent_color_from_name, SpanStyle, StyleColor, StyledLine, StyledSpan};
 use tui_core::theme::{Theme, ThemeName};
@@ -151,9 +153,13 @@ pub fn render_message(
         }
         RenderedMessage::UserResourceUpdate { updates } => updates
             .iter()
-            .map(|(server, target, _)| StyledLine::plain(format!("resource updated: {server}/{target}")))
+            .map(|(server, target, _)| {
+                StyledLine::plain(format!("resource updated: {server}/{target}"))
+            })
             .collect(),
-        RenderedMessage::UserImage { image_id, metadata, .. } => {
+        RenderedMessage::UserImage {
+            image_id, metadata, ..
+        } => {
             let head = match image_id {
                 Some(n) => format!("[Image #{n}]"),
                 None => "[Image]".to_string(),
@@ -276,7 +282,10 @@ fn tool_use_lines(
         }
     } else {
         out.push(StyledLine {
-            spans: vec![dim_span(format!("  {}", truncate(&input.to_string(), 100)), theme)],
+            spans: vec![dim_span(
+                format!("  {}", truncate(&input.to_string(), 100)),
+                theme,
+            )],
         });
     }
     out
@@ -442,9 +451,10 @@ fn advisor_lines(kind: &AdvisorKind, verbose: bool, theme: &Theme) -> Vec<Styled
             out
         }
         AdvisorKind::RedactedResult => colored_lines("✻ Advisor", theme.dim),
-        AdvisorKind::Error { error_code } => {
-            colored_lines(&format!("✻ Advisor unavailable ({error_code})"), theme.error)
-        }
+        AdvisorKind::Error { error_code } => colored_lines(
+            &format!("✻ Advisor unavailable ({error_code})"),
+            theme.error,
+        ),
     }
 }
 
@@ -454,7 +464,8 @@ fn plan_approval_lines(kind: &PlanApprovalKind, theme: &Theme) -> Vec<StyledLine
         PlanApprovalKind::Request {
             from, plan_content, ..
         } => {
-            let mut out = colored_lines(&format!("Plan approval requested by {from}"), theme.warning);
+            let mut out =
+                colored_lines(&format!("Plan approval requested by {from}"), theme.warning);
             out.extend(plain_lines(plan_content));
             out
         }
@@ -699,6 +710,19 @@ mod tests {
     }
 
     #[test]
+    fn system_error_text_is_error_colored() {
+        let m = RenderedMessage::SystemText {
+            body: "disk on fire".to_string(),
+            timestamp: 0,
+            is_error: true,
+        };
+        let lines = render_message(&m, 80, &Theme::dark(), false);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].plain_text(), "disk on fire");
+        assert_eq!(lines[0].spans[0].style.fg, Theme::dark().error);
+    }
+
+    #[test]
     fn rate_limit_and_shutdown_render() {
         let rl = RenderedMessage::RateLimit {
             text: "Rate limited".to_string(),
@@ -717,5 +741,656 @@ mod tests {
         assert!(render_message(&sd, 80, &Theme::dark(), false)[0]
             .plain_text()
             .contains("worker-1"));
+    }
+
+    // ===== Phase 0 exhaustive RenderedMessage coverage (codex-ui-structure plan) =====
+
+    // What a fixture's render must satisfy.
+    enum Expect {
+        // Substrings that must appear in the rendered plain text.
+        Visible(&'static [&'static str]),
+        // Documented intentional non-visible render (the named reason).
+        Hidden(&'static str),
+    }
+
+    // (diagnostic label, message, verbose flag, expectation)
+    type Fixture = (&'static str, RenderedMessage, bool, Expect);
+
+    // Exhaustive by construction: adding a `RenderedMessage` variant breaks this
+    // compile, forcing a new coverage fixture.
+    fn variant_name(m: &RenderedMessage) -> &'static str {
+        match m {
+            RenderedMessage::UserText { .. } => "UserText",
+            RenderedMessage::AssistantText { .. } => "AssistantText",
+            RenderedMessage::SystemText { .. } => "SystemText",
+            RenderedMessage::AssistantToolUse { .. } => "AssistantToolUse",
+            RenderedMessage::UserToolResult { .. } => "UserToolResult",
+            RenderedMessage::AssistantThinking { .. } => "AssistantThinking",
+            RenderedMessage::AssistantRedactedThinking => "AssistantRedactedThinking",
+            RenderedMessage::CompactBoundary { .. } => "CompactBoundary",
+            RenderedMessage::SystemTextRich { .. } => "SystemTextRich",
+            RenderedMessage::SystemApiError { .. } => "SystemApiError",
+            RenderedMessage::RateLimit { .. } => "RateLimit",
+            RenderedMessage::Shutdown { .. } => "Shutdown",
+            RenderedMessage::TaskAssignment { .. } => "TaskAssignment",
+            RenderedMessage::AgentNotification { .. } => "AgentNotification",
+            RenderedMessage::ChannelMessage { .. } => "ChannelMessage",
+            RenderedMessage::UserTeammate { .. } => "UserTeammate",
+            RenderedMessage::Advisor { .. } => "Advisor",
+            RenderedMessage::HookProgress { .. } => "HookProgress",
+            RenderedMessage::PlanApproval { .. } => "PlanApproval",
+            RenderedMessage::UserBashInput { .. } => "UserBashInput",
+            RenderedMessage::UserBashOutput { .. } => "UserBashOutput",
+            RenderedMessage::UserCommand { .. } => "UserCommand",
+            RenderedMessage::UserLocalCommandOutput { .. } => "UserLocalCommandOutput",
+            RenderedMessage::UserMemoryInput { .. } => "UserMemoryInput",
+            RenderedMessage::UserPlan { .. } => "UserPlan",
+            RenderedMessage::UserPrompt { .. } => "UserPrompt",
+            RenderedMessage::UserResourceUpdate { .. } => "UserResourceUpdate",
+            RenderedMessage::UserImage { .. } => "UserImage",
+            RenderedMessage::Attachment { .. } => "Attachment",
+            RenderedMessage::GroupedToolUse { .. } => "GroupedToolUse",
+            RenderedMessage::CollapsedReadSearch { .. } => "CollapsedReadSearch",
+        }
+    }
+
+    fn text_fixtures() -> Vec<Fixture> {
+        vec![
+            (
+                "UserText",
+                RenderedMessage::UserText {
+                    body: "hello".to_string(),
+                    timestamp: 0,
+                },
+                false,
+                Expect::Visible(&["> hello"]),
+            ),
+            (
+                "AssistantText",
+                RenderedMessage::AssistantText {
+                    body: "**bold** text".to_string(),
+                    timestamp: 0,
+                },
+                false,
+                Expect::Visible(&["bold"]),
+            ),
+            (
+                "SystemText(error)",
+                RenderedMessage::SystemText {
+                    body: "disk on fire".to_string(),
+                    timestamp: 0,
+                    is_error: true,
+                },
+                false,
+                Expect::Visible(&["disk on fire"]),
+            ),
+            (
+                "SystemTextRich(info)",
+                RenderedMessage::SystemTextRich {
+                    body: "all good".to_string(),
+                    level: SystemLevel::Info,
+                },
+                false,
+                Expect::Visible(&["all good"]),
+            ),
+            (
+                "SystemTextRich(warning)",
+                RenderedMessage::SystemTextRich {
+                    body: "careful".to_string(),
+                    level: SystemLevel::Warning,
+                },
+                false,
+                Expect::Visible(&["careful"]),
+            ),
+            (
+                "SystemTextRich(error)",
+                RenderedMessage::SystemTextRich {
+                    body: "broken".to_string(),
+                    level: SystemLevel::Error,
+                },
+                false,
+                Expect::Visible(&["broken"]),
+            ),
+            (
+                "SystemApiError",
+                RenderedMessage::SystemApiError {
+                    error: "boom".to_string(),
+                    retry_attempt: 2,
+                    retry_in_seconds: 7,
+                    max_retries: 5,
+                    truncated: false,
+                },
+                false,
+                Expect::Visible(&["API error", "boom", "2/5"]),
+            ),
+            (
+                "RateLimit",
+                RenderedMessage::RateLimit {
+                    text: "Rate limited".to_string(),
+                    upsell: Some("Upgrade".to_string()),
+                },
+                false,
+                Expect::Visible(&["Rate limited", "Upgrade"]),
+            ),
+            (
+                "CompactBoundary",
+                RenderedMessage::CompactBoundary {
+                    messages_before: 40,
+                    messages_after: 4,
+                },
+                false,
+                // Counts intentionally omitted (claude-code parity); the marker
+                // line itself must be visible.
+                Expect::Visible(&["Conversation compacted"]),
+            ),
+        ]
+    }
+
+    fn thinking_and_tool_fixtures() -> Vec<Fixture> {
+        vec![
+            (
+                "AssistantToolUse",
+                RenderedMessage::AssistantToolUse {
+                    id: protocol::ToolUseId::new(),
+                    tool: "Read".to_string(),
+                    input: serde_json::json!({"file_path": "src/lib.rs"}),
+                },
+                false,
+                Expect::Visible(&["Read", "file_path"]),
+            ),
+            (
+                "UserToolResult",
+                RenderedMessage::UserToolResult {
+                    id: protocol::ToolUseId::new(),
+                    tool: "Read".to_string(),
+                    result: serde_json::json!({"content": "hello world"}),
+                    old_string: None,
+                    new_string: None,
+                    file_path: None,
+                },
+                false,
+                Expect::Visible(&["hello world"]),
+            ),
+            (
+                "AssistantThinking(collapsed)",
+                RenderedMessage::AssistantThinking {
+                    thinking: "deep thought".to_string(),
+                    expanded: false,
+                },
+                false,
+                Expect::Visible(&["ctrl+o"]),
+            ),
+            (
+                "AssistantThinking(verbose)",
+                RenderedMessage::AssistantThinking {
+                    thinking: "deep thought".to_string(),
+                    expanded: false,
+                },
+                true,
+                Expect::Visible(&["deep thought"]),
+            ),
+            (
+                "AssistantRedactedThinking",
+                RenderedMessage::AssistantRedactedThinking,
+                false,
+                Expect::Visible(&["Thinking"]),
+            ),
+            (
+                "GroupedToolUse",
+                RenderedMessage::GroupedToolUse {
+                    tool: "Read".to_string(),
+                    group_id: protocol::ToolUseId::new(),
+                    entries: vec![
+                        (serde_json::json!({"f": "a"}), serde_json::json!("ok")),
+                        (serde_json::json!({"f": "b"}), serde_json::json!("ok")),
+                    ],
+                },
+                false,
+                Expect::Visible(&["Read", "×2"]),
+            ),
+            (
+                "CollapsedReadSearch",
+                RenderedMessage::CollapsedReadSearch {
+                    search_count: 1,
+                    read_count: 1,
+                    list_count: 0,
+                    is_active: false,
+                    group_id: protocol::ToolUseId::new(),
+                    entries: vec!["Read a.rs".to_string(), "Grep foo".to_string()],
+                    mem_read: 0,
+                    mem_search: 0,
+                    mem_write: 0,
+                },
+                false,
+                Expect::Visible(&["Read/Search", "2"]),
+            ),
+        ]
+    }
+
+    fn team_fixtures() -> Vec<Fixture> {
+        vec![
+            (
+                "Shutdown",
+                RenderedMessage::Shutdown {
+                    from: "worker-1".to_string(),
+                    reason: Some("done".to_string()),
+                    rejected: false,
+                },
+                false,
+                Expect::Visible(&["worker-1 shut down", "done"]),
+            ),
+            (
+                "TaskAssignment",
+                RenderedMessage::TaskAssignment {
+                    task_id: "9".to_string(),
+                    assigned_by: "lead".to_string(),
+                    subject: "Fix bug".to_string(),
+                    description: Some("details here".to_string()),
+                },
+                false,
+                Expect::Visible(&["Task: Fix bug", "details here"]),
+            ),
+            (
+                "AgentNotification",
+                RenderedMessage::AgentNotification {
+                    summary: "agent finished".to_string(),
+                    status: Some("completed".to_string()),
+                },
+                false,
+                Expect::Visible(&["agent finished"]),
+            ),
+            (
+                "AgentNotification(empty summary)",
+                RenderedMessage::AgentNotification {
+                    summary: String::new(),
+                    status: None,
+                },
+                false,
+                Expect::Hidden("tui-core doc: empty summary renders nothing"),
+            ),
+            (
+                "ChannelMessage",
+                RenderedMessage::ChannelMessage {
+                    server: "slack".to_string(),
+                    user: Some("alice".to_string()),
+                    content: "hi there".to_string(),
+                },
+                false,
+                Expect::Visible(&["slack", "alice", "hi there"]),
+            ),
+            (
+                "UserTeammate(TaskCompleted)",
+                RenderedMessage::UserTeammate {
+                    display_name: "worker-1".to_string(),
+                    color: Some("magenta".to_string()),
+                    kind: tui_core::message::UserTeammateKind::TaskCompleted {
+                        task_id: "42".to_string(),
+                        task_subject: None,
+                    },
+                },
+                false,
+                Expect::Visible(&["@worker-1", "Completed task #42"]),
+            ),
+            (
+                "UserTeammate(Note)",
+                RenderedMessage::UserTeammate {
+                    display_name: "leader".to_string(),
+                    color: None,
+                    kind: tui_core::message::UserTeammateKind::Note {
+                        summary: Some("looks good".to_string()),
+                        content: None,
+                        is_transcript_mode: false,
+                    },
+                },
+                false,
+                Expect::Visible(&["@leader", "looks good"]),
+            ),
+        ]
+    }
+
+    fn advisor_and_plan_fixtures() -> Vec<Fixture> {
+        vec![
+            (
+                "Advisor(ServerToolUse)",
+                RenderedMessage::Advisor {
+                    kind: AdvisorKind::ServerToolUse {
+                        model: Some("gpt-5".to_string()),
+                        input: Some("review diff".to_string()),
+                    },
+                    verbose: false,
+                },
+                false,
+                Expect::Visible(&["Advising", "gpt-5", "review diff"]),
+            ),
+            (
+                "Advisor(Result)",
+                RenderedMessage::Advisor {
+                    kind: AdvisorKind::Result {
+                        text: "consider caching".to_string(),
+                    },
+                    verbose: false,
+                },
+                false,
+                Expect::Visible(&["Advisor", "consider caching"]),
+            ),
+            (
+                "Advisor(RedactedResult)",
+                RenderedMessage::Advisor {
+                    kind: AdvisorKind::RedactedResult,
+                    verbose: false,
+                },
+                false,
+                Expect::Visible(&["Advisor"]),
+            ),
+            (
+                "Advisor(Error)",
+                RenderedMessage::Advisor {
+                    kind: AdvisorKind::Error {
+                        error_code: "503".to_string(),
+                    },
+                    verbose: false,
+                },
+                false,
+                Expect::Visible(&["Advisor unavailable (503)"]),
+            ),
+            (
+                "HookProgress",
+                RenderedMessage::HookProgress {
+                    event: "PreToolUse".to_string(),
+                    count: 2,
+                    transcript_summary: true,
+                },
+                false,
+                Expect::Visible(&["PreToolUse", "×2"]),
+            ),
+            (
+                "PlanApproval(Request)",
+                RenderedMessage::PlanApproval {
+                    kind: PlanApprovalKind::Request {
+                        from: "lead".to_string(),
+                        plan_content: "step one".to_string(),
+                        plan_file_path: None,
+                    },
+                },
+                false,
+                Expect::Visible(&["Plan approval requested by lead", "step one"]),
+            ),
+            (
+                "PlanApproval(Approved)",
+                RenderedMessage::PlanApproval {
+                    kind: PlanApprovalKind::Approved {
+                        name: "alice".to_string(),
+                    },
+                },
+                false,
+                Expect::Visible(&["Plan approved by alice"]),
+            ),
+            (
+                "PlanApproval(Rejected)",
+                RenderedMessage::PlanApproval {
+                    kind: PlanApprovalKind::Rejected {
+                        name: "bob".to_string(),
+                        feedback: Some("needs tests".to_string()),
+                    },
+                },
+                false,
+                Expect::Visible(&["Plan rejected by bob", "needs tests"]),
+            ),
+        ]
+    }
+
+    fn command_fixtures() -> Vec<Fixture> {
+        vec![
+            (
+                "UserBashInput",
+                RenderedMessage::UserBashInput {
+                    command: "ls -la".to_string(),
+                },
+                false,
+                Expect::Visible(&["! ls -la"]),
+            ),
+            (
+                "UserBashOutput",
+                RenderedMessage::UserBashOutput {
+                    stdout: "out line".to_string(),
+                    stderr: "err line".to_string(),
+                },
+                false,
+                Expect::Visible(&["out line", "err line"]),
+            ),
+            (
+                "UserCommand(slash)",
+                RenderedMessage::UserCommand {
+                    command: "model".to_string(),
+                    args: "opus".to_string(),
+                    is_skill: false,
+                },
+                false,
+                Expect::Visible(&["/model opus"]),
+            ),
+            (
+                "UserCommand(skill)",
+                RenderedMessage::UserCommand {
+                    command: "deploy".to_string(),
+                    args: String::new(),
+                    is_skill: true,
+                },
+                false,
+                // tui-core doc: is_skill renders the `Skill(name)` form.
+                Expect::Visible(&["Skill(deploy)"]),
+            ),
+            (
+                "UserLocalCommandOutput",
+                RenderedMessage::UserLocalCommandOutput {
+                    stdout: "local out".to_string(),
+                    stderr: "local err".to_string(),
+                },
+                false,
+                Expect::Visible(&["local out", "local err"]),
+            ),
+            (
+                "UserMemoryInput",
+                RenderedMessage::UserMemoryInput {
+                    input: "remember this".to_string(),
+                },
+                false,
+                Expect::Visible(&["# remember this"]),
+            ),
+            (
+                "UserPlan",
+                RenderedMessage::UserPlan {
+                    plan_content: "step 1".to_string(),
+                },
+                false,
+                Expect::Visible(&["step 1"]),
+            ),
+            (
+                "UserPrompt",
+                RenderedMessage::UserPrompt {
+                    text: "echoed prompt".to_string(),
+                },
+                false,
+                Expect::Visible(&["echoed prompt"]),
+            ),
+        ]
+    }
+
+    fn misc_user_fixtures() -> Vec<Fixture> {
+        vec![
+            (
+                "UserResourceUpdate",
+                RenderedMessage::UserResourceUpdate {
+                    updates: vec![(
+                        "grafana".to_string(),
+                        "logs".to_string(),
+                        Some("changed".to_string()),
+                    )],
+                },
+                false,
+                Expect::Visible(&["grafana", "logs"]),
+            ),
+            (
+                "UserImage",
+                RenderedMessage::UserImage {
+                    image_id: Some(3),
+                    metadata: Some("640x480".to_string()),
+                    source_path: None,
+                },
+                false,
+                Expect::Visible(&["[Image #3]", "640x480"]),
+            ),
+        ]
+    }
+
+    fn attachment_fixtures() -> Vec<Fixture> {
+        use tui_core::message::Attachment;
+        let att = |label: &'static str, attachment: Attachment, expect: Expect| -> Fixture {
+            (
+                label,
+                RenderedMessage::Attachment { attachment },
+                false,
+                expect,
+            )
+        };
+        vec![
+            att(
+                "Attachment(Directory)",
+                Attachment::Directory {
+                    display_path: "src".to_string(),
+                },
+                Expect::Visible(&["src"]),
+            ),
+            att(
+                "Attachment(File)",
+                Attachment::File {
+                    display_path: "src/lib.rs".to_string(),
+                    num_lines: 42,
+                    truncated: false,
+                },
+                Expect::Visible(&["src/lib.rs"]),
+            ),
+            att(
+                "Attachment(CompactFileReference)",
+                Attachment::CompactFileReference {
+                    display_path: "notes.md".to_string(),
+                },
+                Expect::Visible(&["notes.md"]),
+            ),
+            att(
+                "Attachment(PdfReference)",
+                Attachment::PdfReference {
+                    display_path: "spec.pdf".to_string(),
+                    page_count: 3,
+                },
+                Expect::Visible(&["spec.pdf"]),
+            ),
+            att(
+                "Attachment(SelectedLines)",
+                Attachment::SelectedLines {
+                    count: 4,
+                    display_path: "main.rs".to_string(),
+                    ide_name: "VS Code".to_string(),
+                },
+                Expect::Visible(&["main.rs"]),
+            ),
+            att(
+                "Attachment(NestedMemory)",
+                Attachment::NestedMemory {
+                    display_path: "MEMORY.md".to_string(),
+                },
+                Expect::Visible(&["MEMORY.md"]),
+            ),
+            att(
+                "Attachment(McpResource)",
+                Attachment::McpResource {
+                    name: "logs".to_string(),
+                    server: "grafana".to_string(),
+                },
+                Expect::Visible(&["logs"]),
+            ),
+            att(
+                "Attachment(PlanFileReference)",
+                Attachment::PlanFileReference {
+                    plan_file_path: "plan.md".to_string(),
+                },
+                Expect::Visible(&["plan.md"]),
+            ),
+            att(
+                "Attachment(InvokedSkills)",
+                Attachment::InvokedSkills {
+                    skill_names: vec!["deploy".to_string()],
+                },
+                Expect::Visible(&["deploy"]),
+            ),
+        ]
+    }
+
+    fn coverage_fixtures() -> Vec<Fixture> {
+        let mut fixtures = text_fixtures();
+        fixtures.extend(thinking_and_tool_fixtures());
+        fixtures.extend(team_fixtures());
+        fixtures.extend(advisor_and_plan_fixtures());
+        fixtures.extend(command_fixtures());
+        fixtures.extend(misc_user_fixtures());
+        fixtures.extend(attachment_fixtures());
+        fixtures
+    }
+
+    // NOT ignored: locks the enumeration itself. `variant_name` is an
+    // exhaustive match, so a new `RenderedMessage` variant fails compilation
+    // here until a coverage fixture exists for it.
+    #[test]
+    fn coverage_fixture_list_spans_every_variant() {
+        let names: std::collections::BTreeSet<&str> = coverage_fixtures()
+            .iter()
+            .map(|(_, m, _, _)| variant_name(m))
+            .collect();
+        assert_eq!(
+            names.len(),
+            31,
+            "one fixture per top-level variant at minimum: {names:?}"
+        );
+    }
+
+    // Confirmed failing on 2026-07-02 (pre-refactor baseline): the
+    // `attachment_lines` wildcard flattens PdfReference/SelectedLines/
+    // McpResource/PlanFileReference/InvokedSkills to "[attachment]" and
+    // `UserCommand { is_skill: true }` loses its `Skill(name)` form. The
+    // message-cells phase replaces those fallbacks and removes this ignore.
+    #[test]
+    #[ignore = "wildcard fallback hides variants; un-ignored in message-cells phase"]
+    fn every_rendered_message_variant_renders_visibly_or_is_documented_hidden() {
+        let theme = Theme::dark();
+        let mut failures = Vec::new();
+        for (name, msg, verbose, expect) in coverage_fixtures() {
+            let text = render_message(&msg, 80, &theme, verbose)
+                .iter()
+                .map(tui_core::render::StyledLine::plain_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+            match expect {
+                Expect::Visible(substrings) => {
+                    if text.trim().is_empty() {
+                        failures.push(format!(
+                            "{name}: renders NOTHING (hidden without a documented reason)"
+                        ));
+                        continue;
+                    }
+                    for s in substrings {
+                        if !text.contains(s) {
+                            failures.push(format!("{name}: missing {s:?} in output {text:?}"));
+                        }
+                    }
+                }
+                Expect::Hidden(reason) => {
+                    if !text.trim().is_empty() {
+                        failures.push(format!(
+                            "{name}: expected hidden ({reason}) but renders {text:?}"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
     }
 }

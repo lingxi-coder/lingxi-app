@@ -17,7 +17,11 @@ const MAX_ENTRIES: usize = 50;
 #[must_use]
 pub fn file_completions(fragment: &str) -> Vec<CompletionItem> {
     let (dir_prefix, name_prefix) = split_fragment(fragment);
-    let base = std::path::Path::new(if dir_prefix.is_empty() { "." } else { dir_prefix });
+    let base = std::path::Path::new(if dir_prefix.is_empty() {
+        "."
+    } else {
+        dir_prefix
+    });
     let Ok(read) = std::fs::read_dir(base) else {
         return Vec::new();
     };
@@ -62,7 +66,11 @@ pub fn filter_entries(
             CompletionItem {
                 label: format!("{name}{slash}"),
                 insert: format!("{dir_prefix}{name}{slash}"),
-                desc: if *is_dir { "dir".to_string() } else { String::new() },
+                desc: if *is_dir {
+                    "dir".to_string()
+                } else {
+                    String::new()
+                },
             }
         })
         .collect()

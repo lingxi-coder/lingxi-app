@@ -15,11 +15,11 @@ use std::io;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use permission::gate::{PermissionRequest, PermissionResponse};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
-use permission::gate::{PermissionRequest, PermissionResponse};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -260,7 +260,11 @@ impl RataApp {
                 KeyOutcome::Continue
             }
             // Modified Enter (Alt/Shift) inserts a newline; plain Enter submits.
-            KeyCode::Enter if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) => {
+            KeyCode::Enter
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
+            {
                 self.composer.insert_newline();
                 KeyOutcome::Continue
             }
@@ -328,7 +332,8 @@ impl RataApp {
                 });
             }
             TurnEvent::TextDelta(delta) => {
-                if let Some(RenderedMessage::AssistantText { body, .. }) = self.messages.last_mut() {
+                if let Some(RenderedMessage::AssistantText { body, .. }) = self.messages.last_mut()
+                {
                     body.push_str(&delta);
                 } else {
                     self.messages.push(RenderedMessage::AssistantText {
@@ -482,8 +487,7 @@ impl RataApp {
                         is_error: false,
                     });
                 } else {
-                    self.active_model_picker =
-                        Some(ModelPicker::new(self.session.models.clone()));
+                    self.active_model_picker = Some(ModelPicker::new(self.session.models.clone()));
                 }
                 Some(KeyOutcome::Continue)
             }
@@ -594,7 +598,10 @@ impl RataApp {
         let overlay = if self.pending_permission.is_some() {
             9
         } else if self.active_model_picker.is_some() {
-            u16::try_from(self.session.models.len()).unwrap_or(0).min(12) + 4
+            u16::try_from(self.session.models.len())
+                .unwrap_or(0)
+                .min(12)
+                + 4
         } else if self.completion.is_some() {
             base + 8
         } else {
@@ -606,7 +613,13 @@ impl RataApp {
     /// Commit finalized `messages` into the terminal's native scrollback via
     /// `insert_before`. The actively-streaming last message is held back until
     /// the turn ends (it still grows), so it commits once as a whole.
-    fn flush_scrollback(&mut self, terminal: &mut RataTerminal) -> io::Result<()> {
+    ///
+    /// Generic over the backend so tests can drive it with `TestBackend`; the
+    /// runtime passes [`RataTerminal`].
+    fn flush_scrollback<B: ratatui::backend::Backend>(
+        &mut self,
+        terminal: &mut ratatui::Terminal<B>,
+    ) -> io::Result<()> {
         let width = usize::from(terminal.size()?.width.max(1));
         while self.committed < self.messages.len() {
             let is_last = self.committed + 1 == self.messages.len();
@@ -638,15 +651,11 @@ impl RataApp {
     /// live activity (`Running Bash` from `ToolUseStart`, else `Working`), and an
     /// elapsed-seconds counter with an interrupt hint — claude-code status parity.
     fn spinner_text(&self) -> String {
-        const FRAMES: &[&str] = &[
-            "·", "✢", "✳", "✶", "✻", "✽", "✽", "✻", "✶", "✳", "✢", "·",
-        ];
+        const FRAMES: &[&str] = &["·", "✢", "✳", "✶", "✻", "✽", "✽", "✻", "✶", "✳", "✢", "·"];
         let idx =
             usize::try_from(self.start.elapsed().as_millis() / 120).unwrap_or(0) % FRAMES.len();
         let verb = self.activity.as_deref().unwrap_or("Working");
-        let secs = self
-            .turn_started_at
-            .map_or(0, |t| t.elapsed().as_secs());
+        let secs = self.turn_started_at.map_or(0, |t| t.elapsed().as_secs());
         format!("{} {verb}… ({secs}s · esc to interrupt)", FRAMES[idx])
     }
 
@@ -665,7 +674,10 @@ impl RataApp {
             let claude = crate::style_adapter::to_ratatui(self.theme.claude);
             Line::from(vec![
                 Span::styled(self.spinner_text(), Style::default().fg(claude)),
-                Span::styled("   ·  Ctrl-C: cancel  ·  Esc: quit", Style::default().fg(dim)),
+                Span::styled(
+                    "   ·  Ctrl-C: cancel  ·  Esc: quit",
+                    Style::default().fg(dim),
+                ),
             ])
         } else if self
             .ctrl_c_at
@@ -919,7 +931,10 @@ mod tests {
     #[test]
     fn empty_submit_is_ignored() {
         let mut app = RataApp::new(Vec::new());
-        assert!(matches!(app.on_key(press(KeyCode::Enter)), KeyOutcome::Continue));
+        assert!(matches!(
+            app.on_key(press(KeyCode::Enter)),
+            KeyOutcome::Continue
+        ));
         assert!(app.messages.is_empty());
     }
 
@@ -948,14 +963,23 @@ mod tests {
         let token = app.current_turn.clone().unwrap();
         assert!(!token.is_cancelled());
         // Ctrl-C during a turn interrupts it (does NOT quit) and clears activity.
-        assert!(matches!(app.on_key(ctrl(KeyCode::Char('c'))), KeyOutcome::Continue));
+        assert!(matches!(
+            app.on_key(ctrl(KeyCode::Char('c'))),
+            KeyOutcome::Continue
+        ));
         assert!(token.is_cancelled());
         assert!(app.current_turn.is_none());
         // First idle Ctrl-C only arms the exit; it does not quit.
-        assert!(matches!(app.on_key(ctrl(KeyCode::Char('c'))), KeyOutcome::Continue));
+        assert!(matches!(
+            app.on_key(ctrl(KeyCode::Char('c'))),
+            KeyOutcome::Continue
+        ));
         assert!(app.ctrl_c_at.is_some());
         // Second idle Ctrl-C within the window quits.
-        assert!(matches!(app.on_key(ctrl(KeyCode::Char('c'))), KeyOutcome::Quit));
+        assert!(matches!(
+            app.on_key(ctrl(KeyCode::Char('c'))),
+            KeyOutcome::Quit
+        ));
     }
 
     #[test]
@@ -967,7 +991,10 @@ mod tests {
         assert!(app.ctrl_c_at.is_some());
         app.on_key(press(KeyCode::Char('h')));
         assert!(app.ctrl_c_at.is_none());
-        assert!(matches!(app.on_key(ctrl(KeyCode::Char('c'))), KeyOutcome::Continue));
+        assert!(matches!(
+            app.on_key(ctrl(KeyCode::Char('c'))),
+            KeyOutcome::Continue
+        ));
     }
 
     #[test]
@@ -1147,7 +1174,14 @@ mod tests {
             tool_input: serde_json::json!({ "command": "ls -la" }),
             default_decision: permission::gate::PromptDefault::DenyByDefault,
         };
-        (PermissionExchange { request, resp_tx, worker: None }, resp_rx)
+        (
+            PermissionExchange {
+                request,
+                resp_tx,
+                worker: None,
+            },
+            resp_rx,
+        )
     }
 
     #[test]
@@ -1166,7 +1200,10 @@ mod tests {
         let outcome = app.on_key(press(KeyCode::Enter));
         assert!(matches!(outcome, KeyOutcome::Continue));
         assert!(app.pending_permission.is_none());
-        assert_eq!(resp_rx.blocking_recv().unwrap(), PermissionResponse::AllowOnce);
+        assert_eq!(
+            resp_rx.blocking_recv().unwrap(),
+            PermissionResponse::AllowOnce
+        );
     }
 
     #[test]
@@ -1202,7 +1239,10 @@ mod tests {
         assert!(matches!(outcome, KeyOutcome::Continue));
         assert_eq!(app.composer.text(), "");
         assert_eq!(app.messages.len(), 1);
-        assert!(matches!(app.messages[0], RenderedMessage::SystemText { .. }));
+        assert!(matches!(
+            app.messages[0],
+            RenderedMessage::SystemText { .. }
+        ));
         assert!(app.current_turn.is_none());
     }
 
@@ -1241,14 +1281,23 @@ mod tests {
     #[test]
     fn slash_exit_quits() {
         let mut app = RataApp::new(Vec::new());
-        assert!(matches!(submit_command(&mut app, "/exit"), KeyOutcome::Quit));
+        assert!(matches!(
+            submit_command(&mut app, "/exit"),
+            KeyOutcome::Quit
+        ));
     }
 
     #[test]
     fn slash_doctor_and_mcp_print_into_scrollback() {
         let mut app = RataApp::new(Vec::new());
-        assert!(matches!(submit_command(&mut app, "/doctor"), KeyOutcome::Continue));
-        assert!(matches!(submit_command(&mut app, "/mcp"), KeyOutcome::Continue));
+        assert!(matches!(
+            submit_command(&mut app, "/doctor"),
+            KeyOutcome::Continue
+        ));
+        assert!(matches!(
+            submit_command(&mut app, "/mcp"),
+            KeyOutcome::Continue
+        ));
         // Both commands print their content into scrollback as system messages.
         assert_eq!(app.messages.len(), 2);
         assert!(app
@@ -1282,7 +1331,10 @@ mod tests {
     #[test]
     fn slash_model_with_no_models_reports_instead_of_opening() {
         let mut app = RataApp::new(Vec::new());
-        assert!(matches!(submit_command(&mut app, "/model"), KeyOutcome::Continue));
+        assert!(matches!(
+            submit_command(&mut app, "/model"),
+            KeyOutcome::Continue
+        ));
         assert!(app.active_model_picker.is_none());
         assert_eq!(app.messages.len(), 1);
     }
@@ -1290,7 +1342,10 @@ mod tests {
     #[test]
     fn slash_model_opens_picker_and_enter_switches() {
         let mut app = app_with_models();
-        assert!(matches!(submit_command(&mut app, "/model"), KeyOutcome::Continue));
+        assert!(matches!(
+            submit_command(&mut app, "/model"),
+            KeyOutcome::Continue
+        ));
         assert!(app.active_model_picker.is_some());
         // Picker owns the keyboard: move up to the first (Opus) row and confirm.
         app.on_key(press(KeyCode::Up));
@@ -1311,5 +1366,303 @@ mod tests {
         let outcome = app.on_key(press(KeyCode::Esc));
         assert!(matches!(outcome, KeyOutcome::Continue));
         assert!(app.active_model_picker.is_none());
+    }
+
+    // ===== Phase 0 behavior locks (codex-ui-structure plan) =====
+    // These tests freeze RataApp's CURRENT behavior before the ChatWidget /
+    // Transcript / BottomPane extraction. Adapt locations when structure moves,
+    // but preserve every assertion.
+
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Cell;
+    use ratatui::layout::Position;
+    use ratatui::{Terminal, TerminalOptions, Viewport};
+
+    /// An inline-viewport terminal over an 80x24 `TestBackend`, mirroring the
+    /// production `Viewport::Inline` runtime (viewport pinned at rows `0..h`
+    /// because the test cursor starts at the origin).
+    fn inline_test_terminal(viewport: u16) -> Terminal<TestBackend> {
+        Terminal::with_options(
+            TestBackend::new(80, 24),
+            TerminalOptions {
+                viewport: Viewport::Inline(viewport),
+            },
+        )
+        .expect("test terminal")
+    }
+
+    /// Draw the bottom viewport at its self-reported height; returns the
+    /// terminal for buffer/cursor inspection.
+    fn draw_viewport(app: &mut RataApp) -> Terminal<TestBackend> {
+        let mut terminal = inline_test_terminal(app.viewport_height());
+        terminal
+            .draw(|frame| app.render_viewport(frame))
+            .expect("draw");
+        terminal
+    }
+
+    /// The backend buffer as one string per row.
+    fn buffer_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let buf = terminal.backend().buffer();
+        let area = buf.area;
+        (area.top()..area.bottom())
+            .map(|y| {
+                (area.left()..area.right())
+                    .map(|x| buf.cell(Position::new(x, y)).map_or(" ", Cell::symbol))
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn submitted_prompt_is_trimmed_before_echo_and_submit() {
+        let mut app = RataApp::new(Vec::new());
+        typ(&mut app, "  hi there  ");
+        let outcome = app.on_key(press(KeyCode::Enter));
+        assert!(matches!(outcome, KeyOutcome::Submit(ref p, _) if p == "hi there"));
+        match &app.messages[0] {
+            RenderedMessage::UserText { body, .. } => assert_eq!(body, "hi there"),
+            other => panic!("expected user text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn whitespace_only_submit_is_ignored() {
+        let mut app = RataApp::new(Vec::new());
+        typ(&mut app, "   ");
+        assert!(matches!(
+            app.on_key(press(KeyCode::Enter)),
+            KeyOutcome::Continue
+        ));
+        assert!(app.messages.is_empty());
+        assert!(app.current_turn.is_none());
+    }
+
+    #[test]
+    fn slash_hooks_agents_and_quit_route_as_commands() {
+        let mut app = RataApp::new(Vec::new());
+        assert!(matches!(
+            submit_command(&mut app, "/hooks"),
+            KeyOutcome::Continue
+        ));
+        assert!(matches!(
+            submit_command(&mut app, "/agents"),
+            KeyOutcome::Continue
+        ));
+        assert_eq!(app.messages.len(), 2);
+        assert!(app
+            .messages
+            .iter()
+            .all(|m| matches!(m, RenderedMessage::SystemText { .. })));
+        assert!(app.current_turn.is_none(), "no prompt turn for commands");
+        assert!(matches!(
+            submit_command(&mut app, "/quit"),
+            KeyOutcome::Quit
+        ));
+    }
+
+    #[test]
+    fn permission_prompt_second_option_allows_always() {
+        let mut app = RataApp::new(Vec::new());
+        let (exchange, resp_rx) = tool_exchange();
+        app.open_permission(exchange);
+        app.on_key(press(KeyCode::Down)); // highlight "Yes, allow always"
+        let outcome = app.on_key(press(KeyCode::Enter));
+        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert!(app.pending_permission.is_none());
+        assert_eq!(
+            resp_rx.blocking_recv().unwrap(),
+            PermissionResponse::AllowAlways
+        );
+    }
+
+    #[test]
+    fn permission_resolution_is_single_shot_and_releases_keyboard() {
+        let mut app = RataApp::new(Vec::new());
+        let (exchange, resp_rx) = tool_exchange();
+        app.open_permission(exchange);
+        // '1' shortcut resolves with the first option (AllowOnce)…
+        app.on_key(press(KeyCode::Char('1')));
+        assert!(app.pending_permission.is_none());
+        assert_eq!(
+            resp_rx.blocking_recv().unwrap(),
+            PermissionResponse::AllowOnce
+        );
+        // …after which the keyboard belongs to the composer again; further keys
+        // cannot re-resolve the consumed exchange (its sender is gone).
+        app.on_key(press(KeyCode::Char('x')));
+        assert_eq!(app.composer.text(), "x");
+        assert!(matches!(
+            app.on_key(press(KeyCode::Enter)),
+            KeyOutcome::Submit(ref p, _) if p == "x"
+        ));
+    }
+
+    #[test]
+    fn paste_existing_image_path_becomes_image_message() {
+        let path =
+            std::env::temp_dir().join(format!("tui-rata-p0-paste-{}.png", std::process::id()));
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\n").expect("write fixture image");
+        let mut app = RataApp::new(Vec::new());
+        // Surrounding whitespace is trimmed for detection AND stored path.
+        app.on_paste(&format!(" {} ", path.display()));
+        std::fs::remove_file(&path).ok();
+        assert_eq!(
+            app.composer.text(),
+            "",
+            "image paste must not touch composer"
+        );
+        assert_eq!(app.messages.len(), 1);
+        let file_name = path.file_name().unwrap().to_str().unwrap();
+        match &app.messages[0] {
+            RenderedMessage::UserImage {
+                source_path: Some(p),
+                metadata: Some(name),
+                ..
+            } => {
+                assert_eq!(p, &path.display().to_string());
+                assert_eq!(name, file_name, "metadata is the file name");
+            }
+            other => panic!("expected UserImage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flush_scrollback_holds_streaming_tail_until_turn_ends() {
+        let mut app = RataApp::new(Vec::new());
+        typ(&mut app, "hi");
+        app.on_key(press(KeyCode::Enter)); // user message + current_turn
+        app.apply_turn_event(TurnEvent::TurnStarted);
+        app.apply_turn_event(TurnEvent::TextDelta("Hel".to_string()));
+        let mut terminal = inline_test_terminal(4);
+        app.flush_scrollback(&mut terminal).unwrap();
+        // The finalized user message commits; the streaming reply is held back.
+        assert_eq!(app.committed, 1);
+        app.apply_turn_event(TurnEvent::TextDelta("lo".to_string()));
+        app.flush_scrollback(&mut terminal).unwrap();
+        assert_eq!(app.committed, 1, "still streaming: tail stays held back");
+        app.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        app.flush_scrollback(&mut terminal).unwrap();
+        assert_eq!(app.committed, 2, "turn ended: reply commits as a whole");
+    }
+
+    #[test]
+    fn flush_scrollback_commits_everything_when_idle_including_zero_height() {
+        let mut app = RataApp::new(vec![
+            // Renders to zero lines: consumed by the commit cursor, no insert.
+            RenderedMessage::UserText {
+                body: String::new(),
+                timestamp: 0,
+            },
+            RenderedMessage::SystemText {
+                body: "ready".to_string(),
+                timestamp: 0,
+                is_error: false,
+            },
+        ]);
+        let mut terminal = inline_test_terminal(4);
+        app.flush_scrollback(&mut terminal).unwrap();
+        assert_eq!(app.committed, 2);
+    }
+
+    #[test]
+    fn viewport_grows_with_multiline_composer_up_to_cap() {
+        let mut app = RataApp::new(Vec::new());
+        typ(&mut app, "one");
+        for _ in 0..9 {
+            app.on_key(alt(KeyCode::Enter));
+        }
+        // 10 content lines clamp at COMPOSER_MAX_LINES (6): 1 + 6 + 2 = 9.
+        assert_eq!(app.viewport_height(), 9);
+    }
+
+    #[test]
+    fn layout_80x24_idle_status_line_plus_bordered_composer() {
+        let mut app = RataApp::new(Vec::new());
+        assert_eq!(app.viewport_height(), 4, "idle bottom viewport is 4 rows");
+        let terminal = draw_viewport(&mut app);
+        let rows = buffer_rows(&terminal);
+        assert!(rows[0].contains("Enter: send"), "status row: {}", rows[0]);
+        assert!(rows[0].contains("Esc: quit"), "status row: {}", rows[0]);
+        assert!(rows[1].starts_with('┌'), "composer top border: {}", rows[1]);
+        assert!(rows[2].starts_with("│> "), "prompt row: {}", rows[2]);
+        assert!(
+            rows[3].starts_with('└'),
+            "composer bottom border: {}",
+            rows[3]
+        );
+        // Rows below the inline viewport stay untouched (native scrollback).
+        assert!(rows[4].trim().is_empty());
+    }
+
+    #[test]
+    fn layout_cursor_uses_display_columns_for_cjk() {
+        let mut app = RataApp::new(Vec::new());
+        typ(&mut app, "你好");
+        let mut terminal = draw_viewport(&mut app);
+        let pos = terminal.get_cursor_position().unwrap();
+        // x = border(1) + "> "(2) + two wide chars × 2 columns = 7; y = row 2.
+        assert_eq!((pos.x, pos.y), (7, 2));
+    }
+
+    #[test]
+    fn layout_running_turn_shows_spinner_status_with_interrupt_hint() {
+        let mut app = RataApp::new(Vec::new());
+        typ(&mut app, "go");
+        app.on_key(press(KeyCode::Enter));
+        app.apply_turn_event(TurnEvent::TurnStarted);
+        let terminal = draw_viewport(&mut app);
+        let rows = buffer_rows(&terminal);
+        assert!(rows[0].contains("esc to interrupt"), "status: {}", rows[0]);
+        assert!(rows[0].contains("Ctrl-C: cancel"), "status: {}", rows[0]);
+    }
+
+    #[test]
+    fn layout_armed_ctrl_c_shows_press_again_hint() {
+        let mut app = RataApp::new(Vec::new());
+        app.on_key(ctrl(KeyCode::Char('c')));
+        let terminal = draw_viewport(&mut app);
+        let rows = buffer_rows(&terminal);
+        assert!(
+            rows[0].contains("Press Ctrl-C again to exit"),
+            "status: {}",
+            rows[0]
+        );
+    }
+
+    #[test]
+    fn layout_completion_popup_grows_viewport_and_draws_over_it() {
+        let mut app = RataApp::new(Vec::new());
+        typ(&mut app, "/");
+        assert!(app.completion.is_some());
+        assert_eq!(app.viewport_height(), 12, "completion viewport height");
+        let terminal = draw_viewport(&mut app);
+        let all = buffer_rows(&terminal).join("\n");
+        assert!(all.contains("Complete"), "popup title visible:\n{all}");
+    }
+
+    #[test]
+    fn layout_permission_dialog_overlays_viewport() {
+        let mut app = RataApp::new(Vec::new());
+        let (exchange, _resp_rx) = tool_exchange();
+        app.open_permission(exchange);
+        assert_eq!(app.viewport_height(), 9, "permission viewport height");
+        let terminal = draw_viewport(&mut app);
+        let all = buffer_rows(&terminal).join("\n");
+        assert!(all.contains("Permission required"), "{all}");
+        assert!(all.contains("Yes, allow once"), "{all}");
+        assert!(all.contains("No, deny"), "{all}");
+    }
+
+    #[test]
+    fn layout_model_picker_overlays_viewport() {
+        let mut app = app_with_models();
+        submit_command(&mut app, "/model");
+        assert_eq!(app.viewport_height(), 6, "picker viewport height");
+        let terminal = draw_viewport(&mut app);
+        let all = buffer_rows(&terminal).join("\n");
+        assert!(all.contains("Select model"), "{all}");
+        assert!(all.contains("Opus"), "{all}");
+        assert!(all.contains("Sonnet"), "{all}");
     }
 }

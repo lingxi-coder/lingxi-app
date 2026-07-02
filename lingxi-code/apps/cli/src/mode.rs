@@ -328,7 +328,7 @@ async fn run_ratatui(tui_build: crate::init::TuiBuild) -> i32 {
         .map_or_else(|| "(default)".to_string(), |m| m.display.clone());
     let welcome = vec![tui_rata::RenderedMessage::SystemText {
         body: format!(
-            "✻ Welcome to LingXi Code ({})\n  /help for commands · Esc or Ctrl-C twice to quit\n  cwd: {}\n  model: {}",
+            "✻ Welcome to LingXi Code ({})\n  /help for commands · Esc interrupts a running turn · Esc (idle) or Ctrl-C twice to quit\n  cwd: {}\n  model: {}",
             session.doctor.cli_version, session.doctor.cwd, current_model
         ),
         timestamp: 0,
@@ -463,7 +463,10 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui_rata::session:
 /// Flatten the on-disk skill sections (`skill_api::load_file_skill_sections`:
 /// project `.lingxi/skills/` ancestors + user `~/.lingxi/skills/`) into
 /// `/skills` rows: name + `"<section> · <description>"` detail.
-fn skills_rows(cwd: &std::path::Path, lingxi_home: &std::path::Path) -> Vec<tui_rata::session::InfoRow> {
+fn skills_rows(
+    cwd: &std::path::Path,
+    lingxi_home: &std::path::Path,
+) -> Vec<tui_rata::session::InfoRow> {
     skill_api::load_file_skill_sections(cwd, lingxi_home)
         .into_iter()
         .flat_map(|section| {
@@ -484,7 +487,10 @@ fn skills_rows(cwd: &std::path::Path, lingxi_home: &std::path::Path) -> Vec<tui_
 /// selector labels (read-only here): the always-offered Project + User tiers
 /// (marked `(new)` when the file does not exist yet) plus any other LINGXI.md
 /// the `memory::lingxi_md::hierarchy::walk` discovers (project parents).
-fn memory_rows(cwd: &std::path::Path, os_home: &std::path::Path) -> Vec<tui_rata::session::InfoRow> {
+fn memory_rows(
+    cwd: &std::path::Path,
+    os_home: &std::path::Path,
+) -> Vec<tui_rata::session::InfoRow> {
     use memory::lingxi_md::hierarchy::{user_config_dir, walk, FILE_NAME};
     use tui_rata::session::InfoRow;
 
@@ -755,7 +761,10 @@ mod tests {
         assert!(memory.len() >= 2, "{memory:?}");
         assert_eq!(memory[0].title, "Project memory");
         assert!(
-            memory[0].detail.as_deref().is_some_and(|d| d.contains("(new)")),
+            memory[0]
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("(new)")),
             "{memory:?}"
         );
         assert_eq!(memory[1].title, "User memory");

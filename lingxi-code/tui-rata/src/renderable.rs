@@ -3,7 +3,7 @@
 //! Ported from codex-rs `tui/src/render/renderable.rs` (UI architecture
 //! pattern only — no codex product types). A [`Renderable`] draws itself into
 //! `(Rect, &mut Buffer)` instead of owning a full frame: only the terminal
-//! draw boundary (`RataApp::render_viewport`) sees a
+//! draw boundary ([`crate::chat_widget::ChatWidget::render_frame`]) sees a
 //! [`crate::terminal::Frame`], and it adapts by handing the frame's buffer to
 //! renderables and copying the winning cursor position/style back onto the
 //! frame afterwards.

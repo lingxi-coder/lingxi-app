@@ -1,16 +1,17 @@
 //! Interactive `tui-rata` chat app: the runtime event loop around
 //! [`ChatWidget`].
 //!
-//! `RataApp` owns loop plumbing only: the terminal session/draw boundary,
-//! channel draining (turn events + permission requests), viewport sizing,
-//! and the submit/switch-model callbacks to the embedding CLI. All
-//! conversation state — transcript, bottom pane, session snapshot, per-turn
-//! state — lives in [`ChatWidget`] (plan Phase 6).
+//! `RataApp` is runtime orchestration ONLY (plan Phase 7): it owns the chat
+//! widget, the event receivers it drains each tick (turn events + permission
+//! requests), the redraw cadence, and the [`AppCallbacks`] to the embedding
+//! CLI. All conversation state — transcript, bottom pane, session snapshot,
+//! per-turn state, spinner text — lives in [`ChatWidget`]; all terminal state
+//! (viewport rect, buffers, cursor) lives in [`crate::terminal::Terminal`].
 //!
 //! The app is decoupled from orchestrator construction: `run_app` takes a
 //! `TurnEvent` receiver (drained each tick) and an `on_submit` callback that
 //! receives the prompt + a per-turn `CancellationToken` (the caller spawns the
-//! real turn; the widget cancels it on Ctrl-C).
+//! real turn; the widget cancels it on Ctrl-C/Esc).
 
 use std::io;
 use std::io::Write;
@@ -29,29 +30,113 @@ use crate::session::SessionInfo;
 use crate::terminal::TerminalSession;
 use crate::RataTerminal;
 
-/// Interactive chat runtime: the event-loop shell around [`ChatWidget`].
-pub struct RataApp {
-    /// The chat surface: transcript + bottom pane + session snapshot +
-    /// per-turn state (plan Phase 6). The app keeps only loop plumbing
-    /// around it (reduced fully in plan Phase 7).
-    chat_widget: ChatWidget,
+/// The embedding CLI/orchestrator callbacks the event loop executes when the
+/// chat widget returns an app-level [`ChatOutcome`].
+pub struct AppCallbacks<'cb> {
+    /// Executed on [`ChatOutcome::Submit`]: the caller drives a turn for the
+    /// prompt, honoring the paired [`CancellationToken`] (the widget cancels
+    /// it on Ctrl-C/Esc).
+    pub on_submit: Box<dyn FnMut(String, CancellationToken) + 'cb>,
+    /// Executed on [`ChatOutcome::SwitchModel`] with the picked
+    /// `(request_model, profile)` pair.
+    pub on_switch_model: Box<dyn FnMut(String, Option<String>) + 'cb>,
 }
 
-impl RataApp {
-    /// Build an app seeded with an initial conversation (may be empty).
+/// Interactive chat runtime: the event-loop shell around [`ChatWidget`].
+/// Runtime plumbing only — the widget owns every piece of conversation state.
+pub struct RataApp<'cb> {
+    /// The chat surface: transcript + bottom pane + session snapshot +
+    /// per-turn state (plan Phase 6).
+    chat_widget: ChatWidget,
+    /// Streaming turn events from the orchestrator bridge, drained into the
+    /// widget at the top of every tick.
+    events_rx: UnboundedReceiver<TurnEvent>,
+    /// Permission requests from the permission bridge, drained into the
+    /// widget right after the turn events (the widget serializes prompts).
+    permission_rx: Receiver<PermissionExchange>,
+    /// Embedder callbacks executed for app-level widget outcomes.
+    callbacks: AppCallbacks<'cb>,
+    /// Redraw cadence: the input-poll timeout, i.e. how long a tick waits for
+    /// input before redrawing anyway (spinner animation, streamed deltas).
+    redraw_interval: Duration,
+}
+
+impl<'cb> RataApp<'cb> {
+    /// Build an app seeded with an initial conversation (may be empty), the
+    /// startup [`SessionInfo`] snapshot, the event receivers the loop drains,
+    /// and the embedder callbacks.
     #[must_use]
-    pub fn new(messages: Vec<RenderedMessage>) -> Self {
+    pub fn new(
+        messages: Vec<RenderedMessage>,
+        session: SessionInfo,
+        events_rx: UnboundedReceiver<TurnEvent>,
+        permission_rx: Receiver<PermissionExchange>,
+        callbacks: AppCallbacks<'cb>,
+    ) -> Self {
         Self {
-            chat_widget: ChatWidget::new(messages, SessionInfo::default()),
+            chat_widget: ChatWidget::new(messages, session),
+            events_rx,
+            permission_rx,
+            callbacks,
+            redraw_interval: Duration::from_millis(50),
         }
     }
 
-    /// Attach the startup [`SessionInfo`] snapshot the full-page screens render
-    /// from (builder; the default is an empty session).
-    #[must_use]
-    pub fn with_session(mut self, session: SessionInfo) -> Self {
-        self.chat_widget.set_session(session);
-        self
+    /// Run the event loop until the user quits. Per-tick order (locked by the
+    /// Phase 1 handoff): drain turn events into the widget, drain permission
+    /// requests into the widget, size the bottom viewport BEFORE flushing
+    /// (history insertion wraps at the viewport width), flush finalized
+    /// history to native scrollback, draw the widget, then route input and
+    /// execute the returned callbacks.
+    ///
+    /// # Errors
+    /// Propagates the first terminal IO error.
+    pub fn run(&mut self, terminal: &mut RataTerminal) -> io::Result<()> {
+        loop {
+            while let Ok(event) = self.events_rx.try_recv() {
+                self.apply_turn_event(event);
+            }
+            // The widget serializes permission prompts (one owns the
+            // keyboard; later arrivals queue), so the drain is unconditional.
+            while let Ok(exchange) = self.permission_rx.try_recv() {
+                self.open_permission(exchange);
+            }
+            let width = terminal.size()?.width;
+            terminal.set_bottom_viewport_height(self.viewport_height(width))?;
+            self.flush_scrollback(terminal)?;
+            self.draw(terminal)?;
+            if event::poll(self.redraw_interval)? {
+                let outcome = match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key(key),
+                    Event::Paste(text) => self.on_paste(&text),
+                    _ => ChatOutcome::Continue,
+                };
+                match outcome {
+                    ChatOutcome::Quit => return Ok(()),
+                    ChatOutcome::Submit(prompt, token) => {
+                        (self.callbacks.on_submit)(prompt, token);
+                    }
+                    ChatOutcome::SwitchModel(model, profile) => {
+                        (self.callbacks.on_switch_model)(model, profile);
+                    }
+                    ChatOutcome::Continue => {}
+                }
+            }
+        }
+    }
+
+    /// Fold one streaming event from the orchestrator bridge into the chat
+    /// widget's transcript/turn state (the `events_rx` drain path; see
+    /// [`ChatWidget::apply_turn_event`]).
+    fn apply_turn_event(&mut self, event: TurnEvent) {
+        self.chat_widget.apply_turn_event(event);
+    }
+
+    /// Open a permission prompt for `exchange` — or queue it when one is
+    /// already open; prompts are serialized inside the widget (the
+    /// `permission_rx` drain path; see [`ChatWidget::open_permission`]).
+    fn open_permission(&mut self, exchange: PermissionExchange) {
+        self.chat_widget.open_permission(exchange);
     }
 
     /// Route one key press into the chat widget.
@@ -62,26 +147,6 @@ impl RataApp {
     /// Route a bracketed paste into the chat widget.
     fn on_paste(&mut self, text: &str) -> ChatOutcome {
         self.chat_widget.handle_paste(text)
-    }
-
-    /// Fold one streaming event from the orchestrator bridge into the chat
-    /// widget's transcript/turn state (see [`ChatWidget::apply_turn_event`]).
-    pub fn apply_turn_event(&mut self, event: TurnEvent) {
-        self.chat_widget.apply_turn_event(event);
-    }
-
-    /// Open a permission prompt for `exchange` — or queue it when one is
-    /// already open; prompts are serialized inside the widget (see
-    /// [`ChatWidget::open_permission`]).
-    pub fn open_permission(&mut self, exchange: PermissionExchange) {
-        self.chat_widget.open_permission(exchange);
-    }
-
-    /// Whether a permission prompt is currently open (queued exchanges wait
-    /// inside the widget until it resolves).
-    #[must_use]
-    pub fn has_open_permission(&self) -> bool {
-        self.chat_widget.has_open_permission()
     }
 
     /// Desired inline-viewport height at `width` columns: the widget reports
@@ -100,24 +165,20 @@ impl RataApp {
         self.chat_widget.flush_scrollback(terminal)
     }
 
-    /// Draw the bottom viewport through the chat widget's render contract —
-    /// the thin frame wrapper codex's `App::render_chat_widget_frame` keeps
-    /// at the terminal draw boundary: the widget renders into the frame's
-    /// buffer, then its cursor claim is copied onto the frame (no claim →
-    /// cursor hidden).
-    fn render_viewport(&mut self, frame: &mut crate::terminal::Frame) {
-        let area = frame.area();
-        self.chat_widget.render(area, frame.buffer_mut());
-        if let Some(pos) = self.chat_widget.cursor_pos(area) {
-            frame.set_cursor_position(pos);
-            frame.set_cursor_style(self.chat_widget.cursor_style(area));
-        }
+    /// Draw one frame through the widget's render contract
+    /// ([`ChatWidget::render_frame`] is the frame adapter).
+    fn draw<B: Backend + Write>(
+        &mut self,
+        terminal: &mut crate::terminal::Terminal<B>,
+    ) -> io::Result<()> {
+        let chat_widget = &mut self.chat_widget;
+        terminal.draw(|frame| chat_widget.render_frame(frame))
     }
 }
 
 /// Run the interactive chat app on the bottom-anchored custom terminal:
 /// history is committed to the terminal's native scrollback via
-/// [`RataApp::flush_scrollback`]; the bottom viewport (status + composer +
+/// [`ChatWidget::flush_scrollback`]; the bottom viewport (status + composer +
 /// overlays) is diff-redrawn each tick and resized in place via
 /// [`crate::terminal::Terminal::set_bottom_viewport_height`] when its desired
 /// height changes (composer growth / overlay open). Terminal modes are
@@ -129,10 +190,10 @@ impl RataApp {
 pub fn run_app(
     messages: Vec<RenderedMessage>,
     session: SessionInfo,
-    mut events_rx: UnboundedReceiver<TurnEvent>,
-    mut permission_rx: Receiver<PermissionExchange>,
-    mut on_submit: impl FnMut(String, CancellationToken),
-    mut on_switch_model: impl FnMut(String, Option<String>),
+    events_rx: UnboundedReceiver<TurnEvent>,
+    permission_rx: Receiver<PermissionExchange>,
+    on_submit: impl FnMut(String, CancellationToken),
+    on_switch_model: impl FnMut(String, Option<String>),
 ) -> io::Result<()> {
     // Guard first, terminal second: locals drop in reverse order, so the
     // terminal resets the cursor while raw mode is still active, then the
@@ -140,55 +201,17 @@ pub fn run_app(
     let _session_guard = TerminalSession::new()?;
     let mut terminal =
         crate::terminal::Terminal::with_options(CrosstermBackend::new(io::stdout()))?;
-    let mut app = RataApp::new(messages).with_session(session);
-    app_loop(
-        &mut terminal,
-        &mut app,
-        &mut events_rx,
-        &mut permission_rx,
-        &mut on_submit,
-        &mut on_switch_model,
-    )
-}
-
-fn app_loop(
-    terminal: &mut RataTerminal,
-    app: &mut RataApp,
-    events_rx: &mut UnboundedReceiver<TurnEvent>,
-    permission_rx: &mut Receiver<PermissionExchange>,
-    on_submit: &mut impl FnMut(String, CancellationToken),
-    on_switch_model: &mut impl FnMut(String, Option<String>),
-) -> io::Result<()> {
-    loop {
-        while let Ok(event) = events_rx.try_recv() {
-            app.apply_turn_event(event);
-        }
-        // Drain permission requests into the widget: it serializes prompts
-        // (one owns the keyboard; later arrivals queue) — plan Phase 6 moved
-        // the one-at-a-time gate out of this loop.
-        while let Ok(exchange) = permission_rx.try_recv() {
-            app.open_permission(exchange);
-        }
-        // Size the absolute bottom viewport for this tick, THEN commit
-        // finalized history above it (insertion wraps at the viewport width).
-        let width = terminal.size()?.width;
-        terminal.set_bottom_viewport_height(app.viewport_height(width))?;
-        app.flush_scrollback(terminal)?;
-        terminal.draw(|frame| app.render_viewport(frame))?;
-        if event::poll(Duration::from_millis(50))? {
-            let outcome = match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
-                Event::Paste(text) => app.on_paste(&text),
-                _ => ChatOutcome::Continue,
-            };
-            match outcome {
-                ChatOutcome::Quit => return Ok(()),
-                ChatOutcome::Submit(prompt, token) => on_submit(prompt, token),
-                ChatOutcome::SwitchModel(model, profile) => on_switch_model(model, profile),
-                ChatOutcome::Continue => {}
-            }
-        }
-    }
+    let mut app = RataApp::new(
+        messages,
+        session,
+        events_rx,
+        permission_rx,
+        AppCallbacks {
+            on_submit: Box::new(on_submit),
+            on_switch_model: Box::new(on_switch_model),
+        },
+    );
+    app.run(&mut terminal)
 }
 
 #[cfg(test)]
@@ -212,6 +235,24 @@ mod tests {
 
     fn alt(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::ALT)
+    }
+
+    /// An app over dummy (immediately closed) channels and no-op callbacks:
+    /// behavior tests drive keys/events directly through the private seams
+    /// the loop itself uses.
+    fn test_app(messages: Vec<RenderedMessage>) -> RataApp<'static> {
+        let (_events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_permission_tx, permission_rx) = tokio::sync::mpsc::channel(1);
+        RataApp::new(
+            messages,
+            SessionInfo::default(),
+            events_rx,
+            permission_rx,
+            AppCallbacks {
+                on_submit: Box::new(|_, _| {}),
+                on_switch_model: Box::new(|_, _| {}),
+            },
+        )
     }
 
     fn typ(app: &mut RataApp, s: &str) {
@@ -244,7 +285,7 @@ mod tests {
 
     #[test]
     fn alt_enter_inserts_newline_plain_enter_submits_whole_buffer() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         typ(&mut app, "line one");
         // Alt+Enter adds a newline instead of submitting.
         let outcome = app.on_key(alt(KeyCode::Enter));
@@ -262,7 +303,7 @@ mod tests {
 
     #[test]
     fn up_arrow_recalls_submitted_history() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         typ(&mut app, "first prompt");
         app.on_key(press(KeyCode::Enter));
         typ(&mut app, "second prompt");
@@ -282,7 +323,7 @@ mod tests {
 
     #[test]
     fn left_arrow_then_typing_inserts_at_cursor() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         typ(&mut app, "ac");
         app.on_key(press(KeyCode::Left)); // between a|c
         app.on_key(press(KeyCode::Char('b')));
@@ -291,7 +332,7 @@ mod tests {
 
     #[test]
     fn typing_then_submit_echoes_user_and_returns_prompt() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         for c in "hi".chars() {
             app.on_key(press(KeyCode::Char(c)));
         }
@@ -307,7 +348,7 @@ mod tests {
 
     #[test]
     fn empty_submit_is_ignored() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         assert!(matches!(
             app.on_key(press(KeyCode::Enter)),
             ChatOutcome::Continue
@@ -317,7 +358,7 @@ mod tests {
 
     #[test]
     fn streaming_deltas_grow_reply_and_turn_ended_clears_token() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         app.on_key(press(KeyCode::Char('x')));
         app.on_key(press(KeyCode::Enter));
         assert!(app.chat_widget.turn_running());
@@ -334,7 +375,7 @@ mod tests {
 
     #[test]
     fn ctrl_c_cancels_turn_then_needs_two_presses_to_quit() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         app.on_key(press(KeyCode::Char('x')));
         let ChatOutcome::Submit(_, token) = app.on_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
@@ -362,7 +403,7 @@ mod tests {
 
     #[test]
     fn typing_disarms_ctrl_c_exit() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         // Arm the exit with an idle Ctrl-C, then type: the arm must reset so a
         // later single Ctrl-C does not quit unexpectedly.
         app.on_key(ctrl(KeyCode::Char('c')));
@@ -377,7 +418,7 @@ mod tests {
 
     #[test]
     fn composer_line_and_word_editing_keys() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         typ(&mut app, "foo bar");
         // Bare Home/End move the composer cursor (not scrollback).
         app.on_key(press(KeyCode::Home));
@@ -400,7 +441,7 @@ mod tests {
 
     #[test]
     fn ctrl_o_toggles_verbose() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         assert!(!app.chat_widget.transcript().verbose());
         app.on_key(ctrl(KeyCode::Char('o')));
         assert!(app.chat_widget.transcript().verbose());
@@ -410,7 +451,7 @@ mod tests {
 
     #[test]
     fn viewport_height_grows_for_overlays() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         let base = app.viewport_height(80);
         // Opening the completion popup grows the viewport.
         typ(&mut app, "/");
@@ -420,7 +461,7 @@ mod tests {
 
     #[test]
     fn paste_non_image_inserts_into_composer() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         typ(&mut app, "pre ");
         app.on_paste("hello world");
         assert_eq!(
@@ -434,7 +475,7 @@ mod tests {
 
     #[test]
     fn slash_image_pushes_image_message() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         let outcome = submit_command(&mut app, "/image /tmp/pic.png");
         assert!(matches!(outcome, ChatOutcome::Continue));
         let msgs = messages(&app);
@@ -454,7 +495,7 @@ mod tests {
 
     #[test]
     fn slash_vim_toggles_vim_mode() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         assert!(!app.chat_widget.bottom_pane().vim_enabled());
         submit_command(&mut app, "/vim");
         assert!(app.chat_widget.bottom_pane().vim_enabled());
@@ -464,7 +505,7 @@ mod tests {
 
     #[test]
     fn vim_esc_enters_normal_and_motions_edit_instead_of_typing() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         submit_command(&mut app, "/vim");
         typ(&mut app, "hello");
         // Esc → Normal mode (does NOT quit the app).
@@ -482,7 +523,7 @@ mod tests {
 
     #[test]
     fn vim_normal_enter_submits() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         submit_command(&mut app, "/vim");
         typ(&mut app, "hi");
         app.on_key(press(KeyCode::Esc)); // → Normal
@@ -492,7 +533,7 @@ mod tests {
 
     #[test]
     fn ctrl_left_right_move_by_word() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         typ(&mut app, "alpha beta");
         app.on_key(ctrl(KeyCode::Left)); // to start of "beta"
         assert_eq!(
@@ -508,7 +549,7 @@ mod tests {
 
     #[test]
     fn typing_slash_opens_and_filters_command_palette() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         app.on_key(press(KeyCode::Char('/')));
         assert!(app.chat_widget.bottom_pane().completion().is_some());
         typ(&mut app, "m"); // "/m" narrows to /model + /mcp
@@ -521,7 +562,7 @@ mod tests {
 
     #[test]
     fn tab_completes_selected_command_into_composer() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         typ(&mut app, "/mc");
         assert!(app.chat_widget.bottom_pane().completion().is_some());
         app.on_key(press(KeyCode::Tab));
@@ -530,7 +571,7 @@ mod tests {
 
     #[test]
     fn palette_arrows_navigate_and_esc_dismisses_without_quitting() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         typ(&mut app, "/");
         app.on_key(press(KeyCode::Down)); // navigate the popup, not history
         let outcome = app.on_key(press(KeyCode::Esc));
@@ -542,7 +583,7 @@ mod tests {
 
     #[test]
     fn typing_at_opens_file_completion_and_tab_completes_in_place() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         // `@Carg` should match Cargo.toml in the tui-rata crate cwd.
         typ(&mut app, "see @Carg");
         assert!(
@@ -564,8 +605,115 @@ mod tests {
 
     #[test]
     fn esc_quits() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         assert!(matches!(app.on_key(press(KeyCode::Esc)), ChatOutcome::Quit));
+    }
+
+    // ===== Layered Ctrl-C/Esc routing (acceptance criterion 14, plan Phase 7):
+    // active view first, composer/completion second, chat-widget
+    // interrupt/quit policy last. =====
+
+    #[test]
+    fn esc_interrupts_running_turn_then_quits_when_idle() {
+        let mut app = test_app(Vec::new());
+        typ(&mut app, "go");
+        let ChatOutcome::Submit(_, token) = app.on_key(press(KeyCode::Enter)) else {
+            panic!("expected submit");
+        };
+        app.apply_turn_event(TurnEvent::TurnStarted);
+        // No view, no completion: Esc reaches the interrupt/quit policy layer
+        // — running, so it interrupts (the spinner's "esc to interrupt").
+        assert!(matches!(
+            app.on_key(press(KeyCode::Esc)),
+            ChatOutcome::Continue
+        ));
+        assert!(token.is_cancelled());
+        assert!(!app.chat_widget.turn_running());
+        // Idle now: the same key falls through to the quit policy.
+        assert!(matches!(app.on_key(press(KeyCode::Esc)), ChatOutcome::Quit));
+    }
+
+    #[test]
+    fn esc_routes_to_active_view_before_the_interrupt_policy() {
+        let mut app = test_app(Vec::new());
+        typ(&mut app, "go");
+        let ChatOutcome::Submit(_, token) = app.on_key(press(KeyCode::Enter)) else {
+            panic!("expected submit");
+        };
+        let (exchange, resp_rx) = tool_exchange();
+        app.open_permission(exchange);
+        // Layer 1 — the active view owns Esc: the permission resolves (deny);
+        // the running turn is untouched.
+        assert!(matches!(
+            app.on_key(press(KeyCode::Esc)),
+            ChatOutcome::Continue
+        ));
+        assert_eq!(resp_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
+        assert!(!token.is_cancelled(), "view-owned Esc must not interrupt");
+        assert!(app.chat_widget.turn_running());
+        // Layer 3 — with no view left, Esc interrupts the turn.
+        assert!(matches!(
+            app.on_key(press(KeyCode::Esc)),
+            ChatOutcome::Continue
+        ));
+        assert!(token.is_cancelled());
+        // And once idle, Esc quits.
+        assert!(matches!(app.on_key(press(KeyCode::Esc)), ChatOutcome::Quit));
+    }
+
+    #[test]
+    fn esc_dismisses_completion_before_the_interrupt_policy() {
+        let mut app = test_app(Vec::new());
+        typ(&mut app, "go");
+        let ChatOutcome::Submit(_, token) = app.on_key(press(KeyCode::Enter)) else {
+            panic!("expected submit");
+        };
+        // Layer 2 — the completion popup owns Esc while open.
+        typ(&mut app, "/");
+        assert!(app.chat_widget.bottom_pane().completion().is_some());
+        assert!(matches!(
+            app.on_key(press(KeyCode::Esc)),
+            ChatOutcome::Continue
+        ));
+        assert!(app.chat_widget.bottom_pane().completion().is_none());
+        assert!(!token.is_cancelled(), "popup-owned Esc must not interrupt");
+        assert!(app.chat_widget.turn_running());
+        // Layer 3 — the next Esc reaches the policy layer and interrupts.
+        assert!(matches!(
+            app.on_key(press(KeyCode::Esc)),
+            ChatOutcome::Continue
+        ));
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn ctrl_c_routes_to_active_view_before_the_interrupt_policy() {
+        let mut app = test_app(Vec::new());
+        typ(&mut app, "go");
+        let ChatOutcome::Submit(_, token) = app.on_key(press(KeyCode::Enter)) else {
+            panic!("expected submit");
+        };
+        let (exchange, _resp_rx) = tool_exchange();
+        app.open_permission(exchange);
+        // Layer 1 — the active view swallows Ctrl-C (it owns the keyboard
+        // until resolved): no interrupt, no quit, prompt still open.
+        assert!(matches!(
+            app.on_key(ctrl(KeyCode::Char('c'))),
+            ChatOutcome::Continue
+        ));
+        assert!(app.chat_widget.has_open_permission());
+        assert!(
+            !token.is_cancelled(),
+            "view-owned Ctrl-C must not interrupt"
+        );
+        // Resolve the prompt ('1' = allow once); layer 3 then interrupts.
+        app.on_key(press(KeyCode::Char('1')));
+        assert!(!app.chat_widget.has_open_permission());
+        assert!(matches!(
+            app.on_key(ctrl(KeyCode::Char('c'))),
+            ChatOutcome::Continue
+        ));
+        assert!(token.is_cancelled());
     }
 
     fn tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
@@ -587,10 +735,10 @@ mod tests {
 
     #[test]
     fn permission_prompt_owns_keyboard_and_enter_allows_once() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         let (exchange, resp_rx) = tool_exchange();
         app.open_permission(exchange);
-        assert!(app.has_open_permission());
+        assert!(app.chat_widget.has_open_permission());
 
         // While a prompt is open, normal keys are swallowed by the dialog and
         // never reach the composer.
@@ -600,7 +748,7 @@ mod tests {
         // Enter selects the highlighted option (index 0 = AllowOnce).
         let outcome = app.on_key(press(KeyCode::Enter));
         assert!(matches!(outcome, ChatOutcome::Continue));
-        assert!(!app.has_open_permission());
+        assert!(!app.chat_widget.has_open_permission());
         assert_eq!(
             resp_rx.blocking_recv().unwrap(),
             PermissionResponse::AllowOnce
@@ -609,29 +757,29 @@ mod tests {
 
     #[test]
     fn permission_prompt_esc_denies() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         let (exchange, resp_rx) = tool_exchange();
         app.open_permission(exchange);
         let outcome = app.on_key(press(KeyCode::Esc));
         assert!(matches!(outcome, ChatOutcome::Continue));
-        assert!(!app.has_open_permission());
+        assert!(!app.chat_widget.has_open_permission());
         assert_eq!(resp_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
     }
 
     #[test]
     fn permission_prompt_number_three_denies() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         let (exchange, resp_rx) = tool_exchange();
         app.open_permission(exchange);
         // '3' shortcut = third option = Deny.
         app.on_key(press(KeyCode::Char('3')));
-        assert!(!app.has_open_permission());
+        assert!(!app.chat_widget.has_open_permission());
         assert_eq!(resp_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
     }
 
     #[test]
     fn slash_help_opens_screen_view_without_sending_a_prompt() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         for c in "/help".chars() {
             app.on_key(press(KeyCode::Char(c)));
         }
@@ -651,7 +799,7 @@ mod tests {
 
     #[test]
     fn screen_view_owns_keys_scrolls_and_esc_closes_without_quitting() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         submit_command(&mut app, "/help");
         assert!(app
             .chat_widget
@@ -682,7 +830,7 @@ mod tests {
 
     #[test]
     fn screen_view_q_closes() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         submit_command(&mut app, "/help");
         let outcome = app.on_key(press(KeyCode::Char('q')));
         assert!(matches!(outcome, ChatOutcome::Continue));
@@ -691,7 +839,7 @@ mod tests {
 
     #[test]
     fn non_command_slash_input_is_sent_as_a_prompt() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         for c in "/frobnicate".chars() {
             app.on_key(press(KeyCode::Char(c)));
         }
@@ -710,7 +858,7 @@ mod tests {
 
     #[test]
     fn slash_clear_empties_messages() {
-        let mut app = RataApp::new(vec![RenderedMessage::SystemText {
+        let mut app = test_app(vec![RenderedMessage::SystemText {
             body: "old".to_string(),
             timestamp: 0,
             is_error: false,
@@ -723,7 +871,7 @@ mod tests {
 
     #[test]
     fn slash_exit_quits() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         assert!(matches!(
             submit_command(&mut app, "/exit"),
             ChatOutcome::Quit
@@ -732,7 +880,7 @@ mod tests {
 
     #[test]
     fn slash_doctor_and_mcp_open_screen_views() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         assert!(matches!(
             submit_command(&mut app, "/doctor"),
             ChatOutcome::Continue
@@ -758,8 +906,9 @@ mod tests {
         assert!(!app.chat_widget.turn_running());
     }
 
-    fn app_with_models() -> RataApp {
-        RataApp::new(Vec::new()).with_session(crate::session::SessionInfo {
+    fn app_with_models() -> RataApp<'static> {
+        let mut app = test_app(Vec::new());
+        app.chat_widget.set_session(crate::session::SessionInfo {
             models: vec![
                 crate::session::ModelRow {
                     display: "Opus".into(),
@@ -777,12 +926,13 @@ mod tests {
                 },
             ],
             ..Default::default()
-        })
+        });
+        app
     }
 
     #[test]
     fn slash_model_with_no_models_reports_instead_of_opening() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         assert!(matches!(
             submit_command(&mut app, "/model"),
             ChatOutcome::Continue
@@ -900,13 +1050,13 @@ mod tests {
         terminal
     }
 
-    /// Draw the bottom viewport at its self-reported height (80 columns);
-    /// returns the terminal for buffer/cursor inspection.
+    /// Draw the bottom viewport at its self-reported height (80 columns)
+    /// through the app's own draw path ([`RataApp::draw`] →
+    /// [`ChatWidget::render_frame`]); returns the terminal for buffer/cursor
+    /// inspection.
     fn draw_viewport(app: &mut RataApp) -> Terminal<TestWriteBackend> {
         let mut terminal = inline_test_terminal(app.viewport_height(80));
-        terminal
-            .draw(|frame| app.render_viewport(frame))
-            .expect("draw");
+        app.draw(&mut terminal).expect("draw");
         terminal
     }
 
@@ -925,7 +1075,7 @@ mod tests {
 
     #[test]
     fn submitted_prompt_is_trimmed_before_echo_and_submit() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         typ(&mut app, "  hi there  ");
         let outcome = app.on_key(press(KeyCode::Enter));
         assert!(matches!(outcome, ChatOutcome::Submit(ref p, _) if p == "hi there"));
@@ -937,7 +1087,7 @@ mod tests {
 
     #[test]
     fn whitespace_only_submit_is_ignored() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         typ(&mut app, "   ");
         assert!(matches!(
             app.on_key(press(KeyCode::Enter)),
@@ -949,7 +1099,7 @@ mod tests {
 
     #[test]
     fn slash_hooks_agents_and_quit_route_as_commands() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         assert!(matches!(
             submit_command(&mut app, "/hooks"),
             ChatOutcome::Continue
@@ -983,13 +1133,13 @@ mod tests {
 
     #[test]
     fn permission_prompt_second_option_allows_always() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         let (exchange, resp_rx) = tool_exchange();
         app.open_permission(exchange);
         app.on_key(press(KeyCode::Down)); // highlight "Yes, allow always"
         let outcome = app.on_key(press(KeyCode::Enter));
         assert!(matches!(outcome, ChatOutcome::Continue));
-        assert!(!app.has_open_permission());
+        assert!(!app.chat_widget.has_open_permission());
         assert_eq!(
             resp_rx.blocking_recv().unwrap(),
             PermissionResponse::AllowAlways
@@ -998,12 +1148,12 @@ mod tests {
 
     #[test]
     fn permission_resolution_is_single_shot_and_releases_keyboard() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         let (exchange, resp_rx) = tool_exchange();
         app.open_permission(exchange);
         // '1' shortcut resolves with the first option (AllowOnce)…
         app.on_key(press(KeyCode::Char('1')));
-        assert!(!app.has_open_permission());
+        assert!(!app.chat_widget.has_open_permission());
         assert_eq!(
             resp_rx.blocking_recv().unwrap(),
             PermissionResponse::AllowOnce
@@ -1023,7 +1173,7 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("tui-rata-p0-paste-{}.png", std::process::id()));
         std::fs::write(&path, b"\x89PNG\r\n\x1a\n").expect("write fixture image");
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         // Surrounding whitespace is trimmed for detection AND stored path.
         app.on_paste(&format!(" {} ", path.display()));
         std::fs::remove_file(&path).ok();
@@ -1050,7 +1200,7 @@ mod tests {
 
     #[test]
     fn flush_scrollback_holds_streaming_tail_until_turn_ends() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         typ(&mut app, "hi");
         app.on_key(press(KeyCode::Enter)); // user message + current_turn
         app.apply_turn_event(TurnEvent::TurnStarted);
@@ -1077,7 +1227,7 @@ mod tests {
 
     #[test]
     fn flush_scrollback_commits_everything_when_idle_including_zero_height() {
-        let mut app = RataApp::new(vec![
+        let mut app = test_app(vec![
             // Renders to zero lines: consumed by the commit cursor, no insert.
             RenderedMessage::UserText {
                 body: String::new(),
@@ -1096,7 +1246,7 @@ mod tests {
 
     #[test]
     fn viewport_grows_with_multiline_composer_up_to_cap() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         typ(&mut app, "one");
         for _ in 0..9 {
             app.on_key(alt(KeyCode::Enter));
@@ -1107,7 +1257,7 @@ mod tests {
 
     #[test]
     fn layout_80x24_idle_status_line_plus_bordered_composer() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         assert_eq!(app.viewport_height(80), 4, "idle bottom viewport is 4 rows");
         let terminal = draw_viewport(&mut app);
         let rows = buffer_rows(&terminal);
@@ -1132,7 +1282,7 @@ mod tests {
 
     #[test]
     fn layout_cursor_uses_display_columns_for_cjk() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         typ(&mut app, "你好");
         let mut terminal = draw_viewport(&mut app);
         let pos = terminal.get_cursor_position().unwrap();
@@ -1142,7 +1292,7 @@ mod tests {
 
     #[test]
     fn layout_running_turn_shows_spinner_status_with_interrupt_hint() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         typ(&mut app, "go");
         app.on_key(press(KeyCode::Enter));
         app.apply_turn_event(TurnEvent::TurnStarted);
@@ -1156,7 +1306,7 @@ mod tests {
 
     #[test]
     fn layout_streaming_tail_is_visible_above_the_pane_before_turn_ends() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         typ(&mut app, "go");
         app.on_key(press(KeyCode::Enter));
         app.apply_turn_event(TurnEvent::TurnStarted);
@@ -1183,7 +1333,7 @@ mod tests {
 
     #[test]
     fn layout_armed_ctrl_c_shows_press_again_hint() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         app.on_key(ctrl(KeyCode::Char('c')));
         let terminal = draw_viewport(&mut app);
         let rows = buffer_rows(&terminal);
@@ -1196,7 +1346,7 @@ mod tests {
 
     #[test]
     fn layout_completion_popup_grows_viewport_and_draws_over_it() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         typ(&mut app, "/");
         assert!(app.chat_widget.bottom_pane().completion().is_some());
         assert_eq!(app.viewport_height(80), 12, "completion viewport height");
@@ -1207,7 +1357,7 @@ mod tests {
 
     #[test]
     fn layout_permission_dialog_overlays_viewport() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         let (exchange, _resp_rx) = tool_exchange();
         app.open_permission(exchange);
         assert_eq!(app.viewport_height(80), 9, "permission viewport height");
@@ -1232,7 +1382,7 @@ mod tests {
 
     #[test]
     fn layout_help_screen_fills_viewport_without_status_or_composer() {
-        let mut app = RataApp::new(Vec::new());
+        let mut app = test_app(Vec::new());
         submit_command(&mut app, "/help");
         // The help body wants more rows than the viewport allows: clamps at
         // the 20-row viewport cap (new Phase 4 lock).
@@ -1248,5 +1398,38 @@ mod tests {
         assert!(!all.contains("│> "), "composer suppressed:\n{all}");
         // The view claims no cursor, so the draw hides it.
         assert!(terminal.cursor_hidden(), "screen view hides the cursor");
+    }
+
+    #[test]
+    fn terminal_restores_cursor_style_even_when_a_draw_panics() {
+        // Panic-safety smoke for the run-loop's restore guarantees: `run_app`
+        // declares the `TerminalSession` guard before the terminal, so an
+        // unwinding panic drops the terminal (cursor style/visibility reset)
+        // and then the guard (raw mode + bracketed paste — untestable here:
+        // it needs a real tty). This exercises the terminal half through the
+        // app's own tick path.
+        let backend = TestWriteBackend::new(80, 24);
+        let raw = backend.raw_handle();
+        let observed = std::rc::Rc::clone(&raw);
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let mut app = test_app(Vec::new());
+            let mut terminal = Terminal::with_options(backend).expect("terminal");
+            // One healthy tick: viewport sizing, flush, draw.
+            terminal
+                .set_bottom_viewport_height(app.viewport_height(80))
+                .expect("viewport");
+            app.flush_scrollback(&mut terminal).expect("flush");
+            app.draw(&mut terminal).expect("draw");
+            // Only the panicking draw + unwind cleanup from here on.
+            raw.borrow_mut().clear();
+            let _ = terminal.draw(|_frame| panic!("render panic"));
+        }));
+        assert!(panic_result.is_err(), "the draw panic must propagate");
+        let bytes = observed.borrow().clone();
+        let escapes = String::from_utf8_lossy(&bytes);
+        assert!(
+            escapes.contains("\x1b[0 q"),
+            "terminal drop must reset the cursor style during unwind; got: {escapes:?}"
+        );
     }
 }

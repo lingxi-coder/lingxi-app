@@ -446,9 +446,10 @@ impl Composer {
 /// cursor row stays visible. The cursor position is reported in DISPLAY
 /// columns (CJK/wide chars are 2 columns), clamped inside the box.
 ///
-/// Extracted from `RataApp::render_viewport`'s composer zone (plan Phase 2):
-/// the view renders into `(Rect, &mut Buffer)`; only the terminal draw
-/// boundary adapts a [`crate::terminal::Frame`].
+/// Extracted from the former `RataApp::render_viewport`'s composer zone (plan
+/// Phase 2): the view renders into `(Rect, &mut Buffer)`; only the terminal
+/// draw boundary ([`crate::chat_widget::ChatWidget::render_frame`]) adapts a
+/// [`crate::terminal::Frame`].
 pub struct ComposerView<'a> {
     composer: &'a Composer,
 }

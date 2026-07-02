@@ -102,8 +102,8 @@ impl ChatWidget {
         }
     }
 
-    /// Replace the startup [`SessionInfo`] snapshot (builder support for
-    /// `RataApp::with_session`).
+    /// Replace the startup [`SessionInfo`] snapshot the screens and the
+    /// model picker render from.
     pub fn set_session(&mut self, session: SessionInfo) {
         self.session = session;
     }
@@ -272,6 +272,20 @@ impl ChatWidget {
     pub fn cursor_style(&self, area: Rect) -> SetCursorStyle {
         let (_, pane_area) = self.split_area(area, self.live_tail_height(area.width));
         self.bottom_pane.cursor_style(pane_area)
+    }
+
+    /// Draw the widget into one terminal [`crate::terminal::Frame`] through
+    /// its own render contract — the thin adapter codex keeps at the terminal
+    /// draw boundary (`App::render_chat_widget_frame`): render into the
+    /// frame's buffer, then copy the widget's cursor claim onto the frame (no
+    /// claim → the terminal hides the cursor).
+    pub fn render_frame(&mut self, frame: &mut crate::terminal::Frame<'_>) {
+        let area = frame.area();
+        self.render(area, frame.buffer_mut());
+        if let Some(pos) = self.cursor_pos(area) {
+            frame.set_cursor_position(pos);
+            frame.set_cursor_style(self.cursor_style(area));
+        }
     }
 
     /// Commit finalized transcript cells into the terminal's native scrollback
@@ -1010,6 +1024,43 @@ mod tests {
             "composer visible:\n{}",
             rows.join("\n")
         );
+    }
+
+    #[test]
+    fn spinner_text_has_frame_activity_elapsed_seconds_and_interrupt_hint() {
+        let mut widget = widget();
+        submit_command(&mut widget, "go");
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        // Default activity: an animation frame glyph, "Working", elapsed
+        // seconds, and the esc-to-interrupt hint (claude-code status parity).
+        let text = widget.spinner_text();
+        let frame = text.chars().next().expect("spinner frame glyph");
+        assert!("·✢✳✶✻✽".contains(frame), "unknown frame: {text}");
+        assert!(text.contains("Working… ("), "verb + elapsed open: {text}");
+        assert!(text.ends_with("s · esc to interrupt)"), "hint: {text}");
+        // ToolUseStart swaps the verb for the activity label.
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("t1"),
+            tool: "Edit".to_string(),
+            input: serde_json::json!({}),
+        });
+        assert!(widget.spinner_text().contains("Editing… ("));
+    }
+
+    #[test]
+    fn activity_label_maps_known_tools_to_gerunds() {
+        assert_eq!(activity_label("Bash"), "Running Bash");
+        assert_eq!(activity_label("BashOutput"), "Running Bash");
+        assert_eq!(activity_label("Read"), "Reading");
+        assert_eq!(activity_label("Write"), "Writing");
+        assert_eq!(activity_label("Edit"), "Editing");
+        assert_eq!(activity_label("MultiEdit"), "Editing");
+        assert_eq!(activity_label("Grep"), "Searching");
+        assert_eq!(activity_label("Glob"), "Searching");
+        assert_eq!(activity_label("WebFetch"), "Browsing");
+        assert_eq!(activity_label("WebSearch"), "Browsing");
+        assert_eq!(activity_label("Task"), "Delegating");
+        assert_eq!(activity_label("SomeMcpTool"), "Running SomeMcpTool");
     }
 
     #[test]

@@ -86,11 +86,13 @@ pub enum BottomPaneOutcome {
     /// Ctrl-O: the owner should toggle transcript verbose mode (and reflect
     /// the new state back via [`BottomPane::set_verbose`]).
     ToggleVerbose,
-    /// Ctrl-C while a task is running: the owner should cancel the turn.
+    /// Ctrl-C or Esc while a task is running: the owner should cancel the
+    /// turn (the interrupt-before-quit half of the layered routing policy —
+    /// acceptance criterion 14).
     Interrupt,
-    /// The user asked to quit (Esc with no local surface to consume it, or a
-    /// second idle Ctrl-C inside the arm window). The owner's quit policy
-    /// applies.
+    /// The user asked to quit (idle Esc with no local surface to consume it,
+    /// or a second idle Ctrl-C inside the arm window). The owner's quit
+    /// policy applies.
     Quit,
     /// A pasted path to an existing image file: the owner should record it as
     /// an image message (the composer text is untouched).
@@ -377,7 +379,18 @@ impl BottomPane {
             self.ctrl_c_at = None;
         }
         match key.code {
-            KeyCode::Esc => BottomPaneOutcome::Quit,
+            // Esc interrupts an in-flight turn (the spinner's "esc to
+            // interrupt" hint); idle it quits. Local surfaces (active view,
+            // completion, vim Normal-mode switch) consumed Esc earlier, so
+            // this is the widget's interrupt/quit policy layer — last, per
+            // acceptance criterion 14 — fed through `status.running`.
+            KeyCode::Esc => {
+                if self.status.running {
+                    BottomPaneOutcome::Interrupt
+                } else {
+                    BottomPaneOutcome::Quit
+                }
+            }
             // Ctrl-C interrupts an in-flight turn; when idle it arms, and a
             // second press within the window quits (claude-code parity).
             KeyCode::Char('c') if ctrl => {
@@ -476,12 +489,11 @@ impl BottomPane {
         let dim = crate::style_adapter::to_ratatui(self.theme.dim);
         if self.status.running {
             let claude = crate::style_adapter::to_ratatui(self.theme.claude);
+            // The spinner text already carries "esc to interrupt"; Esc while
+            // running interrupts (it does NOT quit), so no "Esc: quit" here.
             return Line::from(vec![
                 Span::styled(self.status.text.clone(), Style::default().fg(claude)),
-                Span::styled(
-                    "   ·  Ctrl-C: cancel  ·  Esc: quit",
-                    Style::default().fg(dim),
-                ),
+                Span::styled("   ·  Ctrl-C: cancel", Style::default().fg(dim)),
             ]);
         }
         if self.ctrl_c_armed() {
@@ -1093,6 +1105,31 @@ mod tests {
         ));
         assert!(pane.ctrl_c_armed());
         assert!(matches!(pane.handle_key(ctrl_c), BottomPaneOutcome::Quit));
+    }
+
+    #[test]
+    fn esc_interrupts_when_running_and_quits_when_idle() {
+        let mut pane = pane();
+        pane.set_task_running(BottomPaneStatus {
+            running: true,
+            text: "✻ Working… (1s · esc to interrupt)".to_string(),
+        });
+        // Running + no local surface: Esc surfaces the interrupt intent (the
+        // spinner's "esc to interrupt" hint), never Quit.
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Esc)),
+            BottomPaneOutcome::Interrupt
+        ));
+        assert!(
+            !pane.ctrl_c_armed(),
+            "interrupt does not arm the quit chord"
+        );
+        // Idle again: Esc falls back to the quit policy.
+        pane.set_task_running(BottomPaneStatus::default());
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Esc)),
+            BottomPaneOutcome::Quit
+        ));
     }
 
     #[test]

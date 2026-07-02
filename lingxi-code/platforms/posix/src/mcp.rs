@@ -357,8 +357,11 @@ impl McpTransport for PosixMcpTransport {
                 // passes only the static `headers` map and no auth token. The
                 // `..` rest-pattern skips `headers_helper`/`oauth`. OAuth
                 // integration lands in M2-06.
-                let connection =
-                    Arc::new(connect_sse(url, None, headers).await.map_err(McpError::from)?);
+                let connection = Arc::new(
+                    connect_sse(url, None, headers)
+                        .await
+                        .map_err(McpError::from)?,
+                );
                 // Answer server-initiated keepalive pings with `{}` for parity
                 // with the `Stdio` arm (see its `register_handler` comment).
                 connection
@@ -384,10 +387,7 @@ impl McpTransport for PosixMcpTransport {
         Ok(McpRawConnection { connection_id: id })
     }
 
-    async fn initialize(
-        &self,
-        conn: &McpRawConnection,
-    ) -> Result<ServerCapabilitiesDto, McpError> {
+    async fn initialize(&self, conn: &McpRawConnection) -> Result<ServerCapabilitiesDto, McpError> {
         let connection = self.connection_for_result(conn.connection_id)?;
 
         // Send the MCP `initialize` request. The advertised capabilities and
@@ -604,11 +604,7 @@ impl McpTransport for PosixMcpTransport {
             .map(|d| d.as_millis())
             .unwrap_or(0);
         Ok(mcp::map_resource_contents(
-            contents,
-            "",
-            output_dir,
-            now_millis,
-            "posix",
+            contents, "", output_dir, now_millis, "posix",
         ))
     }
 
@@ -703,8 +699,7 @@ impl McpTransport for PosixMcpTransport {
             // outstanding (e.g. an in-flight `connection_for` handle) — the
             // bare entry drop would otherwise wait for the last `Arc` to go.
             Some(
-                PosixMcpConnection::Sse { connection }
-                | PosixMcpConnection::Http { connection },
+                PosixMcpConnection::Sse { connection } | PosixMcpConnection::Http { connection },
             ) => {
                 connection.close();
             }
@@ -942,7 +937,11 @@ mod initialize_params_tests {
         // Each marker is the LITERAL empty object `{}` — not null, not missing,
         // not `{form:{},url:{}}` (the Java MCP SDK rejects unknown props).
         assert!(caps["roots"].is_object(), "roots must be an object");
-        assert_eq!(caps["roots"].as_object().unwrap().len(), 0, "roots must be EMPTY");
+        assert_eq!(
+            caps["roots"].as_object().unwrap().len(),
+            0,
+            "roots must be EMPTY"
+        );
         assert!(
             caps["elicitation"].is_object(),
             "elicitation must be an object"
@@ -992,7 +991,10 @@ mod initialize_params_tests {
             "websiteUrl must be camelCase, got: {s}",
         );
         // No stale `claude-code` client name and no snake_case `website_url` leak.
-        assert!(!s.contains(r#""name":"claude-code""#), "stale claude-code name leaked");
+        assert!(
+            !s.contains(r#""name":"claude-code""#),
+            "stale claude-code name leaked"
+        );
         assert!(!s.contains("website_url"), "snake_case website_url leaked");
     }
 }

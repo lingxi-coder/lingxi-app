@@ -163,7 +163,10 @@ mod tests {
         // r6r returns "" for t <= 1, so a 1-day memory carries the bare header.
         let out = render_surfacing_block(&[mem("/m/a.md", "B", 1)]);
         assert!(out.contains("Memory: /m/a.md:"));
-        assert!(!out.contains("days old"), "1-day memory must not be stale-prefixed: {out}");
+        assert!(
+            !out.contains("days old"),
+            "1-day memory must not be stale-prefixed: {out}"
+        );
     }
 
     #[test]
@@ -179,23 +182,21 @@ mod tests {
             "got: {out}"
         );
         // idx-0 preamble still precedes the staleness sentence on the first memory.
-        assert!(out.starts_with(
-            "<system-reminder>\nRetrieved for possible relevance \u{2014}"
-        ));
+        assert!(out.starts_with("<system-reminder>\nRetrieved for possible relevance \u{2014}"));
     }
 
     #[test]
     fn idx0_preamble_only_on_first_memory() {
-        let out = render_surfacing_block(&[
-            mem("/m/a.md", "AAA", 0),
-            mem("/m/b.md", "BBB", 0),
-        ]);
+        let out = render_surfacing_block(&[mem("/m/a.md", "AAA", 0), mem("/m/b.md", "BBB", 0)]);
         // Exactly one occurrence of the preamble.
         assert_eq!(out.matches("Retrieved for possible relevance").count(), 1);
         // Both memories present, joined by a blank line.
         assert!(out.contains("Memory: /m/a.md:\n\nAAA"));
         assert!(out.contains("Memory: /m/b.md:\n\nBBB"));
-        assert!(out.contains("AAA\n\nMemory: /m/b.md:"), "blocks joined by blank line: {out}");
+        assert!(
+            out.contains("AAA\n\nMemory: /m/b.md:"),
+            "blocks joined by blank line: {out}"
+        );
     }
 
     #[test]
@@ -204,16 +205,16 @@ mod tests {
         // `<synthesis:...>` first memory now DOES get the em-dash preamble
         // (claude `o === 0` only).
         let out = render_surfacing_block(&[mem("<synthesis:summary>", "SYNTH", 0)]);
-        assert!(out.contains("Retrieved for possible relevance"), "got: {out}");
+        assert!(
+            out.contains("Retrieved for possible relevance"),
+            "got: {out}"
+        );
         assert!(out.contains("Memory: <synthesis:summary>:\n\nSYNTH"));
     }
 
     #[test]
     fn single_system_reminder_envelope_wraps_all_blocks() {
-        let out = render_surfacing_block(&[
-            mem("/m/a.md", "A", 0),
-            mem("/m/b.md", "B", 3),
-        ]);
+        let out = render_surfacing_block(&[mem("/m/a.md", "A", 0), mem("/m/b.md", "B", 3)]);
         // Exactly ONE envelope (not one-per-memory).
         assert_eq!(out.matches("<system-reminder>").count(), 1);
         assert_eq!(out.matches("</system-reminder>").count(), 1);

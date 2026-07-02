@@ -385,9 +385,7 @@ mod tests {
     async fn registry_invoker_unknown_tool_surfaces_not_found() {
         let registry = registry_with_echo();
         let invoker = RegistryToolInvoker::new(registry);
-        let result = invoker
-            .invoke("NotARealTool", json!({}), no_ctx())
-            .await;
+        let result = invoker.invoke("NotARealTool", json!({}), no_ctx()).await;
         match result {
             Err(ToolInvokerError::NotFound(name)) => assert_eq!(name, "NotARealTool"),
             other => panic!("expected NotFound, got {other:?}"),
@@ -684,7 +682,9 @@ mod tests {
         // Named but NOT prompt-eligible (`can_show_permission_prompts = false`)
         // → no worker chrome.
         let seen2 = Arc::new(StdMutex::new(None));
-        let gate2 = Arc::new(WorkerRecordingGate { seen: seen2.clone() });
+        let gate2 = Arc::new(WorkerRecordingGate {
+            seen: seen2.clone(),
+        });
         RegistryToolInvoker::new(registry_with_echo())
             .with_gate(gate2)
             .invoke("TestEcho", json!({}), named_ctx(false))
@@ -749,16 +749,26 @@ mod tests {
         });
         let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
         invoker
-            .invoke("TestEcho", json!({ "a": 1 }), ctx_with_tool_use_id("toolu_abc123"))
+            .invoke(
+                "TestEcho",
+                json!({ "a": 1 }),
+                ctx_with_tool_use_id("toolu_abc123"),
+            )
             .await
             .expect("allow dispatches");
-        let ctx = seen.lock().unwrap().clone().expect("context gate consulted");
+        let ctx = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("context gate consulted");
         assert_eq!(
             ctx.tool_use_id.as_deref(),
             Some("toolu_abc123"),
             "the dispatching call's real tool_use_id reaches PermissionCheckContext.tool_use_id"
         );
-        let worker = ctx.worker.expect("a named, prompt-eligible worker is attributed");
+        let worker = ctx
+            .worker
+            .expect("a named, prompt-eligible worker is attributed");
         assert_eq!(worker.name, "researcher");
         assert_eq!(worker.team.as_deref(), Some("alpha"));
         assert!(worker.is_async);
@@ -779,7 +789,11 @@ mod tests {
         });
         let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
         let out = invoker
-            .invoke("TestEcho", json!({ "original": true }), ctx_with_tool_use_id("toolu_x"))
+            .invoke(
+                "TestEcho",
+                json!({ "original": true }),
+                ctx_with_tool_use_id("toolu_x"),
+            )
             .await
             .expect("allow dispatches");
         assert_eq!(

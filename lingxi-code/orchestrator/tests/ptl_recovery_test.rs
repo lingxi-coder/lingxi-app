@@ -11,9 +11,9 @@
 //!   retry budget the loop attempts ONE reactive full compact and retries; when
 //!   that STILL 413s, the turn ends with the byte-exact
 //!   `PROMPT_TOO_LONG_ERROR_MESSAGE` assistant message (no hard error bubbled).
-use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
 use async_trait::async_trait;
 use compaction::CompactionOrchestrator;
+use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
 use orchestrator::test_support::{
     mock_message_response, noop_hook_executor, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
@@ -121,12 +121,16 @@ async fn seed_rounds(orch: &ConversationOrchestrator, rounds: usize) {
     for i in 0..rounds {
         s.history.push(ConversationMessage::user(
             MessageId::new(),
-            format!("round-{i} user message with filler text to give the round a real token estimate"),
+            format!(
+                "round-{i} user message with filler text to give the round a real token estimate"
+            ),
         ));
         s.history.push(ConversationMessage::Assistant {
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
-                text: format!("round-{i} assistant reply with filler text to give the round weight"),
+                text: format!(
+                    "round-{i} assistant reply with filler text to give the round weight"
+                ),
             }],
             stop_reason: Some("end_turn".to_string()),
         });
@@ -202,8 +206,7 @@ async fn ptl_exhausted_attempts_reactive_compact_then_surfaces_error() {
     // Script: PTL on every call (more than MAX_PTL_RETRIES + the one
     // reactive-compact retry), so recovery exhausts and the turn ends with the
     // byte-exact error message.
-    let script: Vec<Result<LlmResponse, LlmError>> =
-        (0..12).map(|_| ptl_err(500)).collect();
+    let script: Vec<Result<LlmResponse, LlmError>> = (0..12).map(|_| ptl_err(500)).collect();
     let api = Arc::new(PtlMockApi::new(script));
     // Low-threshold compactor so the reactive full-compact fallback actually
     // fires (autocompact > snip-alone) and we exercise the apply_post_compact
@@ -214,7 +217,9 @@ async fn ptl_exhausted_attempts_reactive_compact_then_surfaces_error() {
 
     // The turn must NOT bubble a hard error — it ends normally with the
     // prompt-too-long assistant message.
-    orch.run_turn("trigger").await.expect("turn ends without bubbling a hard error");
+    orch.run_turn("trigger")
+        .await
+        .expect("turn ends without bubbling a hard error");
 
     // A compaction must have been attempted during recovery. We assert this via
     // the `CompactionCompleted` output event rather than a surviving boundary

@@ -28,14 +28,20 @@ fn with_image_attaches_to_last_user_message_or_starts_one() {
     let mut request = LlmRequest::new("vision-model").with_user_text("look at this");
     request.messages.push(llm_client::Message {
         role: "assistant".to_string(),
-        content: vec![ContentBlock::Text { text: "ok".to_string(), cache_control: None }],
+        content: vec![ContentBlock::Text {
+            text: "ok".to_string(),
+            cache_control: None,
+        }],
     });
 
     let request = request.with_image("image/png", vec![1, 2, 3]);
 
     let last = request.messages.last().expect("messages");
     assert_eq!(last.role, "user");
-    assert!(matches!(last.content.as_slice(), [ContentBlock::Image { .. }]));
+    assert!(matches!(
+        last.content.as_slice(),
+        [ContentBlock::Image { .. }]
+    ));
 }
 
 #[test]
@@ -65,7 +71,9 @@ fn image_url_block_requires_vision_capability() {
     let mut request = LlmRequest::new("m");
     request.messages.push(Message {
         role: "user".to_string(),
-        content: vec![ContentBlock::ImageUrl { url: "https://x/y.png".to_string() }],
+        content: vec![ContentBlock::ImageUrl {
+            url: "https://x/y.png".to_string(),
+        }],
     });
     let capabilities = Capabilities {
         streaming: true,
@@ -85,7 +93,9 @@ fn image_url_block_requires_vision_capability() {
 #[test]
 fn reasoning_config_requires_reasoning_capability() {
     let mut request = LlmRequest::new("m").with_user_text("hi");
-    request.reasoning = Some(llm_client::ReasoningConfig::Enabled { budget_tokens: 1024 });
+    request.reasoning = Some(llm_client::ReasoningConfig::Enabled {
+        budget_tokens: 1024,
+    });
     let capabilities = Capabilities {
         streaming: true,
         tools: true,

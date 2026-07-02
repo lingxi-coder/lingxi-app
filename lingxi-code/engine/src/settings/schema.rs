@@ -272,9 +272,13 @@ mod tests {
         let json = r#"{
             "permissions": { "allow": ["Bash(npm run *)"], "deny": ["Read(./secrets/**)"], "ask": [], "defaultMode": "default" }
         }"#;
-        let parsed: SettingsJson = serde_json::from_str(json).expect("permissions block must parse");
+        let parsed: SettingsJson =
+            serde_json::from_str(json).expect("permissions block must parse");
         assert!(parsed.permissions.is_some());
-        assert!(strategy_for("permissions").is_some(), "permissions has a merge strategy");
+        assert!(
+            strategy_for("permissions").is_some(),
+            "permissions has a merge strategy"
+        );
     }
 
     #[test]
@@ -290,7 +294,10 @@ mod tests {
         let parsed: SettingsJson =
             serde_json::from_str(json).expect("string outputStyle must parse");
         assert_eq!(parsed.output_style.as_deref(), Some("Explanatory"));
-        assert!(parsed.model.is_some(), "sibling fields must survive the load");
+        assert!(
+            parsed.model.is_some(),
+            "sibling fields must survive the load"
+        );
         // Scalar-override, not deep-merge.
         assert!(
             strategy_for("outputStyle").is_none(),

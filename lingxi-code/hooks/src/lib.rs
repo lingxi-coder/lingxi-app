@@ -39,11 +39,11 @@ pub use async_registry::AsyncHookRegistry;
 pub use cwd_changed_firer::{CwdChangedFire, CwdChangedFirer, OptionalCwdChangedFirer};
 pub use definition::{HookCondition, HookDefinition, HookExecutor, HookSource};
 pub use events::{HookEvent, HookEventType, HookProgressEvent};
-pub use file_changed_firer::{FileChangedFire, FileChangedFirer, OptionalFileChangedFirer};
 pub use executor::{
     BuiltinHookHandler, HookExecutorImpl, HOOK_AGENT_TIMEOUT_MS, HOOK_COMMAND_TIMEOUT_MS,
     HOOK_HTTP_TIMEOUT_MS,
 };
+pub use file_changed_firer::{FileChangedFire, FileChangedFirer, OptionalFileChangedFirer};
 pub use hook_payload::{
     parse_response, HookBackgroundTask, HookEventEnvelope, HookEventNamePost, HookEventNamePre,
     HookResponseParseError, HookSessionCron, PostToolUsePayload, PreToolUsePayload,
@@ -61,10 +61,6 @@ pub use response::{
     HookResult,
 };
 pub use ssrf_guard::{IpRange, SsrfError, SsrfGuard};
-pub use task_completed_firer::{
-    OptionalTaskCompletedFirer, TaskCompletedFire, TaskCompletedFirer,
-};
+pub use task_completed_firer::{OptionalTaskCompletedFirer, TaskCompletedFire, TaskCompletedFirer};
 pub use task_created_firer::{OptionalTaskCreatedFirer, TaskCreatedFire, TaskCreatedFirer};
-pub use teammate_idle_firer::{
-    OptionalTeammateIdleFirer, TeammateIdleFire, TeammateIdleFirer,
-};
+pub use teammate_idle_firer::{OptionalTeammateIdleFirer, TeammateIdleFire, TeammateIdleFirer};

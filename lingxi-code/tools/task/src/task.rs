@@ -227,10 +227,7 @@ fn agent_swarms_enabled_inner(user_type_ant: bool, experimental_env: bool) -> bo
 #[must_use]
 pub fn is_agent_swarms_enabled() -> bool {
     let user_type_ant = std::env::var("USER_TYPE").is_ok_and(|v| v == "ant");
-    agent_swarms_enabled_inner(
-        user_type_ant,
-        env_truthy("LINGXI_EXPERIMENTAL_AGENT_TEAMS"),
-    )
+    agent_swarms_enabled_inner(user_type_ant, env_truthy("LINGXI_EXPERIMENTAL_AGENT_TEAMS"))
 }
 
 // ==== Verification nudge (sub-batch [5]) ====================================
@@ -1477,8 +1474,14 @@ impl Tool for TaskUpdateTool {
             Some("in_progress") => StatusInput::State(TodoState::InProgress),
             Some("completed") => StatusInput::State(TodoState::Completed),
             Some(other) => {
-                emit_failed(&bus, TASK_UPDATE_FAILED, &invocation_id, "invalid_status", duration())
-                    .await;
+                emit_failed(
+                    &bus,
+                    TASK_UPDATE_FAILED,
+                    &invocation_id,
+                    "invalid_status",
+                    duration(),
+                )
+                .await;
                 return Err(ToolError::InvalidInput(format!(
                     "TaskUpdate: invalid status '{other}'"
                 )));
@@ -1686,7 +1689,8 @@ impl Tool for TaskUpdateTool {
         // address is that same name/label, which the router resolves to an id
         // (or accepts as the `team-lead` label).
         if is_agent_swarms_enabled() {
-            if let (Some(owner), Some(router)) = (new_owner.clone(), self.ctx.mailbox_router.clone())
+            if let (Some(owner), Some(router)) =
+                (new_owner.clone(), self.ctx.mailbox_router.clone())
             {
                 let sender_name = ctx
                     .agent_name
@@ -2270,10 +2274,7 @@ fn format_task_output(output: &str, task_id: &str, output_path: Option<&str>) ->
 /// (lines 283-308): the XML render of a `retrieval_status` + optional `task`,
 /// joined by a single newline (`n.join("\n")`). Fed to the model verbatim via
 /// the `content` key.
-fn render_task_output(
-    retrieval_status: &str,
-    task: Option<&TaskOutputView>,
-) -> String {
+fn render_task_output(retrieval_status: &str, task: Option<&TaskOutputView>) -> String {
     let mut parts: Vec<String> = Vec::new();
     parts.push(format!(
         "<retrieval_status>{retrieval_status}</retrieval_status>"
@@ -2290,8 +2291,7 @@ fn render_task_output(
         // `output?.trim()`), then truncate-and-format and `.trimEnd()` the
         // result (TS: `formatTaskOutput(output, task_id)` → `content.trimEnd()`).
         if !t.output.trim().is_empty() {
-            let formatted =
-                format_task_output(&t.output, &t.task_id, t.output_path.as_deref());
+            let formatted = format_task_output(&t.output, &t.task_id, t.output_path.as_deref());
             parts.push(format!("<output>\n{}\n</output>", formatted.trim_end()));
         }
         // `<error>` AFTER `<output>` (TS `mapToolResultToToolResultBlockParam`
@@ -2367,7 +2367,12 @@ impl Tool for TaskOutputTool {
     /// Backwards-compatible aliases for the renamed tools
     /// (`TaskOutputTool.tsx:150`).
     fn aliases(&self) -> &[&str] {
-        const ALIASES: &[&str] = &["AgentOutputTool", "BashOutputTool", "AgentOutput", "BashOutput"];
+        const ALIASES: &[&str] = &[
+            "AgentOutputTool",
+            "BashOutputTool",
+            "AgentOutput",
+            "BashOutput",
+        ];
         ALIASES
     }
     /// `searchHint: 'read output/logs from a background task'`
@@ -2600,7 +2605,10 @@ impl Tool for TaskOutputTool {
             task_type: record.task_type.clone(),
             // Status from the (latest) chunk; fall back to the record if the
             // registry could not resolve it at the chunk point.
-            status: chunk.status.clone().unwrap_or_else(|| record.status.clone()),
+            status: chunk
+                .status
+                .clone()
+                .unwrap_or_else(|| record.status.clone()),
             description: record.description.clone(),
             output,
             exit_code: chunk.exit_code,

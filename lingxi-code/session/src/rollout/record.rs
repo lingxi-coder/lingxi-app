@@ -203,8 +203,7 @@ impl<'de> Deserialize<'de> for SessionMetaLine {
         // map; drop it from the value before re-deserializing so it does not
         // also land in `meta.extra`.
         let git_value = fields.remove("git");
-        let Fields { mut meta, .. } =
-            serde_json::from_value(value).map_err(D::Error::custom)?;
+        let Fields { mut meta, .. } = serde_json::from_value(value).map_err(D::Error::custom)?;
         meta.extra.remove("git");
         let git = match git_value {
             Some(Value::Null) | None => None,

@@ -628,7 +628,10 @@ mod tests {
     fn sentinel_constants_locked() {
         let _g = guard();
         assert_eq!(AUTONOMOUS_LOOP_SENTINEL, "<<autonomous-loop>>");
-        assert_eq!(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL, "<<autonomous-loop-dynamic>>");
+        assert_eq!(
+            AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
+            "<<autonomous-loop-dynamic>>"
+        );
         assert_eq!(LOOP_FILE_SENTINEL, "<<loop.md>>");
         assert_eq!(LOOP_FILE_DYNAMIC_SENTINEL, "<<loop.md-dynamic>>");
     }
@@ -758,7 +761,10 @@ mod tests {
     fn non_sentinel_passes_through() {
         let _g = guard();
         let cwd = std::env::temp_dir();
-        assert_eq!(resolve_loop_default_fire("5m /babysit-prs", &cwd), "5m /babysit-prs");
+        assert_eq!(
+            resolve_loop_default_fire("5m /babysit-prs", &cwd),
+            "5m /babysit-prs"
+        );
         assert!(resolve_autonomous_loop_fire("5m /x").is_none());
         assert!(resolve_loop_file_fire("5m /x", &cwd).is_none());
     }

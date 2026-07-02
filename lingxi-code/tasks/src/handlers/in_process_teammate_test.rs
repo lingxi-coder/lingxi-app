@@ -55,8 +55,7 @@ impl FileSystem for InMemoryFs {
     async fn watch(
         &self,
         _: &str,
-    ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = FileEvent> + Send>>, FsError>
-    {
+    ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = FileEvent> + Send>>, FsError> {
         Err(FsError::Io("not supported".into()))
     }
     async fn append_file(&self, path: &str, body: &str) -> Result<(), FsError> {
@@ -247,8 +246,7 @@ fn make_handler_with_sink(
         8,
     ));
     let sink = Arc::new(RecordingSink::default());
-    let handler =
-        InProcessTeammateHandler::new(pool, output, api).with_status_sink(sink.clone());
+    let handler = InProcessTeammateHandler::new(pool, output, api).with_status_sink(sink.clone());
     (dir, fs, runtime, handler, sink)
 }
 
@@ -314,9 +312,17 @@ async fn build_context_resolves_inherit_to_default_model() {
         .resolve(&protocol::AgentId::new(), "lead")
         .unwrap();
     let ctx = handler
-        .build_context(protocol::AgentId::new(), "lead", "alpha", "go research", def)
+        .build_context(
+            protocol::AgentId::new(),
+            "lead",
+            "alpha",
+            "go research",
+            def,
+        )
         .await;
-    assert!(matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-opus-4-7"));
+    assert!(
+        matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-opus-4-7")
+    );
     // Swarm identity threaded onto the context (claude-code
     // `TeammateContext.agentName` / `.teamName`).
     assert_eq!(ctx.agent_name.as_deref(), Some("lead"));
@@ -352,10 +358,19 @@ async fn build_context_wires_budget_description_and_tool_resolution() {
         .resolve(&protocol::AgentId::new(), "lead")
         .unwrap();
     let ctx = handler
-        .build_context(protocol::AgentId::new(), "lead", "alpha", "do the task", def)
+        .build_context(
+            protocol::AgentId::new(),
+            "lead",
+            "alpha",
+            "do the task",
+            def,
+        )
         .await;
     // Budget inherited (was None before this fix).
-    assert!(ctx.budget.is_some(), "teammate must inherit the budget enforcer");
+    assert!(
+        ctx.budget.is_some(),
+        "teammate must inherit the budget enforcer"
+    );
     // Description seeded as the first user message (was empty before).
     assert_eq!(ctx.prompt_messages.len(), 1);
     assert_eq!(ctx.prompt_messages[0].text_content(), "do the task");
@@ -431,7 +446,10 @@ async fn build_context_opusplan_default_mode_returns_resolved_parent() {
     // resolver, exactly as the composition root produces it.
     let _g = OpusEnvGuard::clear_providers();
     let parent = agent::model_resolution::resolve_user_specified_model("opusplan");
-    assert_eq!(parent, "claude-sonnet-4-6", "opusplan resolves to Sonnet outside plan mode");
+    assert_eq!(
+        parent, "claude-sonnet-4-6",
+        "opusplan resolves to Sonnet outside plan mode"
+    );
     let handler = model_test_handler(Some(&parent))
         .with_permission_mode(PermissionMode::Default)
         .with_model_setting("opusplan");
@@ -535,7 +553,11 @@ async fn spawn_send_message_then_kill_lifecycle() {
         .unwrap();
     assert!(h.task_id.starts_with('t'), "teammate ids prefix 't'");
     assert!(h.cleanup.is_some(), "cleanup hook present");
-    assert_eq!(handler.entries.lock().await.len(), 1, "spawn registers slot");
+    assert_eq!(
+        handler.entries.lock().await.len(),
+        1,
+        "spawn registers slot"
+    );
 
     let spool = dir.path().join(format!("{}.output", h.task_id));
     let spool_str = spool.to_str().unwrap().to_string();
@@ -716,10 +738,7 @@ fn make_handler_with_idle_firer(
 /// Yield until the firer has recorded at least `n` fires, or the budget runs
 /// out. Returns the recorded fires.
 #[allow(clippy::similar_names)] // `fires` is the plural noun form of `firer`'s fires method
-async fn await_fires(
-    firer: &Arc<RecordingIdleFirer>,
-    n: usize,
-) -> Vec<hooks::TeammateIdleFire> {
+async fn await_fires(firer: &Arc<RecordingIdleFirer>, n: usize) -> Vec<hooks::TeammateIdleFire> {
     for _ in 0..400 {
         let fires = firer.fires();
         if fires.len() >= n {
@@ -807,7 +826,10 @@ async fn no_idle_firer_is_a_noop() {
     let spool = dir.path().join(format!("{}.output", h.task_id));
     let spool_str = spool.to_str().unwrap().to_string();
     let body = await_spool(&fs, &spool_str, |b| b.contains("answer one")).await;
-    assert!(body.contains("completed:"), "turn-set still completes: {body:?}");
+    assert!(
+        body.contains("completed:"),
+        "turn-set still completes: {body:?}"
+    );
 
     handler.kill(&h.task_id, c).await.unwrap();
 }

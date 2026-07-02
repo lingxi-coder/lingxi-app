@@ -98,7 +98,8 @@ pub fn parse_tasks(body: &str) -> ScheduledTasks {
 pub fn serialize_tasks(tasks: &ScheduledTasks) -> String {
     // `serde_json::to_string_pretty` uses a 2-space indent (matching
     // `JSON.stringify(_, null, 2)`); append the trailing newline claude-code adds.
-    let mut s = serde_json::to_string_pretty(tasks).unwrap_or_else(|_| "{\n  \"tasks\": []\n}".into());
+    let mut s =
+        serde_json::to_string_pretty(tasks).unwrap_or_else(|_| "{\n  \"tasks\": []\n}".into());
     s.push('\n');
     s
 }

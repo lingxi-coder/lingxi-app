@@ -228,7 +228,17 @@ mod tests {
         let a = build_pdftoppm_args(5, 5, Path::new("/in.pdf"), Path::new("/tmp/x/page"));
         assert_eq!(
             args_as_strings(&a),
-            vec!["-jpeg", "-r", "100", "-f", "5", "-l", "5", "/in.pdf", "/tmp/x/page"]
+            vec![
+                "-jpeg",
+                "-r",
+                "100",
+                "-f",
+                "5",
+                "-l",
+                "5",
+                "/in.pdf",
+                "/tmp/x/page"
+            ]
         );
     }
 
@@ -237,7 +247,17 @@ mod tests {
         let a = build_pdftoppm_args(2, 7, Path::new("/in.pdf"), Path::new("/tmp/x/page"));
         assert_eq!(
             args_as_strings(&a),
-            vec!["-jpeg", "-r", "100", "-f", "2", "-l", "7", "/in.pdf", "/tmp/x/page"]
+            vec![
+                "-jpeg",
+                "-r",
+                "100",
+                "-f",
+                "2",
+                "-l",
+                "7",
+                "/in.pdf",
+                "/tmp/x/page"
+            ]
         );
     }
 
@@ -278,7 +298,11 @@ mod tests {
 
     #[test]
     fn classify_corrupted() {
-        for s in ["the file is damaged", "May not be a PDF (corrupt)", "Invalid XRef"] {
+        for s in [
+            "the file is damaged",
+            "May not be a PDF (corrupt)",
+            "Invalid XRef",
+        ] {
             assert!(
                 matches!(classify_pdftoppm_failure(s), PdfRenderError::Corrupted),
                 "stderr {s:?} should classify corrupted"
@@ -330,11 +354,20 @@ mod tests {
     fn telemetry_codes_are_stable() {
         assert_eq!(PdfRenderError::Empty.telemetry_code(), "pdf_empty");
         assert_eq!(PdfRenderError::TooLarge.telemetry_code(), "pdf_too_large");
-        assert_eq!(PdfRenderError::Unavailable.telemetry_code(), "pdf_unavailable");
-        assert_eq!(PdfRenderError::PasswordProtected.telemetry_code(), "pdf_password_protected");
+        assert_eq!(
+            PdfRenderError::Unavailable.telemetry_code(),
+            "pdf_unavailable"
+        );
+        assert_eq!(
+            PdfRenderError::PasswordProtected.telemetry_code(),
+            "pdf_password_protected"
+        );
         assert_eq!(PdfRenderError::Corrupted.telemetry_code(), "pdf_corrupted");
         assert_eq!(PdfRenderError::NoOutput.telemetry_code(), "pdf_no_output");
-        assert_eq!(PdfRenderError::Unknown(String::new()).telemetry_code(), "pdf_unknown");
+        assert_eq!(
+            PdfRenderError::Unknown(String::new()).telemetry_code(),
+            "pdf_unknown"
+        );
     }
 
     // A valid minimal 1-page PDF (same fixture pdf_read uses). pdftoppm renders one

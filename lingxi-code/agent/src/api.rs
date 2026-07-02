@@ -198,7 +198,13 @@ mod tests {
         // Calling the NEW profile-aware method on a mock that only implements
         // the legacy one must transparently fall through to `messages_create`.
         let resp = client
-            .messages_create_in("some-model", Some("a-profile"), None, Vec::new(), Vec::new())
+            .messages_create_in(
+                "some-model",
+                Some("a-profile"),
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await;
         assert!(resp.is_ok(), "default messages_create_in delegates cleanly");
         assert_eq!(

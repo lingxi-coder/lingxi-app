@@ -1,4 +1,3 @@
-
 use memory::lingxi_md::LingxiMdTier;
 use orchestrator::prompt::{memory_block, MemoryFile};
 use std::path::PathBuf;
@@ -111,7 +110,10 @@ fn conditional_rule_with_paths_is_excluded_from_eager_block() {
     assert_eq!(eager[0].path, included.path);
     let out = memory_block::format(&eager);
     assert!(out.contains("always"));
-    assert!(!out.contains("scoped"), "conditional rule must not be injected");
+    assert!(
+        !out.contains("scoped"),
+        "conditional rule must not be injected"
+    );
 }
 
 #[tokio::test]

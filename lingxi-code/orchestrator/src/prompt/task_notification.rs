@@ -264,7 +264,9 @@ mod tests {
         n.exit_code = Some(2);
         let block = render_one(&n);
         assert!(
-            block.contains("<summary>Background command \"build\" failed with exit code 2</summary>"),
+            block.contains(
+                "<summary>Background command \"build\" failed with exit code 2</summary>"
+            ),
             "got: {block}"
         );
     }
@@ -310,8 +312,9 @@ mod tests {
             render_one(&n)
         );
         n.error = None;
-        assert!(render_one(&n)
-            .contains("<summary>Agent \"research\" failed: Unknown error</summary>"));
+        assert!(
+            render_one(&n).contains("<summary>Agent \"research\" failed: Unknown error</summary>")
+        );
     }
 
     #[test]
@@ -360,7 +363,10 @@ mod tests {
             duration_ms: 1,
         });
         let block = render_one(&n);
-        assert!(!block.contains("<result>"), "no result section; got: {block}");
+        assert!(
+            !block.contains("<result>"),
+            "no result section; got: {block}"
+        );
         assert!(
             block.contains(
                 "<usage><subagent_tokens>5</subagent_tokens><tool_uses>0</tool_uses><duration_ms>1</duration_ms></usage>"
@@ -375,7 +381,9 @@ mod tests {
         n.tool_use_id = Some("toolu_42".to_string());
         let block = render_one(&n);
         assert!(
-            block.contains("<task-id>b12345678</task-id>\n<tool-use-id>toolu_42</tool-use-id>\n<output-file>"),
+            block.contains(
+                "<task-id>b12345678</task-id>\n<tool-use-id>toolu_42</tool-use-id>\n<output-file>"
+            ),
             "got: {block}"
         );
     }
@@ -409,7 +417,10 @@ mod tests {
     fn generic_type_uses_task_type_tag_and_status_text() {
         let n = base("w12345678", "local_workflow", "completed", "deploy");
         let block = render_one(&n);
-        assert!(block.contains("<task-type>local_workflow</task-type>"), "got: {block}");
+        assert!(
+            block.contains("<task-type>local_workflow</task-type>"),
+            "got: {block}"
+        );
         assert!(
             block.contains("<summary>Task \"deploy\" completed successfully</summary>"),
             "got: {block}"

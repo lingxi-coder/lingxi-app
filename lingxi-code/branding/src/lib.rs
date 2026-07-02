@@ -104,8 +104,15 @@ mod tests {
         assert_eq!(PRODUCT_NAME, "LingXi");
         assert_eq!(ENV_PREFIX, "LINGXI_");
         // No Claude namespace leaks in our own values.
-        for v in [DOT_DIR, GLOBAL_CONFIG_FILE, CONFIG_DIR_ENV, MEMORY_FILE,
-                  MEMORY_LOCAL_FILE, PLUGIN_MANIFEST_DIR, ENV_PREFIX] {
+        for v in [
+            DOT_DIR,
+            GLOBAL_CONFIG_FILE,
+            CONFIG_DIR_ENV,
+            MEMORY_FILE,
+            MEMORY_LOCAL_FILE,
+            PLUGIN_MANIFEST_DIR,
+            ENV_PREFIX,
+        ] {
             assert!(!v.to_lowercase().contains("claude"), "claude leak: {v}");
         }
     }

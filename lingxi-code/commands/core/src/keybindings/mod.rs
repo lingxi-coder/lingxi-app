@@ -73,8 +73,8 @@ pub mod types;
 pub mod validate;
 
 pub use keymap::{InputKey, Keymap, Resolution};
-pub use resolver::get_binding_display_text;
 pub use loader::{load_keybindings, KeybindingsLoadResult};
+pub use resolver::get_binding_display_text;
 pub use types::{Chord, KeybindingBlock, ParsedBinding, ParsedKeystroke};
 pub use validate::{KeybindingWarning, KeybindingWarningType};
 

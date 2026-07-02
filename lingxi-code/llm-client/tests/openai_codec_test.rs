@@ -9,67 +9,90 @@ use llm_client::{
 #[test]
 fn decode_content_array_single_text_part() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let response = ProviderResponse::json(200, serde_json::json!({
-        "id": "chatcmpl-arr1",
-        "model": "gpt-4o",
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": [{"type": "text", "text": "hello array"}]}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 3, "completion_tokens": 2}
-    }));
+    let response = ProviderResponse::json(
+        200,
+        serde_json::json!({
+            "id": "chatcmpl-arr1",
+            "model": "gpt-4o",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": [{"type": "text", "text": "hello array"}]}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2}
+        }),
+    );
     let decoded = codec.decode_response(response).unwrap();
     assert_eq!(decoded.content.len(), 1);
-    assert!(matches!(&decoded.content[0], ContentBlock::Text { text, .. } if text == "hello array"));
+    assert!(
+        matches!(&decoded.content[0], ContentBlock::Text { text, .. } if text == "hello array")
+    );
 }
 
 #[test]
 fn decode_content_array_multi_text_parts_concatenated() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let response = ProviderResponse::json(200, serde_json::json!({
-        "id": "chatcmpl-arr2",
-        "model": "gpt-4o",
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": [
-            {"type": "text", "text": "hello "},
-            {"type": "text", "text": "world"}
-        ]}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 3, "completion_tokens": 2}
-    }));
+    let response = ProviderResponse::json(
+        200,
+        serde_json::json!({
+            "id": "chatcmpl-arr2",
+            "model": "gpt-4o",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "hello "},
+                {"type": "text", "text": "world"}
+            ]}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2}
+        }),
+    );
     let decoded = codec.decode_response(response).unwrap();
     // Multi text parts should produce one block (concatenated) or multiple - both fine; just confirm text is present
-    let text: String = decoded.content.iter().filter_map(|b| match b {
-        ContentBlock::Text { text, .. } => Some(text.as_str()),
-        _ => None,
-    }).collect();
+    let text: String = decoded
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
     assert!(text.contains("hello") && text.contains("world"));
 }
 
 #[test]
 fn decode_content_array_unknown_part_types_are_skipped() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let response = ProviderResponse::json(200, serde_json::json!({
-        "id": "chatcmpl-arr3",
-        "model": "gpt-4o",
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": [
-            {"type": "text", "text": "known"},
-            {"type": "refusal", "refusal": "I can't do that"},
-            {"type": "future_type", "data": "ignored"}
-        ]}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 3, "completion_tokens": 2}
-    }));
+    let response = ProviderResponse::json(
+        200,
+        serde_json::json!({
+            "id": "chatcmpl-arr3",
+            "model": "gpt-4o",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "known"},
+                {"type": "refusal", "refusal": "I can't do that"},
+                {"type": "future_type", "data": "ignored"}
+            ]}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2}
+        }),
+    );
     let decoded = codec.decode_response(response).unwrap();
     // Only text part should appear
-    assert!(decoded.content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. } if text == "known")));
+    assert!(decoded
+        .content
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Text { text, .. } if text == "known")));
 }
 
 #[test]
 fn decode_content_string_still_works() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let response = ProviderResponse::json(200, serde_json::json!({
-        "id": "chatcmpl-str",
-        "model": "gpt-4o",
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": "plain string"}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 3, "completion_tokens": 2}
-    }));
+    let response = ProviderResponse::json(
+        200,
+        serde_json::json!({
+            "id": "chatcmpl-str",
+            "model": "gpt-4o",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "plain string"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2}
+        }),
+    );
     let decoded = codec.decode_response(response).unwrap();
-    assert!(matches!(&decoded.content[0], ContentBlock::Text { text, .. } if text == "plain string"));
+    assert!(
+        matches!(&decoded.content[0], ContentBlock::Text { text, .. } if text == "plain string")
+    );
 }
 
 // ── Item 3: OpenAI image encode ───────────────────────────────────────────────
@@ -101,7 +124,9 @@ fn encode_image_url_produces_url_part() {
     let mut request = LlmRequest::new("gpt-4o");
     request.messages.push(Message {
         role: "user".to_string(),
-        content: vec![ContentBlock::ImageUrl { url: "https://example.com/img.png".to_string() }],
+        content: vec![ContentBlock::ImageUrl {
+            url: "https://example.com/img.png".to_string(),
+        }],
     });
     let provider_request = codec.encode_request(&request).unwrap();
     let msg = &provider_request.body_json["messages"][0];
@@ -118,8 +143,14 @@ fn encode_mixed_text_and_image_becomes_array_form() {
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![
-            ContentBlock::Text { text: "look at this".to_string(), cache_control: None },
-            ContentBlock::Image { media_type: "image/jpeg".to_string(), bytes: vec![0xDE, 0xAD] },
+            ContentBlock::Text {
+                text: "look at this".to_string(),
+                cache_control: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/jpeg".to_string(),
+                bytes: vec![0xDE, 0xAD],
+            },
         ],
     });
     let provider_request = codec.encode_request(&request).unwrap();
@@ -138,7 +169,10 @@ fn encode_text_only_message_stays_plain_string() {
     let request = LlmRequest::new("gpt-4o").with_user_text("just text");
     let provider_request = codec.encode_request(&request).unwrap();
     let content = &provider_request.body_json["messages"][0]["content"];
-    assert!(content.is_string(), "text-only should be plain string, got: {content}");
+    assert!(
+        content.is_string(),
+        "text-only should be plain string, got: {content}"
+    );
 }
 
 #[test]
@@ -165,7 +199,10 @@ fn encode_document_produces_file_part() {
     assert_eq!(part["file"]["filename"], "document");
     let data_uri = part["file"]["file_data"].as_str().unwrap();
     let expected_b64 = base64::engine::general_purpose::STANDARD.encode(&pdf_bytes);
-    assert_eq!(data_uri, format!("data:application/pdf;base64,{expected_b64}"));
+    assert_eq!(
+        data_uri,
+        format!("data:application/pdf;base64,{expected_b64}")
+    );
 }
 
 #[test]
@@ -175,7 +212,10 @@ fn encode_mixed_text_and_document_becomes_array_form() {
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![
-            ContentBlock::Text { text: "see the attached".to_string(), cache_control: None },
+            ContentBlock::Text {
+                text: "see the attached".to_string(),
+                cache_control: None,
+            },
             ContentBlock::Document {
                 media_type: "application/pdf".to_string(),
                 bytes: vec![0x25, 0x50, 0x44, 0x46],
@@ -184,7 +224,10 @@ fn encode_mixed_text_and_document_becomes_array_form() {
     });
     let provider_request = codec.encode_request(&request).unwrap();
     let content = &provider_request.body_json["messages"][0]["content"];
-    assert!(content.is_array(), "mixed text+document must produce array form");
+    assert!(
+        content.is_array(),
+        "mixed text+document must produce array form"
+    );
     let parts = content.as_array().unwrap();
     assert_eq!(parts.len(), 2);
     assert_eq!(parts[0]["type"], "text");
@@ -214,12 +257,15 @@ fn encode_request_shape_is_openai_chat_completions() {
 #[test]
 fn decode_text_and_tool_responses() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let text = ProviderResponse::json(200, serde_json::json!({
-        "id":"chatcmpl-x",
-        "model":"gpt-4o-2024-08-06",
-        "choices":[{"index":0,"message":{"role":"assistant","content":"hi there"},"finish_reason":"stop"}],
-        "usage":{"prompt_tokens":9,"completion_tokens":3}
-    }));
+    let text = ProviderResponse::json(
+        200,
+        serde_json::json!({
+            "id":"chatcmpl-x",
+            "model":"gpt-4o-2024-08-06",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"hi there"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":9,"completion_tokens":3}
+        }),
+    );
     let decoded = codec.decode_response(text).unwrap();
     assert_eq!(decoded.model, "gpt-4o-2024-08-06");
     assert_eq!(decoded.usage.billable_tokens.input, 9);
@@ -227,13 +273,18 @@ fn decode_text_and_tool_responses() {
     assert!(matches!(decoded.content[0], ContentBlock::Text { .. }));
     assert_eq!(decoded.stop_reason.as_deref(), Some("end_turn"));
 
-    let tool = ProviderResponse::json(200, serde_json::json!({
-        "id":"chatcmpl-y",
-        "model":"gpt-4o",
-        "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"Bash","arguments":"{\"command\":\"ls\"}"}}]},"finish_reason":"tool_calls"}]
-    }));
+    let tool = ProviderResponse::json(
+        200,
+        serde_json::json!({
+            "id":"chatcmpl-y",
+            "model":"gpt-4o",
+            "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"Bash","arguments":"{\"command\":\"ls\"}"}}]},"finish_reason":"tool_calls"}]
+        }),
+    );
     let decoded = codec.decode_response(tool).unwrap();
-    assert!(matches!(decoded.content[0], ContentBlock::ToolCall { ref name, .. } if name == "Bash"));
+    assert!(
+        matches!(decoded.content[0], ContentBlock::ToolCall { ref name, .. } if name == "Bash")
+    );
     assert_eq!(decoded.stop_reason.as_deref(), Some("tool_use"));
 }
 
@@ -251,7 +302,10 @@ fn encode_sampling_controls() {
     assert_eq!(provider_request.body_json["max_tokens"], 1024);
     assert_eq!(provider_request.body_json["temperature"], 0.5);
     assert_eq!(provider_request.body_json["top_p"], 0.9);
-    assert_eq!(provider_request.body_json["stop"], serde_json::json!(["END"]));
+    assert_eq!(
+        provider_request.body_json["stop"],
+        serde_json::json!(["END"])
+    );
 
     let bare = codec.encode_request(&LlmRequest::new("gpt-4o")).unwrap();
     assert!(bare.body_json.get("max_tokens").is_none());
@@ -278,9 +332,14 @@ fn encode_tool_result_as_tool_message_not_tool_call() {
     let provider_request = codec.encode_request(&request).unwrap();
 
     assert_eq!(provider_request.body_json["messages"][0]["role"], "tool");
-    assert_eq!(provider_request.body_json["messages"][0]["tool_call_id"], "call_1");
+    assert_eq!(
+        provider_request.body_json["messages"][0]["tool_call_id"],
+        "call_1"
+    );
     assert_eq!(provider_request.body_json["messages"][0]["content"], "done");
-    assert!(provider_request.body_json["messages"][0].get("tool_calls").is_none());
+    assert!(provider_request.body_json["messages"][0]
+        .get("tool_calls")
+        .is_none());
 }
 
 #[test]
@@ -310,22 +369,43 @@ fn encode_multiple_tool_results_preserves_each_as_tool_message() {
     let provider_request = codec.encode_request(&request).unwrap();
 
     assert_eq!(provider_request.body_json["messages"][0]["role"], "tool");
-    assert_eq!(provider_request.body_json["messages"][0]["tool_call_id"], "call_1");
-    assert_eq!(provider_request.body_json["messages"][0]["content"], "first");
+    assert_eq!(
+        provider_request.body_json["messages"][0]["tool_call_id"],
+        "call_1"
+    );
+    assert_eq!(
+        provider_request.body_json["messages"][0]["content"],
+        "first"
+    );
     assert_eq!(provider_request.body_json["messages"][1]["role"], "tool");
-    assert_eq!(provider_request.body_json["messages"][1]["tool_call_id"], "call_2");
-    assert_eq!(provider_request.body_json["messages"][1]["content"], "second");
-    assert_eq!(provider_request.body_json["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        provider_request.body_json["messages"][1]["tool_call_id"],
+        "call_2"
+    );
+    assert_eq!(
+        provider_request.body_json["messages"][1]["content"],
+        "second"
+    );
+    assert_eq!(
+        provider_request.body_json["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[test]
 fn decode_rejects_invalid_tool_call_arguments() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let response = ProviderResponse::json(200, serde_json::json!({
-        "id":"chatcmpl-z",
-        "model":"gpt-4o",
-        "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"Bash","arguments":"not-json"}}]},"finish_reason":"tool_calls"}]
-    }));
+    let response = ProviderResponse::json(
+        200,
+        serde_json::json!({
+            "id":"chatcmpl-z",
+            "model":"gpt-4o",
+            "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"Bash","arguments":"not-json"}}]},"finish_reason":"tool_calls"}]
+        }),
+    );
 
     let err = codec.decode_response(response).unwrap_err();
     assert!(matches!(err, llm_client::LlmError::InvalidRequest { .. }));
@@ -334,11 +414,14 @@ fn decode_rejects_invalid_tool_call_arguments() {
 #[test]
 fn decode_rejects_missing_tool_call_arguments() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let response = ProviderResponse::json(200, serde_json::json!({
-        "id":"chatcmpl-w",
-        "model":"gpt-4o",
-        "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"Bash"}}]},"finish_reason":"tool_calls"}]
-    }));
+    let response = ProviderResponse::json(
+        200,
+        serde_json::json!({
+            "id":"chatcmpl-w",
+            "model":"gpt-4o",
+            "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"Bash"}}]},"finish_reason":"tool_calls"}]
+        }),
+    );
 
     let err = codec.decode_response(response).unwrap_err();
     assert!(matches!(err, llm_client::LlmError::InvalidRequest { .. }));
@@ -356,11 +439,18 @@ fn sse_stream_reassembles_text_then_tool_call() {
     let mut decoder = OpenAiChatCodec::new("https://api.openai.com/v1").stream_decoder();
     let mut events = Vec::new();
     for frame in frames {
-        events.extend(decoder.decode_frame(RawStreamFrame::new(frame.as_bytes().to_vec())).unwrap());
+        events.extend(
+            decoder
+                .decode_frame(RawStreamFrame::new(frame.as_bytes().to_vec()))
+                .unwrap(),
+        );
     }
     events.extend(decoder.finish().unwrap());
 
-    assert!(matches!(events.first(), Some(LlmEvent::MessageStart { .. })));
+    assert!(matches!(
+        events.first(),
+        Some(LlmEvent::MessageStart { .. })
+    ));
     let args: String = events
         .iter()
         .filter_map(|event| match event {
@@ -386,14 +476,20 @@ fn stream_usage_keeps_reasoning_and_cached_buckets_independent() {
     let mut decoder = OpenAiChatCodec::new("https://api.openai.com/v1").stream_decoder();
     let mut events = Vec::new();
     for frame in frames {
-        events.extend(decoder.decode_frame(RawStreamFrame::new(frame.as_bytes().to_vec())).unwrap());
+        events.extend(
+            decoder
+                .decode_frame(RawStreamFrame::new(frame.as_bytes().to_vec()))
+                .unwrap(),
+        );
     }
     events.extend(decoder.finish().unwrap());
 
     let usage = events
         .iter()
         .find_map(|event| match event {
-            LlmEvent::MessageDelta { usage: Some(usage), .. } => Some(usage.clone()),
+            LlmEvent::MessageDelta {
+                usage: Some(usage), ..
+            } => Some(usage.clone()),
             _ => None,
         })
         .expect("terminal usage");
@@ -407,12 +503,15 @@ fn stream_usage_keeps_reasoning_and_cached_buckets_independent() {
 #[test]
 fn decode_response_usage_normalization_matches_stream_path() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let response = ProviderResponse::json(200, serde_json::json!({
-        "id":"chatcmpl-u",
-        "model":"gpt-4o",
-        "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],
-        "usage":{"prompt_tokens":100,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":40},"completion_tokens_details":{"reasoning_tokens":30},"total_tokens":150}
-    }));
+    let response = ProviderResponse::json(
+        200,
+        serde_json::json!({
+            "id":"chatcmpl-u",
+            "model":"gpt-4o",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":100,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":40},"completion_tokens_details":{"reasoning_tokens":30},"total_tokens":150}
+        }),
+    );
 
     let decoded = codec.decode_response(response).unwrap();
 
@@ -434,16 +533,25 @@ fn stream_tool_fragment_without_index_defaults_to_slot_zero() {
     let mut decoder = OpenAiChatCodec::new("https://api.openai.com/v1").stream_decoder();
     let mut events = Vec::new();
     for frame in frames {
-        events.extend(decoder.decode_frame(RawStreamFrame::new(frame.as_bytes().to_vec())).unwrap());
+        events.extend(
+            decoder
+                .decode_frame(RawStreamFrame::new(frame.as_bytes().to_vec()))
+                .unwrap(),
+        );
     }
     events.extend(decoder.finish().unwrap());
 
     let starts = events
         .iter()
-        .filter(|event| matches!(
-            event,
-            LlmEvent::ContentBlockStart { content_block: ContentBlock::ToolCall { .. }, .. }
-        ))
+        .filter(|event| {
+            matches!(
+                event,
+                LlmEvent::ContentBlockStart {
+                    content_block: ContentBlock::ToolCall { .. },
+                    ..
+                }
+            )
+        })
         .count();
     assert_eq!(starts, 1);
 
@@ -464,11 +572,15 @@ fn stream_tool_fragment_without_index_defaults_to_slot_zero() {
 fn reasoning_config_is_rejected_until_responses_api_exists() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
     let mut request = LlmRequest::new("gpt-4o");
-    request.reasoning = Some(llm_client::ReasoningConfig::Enabled { budget_tokens: 2048 });
+    request.reasoning = Some(llm_client::ReasoningConfig::Enabled {
+        budget_tokens: 2048,
+    });
 
     let err = codec.encode_request(&request).unwrap_err();
 
-    assert!(matches!(err, llm_client::LlmError::InvalidRequest { message } if message.contains("reasoning")));
+    assert!(
+        matches!(err, llm_client::LlmError::InvalidRequest { message } if message.contains("reasoning"))
+    );
 }
 
 #[test]
@@ -476,14 +588,23 @@ fn system_blocks_join_into_one_system_message() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
     let mut request = LlmRequest::new("gpt-4o");
     request.system = vec![
-        llm_client::SystemBlock { text: "a".to_string(), cache_control: Some(llm_client::CacheControl::Ephemeral) },
-        llm_client::SystemBlock { text: "b".to_string(), cache_control: None },
+        llm_client::SystemBlock {
+            text: "a".to_string(),
+            cache_control: Some(llm_client::CacheControl::Ephemeral),
+        },
+        llm_client::SystemBlock {
+            text: "b".to_string(),
+            cache_control: None,
+        },
     ];
 
     let provider_request = codec.encode_request(&request).unwrap();
 
     assert_eq!(provider_request.body_json["messages"][0]["role"], "system");
-    assert_eq!(provider_request.body_json["messages"][0]["content"], "a\n\nb");
+    assert_eq!(
+        provider_request.body_json["messages"][0]["content"],
+        "a\n\nb"
+    );
 
     let bare = codec
         .encode_request(&LlmRequest::new("gpt-4o").with_user_text("hi"))

@@ -341,9 +341,7 @@ mod tests {
         );
         assert_eq!(worker_status_label(&WorkerStatus::Completed), "completed");
         assert_eq!(
-            worker_status_label(&WorkerStatus::Failed {
-                error: "e".into()
-            }),
+            worker_status_label(&WorkerStatus::Failed { error: "e".into() }),
             "failed"
         );
         assert_eq!(worker_status_label(&WorkerStatus::Killed), "killed");

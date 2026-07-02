@@ -95,7 +95,11 @@ pub fn status_value(cwd: &Path) -> Option<String> {
     let branch = run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
         .map(|s| {
             let t = s.trim();
-            if t.is_empty() { "HEAD".to_string() } else { t.to_string() }
+            if t.is_empty() {
+                "HEAD".to_string()
+            } else {
+                t.to_string()
+            }
         })
         .unwrap_or_else(|| "HEAD".to_string());
 
@@ -128,12 +132,9 @@ If you need more information, run \"git status\" using {})",
 
     // `git --no-optional-locks log --oneline -n 5` (trimmed) → Recent commits.
     let n = RECENT_COMMITS_N.to_string();
-    let recent_commits = run_git(
-        cwd,
-        &["--no-optional-locks", "log", "--oneline", "-n", &n],
-    )
-    .map(|s| s.trim().to_string())
-    .unwrap_or_default();
+    let recent_commits = run_git(cwd, &["--no-optional-locks", "log", "--oneline", "-n", &n])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
 
     // `git config user.name` (trimmed) — only included when non-empty.
     let git_user = run_git(cwd, &["config", "user.name"])
@@ -165,9 +166,12 @@ snapshot in time, and will not update during the conversation."
 /// of `[detected, "main", "master"]` that exists as
 /// `refs/remotes/origin/<name>`; falling back to `"main"`.
 fn resolve_main_branch(cwd: &Path) -> String {
-    let detected = run_git(cwd, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-        .map(|s| s.trim().trim_start_matches("origin/").to_string())
-        .filter(|s| !s.is_empty());
+    let detected = run_git(
+        cwd,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .map(|s| s.trim().trim_start_matches("origin/").to_string())
+    .filter(|s| !s.is_empty());
 
     let candidates: Vec<String> = match &detected {
         Some(d) => vec![d.clone(), "main".to_string(), "master".to_string()],

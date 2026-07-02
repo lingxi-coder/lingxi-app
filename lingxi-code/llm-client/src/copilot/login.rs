@@ -181,7 +181,10 @@ impl<H: CopilotHttp> CopilotLogin<H> {
             "device_code": dc.device_code,
             "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
         });
-        let v = self.http.post_json(&access_token_url(&dc.domain), &body).await?;
+        let v = self
+            .http
+            .post_json(&access_token_url(&dc.domain), &body)
+            .await?;
 
         if let Some(token) = v.get("access_token").and_then(Value::as_str) {
             return Ok(PollOutcome::Success(CopilotSecret::new(token)));
@@ -278,7 +281,10 @@ pub async fn exchange_copilot_token<H: CopilotHttp + ?Sized>(
     let headers = [
         ("Authorization", format!("token {oauth_token}")),
         ("Editor-Version", COPILOT_EDITOR_VERSION.to_string()),
-        ("Editor-Plugin-Version", COPILOT_EDITOR_PLUGIN_VERSION.to_string()),
+        (
+            "Editor-Plugin-Version",
+            COPILOT_EDITOR_PLUGIN_VERSION.to_string(),
+        ),
         ("Copilot-Integration-Id", COPILOT_INTEGRATION_ID.to_string()),
         ("User-Agent", COPILOT_EDITOR_USER_AGENT.to_string()),
     ];
@@ -301,12 +307,12 @@ fn parse_exchange_response(v: &Value) -> Result<ExchangedToken, LlmError> {
             message: "copilot token-exchange response had an empty 'token'".to_string(),
         });
     }
-    let expires_at = v
-        .get("expires_at")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| LlmError::InvalidRequest {
-            message: "copilot token-exchange response missing numeric 'expires_at'".to_string(),
-        })?;
+    let expires_at =
+        v.get("expires_at")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| LlmError::InvalidRequest {
+                message: "copilot token-exchange response missing numeric 'expires_at'".to_string(),
+            })?;
     Ok(ExchangedToken {
         secret: CopilotSecret::new(token),
         expires_at,
@@ -447,7 +453,10 @@ mod tests {
         let exchanged = parse_exchange_response(&v).expect("parses");
         assert_eq!(exchanged.expires_at, 1_900_000_000);
         // Bearer is usable but never leaked via Debug.
-        assert_eq!(exchanged.secret().token_for_storage(), "tid=abc;exp=123;sku=copilot");
+        assert_eq!(
+            exchanged.secret().token_for_storage(),
+            "tid=abc;exp=123;sku=copilot"
+        );
         assert!(!format!("{exchanged:?}").contains("tid=abc"));
     }
 
@@ -505,7 +514,9 @@ mod tests {
             body: json!({ "token": "copilot-bearer", "expires_at": 1_900_000_000_u64 }),
             seen_headers: std::sync::Mutex::new(Vec::new()),
         };
-        let exchanged = exchange_copilot_token(&mock, "ght_oauth").await.expect("ok");
+        let exchanged = exchange_copilot_token(&mock, "ght_oauth")
+            .await
+            .expect("ok");
         assert_eq!(exchanged.expires_at, 1_900_000_000);
         assert_eq!(exchanged.secret().token_for_storage(), "copilot-bearer");
         // Auth header is the GitHub `token <oauth>` scheme, not `Bearer`.

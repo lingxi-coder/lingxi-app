@@ -167,7 +167,10 @@ async fn streaming_tool_results_are_per_result_assistant_parented() {
     )
     .with_jsonl_writer(writer);
 
-    let _ = orch.run_turn_streaming("call three tools").await.expect("ok");
+    let _ = orch
+        .run_turn_streaming("call three tools")
+        .await
+        .expect("ok");
 
     // ── (1) + (3): N per-result user messages in session.history, in received order
     let session = orch.session();
@@ -180,8 +183,7 @@ async fn streaming_tool_results_are_per_result_assistant_parented() {
         .iter()
         .filter_map(|m| match m {
             ConversationMessage::User { content, .. }
-                if content.len() == 1
-                    && matches!(content[0], ContentBlock::ToolResult { .. }) =>
+                if content.len() == 1 && matches!(content[0], ContentBlock::ToolResult { .. }) =>
             {
                 Some(content)
             }
@@ -261,7 +263,12 @@ async fn streaming_tool_results_are_per_result_assistant_parented() {
     // All share one inner message.id (distinct top-level uuids).
     let inner_ids: std::collections::HashSet<&str> = assistant_lines
         .iter()
-        .map(|m| m.message.get("id").and_then(|v| v.as_str()).expect("inner id"))
+        .map(|m| {
+            m.message
+                .get("id")
+                .and_then(|v| v.as_str())
+                .expect("inner id")
+        })
         .collect();
     assert_eq!(inner_ids.len(), 1, "all blocks share one inner message.id");
     let top_uuids: std::collections::HashSet<&str> =

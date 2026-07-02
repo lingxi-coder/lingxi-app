@@ -379,7 +379,8 @@ mod tests {
         // W^X: a bundled exec target that exists but lives OUTSIDE nativeLibraryDir
         // (e.g. under an app-writable root) must fail closed, never reach execve.
         let tmp = tempfile::tempdir().expect("tempdir");
-        let mut cfg = config_with_bundled(tmp.path(), "/nl/libmksh.so", "/app/applet-bin", "deadbeef");
+        let mut cfg =
+            config_with_bundled(tmp.path(), "/nl/libmksh.so", "/app/applet-bin", "deadbeef");
         // Point the exec target at a real file under the app-writable root.
         let writable = tmp.path().join("files");
         let rogue = writable.join("evil-mksh.so");

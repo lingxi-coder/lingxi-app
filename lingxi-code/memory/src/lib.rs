@@ -7,8 +7,8 @@
 
 #![forbid(unsafe_code)]
 
-pub mod lingxi_md;
 pub mod file;
+pub mod lingxi_md;
 pub mod memdir;
 pub mod prefetch;
 pub mod secret_scan;

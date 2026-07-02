@@ -496,9 +496,7 @@ impl Tool for ExitWorktreeTool {
         match result {
             Ok(()) => {
                 self.emit_completed(&invocation_id, duration_ms).await;
-                let discard_note = change_summary
-                    .map(|s| s.discard_note())
-                    .unwrap_or_default();
+                let discard_note = change_summary.map(|s| s.discard_note()).unwrap_or_default();
                 let message = format!(
                     "Exited and removed worktree at {}.{discard_note}",
                     handle.path.to_string_lossy()
@@ -854,7 +852,10 @@ mod tests {
             "unknown state surfaces as null, not 0/0"
         );
         let msg = res.data["message"].as_str().unwrap();
-        assert!(!msg.contains("Discarded"), "unknown state adds no discard note");
+        assert!(
+            !msg.contains("Discarded"),
+            "unknown state adds no discard note"
+        );
     }
 
     #[tokio::test]

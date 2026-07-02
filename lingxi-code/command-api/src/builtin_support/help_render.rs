@@ -37,8 +37,11 @@ pub fn render_help_screen() -> String {
     // never pads to a hidden command's width since the hidden ones never
     // reach the renderer). A command whose `DISABLE_*_COMMAND` env gate is
     // tripped is also dropped (claude-code's `!$te(c)` isEnabled()===off arm).
-    let visible =
-        || BUILTIN_COMMAND_NAMES.iter().filter(|n| !is_palette_hidden(n) && !is_command_env_disabled(n));
+    let visible = || {
+        BUILTIN_COMMAND_NAMES
+            .iter()
+            .filter(|n| !is_palette_hidden(n) && !is_command_env_disabled(n))
+    };
 
     let col1_width = visible().map(|n| n.len()).max().unwrap_or(0) + 2;
 
@@ -118,7 +121,14 @@ mod tests {
     fn visible_host_bound_commands_still_appear() {
         // claude-code SHOWS these (no isHidden/isEnabled gate), so /help must too.
         let s = render_help_screen();
-        for name in ["btw", "x402", "reload-plugins", "install-slack-app", "mobile", "desktop"] {
+        for name in [
+            "btw",
+            "x402",
+            "reload-plugins",
+            "install-slack-app",
+            "mobile",
+            "desktop",
+        ] {
             assert!(
                 s.contains(&format!("  /{name} ")),
                 "/{name} is visible in claude-code and must appear in /help"
@@ -147,7 +157,10 @@ mod tests {
         let line = s.lines().find(|l| l.starts_with("  /agents ")).unwrap();
         // "/agents" = 7 chars; pad 13 spaces to col1=20; then 2 separator
         // spaces; then "Manage agent configurations".
-        let expected = format!("  /agents{}  Manage agent configurations", " ".repeat(20 - 7));
+        let expected = format!(
+            "  /agents{}  Manage agent configurations",
+            " ".repeat(20 - 7)
+        );
         assert_eq!(line, expected);
     }
 

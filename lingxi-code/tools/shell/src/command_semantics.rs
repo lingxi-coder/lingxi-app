@@ -60,9 +60,7 @@ pub fn interpret_command_result(command: &str, exit_code: i32) -> CommandInterpr
 /// it wrong — not used for security" (claude-code comment).
 fn base_command(command: &str) -> String {
     let segments = split_command(command);
-    let last = segments
-        .last()
-        .map_or(command, std::string::String::as_str);
+    let last = segments.last().map_or(command, std::string::String::as_str);
     extract_base_command(last)
 }
 
@@ -142,7 +140,9 @@ mod tests {
             Some("No matches found")
         );
         assert_eq!(
-            interpret_command_result("find . -name x", 1).message.as_deref(),
+            interpret_command_result("find . -name x", 1)
+                .message
+                .as_deref(),
             Some("Some directories were inaccessible")
         );
         assert_eq!(
@@ -168,7 +168,10 @@ mod tests {
         // `grep x && echo done` → last is `echo`, default semantic.
         let r2 = interpret_command_result("grep x f && echo done", 1);
         assert!(r2.is_error);
-        assert_eq!(r2.message.as_deref(), Some("Command failed with exit code 1"));
+        assert_eq!(
+            r2.message.as_deref(),
+            Some("Command failed with exit code 1")
+        );
     }
 
     #[test]
@@ -178,7 +181,10 @@ mod tests {
         assert_eq!(ok.message, None);
         let bad = interpret_command_result("cargo build", 101);
         assert!(bad.is_error);
-        assert_eq!(bad.message.as_deref(), Some("Command failed with exit code 101"));
+        assert_eq!(
+            bad.message.as_deref(),
+            Some("Command failed with exit code 101")
+        );
     }
 
     #[test]

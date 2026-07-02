@@ -412,7 +412,13 @@ mod tests {
         let hook = make_prompt_hook();
 
         let outcome = exec
-            .execute(&hook, "Is $ARGUMENTS safe?", None, false, r#"{"tool":"Bash"}"#)
+            .execute(
+                &hook,
+                "Is $ARGUMENTS safe?",
+                None,
+                false,
+                r#"{"tool":"Bash"}"#,
+            )
             .await;
 
         assert_eq!(outcome.signal, PromptExecutionSignal::Ok);
@@ -461,7 +467,10 @@ mod tests {
 
         let resp = outcome.result.response.expect("block response present");
         assert_eq!(resp.decision, Some(HookDecision::Block));
-        assert!(!resp.prevent_continuation, "continueOnBlock=true → may continue");
+        assert!(
+            !resp.prevent_continuation,
+            "continueOnBlock=true → may continue"
+        );
     }
 
     #[tokio::test]
@@ -474,10 +483,7 @@ mod tests {
 
         let resp = outcome.result.response.expect("block response present");
         assert_eq!(resp.decision, Some(HookDecision::Block));
-        assert_eq!(
-            resp.reason.as_deref(),
-            Some("[vet it]: ")
-        );
+        assert_eq!(resp.reason.as_deref(), Some("[vet it]: "));
         assert!(resp.prevent_continuation);
     }
 
@@ -506,7 +512,10 @@ mod tests {
 
         assert!(matches!(outcome.result.outcome, HookOutcome::Error));
         assert!(
-            outcome.result.stderr.starts_with("Schema validation failed:"),
+            outcome
+                .result
+                .stderr
+                .starts_with("Schema validation failed:"),
             "stderr was {:?}",
             outcome.result.stderr
         );
@@ -562,7 +571,10 @@ mod tests {
 
         assert!(matches!(outcome.result.outcome, HookOutcome::Error));
         assert!(
-            outcome.result.stderr.contains("Error executing prompt hook: provider 500"),
+            outcome
+                .result
+                .stderr
+                .contains("Error executing prompt hook: provider 500"),
             "stderr was {:?}",
             outcome.result.stderr
         );
@@ -601,6 +613,9 @@ mod tests {
 
     #[test]
     fn add_arguments_no_placeholder_empty_json_leaves_prompt() {
-        assert_eq!(add_arguments_to_prompt("evaluate this", ""), "evaluate this");
+        assert_eq!(
+            add_arguments_to_prompt("evaluate this", ""),
+            "evaluate this"
+        );
     }
 }

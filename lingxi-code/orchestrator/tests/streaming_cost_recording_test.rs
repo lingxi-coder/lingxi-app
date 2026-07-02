@@ -114,10 +114,15 @@ async fn streaming_turn_records_cost_in_tracker() {
 
     let (orch, mut rx, _output) = make_streaming_orch_with_tracker(vec![stream]);
 
-    orch.run_turn_streaming("hello").await.expect("streaming turn ok");
+    orch.run_turn_streaming("hello")
+        .await
+        .expect("streaming turn ok");
 
     // CostTracker must have received exactly one snapshot.
-    let snap = rx.recv().await.expect("CostTracker must have received a snapshot from streaming turn");
+    let snap = rx
+        .recv()
+        .await
+        .expect("CostTracker must have received a snapshot from streaming turn");
     // 1000*5000 + 500*25000 = 17_500_000 nano-USD (same as the batched-path test).
     assert_eq!(
         snap.total_nano_usd, 17_500_000,
@@ -139,7 +144,9 @@ async fn streaming_turn_increments_api_calls_recorded() {
 
     let (orch, mut rx, _output) = make_streaming_orch_with_tracker(vec![stream]);
 
-    orch.run_turn_streaming("hello").await.expect("streaming turn ok");
+    orch.run_turn_streaming("hello")
+        .await
+        .expect("streaming turn ok");
 
     // Drain channel to confirm recording happened.
     let _snap = rx.recv().await.expect("snapshot received");

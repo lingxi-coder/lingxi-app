@@ -29,7 +29,12 @@ pub trait BypassEnv: Send + Sync {
 /// `isEnvTruthy` (`envUtils.ts:32-37`): unset/empty ⇒ false; else
 /// lowercase-trim ∈ {1, true, yes, on}.
 fn env_truthy(v: Option<String>) -> bool {
-    v.is_some_and(|s| matches!(s.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+    v.is_some_and(|s| {
+        matches!(
+            s.trim().to_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 /// Enforce the bypass safety preconditions. `Err(message)` means the
@@ -87,16 +92,32 @@ mod tests {
     }
     impl Default for FakeEnv {
         fn default() -> Self {
-            Self { windows: false, euid: 1000, docker: false, internet: false, vars: HashMap::new() }
+            Self {
+                windows: false,
+                euid: 1000,
+                docker: false,
+                internet: false,
+                vars: HashMap::new(),
+            }
         }
     }
     #[async_trait::async_trait]
     impl BypassEnv for FakeEnv {
-        fn is_windows(&self) -> bool { self.windows }
-        fn effective_uid(&self) -> u32 { self.euid }
-        fn env(&self, key: &str) -> Option<String> { self.vars.get(key).cloned() }
-        fn is_docker(&self) -> bool { self.docker }
-        async fn has_internet(&self) -> bool { self.internet }
+        fn is_windows(&self) -> bool {
+            self.windows
+        }
+        fn effective_uid(&self) -> u32 {
+            self.euid
+        }
+        fn env(&self, key: &str) -> Option<String> {
+            self.vars.get(key).cloned()
+        }
+        fn is_docker(&self) -> bool {
+            self.docker
+        }
+        async fn has_internet(&self) -> bool {
+            self.internet
+        }
     }
 
     #[tokio::test]
@@ -107,21 +128,30 @@ mod tests {
 
     #[tokio::test]
     async fn root_without_sandbox_is_refused() {
-        let e = FakeEnv { euid: 0, ..FakeEnv::default() };
+        let e = FakeEnv {
+            euid: 0,
+            ..FakeEnv::default()
+        };
         let err = enforce_bypass_safety(&e).await.unwrap_err();
         assert_eq!(err, "--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons");
     }
 
     #[tokio::test]
     async fn root_with_is_sandbox_passes_check_one() {
-        let mut e = FakeEnv { euid: 0, ..FakeEnv::default() };
+        let mut e = FakeEnv {
+            euid: 0,
+            ..FakeEnv::default()
+        };
         e.vars.insert("IS_SANDBOX".into(), "1".into());
         assert!(enforce_bypass_safety(&e).await.is_ok());
     }
 
     #[tokio::test]
     async fn root_with_bubblewrap_passes_check_one() {
-        let mut e = FakeEnv { euid: 0, ..FakeEnv::default() };
+        let mut e = FakeEnv {
+            euid: 0,
+            ..FakeEnv::default()
+        };
         e.vars.insert("LINGXI_BUBBLEWRAP".into(), "1".into());
         assert!(enforce_bypass_safety(&e).await.is_ok());
     }
@@ -136,14 +166,21 @@ mod tests {
 
     #[tokio::test]
     async fn ant_sandboxed_no_internet_passes() {
-        let mut e = FakeEnv { docker: true, ..FakeEnv::default() };
+        let mut e = FakeEnv {
+            docker: true,
+            ..FakeEnv::default()
+        };
         e.vars.insert("USER_TYPE".into(), "ant".into());
         assert!(enforce_bypass_safety(&e).await.is_ok());
     }
 
     #[tokio::test]
     async fn ant_sandboxed_with_internet_is_refused() {
-        let mut e = FakeEnv { docker: true, internet: true, ..FakeEnv::default() };
+        let mut e = FakeEnv {
+            docker: true,
+            internet: true,
+            ..FakeEnv::default()
+        };
         e.vars.insert("USER_TYPE".into(), "ant".into());
         let err = enforce_bypass_safety(&e).await.unwrap_err();
         assert!(err.contains("Docker: true") && err.contains("hasInternet: true"));
@@ -153,7 +190,8 @@ mod tests {
     async fn ant_local_agent_entrypoint_skips_check_two() {
         let mut e = FakeEnv::default(); // not sandboxed, no internet
         e.vars.insert("USER_TYPE".into(), "ant".into());
-        e.vars.insert("CLAUDE_CODE_ENTRYPOINT".into(), "local-agent".into());
+        e.vars
+            .insert("CLAUDE_CODE_ENTRYPOINT".into(), "local-agent".into());
         assert!(enforce_bypass_safety(&e).await.is_ok());
     }
 

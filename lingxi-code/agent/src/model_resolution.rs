@@ -764,7 +764,12 @@ mod tests {
     #[test]
     fn inherit_no_setting_plan_mode_returns_parent_unchanged() {
         assert_eq!(
-            resolve_agent_model(&AgentModel::Inherit, "claude-opus-4-7", PermissionMode::Plan, None),
+            resolve_agent_model(
+                &AgentModel::Inherit,
+                "claude-opus-4-7",
+                PermissionMode::Plan,
+                None
+            ),
             "claude-opus-4-7"
         );
     }

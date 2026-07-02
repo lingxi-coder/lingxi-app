@@ -109,7 +109,11 @@ const GREP_PROMPT_SHORT: &str = r#"Content search built on ripgrep. Prefer this 
 /// `applyHeadLimit` (`GrepTool.ts:110-128`). `limit==Some(0)` → unlimited
 /// escape hatch; otherwise slice `[offset, offset+limit)` and report the
 /// applied limit only when truncation actually occurred.
-fn apply_head_limit<T>(items: Vec<T>, limit: Option<usize>, offset: usize) -> (Vec<T>, Option<usize>) {
+fn apply_head_limit<T>(
+    items: Vec<T>,
+    limit: Option<usize>,
+    offset: usize,
+) -> (Vec<T>, Option<usize>) {
     // Explicit 0 = unlimited escape hatch.
     if limit == Some(0) {
         return (items.into_iter().skip(offset).collect(), None);
@@ -529,7 +533,10 @@ impl Tool for GrepTool {
             .to_string();
         let case_insensitive = input.get("-i").and_then(value_as_bool).unwrap_or(false);
         let show_line_numbers = input.get("-n").and_then(value_as_bool).unwrap_or(true);
-        let multiline = input.get("multiline").and_then(value_as_bool).unwrap_or(false);
+        let multiline = input
+            .get("multiline")
+            .and_then(value_as_bool)
+            .unwrap_or(false);
         // `-o` / `--only-matching` (rg -o): emit only the matched substrings, one
         // per line. Only meaningful in content mode (claude-code: "Requires
         // output_mode: content") and ignores -A/-B/-C context (like rg -o).
@@ -602,7 +609,9 @@ impl Tool for GrepTool {
         if let Some(g) = glob_filter {
             for pat in split_glob_patterns(g) {
                 if let Err(e) = ob.add(&pat) {
-                    return Err(ToolError::InvalidInput(format!("invalid glob {pat:?}: {e}")));
+                    return Err(ToolError::InvalidInput(format!(
+                        "invalid glob {pat:?}: {e}"
+                    )));
                 }
             }
         }
@@ -807,15 +816,18 @@ impl Tool for GrepTool {
             } else {
                 limited.join("\n")
             };
-            let occ = if total == 1 { "occurrence" } else { "occurrences" };
+            let occ = if total == 1 {
+                "occurrence"
+            } else {
+                "occurrences"
+            };
             let fpl = if file_count == 1 { "file" } else { "files" };
             let pag = if limit_info.is_empty() {
                 String::new()
             } else {
                 format!(" with pagination = {limit_info}")
             };
-            let summary =
-                format!("\n\nFound {total} total {occ} across {file_count} {fpl}.{pag}");
+            let summary = format!("\n\nFound {total} total {occ} across {file_count} {fpl}.{pag}");
             let model = format!("{raw_content}{summary}");
             // binary: {mode, numFiles, filenames:[], content, numMatches, appliedLimit?, appliedOffset?}
             data.insert("mode".to_string(), json!("count"));
@@ -970,6 +982,7 @@ mod tests {
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: None,
+                model_profile: None,
             })
             .await;
         assert_eq!(long, GREP_DESCRIPTION);
@@ -978,6 +991,7 @@ mod tests {
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
+                model_profile: None,
             })
             .await;
         assert_eq!(short, GREP_PROMPT_SHORT);
@@ -1011,7 +1025,10 @@ mod tests {
         assert_eq!(result.data["numMatches"], 150);
         assert_eq!(result.data["numFiles"], 1);
         let c = content_str(&result);
-        assert!(c.contains("big.rs:150"), "per-file count should be 150: {c}");
+        assert!(
+            c.contains("big.rs:150"),
+            "per-file count should be 150: {c}"
+        );
         assert!(
             c.ends_with("\n\nFound 150 total occurrences across 1 file."),
             "summary should report 150: {c}"
@@ -1079,12 +1096,18 @@ mod tests {
         // Explicit truthy tokens (lower+trim).
         for v in ["1", "true", "YES", " on "] {
             std::env::set_var("LX_TEST_TOGGLE", v);
-            assert!(is_env_truthy("LX_TEST_TOGGLE", false), "{v} should be truthy");
+            assert!(
+                is_env_truthy("LX_TEST_TOGGLE", false),
+                "{v} should be truthy"
+            );
         }
         // Anything else is falsy (even with default=true, an explicit value wins).
         for v in ["0", "false", "no", "off", "garbage"] {
             std::env::set_var("LX_TEST_TOGGLE", v);
-            assert!(!is_env_truthy("LX_TEST_TOGGLE", true), "{v} should be falsy");
+            assert!(
+                !is_env_truthy("LX_TEST_TOGGLE", true),
+                "{v} should be falsy"
+            );
         }
         std::env::remove_var("LX_TEST_TOGGLE");
     }
@@ -1097,7 +1120,7 @@ mod tests {
         std::env::set_var("LINGXI_GLOB_TIMEOUT_SECONDS", "5");
         assert_eq!(ripgrep_timeout(false), Duration::from_secs(5));
         assert_eq!(ripgrep_timeout(true), Duration::from_secs(5)); // override wins over WSL
-        // Non-positive / garbage → default.
+                                                                   // Non-positive / garbage → default.
         std::env::set_var("LINGXI_GLOB_TIMEOUT_SECONDS", "0");
         assert_eq!(ripgrep_timeout(false), Duration::from_secs(20));
         std::env::set_var("LINGXI_GLOB_TIMEOUT_SECONDS", "nope");
@@ -1207,8 +1230,7 @@ mod tests {
         // bare `.env` (→ `!**/.env`) prunes the dotfile; `a.rs` survives.
         {
             let (mut ctx, _sink) = make_ctx(&tmp);
-            ctx.read_deny_exclude_globs =
-                vec!["/secrets/**".to_string(), ".env".to_string()];
+            ctx.read_deny_exclude_globs = vec!["/secrets/**".to_string(), ".env".to_string()];
             let tool = GrepTool::new(ctx);
             let out = content_str(
                 &tool
@@ -1258,7 +1280,10 @@ mod tests {
             .await
             .unwrap();
         // -n defaults true: relpath:line:text.
-        assert_eq!(content_str(&result), "a.rs:1:fn foo() {}\na.rs:2:fn bar() {}");
+        assert_eq!(
+            content_str(&result),
+            "a.rs:1:fn foo() {}\na.rs:2:fn bar() {}"
+        );
         assert_eq!(result.data["numLines"], 2);
     }
 

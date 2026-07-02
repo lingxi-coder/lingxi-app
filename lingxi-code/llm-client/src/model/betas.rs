@@ -102,8 +102,12 @@ pub const OAUTH: &str = "oauth-2025-04-20";
 /// Four entries — includes [`OAUTH`], which the prior 3-entry `Vertex`-labelled
 /// whitelist omitted. The binary applies `ERr` on the first-party count_tokens
 /// path, not just Vertex.
-pub const COUNT_TOKENS_ALLOWED: &[&str] =
-    &[CLAUDE_CODE_BETA, INTERLEAVED_THINKING, CONTEXT_MANAGEMENT, OAUTH];
+pub const COUNT_TOKENS_ALLOWED: &[&str] = &[
+    CLAUDE_CODE_BETA,
+    INTERLEAVED_THINKING,
+    CONTEXT_MANAGEMENT,
+    OAUTH,
+];
 
 /// Bedrock requires these to ride in `extraBodyParams`, NOT the header
 /// (the binary's `bRr` set: `e5(model).filter(n => !bRr.has(n))`).
@@ -346,7 +350,9 @@ pub fn assemble_beta_header(provider: Provider, endpoint: Endpoint, ctx: &BetaCo
             betas.retain(|b| *b != ADVANCED_TOOL_USE_1P);
         }
         Provider::Bedrock => {
-            betas.retain(|b| !BEDROCK_EXTRA_PARAMS_HEADERS.contains(b) && *b != ADVANCED_TOOL_USE_1P);
+            betas.retain(|b| {
+                !BEDROCK_EXTRA_PARAMS_HEADERS.contains(b) && *b != ADVANCED_TOOL_USE_1P
+            });
         }
     }
 
@@ -438,7 +444,10 @@ mod tests {
         assert_eq!(FAST_MODE, "fast-mode-2026-02-01");
         assert_eq!(REDACT_THINKING, "redact-thinking-2026-02-12");
         assert_eq!(THINKING_TOKEN_COUNT, "thinking-token-count-2026-05-13");
-        assert_eq!(MID_CONVERSATION_SYSTEM, "mid-conversation-system-2026-04-07");
+        assert_eq!(
+            MID_CONVERSATION_SYSTEM,
+            "mid-conversation-system-2026-04-07"
+        );
         assert_eq!(ADVISOR_TOOL, "advisor-tool-2026-03-01");
         assert_eq!(OAUTH, "oauth-2025-04-20");
     }
@@ -582,14 +591,20 @@ mod tests {
             Endpoint::MessagesCreate,
             &BetaContext::for_model("claude-opus-4-8").with_interactive(false),
         );
-        assert!(!headless.split(',').any(|p| p == REDACT_THINKING), "got: {headless}");
+        assert!(
+            !headless.split(',').any(|p| p == REDACT_THINKING),
+            "got: {headless}"
+        );
 
         let summarized = assemble_beta_header(
             Provider::Anthropic,
             Endpoint::MessagesCreate,
             &BetaContext::for_model("claude-opus-4-8").with_show_thinking_summaries(true),
         );
-        assert!(!summarized.split(',').any(|p| p == REDACT_THINKING), "got: {summarized}");
+        assert!(
+            !summarized.split(',').any(|p| p == REDACT_THINKING),
+            "got: {summarized}"
+        );
     }
 
     /// `fast-mode` rides only when the request sets speed:"fast".
@@ -626,8 +641,16 @@ mod tests {
         );
         let expected = [CLAUDE_CODE_BETA, INTERLEAVED_THINKING, CONTEXT_MANAGEMENT].join(",");
         assert_eq!(h, expected, "count_tokens must equal the ERr-filtered set");
-        for excluded in [REDACT_THINKING, THINKING_TOKEN_COUNT, PROMPT_CACHING_SCOPE, MID_CONVERSATION_SYSTEM] {
-            assert!(!h.split(',').any(|p| p == excluded), "{excluded} leaked into count_tokens: {h}");
+        for excluded in [
+            REDACT_THINKING,
+            THINKING_TOKEN_COUNT,
+            PROMPT_CACHING_SCOPE,
+            MID_CONVERSATION_SYSTEM,
+        ] {
+            assert!(
+                !h.split(',').any(|p| p == excluded),
+                "{excluded} leaked into count_tokens: {h}"
+            );
         }
     }
 
@@ -636,8 +659,16 @@ mod tests {
     #[test]
     fn count_tokens_whitelist_is_err_set() {
         assert_eq!(COUNT_TOKENS_ALLOWED.len(), 4);
-        for b in [CLAUDE_CODE_BETA, INTERLEAVED_THINKING, CONTEXT_MANAGEMENT, OAUTH] {
-            assert!(COUNT_TOKENS_ALLOWED.contains(&b), "{b} missing from ERr whitelist");
+        for b in [
+            CLAUDE_CODE_BETA,
+            INTERLEAVED_THINKING,
+            CONTEXT_MANAGEMENT,
+            OAUTH,
+        ] {
+            assert!(
+                COUNT_TOKENS_ALLOWED.contains(&b),
+                "{b} missing from ERr whitelist"
+            );
         }
     }
 
@@ -658,7 +689,10 @@ mod tests {
             &BetaContext::for_model("claude-opus-4-8"),
         );
         for excluded in BEDROCK_EXTRA_PARAMS_HEADERS {
-            assert!(!h.split(',').any(|p| p == *excluded), "Bedrock must not carry {excluded}; got: {h}");
+            assert!(
+                !h.split(',').any(|p| p == *excluded),
+                "Bedrock must not carry {excluded}; got: {h}"
+            );
         }
     }
 
@@ -682,7 +716,13 @@ mod tests {
 
         let value = req.headers.get("anthropic-beta").expect("header present");
         assert!(value.starts_with("oauth-2025-04-20,"), "got: {value}");
-        assert_eq!(value.split(',').filter(|p| *p == "oauth-2025-04-20").count(), 1);
+        assert_eq!(
+            value
+                .split(',')
+                .filter(|p| *p == "oauth-2025-04-20")
+                .count(),
+            1
+        );
     }
 
     /// Subscriber path appends oauth exactly once alongside the model betas.
@@ -700,7 +740,10 @@ mod tests {
             true,
         );
         let value = req.headers.get("anthropic-beta").expect("header present");
-        assert!(value.split(',').any(|p| p == CLAUDE_CODE_BETA), "got: {value}");
+        assert!(
+            value.split(',').any(|p| p == CLAUDE_CODE_BETA),
+            "got: {value}"
+        );
         assert!(value.split(',').any(|p| p == OAUTH), "got: {value}");
         assert_eq!(value.split(',').filter(|p| *p == OAUTH).count(), 1);
     }
@@ -732,8 +775,16 @@ mod tests {
         );
         assert!(!req.headers.contains_key("anthropic-beta"));
         let ctx = BetaContext::for_model("claude-opus-4-8");
-        apply_beta_header(&mut req, Provider::Anthropic, Endpoint::MessagesCreate, &ctx);
+        apply_beta_header(
+            &mut req,
+            Provider::Anthropic,
+            Endpoint::MessagesCreate,
+            &ctx,
+        );
         let expected = assemble_beta_header(Provider::Anthropic, Endpoint::MessagesCreate, &ctx);
-        assert_eq!(req.headers.get("anthropic-beta").map(String::as_str), Some(expected.as_str()));
+        assert_eq!(
+            req.headers.get("anthropic-beta").map(String::as_str),
+            Some(expected.as_str())
+        );
     }
 }

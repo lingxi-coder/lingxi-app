@@ -556,8 +556,7 @@ mod m4_01_error_variant_tests {
         );
 
         let internal = ToolError::Internal(
-            "Agent 'x' requires MCP servers matching: github. MCP servers with tools: none."
-                .into(),
+            "Agent 'x' requires MCP servers matching: github. MCP servers with tools: none.".into(),
         );
         assert_eq!(
             internal.model_facing_message(),

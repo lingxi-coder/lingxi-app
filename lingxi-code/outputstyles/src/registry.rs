@@ -247,7 +247,9 @@ mod tests {
         assert!(s.prompt.contains("# Explanatory Style Active"));
         // figures.star (U+2605) is substituted into the Insight banner.
         assert!(s.prompt.contains("\u{2605} Insight"));
-        assert!(s.prompt.ends_with("rather than general programming concepts."));
+        assert!(s
+            .prompt
+            .ends_with("rather than general programming concepts."));
         // Exact byte length lock (measured from the rendered TS template).
         assert_eq!(s.prompt.chars().count(), 1023);
         assert_eq!(s.prompt.len(), 1197);

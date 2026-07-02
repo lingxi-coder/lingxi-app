@@ -99,7 +99,13 @@ fn whitespace_only_command_is_sandboxed_not_skipped() {
     assert!(matches!(decision, SandboxDecision::Sandbox { .. }));
 
     // The empty string still bails to NoSandbox.
-    let decision_empty =
-        should_use_sandbox("", true, false, true, &cfg, std::path::PathBuf::from("/work"));
+    let decision_empty = should_use_sandbox(
+        "",
+        true,
+        false,
+        true,
+        &cfg,
+        std::path::PathBuf::from("/work"),
+    );
     assert!(matches!(decision_empty, SandboxDecision::NoSandbox));
 }

@@ -55,7 +55,9 @@ pub fn truncate_skill_content(content: &str, max_tokens: u64) -> String {
     }
     let marker_len = SKILL_TRUNCATION_MARKER.len() as u64;
     let keep = (max_tokens.saturating_mul(4)).saturating_sub(marker_len);
-    let keep = usize::try_from(keep).unwrap_or(usize::MAX).min(content.len());
+    let keep = usize::try_from(keep)
+        .unwrap_or(usize::MAX)
+        .min(content.len());
     // Snap to a char boundary so the slice stays valid UTF-8 (ASCII is exact).
     let mut boundary = keep;
     while boundary > 0 && !content.is_char_boundary(boundary) {
@@ -156,8 +158,7 @@ pub fn restore_post_compact_files(
         // exceeding the per-file token budget. Reuse the skill truncation shape
         // (the binary's re-reader applies its own maxTokens truncation; the
         // observable effect is a per-file ceiling).
-        let content =
-            truncate_skill_content(&candidate.content, POST_COMPACT_MAX_TOKENS_PER_FILE);
+        let content = truncate_skill_content(&candidate.content, POST_COMPACT_MAX_TOKENS_PER_FILE);
         let cost = estimate_content_tokens(&content);
         // Running budget: keep while total + cost <= Y9p; else DROP (continue).
         if running.saturating_add(cost) <= POST_COMPACT_TOKEN_BUDGET {
@@ -180,9 +181,7 @@ pub fn restore_post_compact_files(
 /// `<=` [`POST_COMPACT_SKILLS_TOKEN_BUDGET`] (`Q9p = 25000`) — the binary's
 /// `if(n+s>Q9p)return!1; return n+=s,!0` filter.
 #[must_use]
-pub fn restore_post_compact_skills(
-    candidates: Vec<SkillRestoreCandidate>,
-) -> Vec<RestoredSkill> {
+pub fn restore_post_compact_skills(candidates: Vec<SkillRestoreCandidate>) -> Vec<RestoredSkill> {
     let mut sorted = candidates;
     sorted.sort_by(|a, b| b.invoked_at_ms.cmp(&a.invoked_at_ms));
 
@@ -477,10 +476,7 @@ mod tests {
 
     #[test]
     fn restore_files_skips_already_attached() {
-        let candidates = vec![
-            file("/keep", "x", 2),
-            file("/dup", "x", 1),
-        ];
+        let candidates = vec![file("/keep", "x", 2), file("/dup", "x", 1)];
         let restored = restore_post_compact_files(candidates, &[PathBuf::from("/dup")]);
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].path, PathBuf::from("/keep"));
@@ -519,7 +515,7 @@ mod tests {
         // the top-5 isn't reachable (5*5000=25000). So directly test the filter:
         let big = "x".repeat(40_000); // caps to ~5_000 tokens
         let small = "tiny"; // ~1 token
-        // timestamps: big files newest so they're selected first.
+                            // timestamps: big files newest so they're selected first.
         let candidates = vec![
             file("/b1", &big, 5),
             file("/b2", &big, 4),
@@ -554,10 +550,21 @@ mod tests {
         // Six skills each capped to ~5_000 tokens → 6*5_000 = 30_000 > Q9p=25_000.
         // Greedy keeps 5 (25_000), drops the 6th.
         let candidates: Vec<_> = (0..6)
-            .map(|i| skill(&format!("s{i}"), &format!("/s{i}"), &"x".repeat(40_000), i64::from(i)))
+            .map(|i| {
+                skill(
+                    &format!("s{i}"),
+                    &format!("/s{i}"),
+                    &"x".repeat(40_000),
+                    i64::from(i),
+                )
+            })
             .collect();
         let restored = restore_post_compact_skills(candidates);
-        assert_eq!(restored.len(), 5, "5 * ~5_000 = 25_000 <= 25_000; 6th drops");
+        assert_eq!(
+            restored.len(),
+            5,
+            "5 * ~5_000 = 25_000 <= 25_000; 6th drops"
+        );
     }
 
     #[test]
@@ -603,7 +610,8 @@ mod tests {
 
         // Subagent compact must NOT reset (state stays "delivered").
         run_post_compact_cleanup(Some("agent:child"));
-        let after_subagent = resolve_autonomous_loop_fire(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL).unwrap();
+        let after_subagent =
+            resolve_autonomous_loop_fire(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL).unwrap();
         assert!(
             !after_subagent.starts_with(preamble_head),
             "subagent compact must NOT reset delivery state"

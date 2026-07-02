@@ -152,7 +152,9 @@ pub fn convert_settings_to_runtime_config(
     filesystem
         .deny_write
         .extend(ctx.cwd_settings_paths.iter().cloned());
-    filesystem.deny_write.extend(ctx.skills_dirs.iter().cloned());
+    filesystem
+        .deny_write
+        .extend(ctx.skills_dirs.iter().cloned());
     // Git worktree main repo path needs write access for index.lock etc.
     if let Some(main_repo) = &ctx.worktree_main_repo_path {
         filesystem.allow_write.push(main_repo.clone());

@@ -82,6 +82,56 @@ async fn store_then_retrieve_round_trip() {
 }
 
 #[tokio::test]
+async fn accounts_are_isolated_under_same_service() {
+    let Some(storage) = mk_storage("account-isolation") else {
+        eprintln!("security CLI unavailable; skipping");
+        return;
+    };
+
+    let account_a = unique_account();
+    let account_b = unique_account();
+    let payload_a = mk_payload(b"secret-a");
+    let payload_b = mk_payload(b"secret-b");
+
+    storage
+        .store("-credentials", &account_a, payload_a.clone())
+        .await
+        .expect("store a");
+    storage
+        .store("-credentials", &account_b, payload_b.clone())
+        .await
+        .expect("store b");
+
+    let read_a = storage
+        .retrieve("-credentials", &account_a)
+        .await
+        .expect("retrieve a")
+        .expect("entry a");
+    let read_b = storage
+        .retrieve("-credentials", &account_b)
+        .await
+        .expect("retrieve b")
+        .expect("entry b");
+    assert_eq!(
+        read_a.expose_secret_bytes(),
+        payload_a.expose_secret_bytes()
+    );
+    assert_eq!(
+        read_b.expose_secret_bytes(),
+        payload_b.expose_secret_bytes()
+    );
+
+    storage
+        .delete("-credentials", &account_a)
+        .await
+        .expect("delete a");
+    storage
+        .delete("-credentials", &account_b)
+        .await
+        .expect("delete b");
+}
+
+#[tokio::test]
 async fn delete_then_retrieve_returns_none() {
     let Some(storage) = mk_storage("delete") else {
         eprintln!("security CLI unavailable; skipping");

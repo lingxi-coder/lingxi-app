@@ -137,9 +137,7 @@ fn build_connection() -> BridgeConnection {
 /// Open an authenticated WS connection to `port`.
 async fn connect(
     port: u16,
-) -> tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-> {
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     let url = format!("ws://127.0.0.1:{port}/mcp");
     let req = http::Request::builder()
         .method("GET")
@@ -281,8 +279,14 @@ async fn permission_request_event_then_approve_resolves_check() {
             other => panic!("unexpected frame after approve: {other:?}"),
         }
     }
-    assert!(saw_tool_result, "the approved tool must have produced a result");
-    assert!(saw_turn_ended, "the turn must end after the tool dispatches");
+    assert!(
+        saw_tool_result,
+        "the approved tool must have produced a result"
+    );
+    assert!(
+        saw_turn_ended,
+        "the turn must end after the tool dispatches"
+    );
 
     endpoint.shutdown().await;
 }

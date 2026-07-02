@@ -211,7 +211,10 @@ mod tests {
         let mailbox = Arc::new(TeammateMailbox::new(agent));
         router.register(agent, mailbox.clone()).await;
 
-        let got = router.get(&agent).await.expect("registered mailbox resolves");
+        let got = router
+            .get(&agent)
+            .await
+            .expect("registered mailbox resolves");
         assert!(Arc::ptr_eq(&got, &mailbox), "get returns the same Arc");
 
         // After unregister it is gone again.

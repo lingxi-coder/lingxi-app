@@ -165,9 +165,19 @@ fn route_lines_keeps_only_transcript_messages_and_skips_malformed() {
     assert_eq!(att.timestamp, "", "absent `timestamp` defaults to empty");
 
     // Tier-1 side-maps populated.
-    assert_eq!(routed.summaries.get("u-2").map(String::as_str), Some("prior session"));
-    assert_eq!(routed.custom_titles.len(), 0, "no custom-title lines present");
-    assert_eq!(routed.ai_titles.get("sid-1").map(String::as_str), Some("Greeting"));
+    assert_eq!(
+        routed.summaries.get("u-2").map(String::as_str),
+        Some("prior session")
+    );
+    assert_eq!(
+        routed.custom_titles.len(),
+        0,
+        "no custom-title lines present"
+    );
+    assert_eq!(
+        routed.ai_titles.get("sid-1").map(String::as_str),
+        Some("Greeting")
+    );
 }
 
 #[tokio::test]

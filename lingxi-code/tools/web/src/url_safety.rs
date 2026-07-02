@@ -311,7 +311,9 @@ mod tests {
 
     #[test]
     fn preapproved_hostname_only() {
-        assert!(is_preapproved_url("https://docs.python.org/3/library/os.html"));
+        assert!(is_preapproved_url(
+            "https://docs.python.org/3/library/os.html"
+        ));
         assert!(is_preapproved_url("https://react.dev/learn"));
         assert!(!is_preapproved_url("https://random-blog.example/"));
     }
@@ -320,9 +322,13 @@ mod tests {
     fn preapproved_path_scoped_segment_boundary() {
         // github.com/anthropics is path-scoped.
         assert!(is_preapproved_url("https://github.com/anthropics"));
-        assert!(is_preapproved_url("https://github.com/anthropics/claude-code"));
+        assert!(is_preapproved_url(
+            "https://github.com/anthropics/claude-code"
+        ));
         // segment boundary: /anthropics-evil must NOT match.
-        assert!(!is_preapproved_url("https://github.com/anthropics-evil/malware"));
+        assert!(!is_preapproved_url(
+            "https://github.com/anthropics-evil/malware"
+        ));
         // a non-anthropics github path is not preapproved.
         assert!(!is_preapproved_url("https://github.com/someone-else/repo"));
         // vercel.com/docs path scope.

@@ -162,10 +162,7 @@ pub(crate) fn sanitize_segment(s: &str, allow_dot: bool) -> String {
     let mapped: String = s
         .chars()
         .map(|c| {
-            let keep = c.is_ascii_alphanumeric()
-                || c == '-'
-                || c == '_'
-                || (allow_dot && c == '.');
+            let keep = c.is_ascii_alphanumeric() || c == '-' || c == '_' || (allow_dot && c == '.');
             if keep {
                 c
             } else {
@@ -338,9 +335,7 @@ pub async fn discover_installed_plugins(
 ///
 /// Mirrors `createPluginFromPath` (`pluginLoader.ts:1348`): Step 1 loads the
 /// manifest, Step 3 auto-detects the optional component directories.
-pub(crate) async fn load_plugin_from_path(
-    plugin_dir: &Path,
-) -> Option<(PluginId, PluginManifest)> {
+pub(crate) async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId, PluginManifest)> {
     let manifest_path = plugin_dir
         .join(branding::PLUGIN_MANIFEST_DIR)
         .join("plugin.json");
@@ -455,10 +450,7 @@ async fn load_mcp_servers(plugin_dir: &Path) -> HashMap<String, mcp::McpServerCo
     // Plugin MCP servers are dynamic-scoped (`addPluginScopeToServers` uses
     // `scope: 'dynamic'`, `mcpPluginIntegration.ts:353`).
     match mcp::parse_mcp_json_string(&raw, mcp::ConfigScope::Dynamic) {
-        Ok(configs) => configs
-            .into_iter()
-            .map(|c| (c.name.clone(), c))
-            .collect(),
+        Ok(configs) => configs.into_iter().map(|c| (c.name.clone(), c)).collect(),
         Err(e) => {
             tracing::warn!(error = %e, path = %path.display(), "skipping malformed plugin .mcp.json");
             HashMap::new()

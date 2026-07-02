@@ -233,8 +233,13 @@ mod tests {
     use crate::oauth::anthropic::testsupport::{Canned, MockHttp};
 
     fn transport(status: u16, body: &str) -> Arc<dyn HttpTransport> {
-        MockHttp::new(vec![("anthropic.com", Canned { status, body: body.into() })])
-            as Arc<dyn HttpTransport>
+        MockHttp::new(vec![(
+            "anthropic.com",
+            Canned {
+                status,
+                body: body.into(),
+            },
+        )]) as Arc<dyn HttpTransport>
     }
 
     #[tokio::test]
@@ -263,7 +268,10 @@ mod tests {
         )]);
         let arc = mock.clone() as Arc<dyn HttpTransport>;
         let profile = fetch_profile_from_oauth_token("tok-xyz", &arc).await;
-        assert_eq!(profile.unwrap().subscription_type(), Some(SubscriptionType::Pro));
+        assert_eq!(
+            profile.unwrap().subscription_type(),
+            Some(SubscriptionType::Pro)
+        );
         let req = mock.last_request().expect("a request was sent");
         assert!(req.url.ends_with("/api/oauth/profile"), "url = {}", req.url);
         assert_eq!(req.method, HttpMethod::Get);
@@ -289,7 +297,10 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_org_type_resolves_to_none_tier() {
-        let t = transport(200, r#"{"organization":{"organization_type":"claude_galaxy"}}"#);
+        let t = transport(
+            200,
+            r#"{"organization":{"organization_type":"claude_galaxy"}}"#,
+        );
         let profile = fetch_profile_from_oauth_token("tok", &t).await.unwrap();
         assert_eq!(profile.subscription_type(), None);
     }
@@ -310,8 +321,13 @@ mod tests {
             Some(SubscriptionType::Enterprise)
         );
         let req = mock.last_request().unwrap();
-        assert!(req.url.contains("/api/claude_cli_profile?account_uuid=acct-77"));
-        assert!(req.headers.iter().any(|(k, v)| k == "x-api-key" && v == "sk-key"));
+        assert!(req
+            .url
+            .contains("/api/claude_cli_profile?account_uuid=acct-77"));
+        assert!(req
+            .headers
+            .iter()
+            .any(|(k, v)| k == "x-api-key" && v == "sk-key"));
         assert!(req
             .headers
             .iter()
@@ -326,7 +342,9 @@ mod tests {
             r#"{"organization_role":"admin","workspace_role":"workspace_developer",
                 "organization_name":"Acme"}"#,
         );
-        let roles = fetch_user_roles("tok", &t).await.expect("200 → Some(roles)");
+        let roles = fetch_user_roles("tok", &t)
+            .await
+            .expect("200 → Some(roles)");
         assert_eq!(roles.organization_role.as_deref(), Some("admin"));
         assert_eq!(roles.workspace_role.as_deref(), Some("workspace_developer"));
         assert_eq!(roles.organization_name.as_deref(), Some("Acme"));
@@ -345,13 +363,19 @@ mod tests {
     async fn fetch_user_roles_requests_roles_url_with_bearer() {
         let mock = MockHttp::new(vec![(
             "anthropic.com",
-            Canned { status: 200, body: r#"{"organization_role":"member"}"#.into() },
+            Canned {
+                status: 200,
+                body: r#"{"organization_role":"member"}"#.into(),
+            },
         )]);
         let arc = mock.clone() as Arc<dyn HttpTransport>;
         let roles = fetch_user_roles("test-token", &arc).await.unwrap();
         assert_eq!(roles.organization_role.as_deref(), Some("member"));
         let req = mock.last_request().expect("a request was sent");
-        assert_eq!(req.url, "https://api.anthropic.com/api/oauth/claude_cli/roles");
+        assert_eq!(
+            req.url,
+            "https://api.anthropic.com/api/oauth/claude_cli/roles"
+        );
         assert_eq!(req.method, HttpMethod::Get);
         assert!(req
             .headers
@@ -375,10 +399,15 @@ mod tests {
     async fn api_key_profile_requires_both_inputs() {
         let mock = MockHttp::new(vec![(
             "anthropic.com",
-            Canned { status: 200, body: "{}".into() },
+            Canned {
+                status: 200,
+                body: "{}".into(),
+            },
         )]);
         let arc = mock.clone() as Arc<dyn HttpTransport>;
-        assert!(fetch_profile_from_api_key("", "sk-key", &arc).await.is_none());
+        assert!(fetch_profile_from_api_key("", "sk-key", &arc)
+            .await
+            .is_none());
         assert!(fetch_profile_from_api_key("acct", "", &arc).await.is_none());
         // No request should have been issued for the early-return cases.
         assert_eq!(mock.call_count(), 0);

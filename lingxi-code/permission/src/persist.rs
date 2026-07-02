@@ -64,7 +64,9 @@ impl PermissionPaths {
     #[must_use]
     pub fn destination_path(&self, dest: PermissionUpdateDestination) -> Option<PathBuf> {
         match dest {
-            PermissionUpdateDestination::UserSettings => Some(self.lingxi_home.join("settings.json")),
+            PermissionUpdateDestination::UserSettings => {
+                Some(self.lingxi_home.join("settings.json"))
+            }
             PermissionUpdateDestination::ProjectSettings => {
                 Some(self.cwd.join(branding::DOT_DIR).join("settings.json"))
             }
@@ -84,7 +86,9 @@ pub enum PersistError {
     /// wrong type (a string/object where an object/array is expected). In every
     /// case the file is left UNTOUCHED (claude-code's `updateSettingsForSource`
     /// "Invalid JSON syntax" + the `.map()`-throws-on-non-array contract).
-    #[error("settings file at {0} cannot be merged (invalid or wrong-typed JSON); not overwriting")]
+    #[error(
+        "settings file at {0} cannot be merged (invalid or wrong-typed JSON); not overwriting"
+    )]
     BrokenJson(PathBuf),
     /// A filesystem error reading/creating/writing the settings file.
     #[error("io error on {path}: {source}")]
@@ -223,9 +227,9 @@ fn remove_rule_from_settings_json(raw: &str, rule: &PermissionRule) -> Result<Op
     let target = rule.value.to_rule_string();
     let before = arr_vec.len();
     arr_vec.retain(|existing| {
-        existing.as_str().is_none_or(|s| {
-            PermissionRuleValue::from_rule_string(s).to_rule_string() != target
-        })
+        existing
+            .as_str()
+            .is_none_or(|s| PermissionRuleValue::from_rule_string(s).to_rule_string() != target)
     });
     if arr_vec.len() == before {
         return Ok(None); // nothing matched.
@@ -466,7 +470,9 @@ mod tests {
         // Rule not present → None.
         let raw = r#"{ "permissions": { "allow": ["Read"] } }"#;
         let rule = allow_rule("Bash", PermissionUpdateDestination::LocalSettings).rule;
-        assert!(remove_rule_from_settings_json(raw, &rule).unwrap().is_none());
+        assert!(remove_rule_from_settings_json(raw, &rule)
+            .unwrap()
+            .is_none());
         // Empty / missing permissions → None.
         assert!(remove_rule_from_settings_json("", &rule).unwrap().is_none());
         assert!(remove_rule_from_settings_json(r#"{ "model": "x" }"#, &rule)
@@ -479,7 +485,9 @@ mod tests {
         // On-disk "Task" normalizes to "Agent"; removing "Agent" removes it.
         let raw = r#"{ "permissions": { "allow": ["Task", "Read"] } }"#;
         let agent = allow_rule("Agent", PermissionUpdateDestination::LocalSettings).rule;
-        let out = remove_rule_from_settings_json(raw, &agent).unwrap().unwrap();
+        let out = remove_rule_from_settings_json(raw, &agent)
+            .unwrap()
+            .unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["permissions"]["allow"], json!(["Read"]));
     }
@@ -588,7 +596,9 @@ mod tests {
             cwd: tmp.join("proj"),
         };
         let update = allow_rule("Bash", PermissionUpdateDestination::LocalSettings);
-        let err = persist_permission_update(&update, &paths).await.unwrap_err();
+        let err = persist_permission_update(&update, &paths)
+            .await
+            .unwrap_err();
         assert!(matches!(err, PersistError::BrokenJson(_)));
         // File left untouched.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ broken");

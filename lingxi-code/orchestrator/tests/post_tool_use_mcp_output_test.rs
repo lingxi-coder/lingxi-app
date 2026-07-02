@@ -13,7 +13,6 @@
 //!    `isMcpTool` gate suppresses the mutation).
 //! 3. An MCP tool + NO hook (or a hook that doesn't set the field) → the result
 //!    is the tool's own output, byte-identical (strict no-op).
-use llm_client::ContentBlock as LlmContentBlock;
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
 use hooks::events::{HookEvent, HookEventType};
@@ -21,8 +20,10 @@ use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookOutcome, HookResponse, HookResult};
 use hooks::HookExecutorImpl;
+use llm_client::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
-    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
@@ -200,7 +201,10 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
     }
 }
 
-async fn exec_with(handler: Arc<dyn BuiltinHookHandler>, handler_id: &str) -> Arc<HookExecutorImpl> {
+async fn exec_with(
+    handler: Arc<dyn BuiltinHookHandler>,
+    handler_id: &str,
+) -> Arc<HookExecutorImpl> {
     let registry = Arc::new(RwLock::new(HookRegistry::new()));
     registry
         .write()

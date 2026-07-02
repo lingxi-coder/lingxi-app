@@ -17,7 +17,6 @@
 //! 3. A non-worktree tool never fires `WorktreeCreate`.
 //! 4. A `WorktreeCreate` hook that itself fails does NOT break the turn
 //!    (best-effort, like the `PostToolUse` arm).
-use llm_client::ContentBlock as LlmContentBlock;
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
 use hooks::events::{HookEvent, HookEventType};
@@ -25,8 +24,10 @@ use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookOutcome, HookResult};
 use hooks::HookExecutorImpl;
+use llm_client::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
-    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
@@ -140,7 +141,9 @@ impl Tool for FakeEnterWorktreeTool {
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         if self.fail {
-            return Err(ToolError::Internal("git error: not a git repository".into()));
+            return Err(ToolError::Internal(
+                "git error: not a git repository".into(),
+            ));
         }
         Ok(ToolCallResult {
             data: json!({ "path": self.path, "branch_name": self.branch_name }),
@@ -294,10 +297,10 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
 
 async fn exec_recording(log: Arc<Mutex<Vec<SeenWorktree>>>) -> Arc<HookExecutorImpl> {
     let registry = Arc::new(RwLock::new(HookRegistry::new()));
-    registry
-        .write()
-        .await
-        .register(builtin_hook("record-worktree", HookEventType::WorktreeCreate));
+    registry.write().await.register(builtin_hook(
+        "record-worktree",
+        HookEventType::WorktreeCreate,
+    ));
     let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
     exec.register_builtin(Arc::new(RecordingHandler { log }));
     Arc::new(exec)
@@ -385,7 +388,11 @@ async fn successful_enter_worktree_fires_worktree_create_with_name_and_path() {
 #[tokio::test]
 async fn failed_enter_worktree_does_not_fire_worktree_create() {
     let tool_use_id = ToolUseId::new();
-    let api = two_turn_api(tool_use_id.clone(), "EnterWorktree", json!({ "slug": "user/feature" }));
+    let api = two_turn_api(
+        tool_use_id.clone(),
+        "EnterWorktree",
+        json!({ "slug": "user/feature" }),
+    );
     let log = Arc::new(Mutex::new(Vec::<SeenWorktree>::new()));
     let hooks = exec_recording(log.clone()).await;
     let mut registry = ToolRegistry::new();

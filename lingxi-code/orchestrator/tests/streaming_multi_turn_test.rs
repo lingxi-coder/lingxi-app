@@ -1,4 +1,3 @@
-
 use async_trait::async_trait;
 use orchestrator::test_support::{
     content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,

@@ -147,7 +147,10 @@ async fn poll_once(
             append_line(
                 fs,
                 spool,
-                &format!("[{}] mcp:{server_name} list_resources failed: {e}", unix_ts()),
+                &format!(
+                    "[{}] mcp:{server_name} list_resources failed: {e}",
+                    unix_ts()
+                ),
             )
             .await;
             return prev.cloned().unwrap_or_default();
@@ -163,8 +166,10 @@ async fn poll_once(
             snapshot.insert(r.uri.clone(), list_signature(&r.mime_type));
         }
     } else {
-        let present: HashMap<&str, &Option<String>> =
-            resources.iter().map(|r| (r.uri.as_str(), &r.mime_type)).collect();
+        let present: HashMap<&str, &Option<String>> = resources
+            .iter()
+            .map(|r| (r.uri.as_str(), &r.mime_type))
+            .collect();
         for uri in watch {
             // Only fingerprint watched URIs the server currently advertises.
             if let Some(mime) = present.get(uri.as_str()) {
@@ -186,8 +191,12 @@ async fn poll_once(
         for (uri, sig) in &snapshot {
             match prev.get(uri) {
                 None => {
-                    append_line(fs, spool, &format!("[{ts}] mcp:{server_name} resource added: {uri}"))
-                        .await;
+                    append_line(
+                        fs,
+                        spool,
+                        &format!("[{ts}] mcp:{server_name} resource added: {uri}"),
+                    )
+                    .await;
                 }
                 Some(old) if old != sig => {
                     append_line(
@@ -534,7 +543,9 @@ mod tests {
         let ts = unix_ts();
         for (uri, sig) in &new {
             match prev.get(uri) {
-                None => append_line(&fs, spool, &format!("[{ts}] mcp:s resource added: {uri}")).await,
+                None => {
+                    append_line(&fs, spool, &format!("[{ts}] mcp:s resource added: {uri}")).await
+                }
                 Some(old) if old != sig => {
                     append_line(&fs, spool, &format!("[{ts}] mcp:s resource changed: {uri}")).await;
                 }
@@ -590,10 +601,7 @@ mod tests {
         );
 
         // Killing an unknown id is NotFound.
-        let err = handler
-            .kill("nope", ctx(fs, runtime))
-            .await
-            .unwrap_err();
+        let err = handler.kill("nope", ctx(fs, runtime)).await.unwrap_err();
         assert!(matches!(err, TaskError::NotFound(_)));
     }
 

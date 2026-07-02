@@ -9,7 +9,6 @@
 //! - POST goes to the SAME URL as the GET. `Content-Type: application/json`.
 //! - Each SSE event is a single JSON-RPC `Message`: `data: {...}\n\n`.
 
-
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use jsonrpc::messages::Message as JsonRpcMessage;
@@ -66,10 +65,7 @@ where
     if let Some(token) = auth_token {
         let v = HeaderValue::try_from(token)
             .map_err(|e| SseConnectError::InvalidAuth(e.to_string()))?;
-        h.insert(
-            HeaderName::from_static("x-lingxi-ide-authorization"),
-            v,
-        );
+        h.insert(HeaderName::from_static("x-lingxi-ide-authorization"), v);
     }
     for (k, v) in extra_headers {
         let name = HeaderName::try_from(k.as_str())

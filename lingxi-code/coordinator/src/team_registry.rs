@@ -345,13 +345,8 @@ mod tests {
         let _ = idle;
         reg.update_status(&awaiting, WorkerStatus::AwaitingMessage)
             .await;
-        reg.update_status(
-            &failed,
-            WorkerStatus::Failed {
-                error: "x".into(),
-            },
-        )
-        .await;
+        reg.update_status(&failed, WorkerStatus::Failed { error: "x".into() })
+            .await;
         reg.update_status(&killed, WorkerStatus::Killed).await;
         reg.update_status(&completed, WorkerStatus::Completed).await;
 

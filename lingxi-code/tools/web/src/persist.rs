@@ -125,7 +125,8 @@ pub fn human_size(bytes: u64) -> String {
 /// `.0` (`1.0 -> "1"`, `1.5 -> "1.5"`).
 fn trim_dot_zero(n: f64) -> String {
     let s = format!("{n:.1}");
-    s.strip_suffix(".0").map_or_else(|| s.clone(), ToString::to_string)
+    s.strip_suffix(".0")
+        .map_or_else(|| s.clone(), ToString::to_string)
 }
 
 /// The temp-file stem `webfetch-${Date.now()}-${Math.random().toString(36).
@@ -193,7 +194,9 @@ pub fn persist_binary_content(
     output_dir: &Path,
 ) -> PersistResult {
     if let Err(e) = std::fs::create_dir_all(output_dir) {
-        return PersistResult::Err { error: e.to_string() };
+        return PersistResult::Err {
+            error: e.to_string(),
+        };
     }
     let ext = mime_extension(content_type);
     let mut filepath: PathBuf = output_dir.to_path_buf();
@@ -203,7 +206,9 @@ pub fn persist_binary_content(
             filepath: filepath.to_string_lossy().into_owned(),
             size: bytes.len(),
         },
-        Err(e) => PersistResult::Err { error: e.to_string() },
+        Err(e) => PersistResult::Err {
+            error: e.to_string(),
+        },
     }
 }
 
@@ -249,7 +254,9 @@ mod tests {
         assert!(!is_binary_content_type("application/xml"));
         assert!(!is_binary_content_type("image/svg+xml"));
         // JavaScript + form-encoded.
-        assert!(!is_binary_content_type("application/javascript; charset=utf-8"));
+        assert!(!is_binary_content_type(
+            "application/javascript; charset=utf-8"
+        ));
         assert!(!is_binary_content_type("application/x-www-form-urlencoded"));
     }
 
@@ -298,7 +305,9 @@ mod tests {
         assert!(name.starts_with("webfetch-1700000000000-"));
         let suffix = name.rsplit('-').next().unwrap();
         assert_eq!(suffix.len(), 6);
-        assert!(suffix.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+        assert!(suffix
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
     }
 
     // ---- B$e (persist) -----------------------------------------------------

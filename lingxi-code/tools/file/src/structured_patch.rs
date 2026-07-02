@@ -69,11 +69,17 @@ pub fn build_structured_patch(before: &str, after: &str) -> Vec<StructuredPatchH
         let line = ch.value().to_string();
         match segs.last_mut() {
             Some(s) if s.kind == kind => s.lines.push(line),
-            _ => segs.push(Seg { kind, lines: vec![line] }),
+            _ => segs.push(Seg {
+                kind,
+                lines: vec![line],
+            }),
         }
     }
     // jsdiff appends a sentinel empty unchanged segment so the final hunk closes.
-    segs.push(Seg { kind: SegKind::Unchanged, lines: Vec::new() });
+    segs.push(Seg {
+        kind: SegKind::Unchanged,
+        lines: Vec::new(),
+    });
 
     let n = segs.len() as i64;
     let mut hunks: Vec<StructuredPatchHunk> = Vec::new();
@@ -174,10 +180,7 @@ mod tests {
         assert_eq!(h[0].old_lines, 3);
         assert_eq!(h[0].new_start, 1);
         assert_eq!(h[0].new_lines, 3);
-        assert_eq!(
-            h[0].lines,
-            vec![" line1", "-line2", "+CHANGED", " line3"]
-        );
+        assert_eq!(h[0].lines, vec![" line1", "-line2", "+CHANGED", " line3"]);
     }
 
     #[test]
@@ -203,7 +206,16 @@ mod tests {
         // The replaced last line lacks a trailing newline → the marker is inserted.
         let h = build_structured_patch("a\nb", "a\nB");
         assert_eq!(h.len(), 1);
-        assert_eq!(h[0].lines, vec![" a", "-b", "\\ No newline at end of file", "+B", "\\ No newline at end of file"]);
+        assert_eq!(
+            h[0].lines,
+            vec![
+                " a",
+                "-b",
+                "\\ No newline at end of file",
+                "+B",
+                "\\ No newline at end of file"
+            ]
+        );
     }
 
     #[test]

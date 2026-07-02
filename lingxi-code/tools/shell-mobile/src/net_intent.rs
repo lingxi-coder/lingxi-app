@@ -19,9 +19,26 @@
 /// interface and are not egress.
 const NET_HEADS: &[&str] = &[
     // External clients.
-    "curl", "wget", "nc", "ncat", "ssh", "scp", "sftp", "rsync", "telnet", "ftp",
+    "curl",
+    "wget",
+    "nc",
+    "ncat",
+    "ssh",
+    "scp",
+    "sftp",
+    "rsync",
+    "telnet",
+    "ftp",
     // Bundled toybox networking applets.
-    "netcat", "ping", "ping6", "ftpget", "ftpput", "httpd", "host", "sntp", "nbd_client",
+    "netcat",
+    "ping",
+    "ping6",
+    "ftpget",
+    "ftpput",
+    "httpd",
+    "host",
+    "sntp",
+    "nbd_client",
     "nbd_server",
 ];
 

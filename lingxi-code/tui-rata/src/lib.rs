@@ -32,13 +32,11 @@ use std::io::{self, Stdout};
 
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Terminal;
+use ratatui::{Terminal, TerminalOptions, Viewport};
 pub use tui_core::message::RenderedMessage;
 pub use tui_core::orchestrator_bridge::TurnEvent;
 use tui_core::render::StyledLine;
@@ -47,27 +45,53 @@ use tui_core::theme::Theme;
 /// The concrete ratatui terminal type used by the runtime.
 pub type RataTerminal = Terminal<CrosstermBackend<Stdout>>;
 
-/// Enter raw mode + the alternate screen and construct a ratatui terminal.
+/// Enter raw mode + bracketed paste and construct a ratatui terminal with an
+/// INLINE viewport of `viewport_height` rows pinned to the bottom. Conversation
+/// history is written ABOVE the viewport into the terminal's native scrollback
+/// (via [`RataTerminal::insert_before`]), so the terminal owns scrolling — no
+/// alternate screen, no manual scroll math (codex `Tui` layout parity).
 ///
 /// # Errors
-/// Returns any terminal IO error from enabling raw mode, switching screens, or
-/// constructing the backend.
-pub fn setup_terminal() -> io::Result<RataTerminal> {
+/// Returns any terminal IO error from enabling raw mode or constructing the
+/// backend.
+pub fn setup_terminal(viewport_height: u16) -> io::Result<RataTerminal> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    Terminal::new(CrosstermBackend::new(stdout))
+    execute!(stdout, crossterm::event::EnableBracketedPaste)?;
+    Terminal::with_options(
+        CrosstermBackend::new(stdout),
+        TerminalOptions {
+            viewport: Viewport::Inline(viewport_height),
+        },
+    )
 }
 
-/// Restore the terminal to its pre-session state (leave alt screen, disable raw
-/// mode, show the cursor). Safe to call during unwind/exit.
+/// Restore the terminal: disable bracketed paste + raw mode, show the cursor.
+/// The inline viewport leaves history in native scrollback, so there is no
+/// alternate screen to leave.
 ///
 /// # Errors
-/// Returns any terminal IO error from restoring screen/cursor state.
+/// Returns any terminal IO error from restoring cursor/paste state.
 pub fn restore_terminal(terminal: &mut RataTerminal) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), crossterm::event::DisableBracketedPaste)?;
     terminal.show_cursor()
+}
+
+/// Rebuild the terminal with a new inline viewport `height` (ratatui's inline
+/// viewport is fixed-height, so growing/shrinking it — e.g. for the composer or
+/// an overlay — means recreating). Raw mode + bracketed paste are already on;
+/// history already in native scrollback is untouched.
+///
+/// # Errors
+/// Returns any terminal IO error from constructing the backend.
+pub fn resize_inline_viewport(height: u16) -> io::Result<RataTerminal> {
+    Terminal::with_options(
+        CrosstermBackend::new(io::stdout()),
+        TerminalOptions {
+            viewport: Viewport::Inline(height),
+        },
+    )
 }
 
 /// Phase-1 runtime shell: set up the terminal, run the draw/event loop until
@@ -78,7 +102,7 @@ pub fn restore_terminal(terminal: &mut RataTerminal) -> io::Result<()> {
 /// Propagates the draw/event loop's first IO error (after restoring the
 /// terminal).
 pub fn run_shell() -> io::Result<()> {
-    let mut terminal = setup_terminal()?;
+    let mut terminal = setup_terminal(6)?;
     let result = draw_loop(&mut terminal);
     restore_terminal(&mut terminal)?;
     result

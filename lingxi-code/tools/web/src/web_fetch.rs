@@ -397,7 +397,10 @@ impl WebFetchTool {
     /// Construct a new tool (no apply step until [`Self::with_side_query`]).
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        Self { ctx, side_query: None }
+        Self {
+            ctx,
+            side_query: None,
+        }
     }
 
     /// Attach the side-query client that powers the secondary-model apply step.
@@ -437,9 +440,9 @@ impl WebFetchTool {
     }
 
     /// Run the secondary-model apply step over `markdown` with `prompt`. Returns
-    /// the model's text (or the fallback "No response from model"). `is_preapproved`
-    /// is the host+path allowlist result (TS `isPreapprovedUrl(url)`), selecting the
-    /// relaxed vs strict guideline block in the secondary-model prompt.
+    /// the model's text when available. `None` means the apply side-query failed
+    /// or returned no usable text, in which case the caller falls back to the raw
+    /// markdown so WebFetch remains model-usable.
     #[cfg(feature = "web-markdown")]
     async fn apply_prompt(
         &self,
@@ -447,15 +450,12 @@ impl WebFetchTool {
         is_preapproved: bool,
         markdown: &str,
         prompt: &str,
-    ) -> String {
+    ) -> Option<String> {
         use protocol::{ConversationMessage, MessageId};
         use sidequery::{QuerySource, SideQueryRequest};
         let truncated = crate::markdown::truncate_markdown(markdown.to_string());
-        let model_prompt = crate::markdown::make_secondary_model_prompt(
-            &truncated,
-            prompt,
-            is_preapproved,
-        );
+        let model_prompt =
+            crate::markdown::make_secondary_model_prompt(&truncated, prompt, is_preapproved);
         let req = SideQueryRequest {
             model: self.apply_model(),
             system_prompt: None,
@@ -473,10 +473,18 @@ impl WebFetchTool {
             query_source: QuerySource::WebFetchApply,
             skip_system_prompt_prefix: true,
         };
-        match client.query(req).await {
-            Ok(resp) => resp.text.unwrap_or_else(|| "No response from model".to_string()),
-            Err(_) => "No response from model".to_string(),
-        }
+        client
+            .query(req)
+            .await
+            .ok()
+            .and_then(|resp| resp.text)
+            .and_then(|text| {
+                if text.trim().is_empty() {
+                    None
+                } else {
+                    Some(text)
+                }
+            })
     }
 
     /// Produce the tool-visible result body from the FULL fetched `content`,
@@ -518,9 +526,12 @@ impl WebFetchTool {
         }
         // Apply step is the default whenever a model (side_query) is wired.
         if let Some(client) = self.side_query.as_ref() {
-            return self
+            if let Some(applied) = self
                 .apply_prompt(client, is_preapproved, content, prompt.unwrap_or(""))
-                .await;
+                .await
+            {
+                return applied;
+            }
         }
         // Degraded path (no model wired): return the raw body.
         content.to_string()
@@ -552,11 +563,7 @@ impl WebFetchTool {
     /// claude-code uses `<config>/<session>/tool-results`; LingXi's tool context
     /// exposes the workspace root, not the config/session root, so the artifact is
     /// written under the project's `.lingxi/tool-results`. (Residual: see report.)
-    fn persist_binary(
-        &self,
-        content_type: &str,
-        body: &[u8],
-    ) -> (Option<String>, Option<usize>) {
+    fn persist_binary(&self, content_type: &str, body: &[u8]) -> (Option<String>, Option<usize>) {
         if !is_binary_content_type(content_type) {
             return (None, None);
         }
@@ -573,7 +580,11 @@ impl WebFetchTool {
             ns ^ (body.len() as u64).rotate_left(17) ^ (body.as_ptr() as u64)
         };
         let stem = crate::persist::persisted_filename(unix_ms, seed);
-        let output_dir = self.ctx.workspace.join(branding::DOT_DIR).join("tool-results");
+        let output_dir = self
+            .ctx
+            .workspace
+            .join(branding::DOT_DIR)
+            .join("tool-results");
         match crate::persist::persist_binary_content(body, content_type, &stem, &output_dir) {
             crate::persist::PersistResult::Ok { filepath, size } => (Some(filepath), Some(size)),
             crate::persist::PersistResult::Err { .. } => (None, None),
@@ -775,9 +786,12 @@ Usage notes:\n\
             "Fetches a URL, converts the page to markdown, and answers `prompt` against it using a small fast model.\n\n- Fails on authenticated/private URLs \u{2014} use an authenticated MCP tool or `gh` for those instead.\n- HTTP is upgraded to HTTPS. Cross-host redirects are returned to you rather than followed; call again with the redirect URL.\n- Responses are cached for 15 minutes per URL.".to_string()
         } else {
             let description = self
-                .description(&Value::Null, &DescriptionOptions {
-                    is_non_interactive_session: false,
-                })
+                .description(
+                    &Value::Null,
+                    &DescriptionOptions {
+                        is_non_interactive_session: false,
+                    },
+                )
                 .await;
             format!(
                 "IMPORTANT: WebFetch WILL FAIL for authenticated or private URLs. Before using this tool, check if the URL points to an authenticated service (e.g. Google Docs, Confluence, Jira, GitHub). If so, look for a specialized MCP tool that provides authenticated access.\n{description}"
@@ -1018,8 +1032,13 @@ Usage notes:\n\
                         hops += 1;
                         if hops > WEBFETCH_MAX_REDIRECTS {
                             let elapsed_ms = started.elapsed().as_millis() as u64;
-                            self.emit_failed(&invocation_id, "too_many_redirects", None, elapsed_ms)
-                                .await;
+                            self.emit_failed(
+                                &invocation_id,
+                                "too_many_redirects",
+                                None,
+                                elapsed_ms,
+                            )
+                            .await;
                             return Err(ToolError::Transport(format!(
                                 "WebFetch: too many redirects (exceeded {WEBFETCH_MAX_REDIRECTS})"
                             )));
@@ -1085,8 +1104,7 @@ Usage notes:\n\
                     .find(|(k, _)| k.eq_ignore_ascii_case("retry-after"))
                     .map(|(_, v)| v.clone());
                 let code_text = status_reason_phrase(resp.status);
-                let message =
-                    format_http_error_message(resp.status, retry_after.as_deref());
+                let message = format_http_error_message(resp.status, retry_after.as_deref());
                 // The tool call COMPLETED (it returns a result); claude-code logs a
                 // distinct `tengu_web_fetch_http_error`, but LingXi's telemetry
                 // vocabulary is started/completed/failed — completed is the faithful
@@ -1117,8 +1135,13 @@ Usage notes:\n\
                 // than 10 MB is rejected, NOT truncated (TS: axios throws). The M1
                 // transport already buffered the body, so we check its length here.
                 if body_bytes > WEBFETCH_MAX_TRANSFER_BYTES {
-                    self.emit_failed(&invocation_id, "content_too_large", Some(status), elapsed_ms)
-                        .await;
+                    self.emit_failed(
+                        &invocation_id,
+                        "content_too_large",
+                        Some(status),
+                        elapsed_ms,
+                    )
+                    .await;
                     return Err(ToolError::Transport(format!(
                         "WebFetch: response body ({body_bytes} bytes) exceeds maximum allowed size ({WEBFETCH_MAX_TRANSFER_BYTES} bytes)"
                     )));
@@ -1176,8 +1199,14 @@ Usage notes:\n\
                         persisted_size,
                     },
                 );
-                self.emit_completed(&invocation_id, status, body_bytes as u64, truncated, elapsed_ms)
-                    .await;
+                self.emit_completed(
+                    &invocation_id,
+                    status,
+                    body_bytes as u64,
+                    truncated,
+                    elapsed_ms,
+                )
+                .await;
 
                 // PARITY (#89): apply is the default; raw only for preapproved +
                 // text/markdown + under-cap.

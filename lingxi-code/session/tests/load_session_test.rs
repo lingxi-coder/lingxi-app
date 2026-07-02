@@ -173,7 +173,10 @@ async fn first_message_with_parent_uuid_no_longer_errors() {
         .expect("tolerant load must succeed");
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].uuid, m1.to_string());
-    assert_eq!(messages[0].parent_uuid.as_deref(), Some(bogus_parent.to_string().as_str()));
+    assert_eq!(
+        messages[0].parent_uuid.as_deref(),
+        Some(bogus_parent.to_string().as_str())
+    );
 }
 
 #[tokio::test]
@@ -415,25 +418,53 @@ async fn recovers_orphaned_parallel_tool_result_from_sibling_branch() {
     let a3 = "a3000000-0000-4000-8000-000000000003";
 
     let mut body = String::new();
-    body.push_str(&msg_line("user", u0, None, &sid, "2026-05-25T12:00:00.000Z"));
+    body.push_str(&msg_line(
+        "user",
+        u0,
+        None,
+        &sid,
+        "2026-05-25T12:00:00.000Z",
+    ));
     body.push_str(&assistant_tooluse_line(
-        a1, Some(u0), &sid, "2026-05-25T12:00:01.000Z", "msg_par", "tool_1",
+        a1,
+        Some(u0),
+        &sid,
+        "2026-05-25T12:00:01.000Z",
+        "msg_par",
+        "tool_1",
     ));
     // Sibling assistant: SAME message.id (msg_par), chained off a1, OFF the walk.
     body.push_str(&assistant_tooluse_line(
-        a2, Some(a1), &sid, "2026-05-25T12:00:02.000Z", "msg_par", "tool_2",
+        a2,
+        Some(a1),
+        &sid,
+        "2026-05-25T12:00:02.000Z",
+        "msg_par",
+        "tool_2",
     ));
     // tr1 answers a1 → ON the walk (a3's parent chain runs a3→tr1→a1→u0).
     body.push_str(&tool_result_line(
-        tr1, a1, &sid, "2026-05-25T12:00:03.000Z", "tool_1",
+        tr1,
+        a1,
+        &sid,
+        "2026-05-25T12:00:03.000Z",
+        "tool_1",
     ));
     // tr2 answers a2 → ORPHAN (its carrier a2 is off-chain).
     body.push_str(&tool_result_line(
-        tr2, a2, &sid, "2026-05-25T12:00:04.000Z", "tool_2",
+        tr2,
+        a2,
+        &sid,
+        "2026-05-25T12:00:04.000Z",
+        "tool_2",
     ));
     // Final answer is the newest leaf → the tip.
     body.push_str(&assistant_text_line(
-        a3, Some(tr1), &sid, "2026-05-25T12:00:05.000Z", "msg_final",
+        a3,
+        Some(tr1),
+        &sid,
+        "2026-05-25T12:00:05.000Z",
+        "msg_final",
     ));
 
     let sid_uuid = Uuid::parse_str(&sid).unwrap();
@@ -448,8 +479,14 @@ async fn recovers_orphaned_parallel_tool_result_from_sibling_branch() {
     let uuids: Vec<&str> = chain.iter().map(|m| m.uuid.as_str()).collect();
 
     // The orphaned sibling a2 AND its orphaned tool_result tr2 are recovered.
-    assert!(uuids.contains(&a2), "orphaned sibling assistant a2 recovered: {uuids:?}");
-    assert!(uuids.contains(&tr2), "orphaned tool_result tr2 recovered: {uuids:?}");
+    assert!(
+        uuids.contains(&a2),
+        "orphaned sibling assistant a2 recovered: {uuids:?}"
+    );
+    assert!(
+        uuids.contains(&tr2),
+        "orphaned tool_result tr2 recovered: {uuids:?}"
+    );
 
     // Main chain is NOT reordered: u0, a1, tr1, a3 keep their relative order,
     // and the recovered group [a2, tr2] is spliced right after the anchor a1.
@@ -472,15 +509,34 @@ async fn no_parallel_calls_chain_is_unchanged_by_recovery() {
     let a2 = "a2000000-0000-4000-8000-0000000000a2";
 
     let mut body = String::new();
-    body.push_str(&msg_line("user", u0, None, &sid, "2026-05-25T12:00:00.000Z"));
+    body.push_str(&msg_line(
+        "user",
+        u0,
+        None,
+        &sid,
+        "2026-05-25T12:00:00.000Z",
+    ));
     body.push_str(&assistant_tooluse_line(
-        a1, Some(u0), &sid, "2026-05-25T12:00:01.000Z", "msg_one", "tool_x",
+        a1,
+        Some(u0),
+        &sid,
+        "2026-05-25T12:00:01.000Z",
+        "msg_one",
+        "tool_x",
     ));
     body.push_str(&tool_result_line(
-        tr1, a1, &sid, "2026-05-25T12:00:02.000Z", "tool_x",
+        tr1,
+        a1,
+        &sid,
+        "2026-05-25T12:00:02.000Z",
+        "tool_x",
     ));
     body.push_str(&assistant_text_line(
-        a2, Some(tr1), &sid, "2026-05-25T12:00:03.000Z", "msg_two",
+        a2,
+        Some(tr1),
+        &sid,
+        "2026-05-25T12:00:03.000Z",
+        "msg_two",
     ));
 
     let sid_uuid = Uuid::parse_str(&sid).unwrap();

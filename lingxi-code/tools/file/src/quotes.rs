@@ -91,8 +91,7 @@ pub fn find_actual_string(file: &str, search: &str) -> Option<String> {
     // slice the original file's chars by the same window.
     let normalized_file_chars: Vec<char> = normalized_file.chars().collect();
     let normalized_search_chars: Vec<char> = normalized_search.chars().collect();
-    if let Some(search_char_index) =
-        char_index_of(&normalized_file_chars, &normalized_search_chars)
+    if let Some(search_char_index) = char_index_of(&normalized_file_chars, &normalized_search_chars)
     {
         // TS: fileContent.substring(searchIndex, searchIndex + searchString.length).
         // We use the ORIGINAL search's char length (JS `.length` is UTF-16 units;
@@ -327,7 +326,8 @@ fn char_index_of(haystack: &[char], needle: &[char]) -> Option<usize> {
     if needle.len() > haystack.len() {
         return None;
     }
-    (0..=haystack.len() - needle.len()).find(|&start| haystack[start..start + needle.len()] == *needle)
+    (0..=haystack.len() - needle.len())
+        .find(|&start| haystack[start..start + needle.len()] == *needle)
 }
 
 /// When `old_string` matched via quote normalization (curly quotes in file,

@@ -19,8 +19,10 @@ use llm_client::{builtin_presets, ClientConfig, ModelRegistry};
 
 fn registry() -> ModelRegistry {
     let cat = builtin_presets();
-    ModelRegistry::from_config(ClientConfig { providers: cat.providers })
-        .expect("registry from builtin presets")
+    ModelRegistry::from_config(ClientConfig {
+        providers: cat.providers,
+    })
+    .expect("registry from builtin presets")
 }
 
 #[test]
@@ -51,6 +53,10 @@ fn codex_ids_owned_solely_by_openai_chatgpt() {
             .filter(|p| p.models.iter().any(|m| m.request_model == id))
             .map(|p| p.profile_name.as_str())
             .collect();
-        assert_eq!(owners, ["openai-chatgpt"], "'{id}' must be owned solely by openai-chatgpt");
+        assert_eq!(
+            owners,
+            ["openai-chatgpt"],
+            "'{id}' must be owned solely by openai-chatgpt"
+        );
     }
 }

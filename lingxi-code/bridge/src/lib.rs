@@ -32,6 +32,6 @@ pub use mcp_endpoint::{FramePump, FrameSink, McpEndpoint, AUTH_HEADER_NAME, WS_S
 pub use state::BridgeState;
 pub use transport::{BridgeError, IdeBridge};
 pub use wire::{
-    version_compatible, AuthChallenge, AuthResponse, BridgeRequest, BridgeResponse, BridgeWireError,
-    Capabilities, ClientHello, Frame, ServerHello, BRIDGE_PROTOCOL_VERSION,
+    version_compatible, AuthChallenge, AuthResponse, BridgeRequest, BridgeResponse,
+    BridgeWireError, Capabilities, ClientHello, Frame, ServerHello, BRIDGE_PROTOCOL_VERSION,
 };

@@ -54,7 +54,9 @@ fn wire_codec_round_trip(codec: &dyn WireCodec) -> (ProviderRequest, llm_client:
 
 #[test]
 fn codec_returns_post_json_provider_request() {
-    let request = DummyCodec.encode_request(&LlmRequest::new("model-a")).unwrap();
+    let request = DummyCodec
+        .encode_request(&LlmRequest::new("model-a"))
+        .unwrap();
 
     assert_eq!(request.method, "POST");
     assert_eq!(request.url, "https://example.test/v1/messages");
@@ -76,17 +78,23 @@ fn provider_envelopes_round_trip_through_serde_with_headers_and_request_id() {
         "https://example.test/v1/messages",
         serde_json::json!({"model": "model-a"}),
     );
-    request.headers.insert("x-request-id".to_string(), "abc123".to_string());
+    request
+        .headers
+        .insert("x-request-id".to_string(), "abc123".to_string());
 
     let mut response = ProviderResponse::json(201, serde_json::json!({"ok": true}));
-    response.headers.insert("content-type".to_string(), "application/json".to_string());
+    response
+        .headers
+        .insert("content-type".to_string(), "application/json".to_string());
     response.request_id = Some("req-1".to_string());
 
     let request_value = serde_json::to_value(&request).expect("serialize request");
     let response_value = serde_json::to_value(&response).expect("serialize response");
 
-    let request_round_trip: ProviderRequest = serde_json::from_value(request_value).expect("request round trip");
-    let response_round_trip: ProviderResponse = serde_json::from_value(response_value).expect("response round trip");
+    let request_round_trip: ProviderRequest =
+        serde_json::from_value(request_value).expect("request round trip");
+    let response_round_trip: ProviderResponse =
+        serde_json::from_value(response_value).expect("response round trip");
 
     assert_eq!(request_round_trip, request);
     assert_eq!(response_round_trip, response);
@@ -94,13 +102,18 @@ fn provider_envelopes_round_trip_through_serde_with_headers_and_request_id() {
 
 #[test]
 fn normalized_headers_keep_a_single_value_per_name() {
-    let mut request = ProviderRequest::post_json(
-        "https://example.test/v1/messages",
-        serde_json::json!({}),
-    );
-    request.headers.insert("x-dup".to_string(), "one".to_string());
-    request.headers.insert("x-dup".to_string(), "two".to_string());
+    let mut request =
+        ProviderRequest::post_json("https://example.test/v1/messages", serde_json::json!({}));
+    request
+        .headers
+        .insert("x-dup".to_string(), "one".to_string());
+    request
+        .headers
+        .insert("x-dup".to_string(), "two".to_string());
 
     assert_eq!(request.headers.len(), 1);
-    assert_eq!(request.headers.get("x-dup").map(String::as_str), Some("two"));
+    assert_eq!(
+        request.headers.get("x-dup").map(String::as_str),
+        Some("two")
+    );
 }

@@ -1,4 +1,3 @@
-
 use orchestrator::prompt::{assemble_system_prompt, FileTree, MemoryFile, SystemPromptContext};
 use std::path::PathBuf;
 
@@ -125,7 +124,9 @@ fn static_body_sections_present_and_ordered_between_header_and_env() {
     ];
     let out = assemble_system_prompt(&ctx);
 
-    let i_header = out.find("You are LingXi, an agentic command-line coding assistant.").unwrap();
+    let i_header = out
+        .find("You are LingXi, an agentic command-line coding assistant.")
+        .unwrap();
     let i_open = out
         .find("You are an interactive agent that helps users with software engineering tasks.")
         .expect("Pym opening present");
@@ -135,8 +136,12 @@ fn static_body_sections_present_and_ordered_between_header_and_env() {
     let i_urls = out
         .find("IMPORTANT: You must NEVER generate or guess URLs for the user")
         .expect("NEVER-URLs line present");
-    let i_system = out.find("\n# System\n - All text you output outside of tool use").unwrap();
-    let i_doing = out.find("\n# Doing tasks\n - The user will primarily request you").unwrap();
+    let i_system = out
+        .find("\n# System\n - All text you output outside of tool use")
+        .unwrap();
+    let i_doing = out
+        .find("\n# Doing tasks\n - The user will primarily request you")
+        .unwrap();
     let i_exec = out
         .find("\n# Executing actions with care\n\nCarefully consider the reversibility")
         .unwrap();
@@ -148,12 +153,18 @@ fn static_body_sections_present_and_ordered_between_header_and_env() {
         .find("\n# Tone and style\n - Only use emojis if the user explicitly requests it.")
         .unwrap();
     // GAP-1: # Text output present after # Tone and style, before env.
-    let i_text_output = out.find("\n# Text output").expect("text output section present");
+    let i_text_output = out
+        .find("\n# Text output")
+        .expect("text output section present");
     // GAP-3: # Session-specific guidance present (Agent tool present + interactive).
-    let i_session = out.find("\n# Session-specific guidance").expect("session guidance present");
+    let i_session = out
+        .find("\n# Session-specific guidance")
+        .expect("session guidance present");
     let i_env = out.find("\n# Environment").unwrap();
     // GAP-2: # Context management present AFTER env (binary cx() ordering).
-    let i_ctx_mgmt = out.find("\n# Context management").expect("context management present");
+    let i_ctx_mgmt = out
+        .find("\n# Context management")
+        .expect("context management present");
 
     assert!(i_header < i_open);
     assert!(i_open < i_zho);
@@ -163,10 +174,22 @@ fn static_body_sections_present_and_ordered_between_header_and_env() {
     assert!(i_doing < i_exec);
     assert!(i_exec < i_tools);
     assert!(i_tools < i_tone);
-    assert!(i_tone < i_text_output, "# Text output must follow # Tone and style");
-    assert!(i_text_output < i_session, "# Session-specific guidance must follow # Text output");
-    assert!(i_session < i_env, "# Session-specific guidance must precede the env block");
-    assert!(i_env < i_ctx_mgmt, "# Context management must follow the env block (binary cx() order)");
+    assert!(
+        i_tone < i_text_output,
+        "# Text output must follow # Tone and style"
+    );
+    assert!(
+        i_text_output < i_session,
+        "# Session-specific guidance must follow # Text output"
+    );
+    assert!(
+        i_session < i_env,
+        "# Session-specific guidance must precede the env block"
+    );
+    assert!(
+        i_env < i_ctx_mgmt,
+        "# Context management must follow the env block (binary cx() order)"
+    );
 
     assert!(out.contains(" - Users may configure 'hooks', shell commands that execute"));
     assert!(out.contains("\n  - /help: Get help with using LingXi"));

@@ -579,7 +579,10 @@ mod tests {
             } => {
                 assert_eq!(tool_use_id.as_str(), "toolu_abc");
                 assert_eq!(permission_decision_json["behavior"], "allow");
-                assert_eq!(permission_decision_json["updatedInput"]["command"], "ls -la");
+                assert_eq!(
+                    permission_decision_json["updatedInput"]["command"],
+                    "ls -la"
+                );
                 assert_eq!(reason, "orphaned control_response (no pending request)");
             }
             other => panic!("expected OrphanedPermission, got {other:?}"),
@@ -785,7 +788,10 @@ mod tests {
         assert_eq!(uuids, vec!["first", "second"]);
 
         // A slash command breaks the batch.
-        let cmds2 = vec![mk(QueuePriority::Next, "p"), mk(QueuePriority::Next, "/clear")];
+        let cmds2 = vec![
+            mk(QueuePriority::Next, "p"),
+            mk(QueuePriority::Next, "/clear"),
+        ];
         let (text2, uuids2) = join_prompt_values(&cmds2).unwrap();
         assert_eq!(text2, "p");
         assert_eq!(uuids2, vec!["p"]);

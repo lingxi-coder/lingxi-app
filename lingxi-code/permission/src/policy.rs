@@ -192,8 +192,11 @@ impl PermissionPolicy {
     /// in the same buckets [`Self::authorize`] already evaluates. Wiring a gate
     /// over the resulting policy is a later phase.
     #[must_use]
-    pub fn from_rules(mode: PermissionMode, rules: impl IntoIterator<Item = PermissionRule>) -> Self {
-        let mut policy = Self::new(mode);
+    pub fn from_rules(
+        mode: PermissionMode,
+        rules: impl IntoIterator<Item = PermissionRule>,
+    ) -> Self {
+        let mut policy = Self::new(PermissionMode::Default);
         for rule in rules {
             let bucket = match rule.behavior {
                 PermissionBehavior::Allow => &mut policy.allow_rules,
@@ -202,6 +205,7 @@ impl PermissionPolicy {
             };
             bucket.entry(rule.source).or_default().push(rule);
         }
+        policy.set_mode(mode);
         policy
     }
 
@@ -438,7 +442,10 @@ impl PermissionPolicy {
         if let Some(roots) = self.roots.as_ref() {
             if shell_command::is_shell_tool(tool_name) {
                 if let Some(command) = shell_command::command_from_input(input) {
-                    let home = roots.home.as_deref().map(|p| p.to_string_lossy().into_owned());
+                    let home = roots
+                        .home
+                        .as_deref()
+                        .map(|p| p.to_string_lossy().into_owned());
                     if let Some(danger) = crate::dangerous_removal::check_dangerous_removal(
                         command,
                         &roots.cwd,
@@ -480,11 +487,13 @@ impl PermissionPolicy {
                     //      exact-match-allow (step 4) and prefix-allow (step 5).
                     //      Shares this slot (after deny/ask, before exact/allow,
                     //      roots- + shell-gated) and the byte-locked ask path.
-                    if let Some(ask) = crate::command_path_containment::check_command_path_containment(
-                        command,
-                        roots,
-                        &self.additional_working_dirs,
-                    ) {
+                    if let Some(ask) =
+                        crate::command_path_containment::check_command_path_containment(
+                            command,
+                            roots,
+                            &self.additional_working_dirs,
+                        )
+                    {
                         return ask_path_constraint(tool_name, ask);
                     }
                 }
@@ -537,7 +546,7 @@ impl PermissionPolicy {
         //     content matching. Reuses [`shell_command::command_exact_allowed`]
         //     (the `matchMode: 'exact'` arm of `filterRulesByContentsMatchingInput`).
         if self.roots.is_some() && shell_command::is_shell_tool(tool_name) {
-            if let Some(rule) = self.shell_exact_allow(tool_name, input, &sources) {
+            if let Some(rule) = self.shell_exact_allow(tool_name, input, &sources, mode) {
                 return allow_with_rule(rule);
             }
         }
@@ -548,15 +557,16 @@ impl PermissionPolicy {
         //    matching ONE subcommand must not allow a whole compound command),
         //    so they take a dedicated path rather than the per-rule walk.
         if self.roots.is_some() && shell_command::is_shell_tool(tool_name) {
-            if let Some(rule) = self.shell_allow(tool_name, input, &sources) {
+            if let Some(rule) = self.shell_allow(tool_name, input, &sources, mode) {
                 return allow_with_rule(rule);
             }
         } else {
             for src in &sources {
                 if let Some(rules) = self.allow_rules.get(src) {
-                    if let Some(rule) =
-                        rules.iter().find(|r| self.rule_matches(r, tool_name, input))
-                    {
+                    if let Some(rule) = rules.iter().find(|r| {
+                        self.rule_is_available_in_mode(r, mode)
+                            && self.rule_matches(r, tool_name, input)
+                    }) {
                         return allow_with_rule(rule);
                     }
                 }
@@ -592,8 +602,7 @@ impl PermissionPolicy {
         //     simply not taken and control falls through to the `AcceptEdits`-mode
         //     ask below. Requires [`Self::roots`] (the working-dir set is derived
         //     from `roots.cwd`).
-        if mode == PermissionMode::AcceptEdits
-            && file_tool_kind(tool_name) == FileToolKind::Editor
+        if mode == PermissionMode::AcceptEdits && file_tool_kind(tool_name) == FileToolKind::Editor
         {
             if let Some(roots) = self.roots.as_ref() {
                 if let Some(raw_path) = input_path_for_tool(tool_name, input, roots) {
@@ -601,10 +610,15 @@ impl PermissionPolicy {
                     // be auto-allowed; an `Unsafe` path falls through to ask.
                     if check_path_safety_for_auto_edit(&raw_path, roots) == AutoEditSafety::Safe {
                         // Working-dir set = cwd + additional dirs (`allWorkingDirectories`).
-                        let mut working_dirs = Vec::with_capacity(1 + self.additional_working_dirs.len());
+                        let mut working_dirs =
+                            Vec::with_capacity(1 + self.additional_working_dirs.len());
                         working_dirs.push(roots.cwd.clone());
                         working_dirs.extend(self.additional_working_dirs.iter().cloned());
-                        if path_in_allowed_working_path(Path::new(raw_path.as_ref()), &working_dirs, roots) {
+                        if path_in_allowed_working_path(
+                            Path::new(raw_path.as_ref()),
+                            &working_dirs,
+                            roots,
+                        ) {
                             return allow_with_mode(PermissionMode::AcceptEdits);
                         }
                     }
@@ -795,7 +809,12 @@ impl PermissionPolicy {
     ///     DENY rule never blocks a read (claude-code `checkRead` only consults
     ///     `read` deny rules) — the `behavior == Allow` clause enforces this
     ///     because deny rules are only ever evaluated from the deny bucket.
-    fn rule_matches(&self, rule: &PermissionRule, tool_name: &str, input: &serde_json::Value) -> bool {
+    fn rule_matches(
+        &self,
+        rule: &PermissionRule,
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> bool {
         let Some(roots) = self.roots.as_ref() else {
             // No roots → phase-2: file/shell content is ignored (matched
             // tool-wide). Tool-wide rules (`rule_content == None`) honor the
@@ -866,6 +885,14 @@ impl PermissionPolicy {
         path_matches_rule_pattern(&path, pattern, rule.source, roots)
     }
 
+    fn rule_is_available_in_mode(&self, rule: &PermissionRule, mode: PermissionMode) -> bool {
+        mode != PermissionMode::Auto
+            || !crate::dangerous_perms::is_dangerous_classifier_permission(
+                &rule.value.tool_name,
+                &rule.value.rule_content,
+            )
+    }
+
     /// First rule in `bucket` (walked highest→lowest source priority) that
     /// applies to this call AND is in the requested tier: `content == false`
     /// selects TOOL-WIDE rules (`rule_content == None`, claude-code
@@ -909,12 +936,14 @@ impl PermissionPolicy {
         tool_name: &str,
         input: &serde_json::Value,
         sources: &[PermissionRuleSource],
+        mode: PermissionMode,
     ) -> Option<&PermissionRule> {
         let command = shell_command::command_from_input(input)?;
         for src in sources {
             if let Some(rules) = self.allow_rules.get(src) {
                 if let Some(rule) = rules.iter().find(|r| {
-                    r.value.tool_name == tool_name
+                    self.rule_is_available_in_mode(r, mode)
+                        && r.value.tool_name == tool_name
                         && r.value
                             .rule_content
                             .as_deref()
@@ -940,14 +969,16 @@ impl PermissionPolicy {
         tool_name: &str,
         input: &serde_json::Value,
         sources: &[PermissionRuleSource],
+        mode: PermissionMode,
     ) -> Option<&PermissionRule> {
         // 1. Tool-wide allow → allow everything.
         for src in sources {
             if let Some(rules) = self.allow_rules.get(src) {
-                if let Some(rule) = rules
-                    .iter()
-                    .find(|r| r.value.tool_name == tool_name && r.value.rule_content.is_none())
-                {
+                if let Some(rule) = rules.iter().find(|r| {
+                    self.rule_is_available_in_mode(r, mode)
+                        && r.value.tool_name == tool_name
+                        && r.value.rule_content.is_none()
+                }) {
                     return Some(rule);
                 }
             }
@@ -958,7 +989,10 @@ impl PermissionPolicy {
         for src in sources {
             if let Some(rules) = self.allow_rules.get(src) {
                 for r in rules {
-                    if r.value.tool_name == tool_name && r.value.rule_content.is_some() {
+                    if self.rule_is_available_in_mode(r, mode)
+                        && r.value.tool_name == tool_name
+                        && r.value.rule_content.is_some()
+                    {
                         content_rules.push(r);
                     }
                 }
@@ -1307,7 +1341,9 @@ fn normalize_domain_key(s: &str) -> String {
     // Split off an optional trailing `:port` (`:\d+$`) so dots are stripped from
     // the host body only (matching the `(?=(:\d+)?$)` lookahead).
     let (body, port) = match lower.rfind(':') {
-        Some(i) if !lower[i + 1..].is_empty() && lower[i + 1..].bytes().all(|b| b.is_ascii_digit()) => {
+        Some(i)
+            if !lower[i + 1..].is_empty() && lower[i + 1..].bytes().all(|b| b.is_ascii_digit()) =>
+        {
             (&lower[..i], &lower[i..])
         }
         _ => (lower.as_str(), ""),
@@ -1341,8 +1377,7 @@ fn domain_wildcard_matches(pattern: &str, candidate: &str) -> bool {
         format!("^domain:{}$", escape_domain_wildcard(rest))
     };
     // `(?i)` mirrors `bRp`'s `new RegExp(n, "i")` (inputs are already lowercased).
-    regex::Regex::new(&format!("(?i){regex_str}"))
-        .is_ok_and(|re| re.is_match(candidate))
+    regex::Regex::new(&format!("(?i){regex_str}")).is_ok_and(|re| re.is_match(candidate))
 }
 
 /// Escape regex metacharacters and turn each `*` into `[^.:]*` — claude-code
@@ -1406,7 +1441,10 @@ fn deny_with_rule_content(
             .get("command")
             .and_then(serde_json::Value::as_str)
             .map(|cmd| {
-                format!("Permission to use {tool_name} with command {} has been denied.", cmd.trim())
+                format!(
+                    "Permission to use {tool_name} with command {} has been denied.",
+                    cmd.trim()
+                )
             })
     } else {
         // Generic CONTENT deny (binary `uMe`/`mZt`: `Permission to use ${e.name}
@@ -1414,9 +1452,10 @@ fn deny_with_rule_content(
         // Non-shell tools with a dedicated content rule (e.g. `WebFetch(domain:…)`,
         // `Agent(type)`) surface the matched `ruleContent`; a tool-wide rule
         // (`rule_content == None`) falls through to the bare generic message.
-        rule.value.rule_content.as_deref().map(|content| {
-            format!("Permission to use {tool_name} with {content} has been denied.")
-        })
+        rule.value
+            .rule_content
+            .as_deref()
+            .map(|content| format!("Permission to use {tool_name} with {content} has been denied."))
     };
     PermissionResult::Deny {
         reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },

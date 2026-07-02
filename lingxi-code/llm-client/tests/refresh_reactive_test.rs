@@ -6,9 +6,9 @@
 //! Loom version (full thread-interleaving exploration) lives in
 //! `refresh_single_flight_test.rs` — this file is a tokio-level smoke test.
 
+use async_trait::async_trait;
 use llm_client::oauth::anthropic::refresh::{AuthState, RefreshDriver};
 use llm_client::oauth::anthropic::ClaudeAiOAuthConfig;
-use async_trait::async_trait;
 use protocol::{HttpRequest, HttpResponse, Secret};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;

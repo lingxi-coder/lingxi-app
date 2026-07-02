@@ -197,7 +197,9 @@ mod tests {
     use tokio::net::TcpStream;
 
     async fn send_get(port: u16, path_and_query: &str) -> String {
-        let mut client = TcpStream::connect(("127.0.0.1", port)).await.expect("connect");
+        let mut client = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
         let req = format!("GET {path_and_query} HTTP/1.1\r\nHost: localhost\r\n\r\n");
         client.write_all(req.as_bytes()).await.expect("write");
         let mut resp = Vec::new();

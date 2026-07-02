@@ -261,7 +261,13 @@ fn catalog_model_listings() -> Vec<traits::orchestrator::ModelListing> {
     }) {
         listings.extend(registry.available_models().into_iter().map(|m| {
             let label = provider_label(&m.profile_name).to_string();
-            row(m.display_model, m.request_model, label, m.profile_name, m.description)
+            row(
+                m.display_model,
+                m.request_model,
+                label,
+                m.profile_name,
+                m.description,
+            )
         }));
     }
     listings
@@ -422,13 +428,13 @@ impl StreamingApiClient for ProviderApiAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_client::{
-        ApiService, AuthStrategy, BoxFuture, Capabilities, ClientConfig, CredentialConfig, LlmError,
-        ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, ProviderRequest,
-        ProviderResponse, StreamingResponse, Transport,
-    };
     use llm_client::model::user_agent::UserAgentEnv;
     use llm_client::DefaultLlmClient;
+    use llm_client::{
+        ApiService, AuthStrategy, BoxFuture, Capabilities, ClientConfig, CredentialConfig,
+        LlmError, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
+        ProviderRequest, ProviderResponse, StreamingResponse, Transport,
+    };
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
@@ -611,9 +617,18 @@ mod tests {
 
     #[test]
     fn model_description_matches_known_families() {
-        assert_eq!(model_description("claude-opus-4-7"), Some("Best for everyday, complex tasks"));
-        assert_eq!(model_description("anthropic/claude-sonnet-4-6"), Some("Efficient for routine tasks"));
-        assert_eq!(model_description("claude-3-5-haiku"), Some("Fastest for quick answers"));
+        assert_eq!(
+            model_description("claude-opus-4-7"),
+            Some("Best for everyday, complex tasks")
+        );
+        assert_eq!(
+            model_description("anthropic/claude-sonnet-4-6"),
+            Some("Efficient for routine tasks")
+        );
+        assert_eq!(
+            model_description("claude-3-5-haiku"),
+            Some("Fastest for quick answers")
+        );
         assert_eq!(model_description("gpt-4o"), None);
     }
 

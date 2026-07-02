@@ -665,7 +665,12 @@ impl Tool for ConfigTool {
         let setting = match input.get("setting").and_then(Value::as_str) {
             Some(s) => s.to_string(),
             None => {
-                emit_failed(&bus, "missing_setting", started.elapsed().as_millis() as u64).await;
+                emit_failed(
+                    &bus,
+                    "missing_setting",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
                 return Err(ToolError::InvalidInput(
                     "Config: missing or non-string setting".into(),
                 ));
@@ -676,7 +681,10 @@ impl Tool for ConfigTool {
         let is_get = value.is_none();
 
         let mut md: LogEventMetadata = HashMap::new();
-        md.insert("op".into(), verified_str(if is_get { "get" } else { "set" }));
+        md.insert(
+            "op".into(),
+            verified_str(if is_get { "get" } else { "set" }),
+        );
         md.insert("setting".into(), verified_str(&setting));
         bus.log_event(CONFIG_STARTED, md).await;
 
@@ -744,12 +752,7 @@ impl Tool for ConfigTool {
         if let Some(options) = get_options_for_setting(&setting) {
             let candidate = js_string(&final_value);
             if !options.iter().any(|o| o == &candidate) {
-                emit_failed(
-                    &bus,
-                    "invalid_option",
-                    started.elapsed().as_millis() as u64,
-                )
-                .await;
+                emit_failed(&bus, "invalid_option", started.elapsed().as_millis() as u64).await;
                 return Ok(done(err_data(
                     &setting,
                     &format!(
@@ -1068,7 +1071,10 @@ mod tests {
             .await
             .expect("ok envelope");
         assert_eq!(out.data["success"], json!(false));
-        assert_eq!(out.data["error"], json!("Unknown setting: \"telemetry_enabled\""));
+        assert_eq!(
+            out.data["error"],
+            json!("Unknown setting: \"telemetry_enabled\"")
+        );
     }
 
     #[tokio::test]
@@ -1234,7 +1240,9 @@ mod tests {
         let home = tmp.path().to_path_buf();
         // Seed an existing permissions sibling.
         let p = config_path(&home);
-        tokio::fs::create_dir_all(p.parent().unwrap()).await.unwrap();
+        tokio::fs::create_dir_all(p.parent().unwrap())
+            .await
+            .unwrap();
         tokio::fs::write(
             &p,
             serde_json::to_vec_pretty(&json!({ "permissions": { "allow": ["Bash"] } })).unwrap(),

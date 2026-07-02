@@ -473,9 +473,8 @@ impl Tool for MCPTool {
         // (client.ts:1786-1794); generic dispatcher → the dispatcher blurb.
         match &self.bound_desc {
             Some(d) => d.clone(),
-            None => {
-                "Invoke a tool on a registered MCP server via mcp__<server>__<tool> full-name.".into()
-            }
+            None => "Invoke a tool on a registered MCP server via mcp__<server>__<tool> full-name."
+                .into(),
         }
     }
     async fn prompt(&self, _: &PromptOptions) -> String {
@@ -616,17 +615,18 @@ impl Tool for MCPTool {
         // Only wired when a toolUseId is present (the `onProgress && toolUseId`
         // gate). Sends are best-effort (`try_send`), like the synchronous TS
         // `onProgress`.
-        let on_progress: Option<mcp::client::McpProgressCallback> = tool_use_id.clone().map(|tuid| {
-            let sender = progress.clone();
-            let server_name = server.clone();
-            let tool_name = tool.clone();
-            Arc::new(move |ev: mcp::client::McpProgressEvent| {
-                let _ = sender.try_send(ToolProgress {
-                    tool_use_id: tuid.clone(),
-                    data: mcp_progress_event_data(&server_name, &tool_name, &ev),
-                });
-            }) as mcp::client::McpProgressCallback
-        });
+        let on_progress: Option<mcp::client::McpProgressCallback> =
+            tool_use_id.clone().map(|tuid| {
+                let sender = progress.clone();
+                let server_name = server.clone();
+                let tool_name = tool.clone();
+                Arc::new(move |ev: mcp::client::McpProgressEvent| {
+                    let _ = sender.try_send(ToolProgress {
+                        tool_use_id: tuid.clone(),
+                        data: mcp_progress_event_data(&server_name, &tool_name, &ev),
+                    });
+                }) as mcp::client::McpProgressCallback
+            });
 
         // The wire form of a `ToolUseId` is its bare (serde-transparent) string.
         let tool_use_id_str = tool_use_id.as_ref().map(|tuid| tuid.to_string());
@@ -1671,13 +1671,18 @@ mod tests {
         let out = build_mcp_meta(Some(meta.clone()), None).expect("Some when _meta present");
         // Only the present key is included — no `structuredContent` placeholder.
         assert_eq!(out, json!({ "_meta": meta }));
-        assert!(out.as_object().expect("object").get("structuredContent").is_none());
+        assert!(out
+            .as_object()
+            .expect("object")
+            .get("structuredContent")
+            .is_none());
     }
 
     #[test]
     fn build_mcp_meta_only_structured_content() {
         let sc = json!({ "y": 2 });
-        let out = build_mcp_meta(None, Some(sc.clone())).expect("Some when structuredContent present");
+        let out =
+            build_mcp_meta(None, Some(sc.clone())).expect("Some when structuredContent present");
         assert_eq!(out, json!({ "structuredContent": sc }));
         assert!(out.as_object().expect("object").get("_meta").is_none());
     }

@@ -27,7 +27,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use telemetry::tengu::agent::{CACHE_EVICTION_HINT, TOOL_COMPLETED, TOOL_SELECTED, TOOL_TERMINATED};
+use telemetry::tengu::agent::{
+    CACHE_EVICTION_HINT, TOOL_COMPLETED, TOOL_SELECTED, TOOL_TERMINATED,
+};
 use telemetry::tengu::tool::{AGENT_COMPLETED_M4_05, AGENT_FAILED, AGENT_STARTED};
 use telemetry::AnalyticsBus;
 use traits::budget::BudgetError;
@@ -160,24 +162,21 @@ fn normalize_agent_type(s: &str) -> String {
 fn is_pd_dash(c: char) -> bool {
     matches!(
         c,
-        '-' | '\u{058A}'
-            | '\u{05BE}'
-            | '\u{1400}'
-            | '\u{1806}'
-            | '\u{2010}'..='\u{2015}'
-            | '\u{2E17}'
-            | '\u{2E1A}'
-            | '\u{2E3A}'
-            | '\u{2E3B}'
-            | '\u{2E40}'
-            | '\u{301C}'
-            | '\u{3030}'
-            | '\u{30A0}'
-            | '\u{FE31}'
-            | '\u{FE32}'
-            | '\u{FE58}'
-            | '\u{FE63}'
-            | '\u{FF0D}'
+        '-' | '\u{058A}' | '\u{05BE}' | '\u{1400}' | '\u{1806}' | '\u{2010}'
+            ..='\u{2015}'
+                | '\u{2E17}'
+                | '\u{2E1A}'
+                | '\u{2E3A}'
+                | '\u{2E3B}'
+                | '\u{2E40}'
+                | '\u{301C}'
+                | '\u{3030}'
+                | '\u{30A0}'
+                | '\u{FE31}'
+                | '\u{FE32}'
+                | '\u{FE58}'
+                | '\u{FE63}'
+                | '\u{FF0D}'
     )
 }
 
@@ -248,10 +247,7 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
 /// is left in place (deferred).
 static AGENT_INPUT_SCHEMA_MODEL: Lazy<Value> = Lazy::new(|| {
     let mut schema = AGENT_INPUT_SCHEMA.clone();
-    if let Some(props) = schema
-        .get_mut("properties")
-        .and_then(Value::as_object_mut)
-    {
+    if let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) {
         props.remove("cwd");
     }
     schema
@@ -724,7 +720,10 @@ Reach for this when the task matches an available agent type, when you have inde
             "total_tool_uses".into(),
             AnalyticsValue::Int(total_tool_uses as i64),
         );
-        md.insert("duration_ms".into(), AnalyticsValue::Int(duration_ms as i64));
+        md.insert(
+            "duration_ms".into(),
+            AnalyticsValue::Int(duration_ms as i64),
+        );
         md.insert(
             "total_tokens".into(),
             AnalyticsValue::Int(total_tokens as i64),
@@ -778,7 +777,10 @@ Reach for this when the task matches an available agent type, when you have inde
                 PiiTagged::assert_pii_tagged_column(model.to_string()).into_inner(),
             ),
         );
-        md.insert("duration_ms".into(), AnalyticsValue::Int(duration_ms as i64));
+        md.insert(
+            "duration_ms".into(),
+            AnalyticsValue::Int(duration_ms as i64),
+        );
         md.insert("is_async".into(), AnalyticsValue::Bool(true));
         md.insert(
             "is_built_in_agent".into(),
@@ -837,9 +839,17 @@ Reach for this when the task matches an available agent type, when you have inde
             model_profile: None,
             run_in_background: true,
             name: if is_fork { None } else { parsed.name.clone() },
-            team_name: if is_fork { None } else { parsed.team_name.clone() },
+            team_name: if is_fork {
+                None
+            } else {
+                parsed.team_name.clone()
+            },
             mode: if is_fork { None } else { parsed.mode.clone() },
-            isolation: if is_fork { None } else { parsed.isolation.clone() },
+            isolation: if is_fork {
+                None
+            } else {
+                parsed.isolation.clone()
+            },
             cwd: if is_fork { None } else { parsed.cwd.clone() },
             fork_context_messages: None,
             fork_parent_system_prompt: None,
@@ -848,7 +858,10 @@ Reach for this when the task matches an available agent type, when you have inde
             effort: None,
             // Thread the originating tool_use_id so the backgrounded agent's
             // `<task-notification>` carries `<tool-use-id>` (claude-code parity).
-            tool_use_id: ctx.tool_use_id.as_ref().map(std::string::ToString::to_string),
+            tool_use_id: ctx
+                .tool_use_id
+                .as_ref()
+                .map(std::string::ToString::to_string),
             // Workflow-only spawn seam (defaults; the Agent tool doesn't use the
             // workflow-subagent prompt override/addendum or disallow-union).
             system_prompt_override: None,
@@ -1327,8 +1340,7 @@ impl Tool for AgentTool {
                     })
                 };
                 if any_required(&reg.servers_pending().await) {
-                    let deadline =
-                        std::time::Instant::now() + std::time::Duration::from_secs(30);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
                     while std::time::Instant::now() < deadline {
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                         // A required server FAILED → stop waiting.
@@ -1435,10 +1447,12 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // `!dqt`; the remote path is separate and out of scope here.) The same
         // `run_in_background` value drives BOTH the telemetry `is_async` flag and
         // the async-dispatch branch below.
-        let background_tasks_disabled =
-            traits::env::is_env_truthy(std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS").ok().as_deref());
-        let run_in_background = (parsed.run_in_background.unwrap_or(false)
-            || selected.background)
+        let background_tasks_disabled = traits::env::is_env_truthy(
+            std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
+                .ok()
+                .as_deref(),
+        );
+        let run_in_background = (parsed.run_in_background.unwrap_or(false) || selected.background)
             && !background_tasks_disabled;
         let is_async = run_in_background;
         Self::emit_agent_tool_selected(
@@ -1546,8 +1560,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // (`def.isolation` frontmatter as a secondary source is not threaded to the
         // tool layer yet — the model-facing `isolation` arg is the supported path.)
         let mut agent_worktree: Option<traits::worktree::WorktreeHandle> = None;
-        let mut resolved_cwd: Option<String> =
-            if is_fork { None } else { parsed.cwd.clone() };
+        let mut resolved_cwd: Option<String> = if is_fork { None } else { parsed.cwd.clone() };
         if !is_fork && parsed.isolation.as_deref() == Some("worktree") {
             let slug = format!("agent-{invocation_id}");
             match self.ctx.worktree.create_worktree(&slug, None, &[]).await {
@@ -1590,9 +1603,17 @@ Use /mcp to configure and authenticate the required MCP servers.",
             run_in_background: parsed.run_in_background.unwrap_or(false),
             // Fork path carries no teammate/isolation/cwd overrides.
             name: if is_fork { None } else { parsed.name.clone() },
-            team_name: if is_fork { None } else { parsed.team_name.clone() },
+            team_name: if is_fork {
+                None
+            } else {
+                parsed.team_name.clone()
+            },
             mode: if is_fork { None } else { parsed.mode.clone() },
-            isolation: if is_fork { None } else { parsed.isolation.clone() },
+            isolation: if is_fork {
+                None
+            } else {
+                parsed.isolation.clone()
+            },
             // The RESOLVED cwd (worktree path for `isolation:"worktree"`, or the
             // explicit `cwd` override) — the spawner sets `SubagentContext.cwd`
             // from this so the agent's tools operate there.
@@ -1737,38 +1758,38 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 // is DEFERRED pending the deeper `llm_client::Usage` extension
                 // (see SubagentUsage doc); the key SHAPE matches now.
                 let mut data = json!({
-                        "status": "completed",
-                        "prompt": parsed.prompt,
-                        "agentId": agent_id_str,
-                        "agentType": effective_type,
-                        "content": content_blocks,
-                        "totalToolUseCount": total_tool_use_count,
-                        "totalDurationMs": total_duration_ms,
-                        "totalTokens": total_tokens,
-                        "usage": {
-                            "input_tokens": usage.input_tokens,
-                            "output_tokens": usage.output_tokens,
-                            "cache_creation_input_tokens": usage.cache_creation_input_tokens,
-                            "cache_read_input_tokens": usage.cache_read_input_tokens,
-                            "server_tool_use": serde_json::Value::Null,
-                            "service_tier": serde_json::Value::Null,
-                            "cache_creation": serde_json::Value::Null,
-                        },
-                        // model-facing string consumed by orchestrator
-                        // `tool_result_to_model_text` (turn_loop.rs).
-                        "model_content": model_content,
-                        // R7 (single-fire): the child runner (`run_subagent`)
-                        // already fired the canonical `SubagentStart` (collecting
-                        // additionalContext for the child) and the child's own
-                        // frontmatter `Stop`→`SubagentStop`, exactly as claude
-                        // does inside `runAgent`. This engine-internal flag tells
-                        // the orchestrator chokepoint to SKIP its own
-                        // SubagentStart fire (no double-fire) and to fire only the
-                        // session/plugin `SubagentStop` complement. Invisible to
-                        // the model (it reads `model_content`) and never written
-                        // to JSONL — same category as `model_content` itself.
-                        "subagentHooksFired": true,
-                    });
+                    "status": "completed",
+                    "prompt": parsed.prompt,
+                    "agentId": agent_id_str,
+                    "agentType": effective_type,
+                    "content": content_blocks,
+                    "totalToolUseCount": total_tool_use_count,
+                    "totalDurationMs": total_duration_ms,
+                    "totalTokens": total_tokens,
+                    "usage": {
+                        "input_tokens": usage.input_tokens,
+                        "output_tokens": usage.output_tokens,
+                        "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+                        "cache_read_input_tokens": usage.cache_read_input_tokens,
+                        "server_tool_use": serde_json::Value::Null,
+                        "service_tier": serde_json::Value::Null,
+                        "cache_creation": serde_json::Value::Null,
+                    },
+                    // model-facing string consumed by orchestrator
+                    // `tool_result_to_model_text` (turn_loop.rs).
+                    "model_content": model_content,
+                    // R7 (single-fire): the child runner (`run_subagent`)
+                    // already fired the canonical `SubagentStart` (collecting
+                    // additionalContext for the child) and the child's own
+                    // frontmatter `Stop`→`SubagentStop`, exactly as claude
+                    // does inside `runAgent`. This engine-internal flag tells
+                    // the orchestrator chokepoint to SKIP its own
+                    // SubagentStart fire (no double-fire) and to fire only the
+                    // session/plugin `SubagentStop` complement. Invisible to
+                    // the model (it reads `model_content`) and never written
+                    // to JSONL — same category as `model_content` itself.
+                    "subagentHooksFired": true,
+                });
                 // claude spreads `worktreePath`/`worktreeBranch` into `data` ONLY
                 // when the worktree was KEPT (the agent left changes).
                 if let Some((path, branch)) = &worktree_result {

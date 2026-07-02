@@ -260,8 +260,8 @@ mod worker {
     use crate::rollout::ARCHIVED_SESSIONS_SUBDIR;
     use crate::rollout::SESSIONS_SUBDIR;
 
-    use super::RolloutFile;
     use super::path;
+    use super::RolloutFile;
 
     const TEMP_SUFFIX: &str = ".tmp";
     const COMPRESSION_LEVEL: i32 = super::COMPRESSION_LEVEL;
@@ -861,9 +861,9 @@ mod reader {
     use std::io::Read;
     use std::path::Path;
 
+    use super::path;
     use super::RolloutLineReader;
     use super::RolloutLineReaderInner;
-    use super::path;
     use tokio::io::AsyncBufReadExt;
 
     pub(super) async fn open_once(path: &Path) -> io::Result<RolloutLineReader> {

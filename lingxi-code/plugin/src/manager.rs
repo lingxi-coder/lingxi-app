@@ -155,10 +155,9 @@ impl PluginManager {
     pub async fn install(&self, source: PluginSource) -> Result<PluginId, PluginManagerError> {
         match source {
             PluginSource::LocalPath { path } => {
-                let discovered = crate::discovery::discover_installed_plugins(
-                    path.parent().unwrap_or(&path),
-                )
-                .await;
+                let discovered =
+                    crate::discovery::discover_installed_plugins(path.parent().unwrap_or(&path))
+                        .await;
                 // Match by directory: the discovery walk returns siblings of
                 // `path`'s parent; pick the one whose install dir is `path`.
                 let found = discovered.into_iter().find(|(_, _, dir)| dir == &path);
@@ -199,26 +198,29 @@ impl PluginManager {
                     .await
                     .map_err(PluginManagerError::Marketplace)?;
                 // 2. Find the plugin entry by name (byte-exact not-found message).
-                let entry = index.plugins.iter().find(|p| p.name == name).ok_or_else(|| {
-                    let avail = index
-                        .plugins
-                        .iter()
-                        .map(|p| p.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    PluginManagerError::Marketplace(format!(
-                        "Marketplace '{name}' not found. Available marketplaces: {avail}"
-                    ))
-                })?;
+                let entry = index
+                    .plugins
+                    .iter()
+                    .find(|p| p.name == name)
+                    .ok_or_else(|| {
+                        let avail = index
+                            .plugins
+                            .iter()
+                            .map(|p| p.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        PluginManagerError::Marketplace(format!(
+                            "Marketplace '{name}' not found. Available marketplaces: {avail}"
+                        ))
+                    })?;
                 // 3. Resolve the plugin dir inside the clone (lexical guard), then
                 //    canonicalize and assert it is STILL inside the clone — a
                 //    120000 symlink in the untrusted repo (e.g. `path` pointing at
                 //    `~/.ssh`) would otherwise let the copy follow it out of the
                 //    clone and exfiltrate host files into the cache.
-                let src_dir = crate::marketplace::MarketplaceManager::plugin_dir_in_clone(
-                    &clone_dir, entry,
-                )
-                .map_err(PluginManagerError::Marketplace)?;
+                let src_dir =
+                    crate::marketplace::MarketplaceManager::plugin_dir_in_clone(&clone_dir, entry)
+                        .map_err(PluginManagerError::Marketplace)?;
                 let real_src = tokio::fs::canonicalize(&src_dir).await.map_err(|_| {
                     PluginManagerError::Marketplace(format!(
                         "Marketplace name '{name}' resolves to a path outside the cache directory"
@@ -358,12 +360,11 @@ impl PluginManager {
         let manifest_path = src_dir
             .join(branding::PLUGIN_MANIFEST_DIR)
             .join("plugin.json");
-        let raw = tokio::fs::read_to_string(&manifest_path).await.map_err(|_| {
-            PluginManagerError::Io(format!(
-                "no plugin manifest found at {}",
-                src_dir.display()
-            ))
-        })?;
+        let raw = tokio::fs::read_to_string(&manifest_path)
+            .await
+            .map_err(|_| {
+                PluginManagerError::Io(format!("no plugin manifest found at {}", src_dir.display()))
+            })?;
         let json: serde_json::Value = serde_json::from_str(&raw)
             .map_err(|e| PluginManagerError::Validation(format!("invalid plugin.json: {e}")))?;
         let name = json
@@ -386,9 +387,9 @@ impl PluginManager {
         if dest.exists() {
             tokio::fs::remove_dir_all(&dest).await.ok();
         }
-        copy_dir_recursive(src_dir, &dest)
-            .await
-            .map_err(|e| PluginManagerError::Io(format!("failed to materialize plugin cache: {e}")))?;
+        copy_dir_recursive(src_dir, &dest).await.map_err(|e| {
+            PluginManagerError::Io(format!("failed to materialize plugin cache: {e}"))
+        })?;
         // Durably record the install (marketplace → plugin → version) so a later
         // launch can re-discover the exact cache dir. Best-effort: a record-write
         // failure must not fail an otherwise-successful install.
@@ -580,9 +581,12 @@ impl PluginManager {
                 let Ok(raw) = tokio::fs::read_to_string(&abs).await else {
                     continue;
                 };
-                let Ok(mut skill) =
-                    parse_skill_markdown(&raw, abs.clone(), SkillSource::Plugin, LoadedFrom::Plugin)
-                else {
+                let Ok(mut skill) = parse_skill_markdown(
+                    &raw,
+                    abs.clone(),
+                    SkillSource::Plugin,
+                    LoadedFrom::Plugin,
+                ) else {
                     continue;
                 };
                 skill.name = format!("{plugin_name}:{}", skill.name);
@@ -606,10 +610,7 @@ impl PluginManager {
                 let Ok(raw) = tokio::fs::read_to_string(&abs).await else {
                     continue;
                 };
-                let stem = abs
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default();
+                let stem = abs.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
                 let disk = outputstyles::parse_output_style(&raw, stem);
                 let name = format!("{plugin_name}:{}", disk.name);
                 styles.push(OutputStyle {
@@ -637,9 +638,7 @@ impl PluginManager {
         //     `.mcp.json` servers (claude-code `getLingXiMcpConfigs`
         //     merges plugin servers into the SAME configs map that the
         //     connection manager dials eagerly at startup — `config.ts:1114`).
-        let mcp_scoped: Vec<McpServerConfig> = if self
-            .strict
-            .is_locked(PluginComponent::McpServers)
+        let mcp_scoped: Vec<McpServerConfig> = if self.strict.is_locked(PluginComponent::McpServers)
         {
             Vec::new()
         } else {
@@ -699,7 +698,10 @@ impl PluginManager {
         //    regardless of the state `connect_all` leaves them in.
         if !mcp_scoped.is_empty() {
             let names: Vec<String> = mcp_scoped.iter().map(|cfg| cfg.name.clone()).collect();
-            self.plugin_mcp_names.write().await.insert(manifest.id, names);
+            self.plugin_mcp_names
+                .write()
+                .await
+                .insert(manifest.id, names);
             self.mcp_registry.connect_all(mcp_scoped).await;
         }
 
@@ -746,11 +748,11 @@ impl PluginManager {
 /// frontmatter. Mirrors the `---\n…\n---` convention claude-code's agent
 /// loader uses (and the engine's `parse_agent_markdown`).
 fn extract_frontmatter(raw: &str) -> Option<&str> {
-    let rest = raw.strip_prefix("---\n").or_else(|| raw.strip_prefix("---\r\n"))?;
+    let rest = raw
+        .strip_prefix("---\n")
+        .or_else(|| raw.strip_prefix("---\r\n"))?;
     // Find the closing fence at the start of a line.
-    let end = rest
-        .find("\n---")
-        .or_else(|| rest.find("\r\n---"))?;
+    let end = rest.find("\n---").or_else(|| rest.find("\r\n---"))?;
     Some(&rest[..end])
 }
 

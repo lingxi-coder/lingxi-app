@@ -26,12 +26,12 @@
 
 use crate::side_query::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
 use async_trait::async_trait;
+use llm_client::LlmTransportBridge;
 use llm_client::{
     AuthStrategy, Capabilities, ClientConfig, Credential, CredentialConfig, DefaultLlmClient,
     LlmRequest, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
     StaticCredentialProvider, SystemBlock,
 };
-use llm_client::LlmTransportBridge;
 use protocol::{HttpRequest, HttpResponse};
 use std::sync::Arc;
 use traits::http::{RawByteStream, SseStream};
@@ -793,7 +793,8 @@ mod tests {
             "id": "msg_fwd", "model": "claude-haiku-4-5",
             "content": [{ "type": "text", "text": "ok" }],
             "stop_reason": "end_turn", "usage": { "input_tokens": 1, "output_tokens": 1 }
-        }).to_string();
+        })
+        .to_string();
         let transport = Arc::new(StubTransport::new(body));
         let client = ProviderSideQueryClient::new("sk-test", None, transport.clone());
         let mut r = req(None);
@@ -803,7 +804,11 @@ mod tests {
         let received = transport.received.lock().unwrap();
         let body: serde_json::Value =
             serde_json::from_str(received[0].body.as_deref().unwrap()).unwrap();
-        assert_eq!(body["tool_choice"]["type"].as_str(), Some("any"), "any→required");
+        assert_eq!(
+            body["tool_choice"]["type"].as_str(),
+            Some("any"),
+            "any→required"
+        );
         assert_eq!(body["stop_sequences"][0].as_str(), Some("STOP"));
     }
 

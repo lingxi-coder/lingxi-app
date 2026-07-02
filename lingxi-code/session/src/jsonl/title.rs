@@ -388,7 +388,10 @@ mod tests {
 
     #[test]
     fn is_compact_summary_is_skipped() {
-        let summary = user_with(json!("compacted history"), json!({"isCompactSummary": true}));
+        let summary = user_with(
+            json!("compacted history"),
+            json!({"isCompactSummary": true}),
+        );
         let real = user(json!("the real prompt"));
         assert_eq!(extract_title(&[summary, real]), "the real prompt");
     }

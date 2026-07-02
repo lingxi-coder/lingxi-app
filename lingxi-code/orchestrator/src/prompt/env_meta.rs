@@ -185,31 +185,55 @@ mod tests {
     #[test]
     fn marketing_names_match_ts_map() {
         assert_eq!(marketing_name_for_model("claude-fable-5"), Some("Fable 5"));
-        assert_eq!(marketing_name_for_model("claude-mythos-5"), Some("Mythos 5"));
-        assert_eq!(marketing_name_for_model("claude-opus-4-8"), Some("Opus 4.8"));
+        assert_eq!(
+            marketing_name_for_model("claude-mythos-5"),
+            Some("Mythos 5")
+        );
+        assert_eq!(
+            marketing_name_for_model("claude-opus-4-8"),
+            Some("Opus 4.8")
+        );
         assert_eq!(
             marketing_name_for_model("claude-opus-4-8-20260101[1m]"),
             Some("Opus 4.8 (1M context)")
         );
-        assert_eq!(marketing_name_for_model("claude-opus-4-7"), Some("Opus 4.7"));
+        assert_eq!(
+            marketing_name_for_model("claude-opus-4-7"),
+            Some("Opus 4.7")
+        );
         assert_eq!(
             marketing_name_for_model("claude-opus-4-7-20251101[1m]"),
             Some("Opus 4.7 (1M context)")
         );
-        assert_eq!(marketing_name_for_model("claude-opus-4-6"), Some("Opus 4.6"));
+        assert_eq!(
+            marketing_name_for_model("claude-opus-4-6"),
+            Some("Opus 4.6")
+        );
         assert_eq!(
             marketing_name_for_model("claude-opus-4-6-20251101[1m]"),
             Some("Opus 4.6 (1M context)")
         );
-        assert_eq!(marketing_name_for_model("claude-opus-4-5"), Some("Opus 4.5"));
-        assert_eq!(marketing_name_for_model("claude-opus-4-1"), Some("Opus 4.1"));
+        assert_eq!(
+            marketing_name_for_model("claude-opus-4-5"),
+            Some("Opus 4.5")
+        );
+        assert_eq!(
+            marketing_name_for_model("claude-opus-4-1"),
+            Some("Opus 4.1")
+        );
         assert_eq!(marketing_name_for_model("claude-opus-4-0"), Some("Opus 4"));
         assert_eq!(
             marketing_name_for_model("claude-sonnet-4-5[1m]"),
             Some("Sonnet 4.5 (1M context)")
         );
-        assert_eq!(marketing_name_for_model("claude-sonnet-4-5"), Some("Sonnet 4.5"));
-        assert_eq!(marketing_name_for_model("claude-haiku-4-5"), Some("Haiku 4.5"));
+        assert_eq!(
+            marketing_name_for_model("claude-sonnet-4-5"),
+            Some("Sonnet 4.5")
+        );
+        assert_eq!(
+            marketing_name_for_model("claude-haiku-4-5"),
+            Some("Haiku 4.5")
+        );
         assert_eq!(
             marketing_name_for_model("claude-3-7-sonnet"),
             Some("Claude 3.7 Sonnet")
@@ -220,17 +244,50 @@ mod tests {
 
     #[test]
     fn knowledge_cutoffs_match_ts_map() {
-        assert_eq!(knowledge_cutoff_for_model("claude-fable-5"), Some("January 2026"));
-        assert_eq!(knowledge_cutoff_for_model("claude-mythos-5"), Some("January 2026"));
-        assert_eq!(knowledge_cutoff_for_model("claude-opus-4-8"), Some("January 2026"));
-        assert_eq!(knowledge_cutoff_for_model("claude-opus-4-7"), Some("January 2026"));
-        assert_eq!(knowledge_cutoff_for_model("claude-sonnet-4-6"), Some("August 2025"));
-        assert_eq!(knowledge_cutoff_for_model("claude-opus-4-6"), Some("May 2025"));
-        assert_eq!(knowledge_cutoff_for_model("claude-opus-4-5"), Some("May 2025"));
-        assert_eq!(knowledge_cutoff_for_model("claude-haiku-4-5"), Some("February 2025"));
-        assert_eq!(knowledge_cutoff_for_model("claude-opus-4-1"), Some("January 2025"));
-        assert_eq!(knowledge_cutoff_for_model("claude-sonnet-4-0"), Some("January 2025"));
-        assert_eq!(knowledge_cutoff_for_model("claude-sonnet-4-5"), Some("January 2025"));
+        assert_eq!(
+            knowledge_cutoff_for_model("claude-fable-5"),
+            Some("January 2026")
+        );
+        assert_eq!(
+            knowledge_cutoff_for_model("claude-mythos-5"),
+            Some("January 2026")
+        );
+        assert_eq!(
+            knowledge_cutoff_for_model("claude-opus-4-8"),
+            Some("January 2026")
+        );
+        assert_eq!(
+            knowledge_cutoff_for_model("claude-opus-4-7"),
+            Some("January 2026")
+        );
+        assert_eq!(
+            knowledge_cutoff_for_model("claude-sonnet-4-6"),
+            Some("August 2025")
+        );
+        assert_eq!(
+            knowledge_cutoff_for_model("claude-opus-4-6"),
+            Some("May 2025")
+        );
+        assert_eq!(
+            knowledge_cutoff_for_model("claude-opus-4-5"),
+            Some("May 2025")
+        );
+        assert_eq!(
+            knowledge_cutoff_for_model("claude-haiku-4-5"),
+            Some("February 2025")
+        );
+        assert_eq!(
+            knowledge_cutoff_for_model("claude-opus-4-1"),
+            Some("January 2025")
+        );
+        assert_eq!(
+            knowledge_cutoff_for_model("claude-sonnet-4-0"),
+            Some("January 2025")
+        );
+        assert_eq!(
+            knowledge_cutoff_for_model("claude-sonnet-4-5"),
+            Some("January 2025")
+        );
         assert_eq!(knowledge_cutoff_for_model("gpt-4o"), None);
     }
 

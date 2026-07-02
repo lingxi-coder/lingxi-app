@@ -134,7 +134,10 @@ fn process_output(output: &Value) -> Option<Value> {
         "stream" => {
             let mut m = Map::new();
             m.insert("output_type".into(), json!(output_type));
-            m.insert("text".into(), json!(process_output_text(output.get("text"))));
+            m.insert(
+                "text".into(),
+                json!(process_output_text(output.get("text"))),
+            );
             Some(Value::Object(m))
         }
         "execute_result" | "display_data" => {
@@ -499,7 +502,10 @@ mod tests {
         let cells = read_notebook(&raw).unwrap();
         let out = &cells[0]["outputs"][0];
         assert_eq!(out["output_type"], "error");
-        assert_eq!(out["text"], "ZeroDivisionError: division by zero\nline1\nline2");
+        assert_eq!(
+            out["text"],
+            "ZeroDivisionError: division by zero\nline1\nline2"
+        );
     }
 
     #[test]

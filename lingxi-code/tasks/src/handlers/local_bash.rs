@@ -210,11 +210,12 @@ impl LocalBashHandler {
     /// worker drops the in-flight `run()`, which `SIGKILL`s the real OS child;
     /// status is flipped to `Killed` regardless.
     pub async fn drain_pending_kills(&self) {
-        let pending: Vec<(String, WorkerCancel)> =
-            self.pending_kill.lock().await.drain().collect();
+        let pending: Vec<(String, WorkerCancel)> = self.pending_kill.lock().await.drain().collect();
         for (task_id, rec) in pending {
             let _ = rec.runtime.cancel(&rec.handle).await;
-            self.status_sink.set_status(&task_id, TaskStatus::Killed).await;
+            self.status_sink
+                .set_status(&task_id, TaskStatus::Killed)
+                .await;
         }
     }
 
@@ -403,7 +404,9 @@ impl Task for LocalBashHandler {
         }
         // Flip status to Killed regardless (best-effort; a worker that already
         // reported a terminal status simply gets a redundant Killed).
-        self.status_sink.set_status(task_id, TaskStatus::Killed).await;
+        self.status_sink
+            .set_status(task_id, TaskStatus::Killed)
+            .await;
         Ok(())
     }
 
@@ -425,9 +428,7 @@ mod tests {
     use tokio::sync::Mutex as TokioMutex;
     use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
     use traits::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
-    use traits::{
-        ProcessCommand, ProcessHandle, SandboxError, SandboxPolicy, SandboxedCommand,
-    };
+    use traits::{ProcessCommand, ProcessHandle, SandboxError, SandboxPolicy, SandboxedCommand};
 
     // ---- In-memory FileSystem (mirrors handle.rs InMemoryFs) ---------------
 
@@ -799,8 +800,8 @@ mod tests {
         ));
         let sink = Arc::new(RecordingSink::default());
 
-        let handler = LocalBashHandler::new(runner, sandbox, mgr.clone())
-            .with_status_sink(sink.clone());
+        let handler =
+            LocalBashHandler::new(runner, sandbox, mgr.clone()).with_status_sink(sink.clone());
 
         let handle = handler
             .spawn(
@@ -834,8 +835,7 @@ mod tests {
         let (_dir, mgr) = make_output_manager(fs.clone());
         let sink = Arc::new(RecordingSink::default());
 
-        let handler =
-            LocalBashHandler::new(runner, sandbox, mgr).with_status_sink(sink.clone());
+        let handler = LocalBashHandler::new(runner, sandbox, mgr).with_status_sink(sink.clone());
 
         handler
             .spawn(
@@ -859,8 +859,7 @@ mod tests {
         let (_dir, mgr) = make_output_manager(fs.clone());
         let sink = Arc::new(RecordingSink::default());
 
-        let handler =
-            LocalBashHandler::new(runner, sandbox, mgr).with_status_sink(sink.clone());
+        let handler = LocalBashHandler::new(runner, sandbox, mgr).with_status_sink(sink.clone());
 
         handler
             .spawn(
@@ -928,7 +927,11 @@ mod tests {
             .await
             .expect("kill should succeed");
 
-        assert_eq!(sink.last_status(), Some(TaskStatus::Killed), "status ⇒ Killed");
+        assert_eq!(
+            sink.last_status(),
+            Some(TaskStatus::Killed),
+            "status ⇒ Killed"
+        );
 
         // The in-flight child future was actually aborted (its drop-guard ran),
         // proving a real termination rather than a bare status flip. Abort is
@@ -946,7 +949,12 @@ mod tests {
 
         // The cancel record is gone — a second kill is a graceful no-op.
         assert!(
-            handler.workers_map().lock().await.get(&handle.task_id).is_none(),
+            handler
+                .workers_map()
+                .lock()
+                .await
+                .get(&handle.task_id)
+                .is_none(),
             "worker-cancel record removed on kill"
         );
     }
@@ -959,8 +967,7 @@ mod tests {
         let (_dir, mgr) = make_output_manager(fs.clone());
         let sink = Arc::new(RecordingSink::default());
 
-        let handler =
-            LocalBashHandler::new(runner, sandbox, mgr).with_status_sink(sink.clone());
+        let handler = LocalBashHandler::new(runner, sandbox, mgr).with_status_sink(sink.clone());
 
         // No spawn ⇒ no worker-cancel record. kill must still succeed (nothing
         // to cancel) and flip to Killed (claude-code `status !== 'running'`).

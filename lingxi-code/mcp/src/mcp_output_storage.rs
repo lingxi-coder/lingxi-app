@@ -114,7 +114,9 @@ pub fn map_resource_contents(
                 PersistBinaryResult::Err { error } => McpResourceContentsRich {
                     uri: c.uri,
                     mime_type: c.mime_type,
-                    text: Some(format!("Binary content could not be saved to disk: {error}")),
+                    text: Some(format!(
+                        "Binary content could not be saved to disk: {error}"
+                    )),
                     blob_saved_to: None,
                 },
             }
@@ -132,7 +134,12 @@ pub fn extension_for_mime_type(mime_type: Option<&str>) -> &'static str {
         return "bin";
     };
     // Strip any charset/boundary parameter, then lowercase.
-    let mt = raw.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let mt = raw
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     match mt.as_str() {
         "application/pdf" => "pdf",
         "application/json" => "json",
@@ -198,7 +205,9 @@ pub fn binary_blob_saved_message(
     size: u64,
     source_description: &str,
 ) -> String {
-    let mt = mime_type.filter(|m| !m.is_empty()).unwrap_or("unknown type");
+    let mt = mime_type
+        .filter(|m| !m.is_empty())
+        .unwrap_or("unknown type");
     format!(
         "{source_description}Binary content ({mt}, {}) saved to {filepath}",
         format_file_size(size)
@@ -239,7 +248,9 @@ pub fn persist_binary_content(
     output_dir: &Path,
 ) -> PersistBinaryResult {
     if let Err(e) = std::fs::create_dir_all(output_dir) {
-        return PersistBinaryResult::Err { error: e.to_string() };
+        return PersistBinaryResult::Err {
+            error: e.to_string(),
+        };
     }
     let ext = extension_for_mime_type(mime_type);
     let mut filepath: PathBuf = output_dir.to_path_buf();
@@ -250,7 +261,9 @@ pub fn persist_binary_content(
             size: bytes.len() as u64,
             ext,
         },
-        Err(e) => PersistBinaryResult::Err { error: e.to_string() },
+        Err(e) => PersistBinaryResult::Err {
+            error: e.to_string(),
+        },
     }
 }
 
@@ -383,7 +396,10 @@ mod tests {
             extension_for_mime_type(Some("text/CSV; charset=utf-8")),
             "csv"
         );
-        assert_eq!(extension_for_mime_type(Some("application/octet-stream")), "bin");
+        assert_eq!(
+            extension_for_mime_type(Some("application/octet-stream")),
+            "bin"
+        );
         assert_eq!(extension_for_mime_type(None), "bin");
     }
 
@@ -401,7 +417,10 @@ mod tests {
         );
         // Absent mime → "unknown type".
         let msg2 = binary_blob_saved_message("/p.bin", None, 10, "");
-        assert_eq!(msg2, "Binary content (unknown type, 10 bytes) saved to /p.bin");
+        assert_eq!(
+            msg2,
+            "Binary content (unknown type, 10 bytes) saved to /p.bin"
+        );
     }
 
     #[test]
@@ -436,7 +455,11 @@ mod tests {
         let bytes = b"\x89PNG\r\n\x1a\n binary payload";
         let res = persist_binary_content(bytes, Some("image/png"), "mcp-resource-42", dir.path());
         match res {
-            PersistBinaryResult::Ok { filepath, size, ext } => {
+            PersistBinaryResult::Ok {
+                filepath,
+                size,
+                ext,
+            } => {
                 assert_eq!(ext, "png");
                 assert_eq!(size, bytes.len() as u64);
                 assert!(filepath.ends_with("mcp-resource-42.png"));
@@ -546,7 +569,10 @@ mod tests {
             "r",
         );
         assert_eq!(out[0].uri, "mock://opaque");
-        assert_eq!(out[0].mime_type.as_deref(), Some("application/octet-stream"));
+        assert_eq!(
+            out[0].mime_type.as_deref(),
+            Some("application/octet-stream")
+        );
         assert_eq!(out[0].text, None);
         assert_eq!(out[0].blob_saved_to, None);
     }

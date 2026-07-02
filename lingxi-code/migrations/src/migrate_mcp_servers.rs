@@ -58,7 +58,11 @@ pub async fn run(env: &MigrationEnv) {
     // returns an ignored `{error}` (settings.ts:416-523). So only the
     // project-config save failure reaches
     // `tengu_migrate_mcp_approval_fields_error`.
-    let lp = settings_path(SettingsSource::Local, &env.lingxi_config_home, &env.project_dir);
+    let lp = settings_path(
+        SettingsSource::Local,
+        &env.lingxi_config_home,
+        &env.project_dir,
+    );
     let existing = read_settings_map(&lp).unwrap_or_else(|e| {
         tracing::warn!(error = %e, "migrate_mcp_servers: settings read failed (treated as empty, TS parity)");
         Map::new()
@@ -147,7 +151,10 @@ mod tests {
             global_config_path: t.global.clone(),
             lingxi_config_home: t.home.clone(),
             project_dir: t.project.clone(),
-            ctx: crate::context::MigrationContext { first_party: true, subscription_type: None },
+            ctx: crate::context::MigrationContext {
+                first_party: true,
+                subscription_type: None,
+            },
             bus: None,
         }
     }

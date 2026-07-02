@@ -38,7 +38,10 @@ impl EngineCredentialWriter {
     /// Construct over the shared credential manager + host prompt port.
     #[must_use]
     pub fn new(credentials: Arc<CredentialManager>, prompt: Arc<dyn SecureKeyPrompt>) -> Self {
-        Self { credentials, prompt }
+        Self {
+            credentials,
+            prompt,
+        }
     }
 }
 
@@ -58,9 +61,11 @@ impl ConnectCredentialWriter for EngineCredentialWriter {
     }
 }
 
-use command_core::{ChatGptConnectDriver, CopilotConnectDriver, CopilotConnectStep, OAuthConnectDriver};
-use llm_client::oauth::openai as openai_oauth;
+use command_core::{
+    ChatGptConnectDriver, CopilotConnectDriver, CopilotConnectStep, OAuthConnectDriver,
+};
 use llm_client::copilot::{CopilotHttp, CopilotLogin, DeviceCodeResponse, PollOutcome};
+use llm_client::oauth::openai as openai_oauth;
 use llm_client::transport::BoxFuture;
 use llm_client::LlmError;
 use platform_posix::PosixHttp;
@@ -82,7 +87,9 @@ impl PosixCopilotHttp {
     /// Construct over a fresh `PosixHttp`.
     #[must_use]
     pub fn new() -> Self {
-        Self { http: PosixHttp::new() }
+        Self {
+            http: PosixHttp::new(),
+        }
     }
 }
 
@@ -93,10 +100,15 @@ impl Default for PosixCopilotHttp {
 }
 
 impl CopilotHttp for PosixCopilotHttp {
-    fn post_json<'a>(&'a self, url: &'a str, body: &'a Value) -> BoxFuture<'a, Result<Value, LlmError>> {
+    fn post_json<'a>(
+        &'a self,
+        url: &'a str,
+        body: &'a Value,
+    ) -> BoxFuture<'a, Result<Value, LlmError>> {
         Box::pin(async move {
-            let payload = serde_json::to_string(body)
-                .map_err(|e| LlmError::Transport { message: e.to_string() })?;
+            let payload = serde_json::to_string(body).map_err(|e| LlmError::Transport {
+                message: e.to_string(),
+            })?;
             // protocol::HttpRequest: method is HttpMethod, headers are Vec pairs,
             // body is Option<String>, plus `body_bytes` (raw body, unused here)
             // and a timeout field (both adapted to main's wider transport shape).
@@ -116,9 +128,12 @@ impl CopilotHttp for PosixCopilotHttp {
                 .http
                 .request(req)
                 .await
-                .map_err(|e| LlmError::Transport { message: e.to_string() })?;
-            serde_json::from_str(&resp.body)
-                .map_err(|e| LlmError::Transport { message: format!("copilot json: {e}") })
+                .map_err(|e| LlmError::Transport {
+                    message: e.to_string(),
+                })?;
+            serde_json::from_str(&resp.body).map_err(|e| LlmError::Transport {
+                message: format!("copilot json: {e}"),
+            })
         })
     }
 
@@ -132,8 +147,10 @@ impl CopilotHttp for PosixCopilotHttp {
             // requires when the caller didn't supply them — the Copilot token
             // exchange sends its own editor `User-Agent`, which must not be
             // shadowed by a duplicate (GitHub rejects the unrecognized one).
-            let mut hdrs: Vec<(String, String)> =
-                headers.iter().map(|(k, v)| ((*k).to_string(), v.clone())).collect();
+            let mut hdrs: Vec<(String, String)> = headers
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), v.clone()))
+                .collect();
             fn has(hdrs: &[(String, String)], name: &str) -> bool {
                 hdrs.iter().any(|(k, _)| k.eq_ignore_ascii_case(name))
             }
@@ -155,9 +172,12 @@ impl CopilotHttp for PosixCopilotHttp {
                 .http
                 .request(req)
                 .await
-                .map_err(|e| LlmError::Transport { message: e.to_string() })?;
-            serde_json::from_str(&resp.body)
-                .map_err(|e| LlmError::Transport { message: format!("copilot json: {e}") })
+                .map_err(|e| LlmError::Transport {
+                    message: e.to_string(),
+                })?;
+            serde_json::from_str(&resp.body).map_err(|e| LlmError::Transport {
+                message: format!("copilot json: {e}"),
+            })
         })
     }
 }
@@ -231,8 +251,12 @@ impl EngineCopilotConnect<PosixCopilotHttp> {
     /// and a native browser opener so `begin()` launches the GitHub sign-in page.
     #[must_use]
     pub fn new(credentials: Arc<CredentialManager>) -> Self {
-        Self::with_parts(credentials, CopilotLogin::new(PosixCopilotHttp::new()), Arc::new(TokioSleeper))
-            .with_browser(native_browser_opener())
+        Self::with_parts(
+            credentials,
+            CopilotLogin::new(PosixCopilotHttp::new()),
+            Arc::new(TokioSleeper),
+        )
+        .with_browser(native_browser_opener())
     }
 }
 
@@ -292,7 +316,12 @@ impl<H: CopilotHttp> CopilotConnectDriver for EngineCopilotConnect<H> {
             .clone()
             .ok_or_else(|| ConnectError::Network("begin() was not called".to_string()))?;
         loop {
-            match self.login.poll_once(&dc).await.map_err(|e| ConnectError::Network(e.to_string()))? {
+            match self
+                .login
+                .poll_once(&dc)
+                .await
+                .map_err(|e| ConnectError::Network(e.to_string()))?
+            {
                 PollOutcome::Success(secret) => {
                     // §10 frozen-crate exception accessor (Task 7).
                     let token = secret.token_for_storage().to_string();
@@ -302,7 +331,8 @@ impl<H: CopilotHttp> CopilotConnectDriver for EngineCopilotConnect<H> {
                         .await
                         .map_err(|e| ConnectError::Storage(e.to_string()));
                 }
-                PollOutcome::Pending { interval_secs } | PollOutcome::SlowDown { interval_secs } => {
+                PollOutcome::Pending { interval_secs }
+                | PollOutcome::SlowDown { interval_secs } => {
                     self.sleeper.sleep_secs(interval_secs).await;
                 }
                 PollOutcome::Failed { error } => return Err(ConnectError::DeviceFailed(error)),
@@ -327,7 +357,10 @@ impl EngineChatGptConnect {
         credentials: Arc<CredentialManager>,
     ) -> Self {
         Self {
-            handle: Arc::new(openai_oauth::handle::OpenAiOAuthHandle::new(client, credentials)),
+            handle: Arc::new(openai_oauth::handle::OpenAiOAuthHandle::new(
+                client,
+                credentials,
+            )),
         }
     }
 }
@@ -388,17 +421,30 @@ mod oauth_connect_tests {
     #[async_trait]
     impl AuthHandle for OkAuth {
         async fn login(&self) -> Result<LoginInfo, AuthError> {
-            Ok(LoginInfo { email: "me@example.com".into(), org_id: "org_1".into() })
+            Ok(LoginInfo {
+                email: "me@example.com".into(),
+                org_id: "org_1".into(),
+            })
         }
-        async fn logout(&self) -> Result<(), AuthError> { Ok(()) }
-        async fn current_user(&self) -> Option<LoginInfo> { None }
+        async fn logout(&self) -> Result<(), AuthError> {
+            Ok(())
+        }
+        async fn current_user(&self) -> Option<LoginInfo> {
+            None
+        }
     }
     struct CancelAuth;
     #[async_trait]
     impl AuthHandle for CancelAuth {
-        async fn login(&self) -> Result<LoginInfo, AuthError> { Err(AuthError::Cancelled) }
-        async fn logout(&self) -> Result<(), AuthError> { Ok(()) }
-        async fn current_user(&self) -> Option<LoginInfo> { None }
+        async fn login(&self) -> Result<LoginInfo, AuthError> {
+            Err(AuthError::Cancelled)
+        }
+        async fn logout(&self) -> Result<(), AuthError> {
+            Ok(())
+        }
+        async fn current_user(&self) -> Option<LoginInfo> {
+            None
+        }
     }
     struct OkChatGpt;
     #[async_trait]
@@ -411,16 +457,26 @@ mod oauth_connect_tests {
     #[tokio::test]
     async fn dispatches_by_provider_id() {
         let d = EngineOAuthConnect::new(Arc::new(OkAuth), Arc::new(OkChatGpt));
-        assert!(d.login("anthropic").await.unwrap().contains("me@example.com"));
+        assert!(d
+            .login("anthropic")
+            .await
+            .unwrap()
+            .contains("me@example.com"));
         assert!(d.login("openai-chatgpt").await.unwrap().contains("chatgpt"));
         // Unknown provider → a clear error, never a panic.
-        assert!(matches!(d.login("github-copilot").await, Err(ConnectError::Network(_))));
+        assert!(matches!(
+            d.login("github-copilot").await,
+            Err(ConnectError::Network(_))
+        ));
     }
 
     #[tokio::test]
     async fn maps_anthropic_cancel_to_connect_cancelled() {
         let d = EngineOAuthConnect::new(Arc::new(CancelAuth), Arc::new(OkChatGpt));
-        assert!(matches!(d.login("anthropic").await, Err(ConnectError::Cancelled)));
+        assert!(matches!(
+            d.login("anthropic").await,
+            Err(ConnectError::Cancelled)
+        ));
     }
 }
 
@@ -431,9 +487,7 @@ mod tests {
     use protocol::SecureStorageData;
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
-    use traits::{
-        Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
-    };
+    use traits::{Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError};
 
     /// In-memory `(service, account) -> data` store. The real
     /// `platform_posix` secure storage backend is keychain/OS-backed and not
@@ -513,9 +567,19 @@ mod tests {
     #[tokio::test]
     async fn store_roundtrips_through_keychain() {
         let cm = manager();
-        let writer = EngineCredentialWriter::new(cm.clone(), Arc::new(CannedPrompt(Some("sk-test-123".into()))));
-        writer.prompt_and_store_key("openrouter").await.expect("store ok");
-        let got = cm.get_provider_key("openrouter").await.expect("read ok").expect("present");
+        let writer = EngineCredentialWriter::new(
+            cm.clone(),
+            Arc::new(CannedPrompt(Some("sk-test-123".into()))),
+        );
+        writer
+            .prompt_and_store_key("openrouter")
+            .await
+            .expect("store ok");
+        let got = cm
+            .get_provider_key("openrouter")
+            .await
+            .expect("read ok")
+            .expect("present");
         assert_eq!(got.expose_secret(), "sk-test-123");
     }
 
@@ -532,12 +596,17 @@ mod tests {
     #[tokio::test]
     async fn empty_key_is_cancelled_not_stored() {
         let cm = manager();
-        let writer = EngineCredentialWriter::new(cm.clone(), Arc::new(CannedPrompt(Some("   ".into()))));
+        let writer =
+            EngineCredentialWriter::new(cm.clone(), Arc::new(CannedPrompt(Some("   ".into()))));
         match writer.prompt_and_store_key("deepseek").await {
             Err(ConnectError::Cancelled) => {}
             other => panic!("expected Cancelled, got {other:?}"),
         }
-        assert!(cm.get_provider_key("deepseek").await.expect("read").is_none());
+        assert!(cm
+            .get_provider_key("deepseek")
+            .await
+            .expect("read")
+            .is_none());
     }
 
     use command_core::CopilotConnectDriver;
@@ -551,11 +620,19 @@ mod tests {
         tokens: StdMutex<std::collections::VecDeque<Value>>,
     }
     impl CopilotHttp for ScriptedCopilotHttp {
-        fn post_json<'a>(&'a self, url: &'a str, _body: &'a Value) -> BoxFuture<'a, Result<Value, LlmError>> {
+        fn post_json<'a>(
+            &'a self,
+            url: &'a str,
+            _body: &'a Value,
+        ) -> BoxFuture<'a, Result<Value, LlmError>> {
             let v = if url.contains("device/code") {
                 self.device.clone()
             } else {
-                self.tokens.lock().unwrap().pop_front().unwrap_or_else(|| json!({ "error": "expired_token" }))
+                self.tokens
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| json!({ "error": "expired_token" }))
             };
             Box::pin(async move { Ok(v) })
         }
@@ -567,8 +644,15 @@ mod tests {
         async fn sleep_secs(&self, _secs: u64) {}
     }
 
-    fn copilot_driver(cm: Arc<CredentialManager>, device: Value, tokens: Vec<Value>) -> EngineCopilotConnect<ScriptedCopilotHttp> {
-        let http = ScriptedCopilotHttp { device, tokens: StdMutex::new(tokens.into_iter().collect()) };
+    fn copilot_driver(
+        cm: Arc<CredentialManager>,
+        device: Value,
+        tokens: Vec<Value>,
+    ) -> EngineCopilotConnect<ScriptedCopilotHttp> {
+        let http = ScriptedCopilotHttp {
+            device,
+            tokens: StdMutex::new(tokens.into_iter().collect()),
+        };
         EngineCopilotConnect::with_parts(cm, CopilotLogin::new(http), Arc::new(InstantSleeper))
     }
 
@@ -599,7 +683,11 @@ mod tests {
         );
         let step = driver.begin(None).await.expect("begin");
         driver.poll_to_completion(&step).await.expect("poll ok");
-        let got = cm.get_provider_key("github-copilot").await.expect("read").expect("present");
+        let got = cm
+            .get_provider_key("github-copilot")
+            .await
+            .expect("read")
+            .expect("present");
         assert_eq!(got.expose_secret(), "ght_live_token");
     }
 
@@ -616,7 +704,11 @@ mod tests {
             Err(ConnectError::DeviceFailed(e)) => assert_eq!(e, "access_denied"),
             other => panic!("expected DeviceFailed, got {other:?}"),
         }
-        assert!(cm.get_provider_key("github-copilot").await.expect("read").is_none());
+        assert!(cm
+            .get_provider_key("github-copilot")
+            .await
+            .expect("read")
+            .is_none());
     }
 
     #[test]

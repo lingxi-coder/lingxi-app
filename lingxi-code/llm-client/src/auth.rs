@@ -94,7 +94,11 @@ impl ChatGptAuthenticator {
     /// Create a `ChatGPT` OAuth authenticator.
     #[must_use]
     pub fn new(token: impl Into<String>, account_id: Option<String>, fedramp: bool) -> Self {
-        Self { token: token.into(), account_id, fedramp }
+        Self {
+            token: token.into(),
+            account_id,
+            fedramp,
+        }
     }
 }
 
@@ -102,7 +106,10 @@ impl Authenticator for ChatGptAuthenticator {
     fn apply(&self, mut request: ProviderRequest) -> Result<ProviderRequest, LlmError> {
         let headers = &mut request.headers;
         headers.remove("x-api-key");
-        headers.insert("Authorization".to_string(), format!("Bearer {}", self.token));
+        headers.insert(
+            "Authorization".to_string(),
+            format!("Bearer {}", self.token),
+        );
         if let Some(acc) = &self.account_id {
             headers.insert("ChatGPT-Account-ID".to_string(), acc.clone());
         }
@@ -121,10 +128,17 @@ mod tests {
     fn chatgpt_authenticator_sets_bearer_and_account_header_and_strips_x_api_key() {
         let auth = ChatGptAuthenticator::new("tok-123", Some("acc_9".to_string()), false);
         let mut req = ProviderRequest::post_json("https://x/responses", serde_json::json!({}));
-        req.headers.insert("x-api-key".to_string(), "leftover".to_string());
+        req.headers
+            .insert("x-api-key".to_string(), "leftover".to_string());
         let req = auth.apply(req).unwrap();
-        assert_eq!(req.headers.get("Authorization").map(String::as_str), Some("Bearer tok-123"));
-        assert_eq!(req.headers.get("ChatGPT-Account-ID").map(String::as_str), Some("acc_9"));
+        assert_eq!(
+            req.headers.get("Authorization").map(String::as_str),
+            Some("Bearer tok-123")
+        );
+        assert_eq!(
+            req.headers.get("ChatGPT-Account-ID").map(String::as_str),
+            Some("acc_9")
+        );
         assert!(!req.headers.contains_key("X-OpenAI-Fedramp"));
         assert!(!req.headers.contains_key("x-api-key"));
     }
@@ -140,8 +154,16 @@ mod tests {
     #[test]
     fn chatgpt_authenticator_sets_fedramp_when_flagged() {
         let auth = ChatGptAuthenticator::new("t", None, true);
-        let req = auth.apply(ProviderRequest::post_json("https://x/responses", serde_json::json!({}))).unwrap();
-        assert_eq!(req.headers.get("X-OpenAI-Fedramp").map(String::as_str), Some("true"));
+        let req = auth
+            .apply(ProviderRequest::post_json(
+                "https://x/responses",
+                serde_json::json!({}),
+            ))
+            .unwrap();
+        assert_eq!(
+            req.headers.get("X-OpenAI-Fedramp").map(String::as_str),
+            Some("true")
+        );
         assert!(!req.headers.contains_key("ChatGPT-Account-ID"));
     }
 }

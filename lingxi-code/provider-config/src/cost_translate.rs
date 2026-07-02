@@ -73,8 +73,7 @@ fn model_pricing_from_token_pricing(mr: &ModelRef, tp: &TokenPricing) -> ModelPr
 }
 
 fn cost_provider_id(profile_name: &str, provider_id: &LlmProviderId) -> CostProviderId {
-    let pricing_provider =
-        llm_client::pricing_provider_id_for_profile(profile_name, provider_id);
+    let pricing_provider = llm_client::pricing_provider_id_for_profile(profile_name, provider_id);
     match pricing_provider {
         LlmProviderId::AnthropicFirstParty => CostProviderId::Anthropic,
         LlmProviderId::OpenAI | LlmProviderId::AzureOpenAI => CostProviderId::OpenAI,

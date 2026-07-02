@@ -394,7 +394,10 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
 async fn emit_completed(bus: &Arc<AnalyticsBus>, duration_ms: u64, scheduled: bool) {
     let mut md: LogEventMetadata = HashMap::new();
     md.insert("tool_name".into(), verified_str(SCHEDULE_WAKEUP_TOOL_NAME));
-    md.insert("duration_ms".into(), AnalyticsValue::Int(duration_ms as i64));
+    md.insert(
+        "duration_ms".into(),
+        AnalyticsValue::Int(duration_ms as i64),
+    );
     md.insert("scheduled".into(), AnalyticsValue::Bool(scheduled));
     bus.log_event(COMPLETED, md).await;
 }
@@ -608,7 +611,11 @@ impl Tool for ScheduleWakeupTool {
         // is JS `String.length` = UTF-16 code units (`o?.length??0`);
         // `superseded_count` 0 (the port's single-shot scheduler has no multi-loop
         // cron registry to supersede).
-        let chosen = if raw_delay.is_finite() { raw_delay } else { 0.0 };
+        let chosen = if raw_delay.is_finite() {
+            raw_delay
+        } else {
+            0.0
+        };
         telemetry::emit_loop_dynamic_wakeup_scheduled(
             chosen,
             delay_secs as u64,
@@ -684,7 +691,10 @@ mod tests {
         assert_eq!(SCHEDULE_WAKEUP_TOOL_NAME, "ScheduleWakeup");
         assert_eq!(MIN_DELAY_SECONDS, 60);
         assert_eq!(MAX_DELAY_SECONDS, 3600);
-        assert_eq!(AUTONOMOUS_LOOP_DYNAMIC_SENTINEL, "<<autonomous-loop-dynamic>>");
+        assert_eq!(
+            AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
+            "<<autonomous-loop-dynamic>>"
+        );
     }
 
     #[test]
@@ -751,7 +761,10 @@ mod tests {
             json!("True if the requested delaySeconds was outside [60, 3600]")
         );
         assert_eq!(s["properties"]["scheduledFor"]["type"], json!("number"));
-        assert_eq!(s["properties"]["clampedDelaySeconds"]["type"], json!("number"));
+        assert_eq!(
+            s["properties"]["clampedDelaySeconds"]["type"],
+            json!("number")
+        );
         assert_eq!(s["properties"]["wasClamped"]["type"], json!("boolean"));
     }
 
@@ -789,7 +802,8 @@ mod tests {
     fn search_hint_byte_exact() {
         // PARITY: binary searchHint (cc_all.txt:507964 / string-table 487571).
         let tmp = tempfile::tempdir().unwrap();
-        let tool = ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let tool =
+            ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         assert_eq!(
             tool.search_hint(),
             Some("self-pace next iteration: pick a delay before resuming work or running the next /loop tick")
@@ -859,7 +873,8 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         telemetry::test_clear_flag("tengu_kairos_loop_dynamic");
         let tmp = tempfile::tempdir().unwrap();
-        let tool = ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let tool =
+            ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
             .call(
                 json!({"delaySeconds": 10, "reason": "poll deploy", "prompt": "check the deploy"}),
@@ -888,7 +903,8 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
         let tmp = tempfile::tempdir().unwrap();
-        let tool = ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let tool =
+            ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
             .call(
                 json!({"delaySeconds": 600, "reason": "r", "prompt": "p"}),
@@ -1026,7 +1042,8 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
         let tmp = tempfile::tempdir().unwrap();
-        let tool = ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let tool =
+            ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let cell = tool.wakeup_cell();
 
         // Before the cell is filled, the tool is an honest no-op (aKi-null).
@@ -1065,7 +1082,8 @@ mod tests {
     #[tokio::test]
     async fn validate_input_rejects_missing_fields() {
         let tmp = tempfile::tempdir().unwrap();
-        let tool = ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let tool =
+            ScheduleWakeupTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         // PARITY: delaySeconds is OPTIONAL ⇒ absent is OK (so long as reason +
         // prompt are present).
         assert!(tool
@@ -1221,7 +1239,10 @@ mod tests {
             calls: StdMutex::new(Vec::new()),
         });
         let sched: Arc<dyn WakeupScheduler> = rec.clone();
-        assert_eq!(maybe_arm_keepalive(&sched).await, Some(KeepaliveOutcome::Armed));
+        assert_eq!(
+            maybe_arm_keepalive(&sched).await,
+            Some(KeepaliveOutcome::Armed)
+        );
         let calls = rec.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, Duration::from_secs(1200));

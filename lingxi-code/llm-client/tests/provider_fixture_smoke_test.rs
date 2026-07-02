@@ -164,8 +164,7 @@ fn provider_fixtures_smoke_test() {
     let decoded = anthropic
         .decode_response(ProviderResponse::json(
             200,
-            serde_json::from_str(anthropic_fixture)
-                .expect("Anthropic fixture JSON should parse"),
+            serde_json::from_str(anthropic_fixture).expect("Anthropic fixture JSON should parse"),
         ))
         .unwrap();
 

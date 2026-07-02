@@ -572,14 +572,18 @@ pub fn generate_sandbox_profile(params: &ProfileParams<'_>) -> String {
                 .to_string(),
         );
         profile.push("(allow appleevent-send)".to_string());
+        profile.push(
+            "(allow mach-lookup (global-name \"com.apple.coreservices.appleevents\"))".to_string(),
+        );
         profile
-            .push("(allow mach-lookup (global-name \"com.apple.coreservices.appleevents\"))".to_string());
-        profile.push("; Launch Services open requests need the lsopen operation plus, on".to_string());
-        profile.push("; macOS 14/15, coreservicesd and the quarantine resolver - without".to_string());
+            .push("; Launch Services open requests need the lsopen operation plus, on".to_string());
+        profile
+            .push("; macOS 14/15, coreservicesd and the quarantine resolver - without".to_string());
         profile.push("; these open fails with -10822 kLSServerCommunicationErr or -54".to_string());
         profile.push("(allow lsopen)".to_string());
         profile.push(
-            "(allow mach-lookup (global-name \"com.apple.CoreServices.coreservicesd\"))".to_string(),
+            "(allow mach-lookup (global-name \"com.apple.CoreServices.coreservicesd\"))"
+                .to_string(),
         );
         profile.push(
             "(allow mach-lookup (global-name \"com.apple.coreservices.quarantine-resolver\"))"
@@ -680,7 +684,8 @@ pub fn generate_sandbox_profile(params: &ProfileParams<'_>) -> String {
         // Unix domain sockets.
         if params.allow_all_unix_sockets {
             profile.push("(allow system-socket (socket-domain AF_UNIX))".to_string());
-            profile.push("(allow network-bind (local unix-socket (path-regex #\"^/\")))".to_string());
+            profile
+                .push("(allow network-bind (local unix-socket (path-regex #\"^/\")))".to_string());
             profile.push(
                 "(allow network-outbound (remote unix-socket (path-regex #\"^/\")))".to_string(),
             );
@@ -703,15 +708,27 @@ pub fn generate_sandbox_profile(params: &ProfileParams<'_>) -> String {
 
         // Localhost TCP for the HTTP proxy.
         if let Some(port) = params.http_proxy_port {
-            profile.push(format!("(allow network-bind (local ip \"localhost:{port}\"))"));
-            profile.push(format!("(allow network-inbound (local ip \"localhost:{port}\"))"));
-            profile.push(format!("(allow network-outbound (remote ip \"localhost:{port}\"))"));
+            profile.push(format!(
+                "(allow network-bind (local ip \"localhost:{port}\"))"
+            ));
+            profile.push(format!(
+                "(allow network-inbound (local ip \"localhost:{port}\"))"
+            ));
+            profile.push(format!(
+                "(allow network-outbound (remote ip \"localhost:{port}\"))"
+            ));
         }
         // Localhost TCP for the SOCKS proxy.
         if let Some(port) = params.socks_proxy_port {
-            profile.push(format!("(allow network-bind (local ip \"localhost:{port}\"))"));
-            profile.push(format!("(allow network-inbound (local ip \"localhost:{port}\"))"));
-            profile.push(format!("(allow network-outbound (remote ip \"localhost:{port}\"))"));
+            profile.push(format!(
+                "(allow network-bind (local ip \"localhost:{port}\"))"
+            ));
+            profile.push(format!(
+                "(allow network-inbound (local ip \"localhost:{port}\"))"
+            ));
+            profile.push(format!(
+                "(allow network-outbound (remote ip \"localhost:{port}\"))"
+            ));
         }
     } else {
         profile.push("(allow network*)".to_string());
@@ -826,8 +843,7 @@ const SYSCTL_READ_PREFIXES: [&str; 9] = [
 /// does. Mirrors `shlex::try_join`, with a NUL-only fallback (a NUL cannot occur
 /// for the paths/commands/profile here).
 fn shjoin(parts: &[String]) -> String {
-    shlex::try_join(parts.iter().map(String::as_str))
-        .unwrap_or_else(|_| parts.join(" "))
+    shlex::try_join(parts.iter().map(String::as_str)).unwrap_or_else(|_| parts.join(" "))
 }
 
 /// Parameters for [`wrap_command_with_sandbox_macos`] — a 1:1 mirror of the TS
@@ -939,9 +955,8 @@ pub fn wrap_command_with_sandbox_macos(params: &WrapParams<'_>) -> std::io::Resu
 
     // Resolve the shell on PATH (the TS `whichSync(shellName)`).
     let shell_name = params.bin_shell.unwrap_or("bash");
-    let shell = which::which(shell_name).map_err(|_| {
-        std::io::Error::other(format!("Shell '{shell_name}' not found in PATH"))
-    })?;
+    let shell = which::which(shell_name)
+        .map_err(|_| std::io::Error::other(format!("Shell '{shell_name}' not found in PATH")))?;
     let shell = shell.to_string_lossy().into_owned();
 
     // shellquote.quote(['env', ...proxyEnvArgs, '/usr/bin/sandbox-exec', '-p',
@@ -1265,7 +1280,9 @@ mod profile_text_tests {
         assert_eq!(rules[0], "(allow file-read*)");
         // Deny /x then re-allow /x/y, in that order.
         let deny_pos = joined.find("(deny file-read*\n  (subpath \"/x\")").unwrap();
-        let allow_pos = joined.find("(allow file-read*\n  (subpath \"/x/y\")").unwrap();
+        let allow_pos = joined
+            .find("(allow file-read*\n  (subpath \"/x/y\")")
+            .unwrap();
         assert!(deny_pos < allow_pos, "deny must precede the re-allow");
         // Directory metadata rule emitted because deny_only is non-empty.
         assert!(joined.contains("(allow file-read-metadata\n  (vnode-type DIRECTORY))"));
@@ -1280,15 +1297,24 @@ mod profile_text_tests {
         let config = rc(&["/x", "/x/secret"], &["/x"]);
         let rules = generate_read_rules(Some(&config), "TAG", None);
         let joined = rules.join("\n");
-        let reallow = joined.find("(allow file-read*\n  (subpath \"/x\")").unwrap();
-        let redeny = joined.rfind("(deny file-read*\n  (subpath \"/x/secret\")").unwrap();
+        let reallow = joined
+            .find("(allow file-read*\n  (subpath \"/x\")")
+            .unwrap();
+        let redeny = joined
+            .rfind("(deny file-read*\n  (subpath \"/x/secret\")")
+            .unwrap();
         assert!(
             redeny > reallow,
             "the nested deny must be re-applied AFTER the re-allow:\n{joined}"
         );
         // A non-nested deny (/x itself) is NOT re-denied (it is not inside /x/).
-        let x_denies = joined.matches("(deny file-read*\n  (subpath \"/x\")\n").count();
-        assert_eq!(x_denies, 1, "/x should be denied once, not re-denied:\n{joined}");
+        let x_denies = joined
+            .matches("(deny file-read*\n  (subpath \"/x\")\n")
+            .count();
+        assert_eq!(
+            x_denies, 1,
+            "/x should be denied once, not re-denied:\n{joined}"
+        );
     }
 
     #[test]
@@ -1337,14 +1363,19 @@ mod profile_text_tests {
         let rules = generate_write_rules(Some(&config), "TAG", false);
         let joined = rules.join("\n");
         // Allow /w.
-        let allow_pos = joined.find("(allow file-write*\n  (subpath \"/w\")").unwrap();
+        let allow_pos = joined
+            .find("(allow file-write*\n  (subpath \"/w\")")
+            .unwrap();
         // Deny /w/d.
-        let deny_pos = joined.find("(deny file-write*\n  (subpath \"/w/d\")").unwrap();
+        let deny_pos = joined
+            .find("(deny file-write*\n  (subpath \"/w/d\")")
+            .unwrap();
         assert!(allow_pos < deny_pos, "allow must precede the deny");
         // Mandatory deny patterns present (e.g. the **/.git/hooks/** glob -> regex).
         // The real pipeline normalizes the pattern before glob_to_regex.
-        let mand_regex =
-            escape_path(&glob_to_regex(&normalize_path_for_sandbox("**/.git/hooks/**")));
+        let mand_regex = escape_path(&glob_to_regex(&normalize_path_for_sandbox(
+            "**/.git/hooks/**",
+        )));
         assert!(
             joined.contains(&format!("(deny file-write*\n  (regex {mand_regex})")),
             "mandatory **/.git/hooks/** deny must appear"
@@ -1425,7 +1456,10 @@ mod profile_text_tests {
 
     #[test]
     fn profile_conditional_sections() {
-        let mach = vec!["com.example.foo".to_string(), "com.example.bar.*".to_string()];
+        let mach = vec![
+            "com.example.foo".to_string(),
+            "com.example.bar.*".to_string(),
+        ];
         let params = ProfileParams {
             enable_weaker_network_isolation: true,
             allow_apple_events: true,
@@ -1440,9 +1474,7 @@ mod profile_text_tests {
         assert!(profile.contains("(allow lsopen)"));
         // Trailing-* user mach service -> global-name-prefix; plain -> global-name.
         assert!(profile.contains("(allow mach-lookup (global-name \"com.example.foo\"))"));
-        assert!(
-            profile.contains("(allow mach-lookup (global-name-prefix \"com.example.bar.\"))")
-        );
+        assert!(profile.contains("(allow mach-lookup (global-name-prefix \"com.example.bar.\"))"));
         // pty block.
         assert!(profile.contains("; Pseudo-terminal (pty) support"));
         assert!(profile.contains("(allow pseudo-tty)"));
@@ -1581,7 +1613,8 @@ mod profile_text_tests {
     #[test]
     fn parse_violation_command_specific_ignore_match() {
         let enc = encode_sandboxed_command("npm install");
-        let chunk = format!("CMD64_{enc}_END_z_SBX\nSandbox: node(1) deny file-read /home/u/.npmrc");
+        let chunk =
+            format!("CMD64_{enc}_END_z_SBX\nSandbox: node(1) deny file-read /home/u/.npmrc");
         let mut ignore = std::collections::HashMap::new();
         ignore.insert("npm".to_string(), vec![".npmrc".to_string()]);
         assert!(parse_violation_chunk(&chunk, Some(&ignore)).is_none());
@@ -1702,19 +1735,13 @@ mod runtime_gate_tests {
 
         let ok_c = std::fs::canonicalize(&ok_file).unwrap();
         let secret_c = std::fs::canonicalize(&secret_file).unwrap();
-        let read_ok = sandbox_exec_ok(
-            &profile,
-            &["/bin/cat", &ok_c.to_string_lossy()],
-        );
+        let read_ok = sandbox_exec_ok(&profile, &["/bin/cat", &ok_c.to_string_lossy()]);
         assert!(
             read_ok.status.success(),
             "read of allow-within-deny file failed: stderr={}",
             String::from_utf8_lossy(&read_ok.stderr)
         );
-        let read_secret = sandbox_exec_ok(
-            &profile,
-            &["/bin/cat", &secret_c.to_string_lossy()],
-        );
+        let read_secret = sandbox_exec_ok(&profile, &["/bin/cat", &secret_c.to_string_lossy()]);
         assert!(
             !read_secret.status.success(),
             "read of a denied-region file SUCCEEDED but should be blocked"

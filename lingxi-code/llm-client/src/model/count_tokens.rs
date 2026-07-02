@@ -2,9 +2,7 @@
 //! character-based approximation elsewhere.
 
 use crate::model::betas::{apply_beta_header, BetaContext, Endpoint, Provider};
-use crate::{
-    client::DefaultLlmClient, AnthropicMessagesCodec, LlmError, LlmRequest, Transport,
-};
+use crate::{client::DefaultLlmClient, AnthropicMessagesCodec, LlmError, LlmRequest, Transport};
 
 /// Approximation divisor for non-Anthropic routes (byte-length/4 ≈ tokens).
 pub const APPROX_CHARS_PER_TOKEN: u64 = 4;

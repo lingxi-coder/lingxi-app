@@ -889,7 +889,10 @@ mod tests {
         let root_idx = triple_index(&args, "--ro-bind", "/", "/").expect("ro-bind / /");
         let bind_idx =
             triple_index(&args, "--bind", &allow_path, &allow_path).expect("bind allow dir");
-        assert!(root_idx < bind_idx, "ro-bind / / must precede the allow bind");
+        assert!(
+            root_idx < bind_idx,
+            "ro-bind / / must precede the allow bind"
+        );
     }
 
     #[test]
@@ -898,7 +901,7 @@ mod tests {
         let allow_path = canon(&allow);
         // An existent file inside the allowed dir to deny.
         fs::create_dir(allow.path().join("secret")).unwrap();
-        let deny_path = cp(&allow,"secret");
+        let deny_path = cp(&allow, "secret");
         let cwd = empty_cwd();
         let wc = WriteConfig {
             allow_only: vec![allow_path.clone()],
@@ -912,11 +915,13 @@ mod tests {
             false,
             &cwd.path().to_string_lossy(),
         );
-        let bind_idx =
-            triple_index(&args, "--bind", &allow_path, &allow_path).expect("allow bind");
-        let deny_idx = triple_index(&args, "--ro-bind", &deny_path, &deny_path)
-            .expect("deny ro-bind p p");
-        assert!(bind_idx < deny_idx, "deny ro-bind must come AFTER allow bind");
+        let bind_idx = triple_index(&args, "--bind", &allow_path, &allow_path).expect("allow bind");
+        let deny_idx =
+            triple_index(&args, "--ro-bind", &deny_path, &deny_path).expect("deny ro-bind p p");
+        assert!(
+            bind_idx < deny_idx,
+            "deny ro-bind must come AFTER allow bind"
+        );
     }
 
     #[test]
@@ -924,7 +929,7 @@ mod tests {
         let allow = TempDir::new().unwrap();
         let allow_path = canon(&allow);
         // Leaf doesn't exist but its parent (allow dir) does.
-        let deny_leaf = cp(&allow,".bashrc");
+        let deny_leaf = cp(&allow, ".bashrc");
         let cwd = empty_cwd();
         let wc = WriteConfig {
             allow_only: vec![allow_path.clone()],
@@ -953,8 +958,8 @@ mod tests {
         let allow = TempDir::new().unwrap();
         let allow_path = canon(&allow);
         // Neither <allow>/missing nor <allow>/missing/config exist.
-        let deny_path = cp(&allow,"missing/config");
-        let first_non_existent = cp(&allow,"missing");
+        let deny_path = cp(&allow, "missing/config");
+        let first_non_existent = cp(&allow, "missing");
         let cwd = empty_cwd();
         let wc = WriteConfig {
             allow_only: vec![allow_path.clone()],
@@ -971,7 +976,9 @@ mod tests {
         // Intermediate component -> --ro-bind <emptydir> <missing>. The empty dir
         // is a temp path, so match the dest + verb only.
         let idx = (0..args.len().saturating_sub(2)).find(|&i| {
-            args[i] == "--ro-bind" && args[i + 2] == first_non_existent && args[i + 1] != "/dev/null"
+            args[i] == "--ro-bind"
+                && args[i + 2] == first_non_existent
+                && args[i + 1] != "/dev/null"
         });
         assert!(
             idx.is_some(),
@@ -986,7 +993,7 @@ mod tests {
         let allow_path = canon(&allow);
         // .git is a FILE inside the allowed dir; deny .git/hooks -> SKIPPED.
         fs::write(allow.path().join(".git"), "gitdir: /x").unwrap();
-        let deny_path = cp(&allow,".git/hooks");
+        let deny_path = cp(&allow, ".git/hooks");
         let cwd = empty_cwd();
         let wc = WriteConfig {
             allow_only: vec![allow_path.clone()],
@@ -1015,9 +1022,9 @@ mod tests {
         fs::create_dir(root.path().join("deny")).unwrap();
         fs::create_dir(root.path().join("deny/writable")).unwrap();
         fs::create_dir(root.path().join("deny/readable")).unwrap();
-        let deny_dir = cp(&root,"deny");
-        let write_sub = cp(&root,"deny/writable");
-        let allow_sub = cp(&root,"deny/readable");
+        let deny_dir = cp(&root, "deny");
+        let write_sub = cp(&root, "deny/writable");
+        let allow_sub = cp(&root, "deny/readable");
         let cwd = empty_cwd();
         let wc = WriteConfig {
             allow_only: vec![write_sub.clone()],
@@ -1041,10 +1048,12 @@ mod tests {
             .expect("tmpfs over deny dir");
         // The write path is bound both initially (in the writeConfig block) AND
         // re-bound AFTER the tmpfs — assert a re-bind triple exists past tmpfs_idx.
-        let rebind_after = (tmpfs_idx..args.len().saturating_sub(2)).any(|i| {
-            args[i] == "--bind" && args[i + 1] == write_sub && args[i + 2] == write_sub
-        });
-        assert!(rebind_after, "write path must be re-bound after tmpfs; args={args:?}");
+        let rebind_after = (tmpfs_idx..args.len().saturating_sub(2))
+            .any(|i| args[i] == "--bind" && args[i + 1] == write_sub && args[i + 2] == write_sub);
+        assert!(
+            rebind_after,
+            "write path must be re-bound after tmpfs; args={args:?}"
+        );
         // allowRead re-bound under tmpfs (its only occurrence is after the tmpfs).
         let allow_idx =
             triple_index(&args, "--ro-bind", &allow_sub, &allow_sub).expect("re-bind allowRead");
@@ -1055,7 +1064,7 @@ mod tests {
     fn case_g_deny_read_file_dev_null() {
         let root = TempDir::new().unwrap();
         fs::write(root.path().join("secret.env"), "S=1").unwrap();
-        let deny_file = cp(&root,"secret.env");
+        let deny_file = cp(&root, "secret.env");
         let cwd = empty_cwd();
         let rc = ReadConfig {
             deny_only: vec![deny_file.clone()],
@@ -1079,7 +1088,7 @@ mod tests {
     fn case_g2_deny_read_file_exact_allow_match_skips() {
         let root = TempDir::new().unwrap();
         fs::write(root.path().join("keep.env"), "S=1").unwrap();
-        let deny_file = cp(&root,"keep.env");
+        let deny_file = cp(&root, "keep.env");
         let cwd = empty_cwd();
         let rc = ReadConfig {
             deny_only: vec![deny_file.clone()],
@@ -1108,7 +1117,7 @@ mod tests {
         let allow = TempDir::new().unwrap();
         let allow_path = canon(&allow);
         fs::write(allow.path().join("dual.conf"), "x").unwrap();
-        let dual = cp(&allow,"dual.conf");
+        let dual = cp(&allow, "dual.conf");
         let cwd = empty_cwd();
         let wc = WriteConfig {
             allow_only: vec![allow_path.clone()],
@@ -1138,14 +1147,8 @@ mod tests {
     #[test]
     fn case_i_no_write_config_binds_root_rw() {
         let cwd = empty_cwd();
-        let (args, mp) = generate_filesystem_args(
-            None,
-            None,
-            "rg",
-            3,
-            false,
-            &cwd.path().to_string_lossy(),
-        );
+        let (args, mp) =
+            generate_filesystem_args(None, None, "rg", 3, false, &cwd.path().to_string_lossy());
         assert!(has_triple(&args, "--bind", "/", "/"));
         assert!(!has_triple(&args, "--ro-bind", "/", "/"));
         assert!(mp.is_empty());

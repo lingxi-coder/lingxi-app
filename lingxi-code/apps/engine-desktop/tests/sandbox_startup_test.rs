@@ -22,11 +22,7 @@ struct NoopPermissionSink;
 
 #[async_trait::async_trait]
 impl client_adapter::PermissionRequestSink for NoopPermissionSink {
-    async fn emit_request(
-        &self,
-        _request: client_protocol::permission::PermissionRequest,
-    ) {
-    }
+    async fn emit_request(&self, _request: client_protocol::permission::PermissionRequest) {}
 }
 
 /// Pure-unit: the `enabledPlatforms` gate. `None` (unset) ⇒ all supported
@@ -40,9 +36,15 @@ fn enabled_platforms_macos_only_disables_on_linux() {
         Platform::Mac
     ));
     // Empty list ⇒ disabled everywhere.
-    assert!(!engine_desktop::platform_in_enabled_list(Some(&[]), Platform::Mac));
+    assert!(!engine_desktop::platform_in_enabled_list(
+        Some(&[]),
+        Platform::Mac
+    ));
     // Unset ⇒ all supported platforms allowed.
-    assert!(engine_desktop::platform_in_enabled_list(None, Platform::Mac));
+    assert!(engine_desktop::platform_in_enabled_list(
+        None,
+        Platform::Mac
+    ));
     // Matching single-platform list ⇒ allowed.
     assert!(engine_desktop::platform_in_enabled_list(
         Some(&[Platform::Mac]),
@@ -105,8 +107,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
 async fn run_build(cfg: DesktopConfig) -> Result<engine_desktop::DesktopRuntime, BuildError> {
     let output: Arc<dyn traits::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
-    let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
-        Arc::new(NoopPermissionSink);
+    let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> = Arc::new(NoopPermissionSink);
     build(cfg, output, perm_sink).await
 }
 

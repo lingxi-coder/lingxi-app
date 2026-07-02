@@ -234,7 +234,10 @@ impl AuthState {
             Ok(Some(prev)) => (prev.email, prev.org_id),
             _ => (String::new(), String::new()),
         };
-        let refresh = info.refresh_token.as_ref().map(|s| s.expose_secret().clone());
+        let refresh = info
+            .refresh_token
+            .as_ref()
+            .map(|s| s.expose_secret().clone());
         cm.store_oauth_tokens(
             info.access_token.expose_secret(),
             refresh.as_deref(),
@@ -314,10 +317,7 @@ impl RefreshDriver {
     /// **Single-flight contract:** acquires `refresh_lock`, then double-checks
     /// `prev_token_hash`. If another task already rotated the token under the
     /// lock, returns the current token without making an HTTP call.
-    pub async fn refresh(
-        &self,
-        prev_token_hash: TokenHash,
-    ) -> Result<BearerToken, OAuthHookError> {
+    pub async fn refresh(&self, prev_token_hash: TokenHash) -> Result<BearerToken, OAuthHookError> {
         // 1. Acquire the single-flight lock.
         let _guard = self.state.refresh_lock.lock().await;
 
@@ -362,7 +362,11 @@ impl RefreshDriver {
 
         // 5. Build the new TokenInfo.
         let now = self.state.clock.now();
-        let expires_in = if body.expires_in == 0 { 3600 } else { body.expires_in };
+        let expires_in = if body.expires_in == 0 {
+            3600
+        } else {
+            body.expires_in
+        };
         let new_expiry = now + Duration::from_secs(expires_in);
 
         // Update account_id/fedramp from id_token if present.
@@ -468,7 +472,8 @@ async fn emit_refresh_succeeded(
         "duration_ms".into(),
         telemetry::sink::AnalyticsValue::Int(i64::try_from(duration_ms).unwrap_or(i64::MAX)),
     );
-    bus.log_event("tengu_openai_oauth_refresh_succeeded", m).await;
+    bus.log_event("tengu_openai_oauth_refresh_succeeded", m)
+        .await;
 }
 
 async fn emit_refresh_failed(
@@ -508,7 +513,8 @@ async fn emit_proactive_canceled(bus: &Option<Arc<telemetry::AnalyticsBus>>, rea
                 .to_string(),
         ),
     );
-    bus.log_event("tengu_openai_oauth_proactive_canceled", m).await;
+    bus.log_event("tengu_openai_oauth_proactive_canceled", m)
+        .await;
 }
 
 /// Compute the proactive refresh lead for a token with `remaining` lifetime.
@@ -568,7 +574,9 @@ async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn traits::RuntimeS
                 Duration::ZERO
             } else {
                 // Wake at the earlier of expiry-lead or 8-day-age trigger.
-                let time_until_age_trigger = LAST_REFRESH_MAX_AGE.checked_sub(age).unwrap_or(Duration::ZERO);
+                let time_until_age_trigger = LAST_REFRESH_MAX_AGE
+                    .checked_sub(age)
+                    .unwrap_or(Duration::ZERO);
                 time_until_expiry_wake.min(time_until_age_trigger)
             }
         } else {
@@ -614,7 +622,8 @@ mod refresh_tests {
 
     #[tokio::test]
     async fn reactive_refresh_sends_json_body_and_rotates_token() {
-        let resp = r#"{"access_token":"NEW_ACCESS","refresh_token":"NEW_REFRESH","expires_in":3600}"#;
+        let resp =
+            r#"{"access_token":"NEW_ACCESS","refresh_token":"NEW_REFRESH","expires_in":3600}"#;
         let http = MockHttp::new(vec![(
             "oauth/token",
             Canned {
@@ -681,7 +690,10 @@ mod refresh_tests {
         );
         let http = MockHttp::new(vec![(
             "oauth/token",
-            Canned { status: 200, body: resp },
+            Canned {
+                status: 200,
+                body: resp,
+            },
         )]);
         let clock = TestClock::new(0);
         let cfg = OpenAiOAuthConfig::default();
@@ -797,9 +809,12 @@ mod refresh_tests {
             None,
         );
         let spawner = InstantSpawner::new();
-        RefreshDriver::spawn_proactive(state.clone(), spawner.clone() as Arc<dyn traits::RuntimeSpawner>)
-            .await
-            .expect("spawn ok");
+        RefreshDriver::spawn_proactive(
+            state.clone(),
+            spawner.clone() as Arc<dyn traits::RuntimeSpawner>,
+        )
+        .await
+        .expect("spawn ok");
 
         clock.set(2);
 

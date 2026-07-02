@@ -145,9 +145,8 @@ mod tests {
         // covered by `todo_v2_enabled_inner` + `traits::env::is_env_defined_falsy`.
         let ctx = ToolStaticContext::default();
         // Holds whenever LINGXI_ENABLE_TASKS is NOT a defined-falsy value.
-        if !traits::env::is_env_defined_falsy(
-            std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref(),
-        ) {
+        if !traits::env::is_env_defined_falsy(std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref())
+        {
             assert!(is_todo_v2_enabled(&ctx));
         } else {
             assert!(!is_todo_v2_enabled(&ctx));
@@ -218,7 +217,10 @@ mod tests {
             render_task_update_success("7", &["status".into(), "owner".into()]),
             "Updated task #7 status, owner"
         );
-        assert_eq!(render_task_update_fail("9", Some("Task not found")), "Task not found");
+        assert_eq!(
+            render_task_update_fail("9", Some("Task not found")),
+            "Task not found"
+        );
         assert_eq!(render_task_update_fail("9", None), "Task #9 not found");
         assert_eq!(render_task_update_fail("9", Some("")), "Task #9 not found");
     }
@@ -425,9 +427,7 @@ mod tests {
                 "feature OFF by default ⇒ no nudge on the common interactive path"
             );
             // Re-open #3 so the transition-on assertions below see the same shape.
-            store
-                .update(&id3, |t| t.status = TodoState::Pending)
-                .await;
+            store.update(&id3, |t| t.status = TodoState::Pending).await;
 
             // Enable the feature for the remaining (gate-on) assertions.
             std::env::set_var("LINGXI_VERIFICATION_AGENT", "1");
@@ -448,7 +448,10 @@ mod tests {
                 json!(false),
                 "no-op completed re-send must not trip the nudge"
             );
-            assert!(res.data.get("statusChange").is_none(), "no statusChange on a no-op");
+            assert!(
+                res.data.get("statusChange").is_none(),
+                "no statusChange on a no-op"
+            );
 
             // Phase 2 — REAL transition: #3 pending → completed closes the list
             // (all 3 completed, >= 3, none /verif/), so the nudge fires.
@@ -478,9 +481,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use telemetry::AnalyticsBus;
         use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
-        use traits::mailbox::{
-            MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck,
-        };
+        use traits::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
 
         /// Restore-on-drop guard for the swarm + store env vars; also removes the
         /// throwaway store dir. Runs even on assertion panic.
@@ -642,7 +643,10 @@ mod tests {
         async fn auto_owner_sets_owner_when_swarm_in_progress_unowned() {
             let (_g, list, router) = setup(true);
             let store = TodoStore::for_list(&list);
-            let id = store.create(task("Build it", TodoState::Pending)).await.unwrap();
+            let id = store
+                .create(task("Build it", TodoState::Pending))
+                .await
+                .unwrap();
 
             // T6: claude-code auto-owner = getAgentName() (the DISPLAY NAME),
             // NOT the agent:<uuid> id. getAgentStatuses matches owners by name.
@@ -680,7 +684,10 @@ mod tests {
         async fn auto_owner_skipped_when_name_unbound() {
             let (_g, list, router) = setup(true);
             let store = TodoStore::for_list(&list);
-            let id = store.create(task("Build it", TodoState::Pending)).await.unwrap();
+            let id = store
+                .create(task("Build it", TodoState::Pending))
+                .await
+                .unwrap();
 
             let tool = TaskUpdateTool::new(bctx(router));
             // agent_id present but agent_name None ⇒ no auto-owner (no uuid owner).
@@ -702,7 +709,10 @@ mod tests {
         async fn auto_owner_skipped_when_swarm_off() {
             let (_g, list, router) = setup(false);
             let store = TodoStore::for_list(&list);
-            let id = store.create(task("Build it", TodoState::Pending)).await.unwrap();
+            let id = store
+                .create(task("Build it", TodoState::Pending))
+                .await
+                .unwrap();
 
             let tool = TaskUpdateTool::new(bctx(router));
             tool.call(
@@ -713,14 +723,20 @@ mod tests {
             .await
             .expect("update ok");
 
-            assert!(store.get(&id).await.unwrap().owner.is_none(), "no auto-owner when swarms off");
+            assert!(
+                store.get(&id).await.unwrap().owner.is_none(),
+                "no auto-owner when swarms off"
+            );
         }
 
         #[tokio::test]
         async fn auto_owner_skipped_when_not_in_progress() {
             let (_g, list, router) = setup(true);
             let store = TodoStore::for_list(&list);
-            let id = store.create(task("Build it", TodoState::Pending)).await.unwrap();
+            let id = store
+                .create(task("Build it", TodoState::Pending))
+                .await
+                .unwrap();
 
             let tool = TaskUpdateTool::new(bctx(router));
             // completed (not in_progress) ⇒ no auto-owner.
@@ -732,7 +748,10 @@ mod tests {
             .await
             .expect("update ok");
 
-            assert!(store.get(&id).await.unwrap().owner.is_none(), "auto-owner only on in_progress");
+            assert!(
+                store.get(&id).await.unwrap().owner.is_none(),
+                "auto-owner only on in_progress"
+            );
         }
 
         #[tokio::test]
@@ -753,14 +772,20 @@ mod tests {
             .expect("update ok");
 
             // The pre-existing owner is preserved, not overwritten by auto-owner.
-            assert_eq!(store.get(&id).await.unwrap().owner.as_deref(), Some("existing-owner"));
+            assert_eq!(
+                store.get(&id).await.unwrap().owner.as_deref(),
+                Some("existing-owner")
+            );
         }
 
         #[tokio::test]
         async fn auto_owner_skipped_when_no_agent_id() {
             let (_g, list, router) = setup(true);
             let store = TodoStore::for_list(&list);
-            let id = store.create(task("Build it", TodoState::Pending)).await.unwrap();
+            let id = store
+                .create(task("Build it", TodoState::Pending))
+                .await
+                .unwrap();
 
             let tool = TaskUpdateTool::new(bctx(router));
             // agent_id None (main thread / getAgentName() undefined) ⇒ no auto-owner.
@@ -772,7 +797,10 @@ mod tests {
             .await
             .expect("update ok");
 
-            assert!(store.get(&id).await.unwrap().owner.is_none(), "no auto-owner without an agent id");
+            assert!(
+                store.get(&id).await.unwrap().owner.is_none(),
+                "no auto-owner without an agent id"
+            );
         }
 
         // ── 5b owner-change mailbox notification ─────────────────────────
@@ -811,7 +839,10 @@ mod tests {
             assert_eq!(body["subject"], "Ship the feature");
             assert_eq!(body["description"], "the description");
             assert_eq!(body["assignedBy"], "scribe");
-            assert!(body["timestamp"].as_str().unwrap().ends_with('Z'), "ISO-8601 Z timestamp");
+            assert!(
+                body["timestamp"].as_str().unwrap().ends_with('Z'),
+                "ISO-8601 Z timestamp"
+            );
         }
 
         /// T6: when the acting agent has NO display name bound (the leader / main
@@ -840,7 +871,10 @@ mod tests {
             assert_eq!(sent.len(), 1, "exactly one task_assignment routed");
             let (from, to, msg) = &sent[0];
             assert_eq!(to, "scout");
-            assert_eq!(from, "team-lead", "unnamed sender → literal team-lead label");
+            assert_eq!(
+                from, "team-lead",
+                "unnamed sender → literal team-lead label"
+            );
             let body: Value = serde_json::from_str(&msg.content).unwrap();
             assert_eq!(body["assignedBy"], "team-lead");
         }
@@ -863,14 +897,20 @@ mod tests {
             .await
             .expect("update ok");
 
-            assert!(router.sent.lock().unwrap().is_empty(), "no route on a no-op owner write");
+            assert!(
+                router.sent.lock().unwrap().is_empty(),
+                "no route on a no-op owner write"
+            );
         }
 
         #[tokio::test]
         async fn no_notification_when_swarm_off() {
             let (_g, list, router) = setup(false);
             let store = TodoStore::for_list(&list);
-            let id = store.create(task("Ship it", TodoState::Pending)).await.unwrap();
+            let id = store
+                .create(task("Ship it", TodoState::Pending))
+                .await
+                .unwrap();
 
             let tool = TaskUpdateTool::new(bctx(router.clone()));
             tool.call(
@@ -881,7 +921,10 @@ mod tests {
             .await
             .expect("update ok");
 
-            assert!(router.sent.lock().unwrap().is_empty(), "no route when swarms off");
+            assert!(
+                router.sent.lock().unwrap().is_empty(),
+                "no route when swarms off"
+            );
         }
 
         // ── T5 teammate completion reminder (TaskUpdateTool.ts:386-394) ──────
@@ -936,7 +979,10 @@ mod tests {
                 .expect("update ok");
 
             assert!(
-                !res.data["content"].as_str().unwrap().contains(TEAMMATE_REMINDER),
+                !res.data["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains(TEAMMATE_REMINDER),
                 "no teammate reminder when swarms are off"
             );
         }
@@ -962,7 +1008,10 @@ mod tests {
                 .expect("update ok");
 
             assert!(
-                !res.data["content"].as_str().unwrap().contains(TEAMMATE_REMINDER),
+                !res.data["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains(TEAMMATE_REMINDER),
                 "no teammate reminder on the main thread (no agent id)"
             );
         }
@@ -988,7 +1037,10 @@ mod tests {
                 .expect("update ok");
 
             assert!(
-                !res.data["content"].as_str().unwrap().contains(TEAMMATE_REMINDER),
+                !res.data["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains(TEAMMATE_REMINDER),
                 "reminder only on a ->completed transition"
             );
         }
@@ -1150,8 +1202,17 @@ mod tests {
         async fn task_list_prompt_disabled_is_base_text() {
             let _g = guard(false);
             let tool = TaskListTool::new(bctx());
-            let p = tool.prompt(&PromptOptions { include_examples: false, model: None }).await;
-            assert_eq!(p, TASK_LIST_PROMPT, "disabled variant is byte-identical to base");
+            let p = tool
+                .prompt(&PromptOptions {
+                    include_examples: false,
+                    model: None,
+                    model_profile: None,
+                })
+                .await;
+            assert_eq!(
+                p, TASK_LIST_PROMPT,
+                "disabled variant is byte-identical to base"
+            );
             assert!(!p.contains("## Teammate Workflow"));
         }
 
@@ -1159,7 +1220,13 @@ mod tests {
         async fn task_list_prompt_enabled_has_teammate_workflow() {
             let _g = guard(true);
             let tool = TaskListTool::new(bctx());
-            let p = tool.prompt(&PromptOptions { include_examples: false, model: None }).await;
+            let p = tool
+                .prompt(&PromptOptions {
+                    include_examples: false,
+                    model: None,
+                    model_profile: None,
+                })
+                .await;
             assert_eq!(p, TASK_LIST_PROMPT_SWARM);
             assert!(p.contains("## Teammate Workflow"));
             assert!(p.contains("- Before assigning tasks to teammates, to see what's available"));
@@ -1171,8 +1238,17 @@ mod tests {
         async fn task_create_prompt_disabled_is_base_text() {
             let _g = guard(false);
             let tool = TaskCreateTool::new(bctx());
-            let p = tool.prompt(&PromptOptions { include_examples: false, model: None }).await;
-            assert_eq!(p, TASK_CREATE_PROMPT, "disabled variant is byte-identical to base");
+            let p = tool
+                .prompt(&PromptOptions {
+                    include_examples: false,
+                    model: None,
+                    model_profile: None,
+                })
+                .await;
+            assert_eq!(
+                p, TASK_CREATE_PROMPT,
+                "disabled variant is byte-identical to base"
+            );
             assert!(!p.contains("and potentially assigned to teammates"));
         }
 
@@ -1180,7 +1256,13 @@ mod tests {
         async fn task_create_prompt_enabled_has_teammate_inserts() {
             let _g = guard(true);
             let tool = TaskCreateTool::new(bctx());
-            let p = tool.prompt(&PromptOptions { include_examples: false, model: None }).await;
+            let p = tool
+                .prompt(&PromptOptions {
+                    include_examples: false,
+                    model: None,
+                    model_profile: None,
+                })
+                .await;
             assert_eq!(p, TASK_CREATE_PROMPT_SWARM);
             assert!(p.contains(
                 "Tasks that require careful planning or multiple operations and potentially assigned to teammates"
@@ -1331,7 +1413,13 @@ mod tests {
             completed_calls: AtomicUsize,
             #[allow(clippy::type_complexity)]
             last_created: std::sync::Mutex<
-                Option<(String, String, Option<String>, Option<String>, Option<String>)>,
+                Option<(
+                    String,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                )>,
             >,
             last_completed: std::sync::Mutex<Option<(String, String, String, Option<String>)>>,
         }
@@ -1387,8 +1475,7 @@ mod tests {
                 Arc::new(AnalyticsBus::new()),
                 vec![std::env::temp_dir()],
             );
-            c.task_lifecycle_hooks =
-                firer.map(|f| f as Arc<dyn TaskLifecycleHookFirer>);
+            c.task_lifecycle_hooks = firer.map(|f| f as Arc<dyn TaskLifecycleHookFirer>);
             c
         }
 
@@ -1420,8 +1507,7 @@ mod tests {
                 other => panic!("expected Internal(reason), got {other:?}"),
             }
             // The fire saw the (task_id, subject, description) payload.
-            let (_id, subj, desc, _tm, _team) =
-                firer.last_created.lock().unwrap().clone().unwrap();
+            let (_id, subj, desc, _tm, _team) = firer.last_created.lock().unwrap().clone().unwrap();
             assert_eq!(subj, "Ship it");
             assert_eq!(desc.as_deref(), Some("do the work"));
             // CRITICAL: the just-created task was rolled back — the store is empty.
@@ -1446,7 +1532,11 @@ mod tests {
                 .await
                 .expect("a non-blocking TaskCreated hook allows the create");
             assert_eq!(res.data["task"]["subject"], "Ship it");
-            assert_eq!(firer.created_calls.load(Ordering::SeqCst), 1, "the hook fired once");
+            assert_eq!(
+                firer.created_calls.load(Ordering::SeqCst),
+                1,
+                "the hook fired once"
+            );
             let store = TodoStore::for_list(&list);
             assert_eq!(store.list().await.len(), 1, "the task is persisted");
         }
@@ -1463,7 +1553,11 @@ mod tests {
             .await
             .expect("no firer → normal create");
             let store = TodoStore::for_list(&list);
-            assert_eq!(store.list().await.len(), 1, "the task is persisted with no firer");
+            assert_eq!(
+                store.list().await.len(),
+                1,
+                "the task is persisted with no firer"
+            );
         }
 
         /// T25: the `TaskCreated` hook fire carries the creating teammate's
@@ -1487,7 +1581,11 @@ mod tests {
 
             let (_id, _subj, _desc, teammate, team) =
                 firer.last_created.lock().unwrap().clone().unwrap();
-            assert_eq!(teammate.as_deref(), Some("researcher"), "teammate_name threaded");
+            assert_eq!(
+                teammate.as_deref(),
+                Some("researcher"),
+                "teammate_name threaded"
+            );
             assert_eq!(team.as_deref(), Some("alpha-team"), "team_name threaded");
         }
 
@@ -1543,7 +1641,10 @@ mod tests {
             assert_eq!(res.data["success"], json!(false));
             assert_eq!(res.data["error"], "not verified");
             assert_eq!(res.data["updatedFields"], json!(Vec::<String>::new()));
-            assert!(res.data.get("statusChange").is_none(), "no statusChange on a block");
+            assert!(
+                res.data.get("statusChange").is_none(),
+                "no statusChange on a block"
+            );
             // The fire saw the EXISTING subject/description + the terminal status.
             let (_id, status, subj, desc) = firer.last_completed.lock().unwrap().clone().unwrap();
             assert_eq!(status, "completed");
@@ -1551,7 +1652,11 @@ mod tests {
             assert_eq!(desc.as_deref(), Some("the description"));
             // CRITICAL: the status was NOT applied — still pending.
             let after = store.get(&id).await.unwrap();
-            assert_eq!(after.status, TodoState::Pending, "a blocked completion must NOT apply the status");
+            assert_eq!(
+                after.status,
+                TodoState::Pending,
+                "a blocked completion must NOT apply the status"
+            );
         }
 
         #[tokio::test]
@@ -1559,7 +1664,12 @@ mod tests {
             let (_g, list) = setup();
             let store = TodoStore::for_list(&list);
             let id = store
-                .create(TodoTask::new("Ship it".into(), "desc".into(), None, Map::new()))
+                .create(TodoTask::new(
+                    "Ship it".into(),
+                    "desc".into(),
+                    None,
+                    Map::new(),
+                ))
                 .await
                 .unwrap();
 
@@ -1575,7 +1685,11 @@ mod tests {
                 .expect("a non-blocking completion succeeds");
             assert_eq!(res.data["success"], json!(true));
             assert_eq!(res.data["statusChange"]["to"], "completed");
-            assert_eq!(firer.completed_calls.load(Ordering::SeqCst), 1, "the hook fired once");
+            assert_eq!(
+                firer.completed_calls.load(Ordering::SeqCst),
+                1,
+                "the hook fired once"
+            );
             let after = store.get(&id).await.unwrap();
             assert_eq!(after.status, TodoState::Completed, "the status is applied");
         }
@@ -1585,7 +1699,12 @@ mod tests {
             let (_g, list) = setup();
             let store = TodoStore::for_list(&list);
             let id = store
-                .create(TodoTask::new("Ship it".into(), "desc".into(), None, Map::new()))
+                .create(TodoTask::new(
+                    "Ship it".into(),
+                    "desc".into(),
+                    None,
+                    Map::new(),
+                ))
                 .await
                 .unwrap();
 
@@ -1611,7 +1730,11 @@ mod tests {
                 "a non-terminal transition must NOT fire the TaskCompleted hook"
             );
             let after = store.get(&id).await.unwrap();
-            assert_eq!(after.status, TodoState::InProgress, "the in_progress status is applied");
+            assert_eq!(
+                after.status,
+                TodoState::InProgress,
+                "the in_progress status is applied"
+            );
         }
     }
 
@@ -1720,7 +1843,9 @@ mod tests {
                 &self,
                 _input: TaskCreateInput,
             ) -> Result<TaskRecord, TaskRegistryError> {
-                Err(TaskRegistryError::Internal("unused in product_b tests".into()))
+                Err(TaskRegistryError::Internal(
+                    "unused in product_b tests".into(),
+                ))
             }
             async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
                 Ok(self.record.lock().unwrap().clone())
@@ -1736,14 +1861,18 @@ mod tests {
                 _id: &str,
                 _patch: TaskUpdatePatch,
             ) -> Result<TaskRecord, TaskRegistryError> {
-                Err(TaskRegistryError::Internal("unused in product_b tests".into()))
+                Err(TaskRegistryError::Internal(
+                    "unused in product_b tests".into(),
+                ))
             }
             async fn set_status(
                 &self,
                 _id: &str,
                 _status: &str,
             ) -> Result<TaskRecord, TaskRegistryError> {
-                Err(TaskRegistryError::Internal("unused in product_b tests".into()))
+                Err(TaskRegistryError::Internal(
+                    "unused in product_b tests".into(),
+                ))
             }
             async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError> {
                 *self.kill_calls.lock().unwrap() += 1;
@@ -1802,7 +1931,12 @@ mod tests {
             }
         }
 
-        fn chunk(status: &str, done: bool, exit_code: Option<i32>, content: &str) -> TaskOutputChunk {
+        fn chunk(
+            status: &str,
+            done: bool,
+            exit_code: Option<i32>,
+            content: &str,
+        ) -> TaskOutputChunk {
             TaskOutputChunk {
                 task_id: "b12345678".into(),
                 content: content.into(),
@@ -1894,7 +2028,12 @@ mod tests {
             let out = TaskOutputTool::new(bctx(MockRegistry::with_record(None)));
             assert_eq!(
                 out.aliases(),
-                &["AgentOutputTool", "BashOutputTool", "AgentOutput", "BashOutput"]
+                &[
+                    "AgentOutputTool",
+                    "BashOutputTool",
+                    "AgentOutput",
+                    "BashOutput"
+                ]
             );
         }
 
@@ -2424,7 +2563,10 @@ mod tests {
             assert!(
                 formatted.starts_with(&format!("[Truncated. Full output: {abs}]\n\n")),
                 "absolute path is used verbatim in the header; got {:?}",
-                &formatted[..formatted.char_indices().nth(120).map_or(formatted.len(), |(i, _)| i)]
+                &formatted[..formatted
+                    .char_indices()
+                    .nth(120)
+                    .map_or(formatted.len(), |(i, _)| i)]
             );
             // A bare filename must NOT leak when the absolute path is present.
             assert!(!formatted.starts_with("[Truncated. Full output: b12345678.output]"));

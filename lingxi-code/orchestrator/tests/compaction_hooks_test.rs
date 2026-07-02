@@ -27,7 +27,8 @@ use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
 use hooks::HookExecutorImpl;
 use orchestrator::test_support::{
-    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use protocol::{ConversationMessage, HookId, HttpRequest, HttpResponse, MessageId};
@@ -105,7 +106,11 @@ impl BuiltinHookHandler for RecordPreCompact {
                 HookOutcome::Success
             },
             stdout: String::new(),
-            stderr: if self.fail { "boom".into() } else { String::new() },
+            stderr: if self.fail {
+                "boom".into()
+            } else {
+                String::new()
+            },
             exit_code: if self.fail { Some(1) } else { None },
             response: if self.block {
                 Some(HookResponse {

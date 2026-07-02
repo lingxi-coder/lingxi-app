@@ -350,7 +350,11 @@ mod tests {
             .take()
             .await;
 
-        assert_eq!(surfaced.len(), 1, "only the selected file surfaces: {surfaced:?}");
+        assert_eq!(
+            surfaced.len(),
+            1,
+            "only the selected file surfaces: {surfaced:?}"
+        );
         assert!(
             surfaced[0].path.ends_with("fd.md"),
             "surfaced path: {:?}",
@@ -379,7 +383,10 @@ mod tests {
             .await
             .take()
             .await;
-        assert!(surfaced.is_empty(), "absent memdir surfaces nothing: {surfaced:?}");
+        assert!(
+            surfaced.is_empty(),
+            "absent memdir surfaces nothing: {surfaced:?}"
+        );
     }
 
     #[test]
@@ -388,7 +395,10 @@ mod tests {
         // with `s.content` === input on the no-truncation path), including a
         // trailing newline (split→join round-trips the final empty segment).
         let p = Path::new("/m/a.md");
-        assert_eq!(truncate_surfaced_content("one\ntwo\nthree", p), "one\ntwo\nthree");
+        assert_eq!(
+            truncate_surfaced_content("one\ntwo\nthree", p),
+            "one\ntwo\nthree"
+        );
         assert_eq!(truncate_surfaced_content("one\ntwo\n", p), "one\ntwo\n");
         assert_eq!(truncate_surfaced_content("", p), "");
     }
@@ -404,7 +414,10 @@ mod tests {
             .join("\n");
         let out = truncate_surfaced_content(&content, Path::new("/m/big.md"));
         assert!(out.starts_with("L1\nL2\n"), "kept body starts at line 1");
-        assert!(out.contains("\nL200\n> This memory file was truncated"), "notice after the 200th kept line: {out}");
+        assert!(
+            out.contains("\nL200\n> This memory file was truncated"),
+            "notice after the 200th kept line: {out}"
+        );
         assert!(
             out.ends_with(
                 "This memory file was truncated (first 200 lines). Use the Read tool to view the complete file at: /m/big.md"

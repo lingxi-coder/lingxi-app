@@ -81,8 +81,14 @@ mod tests {
 
     #[test]
     fn escaped_semicolon_is_not_an_operator() {
-        assert_eq!(has_actual_operator_nodes(r"find . -exec rm {} \;"), Some(false));
-        assert_eq!(has_actual_operator_nodes("cat safe.txt \\; echo secret"), Some(false));
+        assert_eq!(
+            has_actual_operator_nodes(r"find . -exec rm {} \;"),
+            Some(false)
+        );
+        assert_eq!(
+            has_actual_operator_nodes("cat safe.txt \\; echo secret"),
+            Some(false)
+        );
     }
 
     #[test]
@@ -459,7 +465,10 @@ fn process_top_level_child(child: Node<'_>, src: &[u8], acc: &mut CompoundStruct
                 process_top_level_child(c, src, acc);
             }
         }
-        "if_statement" | "while_statement" | "for_statement" | "case_statement"
+        "if_statement"
+        | "while_statement"
+        | "for_statement"
+        | "case_statement"
         | "function_definition" => {
             acc.segments.push(node_text(child, src));
             for c in children(child) {
@@ -478,10 +487,26 @@ mod analysis_tests {
     fn dangerous_patterns_detected_per_kind() {
         let d = extract_dangerous_patterns("echo $(whoami)").unwrap();
         assert!(d.has_command_substitution && !d.has_process_substitution);
-        assert!(extract_dangerous_patterns("cat <(ls)").unwrap().has_process_substitution);
-        assert!(extract_dangerous_patterns("echo ${HOME}").unwrap().has_parameter_expansion);
-        assert!(extract_dangerous_patterns("cat <<EOF\nx\nEOF").unwrap().has_heredoc);
-        assert!(extract_dangerous_patterns("echo hi # note").unwrap().has_comment);
+        assert!(
+            extract_dangerous_patterns("cat <(ls)")
+                .unwrap()
+                .has_process_substitution
+        );
+        assert!(
+            extract_dangerous_patterns("echo ${HOME}")
+                .unwrap()
+                .has_parameter_expansion
+        );
+        assert!(
+            extract_dangerous_patterns("cat <<EOF\nx\nEOF")
+                .unwrap()
+                .has_heredoc
+        );
+        assert!(
+            extract_dangerous_patterns("echo hi # note")
+                .unwrap()
+                .has_comment
+        );
         // A plain command trips nothing.
         assert_eq!(
             extract_dangerous_patterns("ls -la").unwrap(),
@@ -509,7 +534,11 @@ mod analysis_tests {
     #[test]
     fn subshell_and_command_group_and_single() {
         assert!(extract_compound_structure("(echo a)").unwrap().has_subshell);
-        assert!(extract_compound_structure("{ echo a; }").unwrap().has_command_group);
+        assert!(
+            extract_compound_structure("{ echo a; }")
+                .unwrap()
+                .has_command_group
+        );
         // A single plain command yields exactly one segment = the whole command.
         let one = extract_compound_structure("echo hello world").unwrap();
         assert!(!one.has_compound_operators && !one.has_pipeline);
@@ -522,7 +551,10 @@ mod analysis_tests {
         // `cmd1 && cmd2 2>/dev/null` — tree-sitter wraps the list in a
         // redirected_statement; the inner `&&` must still be detected.
         let c = extract_compound_structure("echo a && echo b 2>/dev/null").unwrap();
-        assert!(c.has_compound_operators, "inner && detected through redirect");
+        assert!(
+            c.has_compound_operators,
+            "inner && detected through redirect"
+        );
         assert_eq!(c.operators, vec!["&&".to_string()]);
     }
 }

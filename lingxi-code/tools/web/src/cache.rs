@@ -245,7 +245,11 @@ mod tests {
     #[test]
     fn roundtrip_set_then_get() {
         let now = Instant::now();
-        cache_set_at("https://global.example/roundtrip".into(), entry("body-a", 200), now);
+        cache_set_at(
+            "https://global.example/roundtrip".into(),
+            entry("body-a", 200),
+            now,
+        );
         let got = cache_get_at("https://global.example/roundtrip", now).expect("hit");
         assert_eq!(got, entry("body-a", 200));
     }
@@ -258,7 +262,11 @@ mod tests {
     #[test]
     fn clear_empties_cache() {
         let now = Instant::now();
-        cache_set_at("https://global.example/clear-1".into(), entry("1", 200), now);
+        cache_set_at(
+            "https://global.example/clear-1".into(),
+            entry("1", 200),
+            now,
+        );
         assert!(cache_get_at("https://global.example/clear-1", now).is_some());
         clear_web_fetch_cache();
         assert!(cache_get_at("https://global.example/clear-1", now).is_none());
@@ -322,7 +330,9 @@ mod tests {
         // The very first inserted key (least-recently-used) should be evicted.
         assert!(c.get("https://cap.example/0", now).is_none());
         // The most recent must still be present.
-        assert!(c.get(&format!("https://cap.example/{MAX_CACHE_ENTRIES}"), now).is_some());
+        assert!(c
+            .get(&format!("https://cap.example/{MAX_CACHE_ENTRIES}"), now)
+            .is_some());
     }
 
     #[test]

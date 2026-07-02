@@ -58,7 +58,10 @@ impl OpenAiOAuthConfig {
     /// The PAT `whoami` endpoint (resolves `account_id` / fedramp for a PAT).
     #[must_use]
     pub fn whoami_url(&self) -> String {
-        format!("{}/v1/user-auth-credential/whoami", self.authapi_base_url.trim_end_matches('/'))
+        format!(
+            "{}/v1/user-auth-credential/whoami",
+            self.authapi_base_url.trim_end_matches('/')
+        )
     }
 }
 
@@ -69,7 +72,10 @@ mod tests {
     fn config_has_authapi_and_whoami() {
         let c = OpenAiOAuthConfig::default();
         assert_eq!(c.authapi_base_url, "https://auth.openai.com/api/accounts");
-        assert_eq!(c.whoami_url(), "https://auth.openai.com/api/accounts/v1/user-auth-credential/whoami");
+        assert_eq!(
+            c.whoami_url(),
+            "https://auth.openai.com/api/accounts/v1/user-auth-credential/whoami"
+        );
     }
     #[test]
     fn config_has_codex_constants() {

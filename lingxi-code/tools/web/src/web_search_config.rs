@@ -67,7 +67,10 @@ impl WebSearchConfig {
             .and_then(Value::as_str)
             .and_then(normalize_searxng_url);
 
-        Self { provider, searxng_url }
+        Self {
+            provider,
+            searxng_url,
+        }
     }
 
     pub fn write_settings_json(&self, v: &mut Value) {
@@ -116,14 +119,21 @@ mod tests {
 
     #[test]
     fn provider_round_trips_settings_strings() {
-        assert_eq!(WebSearchProvider::parse("auto"), Some(WebSearchProvider::Auto));
-        assert_eq!(WebSearchProvider::parse("duckduckgo"), Some(WebSearchProvider::DuckDuckGo));
+        assert_eq!(
+            WebSearchProvider::parse("auto"),
+            Some(WebSearchProvider::Auto)
+        );
+        assert_eq!(
+            WebSearchProvider::parse("duckduckgo"),
+            Some(WebSearchProvider::DuckDuckGo)
+        );
         assert_eq!(WebSearchProvider::Tavily.as_str(), "tavily");
     }
 
     #[test]
     fn reads_nested_settings_shape() {
-        let v = json!({ "webSearch": { "provider": "brave", "searxngUrl": "https://search.local" } });
+        let v =
+            json!({ "webSearch": { "provider": "brave", "searxngUrl": "https://search.local" } });
         let cfg = WebSearchConfig::from_settings_json(&v);
         assert_eq!(cfg.provider, WebSearchProvider::Brave);
         assert_eq!(cfg.searxng_url.as_deref(), Some("https://search.local"));
@@ -139,8 +149,11 @@ mod tests {
     #[test]
     fn searxng_url_none_removes_field_on_write() {
         let mut v = json!({ "theme": "dark", "webSearch": { "provider": "searxng", "searxngUrl": "https://old.example/" } });
-        WebSearchConfig { provider: WebSearchProvider::Auto, searxng_url: None }
-            .write_settings_json(&mut v);
+        WebSearchConfig {
+            provider: WebSearchProvider::Auto,
+            searxng_url: None,
+        }
+        .write_settings_json(&mut v);
         assert_eq!(v["theme"], "dark");
         assert_eq!(v["webSearch"]["provider"], "auto");
         assert!(v["webSearch"].get("searxngUrl").is_none());
@@ -161,8 +174,11 @@ mod tests {
     #[test]
     fn writes_nested_settings_shape_preserving_other_keys() {
         let mut v = json!({ "theme": "dark" });
-        WebSearchConfig { provider: WebSearchProvider::Searxng, searxng_url: Some("https://s.example".into()) }
-            .write_settings_json(&mut v);
+        WebSearchConfig {
+            provider: WebSearchProvider::Searxng,
+            searxng_url: Some("https://s.example".into()),
+        }
+        .write_settings_json(&mut v);
         assert_eq!(v["theme"], "dark");
         assert_eq!(v["webSearch"]["provider"], "searxng");
         assert_eq!(v["webSearch"]["searxngUrl"], "https://s.example");

@@ -630,8 +630,7 @@ impl XaaConfigProvider for XaaIdpConfigProvider {
 
         // IdP client secret lives in its own slot, keyed by IdP issuer (a
         // different trust domain). Optional — absent → PKCE-only public client.
-        let idp_client_secret =
-            get_idp_client_secret(&self.storage, &self.settings.issuer).await?;
+        let idp_client_secret = get_idp_client_secret(&self.storage, &self.settings.issuer).await?;
 
         // Acquire the id_token (cache hit or one OIDC browser pop).
         let idp_id_token = acquire_idp_id_token(
@@ -786,7 +785,10 @@ mod tests {
             service: &str,
             account: &str,
         ) -> Result<(), traits::SecureStorageError> {
-            self.map.lock().await.remove(&(service.into(), account.into()));
+            self.map
+                .lock()
+                .await
+                .remove(&(service.into(), account.into()));
             Ok(())
         }
         async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
@@ -824,7 +826,10 @@ mod tests {
                     });
                 }
             }
-            Err(traits::HttpError::Connection(format!("no route for {}", req.url)))
+            Err(traits::HttpError::Connection(format!(
+                "no route for {}",
+                req.url
+            )))
         }
         async fn stream_sse(
             &self,
@@ -868,7 +873,10 @@ mod tests {
         let meta = discover_oidc(&http, "https://idp.example.com/tenant")
             .await
             .expect("discovery ok");
-        assert_eq!(meta.authorization_endpoint, "https://idp.example.com/authorize");
+        assert_eq!(
+            meta.authorization_endpoint,
+            "https://idp.example.com/authorize"
+        );
         assert_eq!(meta.token_endpoint, "https://idp.example.com/token");
     }
 
@@ -898,9 +906,15 @@ mod tests {
         let issuer = "https://idp.example.com/";
 
         // Fresh token (expires in 1h) round-trips.
-        set_cached_id_token(&storage, &clock, issuer, "tok-1", now + Duration::from_secs(3600))
-            .await
-            .unwrap();
+        set_cached_id_token(
+            &storage,
+            &clock,
+            issuer,
+            "tok-1",
+            now + Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
         // Issuer-key normalization: a cosmetically-different issuer hits the slot.
         let got = get_cached_id_token(&storage, &clock, "https://IDP.example.com")
             .await
@@ -908,16 +922,31 @@ mod tests {
         assert_eq!(got.as_deref(), Some("tok-1"));
 
         // A token within the 60s buffer of expiring is a MISS → forces re-acquire.
-        set_cached_id_token(&storage, &clock, issuer, "tok-2", now + Duration::from_secs(30))
-            .await
-            .unwrap();
+        set_cached_id_token(
+            &storage,
+            &clock,
+            issuer,
+            "tok-2",
+            now + Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
         let miss = get_cached_id_token(&storage, &clock, issuer).await.unwrap();
-        assert_eq!(miss, None, "token within expiry buffer must be a cache miss");
+        assert_eq!(
+            miss, None,
+            "token within expiry buffer must be a cache miss"
+        );
 
         // Clear removes the slot.
-        set_cached_id_token(&storage, &clock, issuer, "tok-3", now + Duration::from_secs(3600))
-            .await
-            .unwrap();
+        set_cached_id_token(
+            &storage,
+            &clock,
+            issuer,
+            "tok-3",
+            now + Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
         clear_cached_id_token(&storage, issuer).await.unwrap();
         assert_eq!(
             get_cached_id_token(&storage, &clock, issuer).await.unwrap(),
@@ -938,9 +967,8 @@ mod tests {
     async fn acquire_idp_id_token_runs_pkce_flow_and_caches() {
         let exp = 2_000_000_000;
         let id_token = jwt_with_exp(exp);
-        let token_body = format!(
-            r#"{{"access_token":"at","id_token":"{id_token}","expires_in":3600}}"#
-        );
+        let token_body =
+            format!(r#"{{"access_token":"at","id_token":"{id_token}","expires_in":3600}}"#);
         let http: Arc<dyn HttpTransport> = Arc::new(ScriptedHttp {
             routes: vec![
                 (
@@ -953,7 +981,12 @@ mod tests {
                         "token_endpoint":"https://idp/token"}"#
                         .into(),
                 ),
-                (HttpMethod::Post, "https://idp/token".into(), 200, token_body),
+                (
+                    HttpMethod::Post,
+                    "https://idp/token".into(),
+                    200,
+                    token_body,
+                ),
             ],
         });
         let storage: Arc<dyn SecureStorage> = Arc::new(MemStorage::default());
@@ -991,9 +1024,7 @@ mod tests {
                     .to_string();
                 // Brief retry loop: the listener may not be accepting yet.
                 for _ in 0..50 {
-                    if let Ok(mut s) =
-                        tokio::net::TcpStream::connect(("127.0.0.1", port)).await
-                    {
+                    if let Ok(mut s) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
                         use tokio::io::AsyncWriteExt;
                         let req = format!(
                             "GET /callback?code=the-code&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n"
@@ -1016,16 +1047,10 @@ mod tests {
         // Cached now → a second call is a pure cache hit (no token POST needed).
         // Swap in an HTTP that has NO token route to prove the cache short-circuits.
         let http_no_token: Arc<dyn HttpTransport> = Arc::new(ScriptedHttp { routes: vec![] });
-        let again = acquire_idp_id_token(
-            &http_no_token,
-            &clock,
-            &storage,
-            &on_url,
-            &settings,
-            None,
-        )
-        .await
-        .expect("cache hit");
+        let again =
+            acquire_idp_id_token(&http_no_token, &clock, &storage, &on_url, &settings, None)
+                .await
+                .expect("cache hit");
         assert_eq!(again, id_token);
     }
 
@@ -1045,7 +1070,12 @@ mod tests {
                         "token_endpoint":"https://idp/token"}"#
                         .into(),
                 ),
-                (HttpMethod::Post, "https://idp/token".into(), 200, token_body),
+                (
+                    HttpMethod::Post,
+                    "https://idp/token".into(),
+                    200,
+                    token_body,
+                ),
             ],
         });
         let storage = Arc::new(MemStorage::default());
@@ -1106,14 +1136,7 @@ mod tests {
 
         let lookup: Arc<dyn ServerOAuthLookup> =
             Arc::new(StaticLookup(Some(("as-client".into(), "srv-key".into()))));
-        let provider = XaaIdpConfigProvider::new(
-            http,
-            clock,
-            storage,
-            on_url,
-            settings,
-            lookup,
-        );
+        let provider = XaaIdpConfigProvider::new(http, clock, storage, on_url, settings, lookup);
 
         let inputs = provider
             .xaa_inputs("acme", "https://mcp.acme.com")
@@ -1141,8 +1164,7 @@ mod tests {
         };
         // Lookup returns None → not XAA-provisioned → Ok(None).
         let lookup: Arc<dyn ServerOAuthLookup> = Arc::new(StaticLookup(None));
-        let provider =
-            XaaIdpConfigProvider::new(http, clock, storage, on_url, settings, lookup);
+        let provider = XaaIdpConfigProvider::new(http, clock, storage, on_url, settings, lookup);
         let out = provider.xaa_inputs("unknown", "https://x").await.unwrap();
         assert!(out.is_none(), "unknown server → Ok(None)");
     }
@@ -1205,11 +1227,20 @@ mod tests {
         let issuer = "https://idp.example.com";
 
         // Seed a fresh (1h) cached id_token for this issuer.
-        set_cached_id_token(&storage, &clock, issuer, "tok-cached", now + Duration::from_secs(3600))
-            .await
-            .unwrap();
+        set_cached_id_token(
+            &storage,
+            &clock,
+            issuer,
+            "tok-cached",
+            now + Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
         assert!(
-            get_cached_id_token(&storage, &clock, issuer).await.unwrap().is_some(),
+            get_cached_id_token(&storage, &clock, issuer)
+                .await
+                .unwrap()
+                .is_some(),
             "precondition: id_token is cached"
         );
 
@@ -1241,9 +1272,15 @@ mod tests {
         let clock: Arc<dyn Clock> = Arc::new(TestClock(now));
         let issuer = "https://idp.example.com";
 
-        set_cached_id_token(&storage, &clock, issuer, "tok-cached", now + Duration::from_secs(3600))
-            .await
-            .unwrap();
+        set_cached_id_token(
+            &storage,
+            &clock,
+            issuer,
+            "tok-cached",
+            now + Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
 
         // Mock AS: the IdP token-exchange POST 5xx (IdP outage).
         let http: Arc<dyn HttpTransport> = Arc::new(ScriptedHttp {
@@ -1260,7 +1297,10 @@ mod tests {
 
         // 5xx (IdP outage) ⇒ the cached id_token is KEPT.
         assert_eq!(
-            get_cached_id_token(&storage, &clock, issuer).await.unwrap().as_deref(),
+            get_cached_id_token(&storage, &clock, issuer)
+                .await
+                .unwrap()
+                .as_deref(),
             Some("tok-cached"),
             "5xx token-exchange must keep the cached id_token"
         );

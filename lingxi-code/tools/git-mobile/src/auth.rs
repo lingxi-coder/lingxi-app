@@ -150,8 +150,7 @@ pub fn hostkey_sha256_hex(sha256: &[u8]) -> String {
 /// inline to avoid pulling a `base64` dependency into the mobile crate.
 #[must_use]
 fn base64_no_pad(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0] as usize;
@@ -218,10 +217,7 @@ pub fn host_key_is_pinned(sha256: &[u8], pinned: &[String]) -> bool {
 ///   (does not exist).
 /// - [`GitOpError::InvalidInput`] — the canonical key path lies outside the
 ///   canonical sandbox root.
-pub fn validate_ssh_key_path(
-    path: &str,
-    sandbox_root: &Path,
-) -> Result<PathBuf, GitOpError> {
+pub fn validate_ssh_key_path(path: &str, sandbox_root: &Path) -> Result<PathBuf, GitOpError> {
     let canonical_root = sandbox_root.canonicalize().map_err(|e| {
         GitOpError::NotFound(format!("sandbox root {}: {e}", sandbox_root.display()))
     })?;
@@ -303,7 +299,10 @@ pub fn select_credential(
     }
     if allowed.contains(git2::CredentialType::USER_PASS_PLAINTEXT) {
         if let Some(token) = provider.and_then(tool_api::GitCredentialProvider::https_token) {
-            return CredentialChoice::UserPass { user: TOKEN_USERNAME.to_owned(), token };
+            return CredentialChoice::UserPass {
+                user: TOKEN_USERNAME.to_owned(),
+                token,
+            };
         }
     }
     CredentialChoice::None
@@ -354,8 +353,15 @@ pub fn make_network_callbacks<'a>(p: &NetCallbacks<'a>) -> git2::RemoteCallbacks
         let user = username_from_url.unwrap_or("git");
         match select_credential(allowed, provider, ssh, user) {
             CredentialChoice::Username(u) => git2::Cred::username(&u),
-            CredentialChoice::UserPass { user, token } => git2::Cred::userpass_plaintext(&user, &token),
-            CredentialChoice::SshKey { user, key_path, pubkey, passphrase } => {
+            CredentialChoice::UserPass { user, token } => {
+                git2::Cred::userpass_plaintext(&user, &token)
+            }
+            CredentialChoice::SshKey {
+                user,
+                key_path,
+                pubkey,
+                passphrase,
+            } => {
                 let n = ssh_attempts.get();
                 ssh_attempts.set(n + 1);
                 if n >= 1 {
@@ -556,16 +562,27 @@ mod tests {
         let raw = [0xABu8; 32];
         let hex = hostkey_sha256_hex(&raw);
         assert_eq!(hex.len(), 64);
-        assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(hex
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
         let pinned = vec![hex.clone()];
-        assert!(host_key_is_pinned(&raw, &pinned), "exact hex match accepted");
+        assert!(
+            host_key_is_pinned(&raw, &pinned),
+            "exact hex match accepted"
+        );
         let other = [0x00u8; 32];
         assert!(!host_key_is_pinned(&other, &pinned), "unknown key rejected");
         let pinned_upper = vec![hex.to_uppercase()];
-        assert!(host_key_is_pinned(&raw, &pinned_upper), "pinned hex compared case-insensitively");
+        assert!(
+            host_key_is_pinned(&raw, &pinned_upper),
+            "pinned hex compared case-insensitively"
+        );
         // Fail-closed: an empty pinned set NEVER trusts a host key (no MITM defense
         // would otherwise be bypassed by an unconfigured known_hosts).
-        assert!(!host_key_is_pinned(&raw, &[]), "empty pinned list must reject (fail-closed)");
+        assert!(
+            !host_key_is_pinned(&raw, &[]),
+            "empty pinned list must reject (fail-closed)"
+        );
     }
 
     #[test]
@@ -576,12 +593,24 @@ mod tests {
         let b64 = base64_no_pad(&raw);
         // base64 of 32 bytes is 43 chars unpadded.
         assert_eq!(b64.len(), 43);
-        assert!(host_key_is_pinned(&raw, &[format!("SHA256:{b64}")]), "SHA256: prefixed base64 accepted");
-        assert!(host_key_is_pinned(&raw, &[b64.clone()]), "bare base64 accepted");
-        assert!(host_key_is_pinned(&raw, &[format!("{b64}=")]), "trailing '=' padding tolerated");
+        assert!(
+            host_key_is_pinned(&raw, &[format!("SHA256:{b64}")]),
+            "SHA256: prefixed base64 accepted"
+        );
+        assert!(
+            host_key_is_pinned(&raw, &[b64.clone()]),
+            "bare base64 accepted"
+        );
+        assert!(
+            host_key_is_pinned(&raw, &[format!("{b64}=")]),
+            "trailing '=' padding tolerated"
+        );
         // Base64 is case-sensitive: a wrong-case base64 must NOT match.
         let other = [0x00u8; 32];
-        assert!(!host_key_is_pinned(&other, &[format!("SHA256:{b64}")]), "wrong key rejected via base64 path");
+        assert!(
+            !host_key_is_pinned(&other, &[format!("SHA256:{b64}")]),
+            "wrong key rejected via base64 path"
+        );
         // Sanity vs a known OpenSSH vector: SHA-256 of empty digest input is not
         // exercised here; instead verify the encoder against a RFC4648 vector.
         assert_eq!(base64_no_pad(b"foobar"), "Zm9vYmFy");
@@ -605,39 +634,92 @@ mod tests {
     #[test]
     fn make_network_callbacks_assembles_for_https_and_ssh() {
         let p = mock(Some("tok"), None);
-        let _cb = make_network_callbacks(&NetCallbacks { provider: Some(&p), ssh: None });
+        let _cb = make_network_callbacks(&NetCallbacks {
+            provider: Some(&p),
+            ssh: None,
+        });
         let ssh = SshConfig {
             private_key_path: "/sandbox/id".into(),
             known_hosts_sha256_hex: vec!["abc".into()],
             ..Default::default()
         };
-        let _cb2 = make_network_callbacks(&NetCallbacks { provider: None, ssh: Some(&ssh) });
+        let _cb2 = make_network_callbacks(&NetCallbacks {
+            provider: None,
+            ssh: Some(&ssh),
+        });
     }
 
     use std::sync::atomic::{AtomicUsize, Ordering};
-    struct MockProvider { token: Option<String>, pass: Option<String>, tc: AtomicUsize, pc: AtomicUsize }
+    struct MockProvider {
+        token: Option<String>,
+        pass: Option<String>,
+        tc: AtomicUsize,
+        pc: AtomicUsize,
+    }
     impl tool_api::GitCredentialProvider for MockProvider {
-        fn https_token(&self) -> Option<String> { self.tc.fetch_add(1, Ordering::SeqCst); self.token.clone() }
-        fn ssh_passphrase(&self) -> Option<String> { self.pc.fetch_add(1, Ordering::SeqCst); self.pass.clone() }
+        fn https_token(&self) -> Option<String> {
+            self.tc.fetch_add(1, Ordering::SeqCst);
+            self.token.clone()
+        }
+        fn ssh_passphrase(&self) -> Option<String> {
+            self.pc.fetch_add(1, Ordering::SeqCst);
+            self.pass.clone()
+        }
     }
     fn mock(token: Option<&str>, pass: Option<&str>) -> MockProvider {
-        MockProvider { token: token.map(Into::into), pass: pass.map(Into::into), tc: AtomicUsize::new(0), pc: AtomicUsize::new(0) }
+        MockProvider {
+            token: token.map(Into::into),
+            pass: pass.map(Into::into),
+            tc: AtomicUsize::new(0),
+            pc: AtomicUsize::new(0),
+        }
     }
 
     #[test]
     fn select_credential_userpass_calls_https_token() {
         let p = mock(Some("tok"), None);
-        let c = select_credential(git2::CredentialType::USER_PASS_PLAINTEXT, Some(&p), None, "git");
-        assert_eq!(c, CredentialChoice::UserPass { user: TOKEN_USERNAME.to_owned(), token: "tok".to_owned() });
-        assert_eq!(p.tc.load(Ordering::SeqCst), 1, "https_token fetched once, per-op");
+        let c = select_credential(
+            git2::CredentialType::USER_PASS_PLAINTEXT,
+            Some(&p),
+            None,
+            "git",
+        );
+        assert_eq!(
+            c,
+            CredentialChoice::UserPass {
+                user: TOKEN_USERNAME.to_owned(),
+                token: "tok".to_owned()
+            }
+        );
+        assert_eq!(
+            p.tc.load(Ordering::SeqCst),
+            1,
+            "https_token fetched once, per-op"
+        );
     }
     #[test]
     fn select_credential_sshkey_calls_passphrase() {
         let p = mock(None, Some("pp"));
-        let ssh = SshConfig { private_key_path: "/k".into(), public_key_path: Some("/k.pub".into()), known_hosts_sha256_hex: vec![] };
+        let ssh = SshConfig {
+            private_key_path: "/k".into(),
+            public_key_path: Some("/k.pub".into()),
+            known_hosts_sha256_hex: vec![],
+        };
         let c = select_credential(git2::CredentialType::SSH_KEY, Some(&p), Some(&ssh), "git");
-        assert_eq!(c, CredentialChoice::SshKey { user: "git".into(), key_path: "/k".into(), pubkey: Some("/k.pub".into()), passphrase: Some("pp".into()) });
-        assert_eq!(p.pc.load(Ordering::SeqCst), 1, "ssh_passphrase fetched once, per-op");
+        assert_eq!(
+            c,
+            CredentialChoice::SshKey {
+                user: "git".into(),
+                key_path: "/k".into(),
+                pubkey: Some("/k.pub".into()),
+                passphrase: Some("pp".into())
+            }
+        );
+        assert_eq!(
+            p.pc.load(Ordering::SeqCst),
+            1,
+            "ssh_passphrase fetched once, per-op"
+        );
     }
     #[test]
     fn select_credential_username_first() {
@@ -647,10 +729,21 @@ mod tests {
     #[test]
     fn select_credential_none_without_provider_or_token() {
         // USER_PASS requested but no provider → None.
-        assert_eq!(select_credential(git2::CredentialType::USER_PASS_PLAINTEXT, None, None, "git"), CredentialChoice::None);
+        assert_eq!(
+            select_credential(git2::CredentialType::USER_PASS_PLAINTEXT, None, None, "git"),
+            CredentialChoice::None
+        );
         // provider present but returns no token → None.
         let p = mock(None, None);
-        assert_eq!(select_credential(git2::CredentialType::USER_PASS_PLAINTEXT, Some(&p), None, "git"), CredentialChoice::None);
+        assert_eq!(
+            select_credential(
+                git2::CredentialType::USER_PASS_PLAINTEXT,
+                Some(&p),
+                None,
+                "git"
+            ),
+            CredentialChoice::None
+        );
     }
 
     /// `set_ca_location(Some(dir))` exercises the `GIT_OPT_SET_SSL_CERT_LOCATIONS`

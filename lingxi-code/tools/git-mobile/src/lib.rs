@@ -540,6 +540,7 @@ mod tests {
         let opts = PromptOptions {
             include_examples: false,
             model: None,
+            model_profile: None,
         };
 
         let with_token = GitTool::new(test_ctx_git_enabled());
@@ -696,7 +697,8 @@ mod tests {
             idx.add_path(std::path::Path::new("a.txt")).unwrap();
             idx.write().unwrap();
             let tree = repo.find_tree(idx.write_tree().unwrap()).unwrap();
-            repo.commit(Some("HEAD"), &sig, &sig, "c1", &tree, &[]).unwrap()
+            repo.commit(Some("HEAD"), &sig, &sig, "c1", &tree, &[])
+                .unwrap()
         };
         let branch = repo.head().unwrap().shorthand().unwrap().to_owned();
         repo.remote("origin", &format!("file://{}", bare.path().display()))

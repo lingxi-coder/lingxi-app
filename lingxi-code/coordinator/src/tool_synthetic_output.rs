@@ -218,7 +218,9 @@ impl Tool for SyntheticOutputTool {
 
             // Serialize the structured payload as the message content.
             let content = serde_json::to_string(&payload).map_err(|e| {
-                ToolError::Internal(format!("StructuredOutput: failed to serialize payload: {e}"))
+                ToolError::Internal(format!(
+                    "StructuredOutput: failed to serialize payload: {e}"
+                ))
             })?;
 
             let msg = TeammateMessage {
@@ -270,6 +272,7 @@ mod tests {
                 debug: false,
                 verbose: false,
                 main_loop_model: "test".into(),
+                model_profile: None,
                 max_budget_nano_usd: None,
                 mcp_clients: vec![],
                 is_non_interactive_session: false,
@@ -372,7 +375,11 @@ mod tests {
 
         // Effect: the worker's mailbox now holds exactly the injected output.
         let delivered = mailbox.drain();
-        assert_eq!(delivered.len(), 1, "exactly one synthetic message delivered");
+        assert_eq!(
+            delivered.len(),
+            1,
+            "exactly one synthetic message delivered"
+        );
         assert!(matches!(delivered[0].from, MessageSender::Teammate(id) if id == worker_id));
         assert_eq!(delivered[0].content, r#"{"summary":"done"}"#);
     }

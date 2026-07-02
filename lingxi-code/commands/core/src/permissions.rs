@@ -102,6 +102,9 @@ mod tests {
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = PermissionsHandler::new(mock);
         assert_eq!(h.name(), "permissions");
-        assert_eq!(h.description(), "Manage allow and deny tool permission rules");
+        assert_eq!(
+            h.description(),
+            "Manage allow and deny tool permission rules"
+        );
     }
 }

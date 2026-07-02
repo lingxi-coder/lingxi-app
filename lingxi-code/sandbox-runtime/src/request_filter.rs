@@ -71,9 +71,8 @@ pub struct FilterRequest {
 
 /// A `filter_request` callback: maps a [`FilterRequest`] to a future of a
 /// [`Decision`]. Shared (`Arc`) so the proxy service can call it per request.
-pub type FilterRequestFn = Arc<
-    dyn Fn(FilterRequest) -> Pin<Box<dyn Future<Output = Decision> + Send>> + Send + Sync,
->;
+pub type FilterRequestFn =
+    Arc<dyn Fn(FilterRequest) -> Pin<Box<dyn Future<Output = Decision> + Send>> + Send + Sync>;
 
 /// The outcome of [`decide_and_respond`]: either an allowed body to forward
 /// upstream, or a ready-to-send 403 deny response.
@@ -204,8 +203,7 @@ mod tests {
 
     fn allow_fn() -> FilterRequestFn {
         Arc::new(|_req: FilterRequest| {
-            Box::pin(async { Decision::Allow })
-                as Pin<Box<dyn Future<Output = Decision> + Send>>
+            Box::pin(async { Decision::Allow }) as Pin<Box<dyn Future<Output = Decision> + Send>>
         })
     }
 
@@ -316,9 +314,14 @@ mod tests {
             Box::pin(async { Decision::Deny { reason: None } })
                 as Pin<Box<dyn Future<Output = Decision> + Send>>
         });
-        let out =
-            decide_in_memory(&f, "http://x/", &Method::POST, &HeaderMap::new(), Bytes::new())
-                .await;
+        let out = decide_in_memory(
+            &f,
+            "http://x/",
+            &Method::POST,
+            &HeaderMap::new(),
+            Bytes::new(),
+        )
+        .await;
         match out {
             FilterOutcome::Deny(resp) => {
                 let body = body_bytes(resp.into_body()).await;

@@ -73,10 +73,7 @@ pub fn read_settings_map(path: &Path) -> Result<Map<String, Value>, String> {
 /// return. So in the migration ports `Err` from this function maps to
 /// warn-and-continue; only `global_config::save_map` failures (the
 /// `saveGlobalConfig` analog, which CAN throw in TS) map to a TS catch path.
-pub fn update_settings(
-    path: &Path,
-    updates: Vec<(String, Option<Value>)>,
-) -> Result<(), String> {
+pub fn update_settings(path: &Path, updates: Vec<(String, Option<Value>)>) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
@@ -125,7 +122,11 @@ mod tests {
     fn update_creates_file_and_merges_and_deletes() {
         let t = temp_config();
         let path = settings_path(SettingsSource::User, &t.home, &t.project);
-        update_settings(&path, vec![("model".into(), Some(serde_json::json!("opus")))]).unwrap();
+        update_settings(
+            &path,
+            vec![("model".into(), Some(serde_json::json!("opus")))],
+        )
+        .unwrap();
         update_settings(&path, vec![("other".into(), Some(serde_json::json!(1)))]).unwrap();
         let map = read_settings_map(&path).unwrap();
         assert_eq!(map["model"], serde_json::json!("opus"));

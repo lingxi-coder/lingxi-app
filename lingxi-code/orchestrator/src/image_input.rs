@@ -165,7 +165,10 @@ mod tests {
         assert_eq!(detect_media_type_from_bytes(b"not an image"), None);
         assert_eq!(detect_media_type_from_bytes(b"ab"), None);
         // "RIFF" without the "WEBP" fourcc is not WebP.
-        assert_eq!(detect_media_type_from_bytes(b"RIFF\x00\x00\x00\x00AVI "), None);
+        assert_eq!(
+            detect_media_type_from_bytes(b"RIFF\x00\x00\x00\x00AVI "),
+            None
+        );
     }
 
     fn write_temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {

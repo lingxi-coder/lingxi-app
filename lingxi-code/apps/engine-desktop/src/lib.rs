@@ -33,22 +33,21 @@ pub mod file_changed_watch;
 pub mod settings_watch;
 mod skill_loader;
 
-use llm_client::oauth::anthropic::client::ClaudeAiOAuthClient;
-use llm_client::oauth::anthropic::config::ClaudeAiOAuthConfig;
-use llm_client::oauth::anthropic::handle::OAuthHandle;
-use llm_client::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
-use llm_client::oauth::openai as openai_oauth;
-use tool_api::AnthropicRequestBuilder;
 use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
-use llm_client::{DefaultLlmClient, Transport};
-use orchestrator::model::user_agent::UserAgentEnv;
-use orchestrator::provider_adapter::SubscriberState;
-use llm_client::LlmTransportBridge;
 use command_api::{CommandRegistry, RegistrySlashDispatcher};
 use command_core::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_4, register_core_batch_5,
 };
+use llm_client::oauth::anthropic::client::ClaudeAiOAuthClient;
+use llm_client::oauth::anthropic::config::ClaudeAiOAuthConfig;
+use llm_client::oauth::anthropic::handle::OAuthHandle;
+use llm_client::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
+use llm_client::oauth::openai as openai_oauth;
+use llm_client::LlmTransportBridge;
+use llm_client::{DefaultLlmClient, Transport};
+use orchestrator::model::user_agent::UserAgentEnv;
+use orchestrator::provider_adapter::SubscriberState;
 use orchestrator::test_support::{NoOpPermissionGate, StaticMemoryProvider};
 use orchestrator::{
     ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, ProviderApiAdapter,
@@ -63,6 +62,7 @@ use secret::CredentialManager;
 use skill_api::SkillRegistry;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tool_api::AnthropicRequestBuilder;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 use traits::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
 
@@ -476,8 +476,7 @@ fn managed_only_sandbox_overrides(
         .as_ref()
         .and_then(|s| s.filesystem.as_ref())
         .is_some_and(|f| f.allow_managed_read_paths_only);
-    let domains =
-        domains_only.then(|| sandbox::policy_convert::managed_domain_allowlist(&managed));
+    let domains = domains_only.then(|| sandbox::policy_convert::managed_domain_allowlist(&managed));
     let reads = reads_only
         .then(|| sandbox::policy_convert::managed_read_path_allowlist(&managed, settings_dir));
     (domains, reads)
@@ -794,7 +793,11 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
         // an INLINE `script` may not use Date.now()/Math.random()/new Date()
         // (breaks resume). Author-controlled `scriptPath`/`name` files are exempt.
         let is_inline = spec.script.as_deref().is_some_and(|s| !s.is_empty())
-            && spec.script_path.as_deref().filter(|s| !s.is_empty()).is_none();
+            && spec
+                .script_path
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .is_none();
         if is_inline {
             if let Err(workflow::WorkflowError::Script(m)) = workflow::check_determinism(&script) {
                 return Err(tool_workflow::WorkflowLaunchError(m));
@@ -1432,8 +1435,7 @@ pub async fn desktop_command_registry(
     // (`isKairosCronEnabled` ↔ `cron_scheduler_enabled(LINGXI_DISABLE_CRON)`,
     // loop.ts:83). Registered AFTER builtins; `/loop` is not a builtin name so no
     // shadow conflict.
-    let cron_enabled =
-        cron_scheduler_enabled(std::env::var("LINGXI_DISABLE_CRON").ok().as_deref());
+    let cron_enabled = cron_scheduler_enabled(std::env::var("LINGXI_DISABLE_CRON").ok().as_deref());
     command_core::register_bundled_skills(&mut reg, cron_enabled);
     register_core_batch_1(&mut reg, handle.clone());
     register_core_batch_2(&mut reg, handle.clone(), auth);
@@ -1441,7 +1443,12 @@ pub async fn desktop_command_registry(
     register_core_batch_5(&mut reg, handle);
     // Plan 3c: wire `/connect` over the engine-supplied credential-writer +
     // Copilot device-flow + ChatGPT OAuth seams.
-    command_core::register::register_core_connect(&mut reg, connect_writer, connect_copilot, connect_chatgpt);
+    command_core::register::register_core_connect(
+        &mut reg,
+        connect_writer,
+        connect_copilot,
+        connect_chatgpt,
+    );
     // Desktop-only command handlers: currently none — the desktop command names
     // (/commit, /diff, /review, /chrome, /ide, …) are served as command-core
     // unimplemented stubs. Register real desktop handlers on `reg` directly here
@@ -1741,7 +1748,9 @@ fn oauth_subscriber_flag(
     auth_token_present: bool,
     scopes: &[String],
 ) -> bool {
-    !api_key_present && !auth_token_present && llm_client::oauth::anthropic::subscription_from_scopes(scopes)
+    !api_key_present
+        && !auth_token_present
+        && llm_client::oauth::anthropic::subscription_from_scopes(scopes)
 }
 
 /// Fold the profile + roles responses into the shared snapshot. Pure —
@@ -1857,7 +1866,10 @@ fn anthropic_models_for(
     // `ANTHROPIC_SMALL_FAST_MODEL` > `ANTHROPIC_DEFAULT_HAIKU_MODEL` > default
     // Haiku), so such a request resolves instead of failing `ModelUnavailable`.
     // The default Haiku id (`claude-haiku-4-5`) is already in the list above.
-    for var in ["ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"] {
+    for var in [
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    ] {
         if let Ok(m) = std::env::var(var) {
             if !m.is_empty() {
                 ids.push(m);
@@ -1968,9 +1980,7 @@ struct RegistrySkillListing(Arc<RwLock<CommandRegistry>>);
 
 #[async_trait::async_trait]
 impl orchestrator::prompt::skill_listing::SkillListingProvider for RegistrySkillListing {
-    async fn skill_entries(
-        &self,
-    ) -> Vec<orchestrator::prompt::skill_listing::SkillListingEntry> {
+    async fn skill_entries(&self) -> Vec<orchestrator::prompt::skill_listing::SkillListingEntry> {
         use command_api::{CommandSource, SlashCommandKind};
         let reg = self.0.read().await;
         reg.model_invocable_commands() // !disable_model_invocation (registry.rs)
@@ -2165,8 +2175,7 @@ pub async fn build(
     //      `DefaultLlmClient`. A second `PosixHttp` instance is used so the
     //      bridge owns its own (stateless) handle; the original `http` Arc
     //      continues to serve MCP / hooks / side-query.
-    let llm_transport: Arc<dyn Transport> =
-        Arc::new(LlmTransportBridge::new(PosixHttp::new()));
+    let llm_transport: Arc<dyn Transport> = Arc::new(LlmTransportBridge::new(PosixHttp::new()));
     // Defer client construction to step 3.1 where we know whether OAuth is
     // active (determines auth strategy + credential config). Placeholder: the
     // resolved OAuth `AuthState` (`Some` only for an OAuth-effective subscriber
@@ -2234,8 +2243,7 @@ pub async fn build(
                     ..Default::default()
                 });
             }
-            let profile_token =
-                protocol::Secret::new(tokens.access_token.expose_secret().clone());
+            let profile_token = protocol::Secret::new(tokens.access_token.expose_secret().clone());
             match llm_client::oauth::anthropic::client::init_refresh_driver(
                 oauth_cfg,
                 tokens.access_token,
@@ -2276,19 +2284,21 @@ pub async fn build(
                         // calls and never logged or formatted.
                         {
                             let slot = subscription.clone();
-                            let transport: std::sync::Arc<dyn traits::HttpTransport> =
-                                http.clone();
+                            let transport: std::sync::Arc<dyn traits::HttpTransport> = http.clone();
                             // Move (not copy) the token into the task — its
                             // only consumer.
                             let token = profile_token;
                             tokio::spawn(async move {
                                 let token = token.expose_secret();
-                                let profile = llm_client::oauth::anthropic::fetch_profile_from_oauth_token(
+                                let profile =
+                                    llm_client::oauth::anthropic::fetch_profile_from_oauth_token(
+                                        token, &transport,
+                                    )
+                                    .await;
+                                let roles = llm_client::oauth::anthropic::fetch_user_roles(
                                     token, &transport,
                                 )
                                 .await;
-                                let roles =
-                                    llm_client::oauth::anthropic::fetch_user_roles(token, &transport).await;
                                 let snap = subscription_snapshot_from(
                                     true,
                                     profile.as_ref(),
@@ -2330,14 +2340,17 @@ pub async fn build(
     let mut openai_chatgpt_delegate: Option<Arc<dyn llm_client::CredentialProvider>> = None;
     if let Ok(pat) = std::env::var("OPENAI_PERSONAL_ACCESS_TOKEN") {
         if !pat.trim().is_empty() {
-            let http_dyn: Arc<dyn traits::HttpTransport> = http.clone() as Arc<dyn traits::HttpTransport>;
+            let http_dyn: Arc<dyn traits::HttpTransport> =
+                http.clone() as Arc<dyn traits::HttpTransport>;
             match openai_oauth::whoami(&openai_oauth_cfg, &http_dyn, &pat).await {
                 Ok(md) => {
-                    openai_chatgpt_delegate = Some(Arc::new(
-                        openai_oauth::PatCredentialProvider::new(pat, md),
-                    ) as Arc<dyn llm_client::CredentialProvider>);
+                    openai_chatgpt_delegate =
+                        Some(Arc::new(openai_oauth::PatCredentialProvider::new(pat, md))
+                            as Arc<dyn llm_client::CredentialProvider>);
                 }
-                Err(e) => tracing::warn!(error = %e, "OPENAI_PERSONAL_ACCESS_TOKEN whoami failed; ignoring PAT"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "OPENAI_PERSONAL_ACCESS_TOKEN whoami failed; ignoring PAT")
+                }
             }
         }
     }
@@ -2410,7 +2423,8 @@ pub async fn build(
     let oauth_delegate: Option<Arc<dyn llm_client::CredentialProvider>> =
         oauth_auth_state.clone().map(|state| {
             let driver = Arc::new(RefreshDriver::new(state));
-            Arc::new(OAuthCredentialProvider::new(driver)) as Arc<dyn llm_client::CredentialProvider>
+            Arc::new(OAuthCredentialProvider::new(driver))
+                as Arc<dyn llm_client::CredentialProvider>
         });
 
     let assembled = provider_config::assemble(provider_config::AssembleInputs {
@@ -2469,7 +2483,10 @@ pub async fn build(
         .map_err(|e| BuildError::ApiBase(format!("llm-client config: {e}")))?;
     // §6.1: ONE composite credential slot for ALL providers (anthropic api-key /
     // oauth-delegate + every per-profile credential source).
-    let mut oauth_delegates: std::collections::BTreeMap<String, std::sync::Arc<dyn llm_client::CredentialProvider>> = std::collections::BTreeMap::new();
+    let mut oauth_delegates: std::collections::BTreeMap<
+        String,
+        std::sync::Arc<dyn llm_client::CredentialProvider>,
+    > = std::collections::BTreeMap::new();
     if let Some(d) = oauth_delegate {
         oauth_delegates.insert("anthropic-oauth".to_string(), d);
     }
@@ -2479,7 +2496,8 @@ pub async fn build(
             let driver = std::sync::Arc::new(openai_oauth::RefreshDriver::new(state));
             openai_chatgpt_delegate = Some(std::sync::Arc::new(
                 openai_oauth::OpenAiOAuthCredentialProvider::new(driver),
-            ) as Arc<dyn llm_client::CredentialProvider>);
+            )
+                as Arc<dyn llm_client::CredentialProvider>);
         }
     }
     let has_openai_chatgpt = openai_chatgpt_delegate.is_some();
@@ -2489,7 +2507,11 @@ pub async fn build(
     let composite = provider_config::MultiCredentialProvider::new(
         credentials.clone(),
         assembled.credential_sources.clone(),
-        if has_api_key { Some(cfg.api_key.clone()) } else { None },
+        if has_api_key {
+            Some(cfg.api_key.clone())
+        } else {
+            None
+        },
         oauth_delegates,
     );
     // GitHub Copilot needs a short-lived token minted from the raw OAuth token
@@ -2515,7 +2537,10 @@ pub async fn build(
         let llm_cat = llm_catalog_from_cost(&assembled.pricing);
         Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated))
     };
-    let subscriber_state = SubscriberState { is_subscriber, is_enterprise: false };
+    let subscriber_state = SubscriberState {
+        is_subscriber,
+        is_enterprise: false,
+    };
 
     // Phase 2a CHAINS BRIDGE: translate the assembled `ChainConfig` into main's
     // richer adapter's `fallback_overrides` shape. `assemble` keys each chain by
@@ -2529,7 +2554,12 @@ pub async fn build(
         .chains
         .chains
         .iter()
-        .map(|(key, entries)| (key.clone(), entries.iter().map(|e| e.model.clone()).collect()))
+        .map(|(key, entries)| {
+            (
+                key.clone(),
+                entries.iter().map(|e| e.model.clone()).collect(),
+            )
+        })
         .collect();
     // Retry override → main's scalar settings_max_retries / settings_backoff_ms.
     let settings_max_retries = assembled.chains.retry.as_ref().map(|r| r.max_attempts);
@@ -2661,8 +2691,7 @@ pub async fn build(
     }
     // CLI `--exclude-dynamic-system-prompt-sections`: move the per-machine env
     // block out of the (cacheable) system prompt into the first user message.
-    orch_cfg.exclude_dynamic_system_prompt_sections =
-        cfg.exclude_dynamic_system_prompt_sections;
+    orch_cfg.exclude_dynamic_system_prompt_sections = cfg.exclude_dynamic_system_prompt_sections;
     // CLI `--append-system-prompt` / `--append-system-prompt-file`: text to
     // append after the assembled system prompt (or after `system_prompt_override`
     // when both are set). Appended with a newline separator.
@@ -2680,9 +2709,7 @@ pub async fn build(
     //       fire-and-forget task that discards snapshots (on-disk persistence is
     //       later work). Depth 64 absorbs bursts without blocking.
     let (cost_persist_tx, mut cost_persist_rx) = tokio::sync::mpsc::channel(64);
-    tokio::spawn(async move {
-        while cost_persist_rx.recv().await.is_some() {}
-    });
+    tokio::spawn(async move { while cost_persist_rx.recv().await.is_some() {} });
     // Phase 2a T7: the CostTracker uses the SAME assembled pricing catalog the
     // estimator was built from (built-in reference tiers + non-Anthropic preset
     // rows + settings overrides), not a fresh `builtin_reference()`, so session
@@ -2793,8 +2820,7 @@ pub async fn build(
     let subagent_spawner_arc = Arc::new(subagent_spawner_concrete);
     let subagent_spawner: Arc<dyn traits::subagent_spawn::SubagentSpawner> =
         subagent_spawner_arc.clone();
-    let subagent_streaming_spawner: Arc<dyn agent::StreamingSubagentSpawner> =
-        subagent_spawner_arc;
+    let subagent_streaming_spawner: Arc<dyn agent::StreamingSubagentSpawner> = subagent_spawner_arc;
 
     //       The budget enforcer is an unlimited / non-blocking config (every
     //       limit `None`, no warning thresholds, `WarnOnly` policy) so it never
@@ -3007,155 +3033,152 @@ pub async fn build(
     // Empty (no enforcement / no Read-deny rule) ⇒ VCS-only behavior unchanged.
     let mut read_deny_exclude_globs: Vec<String> = Vec::new();
     let perms: Arc<dyn PermissionGate> = if enforce_permissions {
-            let mut rules = Vec::new();
-            let mut mode = permission::PermissionMode::Default;
-            // Retain each tier's raw text (in ascending priority) so the
-            // sandbox-auto-allow config can be derived from the SAME settings.
-            let mut raw_tiers: Vec<String> = Vec::new();
-            // Bypass-permissions killswitch: if ANY tier sets
-            // `disableBypassPermissionsMode: "disable"`, the policy refuses
-            // `BypassPermissions` mode (`authorize` falls back to Ask). Sticky
-            // across tiers — a disable is not overridable upward (claude-code).
-            let mut bypass_disabled = false;
-            // (#34) Extra working dirs from `permissions.additionalDirectories`,
-            // unioned across tiers (claude-code `TGd` folds each tier's
-            // `additionalDirectories` into `additionalWorkingDirectories`, which
-            // `b$` unions with cwd for the `kF` acceptEdits auto-allow set). The
-            // sole populator of `PermissionPolicy::additional_working_dirs`; without
-            // it an acceptEdits write under an `additionalDirectories` entry ASKS
-            // instead of auto-allowing. Entries stay RAW (relative / `~` / absolute);
-            // `authorize` resolves them against `roots` via `expand_path` (same as
-            // claude-code's `LXr` path resolution).
-            let mut additional_working_dirs: Vec<std::path::PathBuf> = Vec::new();
-            // Read the three persistable rule tiers in ASCENDING priority so
-            // the highest-priority `defaultMode` wins (last write). settings.local.json
-            // (3c) is read LAST so an `AllowAlways` persisted there is loaded back
-            // and honored on the next enforced boot (closing the persist↔enforce
-            // round-trip); rules from every tier accumulate (bucketed by source,
-            // `authorize` walks them by priority).
-            // `--setting-sources` scope (default `(true, true)` = all tiers):
-            // gate the user tier on `include_user` and the project + local tiers
-            // on `include_project` (local folds into project, mirroring the
-            // `Settings::load_scoped` semantics the CLI already applies to the
-            // provider/routing loaders), so e.g. `--setting-sources project` does
-            // NOT load user-level permission rules / defaultMode.
-            let (incl_user_settings, incl_project_settings) = cfg.setting_source_scope;
-            for (path, source, included) in [
-                (
-                    cfg.lingxi_home.join("settings.json"),
-                    permission::PermissionRuleSource::UserSettings,
-                    incl_user_settings,
-                ),
-                (
-                    cwd.join(branding::DOT_DIR).join("settings.json"),
-                    permission::PermissionRuleSource::ProjectSettings,
-                    incl_project_settings,
-                ),
-                (
-                    cwd.join(branding::DOT_DIR).join("settings.local.json"),
-                    permission::PermissionRuleSource::LocalSettings,
-                    incl_project_settings,
-                ),
-            ] {
-                if !included {
-                    continue;
-                }
-                if let Ok(raw) = tokio::fs::read_to_string(&path).await {
-                    match permission::permission_rules_from_settings_json(&raw, source) {
-                        Ok(mut r) => rules.append(&mut r),
-                        Err(e) => tracing::warn!(
-                            error = %e,
-                            path = %path.display(),
-                            "skipping malformed settings permissions"
-                        ),
-                    }
-                    if let Some(m) = permission::default_mode_from_settings_json(&raw) {
-                        mode = m; // local settings read last → its defaultMode wins
-                    }
-                    if permission::bypass_permissions_disabled_from_settings_json(&raw) {
-                        bypass_disabled = true; // sticky: any tier disabling wins
-                    }
-                    // (#34) Union this tier's additionalDirectories into the
-                    // working-dir set (claude-code merges across SETTING_SOURCES).
-                    additional_working_dirs
-                        .extend(permission::additional_directories_from_settings_json(&raw));
-                    raw_tiers.push(raw); // ascending priority preserved for sandbox derivation
-                }
+        let mut rules = Vec::new();
+        let mut mode = permission::PermissionMode::Default;
+        // Retain each tier's raw text (in ascending priority) so the
+        // sandbox-auto-allow config can be derived from the SAME settings.
+        let mut raw_tiers: Vec<String> = Vec::new();
+        // Bypass-permissions killswitch: if ANY tier sets
+        // `disableBypassPermissionsMode: "disable"`, the policy refuses
+        // `BypassPermissions` mode (`authorize` falls back to Ask). Sticky
+        // across tiers — a disable is not overridable upward (claude-code).
+        let mut bypass_disabled = false;
+        // (#34) Extra working dirs from `permissions.additionalDirectories`,
+        // unioned across tiers (claude-code `TGd` folds each tier's
+        // `additionalDirectories` into `additionalWorkingDirectories`, which
+        // `b$` unions with cwd for the `kF` acceptEdits auto-allow set). The
+        // sole populator of `PermissionPolicy::additional_working_dirs`; without
+        // it an acceptEdits write under an `additionalDirectories` entry ASKS
+        // instead of auto-allowing. Entries stay RAW (relative / `~` / absolute);
+        // `authorize` resolves them against `roots` via `expand_path` (same as
+        // claude-code's `LXr` path resolution).
+        let mut additional_working_dirs: Vec<std::path::PathBuf> = Vec::new();
+        // Read the three persistable rule tiers in ASCENDING priority so
+        // the highest-priority `defaultMode` wins (last write). settings.local.json
+        // (3c) is read LAST so an `AllowAlways` persisted there is loaded back
+        // and honored on the next enforced boot (closing the persist↔enforce
+        // round-trip); rules from every tier accumulate (bucketed by source,
+        // `authorize` walks them by priority).
+        // `--setting-sources` scope (default `(true, true)` = all tiers):
+        // gate the user tier on `include_user` and the project + local tiers
+        // on `include_project` (local folds into project, mirroring the
+        // `Settings::load_scoped` semantics the CLI already applies to the
+        // provider/routing loaders), so e.g. `--setting-sources project` does
+        // NOT load user-level permission rules / defaultMode.
+        let (incl_user_settings, incl_project_settings) = cfg.setting_source_scope;
+        for (path, source, included) in [
+            (
+                cfg.lingxi_home.join("settings.json"),
+                permission::PermissionRuleSource::UserSettings,
+                incl_user_settings,
+            ),
+            (
+                cwd.join(branding::DOT_DIR).join("settings.json"),
+                permission::PermissionRuleSource::ProjectSettings,
+                incl_project_settings,
+            ),
+            (
+                cwd.join(branding::DOT_DIR).join("settings.local.json"),
+                permission::PermissionRuleSource::LocalSettings,
+                incl_project_settings,
+            ),
+        ] {
+            if !included {
+                continue;
             }
-            // CLI `--add-dir <directories...>`: union the host-provided dirs into
-            // the working-dir set, exactly like a settings-tier
-            // `additionalDirectories` entry (claude-code "Additional directories
-            // to allow tool access to").
-            additional_working_dirs.extend(cfg.add_dir.iter().cloned());
-            let rule_count = rules.len();
-            // Phase 3a: supply the filesystem roots so file-path CONTENT rules
-            // (`Edit(src/**)`, `Read(./secrets/**)`) match the input path. Roots
-            // resolve per rule source — user settings against `lingxi_home`,
-            // project/local against `cwd` — exactly as claude-code's
-            // `rootPathForSource` does.
-            let roots = permission::FsRoots {
-                cwd: cwd.clone(),
-                home: dirs::home_dir(),
-                lingxi_home: cfg.lingxi_home.clone(),
-            };
-            // Phase 3a-bash: attach the sandbox-auto-allow config derived from
-            // the SAME settings tiers, so a sandboxable bash command that
-            // matched no explicit deny/ask rule is auto-allowed (the sandbox is
-            // the safety boundary). Faithful to claude-code's
-            // `bashToolHasPermission` sandbox branch; a no-op when sandboxing is
-            // disabled in settings (`enabled = false`). OUTSIDE enforce mode this
-            // whole block is skipped, so the layer stays a permanent no-op there.
-            //
-            // Managed (policySettings) tier — HIGHEST priority, appended LAST so
-            // the sandbox-auto-allow fold (last write wins) lets a managed
-            // `sandbox.*` override user/project/local (SETTING_SOURCES:
-            // …→localSettings→flagSettings→policySettings). This is for the
-            // SANDBOX-AUTO-ALLOW derivation ONLY: it is built on a clone, so the
-            // managed raw text is NOT injected into `raw_tiers` (which feeds no
-            // rule parsing here — rules use `rules`/`mode`/`bypass_disabled`
-            // accumulated above). Managed permission RULES are a separate concern
-            // (spec §6) and are deliberately NOT loaded here.
-            let sandbox_raw_tiers: Vec<String> = {
-                let mut v = raw_tiers.clone();
-                v.extend(crate::settings_watch::managed_settings_raw_tiers().await);
-                v
-            };
-            let raw_tier_refs: Vec<&str> =
-                sandbox_raw_tiers.iter().map(String::as_str).collect();
-            let sandbox_auto_allow =
-                sandbox_auto_allow_from_settings_tiers(&raw_tier_refs, &cwd);
-            // CLI-resolved mode is the highest-priority source (TS orderedModes:
-            // the CLI flag / --permission-mode outranks the settings defaultMode).
-            // Apply it only when the CLI actually requested a non-default mode, so
-            // an unset CLI keeps the settings defaultMode computed above.
-            if cfg.permission_mode != permission::PermissionMode::Default {
-                mode = cfg.permission_mode;
+            if let Ok(raw) = tokio::fs::read_to_string(&path).await {
+                match permission::permission_rules_from_settings_json(&raw, source) {
+                    Ok(mut r) => rules.append(&mut r),
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        path = %path.display(),
+                        "skipping malformed settings permissions"
+                    ),
+                }
+                if let Some(m) = permission::default_mode_from_settings_json(&raw) {
+                    mode = m; // local settings read last → its defaultMode wins
+                }
+                if permission::bypass_permissions_disabled_from_settings_json(&raw) {
+                    bypass_disabled = true; // sticky: any tier disabling wins
+                }
+                // (#34) Union this tier's additionalDirectories into the
+                // working-dir set (claude-code merges across SETTING_SOURCES).
+                additional_working_dirs
+                    .extend(permission::additional_directories_from_settings_json(&raw));
+                raw_tiers.push(raw); // ascending priority preserved for sandbox derivation
             }
-            let mut policy = permission::PermissionPolicy::from_rules(mode, rules)
-                .with_roots(roots)
-                .with_working_dirs(additional_working_dirs)
-                .with_sandbox_runtime(sandbox_auto_allow);
-            policy.bypass_killswitch_active = bypass_disabled;
-            // Resolve the active Read(deny) rules to search-exclude globs while
-            // the policy is still in scope (before it moves into the gate).
-            read_deny_exclude_globs =
-                permission::read_deny_exclude_globs(&policy, &cwd);
-            // FIX 1 (subagent pool): hand the policy's TOOL-WIDE deny names to the
-            // subagent spawner so a blanket-denied tool is stripped from each
-            // child's advertised pool too (claude-code `assembleToolPool` →
-            // `filterToolsByDenyRules`). Set-once; only meaningful when there are
-            // tool-wide deny rules (empty otherwise ⇒ no child-pool filtering).
-            let _ = subagent_tool_wide_deny_cell.set(policy.tool_wide_deny_names());
-            let policy = Arc::new(policy);
-            tracing::info!(
-                rules = rule_count,
-                mode = ?mode,
-                "permission enforcement enabled (default on; disable with LINGXI_ENFORCE_PERMISSIONS=0)"
-            );
-            Arc::new(permission::PolicyPermissionGate::new(policy, perms))
-        } else {
-            perms
+        }
+        // CLI `--add-dir <directories...>`: union the host-provided dirs into
+        // the working-dir set, exactly like a settings-tier
+        // `additionalDirectories` entry (claude-code "Additional directories
+        // to allow tool access to").
+        additional_working_dirs.extend(cfg.add_dir.iter().cloned());
+        let rule_count = rules.len();
+        // Phase 3a: supply the filesystem roots so file-path CONTENT rules
+        // (`Edit(src/**)`, `Read(./secrets/**)`) match the input path. Roots
+        // resolve per rule source — user settings against `lingxi_home`,
+        // project/local against `cwd` — exactly as claude-code's
+        // `rootPathForSource` does.
+        let roots = permission::FsRoots {
+            cwd: cwd.clone(),
+            home: dirs::home_dir(),
+            lingxi_home: cfg.lingxi_home.clone(),
         };
+        // Phase 3a-bash: attach the sandbox-auto-allow config derived from
+        // the SAME settings tiers, so a sandboxable bash command that
+        // matched no explicit deny/ask rule is auto-allowed (the sandbox is
+        // the safety boundary). Faithful to claude-code's
+        // `bashToolHasPermission` sandbox branch; a no-op when sandboxing is
+        // disabled in settings (`enabled = false`). OUTSIDE enforce mode this
+        // whole block is skipped, so the layer stays a permanent no-op there.
+        //
+        // Managed (policySettings) tier — HIGHEST priority, appended LAST so
+        // the sandbox-auto-allow fold (last write wins) lets a managed
+        // `sandbox.*` override user/project/local (SETTING_SOURCES:
+        // …→localSettings→flagSettings→policySettings). This is for the
+        // SANDBOX-AUTO-ALLOW derivation ONLY: it is built on a clone, so the
+        // managed raw text is NOT injected into `raw_tiers` (which feeds no
+        // rule parsing here — rules use `rules`/`mode`/`bypass_disabled`
+        // accumulated above). Managed permission RULES are a separate concern
+        // (spec §6) and are deliberately NOT loaded here.
+        let sandbox_raw_tiers: Vec<String> = {
+            let mut v = raw_tiers.clone();
+            v.extend(crate::settings_watch::managed_settings_raw_tiers().await);
+            v
+        };
+        let raw_tier_refs: Vec<&str> = sandbox_raw_tiers.iter().map(String::as_str).collect();
+        let sandbox_auto_allow = sandbox_auto_allow_from_settings_tiers(&raw_tier_refs, &cwd);
+        // CLI-resolved mode is the highest-priority source (TS orderedModes:
+        // the CLI flag / --permission-mode outranks the settings defaultMode).
+        // Apply it only when the CLI actually requested a non-default mode, so
+        // an unset CLI keeps the settings defaultMode computed above.
+        if cfg.permission_mode != permission::PermissionMode::Default {
+            mode = cfg.permission_mode;
+        }
+        let mut policy = permission::PermissionPolicy::from_rules(mode, rules)
+            .with_roots(roots)
+            .with_working_dirs(additional_working_dirs)
+            .with_sandbox_runtime(sandbox_auto_allow);
+        policy.bypass_killswitch_active = bypass_disabled;
+        // Resolve the active Read(deny) rules to search-exclude globs while
+        // the policy is still in scope (before it moves into the gate).
+        read_deny_exclude_globs = permission::read_deny_exclude_globs(&policy, &cwd);
+        // FIX 1 (subagent pool): hand the policy's TOOL-WIDE deny names to the
+        // subagent spawner so a blanket-denied tool is stripped from each
+        // child's advertised pool too (claude-code `assembleToolPool` →
+        // `filterToolsByDenyRules`). Set-once; only meaningful when there are
+        // tool-wide deny rules (empty otherwise ⇒ no child-pool filtering).
+        let _ = subagent_tool_wide_deny_cell.set(policy.tool_wide_deny_names());
+        let policy = Arc::new(policy);
+        tracing::info!(
+            rules = rule_count,
+            mode = ?mode,
+            "permission enforcement enabled (default on; disable with LINGXI_ENFORCE_PERMISSIONS=0)"
+        );
+        Arc::new(permission::PolicyPermissionGate::new(policy, perms))
+    } else {
+        perms
+    };
 
     // (5.25) M5-13: build the real hook executor now that `hook_registry`
     //        exists. This replaces the `noop_hook_executor()` stub (which fed
@@ -3279,13 +3302,12 @@ pub async fn build(
     //         or DENY it; with no hook it falls through to `{"action":"cancel"}`.
     //         `with_hook_dispatcher(Some(..))` is the only behavioral delta from
     //         the previous `with_raw_conn` wiring.
-    let elicitation_dispatcher: Arc<dyn mcp::HookDispatcher> = Arc::new(
-        orchestrator::OrchestratorHookDispatcher::new(
+    let elicitation_dispatcher: Arc<dyn mcp::HookDispatcher> =
+        Arc::new(orchestrator::OrchestratorHookDispatcher::new(
             hooks.clone(),
             cwd.clone(),
             main_transcript_path.clone(),
-        ),
-    );
+        ));
     // OAuth 2.1 + PKCE seam for OAuth-configured remote (SSE/HTTP) MCP servers.
     // Reuses the platform `http` / `clock` / `storage` already built in step (1);
     // `on_authorization_url` surfaces the consent URL to the user (logs it
@@ -3490,9 +3512,7 @@ pub async fn build(
             .into_iter()
             .map(|s| s.name)
             .collect();
-        if let Some(user_ctx) =
-            coordinator::coordinator_user_context(&mcp_names, None, simple)
-        {
+        if let Some(user_ctx) = coordinator::coordinator_user_context(&mcp_names, None, simple) {
             // Wrap as a system-reminder, mirroring how claude-code injects
             // per-turn meta context (`wrapInSystemReminder`).
             prompt.push_str("\n\n<system-reminder>\n");
@@ -4037,8 +4057,9 @@ pub async fn build(
     // runner BEFORE `tool_ctx` is moved into `register_desktop_tools` below. The
     // runner builds a `tool_shell::BashTool` over this exact context, so a typed
     // `!command` runs through the SAME sandbox path as a model-issued Bash call.
-    let bash_runner: Arc<dyn tui::bash_runner::BashRunner> =
-        Arc::new(DesktopBashRunner { ctx: tool_ctx.clone() });
+    let bash_runner: Arc<dyn tui::bash_runner::BashRunner> = Arc::new(DesktopBashRunner {
+        ctx: tool_ctx.clone(),
+    });
     let mut tools_inner = ToolRegistry::new();
     // `RemoteTrigger`'s in-process OAuth resolver, backed by the credential
     // store built at (3). Reads tokens at call-time so the refresh driver wired
@@ -4072,12 +4093,11 @@ pub async fn build(
     // so a child agent runner can preload its frontmatter `skills:` (claude
     // runAgent.ts:577-646). First fill wins; the registry is filled at (6) before
     // any spawn fires, so the loader never reads the empty registry.
-    let skill_loader_arc: Arc<dyn traits::skill_loader::SkillLoader> = Arc::new(
-        agent_skill_loader::AgentSkillLoader::new(
+    let skill_loader_arc: Arc<dyn traits::skill_loader::SkillLoader> =
+        Arc::new(agent_skill_loader::AgentSkillLoader::new(
             shared_command_registry.clone(),
             Some(skill_session_id),
-        ),
-    );
+        ));
     let _ = subagent_skill_loader_cell.set(skill_loader_arc.clone());
     // Same skills-preload loader for the in-process teammate (full parity).
     let _ = teammate_skill_loader_cell.set(skill_loader_arc);
@@ -4093,20 +4113,18 @@ pub async fn build(
     // and the orchestrator (below, via `with_current_cwd`) reads it for hook
     // payloads — so a PreToolUse/PostToolUse/lifecycle hook sees the post-`cd`
     // directory, 1:1 with claude-code's single global `getCwd()`/`setCwdState`.
-    let current_cwd_cell =
-        std::sync::Arc::new(std::sync::Mutex::new(cwd.clone()));
+    let current_cwd_cell = std::sync::Arc::new(std::sync::Mutex::new(cwd.clone()));
     // Clone for the Stop/SubagentStop hook snapshot provider (it locates the
     // project-root cron file via the live cwd); the original cell is moved into
     // `.with_current_cwd(...)` below.
     let current_cwd_cell_for_snapshot = current_cwd_cell.clone();
-    let cwd_changed_firer: hooks::OptionalCwdChangedFirer = Some(Arc::new(
-        orchestrator::OrchestratorCwdChangedFirer::new(
+    let cwd_changed_firer: hooks::OptionalCwdChangedFirer =
+        Some(Arc::new(orchestrator::OrchestratorCwdChangedFirer::new(
             hooks.clone(),
             cwd.clone(),
             main_transcript_path.clone(),
             current_cwd_cell.clone(),
-        ),
-    ));
+        )));
     // The wakeup cell for the registered `ScheduleWakeup` tool — surfaced on
     // `DesktopRuntime` so the bridge composition root fills it once the
     // per-connection queue + spawner exist (`boot::assemble`).
@@ -4176,7 +4194,8 @@ pub async fn build(
     //        real `RegistryToolInvoker` now that `tools` exists — same recursion-
     //        lock invariant and boot gate as the teammate invoker above.
     dream_invoker.set(Arc::new(
-        tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone()).with_gate(perms.clone()),
+        tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
+            .with_gate(perms.clone()),
     ));
 
     // (5.5a-local-agent) T15: bind the `LocalAgent` handler's `DeferredToolInvoker`
@@ -4185,7 +4204,8 @@ pub async fn build(
     //        invokers above. A `LocalAgent` task's child runner dispatches its
     //        tools through the parent registry.
     local_agent_invoker.set(Arc::new(
-        tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone()).with_gate(perms.clone()),
+        tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
+            .with_gate(perms.clone()),
     ));
 
     // (5.5a-local-workflow) Bind the `LocalWorkflow` handler's `DeferredToolInvoker`
@@ -4193,7 +4213,8 @@ pub async fn build(
     //        workflow's `agent()` subagents dispatch their tools through the
     //        parent registry under the same recursion-lock + boot gate.
     local_workflow_invoker.set(Arc::new(
-        tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone()).with_gate(perms.clone()),
+        tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
+            .with_gate(perms.clone()),
     ));
 
     // Break the subagent construction cycle now that `tools` + `agent_catalog`
@@ -4302,7 +4323,15 @@ pub async fn build(
         Arc::new(PosixFileSystem::new(watch_cwd.clone())) as Arc<dyn traits::FileSystem>,
     ));
     let orch_builder = ConversationOrchestrator::new_with_streaming(
-        orch_cfg, api_client, streaming_api, tools, hooks, perms, output, memory, cwd,
+        orch_cfg,
+        api_client,
+        streaming_api,
+        tools,
+        hooks,
+        perms,
+        output,
+        memory,
+        cwd,
     )
     // Gap #5: wire the production JSONL writer (constructed just above) so the
     // session is persisted + discoverable by the resume loader.
@@ -4337,7 +4366,9 @@ pub async fn build(
     // SKILLLIST.1: enumerate model-invocable skills each turn so the model
     // can discover them. Reads `shared_command_registry` lazily at turn time
     // (populated below at (6), before any turn fires).
-    .with_skill_listing(Arc::new(RegistrySkillListing(shared_command_registry.clone())))
+    .with_skill_listing(Arc::new(RegistrySkillListing(
+        shared_command_registry.clone(),
+    )))
     // B5: fold completed background (`async`) hook responses back into the
     // next turn. Backed by the completion-channel drain buffer above.
     .with_async_hook_responses(Arc::new(async_hook_response_buffer))
@@ -4375,17 +4406,14 @@ pub async fn build(
     // prefetch IS the gate — claude-code keeps this behind `tengu_moth_copse`
     // (default false), so unset/false leaves the surfacing channel inert and the
     // locked fixtures byte-identical (`memory_prefetch.is_some() == false`).
-    let orch_builder = match (
-        is_env_truthy("LINGXI_MEMDIR_PREFETCH"),
-        dirs::home_dir(),
-    ) {
-        (true, Some(home)) => orch_builder.with_memory_prefetch(
-            orchestrator::prompt::build_memdir_prefetch(
+    let orch_builder = match (is_env_truthy("LINGXI_MEMDIR_PREFETCH"), dirs::home_dir()) {
+        (true, Some(home)) => {
+            orch_builder.with_memory_prefetch(orchestrator::prompt::build_memdir_prefetch(
                 side_query_client.clone(),
                 Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
                 &home,
-            ),
-        ),
+            ))
+        }
         _ => orch_builder,
     };
 
@@ -4427,20 +4455,17 @@ pub async fn build(
     // scan re-loads next session. Thresholds are unpinned upstream (spec §6.5) —
     // 30/30 tool calls is a tunable default. Unset/false ⇒ no handle ⇒ inert, so
     // the locked fixtures stay byte-identical.
-    let orch_builder = match (
-        is_env_truthy("LINGXI_SESSION_MEMORY"),
-        dirs::home_dir(),
-    ) {
-        (true, Some(home)) => orch_builder.with_session_memory(
-            orchestrator::prompt::build_session_memory_handle(
+    let orch_builder = match (is_env_truthy("LINGXI_SESSION_MEMORY"), dirs::home_dir()) {
+        (true, Some(home)) => {
+            orch_builder.with_session_memory(orchestrator::prompt::build_session_memory_handle(
                 side_query_client.clone(),
                 "claude-haiku-4-5".to_string(),
                 30,
                 30,
                 &home,
                 Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
-            ),
-        ),
+            ))
+        }
         _ => orch_builder,
     };
     let orch = Arc::new(orch_builder);
@@ -4466,8 +4491,9 @@ pub async fn build(
     // Plan 3c: `/connect` seams — Copilot device-flow over `PosixHttp`, and the
     // API-key writer over the host secure prompt (tui-supplied; headless no-op).
     // M8: also wire the ChatGPT OAuth seam (`/connect chatgpt`).
-    let connect_copilot: Arc<dyn command_core::CopilotConnectDriver> =
-        Arc::new(crate::connect::EngineCopilotConnect::new(credentials.clone()));
+    let connect_copilot: Arc<dyn command_core::CopilotConnectDriver> = Arc::new(
+        crate::connect::EngineCopilotConnect::new(credentials.clone()),
+    );
     let connect_writer: Arc<dyn command_core::ConnectCredentialWriter> =
         Arc::new(crate::connect::EngineCredentialWriter::new(
             credentials.clone(),
@@ -4475,11 +4501,9 @@ pub async fn build(
                 Arc::new(crate::connect::NoopKeyPrompt) as Arc<dyn crate::connect::SecureKeyPrompt>
             }),
         ));
-    let connect_chatgpt: Arc<dyn command_core::ChatGptConnectDriver> =
-        Arc::new(crate::connect::EngineChatGptConnect::new(
-            openai_oauth_client,
-            credentials.clone(),
-        ));
+    let connect_chatgpt: Arc<dyn command_core::ChatGptConnectDriver> = Arc::new(
+        crate::connect::EngineChatGptConnect::new(openai_oauth_client, credentials.clone()),
+    );
     // Unified OAuth sign-in driver for the TUI `/connect` picker (Anthropic
     // Pro/Max + OpenAI ChatGPT browser flows). Reuses the same backends as
     // `/login` (the Anthropic `auth` handle) and `/connect chatgpt`
@@ -4534,10 +4558,8 @@ pub async fn build(
     //       non-panicking while only commands + hooks reach the engine's live
     //       registries.
     {
-        let plugins_dir = std::env::var_os("LINGXI_PLUGIN_CACHE_DIR").map_or_else(
-            || cfg.lingxi_home.join("plugins"),
-            std::path::PathBuf::from,
-        );
+        let plugins_dir = std::env::var_os("LINGXI_PLUGIN_CACHE_DIR")
+            .map_or_else(|| cfg.lingxi_home.join("plugins"), std::path::PathBuf::from);
         // Primary (faithful) path: resolve the `settings.enabledPlugins`
         // allowlist (`plugin@marketplace` → enabled) to versioned cache dirs
         // `cache/{marketplace}/{plugin}/{version}/`, exactly as
@@ -4845,7 +4867,9 @@ pub async fn build(
 
 #[cfg(test)]
 mod tests {
-    use super::{build, desktop_tool_registry, model_deprecation_warning, CoordinatorWiring, DesktopConfig};
+    use super::{
+        build, desktop_tool_registry, model_deprecation_warning, CoordinatorWiring, DesktopConfig,
+    };
     use std::sync::Arc;
 
     // ── Plan 3c `/connect` wiring tests ──────────────────────────────────────
@@ -4887,13 +4911,19 @@ mod tests {
         struct C;
         #[async_trait]
         impl CopilotConnectDriver for C {
-            async fn begin(&self, _domain: Option<&str>) -> Result<CopilotConnectStep, ConnectError> {
+            async fn begin(
+                &self,
+                _domain: Option<&str>,
+            ) -> Result<CopilotConnectStep, ConnectError> {
                 Ok(CopilotConnectStep {
                     user_code: "X".into(),
                     verification_uri: "u".into(),
                 })
             }
-            async fn poll_to_completion(&self, _s: &CopilotConnectStep) -> Result<(), ConnectError> {
+            async fn poll_to_completion(
+                &self,
+                _s: &CopilotConnectStep,
+            ) -> Result<(), ConnectError> {
                 Ok(())
             }
         }
@@ -5009,8 +5039,10 @@ mod tests {
         let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
         let cm = Arc::new(secret::CredentialManager::new(storage, clock, http));
 
-        let writer =
-            EngineCredentialWriter::new(cm.clone(), Arc::new(CannedPrompt(Some("sk-test-123".into()))));
+        let writer = EngineCredentialWriter::new(
+            cm.clone(),
+            Arc::new(CannedPrompt(Some("sk-test-123".into()))),
+        );
         writer
             .prompt_and_store_key("openrouter")
             .await
@@ -5048,7 +5080,10 @@ mod tests {
             model_deprecation_warning(Some("claude-3-opus-20240229")).as_deref(),
             Some("⚠ Claude 3 Opus will be retired on January 15, 2026. Consider switching to a newer model.")
         );
-        assert_eq!(model_deprecation_warning(Some("claude-3-5-haiku-20241022")), None);
+        assert_eq!(
+            model_deprecation_warning(Some("claude-3-5-haiku-20241022")),
+            None
+        );
         clear_provider_env();
 
         // Vertex: 3.7 Sonnet has a different date.
@@ -5066,7 +5101,10 @@ mod tests {
         clear_provider_env();
         std::env::set_var("CLAUDE_CODE_USE_BEDROCK", "1");
         // claude-3-5-haiku has `bedrock: None` in the table → no warning.
-        assert_eq!(model_deprecation_warning(Some("claude-3-5-haiku-20241022")), None);
+        assert_eq!(
+            model_deprecation_warning(Some("claude-3-5-haiku-20241022")),
+            None
+        );
         clear_provider_env();
     }
 
@@ -5511,7 +5549,10 @@ mod tests {
         assert_eq!(super::provider_profile_label("openrouter"), "OpenRouter");
         assert_eq!(super::provider_profile_label("deepseek"), "DeepSeek");
         assert_eq!(super::provider_profile_label("glm-coding"), "GLM (coding)");
-        assert_eq!(super::provider_profile_label("github-copilot"), "GitHub Copilot");
+        assert_eq!(
+            super::provider_profile_label("github-copilot"),
+            "GitHub Copilot"
+        );
         // Unknown user profiles are Title-Cased across separators.
         assert_eq!(super::provider_profile_label("groq"), "Groq");
         assert_eq!(super::provider_profile_label("my-provider"), "My Provider");
@@ -5525,9 +5566,18 @@ mod tests {
         let models = super::anthropic_models_for("claude-sonnet-4-6", Some("claude-opus-4-6"));
         let ids: Vec<&str> = models.iter().map(|m| m.display_model.as_str()).collect();
         // First-party defaults are present.
-        assert!(ids.contains(&"claude-opus-4-6"), "missing default opus: {ids:?}");
-        assert!(ids.contains(&"claude-sonnet-4-6"), "missing default sonnet: {ids:?}");
-        assert!(ids.contains(&"claude-haiku-4-5"), "missing default haiku: {ids:?}");
+        assert!(
+            ids.contains(&"claude-opus-4-6"),
+            "missing default opus: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"claude-sonnet-4-6"),
+            "missing default sonnet: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"claude-haiku-4-5"),
+            "missing default haiku: {ids:?}"
+        );
         // A configured default/fallback already in the list does not duplicate.
         assert_eq!(
             ids.iter().filter(|id| **id == "claude-sonnet-4-6").count(),
@@ -5594,9 +5644,14 @@ mod tests {
         let m = &rt.provider_auth_methods;
         // Catalog-derived: keys are real profile_names, values are the tag vocabulary.
         assert_eq!(m.get("anthropic").map(String::as_str), Some("api_key"));
-        assert_eq!(m.get("github-copilot").map(String::as_str), Some("copilot_device"));
+        assert_eq!(
+            m.get("github-copilot").map(String::as_str),
+            Some("copilot_device")
+        );
         assert_eq!(m.get("openai-chatgpt").map(String::as_str), Some("oauth"));
-        assert!(m.values().all(|v| matches!(v.as_str(), "api_key" | "copilot_device" | "oauth")));
+        assert!(m
+            .values()
+            .all(|v| matches!(v.as_str(), "api_key" | "copilot_device" | "oauth")));
     }
 
     /// Phase 2a (T10 integration): a `build()` with BOTH a user-defined provider
@@ -6037,11 +6092,10 @@ mod tests {
         // R-P1: claudeMd lives in the leading additional-context `<system-reminder>`
         // meta now (built from the SAME `memory_block::format`), NOT the system
         // prompt. The injected LINGXI.md must reach THAT.
-        let ctx = rt
-            .orchestrator
-            .additional_context_preview()
-            .await
-            .expect("an additional-context meta must be present (currentDate is unconditional)");
+        let ctx =
+            rt.orchestrator.additional_context_preview().await.expect(
+                "an additional-context meta must be present (currentDate is unconditional)",
+            );
         assert!(
             ctx.contains(
                 "Codebase and user instructions are shown below. Be sure to adhere to these instructions."
@@ -6510,12 +6564,28 @@ mod tests {
         // Unset env: default-ON for BOTH the CLI/desktop NoOp inner AND transport
         // (AdapterPermissionGate) — claude-code enforces one core policy on every
         // host, so the bridge wraps its remote-driven gate with the local policy.
-        assert!(should_enforce_permissions(None, true, PermissionMode::Default));
-        assert!(should_enforce_permissions(None, false, PermissionMode::Default));
+        assert!(should_enforce_permissions(
+            None,
+            true,
+            PermissionMode::Default
+        ));
+        assert!(should_enforce_permissions(
+            None,
+            false,
+            PermissionMode::Default
+        ));
 
         // An explicit env value wins for BOTH inners.
-        assert!(should_enforce_permissions(Some("1"), false, PermissionMode::Default));
-        assert!(should_enforce_permissions(Some("on"), false, PermissionMode::Default));
+        assert!(should_enforce_permissions(
+            Some("1"),
+            false,
+            PermissionMode::Default
+        ));
+        assert!(should_enforce_permissions(
+            Some("on"),
+            false,
+            PermissionMode::Default
+        ));
         for falsey in ["", "0", "off", "false", "no", "  OFF  "] {
             assert!(
                 !should_enforce_permissions(Some(falsey), true, PermissionMode::Default),
@@ -6524,7 +6594,11 @@ mod tests {
         }
 
         // BypassPermissions (--dangerously-skip-permissions) ⇒ never enforce.
-        assert!(!should_enforce_permissions(None, true, PermissionMode::BypassPermissions));
+        assert!(!should_enforce_permissions(
+            None,
+            true,
+            PermissionMode::BypassPermissions
+        ));
         assert!(!should_enforce_permissions(
             Some("1"),
             true,
@@ -6615,7 +6689,10 @@ mod tests {
             std::path::Path::new("/tmp"),
             &ctx,
         );
-        assert!(cfg.enabled, "managed sandbox.enabled:true alone must enable");
+        assert!(
+            cfg.enabled,
+            "managed sandbox.enabled:true alone must enable"
+        );
 
         std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
     }
@@ -6708,10 +6785,8 @@ mod tests {
 
         let tiers = super::settings_watch::managed_settings_raw_tiers().await;
         let refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
-        let auto_allow = super::sandbox_auto_allow_from_settings_tiers(
-            &refs,
-            std::path::Path::new("/tmp"),
-        );
+        let auto_allow =
+            super::sandbox_auto_allow_from_settings_tiers(&refs, std::path::Path::new("/tmp"));
         assert!(auto_allow.enabled, "managed enabled must flow through");
         assert!(
             !auto_allow.auto_allows("bazel build"),
@@ -6775,11 +6850,17 @@ mod tests {
         // No base managed-settings.json (absent → skipped).
         let drop_in = tmp.path().join("managed-settings.d");
         std::fs::create_dir_all(&drop_in).expect("mkdir drop-in");
-        std::fs::write(drop_in.join(".hidden.json"), r#"{"sandbox":{"enabled":true}}"#)
-            .expect("write dotfile");
+        std::fs::write(
+            drop_in.join(".hidden.json"),
+            r#"{"sandbox":{"enabled":true}}"#,
+        )
+        .expect("write dotfile");
         std::fs::write(drop_in.join("README.md"), "not json").expect("write md");
-        std::fs::write(drop_in.join("20-real.json"), r#"{"sandbox":{"enabled":true}}"#)
-            .expect("write real");
+        std::fs::write(
+            drop_in.join("20-real.json"),
+            r#"{"sandbox":{"enabled":true}}"#,
+        )
+        .expect("write real");
         std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
 
         let tiers = super::settings_watch::managed_settings_raw_tiers().await;
@@ -6859,7 +6940,9 @@ mod tests {
 
         // The composition-root assertion: build() must not fail when
         // provider_profiles is set.
-        let rt = build(cfg, output, perm_sink).await.expect("build() failed with custom provider profile");
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() failed with custom provider profile");
         let _ = rt;
 
         // Model/alias assertions via apply_settings_providers directly (same
@@ -6976,7 +7059,8 @@ mod tests {
         let mut cfg_obj =
             platform_common::builtin_anthropic_config("https://api.anthropic.com", false);
         let providers: std::collections::BTreeMap<String, serde_json::Value> =
-            serde_json::from_str(r#"{
+            serde_json::from_str(
+                r#"{
                 "myprovider": {
                     "type": "openai",
                     "baseUrl": "https://api.example.com/v1",
@@ -6986,7 +7070,8 @@ mod tests {
                         "my-model": { "inputPerMtok": 2.50, "outputPerMtok": 10.0 }
                     }
                 }
-            }"#)
+            }"#,
+            )
             .unwrap();
 
         platform_common::apply_settings_providers(&mut cfg_obj, &providers, None)
@@ -6995,13 +7080,18 @@ mod tests {
         // Extract pricing overrides (mirrors the build() block: display_model →
         // billing_model resolution inside each profile).
         let pricing_overrides: Vec<(llm_client::ProviderId, String, llm_client::TokenPricing)> =
-            cfg_obj.providers.iter().flat_map(|p| {
-                p.pricing.overrides.iter().filter_map(|(model_id, tp)| {
-                    p.models.iter()
-                        .find(|m| m.display_model == *model_id)
-                        .map(|m| (p.provider_id.clone(), m.billing_model.clone(), *tp))
+            cfg_obj
+                .providers
+                .iter()
+                .flat_map(|p| {
+                    p.pricing.overrides.iter().filter_map(|(model_id, tp)| {
+                        p.models
+                            .iter()
+                            .find(|m| m.display_model == *model_id)
+                            .map(|m| (p.provider_id.clone(), m.billing_model.clone(), *tp))
+                    })
                 })
-            }).collect();
+                .collect();
 
         assert_eq!(pricing_overrides.len(), 1, "one override expected");
         let (ref prov_id, ref billing_model, _) = pricing_overrides[0];
@@ -7023,13 +7113,20 @@ mod tests {
             display_model: "my-model".to_string(),
         };
         let usage = Usage {
-            billable_tokens: TokenUsage { input: 1_000_000, ..Default::default() },
+            billable_tokens: TokenUsage {
+                input: 1_000_000,
+                ..Default::default()
+            },
             ..Default::default()
         };
-        let estimate = estimator.estimate(pricing_ref, &usage).expect("must yield cost for overridden model");
+        let estimate = estimator
+            .estimate(pricing_ref, &usage)
+            .expect("must yield cost for overridden model");
 
         // Assert exact figure: 1M input × $2.50/M = $2.50
-        let input_cost = estimate.input_cost_usd.expect("input_cost_usd must be Some");
+        let input_cost = estimate
+            .input_cost_usd
+            .expect("input_cost_usd must be Some");
         assert!(
             (input_cost - 2.50).abs() < 1e-9,
             "overridden input cost must be $2.50 (1M tokens × $2.50/M), got ${input_cost}"
@@ -7040,7 +7137,9 @@ mod tests {
             "pricing_source must reflect that an override was used"
         );
         // Total: 1M input × $2.50 + 0 output = $2.50 exactly.
-        let total = estimate.total_cost_usd.expect("total_cost_usd must be Some");
+        let total = estimate
+            .total_cost_usd
+            .expect("total_cost_usd must be Some");
         assert!(
             (total - 2.50).abs() < 1e-9,
             "total cost must be $2.50, got ${total}"
@@ -7068,7 +7167,10 @@ mod tests {
         let snap = super::subscription_snapshot_from(true, Some(&profile), Some(&roles));
         assert!(snap.is_subscriber);
         assert_eq!(snap.subscription_type.as_deref(), Some("team"));
-        assert_eq!(snap.rate_limit_tier.as_deref(), Some("default_claude_max_5x"));
+        assert_eq!(
+            snap.rate_limit_tier.as_deref(),
+            Some("default_claude_max_5x")
+        );
         assert_eq!(snap.billing_type.as_deref(), Some("stripe_subscription"));
         assert!(snap.has_extra_usage_enabled);
         assert_eq!(snap.organization_role.as_deref(), Some("admin"));

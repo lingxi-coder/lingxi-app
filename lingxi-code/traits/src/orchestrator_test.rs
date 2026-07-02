@@ -229,7 +229,10 @@ mod tests {
             overage_disabled_reason: Some("out_of_credits".to_string()),
             ..b
         };
-        assert_ne!(a, c, "different overage_disabled_reason must compare unequal");
+        assert_ne!(
+            a, c,
+            "different overage_disabled_reason must compare unequal"
+        );
     }
 
     /// The default impl of `last_rate_limit_info` on `OrchestratorHandle`
@@ -241,28 +244,61 @@ mod tests {
 
         #[async_trait]
         impl OrchestratorHandle for MinimalHandle {
-            async fn current_session_id(&self) -> SessionId { SessionId::new() }
-            async fn clear_session(&self) -> Result<(), HandleError> { Ok(()) }
-            async fn force_compact(&self) -> Result<CompactionSummary, HandleError> { Ok(CompactionSummary::default()) }
-            async fn snapshot_cost(&self) -> CostSnapshot { CostSnapshot::default() }
-            async fn switch_model(&self, _: &str, _: Option<&str>) -> Result<(), HandleError> { Ok(()) }
-            async fn request_exit(&self) {}
-            async fn current_should_exit(&self) -> bool { false }
-            async fn open_memory_editor(&self) -> Result<MemoryEditorOutcome, HandleError> {
-                Ok(MemoryEditorOutcome { edited_path: PathBuf::new(), exit_code: 0 })
+            async fn current_session_id(&self) -> SessionId {
+                SessionId::new()
             }
-            async fn list_mcp_servers(&self) -> Vec<McpServerInfo> { Vec::new() }
-            async fn list_hooks(&self) -> Vec<HookInfo> { Vec::new() }
-            async fn list_agents(&self) -> Vec<AgentInfo> { Vec::new() }
-            async fn run_doctor_checks(&self) -> DoctorReport { DoctorReport::default() }
-            async fn get_status_snapshot(&self) -> StatusSnapshot { StatusSnapshot::default() }
+            async fn clear_session(&self) -> Result<(), HandleError> {
+                Ok(())
+            }
+            async fn force_compact(&self) -> Result<CompactionSummary, HandleError> {
+                Ok(CompactionSummary::default())
+            }
+            async fn snapshot_cost(&self) -> CostSnapshot {
+                CostSnapshot::default()
+            }
+            async fn switch_model(&self, _: &str, _: Option<&str>) -> Result<(), HandleError> {
+                Ok(())
+            }
+            async fn request_exit(&self) {}
+            async fn current_should_exit(&self) -> bool {
+                false
+            }
+            async fn open_memory_editor(&self) -> Result<MemoryEditorOutcome, HandleError> {
+                Ok(MemoryEditorOutcome {
+                    edited_path: PathBuf::new(),
+                    exit_code: 0,
+                })
+            }
+            async fn list_mcp_servers(&self) -> Vec<McpServerInfo> {
+                Vec::new()
+            }
+            async fn list_hooks(&self) -> Vec<HookInfo> {
+                Vec::new()
+            }
+            async fn list_agents(&self) -> Vec<AgentInfo> {
+                Vec::new()
+            }
+            async fn run_doctor_checks(&self) -> DoctorReport {
+                DoctorReport::default()
+            }
+            async fn get_status_snapshot(&self) -> StatusSnapshot {
+                StatusSnapshot::default()
+            }
             async fn edit_config_file(&self) -> Result<MemoryEditorOutcome, HandleError> {
-                Ok(MemoryEditorOutcome { edited_path: PathBuf::new(), exit_code: 0 })
+                Ok(MemoryEditorOutcome {
+                    edited_path: PathBuf::new(),
+                    exit_code: 0,
+                })
             }
             async fn edit_permissions_file(&self) -> Result<MemoryEditorOutcome, HandleError> {
-                Ok(MemoryEditorOutcome { edited_path: PathBuf::new(), exit_code: 0 })
+                Ok(MemoryEditorOutcome {
+                    edited_path: PathBuf::new(),
+                    exit_code: 0,
+                })
             }
-            async fn list_available_models(&self) -> Vec<String> { Vec::new() }
+            async fn list_available_models(&self) -> Vec<String> {
+                Vec::new()
+            }
         }
 
         let h = MinimalHandle;

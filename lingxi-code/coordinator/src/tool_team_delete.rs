@@ -227,7 +227,9 @@ impl Tool for TeamDeleteTool {
         //    registry rebuild. Net-new in call(); distinct from `is_enabled`'s
         //    static gate (which only governs whether the tool is advertised).
         if !self.mode.is_enabled() {
-            return Err(ToolError::InvalidInput("coordinator mode not active".into()));
+            return Err(ToolError::InvalidInput(
+                "coordinator mode not active".into(),
+            ));
         }
 
         // Parse the target worker id defensively (do not rely on schema alone).
@@ -373,6 +375,7 @@ mod tests {
                 debug: false,
                 verbose: false,
                 main_loop_model: "test".into(),
+                model_profile: None,
                 max_budget_nano_usd: None,
                 mcp_clients: vec![],
                 is_non_interactive_session: false,
@@ -577,11 +580,7 @@ mod tests {
         let team = registry();
         let tool = make_tool(team);
         let err = tool
-            .call(
-                json!({ "agent_id": "not-a-uuid" }),
-                fresh_ctx(),
-                fresh_tx(),
-            )
+            .call(json!({ "agent_id": "not-a-uuid" }), fresh_ctx(), fresh_tx())
             .await
             .expect_err("delete must fail for a malformed UUID");
         assert!(matches!(err, ToolError::InvalidInput(_)));
@@ -601,11 +600,7 @@ mod tests {
 
         let mode = Arc::new(CoordinatorMode::new()); // disabled by default
         let seam = Arc::new(RecordingSeam::new());
-        let tool = TeamDeleteTool::new(
-            team.clone(),
-            mode,
-            seam.clone() as Arc<dyn TeamSpawnSeam>,
-        );
+        let tool = TeamDeleteTool::new(team.clone(), mode, seam.clone() as Arc<dyn TeamSpawnSeam>);
 
         let err = tool
             .call(
@@ -623,7 +618,11 @@ mod tests {
 
         // No kill issued and the worker is still present.
         assert_eq!(seam.kills.load(Ordering::SeqCst), 0);
-        assert_eq!(team.list().await.len(), 1, "worker untouched on disabled mode");
+        assert_eq!(
+            team.list().await.len(),
+            1,
+            "worker untouched on disabled mode"
+        );
     }
 
     #[tokio::test]
@@ -679,7 +678,11 @@ mod tests {
         .expect("delete must succeed");
 
         // No kill issued (nothing to kill) but the worker is still removed.
-        assert_eq!(seam.kills.load(Ordering::SeqCst), 0, "no kill for empty task_id");
+        assert_eq!(
+            seam.kills.load(Ordering::SeqCst),
+            0,
+            "no kill for empty task_id"
+        );
         assert!(team.list().await.is_empty(), "worker removed");
     }
 
@@ -705,7 +708,10 @@ mod tests {
 
         assert_eq!(res.data["success"], true);
         assert_eq!(seam.kills.load(Ordering::SeqCst), 1, "kill was attempted");
-        assert!(team.list().await.is_empty(), "worker removed despite kill error");
+        assert!(
+            team.list().await.is_empty(),
+            "worker removed despite kill error"
+        );
     }
 
     // ---- D1 ITEM 3: active-member guard + dir cleanup + telemetry ----
@@ -810,8 +816,14 @@ mod tests {
         // Team name cleared (set_team_name(None)).
         assert_eq!(team.team_name().await, None, "team context cleared");
         // Directories removed.
-        assert!(!team_file::team_dir(&home, "alpha").exists(), "team dir removed");
-        assert!(!team_file::task_dir(&home, "alpha").exists(), "task dir removed");
+        assert!(
+            !team_file::team_dir(&home, "alpha").exists(),
+            "team dir removed"
+        );
+        assert!(
+            !team_file::task_dir(&home, "alpha").exists(),
+            "task dir removed"
+        );
 
         // Telemetry fired.
         let events = sink.events().await;

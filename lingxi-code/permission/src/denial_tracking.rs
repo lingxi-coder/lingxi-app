@@ -142,7 +142,10 @@ impl DenialBreakerTrip {
     /// ``Classifier denial limit exceeded, falling back to prompting: ${u}``.
     #[must_use]
     pub fn fallback_warn_line(&self) -> String {
-        format!("Classifier denial limit exceeded, falling back to prompting: {}", self.message)
+        format!(
+            "Classifier denial limit exceeded, falling back to prompting: {}",
+            self.message
+        )
     }
 
     /// The rewritten classifier `reason` for the decision the consumer returns —
@@ -150,7 +153,10 @@ impl DenialBreakerTrip {
     /// is the latest blocked action's description.
     #[must_use]
     pub fn decision_reason(&self, latest_blocked_action: &str) -> String {
-        format!("{}\n\nLatest blocked action: {}", self.message, latest_blocked_action)
+        format!(
+            "{}\n\nLatest blocked action: {}",
+            self.message, latest_blocked_action
+        )
     }
 }
 
@@ -158,7 +164,10 @@ impl DenialTrackingState {
     /// Fresh state — 1:1 with claude-code `T6n()` (`{consecutiveDenials:0,totalDenials:0}`).
     #[must_use]
     pub const fn new() -> Self {
-        Self { consecutive_denials: 0, total_denials: 0 }
+        Self {
+            consecutive_denials: 0,
+            total_denials: 0,
+        }
     }
 
     /// Record one auto-mode classifier DENIAL — 1:1 with claude-code `oel`
@@ -275,7 +284,10 @@ mod tests {
         s.record_auto_deny();
         assert!(!s.is_circuit_broken(), "2 consecutive must not trip");
         s.record_auto_deny();
-        assert!(s.is_circuit_broken(), "3 consecutive must trip (maxConsecutive=3)");
+        assert!(
+            s.is_circuit_broken(),
+            "3 consecutive must trip (maxConsecutive=3)"
+        );
         assert_eq!(limits::MAX_CONSECUTIVE, 3);
     }
 
@@ -290,14 +302,20 @@ mod tests {
             total += 1;
             s.record_auto_deny();
             total += 1;
-            assert!(s.consecutive_denials < 3, "consecutive must stay below 3 in this pattern");
+            assert!(
+                s.consecutive_denials < 3,
+                "consecutive must stay below 3 in this pattern"
+            );
             if total < 20 {
                 s.record_non_deny(); // allow resets consecutive, NOT total
             }
         }
         assert_eq!(s.total_denials, 20);
         assert!(s.consecutive_denials < 3);
-        assert!(s.is_circuit_broken(), "total=20 must trip (maxTotal=20) even with consecutive<3");
+        assert!(
+            s.is_circuit_broken(),
+            "total=20 must trip (maxTotal=20) even with consecutive<3"
+        );
         assert_eq!(limits::MAX_TOTAL, 20);
     }
 
@@ -309,7 +327,10 @@ mod tests {
         assert_eq!(s.consecutive_denials, 2);
         assert_eq!(s.total_denials, 2);
         s.record_non_deny();
-        assert_eq!(s.consecutive_denials, 0, "non-deny resets consecutive (Y4t)");
+        assert_eq!(
+            s.consecutive_denials, 0,
+            "non-deny resets consecutive (Y4t)"
+        );
         assert_eq!(s.total_denials, 2, "non-deny must NOT touch total");
         assert!(!s.is_circuit_broken());
     }
@@ -363,7 +384,10 @@ mod tests {
             "3 consecutive actions were blocked. Please review the transcript before continuing."
         );
         // Consecutive-only case does NOT reset in trip() (reset happens on next non-deny).
-        assert_eq!(s.consecutive_denials, 3, "consecutive case must not reset counters in trip");
+        assert_eq!(
+            s.consecutive_denials, 3,
+            "consecutive case must not reset counters in trip"
+        );
         assert_eq!(s.total_denials, 3);
     }
 
@@ -392,7 +416,11 @@ mod tests {
         s.consecutive_denials = 5; // >= 3
         s.total_denials = 25; // >= 20
         let trip = s.trip(false).expect("both tripped");
-        assert_eq!(trip.limit, DenialLimit::Total, "i=totalDenials>=maxTotal dominates");
+        assert_eq!(
+            trip.limit,
+            DenialLimit::Total,
+            "i=totalDenials>=maxTotal dominates"
+        );
     }
 
     #[test]

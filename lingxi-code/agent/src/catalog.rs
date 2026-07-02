@@ -466,23 +466,12 @@ fn parse_positive_int_from_frontmatter(value: &serde_yaml::Value) -> Option<u32>
         serde_yaml::Value::Null => None,
         serde_yaml::Value::Number(n) => {
             // Number.isInteger(parsed) && parsed > 0
-            n.as_i64().and_then(|i| {
-                if i > 0 {
-                    u32::try_from(i).ok()
-                } else {
-                    None
-                }
-            })
+            n.as_i64()
+                .and_then(|i| if i > 0 { u32::try_from(i).ok() } else { None })
         }
         serde_yaml::Value::String(s) => {
             // parseInt(String(value), 10); Number.isInteger && > 0
-            parse_int_radix10(s).and_then(|i| {
-                if i > 0 {
-                    u32::try_from(i).ok()
-                } else {
-                    None
-                }
-            })
+            parse_int_radix10(s).and_then(|i| if i > 0 { u32::try_from(i).ok() } else { None })
         }
         // booleans: String(true)='true' -> parseInt NaN -> None
         _ => None,
@@ -741,7 +730,9 @@ pub fn parse_agent_from_json(
     let tools_field = match json_string_array_strict(obj.get("tools")) {
         Ok(v) => v,
         Err(()) => {
-            tracing::debug!("Error parsing agent '{name}' from JSON: tools must be an array of strings");
+            tracing::debug!(
+                "Error parsing agent '{name}' from JSON: tools must be an array of strings"
+            );
             return None;
         }
     };
@@ -779,7 +770,9 @@ pub fn parse_agent_from_json(
         }
         Ok(None) => Vec::new(),
         Err(()) => {
-            tracing::debug!("Error parsing agent '{name}' from JSON: skills must be an array of strings");
+            tracing::debug!(
+                "Error parsing agent '{name}' from JSON: skills must be an array of strings"
+            );
             return None;
         }
     };
@@ -999,9 +992,7 @@ fn json_as_string(v: &serde_json::Value) -> Option<String> {
 /// an array of strings -> `Ok(Some(arr))`; a JSON `null` -> `Ok(None)` (optional);
 /// a non-array OR an array containing a non-string element -> `Err(())` (zod throw).
 #[allow(clippy::result_unit_err)]
-fn json_string_array_strict(
-    value: Option<&serde_json::Value>,
-) -> Result<Option<Vec<String>>, ()> {
+fn json_string_array_strict(value: Option<&serde_json::Value>) -> Result<Option<Vec<String>>, ()> {
     match value {
         None | Some(serde_json::Value::Null) => Ok(None),
         Some(serde_json::Value::Array(arr)) => {
@@ -1375,9 +1366,8 @@ mod tests {
         // claude applies `tools` (allowlist → Explicit) and `disallowedTools`
         // (denylist) ORTHOGONALLY: an agent can carry both. The resolver
         // subtracts disallowed_tools from the Explicit-resolved pool.
-        let def = md(
-            "---\nname: a\ndescription: d\ntools: [Read, Bash]\ndisallowedTools: [Bash]\n---\n",
-        );
+        let def =
+            md("---\nname: a\ndescription: d\ntools: [Read, Bash]\ndisallowedTools: [Bash]\n---\n");
         match &def.tools {
             AgentToolPolicy::Explicit(names) => {
                 assert_eq!(names, &vec!["Read".to_string(), "Bash".to_string()]);
@@ -1623,37 +1613,127 @@ mod tests {
         };
 
         // bad effort: numeric string "7" is NOT a level and NOT a number.
-        assert!(parse_agent_from_json("a", &base(serde_json::json!({"effort": "7"})), AgentSource::Flag).is_none());
+        assert!(parse_agent_from_json(
+            "a",
+            &base(serde_json::json!({"effort": "7"})),
+            AgentSource::Flag
+        )
+        .is_none());
         // bad effort: float is not an int.
-        assert!(parse_agent_from_json("a", &base(serde_json::json!({"effort": 1.5})), AgentSource::Flag).is_none());
+        assert!(parse_agent_from_json(
+            "a",
+            &base(serde_json::json!({"effort": 1.5})),
+            AgentSource::Flag
+        )
+        .is_none());
         // bad effort: wrong-case level (zod enum is case-sensitive).
-        assert!(parse_agent_from_json("a", &base(serde_json::json!({"effort": "HIGH"})), AgentSource::Flag).is_none());
+        assert!(parse_agent_from_json(
+            "a",
+            &base(serde_json::json!({"effort": "HIGH"})),
+            AgentSource::Flag
+        )
+        .is_none());
         // bad maxTurns: zero / negative / non-number string.
-        assert!(parse_agent_from_json("a", &base(serde_json::json!({"maxTurns": 0})), AgentSource::Flag).is_none());
-        assert!(parse_agent_from_json("a", &base(serde_json::json!({"maxTurns": -3})), AgentSource::Flag).is_none());
-        assert!(parse_agent_from_json("a", &base(serde_json::json!({"maxTurns": "5"})), AgentSource::Flag).is_none());
+        assert!(parse_agent_from_json(
+            "a",
+            &base(serde_json::json!({"maxTurns": 0})),
+            AgentSource::Flag
+        )
+        .is_none());
+        assert!(parse_agent_from_json(
+            "a",
+            &base(serde_json::json!({"maxTurns": -3})),
+            AgentSource::Flag
+        )
+        .is_none());
+        assert!(parse_agent_from_json(
+            "a",
+            &base(serde_json::json!({"maxTurns": "5"})),
+            AgentSource::Flag
+        )
+        .is_none());
         // bad permissionMode.
-        assert!(parse_agent_from_json("a", &base(serde_json::json!({"permissionMode": "bogus"})), AgentSource::Flag).is_none());
+        assert!(parse_agent_from_json(
+            "a",
+            &base(serde_json::json!({"permissionMode": "bogus"})),
+            AgentSource::Flag
+        )
+        .is_none());
         // bad memory.
-        assert!(parse_agent_from_json("a", &base(serde_json::json!({"memory": "bogus"})), AgentSource::Flag).is_none());
+        assert!(parse_agent_from_json(
+            "a",
+            &base(serde_json::json!({"memory": "bogus"})),
+            AgentSource::Flag
+        )
+        .is_none());
         // bad isolation (non-ant: 'remote' not in enum; assumes test env != ant).
         if std::env::var("USER_TYPE").as_deref() != Ok("ant") {
-            assert!(parse_agent_from_json("a", &base(serde_json::json!({"isolation": "remote"})), AgentSource::Flag).is_none());
+            assert!(parse_agent_from_json(
+                "a",
+                &base(serde_json::json!({"isolation": "remote"})),
+                AgentSource::Flag
+            )
+            .is_none());
         }
-        assert!(parse_agent_from_json("a", &base(serde_json::json!({"isolation": "bogus"})), AgentSource::Flag).is_none());
+        assert!(parse_agent_from_json(
+            "a",
+            &base(serde_json::json!({"isolation": "bogus"})),
+            AgentSource::Flag
+        )
+        .is_none());
         // non-array tools / disallowedTools / skills.
-        assert!(parse_agent_from_json("a", &base(serde_json::json!({"tools": "Read"})), AgentSource::Flag).is_none());
-        assert!(parse_agent_from_json("a", &base(serde_json::json!({"tools": [1, 2]})), AgentSource::Flag).is_none());
-        assert!(parse_agent_from_json("a", &base(serde_json::json!({"disallowedTools": "Bash"})), AgentSource::Flag).is_none());
-        assert!(parse_agent_from_json("a", &base(serde_json::json!({"skills": "alpha"})), AgentSource::Flag).is_none());
+        assert!(parse_agent_from_json(
+            "a",
+            &base(serde_json::json!({"tools": "Read"})),
+            AgentSource::Flag
+        )
+        .is_none());
+        assert!(parse_agent_from_json(
+            "a",
+            &base(serde_json::json!({"tools": [1, 2]})),
+            AgentSource::Flag
+        )
+        .is_none());
+        assert!(parse_agent_from_json(
+            "a",
+            &base(serde_json::json!({"disallowedTools": "Bash"})),
+            AgentSource::Flag
+        )
+        .is_none());
+        assert!(parse_agent_from_json(
+            "a",
+            &base(serde_json::json!({"skills": "alpha"})),
+            AgentSource::Flag
+        )
+        .is_none());
         // non-bool background.
-        assert!(parse_agent_from_json("a", &base(serde_json::json!({"background": "true"})), AgentSource::Flag).is_none());
+        assert!(parse_agent_from_json(
+            "a",
+            &base(serde_json::json!({"background": "true"})),
+            AgentSource::Flag
+        )
+        .is_none());
         // whitespace-only model.
-        assert!(parse_agent_from_json("a", &base(serde_json::json!({"model": "   "})), AgentSource::Flag).is_none());
+        assert!(parse_agent_from_json(
+            "a",
+            &base(serde_json::json!({"model": "   "})),
+            AgentSource::Flag
+        )
+        .is_none());
         // invalid mcpServers item (number is neither string nor record).
-        assert!(parse_agent_from_json("a", &base(serde_json::json!({"mcpServers": [123]})), AgentSource::Flag).is_none());
+        assert!(parse_agent_from_json(
+            "a",
+            &base(serde_json::json!({"mcpServers": [123]})),
+            AgentSource::Flag
+        )
+        .is_none());
         // mcpServers not an array.
-        assert!(parse_agent_from_json("a", &base(serde_json::json!({"mcpServers": "slack"})), AgentSource::Flag).is_none());
+        assert!(parse_agent_from_json(
+            "a",
+            &base(serde_json::json!({"mcpServers": "slack"})),
+            AgentSource::Flag
+        )
+        .is_none());
     }
 
     #[test]

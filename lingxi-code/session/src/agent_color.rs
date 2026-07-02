@@ -56,7 +56,9 @@ pub async fn save_agent_color(
     // `to_string` on a `serde_json::Value` is infallible for finite data; map
     // the (unreachable) error into `FsError` rather than panic.
     let line = serde_json::to_string(&entry).map_err(|e| FsError::Io(e.to_string()))?;
-    let path_str = path.to_str().ok_or_else(|| FsError::Io("non-UTF-8 path".into()))?;
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| FsError::Io("non-UTF-8 path".into()))?;
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             std::fs::create_dir_all(parent).map_err(|e| FsError::Io(e.to_string()))?;
@@ -149,9 +151,14 @@ mod tests {
             .await
             .expect("save cyan");
         // A later write wins (set then reset to default).
-        save_agent_color(&fs, &path, "11111111-2222-3333-4444-555555555555", "default")
-            .await
-            .expect("save default");
+        save_agent_color(
+            &fs,
+            &path,
+            "11111111-2222-3333-4444-555555555555",
+            "default",
+        )
+        .await
+        .expect("save default");
 
         let raw = std::fs::read_to_string(&path).expect("file written");
         // Two lines, each terminated by exactly one LF (no extra whitespace).

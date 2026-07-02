@@ -129,7 +129,9 @@ fn edit_distance(a: &str, b: &str, max_distance: usize) -> usize {
     for i in 1..=la {
         for j in 1..=lb {
             let cost = usize::from(a[i - 1] != b[j - 1]);
-            let mut m = (d[i - 1][j] + 1).min(d[i][j - 1] + 1).min(d[i - 1][j - 1] + cost);
+            let mut m = (d[i - 1][j] + 1)
+                .min(d[i][j - 1] + 1)
+                .min(d[i - 1][j - 1] + cost);
             if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
                 m = m.min(d[i - 2][j - 2] + 1);
             }
@@ -192,7 +194,9 @@ fn invalid_subcommand_candidates(args: &[OsString], bad: &str) -> Vec<String> {
             cmd = sub.clone();
         }
     }
-    cmd.get_subcommands().map(|s| s.get_name().to_string()).collect()
+    cmd.get_subcommands()
+        .map(|s| s.get_name().to_string())
+        .collect()
 }
 
 /// Reformat the clap argv errors that claude-code (commander) renders
@@ -388,7 +392,9 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // error + exit 1 (ARGV_ERROR). Without this gate lingxi silently accepted
     // the misuse and ran a (billable) turn.
     if parsed.include_partial_messages && !(parsed.print && parsed.is_stream_json()) {
-        eprintln!("Error: --include-partial-messages requires --print and --output-format=stream-json.");
+        eprintln!(
+            "Error: --include-partial-messages requires --print and --output-format=stream-json."
+        );
         return exit_codes::ARGV_ERROR;
     }
 
@@ -439,8 +445,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
                     },
                 ),
             );
-            cfg.injected_permission_gate =
-                Some(gate as Arc<dyn permission::gate::PermissionGate>);
+            cfg.injected_permission_gate = Some(gate as Arc<dyn permission::gate::PermissionGate>);
             match init::build_runtime_from_config(cfg, adapter).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -483,7 +488,10 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // a non-slash prompt is present or `--print` is active (no slash prompt)
     // — slash commands keep the old JSON event format, interactive/REPL mode
     // with `--json` falls through to the normal dispatch path (repl.rs handles it).
-    let is_non_slash_print = parsed.prompt.as_deref().map_or(false, |p| !p.trim_start().starts_with('/'));
+    let is_non_slash_print = parsed
+        .prompt
+        .as_deref()
+        .map_or(false, |p| !p.trim_start().starts_with('/'));
     if parsed.is_json_output() && (is_non_slash_print || parsed.print) {
         let stream = Arc::new(stream_json::StreamJsonStream::new_json_mode_placeholder());
         let adapter: Arc<dyn traits::OutputStream> = stream.clone();
@@ -603,8 +611,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         migrations::global_config::global_config_path(),
         migrations::global_config::lingxi_config_home(),
     ) {
-        let project_dir =
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let env = migrations::MigrationEnv {
             global_config_path,
             lingxi_config_home: lingxi_home,
@@ -652,9 +659,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
 /// this helper to re-derive the mode must NOT re-run it. Returns
 /// `(mode, notice)` where `notice` is `Some` only when the bypass killswitch
 /// suppressed a requested bypass (`permissionModeNotification`).
-pub(crate) fn resolve_permission_mode(
-    argv: &Argv,
-) -> (permission::PermissionMode, Option<String>) {
+pub(crate) fn resolve_permission_mode(argv: &Argv) -> (permission::PermissionMode, Option<String>) {
     let settings = read_cli_mode_settings(argv);
     permission::initial_permission_mode_from_cli(
         argv.permission_mode.as_deref(),
@@ -682,8 +687,7 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
     // permission-mode reader consults too (claude scopes ALL settings loading,
     // not just providers/routing). `None` ⟶ both layers (default).
     let (incl_user, incl_project) = init::setting_source_flags(parsed.setting_sources.as_deref());
-    let project_dir =
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut default_mode = None;
     let mut bypass_disabled = false;
     let home = incl_user.then(|| crate::run::lingxi_home_dir().join("settings.json"));
@@ -804,9 +808,18 @@ mod startup_notice_tests {
     #[test]
     fn deprecated_override_model_yields_first_party_notice() {
         let prior = [
-            ("CLAUDE_CODE_USE_BEDROCK", std::env::var_os("CLAUDE_CODE_USE_BEDROCK")),
-            ("CLAUDE_CODE_USE_VERTEX", std::env::var_os("CLAUDE_CODE_USE_VERTEX")),
-            ("CLAUDE_CODE_USE_FOUNDRY", std::env::var_os("CLAUDE_CODE_USE_FOUNDRY")),
+            (
+                "CLAUDE_CODE_USE_BEDROCK",
+                std::env::var_os("CLAUDE_CODE_USE_BEDROCK"),
+            ),
+            (
+                "CLAUDE_CODE_USE_VERTEX",
+                std::env::var_os("CLAUDE_CODE_USE_VERTEX"),
+            ),
+            (
+                "CLAUDE_CODE_USE_FOUNDRY",
+                std::env::var_os("CLAUDE_CODE_USE_FOUNDRY"),
+            ),
         ];
         for (k, _) in &prior {
             std::env::remove_var(k);
@@ -851,7 +864,9 @@ mod cli_mode_settings_tests {
     /// `getSettings_DEPRECATED() || {}` fallback).
     #[test]
     fn degrades_to_default_when_no_settings_files() {
-        let _g = env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let prior_home = std::env::var_os("HOME");
         let prior_cwd = std::env::current_dir().ok();
 
@@ -880,7 +895,9 @@ mod cli_mode_settings_tests {
     /// killswitch — exercising the parse path, not just the empty degrade.
     #[test]
     fn reads_project_settings_default_mode_and_killswitch() {
-        let _g = env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let prior_home = std::env::var_os("HOME");
         let prior_cwd = std::env::current_dir().ok();
 
@@ -897,7 +914,10 @@ mod cli_mode_settings_tests {
         std::env::set_current_dir(proj.path()).expect("chdir proj");
 
         let s = read_cli_mode_settings(&argv());
-        assert_eq!(s.default_mode, Some(permission::PermissionMode::AcceptEdits));
+        assert_eq!(
+            s.default_mode,
+            Some(permission::PermissionMode::AcceptEdits)
+        );
         assert!(s.bypass_disabled);
 
         if let Some(cwd) = prior_cwd {

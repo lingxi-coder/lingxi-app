@@ -1,7 +1,7 @@
 use crate::{
-    ContentBlock, ContentDelta, LlmError, LlmEvent, LlmRequest, LlmResponse,
-    MessageDeltaPayload, ProviderRequest, ProviderResponse, RawStreamFrame, ResponseFormat,
-    StreamDecoder, ToolDeclaration, ToolChoice, Usage, WireCodec,
+    ContentBlock, ContentDelta, LlmError, LlmEvent, LlmRequest, LlmResponse, MessageDeltaPayload,
+    ProviderRequest, ProviderResponse, RawStreamFrame, ResponseFormat, StreamDecoder, ToolChoice,
+    ToolDeclaration, Usage, WireCodec,
 };
 
 use std::collections::BTreeMap;
@@ -72,12 +72,22 @@ impl WireCodec for OpenAiChatCodec {
         if !request.stop_sequences.is_empty() {
             body.insert(
                 "stop".to_string(),
-                Value::Array(request.stop_sequences.iter().cloned().map(Value::String).collect()),
+                Value::Array(
+                    request
+                        .stop_sequences
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
             );
         }
 
         if let Some(response_format) = &request.response_format {
-            body.insert("response_format".to_string(), encode_response_format(response_format));
+            body.insert(
+                "response_format".to_string(),
+                encode_response_format(response_format),
+            );
         }
 
         if let Some(tool_choice) = &request.tool_choice {
@@ -91,7 +101,8 @@ impl WireCodec for OpenAiChatCodec {
             );
         }
 
-        let mut provider_request = ProviderRequest::post_json(self.chat_completions_url(), Value::Object(body));
+        let mut provider_request =
+            ProviderRequest::post_json(self.chat_completions_url(), Value::Object(body));
         provider_request
             .headers
             .insert("content-type".to_string(), "application/json".to_string());
@@ -143,7 +154,11 @@ pub(crate) fn decode_error_response(response: &ProviderResponse) -> LlmError {
     let code = error
         .and_then(|error| error.get("code"))
         .and_then(Value::as_str)
-        .or_else(|| error.and_then(|error| error.get("type")).and_then(Value::as_str))
+        .or_else(|| {
+            error
+                .and_then(|error| error.get("type"))
+                .and_then(Value::as_str)
+        })
         .unwrap_or_default();
 
     match code {
@@ -183,9 +198,10 @@ impl StreamDecoder for OpenAiStreamDecoder {
             return Ok(out);
         }
 
-        let root: serde_json::Value = serde_json::from_str(data).map_err(|_| LlmError::InvalidRequest {
-            message: "OpenAI stream frame is not valid JSON".to_string(),
-        })?;
+        let root: serde_json::Value =
+            serde_json::from_str(data).map_err(|_| LlmError::InvalidRequest {
+                message: "OpenAI stream frame is not valid JSON".to_string(),
+            })?;
 
         self.ensure_started(&root, &mut out);
 
@@ -193,21 +209,34 @@ impl StreamDecoder for OpenAiStreamDecoder {
             self.usage = Some(normalize_usage(usage));
         }
 
-        if let Some(choice) = root.get("choices").and_then(|choices| choices.as_array()).and_then(|choices| choices.first()) {
+        if let Some(choice) = root
+            .get("choices")
+            .and_then(|choices| choices.as_array())
+            .and_then(|choices| choices.first())
+        {
             if let Some(delta) = choice.get("delta") {
-                if let Some(reasoning) = delta.get("reasoning_content").and_then(serde_json::Value::as_str) {
+                if let Some(reasoning) = delta
+                    .get("reasoning_content")
+                    .and_then(serde_json::Value::as_str)
+                {
                     self.handle_reasoning(reasoning, &mut out);
                 }
                 if let Some(content) = delta.get("content").and_then(serde_json::Value::as_str) {
                     self.handle_text(content, &mut out);
                 }
-                if let Some(tool_calls) = delta.get("tool_calls").and_then(serde_json::Value::as_array) {
+                if let Some(tool_calls) = delta
+                    .get("tool_calls")
+                    .and_then(serde_json::Value::as_array)
+                {
                     for tool_call in tool_calls {
                         self.handle_tool_fragment(tool_call, &mut out);
                     }
                 }
             }
-            if let Some(finish_reason) = choice.get("finish_reason").and_then(serde_json::Value::as_str) {
+            if let Some(finish_reason) = choice
+                .get("finish_reason")
+                .and_then(serde_json::Value::as_str)
+            {
                 self.stop_reason = Some(map_finish_reason(finish_reason));
             }
         }
@@ -229,8 +258,16 @@ impl OpenAiStreamDecoder {
         }
         self.started = true;
         let response = LlmResponse {
-            id: root.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
-            model: root.get("model").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+            id: root
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            model: root
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
             content: Vec::new(),
             stop_reason: None,
             stop_details: None,
@@ -238,7 +275,9 @@ impl OpenAiStreamDecoder {
             cost: None,
             provider_metadata: serde_json::Value::Null,
         };
-        out.push(LlmEvent::MessageStart { response: Box::new(response) });
+        out.push(LlmEvent::MessageStart {
+            response: Box::new(response),
+        });
     }
 
     fn handle_reasoning(&mut self, reasoning: &str, out: &mut Vec<LlmEvent>) {
@@ -463,7 +502,12 @@ fn encode_message(message: &crate::Message) -> Vec<Value> {
     }
 
     if !text.is_empty() || !media_parts.is_empty() {
-        messages.push(build_user_message(&message.role, &text, &media_parts, has_media));
+        messages.push(build_user_message(
+            &message.role,
+            &text,
+            &media_parts,
+            has_media,
+        ));
     }
     if !tool_calls.is_empty() {
         messages.push(assistant_tool_call_message(&message.role, &tool_calls));
@@ -564,7 +608,9 @@ fn reject_unsupported_content_blocks(request: &LlmRequest) -> Result<(), LlmErro
                 | ContentBlock::ConnectorText { .. }
                 | ContentBlock::AdvisorToolResult { .. } => {
                     return Err(LlmError::InvalidRequest {
-                        message: "OpenAiChatCodec does not encode Anthropic server-generated blocks".to_string(),
+                        message:
+                            "OpenAiChatCodec does not encode Anthropic server-generated blocks"
+                                .to_string(),
                     });
                 }
                 _ => {}
@@ -636,21 +682,30 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
     if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
         for tool_call in tool_calls {
             let id = string_field(tool_call, "id")?;
-            let function = tool_call.get("function").ok_or_else(|| LlmError::InvalidRequest {
-                message: "OpenAI tool call missing function".to_string(),
-            })?;
+            let function = tool_call
+                .get("function")
+                .ok_or_else(|| LlmError::InvalidRequest {
+                    message: "OpenAI tool call missing function".to_string(),
+                })?;
             let name = string_field(function, "name")?;
-            let arguments = function.get("arguments").and_then(Value::as_str).ok_or_else(|| LlmError::InvalidRequest {
-                message: "OpenAI tool call missing function.arguments".to_string(),
-            })?;
-            let input = serde_json::from_str::<Value>(arguments).map_err(|_| LlmError::InvalidRequest {
-                message: "OpenAI tool call has invalid function.arguments JSON".to_string(),
-            })?;
+            let arguments = function
+                .get("arguments")
+                .and_then(Value::as_str)
+                .ok_or_else(|| LlmError::InvalidRequest {
+                    message: "OpenAI tool call missing function.arguments".to_string(),
+                })?;
+            let input =
+                serde_json::from_str::<Value>(arguments).map_err(|_| LlmError::InvalidRequest {
+                    message: "OpenAI tool call has invalid function.arguments JSON".to_string(),
+                })?;
             content.push(ContentBlock::ToolCall { id, name, input });
         }
     }
 
-    let usage = body_json.get("usage").map(normalize_usage).unwrap_or_default();
+    let usage = body_json
+        .get("usage")
+        .map(normalize_usage)
+        .unwrap_or_default();
     let stop_reason = choice
         .get("finish_reason")
         .and_then(Value::as_str)
@@ -669,8 +724,14 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
 }
 
 fn normalize_usage(usage: &Value) -> Usage {
-    let prompt_tokens = usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
-    let completion_tokens = usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let prompt_tokens = usage
+        .get("prompt_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let completion_tokens = usage
+        .get("completion_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     // OpenAI reports cached/reasoning tokens as subsets of prompt/completion
     // counts; subtract them so every TokenUsage bucket stays independently billable.
     let cached_tokens = usage
@@ -732,7 +793,9 @@ mod tests {
     #[test]
     fn reasoning_budget_is_dropped_not_rejected() {
         let mut request = LlmRequest::new("deepseek-reasoner");
-        request.reasoning = Some(ReasoningConfig::Enabled { budget_tokens: 4096 });
+        request.reasoning = Some(ReasoningConfig::Enabled {
+            budget_tokens: 4096,
+        });
         request.messages.push(Message {
             role: "user".to_string(),
             content: vec![ContentBlock::Text {
@@ -742,12 +805,25 @@ mod tests {
         });
 
         let codec = OpenAiChatCodec::new("https://api.deepseek.com");
-        let provider_request = codec.encode_request(&request).expect("reasoning budget must not error");
+        let provider_request = codec
+            .encode_request(&request)
+            .expect("reasoning budget must not error");
 
-        let body = body_of(&provider_request).as_object().expect("body is an object");
-        assert!(!body.contains_key("reasoning"), "no reasoning field on the wire");
-        assert!(!body.contains_key("reasoning_content"), "no reasoning_content field");
-        assert!(!body.contains_key("budget_tokens"), "no budget_tokens field");
+        let body = body_of(&provider_request)
+            .as_object()
+            .expect("body is an object");
+        assert!(
+            !body.contains_key("reasoning"),
+            "no reasoning field on the wire"
+        );
+        assert!(
+            !body.contains_key("reasoning_content"),
+            "no reasoning_content field"
+        );
+        assert!(
+            !body.contains_key("budget_tokens"),
+            "no budget_tokens field"
+        );
     }
 
     /// (b) History containing a Reasoning block (emitted by the stream decoder on a
@@ -770,7 +846,9 @@ mod tests {
         });
 
         let codec = OpenAiChatCodec::new("https://api.deepseek.com");
-        let provider_request = codec.encode_request(&request).expect("reasoning block must not error");
+        let provider_request = codec
+            .encode_request(&request)
+            .expect("reasoning block must not error");
 
         let messages = body_of(&provider_request)
             .get("messages")
@@ -780,7 +858,10 @@ mod tests {
         let serialized = serde_json::to_string(messages).expect("serialize messages");
         assert!(serialized.contains("the answer is 42"), "text survives");
         assert!(!serialized.contains("let me think"), "reasoning is omitted");
-        assert!(!serialized.contains("reasoning_content"), "no reasoning_content key");
+        assert!(
+            !serialized.contains("reasoning_content"),
+            "no reasoning_content key"
+        );
     }
 
     /// (c) Non-streaming decode of a message carrying `reasoning_content` yields a
@@ -827,7 +908,10 @@ mod tests {
         let openrouter = OpenAiChatCodec::new("https://openrouter.ai/api/v1");
         let with_attribution = openrouter.encode_request(&request).expect("encode");
         assert_eq!(
-            with_attribution.headers.get("HTTP-Referer").map(String::as_str),
+            with_attribution
+                .headers
+                .get("HTTP-Referer")
+                .map(String::as_str),
             Some("https://lingxi.dev")
         );
         assert_eq!(

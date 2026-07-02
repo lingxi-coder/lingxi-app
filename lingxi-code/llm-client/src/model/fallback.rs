@@ -79,7 +79,9 @@ mod tests {
         // TS getModelStrings() would resolve those per-provider; Rust hard-codes
         // firstParty only until those providers wire up).
         assert!(!is_non_custom_opus("claude-opus-4-5-20251101-v1:0"));
-        assert!(!is_non_custom_opus("us.anthropic.claude-opus-4-5-20251101-v1:0"));
+        assert!(!is_non_custom_opus(
+            "us.anthropic.claude-opus-4-5-20251101-v1:0"
+        ));
         assert!(!is_non_custom_opus("claude-opus-4-5@20251101"));
         assert!(!is_non_custom_opus("claude-opus-4-6-custom"));
         assert!(!is_non_custom_opus("my-claude-opus-4-6"));

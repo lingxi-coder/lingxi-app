@@ -155,7 +155,8 @@ mod tests {
     #[test]
     fn socks_port_sets_all_proxy_git_ssh_ftp_grpc() {
         // linux + http port → socat GIT_SSH_COMMAND
-        let e = generate_proxy_env_vars(Some(3128), Some(1080), None, Platform::Linux, "/tmp/claude");
+        let e =
+            generate_proxy_env_vars(Some(3128), Some(1080), None, Platform::Linux, "/tmp/claude");
         assert!(has(&e, "ALL_PROXY", "socks5h://localhost:1080"));
         assert!(has(&e, "all_proxy", "socks5h://localhost:1080"));
         assert!(has(&e, "FTP_PROXY", "socks5h://localhost:1080"));
@@ -177,7 +178,13 @@ mod tests {
 
     #[test]
     fn ca_cert_path_sets_all_trust_vars() {
-        let e = generate_proxy_env_vars(Some(3128), None, Some("/tmp/ca.pem"), Platform::Linux, "/tmp/claude");
+        let e = generate_proxy_env_vars(
+            Some(3128),
+            None,
+            Some("/tmp/ca.pem"),
+            Platform::Linux,
+            "/tmp/claude",
+        );
         for v in CA_TRUST_VARS {
             assert!(has(&e, v, "/tmp/ca.pem"), "missing {v}");
         }
@@ -185,7 +192,10 @@ mod tests {
 
     #[test]
     fn encode_decode_roundtrip_and_truncation() {
-        assert_eq!(decode_sandboxed_command(&encode_sandboxed_command("hello")), "hello");
+        assert_eq!(
+            decode_sandboxed_command(&encode_sandboxed_command("hello")),
+            "hello"
+        );
         let long = "x".repeat(200);
         let dec = decode_sandboxed_command(&encode_sandboxed_command(&long));
         assert_eq!(dec.len(), 100); // truncated to 100 chars before base64

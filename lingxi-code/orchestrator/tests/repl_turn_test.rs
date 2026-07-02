@@ -37,7 +37,10 @@ fn build_orch_with_response(
 #[tokio::test]
 async fn run_turn_with_cancel_returns_end_turn_on_normal_completion() {
     let resp = mock_message_response(
-        vec![LlmContentBlock::Text { text: "Hi!".into(), cache_control: None }],
+        vec![LlmContentBlock::Text {
+            text: "Hi!".into(),
+            cache_control: None,
+        }],
         Some("end_turn"),
     );
     let (orch, api, _output) = build_orch_with_response(resp);

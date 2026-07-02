@@ -35,7 +35,10 @@ fn macos_wrap_emits_profile_at_real_path() {
     // The profile is now the full claude-code k0d template: `(deny default)`
     // carries a `(with message "<logTag>")` and the static header follows.
     assert!(content.starts_with("(version 1)\n"), "got: {content}");
-    assert!(content.contains("(deny default (with message"), "got: {content}");
+    assert!(
+        content.contains("(deny default (with message"),
+        "got: {content}"
+    );
     assert!(content.contains("(allow file-read*)"), "got: {content}");
     let _ = std::fs::remove_file(path);
 }
@@ -122,7 +125,10 @@ fn macos_sbpl_full_network_only_for_wildcard() {
     let mut wildcard = cfg(vec![], vec![]);
     wildcard.network.allowed_domains = vec!["*".to_string()];
     let p = profile_of(wrap_with_sandbox("curl", &wildcard, Platform::Mac).expect("wrap ok"));
-    assert!(p.contains("(allow network*)"), "wildcard should allow all: {p}");
+    assert!(
+        p.contains("(allow network*)"),
+        "wildcard should allow all: {p}"
+    );
 }
 
 /// Read + delete the SBPL profile a wrapped `sandbox-exec -f <path> …` points at.

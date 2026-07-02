@@ -152,15 +152,7 @@ fn normalize_step(step: &str) -> String {
         let lower = part.trim().to_lowercase();
         if matches!(
             lower.as_str(),
-            "ctrl"
-                | "control"
-                | "alt"
-                | "opt"
-                | "option"
-                | "meta"
-                | "cmd"
-                | "command"
-                | "shift"
+            "ctrl" | "control" | "alt" | "opt" | "option" | "meta" | "cmd" | "command" | "shift"
         ) {
             // Normalize modifier names (match the TS branch order/results).
             if lower == "control" {

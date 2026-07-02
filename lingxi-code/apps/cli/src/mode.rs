@@ -320,10 +320,17 @@ async fn run_ratatui(tui_build: crate::init::TuiBuild) -> i32 {
     let handle = tokio::runtime::Handle::current();
     let switch_orch = orchestrator.clone();
     let switch_handle = handle.clone();
+    let summary_orch = orchestrator.clone();
+    let current_model = session
+        .models
+        .iter()
+        .find(|m| m.is_current)
+        .map_or_else(|| "(default)".to_string(), |m| m.display.clone());
     let welcome = vec![tui_rata::RenderedMessage::SystemText {
-        body: "LingXi — ratatui TUI. Type a message, Enter to send, Esc to quit. \
-               (Set LINGXI_TUI_BACKEND=iocraft for the legacy UI.)"
-            .to_string(),
+        body: format!(
+            "✻ Welcome to LingXi Code ({})\n  /help for commands · Esc or Ctrl-C twice to quit\n  cwd: {}\n  model: {}",
+            session.doctor.cli_version, session.doctor.cwd, current_model
+        ),
         timestamp: 0,
         is_error: false,
     }];
@@ -352,7 +359,11 @@ async fn run_ratatui(tui_build: crate::init::TuiBuild) -> i32 {
     })
     .await
     {
-        Ok(Ok(())) => exit_codes::SUCCESS,
+        Ok(Ok(())) => {
+            let session_id = summary_orch.current_session_id().await;
+            println!("\nSession {session_id} saved. Resume with: lingxi --resume {session_id}");
+            exit_codes::SUCCESS
+        }
         Ok(Err(e)) => {
             eprintln!("lingxi-cli: tui-rata session failed: {e}");
             exit_codes::RUNTIME_ERROR

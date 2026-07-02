@@ -228,10 +228,7 @@ mod tests {
             "PostToolUse",
         )
         .unwrap();
-        assert_eq!(
-            r.updated_mcp_tool_output,
-            Some(json!({ "content": "new" }))
-        );
+        assert_eq!(r.updated_mcp_tool_output, Some(json!({ "content": "new" })));
     }
 
     #[test]
@@ -532,7 +529,9 @@ mod tests {
         assert_eq!(back.terminal_sequence.as_deref(), Some("\u{0007}"));
         // default (None) is omitted
         let none = crate::response::HookResponse::default();
-        assert!(!serde_json::to_string(&none).unwrap().contains("terminal_sequence"));
+        assert!(!serde_json::to_string(&none)
+            .unwrap()
+            .contains("terminal_sequence"));
     }
 
     // ---- PermissionDenied wire payload (`coreSchemas.ts:461-471`) ---------
@@ -1310,17 +1309,50 @@ mod tests {
     #[test]
     fn b6_event_name_markers_round_trip() {
         for (got, want) in [
-            (serde_json::to_string(&HookEventNamePostToolUseFailure).unwrap(), r#""PostToolUseFailure""#),
-            (serde_json::to_string(&HookEventNameSessionEnd).unwrap(), r#""SessionEnd""#),
-            (serde_json::to_string(&HookEventNamePreCompact).unwrap(), r#""PreCompact""#),
-            (serde_json::to_string(&HookEventNamePostCompact).unwrap(), r#""PostCompact""#),
-            (serde_json::to_string(&HookEventNameNotification).unwrap(), r#""Notification""#),
-            (serde_json::to_string(&HookEventNamePermissionRequest).unwrap(), r#""PermissionRequest""#),
-            (serde_json::to_string(&HookEventNameSetup).unwrap(), r#""Setup""#),
-            (serde_json::to_string(&HookEventNameSubagentStart).unwrap(), r#""SubagentStart""#),
-            (serde_json::to_string(&HookEventNameCwdChanged).unwrap(), r#""CwdChanged""#),
-            (serde_json::to_string(&HookEventNameFileChanged).unwrap(), r#""FileChanged""#),
-            (serde_json::to_string(&HookEventNameWorktreeRemove).unwrap(), r#""WorktreeRemove""#),
+            (
+                serde_json::to_string(&HookEventNamePostToolUseFailure).unwrap(),
+                r#""PostToolUseFailure""#,
+            ),
+            (
+                serde_json::to_string(&HookEventNameSessionEnd).unwrap(),
+                r#""SessionEnd""#,
+            ),
+            (
+                serde_json::to_string(&HookEventNamePreCompact).unwrap(),
+                r#""PreCompact""#,
+            ),
+            (
+                serde_json::to_string(&HookEventNamePostCompact).unwrap(),
+                r#""PostCompact""#,
+            ),
+            (
+                serde_json::to_string(&HookEventNameNotification).unwrap(),
+                r#""Notification""#,
+            ),
+            (
+                serde_json::to_string(&HookEventNamePermissionRequest).unwrap(),
+                r#""PermissionRequest""#,
+            ),
+            (
+                serde_json::to_string(&HookEventNameSetup).unwrap(),
+                r#""Setup""#,
+            ),
+            (
+                serde_json::to_string(&HookEventNameSubagentStart).unwrap(),
+                r#""SubagentStart""#,
+            ),
+            (
+                serde_json::to_string(&HookEventNameCwdChanged).unwrap(),
+                r#""CwdChanged""#,
+            ),
+            (
+                serde_json::to_string(&HookEventNameFileChanged).unwrap(),
+                r#""FileChanged""#,
+            ),
+            (
+                serde_json::to_string(&HookEventNameWorktreeRemove).unwrap(),
+                r#""WorktreeRemove""#,
+            ),
         ] {
             assert_eq!(got, want);
         }
@@ -1499,10 +1531,22 @@ mod tests {
     #[test]
     fn deferred_batch_event_name_markers_round_trip() {
         for (got, want) in [
-            (serde_json::to_string(&HookEventNameConfigChange).unwrap(), r#""ConfigChange""#),
-            (serde_json::to_string(&HookEventNameInstructionsLoaded).unwrap(), r#""InstructionsLoaded""#),
-            (serde_json::to_string(&HookEventNameElicitation).unwrap(), r#""Elicitation""#),
-            (serde_json::to_string(&HookEventNameWorktreeCreate).unwrap(), r#""WorktreeCreate""#),
+            (
+                serde_json::to_string(&HookEventNameConfigChange).unwrap(),
+                r#""ConfigChange""#,
+            ),
+            (
+                serde_json::to_string(&HookEventNameInstructionsLoaded).unwrap(),
+                r#""InstructionsLoaded""#,
+            ),
+            (
+                serde_json::to_string(&HookEventNameElicitation).unwrap(),
+                r#""Elicitation""#,
+            ),
+            (
+                serde_json::to_string(&HookEventNameWorktreeCreate).unwrap(),
+                r#""WorktreeCreate""#,
+            ),
         ] {
             assert_eq!(got, want);
         }
@@ -1537,7 +1581,10 @@ mod tests {
             content: None,
         };
         let s = serde_json::to_string(&p).unwrap();
-        assert!(s.contains(r#""hook_event_name":"ElicitationResult""#), "{s}");
+        assert!(
+            s.contains(r#""hook_event_name":"ElicitationResult""#),
+            "{s}"
+        );
         assert!(s.contains(r#""mcp_server_name":"my-server""#), "{s}");
         assert!(s.contains(r#""action":"accept""#), "{s}");
         // Optional fields absent when None.
@@ -1605,7 +1652,10 @@ mod tests {
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains(r#""session_title":"My Project""#), "{s}");
         // When None, key is omitted.
-        let p2 = UserPromptSubmitPayload { session_title: None, ..p };
+        let p2 = UserPromptSubmitPayload {
+            session_title: None,
+            ..p
+        };
         let s2 = serde_json::to_string(&p2).unwrap();
         assert!(!s2.contains("session_title"), "{s2}");
     }
@@ -1630,7 +1680,10 @@ mod tests {
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains(r#""session_title":"New Chat""#), "{s}");
         // When None, key is omitted.
-        let p2 = SessionStartPayload { session_title: None, ..p };
+        let p2 = SessionStartPayload {
+            session_title: None,
+            ..p
+        };
         let s2 = serde_json::to_string(&p2).unwrap();
         assert!(!s2.contains("session_title"), "{s2}");
     }
@@ -1653,7 +1706,10 @@ mod tests {
             "Stop",
         )
         .unwrap();
-        assert!(r2.session_title.is_none(), "sessionTitle ignored for non-UserPromptSubmit");
+        assert!(
+            r2.session_title.is_none(),
+            "sessionTitle ignored for non-UserPromptSubmit"
+        );
     }
 
     #[test]
@@ -1680,7 +1736,10 @@ mod tests {
             "Stop",
         )
         .unwrap();
-        assert!(!r3.suppress_original_prompt, "suppressOriginalPrompt ignored for non-UserPromptSubmit");
+        assert!(
+            !r3.suppress_original_prompt,
+            "suppressOriginalPrompt ignored for non-UserPromptSubmit"
+        );
         // Default is false.
         let r4 = parse_response(
             r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit"}}"#,
@@ -1716,6 +1775,9 @@ mod tests {
             "Stop",
         )
         .unwrap();
-        assert!(r3.display_content.is_none(), "displayContent ignored for non-MessageDisplay");
+        assert!(
+            r3.display_content.is_none(),
+            "displayContent ignored for non-MessageDisplay"
+        );
     }
 }

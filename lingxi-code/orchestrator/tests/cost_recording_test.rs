@@ -184,7 +184,10 @@ async fn run_turn_stops_at_max_budget() {
     let orch = budget_orch(api, tracker, Some(1_000_000));
     let err = orch.run_turn("hi").await.expect_err("must stop on budget");
     assert!(
-        matches!(err, orchestrator::OrchestratorError::MaxBudgetReached { .. }),
+        matches!(
+            err,
+            orchestrator::OrchestratorError::MaxBudgetReached { .. }
+        ),
         "expected MaxBudgetReached, got {err:?}"
     );
 }

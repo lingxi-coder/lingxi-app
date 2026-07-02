@@ -332,7 +332,9 @@ mod tests {
 
         let id = protocol::ToolUseId::new();
         let result = serde_json::json!({"error": "file not found"});
-        stream.emit_tool_result(&id, "Read", "file not found", &result).await;
+        stream
+            .emit_tool_result(&id, "Read", "file not found", &result)
+            .await;
 
         let events = sink.events().await;
         assert_eq!(events.len(), 1);
@@ -477,7 +479,9 @@ mod tests {
         let sink = MockSink::arc();
         let stream = AdapterOutputStream::new(sink.clone());
 
-        stream.emit_thinking("done reasoning", Some("sig-abc")).await;
+        stream
+            .emit_thinking("done reasoning", Some("sig-abc"))
+            .await;
 
         let events = sink.events().await;
         assert_eq!(events.len(), 1);

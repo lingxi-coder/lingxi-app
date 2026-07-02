@@ -138,7 +138,9 @@ static LOCKS: Lazy<std::sync::Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
     Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
 
 fn lock_for(dir: &Path) -> Arc<Mutex<()>> {
-    let mut map = LOCKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut map = LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     map.entry(dir.to_path_buf())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
@@ -172,7 +174,8 @@ impl TodoStore {
     }
 
     fn task_path(&self, id: &str) -> PathBuf {
-        self.dir.join(format!("{}.json", sanitize_path_component(id)))
+        self.dir
+            .join(format!("{}.json", sanitize_path_component(id)))
     }
 
     fn hwm_path(&self) -> PathBuf {
@@ -216,7 +219,8 @@ impl TodoStore {
 
     /// Highest id ever assigned (max of existing files and the high-water mark).
     fn highest_id(&self) -> i64 {
-        self.highest_id_from_files().max(self.read_high_water_mark())
+        self.highest_id_from_files()
+            .max(self.read_high_water_mark())
     }
 
     fn write_task(&self, task: &TodoTask) -> std::io::Result<()> {
@@ -278,11 +282,7 @@ impl TodoStore {
     /// Apply `mutate` to the task under `id` (read → mutate → write), holding
     /// the list lock. Port of `updateTask`: returns the updated task, or `None`
     /// if the task does not exist / cannot be read. `id` is always preserved.
-    pub async fn update(
-        &self,
-        id: &str,
-        mutate: impl FnOnce(&mut TodoTask),
-    ) -> Option<TodoTask> {
+    pub async fn update(&self, id: &str, mutate: impl FnOnce(&mut TodoTask)) -> Option<TodoTask> {
         let _guard = self.lock.lock().await;
         let content = std::fs::read_to_string(self.task_path(id)).ok()?;
         let mut task = serde_json::from_str::<TodoTask>(&content).ok()?;
@@ -384,11 +384,21 @@ mod tests {
     async fn create_assigns_incrementing_decimal_ids() {
         let (store, dir) = temp_store();
         let a = store
-            .create(TodoTask::new("first".into(), "do first".into(), None, Map::new()))
+            .create(TodoTask::new(
+                "first".into(),
+                "do first".into(),
+                None,
+                Map::new(),
+            ))
             .await
             .unwrap();
         let b = store
-            .create(TodoTask::new("second".into(), "do second".into(), None, Map::new()))
+            .create(TodoTask::new(
+                "second".into(),
+                "do second".into(),
+                None,
+                Map::new(),
+            ))
             .await
             .unwrap();
         assert_eq!(a, "1");
@@ -428,12 +438,7 @@ mod tests {
         let (store, dir) = temp_store();
         for i in 0..3 {
             store
-                .create(TodoTask::new(
-                    format!("s{i}"),
-                    "d".into(),
-                    None,
-                    Map::new(),
-                ))
+                .create(TodoTask::new(format!("s{i}"), "d".into(), None, Map::new()))
                 .await
                 .unwrap();
         }

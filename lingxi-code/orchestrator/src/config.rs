@@ -338,7 +338,10 @@ mod tests {
         );
         assert_eq!(back.max_budget_nano_usd, Some(5_000_000_000));
         assert!(back.transcript_classifier_enabled);
-        assert_eq!(back.refusal_fallback_model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(
+            back.refusal_fallback_model.as_deref(),
+            Some("claude-sonnet-4-6")
+        );
         assert_eq!(back.user_email.as_deref(), Some("u@example.com"));
     }
 
@@ -351,7 +354,9 @@ mod tests {
     fn default_refusal_fallback_model_is_none() {
         // Finding #80: the parity default is a strict no-op — a `refusal`
         // response keeps today's terminal/Continue behavior.
-        assert!(OrchestratorConfig::default().refusal_fallback_model.is_none());
+        assert!(OrchestratorConfig::default()
+            .refusal_fallback_model
+            .is_none());
     }
 
     #[test]

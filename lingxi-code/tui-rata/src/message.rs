@@ -11,7 +11,14 @@ use tui_core::render::markdown::{render_with_width, MarkdownTheme};
 use tui_core::render::{agent_color_from_name, SpanStyle, StyleColor, StyledLine, StyledSpan};
 use tui_core::theme::{Theme, ThemeName};
 
-const ASSISTANT_MARKER: &str = "● ";
+/// Assistant dot marker (iocraft `assistant_text::MARKER` parity): `⏺ `
+/// (U+23FA) on macOS — renders as the reddish record glyph — `● ` (U+25CF)
+/// elsewhere, each + a trailing space.
+const ASSISTANT_MARKER: &str = if cfg!(target_os = "macos") {
+    "\u{23FA} "
+} else {
+    "\u{25CF} "
+};
 const CONT_INDENT: &str = "  ";
 const DEFAULT_WIDTH: usize = 80;
 

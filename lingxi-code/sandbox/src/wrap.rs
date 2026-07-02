@@ -14,9 +14,9 @@
 
 use crate::runtime_config::{Platform, SandboxRuntimeConfig};
 use sandbox_runtime::fs_args::{ReadConfig, WriteConfig};
+use sandbox_runtime::get_default_write_paths;
 use sandbox_runtime::macos::{generate_sandbox_profile, ProfileParams};
 use sandbox_runtime::path_utils::remove_trailing_glob_suffix;
-use sandbox_runtime::get_default_write_paths;
 use thiserror::Error;
 
 /// Errors produced by [`wrap_with_sandbox`].
@@ -333,9 +333,9 @@ mod tests {
     #[test]
     fn sbpl_mach_allowlist_is_present() {
         let p = generate_sbpl_profile_with(&SandboxRuntimeConfig::default(), "TAG");
-        assert!(p.contains(
-            "(allow mach-lookup\n  (global-name \"com.apple.audio.systemsoundserver\")"
-        ));
+        assert!(
+            p.contains("(allow mach-lookup\n  (global-name \"com.apple.audio.systemsoundserver\")")
+        );
         assert!(p.contains("(global-name \"com.apple.coreservices.launchservicesd\")\n)"));
     }
 
@@ -377,13 +377,18 @@ mod tests {
         cfg.filesystem.deny_read = vec!["/x".into()];
         cfg.filesystem.allow_read = vec!["/x/y".into()];
         let p = generate_sbpl_profile_with(&cfg, "TAG");
-        let deny = p.find("(deny file-read*\n  (subpath \"/x\")").expect("deny present");
+        let deny = p
+            .find("(deny file-read*\n  (subpath \"/x\")")
+            .expect("deny present");
         let allow = p
             .find("(allow file-read*\n  (subpath \"/x/y\")")
             .expect("re-allow present");
         assert!(deny < allow, "deny must precede re-allow");
         // directory-metadata allow appears once a read deny exists (k0d).
-        assert!(p.contains("(allow file-read-metadata\n  (vnode-type DIRECTORY))"), "{p}");
+        assert!(
+            p.contains("(allow file-read-metadata\n  (vnode-type DIRECTORY))"),
+            "{p}"
+        );
     }
 
     #[test]
@@ -393,12 +398,24 @@ mod tests {
         let p = generate_sbpl_profile_with(&cfg, "TAG");
         // The base writable set (claude-code TLt) is ALWAYS prepended so ordinary
         // shell I/O works — `/dev/null`, `/dev/stdout`, `/tmp/claude`, …
-        assert!(p.contains("(allow file-write*\n  (subpath \"/dev/null\")"), "{p}");
-        assert!(p.contains("(allow file-write*\n  (subpath \"/dev/stdout\")"), "{p}");
+        assert!(
+            p.contains("(allow file-write*\n  (subpath \"/dev/null\")"),
+            "{p}"
+        );
+        assert!(
+            p.contains("(allow file-write*\n  (subpath \"/dev/stdout\")"),
+            "{p}"
+        );
         // The user allow path is present too.
-        assert!(p.contains("(allow file-write*\n  (subpath \"/work\")"), "{p}");
+        assert!(
+            p.contains("(allow file-write*\n  (subpath \"/work\")"),
+            "{p}"
+        );
         // mandatory git-config write-deny present by default; move-blocking pairs.
-        assert!(p.contains(".git/config"), "git-config must be denied by default:\n{p}");
+        assert!(
+            p.contains(".git/config"),
+            "git-config must be denied by default:\n{p}"
+        );
         assert!(p.contains("(deny file-write-unlink"), "{p}");
         assert!(p.contains("(deny file-write-create"), "{p}");
     }
@@ -408,8 +425,14 @@ mod tests {
         // REGRESSION GUARD: an empty/default config must NOT yield bare
         // `(allow file-write*)` (writes everywhere). It restricts to the base set.
         let p = generate_sbpl_profile_with(&SandboxRuntimeConfig::default(), "TAG");
-        assert!(!p.contains("; File write\n(allow file-write*)\n"), "default must not be write-open:\n{p}");
-        assert!(p.contains("(allow file-write*\n  (subpath \"/dev/null\")"), "{p}");
+        assert!(
+            !p.contains("; File write\n(allow file-write*)\n"),
+            "default must not be write-open:\n{p}"
+        );
+        assert!(
+            p.contains("(allow file-write*\n  (subpath \"/dev/null\")"),
+            "{p}"
+        );
     }
 
     #[test]
@@ -437,7 +460,10 @@ mod tests {
         let mut cfg = SandboxRuntimeConfig::default();
         cfg.network.allow_mach_lookup = vec!["com.foo.bar".into(), "com.foo.*".into()];
         let p = generate_sbpl_profile_with(&cfg, "TAG");
-        assert!(p.contains("(allow mach-lookup (global-name \"com.foo.bar\"))"), "{p}");
+        assert!(
+            p.contains("(allow mach-lookup (global-name \"com.foo.bar\"))"),
+            "{p}"
+        );
         assert!(
             p.contains("(allow mach-lookup (global-name-prefix \"com.foo.\"))"),
             "{p}"
@@ -464,8 +490,10 @@ mod tests {
     #[test]
     fn bwrap_creates_a_user_namespace() {
         let w = wrap_linux_bwrap("true", &SandboxRuntimeConfig::default());
-        assert!(w.contains("--unshare-user-try"),
-            "bwrap must request a userns (degrading) so it can create pid/net ns unprivileged: {w}");
+        assert!(
+            w.contains("--unshare-user-try"),
+            "bwrap must request a userns (degrading) so it can create pid/net ns unprivileged: {w}"
+        );
     }
 
     #[test]

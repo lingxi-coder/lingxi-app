@@ -28,6 +28,8 @@ image = { version = "0.25.5", default-features = false, features = ["png", "jpeg
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde_json = { workspace = true }
+# Display-column width for CJK/wide-char-aware cursor positioning in the composer.
+unicode-width = "=0.1.14"
 
 [dev-dependencies]
 protocol = { path = "../protocol" }

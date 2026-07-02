@@ -22,27 +22,11 @@
 /// on interpreter additions. 1:1 with `dangerousPatterns.ts:18-42`.
 pub const CROSS_PLATFORM_CODE_EXEC: &[&str] = &[
     // Interpreters
-    "python",
-    "python3",
-    "python2",
-    "node",
-    "deno",
-    "tsx",
-    "ruby",
-    "perl",
-    "php",
-    "lua",
+    "python", "python3", "python2", "node", "deno", "tsx", "ruby", "perl", "php", "lua",
     // Package runners
-    "npx",
-    "bunx",
-    "npm run",
-    "yarn run",
-    "pnpm run",
-    "bun run",
+    "npx", "bunx", "npm run", "yarn run", "pnpm run", "bun run",
     // Shells reachable from both (Git Bash / WSL on Windows, native on Unix)
-    "bash",
-    "sh",
-    // Remote arbitrary-command wrapper (native OpenSSH on Win10+)
+    "bash", "sh", // Remote arbitrary-command wrapper (native OpenSSH on Win10+)
     "ssh",
 ];
 

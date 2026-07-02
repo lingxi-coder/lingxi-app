@@ -1,3 +1,5 @@
+use crate::feature_for_key;
+use crate::unstable_features_warning;
 use crate::Feature;
 use crate::FeatureConfigSource;
 use crate::FeatureOverrides;
@@ -5,8 +7,6 @@ use crate::FeatureToml;
 use crate::Features;
 use crate::FeaturesToml;
 use crate::Stage;
-use crate::feature_for_key;
-use crate::unstable_features_warning;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 use toml::Table;

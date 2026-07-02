@@ -27,9 +27,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bridge::wire::Frame;
-use bridge::{
-    BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION,
-};
+use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
 use bridge_server::server::{BridgeConnection, TurnDriver};
 use client_adapter::AdapterPermissionGate;
 use client_protocol::commands::ClientCommand;
@@ -176,7 +174,10 @@ async fn matching_versions_accept_handshake() {
 
     match next_frame(&mut ws).await {
         Frame::Response(resp) => {
-            assert!(resp.error.is_none(), "matching versions must NOT be refused");
+            assert!(
+                resp.error.is_none(),
+                "matching versions must NOT be refused"
+            );
             let result = resp.result.expect("accept must carry a ServerHello result");
             let server_hello: bridge::ServerHello =
                 serde_json::from_value(result).expect("ServerHello in result");
@@ -314,12 +315,15 @@ async fn refused_connection_does_not_route_commands() {
 
     // Now attempt to drive a turn on the refused connection. A compliant server
     // MUST NOT route it to the engine.
-    send_command(&mut ws, &ClientCommand::SendPrompt {
-        text: "drive a turn".into(),
-        prompt_mode: None,
-        images: Vec::new(),
-        turn_id: None,
-    })
+    send_command(
+        &mut ws,
+        &ClientCommand::SendPrompt {
+            text: "drive a turn".into(),
+            prompt_mode: None,
+            images: Vec::new(),
+            turn_id: None,
+        },
+    )
     .await;
 
     // Give the server task ample time to (incorrectly) spawn a turn if the guard

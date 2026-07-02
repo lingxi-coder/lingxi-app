@@ -504,7 +504,10 @@ async fn enable_materializes_skill_outputstyle_mcp_lsp_into_live_registries() {
             .expect("plugin MCP server should be materialized under plugin:fullplugin:echo");
         let is_inert_seed = matches!(
             state,
-            mcp::McpConnectionState::Disconnected { last_error: None, .. }
+            mcp::McpConnectionState::Disconnected {
+                last_error: None,
+                ..
+            }
         );
         assert!(
             !is_inert_seed,
@@ -522,7 +525,10 @@ async fn enable_materializes_skill_outputstyle_mcp_lsp_into_live_registries() {
     manager.disable(&id).await.expect("disable should unload");
     {
         let reg = skill_registry.read().await;
-        assert!(reg.get("fullplugin:greeter").is_none(), "skill removed on unload");
+        assert!(
+            reg.get("fullplugin:greeter").is_none(),
+            "skill removed on unload"
+        );
     }
     {
         let reg = output_style_registry.read().await;
@@ -643,7 +649,10 @@ async fn install_git_arm_clones_materializes_and_registers() {
             found_manifest = true;
         }
     }
-    assert!(found_manifest, "plugin manifest should be materialized under {cache_root:?}");
+    assert!(
+        found_manifest,
+        "plugin manifest should be materialized under {cache_root:?}"
+    );
 
     // The plugin's command was registered via install→enable (namespaced).
     assert!(
@@ -683,7 +692,11 @@ async fn install_git_arm_malicious_version_cannot_escape_cache() {
         .into_iter()
         .filter(|p| p.ends_with(".lingxi-plugin/plugin.json"))
         .collect();
-    assert_eq!(manifests.len(), 1, "exactly one manifest materialized: {manifests:?}");
+    assert_eq!(
+        manifests.len(),
+        1,
+        "exactly one manifest materialized: {manifests:?}"
+    );
     assert!(
         manifests[0].contains("/evil/-/.lingxi-plugin/plugin.json"),
         "version must be neutralized to '-' and stay nested; got {}",
@@ -836,7 +849,10 @@ async fn install_marketplace_arm_rejects_symlink_escape() {
     let leaked = walkdir(&install_root.join("cache"))
         .into_iter()
         .any(|p| p.ends_with("id_rsa"));
-    assert!(!leaked, "the symlink target's files must NOT be copied into the cache");
+    assert!(
+        !leaked,
+        "the symlink target's files must NOT be copied into the cache"
+    );
 }
 
 /// Write a `.mcpb` (zip) bundle of `(entry_name, contents)` to `dest`.
@@ -864,8 +880,14 @@ async fn install_mcpb_arm_unpacks_materializes_and_registers() {
     write_mcpb(
         &bundle,
         &[
-            (".lingxi-plugin/plugin.json", r#"{"name":"bundleplugin","version":"1.0.0"}"#),
-            ("commands/zip.md", "---\ndescription: from a bundle\n---\nZipped command.\n"),
+            (
+                ".lingxi-plugin/plugin.json",
+                r#"{"name":"bundleplugin","version":"1.0.0"}"#,
+            ),
+            (
+                "commands/zip.md",
+                "---\ndescription: from a bundle\n---\nZipped command.\n",
+            ),
         ],
     );
     let install_root = tmp.path().join("plugins");
@@ -881,7 +903,11 @@ async fn install_mcpb_arm_unpacks_materializes_and_registers() {
         .expect(".mcpb install should unpack + materialize + enable");
     assert!(!id.to_string().is_empty());
     assert!(
-        command_registry.read().await.resolve("bundleplugin:zip").is_some(),
+        command_registry
+            .read()
+            .await
+            .resolve("bundleplugin:zip")
+            .is_some(),
         ".mcpb plugin's command should be registered as bundleplugin:zip"
     );
 }
@@ -905,7 +931,10 @@ async fn install_mcpb_arm_rejects_path_traversal() {
         format!("{err}").contains("Path traversal attempt detected"),
         "got: {err}"
     );
-    assert!(!tmp.path().join("escape.txt").exists(), "no file escaped the extract dir");
+    assert!(
+        !tmp.path().join("escape.txt").exists(),
+        "no file escaped the extract dir"
+    );
 }
 
 #[tokio::test]
@@ -915,7 +944,10 @@ async fn install_mcpb_arm_rejects_hash_mismatch() {
     let bundle = tmp.path().join("p.mcpb");
     write_mcpb(
         &bundle,
-        &[(".lingxi-plugin/plugin.json", r#"{"name":"p","version":"1.0.0"}"#)],
+        &[(
+            ".lingxi-plugin/plugin.json",
+            r#"{"name":"p","version":"1.0.0"}"#,
+        )],
     );
     let (manager, _) = make_manager(&tmp.path().join("plugins"), &tmp.path().join("secrets")).await;
 
@@ -988,7 +1020,10 @@ async fn install_records_to_installed_plugins_json_and_is_rediscovered() {
 
     // The durable record was written.
     let recorded = install_root.join("installed_plugins.json");
-    assert!(recorded.exists(), "installed_plugins.json should be written");
+    assert!(
+        recorded.exists(),
+        "installed_plugins.json should be written"
+    );
     let json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&recorded).unwrap()).unwrap();
     assert_eq!(json["version"], 2, "V2 schema");
@@ -996,14 +1031,20 @@ async fn install_records_to_installed_plugins_json_and_is_rediscovered() {
     // A FRESH manager (simulating a relaunch) re-discovers the plugin from the
     // record alone — resolving its exact cache dir, no probing.
     let rediscovered = plugin::discover_recorded_plugins(&install_root).await;
-    assert_eq!(rediscovered.len(), 1, "exactly one recorded plugin re-discovered");
+    assert_eq!(
+        rediscovered.len(),
+        1,
+        "exactly one recorded plugin re-discovered"
+    );
     assert_eq!(rediscovered[0].1.name, "durableplugin");
     assert_eq!(rediscovered[0].1.version, "2.1.0");
 
     // And re-enabling it on a fresh manager materializes its command again.
     let (m2, cmd2) = make_manager(&install_root, &tmp.path().join("secrets2")).await;
     let (id, manifest, dir) = rediscovered.into_iter().next().unwrap();
-    m2.enable(&id, manifest, dir).await.expect("re-enable from record");
+    m2.enable(&id, manifest, dir)
+        .await
+        .expect("re-enable from record");
     assert!(
         cmd2.read().await.resolve("durableplugin:hello").is_some(),
         "re-discovered plugin's command should register"

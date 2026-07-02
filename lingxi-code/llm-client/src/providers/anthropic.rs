@@ -1,7 +1,7 @@
 use crate::{
     normalize_anthropic_usage, ContentBlock, ContentDelta, LlmError, LlmEvent, LlmRequest,
-    LlmResponse, MessageDeltaPayload, ProviderRequest, ProviderResponse,
-    RawStreamFrame, StreamDecoder, ToolDeclaration, WireCodec,
+    LlmResponse, MessageDeltaPayload, ProviderRequest, ProviderResponse, RawStreamFrame,
+    StreamDecoder, ToolDeclaration, WireCodec,
 };
 
 use std::time::Duration;
@@ -31,17 +31,25 @@ impl AnthropicMessagesCodec {
     }
 
     fn count_tokens_url(&self) -> String {
-        format!("{}/v1/messages/count_tokens", self.base_url.trim_end_matches('/'))
+        format!(
+            "{}/v1/messages/count_tokens",
+            self.base_url.trim_end_matches('/')
+        )
     }
 
     /// Encode a `count_tokens` request (same prompt shape, no generation
     /// controls).
-    pub fn encode_count_tokens_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
+    pub fn encode_count_tokens_request(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<ProviderRequest, LlmError> {
         let body = base_body(request)?;
-        let mut provider_request = ProviderRequest::post_json(self.count_tokens_url(), Value::Object(body));
-        provider_request
-            .headers
-            .insert("anthropic-version".to_string(), self.anthropic_version.clone());
+        let mut provider_request =
+            ProviderRequest::post_json(self.count_tokens_url(), Value::Object(body));
+        provider_request.headers.insert(
+            "anthropic-version".to_string(),
+            self.anthropic_version.clone(),
+        );
         provider_request
             .headers
             .insert("content-type".to_string(), "application/json".to_string());
@@ -49,7 +57,10 @@ impl AnthropicMessagesCodec {
     }
 
     /// Decode a `count_tokens` response into the input-token count.
-    pub fn decode_count_tokens_response(&self, response: &ProviderResponse) -> Result<u64, LlmError> {
+    pub fn decode_count_tokens_response(
+        &self,
+        response: &ProviderResponse,
+    ) -> Result<u64, LlmError> {
         if response.status >= 400 {
             return Err(decode_error_response(response));
         }
@@ -81,7 +92,14 @@ impl WireCodec for AnthropicMessagesCodec {
         if !request.stop_sequences.is_empty() {
             body.insert(
                 "stop_sequences".to_string(),
-                Value::Array(request.stop_sequences.iter().cloned().map(Value::String).collect()),
+                Value::Array(
+                    request
+                        .stop_sequences
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
             );
         }
 
@@ -104,10 +122,12 @@ impl WireCodec for AnthropicMessagesCodec {
             );
         }
 
-        let mut provider_request = ProviderRequest::post_json(self.messages_url(), Value::Object(body));
-        provider_request
-            .headers
-            .insert("anthropic-version".to_string(), self.anthropic_version.clone());
+        let mut provider_request =
+            ProviderRequest::post_json(self.messages_url(), Value::Object(body));
+        provider_request.headers.insert(
+            "anthropic-version".to_string(),
+            self.anthropic_version.clone(),
+        );
         provider_request
             .headers
             .insert("content-type".to_string(), "application/json".to_string());
@@ -180,7 +200,8 @@ fn base_body(request: &LlmRequest) -> Result<serde_json::Map<String, Value>, Llm
             // sent via `client.beta.messages.create` + STRUCTURED_OUTPUTS_BETA_HEADER.
             message: "AnthropicMessagesCodec: response_format is not encoded (Anthropic's \
                       structured output uses a beta-only output_config key, not the stable \
-                      /v1/messages API — see sideQuery.ts:190)".to_string(),
+                      /v1/messages API — see sideQuery.ts:190)"
+                .to_string(),
         });
     }
 
@@ -283,7 +304,10 @@ fn with_cache_control(mut block: Value, cache_control: Option<crate::CacheContro
 
 fn encode_content_block(block: &ContentBlock) -> Result<Value, LlmError> {
     match block {
-        ContentBlock::Text { text, cache_control } => Ok(with_cache_control(
+        ContentBlock::Text {
+            text,
+            cache_control,
+        } => Ok(with_cache_control(
             serde_json::json!({"type": "text", "text": text}),
             *cache_control,
         )),
@@ -301,7 +325,13 @@ fn encode_content_block(block: &ContentBlock) -> Result<Value, LlmError> {
             "name": name,
             "input": input,
         })),
-        ContentBlock::ToolResult { tool_call_id, output, is_error, cache_control, cache_reference } => {
+        ContentBlock::ToolResult {
+            tool_call_id,
+            output,
+            is_error,
+            cache_control,
+            cache_reference,
+        } => {
             let mut block = serde_json::json!({
                 "type": "tool_result",
                 "tool_use_id": tool_call_id,
@@ -338,7 +368,8 @@ fn encode_content_block(block: &ContentBlock) -> Result<Value, LlmError> {
         ContentBlock::Reasoning { text, signature } => {
             let Some(signature) = signature else {
                 return Err(LlmError::InvalidRequest {
-                    message: "Anthropic thinking blocks require a signature to round-trip".to_string(),
+                    message: "Anthropic thinking blocks require a signature to round-trip"
+                        .to_string(),
                 });
             };
             Ok(serde_json::json!({
@@ -375,7 +406,8 @@ fn encode_content_block(block: &ContentBlock) -> Result<Value, LlmError> {
             message: "AnthropicMessagesCodec does not encode connector_text blocks".to_string(),
         }),
         ContentBlock::AdvisorToolResult { .. } => Err(LlmError::InvalidRequest {
-            message: "AnthropicMessagesCodec does not encode advisor_tool_result blocks".to_string(),
+            message: "AnthropicMessagesCodec does not encode advisor_tool_result blocks"
+                .to_string(),
         }),
     }
 }
@@ -561,9 +593,12 @@ fn decode_stream_event(value: &Value) -> Result<Vec<LlmEvent>, LlmError> {
             response: Box::new(decode_message_start(value)?),
         }]),
         Some("content_block_start") => {
-            let block_value = value.get("content_block").ok_or_else(|| LlmError::InvalidRequest {
-                message: "Anthropic content_block_start missing content_block".to_string(),
-            })?;
+            let block_value =
+                value
+                    .get("content_block")
+                    .ok_or_else(|| LlmError::InvalidRequest {
+                        message: "Anthropic content_block_start missing content_block".to_string(),
+                    })?;
             match decode_content_block(block_value)? {
                 Some(content_block) => Ok(vec![LlmEvent::ContentBlockStart {
                     index: u32_field(value, "index")?,
@@ -595,7 +630,9 @@ fn decode_stream_event(value: &Value) -> Result<Vec<LlmEvent>, LlmError> {
                     .and_then(Value::as_str)
                     .map(ToString::to_string),
                 stop_details: decode_stop_details(
-                    value.get("delta").and_then(|delta| delta.get("stop_details")),
+                    value
+                        .get("delta")
+                        .and_then(|delta| delta.get("stop_details")),
                 ),
             },
             usage: value.get("usage").map(normalize_anthropic_usage),

@@ -18,7 +18,8 @@ use hooks::response::{HookOutcome, HookResponse, HookResult};
 use hooks::HookExecutorImpl;
 use llm_client::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
-    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
@@ -172,7 +173,10 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
     }
 }
 
-async fn exec_with(handler: Arc<dyn BuiltinHookHandler>, handler_id: &str) -> Arc<HookExecutorImpl> {
+async fn exec_with(
+    handler: Arc<dyn BuiltinHookHandler>,
+    handler_id: &str,
+) -> Arc<HookExecutorImpl> {
     let registry = Arc::new(RwLock::new(HookRegistry::new()));
     registry
         .write()
@@ -254,8 +258,10 @@ async fn pre_tool_use_additional_context_is_a_separate_system_reminder_message()
     // as claude-code's `hook_additional_context` attachment renders it.
     let expected = "<system-reminder>\nPreToolUse:Echo hook additional context: USE THE NEW API\n</system-reminder>";
     let found_separate = s.history.iter().any(|m| match m {
-        ConversationMessage::User { content, .. } => content.iter().any(|b| matches!(
-            b, ContentBlock::Text { text } if text == expected)),
+        ConversationMessage::User { content, .. } => content.iter().any(|b| {
+            matches!(
+            b, ContentBlock::Text { text } if text == expected)
+        }),
         _ => false,
     });
     assert!(

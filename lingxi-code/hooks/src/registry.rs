@@ -531,9 +531,9 @@ impl HookRegistry {
                 Some(load_reason_wire(*load_reason).to_string())
             }
             // claude `i = path.basename(r.file_path)`.
-            HookEvent::FileChanged { path, .. } => path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned()),
+            HookEvent::FileChanged { path, .. } => {
+                path.file_name().map(|n| n.to_string_lossy().into_owned())
+            }
             // Remaining query-deriving events whose port variant lacks the
             // field claude reads (event-schema gap): `Setup`→`trigger` and
             // `PostCompact`→`trigger`. They fall here and skip the matcher
@@ -587,7 +587,10 @@ impl HookRegistry {
     /// bypass it. [`crate::HookExecutor::Builtin`] is the in-process analogue of
     /// the latter, so it is the sole exempt arm.
     fn if_condition_applies(hook: &HookDefinition) -> bool {
-        !matches!(hook.executor, crate::definition::HookExecutor::Builtin { .. })
+        !matches!(
+            hook.executor,
+            crate::definition::HookExecutor::Builtin { .. }
+        )
     }
 
     /// Whether ANY registered hook (across every bucket) subscribes to
@@ -786,7 +789,11 @@ mod all_hooks_tests {
     fn http_hooks_dropped_for_sessionstart_and_setup_only() {
         let mut r = HookRegistry::new();
         r.register(hk_http("http-ss", HookEventType::SessionStart));
-        r.register(hk("builtin-ss", HookEventType::SessionStart, HookSource::User));
+        r.register(hk(
+            "builtin-ss",
+            HookEventType::SessionStart,
+            HookSource::User,
+        ));
         r.register(hk_http("http-setup", HookEventType::Setup));
         r.register(hk_http("http-pre", HookEventType::PreToolUse));
 
@@ -798,10 +805,17 @@ mod all_hooks_tests {
             &HookContext::default(),
         );
         let ss_names: Vec<&str> = ss.iter().map(|h| h.name.as_str()).collect();
-        assert_eq!(ss_names, vec!["builtin-ss"], "HTTP hook dropped from SessionStart");
+        assert_eq!(
+            ss_names,
+            vec!["builtin-ss"],
+            "HTTP hook dropped from SessionStart"
+        );
 
         let setup = r.match_event(&HookEvent::Setup, &HookContext::default());
-        assert!(setup.is_empty(), "HTTP hook dropped from Setup; got {setup:?}");
+        assert!(
+            setup.is_empty(),
+            "HTTP hook dropped from Setup; got {setup:?}"
+        );
 
         // Non-session event: HTTP hook is kept.
         let pre = r.match_event(
@@ -813,7 +827,10 @@ mod all_hooks_tests {
             &HookContext::default(),
         );
         let pre_names: Vec<&str> = pre.iter().map(|h| h.name.as_str()).collect();
-        assert!(pre_names.contains(&"http-pre"), "HTTP hook fires for PreToolUse; got {pre_names:?}");
+        assert!(
+            pre_names.contains(&"http-pre"),
+            "HTTP hook fires for PreToolUse; got {pre_names:?}"
+        );
     }
 
     #[test]
@@ -865,9 +882,7 @@ mod all_hooks_tests {
         );
         assert_eq!(on_subagent_stop.len(), 1, "Stop retargeted to SubagentStop");
         let on_stop = r.match_event(
-            &HookEvent::Stop {
-                reason: "x".into(),
-            },
+            &HookEvent::Stop { reason: "x".into() },
             &HookContext::default(),
         );
         assert!(on_stop.is_empty(), "no longer fires on plain Stop");
@@ -880,13 +895,15 @@ mod all_hooks_tests {
         let agent = AgentId::new();
         r.register_agent_hooks(
             agent,
-            &[hk("skill-stop", HookEventType::Stop, HookSource::FrontMatter)],
+            &[hk(
+                "skill-stop",
+                HookEventType::Stop,
+                HookSource::FrontMatter,
+            )],
             false,
         );
         let on_stop = r.match_event(
-            &HookEvent::Stop {
-                reason: "x".into(),
-            },
+            &HookEvent::Stop { reason: "x".into() },
             &HookContext::default(),
         );
         assert_eq!(on_stop.len(), 1, "Stop preserved when is_agent=false");
@@ -1062,7 +1079,10 @@ mod all_hooks_tests {
             .iter()
             .map(|h| h.name.as_str())
             .collect();
-        assert_eq!(excluded, general, "no excluded frontmatter ⇒ identical to general");
+        assert_eq!(
+            excluded, general,
+            "no excluded frontmatter ⇒ identical to general"
+        );
         assert_eq!(excluded, vec!["session-stop"]);
     }
 
@@ -1299,7 +1319,10 @@ mod match_event_matcher_tests {
             Some("Bash"),
             "Bash(git push:*)",
         ));
-        let pushing = pre_tool_use_in("Bash", serde_json::json!({ "command": "git push origin x" }));
+        let pushing = pre_tool_use_in(
+            "Bash",
+            serde_json::json!({ "command": "git push origin x" }),
+        );
         assert_eq!(matched_names(&reg, &pushing), vec!["guard"]);
         let status = pre_tool_use_in("Bash", serde_json::json!({ "command": "git status" }));
         assert!(matched_names(&reg, &status).is_empty());
@@ -1461,7 +1484,11 @@ mod match_event_matcher_tests {
     fn session_start_event_filters_by_source() {
         // SessionStart derives its query from the `source` trigger string.
         let mut reg = HookRegistry::new();
-        reg.register(hook_with("boot", HookEventType::SessionStart, Some("startup")));
+        reg.register(hook_with(
+            "boot",
+            HookEventType::SessionStart,
+            Some("startup"),
+        ));
         let start = |src: &str| HookEvent::SessionStart {
             session_id: SessionId::new(),
             source: src.into(),

@@ -15,9 +15,7 @@
 //!    injected — today's behavior unchanged.
 
 use async_trait::async_trait;
-use orchestrator::prompt::mid_turn_input::{
-    CancelReason, CancelReasonFlag, MidTurnInputSource,
-};
+use orchestrator::prompt::mid_turn_input::{CancelReason, CancelReasonFlag, MidTurnInputSource};
 use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -81,7 +79,9 @@ impl Tool for CancelBlockingTool {
         _ctx: &tool_api::context::ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
-            reason: permission::PermissionDecisionReason::Other { reason: "test".into() },
+            reason: permission::PermissionDecisionReason::Other {
+                reason: "test".into(),
+            },
             updated_input: None,
             update_destination: None,
             metadata: permission::result::PermissionMetadata::default(),

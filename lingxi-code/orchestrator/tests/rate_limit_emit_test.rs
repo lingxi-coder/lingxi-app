@@ -48,10 +48,7 @@ fn sample_info() -> RateLimitInfo {
     }
 }
 
-fn build_orch(
-    api: Arc<MockApiClient>,
-    output: Arc<MockOutputStream>,
-) -> ConversationOrchestrator {
+fn build_orch(api: Arc<MockApiClient>, output: Arc<MockOutputStream>) -> ConversationOrchestrator {
     ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         api,
@@ -281,7 +278,11 @@ async fn emits_raw_utilization_on_first_snapshot() {
     orch.run_turn("hello").await.expect("turn 1");
 
     let events = raw_utilization_events(&output.snapshot().await);
-    assert_eq!(events.len(), 1, "exactly one RawUtilization event: {events:?}");
+    assert_eq!(
+        events.len(),
+        1,
+        "exactly one RawUtilization event: {events:?}"
+    );
     let OutputEvent::RawUtilization {
         five_hour_utilization,
         five_hour_resets_at,

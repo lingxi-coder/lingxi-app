@@ -1,9 +1,7 @@
 //! Extracted tests for `platforms::common::llm_config`.
 
 use super::*;
-use llm_client::{
-    DefaultLlmClient, LlmError, PricingConfig, ProtocolFamily, ProviderId,
-};
+use llm_client::{DefaultLlmClient, LlmError, PricingConfig, ProtocolFamily, ProviderId};
 
 /// Build a test config with `AuthStrategy::None` + `CredentialConfig::None`
 /// so `prepare()` never attempts a credential lookup (no env var needed).
@@ -1939,7 +1937,10 @@ fn supported_provider_kinds_parse_to_expected_protocols() {
         ProtocolFamily::BedrockClaude
     );
     assert_eq!(by_name("bedrock-api").auth, AuthStrategy::AwsSigV4);
-    assert_eq!(by_name("bedrock-api").provider_id, ProviderId::BedrockClaude);
+    assert_eq!(
+        by_name("bedrock-api").provider_id,
+        ProviderId::BedrockClaude
+    );
     assert_eq!(
         by_name("bedrock-api")
             .signing

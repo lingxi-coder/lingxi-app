@@ -294,8 +294,10 @@ async fn full_name_normalizes_invalid_server_name_and_round_trips() {
     // display (claude-code keeps client.name raw, normalizing only the FQN).
     let captured = Arc::new(Mutex::new(None::<String>));
     let captured_clone = captured.clone();
-    let (client, _cap, _h) =
-        make_client_against_mock("my.server", std::path::PathBuf::from("/tmp/work"), move |req| {
+    let (client, _cap, _h) = make_client_against_mock(
+        "my.server",
+        std::path::PathBuf::from("/tmp/work"),
+        move |req| {
             let id = req["id"].clone();
             let method = req["method"].as_str().unwrap_or("");
             if method == "tools/call" {
@@ -312,12 +314,15 @@ async fn full_name_normalizes_invalid_server_name_and_round_trips() {
                 "tools/list" => json!({
                     "tools": [ { "name": "read_file", "description": "Read", "inputSchema": {} } ]
                 }),
-                "tools/call" => json!({ "content": [{ "type": "text", "text": "ok" }], "isError": false }),
+                "tools/call" => {
+                    json!({ "content": [{ "type": "text", "text": "ok" }], "isError": false })
+                }
                 _ => return None,
             };
             Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
-        })
-        .await;
+        },
+    )
+    .await;
 
     client.initialize().await.expect("init");
     let tools = client.list_tools().await.expect("list");
@@ -680,7 +685,9 @@ async fn read_resource_rich_returns_multi_content_with_blob_persisted() {
         .as_deref()
         .expect("blob persisted to disk");
     assert_eq!(
-        std::path::Path::new(saved).extension().and_then(|e| e.to_str()),
+        std::path::Path::new(saved)
+            .extension()
+            .and_then(|e| e.to_str()),
         Some("pdf"),
         "mime-derived extension: {saved}"
     );
@@ -696,10 +703,15 @@ async fn read_resource_rich_returns_multi_content_with_blob_persisted() {
     // text carries the getBinaryBlobSavedMessage line with the server name.
     let text = contents[1].text.as_deref().expect("blob saved message");
     assert!(
-        text.starts_with("[Resource from rich-srv at file:///doc.pdf] Binary content (application/pdf,"),
+        text.starts_with(
+            "[Resource from rich-srv at file:///doc.pdf] Binary content (application/pdf,"
+        ),
         "saved message prefix: {text}"
     );
-    assert!(text.ends_with(&format!("saved to {saved}")), "saved message tail: {text}");
+    assert!(
+        text.ends_with(&format!("saved to {saved}")),
+        "saved message tail: {text}"
+    );
 }
 
 #[tokio::test]

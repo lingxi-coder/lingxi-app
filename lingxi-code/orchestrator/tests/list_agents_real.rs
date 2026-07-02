@@ -1,4 +1,3 @@
-
 use agent::definition::{
     AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
 };

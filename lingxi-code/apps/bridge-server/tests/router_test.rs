@@ -185,7 +185,10 @@ async fn set_model_routes() {
 
     // The command reached the engine handle.
     assert_eq!(handle.switch_model_call_count(), 1);
-    assert_eq!(handle.last_switched_model().as_deref(), Some("claude-opus-4-8"));
+    assert_eq!(
+        handle.last_switched_model().as_deref(),
+        Some("claude-opus-4-8")
+    );
 
     // …and the reply is a `ModelChanged` carrying the new model.
     let events = sink.events().await;
@@ -325,7 +328,12 @@ async fn task_list_command_emits_task_rows() {
     let sink = CapturingSink::arc();
 
     router
-        .route(ClientCommand::TaskList { status_filter: None }, sink.clone())
+        .route(
+            ClientCommand::TaskList {
+                status_filter: None,
+            },
+            sink.clone(),
+        )
         .await;
 
     let events = sink.events().await;
@@ -377,7 +385,10 @@ async fn task_list_poll_emits_task_row() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     poll.stop();
-    assert!(saw_row, "the task poll loop must emit a TaskRow per live task");
+    assert!(
+        saw_row,
+        "the task poll loop must emit a TaskRow per live task"
+    );
 
     let events = sink.events().await;
     let row = events
@@ -419,7 +430,9 @@ async fn clear_session_rejected_mid_turn() {
     // `SessionEnded`.
     router.set_turn_active(false);
     let sink2 = CapturingSink::arc();
-    router.route(ClientCommand::ClearSession, sink2.clone()).await;
+    router
+        .route(ClientCommand::ClearSession, sink2.clone())
+        .await;
 
     assert!(
         handle.was_clear_session_called(),
@@ -427,7 +440,9 @@ async fn clear_session_rejected_mid_turn() {
     );
     let events2 = sink2.events().await;
     assert!(
-        events2.iter().any(|e| matches!(e, ClientEvent::SessionEnded)),
+        events2
+            .iter()
+            .any(|e| matches!(e, ClientEvent::SessionEnded)),
         "a successful ClearSession must report SessionEnded, got {events2:?}"
     );
 }
@@ -550,7 +565,10 @@ async fn set_model_routes_over_ws() {
     }
     // …and the command reached the engine handle.
     assert_eq!(handle.switch_model_call_count(), 1);
-    assert_eq!(handle.last_switched_model().as_deref(), Some("claude-opus-4-8"));
+    assert_eq!(
+        handle.last_switched_model().as_deref(),
+        Some("claude-opus-4-8")
+    );
 
     endpoint.shutdown().await;
 }

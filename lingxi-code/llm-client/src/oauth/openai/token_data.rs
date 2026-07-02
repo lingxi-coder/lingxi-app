@@ -33,7 +33,11 @@ pub fn parse_id_token(jwt: &str) -> Option<IdTokenClaims> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let email = v.get("email").and_then(Value::as_str).map(str::to_string);
-    Some(IdTokenClaims { account_id, fedramp, email })
+    Some(IdTokenClaims {
+        account_id,
+        fedramp,
+        email,
+    })
 }
 
 #[cfg(test)]

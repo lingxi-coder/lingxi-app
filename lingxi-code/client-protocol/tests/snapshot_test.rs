@@ -237,7 +237,10 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
         (
             "event/model_list.json",
             ClientEvent::ModelList {
-                models: vec!["claude-opus-4-7".to_string(), "claude-sonnet-4-5".to_string()],
+                models: vec![
+                    "claude-opus-4-7".to_string(),
+                    "claude-sonnet-4-5".to_string(),
+                ],
                 current: "claude-opus-4-7".to_string(),
             },
         ),
@@ -743,7 +746,11 @@ fn every_client_error_variant_matches_golden() {
 #[test]
 fn message_dto_block_set_matches_golden() {
     let mut failures = Vec::new();
-    check_golden("message/block_set.json", &canonical_message(), &mut failures);
+    check_golden(
+        "message/block_set.json",
+        &canonical_message(),
+        &mut failures,
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 
     // Defence-in-depth: the canonical message enumerates exactly the five block

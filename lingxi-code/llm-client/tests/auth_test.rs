@@ -21,9 +21,15 @@ async fn env_credential_provider_loads_secret_for_scope() {
 
 #[tokio::test]
 async fn static_credential_debug_is_redacted() {
-    let provider = StaticCredentialProvider::new(Credential::BearerToken("secret-token".to_string()));
+    let provider =
+        StaticCredentialProvider::new(Credential::BearerToken("secret-token".to_string()));
 
-    let debug = format!("{:?}", provider.load(&CredentialScope::new(ProviderId::OpenAI, "openai")).await);
+    let debug = format!(
+        "{:?}",
+        provider
+            .load(&CredentialScope::new(ProviderId::OpenAI, "openai"))
+            .await
+    );
 
     assert!(debug.contains("[REDACTED]"));
     assert!(!debug.contains("secret-token"));
@@ -48,7 +54,10 @@ fn api_key_authenticator_applies_header_to_provider_request() {
 
     let signed = auth.apply(request).expect("signed request");
 
-    assert_eq!(signed.headers.get("x-api-key"), Some(&"test-key".to_string()));
+    assert_eq!(
+        signed.headers.get("x-api-key"),
+        Some(&"test-key".to_string())
+    );
     assert_eq!(signed.body_json["model"], "claude");
 }
 
@@ -62,7 +71,10 @@ fn api_key_authenticator_supports_provider_specific_header_names() {
 
     let signed = auth.apply(request).expect("signed request");
 
-    assert_eq!(signed.headers.get("x-goog-api-key"), Some(&"g-key".to_string()));
+    assert_eq!(
+        signed.headers.get("x-goog-api-key"),
+        Some(&"g-key".to_string())
+    );
 }
 
 #[test]

@@ -100,7 +100,11 @@ impl ConnectHandler {
         copilot: Arc<dyn CopilotConnectDriver>,
         chatgpt: Arc<dyn ChatGptConnectDriver>,
     ) -> Self {
-        Self { writer, copilot, chatgpt }
+        Self {
+            writer,
+            copilot,
+            chatgpt,
+        }
     }
 }
 
@@ -120,30 +124,48 @@ impl BuiltinCommandHandler for ConnectHandler {
             // deployment; the TUI's deployment-type popup drives Enterprise.
             let step = match self.copilot.begin(None).await {
                 Ok(s) => s,
-                Err(e) => return CommandResult::Done { display: Some(format!("Could not start Copilot sign-in: {e}")) },
+                Err(e) => {
+                    return CommandResult::Done {
+                        display: Some(format!("Could not start Copilot sign-in: {e}")),
+                    }
+                }
             };
             let intro = format!(
                 "To sign in to GitHub Copilot, open {} and enter code {}",
                 step.verification_uri, step.user_code
             );
             match self.copilot.poll_to_completion(&step).await {
-                Ok(()) => CommandResult::Done { display: Some(format!("{intro}\nConnected github-copilot.")) },
-                Err(e) => CommandResult::Done { display: Some(format!("{intro}\nCould not connect github-copilot: {e}")) },
+                Ok(()) => CommandResult::Done {
+                    display: Some(format!("{intro}\nConnected github-copilot.")),
+                },
+                Err(e) => CommandResult::Done {
+                    display: Some(format!("{intro}\nCould not connect github-copilot: {e}")),
+                },
             }
         } else if provider == "chatgpt" || provider == "openai-chatgpt" {
             match self.chatgpt.connect().await {
                 Ok(msg) => CommandResult::Done { display: Some(msg) },
-                Err(e) => CommandResult::Done { display: Some(format!("Could not connect chatgpt: {e}")) },
+                Err(e) => CommandResult::Done {
+                    display: Some(format!("Could not connect chatgpt: {e}")),
+                },
             }
         } else {
             match self.writer.prompt_and_store_key(provider).await {
-                Ok(()) => CommandResult::Done { display: Some(format!("Connected {provider}.")) },
-                Err(e) => CommandResult::Done { display: Some(format!("Could not connect {provider}: {e}")) },
+                Ok(()) => CommandResult::Done {
+                    display: Some(format!("Connected {provider}.")),
+                },
+                Err(e) => CommandResult::Done {
+                    display: Some(format!("Could not connect {provider}: {e}")),
+                },
             }
         }
     }
-    fn name(&self) -> &str { "connect" }
-    fn description(&self) -> &str { CONNECT_DESCRIPTION }
+    fn name(&self) -> &str {
+        "connect"
+    }
+    fn description(&self) -> &str {
+        CONNECT_DESCRIPTION
+    }
 }
 
 #[cfg(test)]
@@ -164,8 +186,18 @@ mod tests {
         result: StdMutex<Result<(), ConnectError>>,
     }
     impl MockWriter {
-        fn ok() -> Self { Self { last_id: StdMutex::new(None), result: StdMutex::new(Ok(())) } }
-        fn err(e: ConnectError) -> Self { Self { last_id: StdMutex::new(None), result: StdMutex::new(Err(e)) } }
+        fn ok() -> Self {
+            Self {
+                last_id: StdMutex::new(None),
+                result: StdMutex::new(Ok(())),
+            }
+        }
+        fn err(e: ConnectError) -> Self {
+            Self {
+                last_id: StdMutex::new(None),
+                result: StdMutex::new(Err(e)),
+            }
+        }
     }
     #[async_trait]
     impl ConnectCredentialWriter for MockWriter {
@@ -199,7 +231,9 @@ mod tests {
     }
     impl MockChatGpt {
         fn ok(msg: impl Into<String>) -> Self {
-            Self { result: Ok(msg.into()) }
+            Self {
+                result: Ok(msg.into()),
+            }
         }
         fn err(e: ConnectError) -> Self {
             Self { result: Err(e) }
@@ -218,11 +252,17 @@ mod tests {
 
     #[tokio::test]
     async fn no_arg_shows_usage() {
-        let h = ConnectHandler::new(Arc::new(MockWriter::ok()), Arc::new(PanicCopilot), Arc::new(PanicChatGpt));
+        let h = ConnectHandler::new(
+            Arc::new(MockWriter::ok()),
+            Arc::new(PanicCopilot),
+            Arc::new(PanicChatGpt),
+        );
         if let CommandResult::Done { display: Some(s) } = h.handle(&args("")).await {
             assert!(s.starts_with("Usage: /connect <provider>"));
             assert!(s.contains("chatgpt"));
-        } else { panic!("expected Done"); }
+        } else {
+            panic!("expected Done");
+        }
     }
 
     #[tokio::test]
@@ -231,22 +271,38 @@ mod tests {
         let h = handler_with_panic_chatgpt(writer.clone());
         if let CommandResult::Done { display: Some(s) } = h.handle(&args("openrouter")).await {
             assert_eq!(s, "Connected openrouter.");
-        } else { panic!("expected Done"); }
-        assert_eq!(writer.last_id.lock().unwrap().as_deref(), Some("openrouter"));
+        } else {
+            panic!("expected Done");
+        }
+        assert_eq!(
+            writer.last_id.lock().unwrap().as_deref(),
+            Some("openrouter")
+        );
     }
 
     #[tokio::test]
     async fn api_key_store_failure_is_surfaced() {
-        let writer = Arc::new(MockWriter::err(ConnectError::Storage("keychain locked".into())));
+        let writer = Arc::new(MockWriter::err(ConnectError::Storage(
+            "keychain locked".into(),
+        )));
         let h = handler_with_panic_chatgpt(writer);
         if let CommandResult::Done { display: Some(s) } = h.handle(&args("deepseek")).await {
-            assert_eq!(s, "Could not connect deepseek: could not store credential: keychain locked");
-        } else { panic!("expected Done"); }
+            assert_eq!(
+                s,
+                "Could not connect deepseek: could not store credential: keychain locked"
+            );
+        } else {
+            panic!("expected Done");
+        }
     }
 
     #[tokio::test]
     async fn name_and_description() {
-        let h = ConnectHandler::new(Arc::new(MockWriter::ok()), Arc::new(PanicCopilot), Arc::new(PanicChatGpt));
+        let h = ConnectHandler::new(
+            Arc::new(MockWriter::ok()),
+            Arc::new(PanicCopilot),
+            Arc::new(PanicChatGpt),
+        );
         assert_eq!(h.name(), "connect");
         assert_eq!(h.description(), CONNECT_DESCRIPTION);
     }
@@ -260,7 +316,9 @@ mod tests {
         );
         if let CommandResult::Done { display: Some(s) } = h.handle(&args("chatgpt")).await {
             assert_eq!(s, "Connected chatgpt (account acct_test).");
-        } else { panic!("expected Done"); }
+        } else {
+            panic!("expected Done");
+        }
     }
 
     #[tokio::test]
@@ -272,7 +330,9 @@ mod tests {
         );
         if let CommandResult::Done { display: Some(s) } = h.handle(&args("openai-chatgpt")).await {
             assert_eq!(s, "Connected chatgpt (account acct_test).");
-        } else { panic!("expected Done"); }
+        } else {
+            panic!("expected Done");
+        }
     }
 
     #[tokio::test]
@@ -280,10 +340,14 @@ mod tests {
         let h = ConnectHandler::new(
             Arc::new(MockWriter::ok()),
             Arc::new(PanicCopilot),
-            Arc::new(MockChatGpt::err(ConnectError::Network("browser timed out".into()))),
+            Arc::new(MockChatGpt::err(ConnectError::Network(
+                "browser timed out".into(),
+            ))),
         );
         if let CommandResult::Done { display: Some(s) } = h.handle(&args("chatgpt")).await {
             assert!(s.starts_with("Could not connect chatgpt:"), "got: {s}");
-        } else { panic!("expected Done"); }
+        } else {
+            panic!("expected Done");
+        }
     }
 }

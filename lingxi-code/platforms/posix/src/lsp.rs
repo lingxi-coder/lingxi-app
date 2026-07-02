@@ -168,10 +168,7 @@ impl LspTransport for PosixLspTransport {
         client.notify(method, params).await
     }
 
-    async fn connection(
-        &self,
-        conn_id: McpConnectionId,
-    ) -> Result<Arc<Connection>, LspError> {
+    async fn connection(&self, conn_id: McpConnectionId) -> Result<Arc<Connection>, LspError> {
         let client = self
             .lookup_client(conn_id)
             .await

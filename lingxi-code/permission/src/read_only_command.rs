@@ -49,9 +49,7 @@
 /// expansion metacharacters `$` and backtick are NOT in this set; they are
 /// QUOTE-AWARE (literal inside single quotes), handled by
 /// [`contains_unquoted_expansion`].
-const READONLY_METACHARS: &[char] = &[
-    '<', '>', '(', ')', '|', '{', '}', '&', ';', '\n', '\r',
-];
+const READONLY_METACHARS: &[char] = &['<', '>', '(', ')', '|', '{', '}', '&', ';', '\n', '\r'];
 
 /// Base (simple) commands that are read-only — 1:1 with the TS `READONLY_COMMANDS`
 /// array (`readOnlyValidation.ts:1432-1499`, the `makeRegexForSafeCommand` set)
@@ -62,19 +60,14 @@ const READONLY_METACHARS: &[char] = &[
 /// arguments free of shell metacharacters.
 const READONLY_BASE_COMMANDS: &[&str] = &[
     // Time and date
-    "cal", "uptime",
-    // File content viewing
-    "cat", "head", "tail", "wc", "stat", "strings", "hexdump", "od", "nl",
-    // System info
+    "cal", "uptime", // File content viewing
+    "cat", "head", "tail", "wc", "stat", "strings", "hexdump", "od", "nl", // System info
     "id", "uname", "free", "df", "du", "locale", "groups", "nproc",
     // Path information
-    "basename", "dirname", "realpath", "readlink",
-    // Text processing
-    "cut", "paste", "tr", "column", "tac", "rev", "fold", "expand", "unexpand",
-    "fmt", "comm", "cmp", "numfmt",
-    // File comparison
-    "diff",
-    // true / false
+    "basename", "dirname", "realpath", "readlink", // Text processing
+    "cut", "paste", "tr", "column", "tac", "rev", "fold", "expand", "unexpand", "fmt", "comm",
+    "cmp", "numfmt", // File comparison
+    "diff",   // true / false
     "true", "false",
     // Misc. safe commands. (Binary `vho` = `…,"expr","seq","tsort","pr"` — NO
     // `test`/`getconf`; the port previously over-allowed those two read-only.)

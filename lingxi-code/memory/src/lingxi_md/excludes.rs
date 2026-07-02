@@ -163,8 +163,10 @@ mod tests {
         assert!(ex.is_excluded(Path::new("/etc/proj/LINGXI.md"), LingxiMdTier::Local));
         assert!(!ex.is_excluded(Path::new("/a/public/LINGXI.md"), LingxiMdTier::User));
         // `*` does not cross `/`.
-        assert!(!ex.is_excluded(Path::new("/a/b/LINGXI.md"), LingxiMdTier::Project)
-            && LingxiMdExcluder::new(&["/a/*/LINGXI.md".to_string()])
-                .is_excluded(Path::new("/a/b/LINGXI.md"), LingxiMdTier::Project));
+        assert!(
+            !ex.is_excluded(Path::new("/a/b/LINGXI.md"), LingxiMdTier::Project)
+                && LingxiMdExcluder::new(&["/a/*/LINGXI.md".to_string()])
+                    .is_excluded(Path::new("/a/b/LINGXI.md"), LingxiMdTier::Project)
+        );
     }
 }

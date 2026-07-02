@@ -486,8 +486,8 @@ async fn post_token_grant(
             resp.status, resp.body
         )));
     }
-    let parsed: TokenResponse = serde_json::from_str(&resp.body)
-        .map_err(|e| OAuthError::Token(format!("decode: {e}")))?;
+    let parsed: TokenResponse =
+        serde_json::from_str(&resp.body).map_err(|e| OAuthError::Token(format!("decode: {e}")))?;
     let expires_at = clock.now() + Duration::from_secs(parsed.expires_in);
     let tokens = Tokens {
         access_token: Secret::new(parsed.access_token),
@@ -597,12 +597,9 @@ pub async fn perform_oauth_flow(
     scope_override: Option<&str>,
 ) -> Result<Tokens, OAuthError> {
     // 1. Discovery.
-    let meta = discover_auth_server_metadata(
-        http,
-        server_url,
-        oauth.auth_server_metadata_url.as_deref(),
-    )
-    .await?;
+    let meta =
+        discover_auth_server_metadata(http, server_url, oauth.auth_server_metadata_url.as_deref())
+            .await?;
 
     // 2. Bind the loopback listener FIRST so the redirect_uri is known before
     //    the authorize URL is built (claude-code's listen(0) pattern). A
@@ -640,8 +637,7 @@ pub async fn perform_oauth_flow(
     };
 
     // 5. Authorize URL (PKCE inside) + surface it to the host.
-    let (auth_url, verifier, state) =
-        build_authorize_url(&meta, &client_id, &redirect_uri, &scope);
+    let (auth_url, verifier, state) = build_authorize_url(&meta, &client_id, &redirect_uri, &scope);
     on_auth_url(&auth_url);
 
     // 6. Wait for the redirect, validate state, capture the code. `redirect_uri`
@@ -803,8 +799,8 @@ pub async fn store_tokens(
     key: &str,
     stored: &StoredTokens,
 ) -> Result<(), OAuthError> {
-    let bytes = serde_json::to_vec(stored)
-        .map_err(|e| OAuthError::Token(format!("encode tokens: {e}")))?;
+    let bytes =
+        serde_json::to_vec(stored).map_err(|e| OAuthError::Token(format!("encode tokens: {e}")))?;
     let metadata = protocol::SecureStorageMetadata {
         created_at: clock.now(),
         last_accessed: None,
@@ -916,7 +912,10 @@ pub async fn revoke_token(
                 );
                 headers.push((
                     "authorization".into(),
-                    format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(basic)),
+                    format!(
+                        "Basic {}",
+                        base64::engine::general_purpose::STANDARD.encode(basic)
+                    ),
                 ));
             }
         }
@@ -1014,12 +1013,13 @@ pub async fn revoke_server_tokens(
 
     if let Some(stored) = &stored {
         let has_access = !stored.access_token.is_empty();
-        let has_refresh = stored.refresh_token.as_deref().is_some_and(|s| !s.is_empty());
+        let has_refresh = stored
+            .refresh_token
+            .as_deref()
+            .is_some_and(|s| !s.is_empty());
         if has_access || has_refresh {
             // Best-effort server-side revocation; never propagate failures.
-            if let Err(e) =
-                revoke_at_endpoint(http, server_url, oauth_cfg, stored).await
-            {
+            if let Err(e) = revoke_at_endpoint(http, server_url, oauth_cfg, stored).await {
                 tracing::debug!(error = %e, "mcp oauth: token revocation failed (best-effort)");
             }
         } else {
@@ -1040,9 +1040,12 @@ async fn revoke_at_endpoint(
     oauth_cfg: &traits::McpOAuthConfigDto,
     stored: &StoredTokens,
 ) -> Result<(), OAuthError> {
-    let meta =
-        discover_auth_server_metadata(http, server_url, oauth_cfg.auth_server_metadata_url.as_deref())
-            .await?;
+    let meta = discover_auth_server_metadata(
+        http,
+        server_url,
+        oauth_cfg.auth_server_metadata_url.as_deref(),
+    )
+    .await?;
 
     let Some(endpoint) = meta.revocation_endpoint.as_deref() else {
         tracing::debug!("mcp oauth: server does not support token revocation");
@@ -1136,7 +1139,10 @@ mod tests {
         );
         // Path-aware form inserts well-known after host, appends path.
         assert_eq!(
-            well_known_url("https://mcp.example.com/tenant/a", "oauth-authorization-server"),
+            well_known_url(
+                "https://mcp.example.com/tenant/a",
+                "oauth-authorization-server"
+            ),
             "https://mcp.example.com/.well-known/oauth-authorization-server/tenant/a"
         );
     }
@@ -1245,7 +1251,10 @@ mod tests {
         assert!(json.contains("\"client_id\":\"dcr-client-xyz\""));
         let back: StoredTokens = serde_json::from_str(&json).unwrap();
         assert_eq!(back.client_id.as_deref(), Some("dcr-client-xyz"));
-        assert_eq!(back.into_tokens().client_id.as_deref(), Some("dcr-client-xyz"));
+        assert_eq!(
+            back.into_tokens().client_id.as_deref(),
+            Some("dcr-client-xyz")
+        );
     }
 
     /// Legacy blobs (no `client_id` field) deserialize to `None`, not an error.

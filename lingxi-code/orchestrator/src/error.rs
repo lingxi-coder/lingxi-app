@@ -163,8 +163,7 @@ mod tests {
     fn repeated_529_terminal_renders_byte_locked_copy() {
         // Locked against errors.ts:166: REPEATED_529_ERROR_MESSAGE = 'Repeated 529 Overloaded errors'
         assert_eq!(
-            REPEATED_529_ERROR_MESSAGE,
-            "Repeated 529 Overloaded errors",
+            REPEATED_529_ERROR_MESSAGE, "Repeated 529 Overloaded errors",
             "REPEATED_529_ERROR_MESSAGE constant must be byte-locked"
         );
         let err = OrchestratorError::RepeatedOverloaded;
@@ -301,10 +300,17 @@ mod tests {
             LlmError::Authentication,
             LlmError::PermissionDenied,
             LlmError::ProviderInternal,
-            LlmError::Transport { message: "t".into() },
-            LlmError::RateLimited { retry_after: None, scope: None },
+            LlmError::Transport {
+                message: "t".into(),
+            },
+            LlmError::RateLimited {
+                retry_after: None,
+                scope: None,
+            },
             LlmError::ContextOverflow { token_gap: 0 },
-            LlmError::InvalidRequest { message: "bad".into() },
+            LlmError::InvalidRequest {
+                message: "bad".into(),
+            },
         ];
         for variant in variants {
             let e: OrchestratorError = variant.clone().into();

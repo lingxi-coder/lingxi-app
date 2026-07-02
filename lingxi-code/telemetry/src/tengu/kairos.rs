@@ -84,12 +84,24 @@ mod tests {
     #[test]
     fn event_names_are_byte_exact() {
         // PARITY: binary event-name literals (cc_all.txt:504950 / Vst / cKi / lKi).
-        assert_eq!(LOOP_PERSISTENT_ACTIVATED, "tengu_kairos_loop_persistent_activated");
+        assert_eq!(
+            LOOP_PERSISTENT_ACTIVATED,
+            "tengu_kairos_loop_persistent_activated"
+        );
         assert_eq!(LOOP_ENDED, "tengu_loop_ended");
-        assert_eq!(LOOP_DYNAMIC_WAKEUP_SCHEDULED, "tengu_loop_dynamic_wakeup_scheduled");
+        assert_eq!(
+            LOOP_DYNAMIC_WAKEUP_SCHEDULED,
+            "tengu_loop_dynamic_wakeup_scheduled"
+        );
         assert_eq!(LOOP_KEEPALIVE_FIRED, "tengu_loop_keepalive_fired");
-        assert_eq!(LOOP_DYNAMIC_WAKEUP_AGED_OUT, "tengu_loop_dynamic_wakeup_aged_out");
+        assert_eq!(
+            LOOP_DYNAMIC_WAKEUP_AGED_OUT,
+            "tengu_loop_dynamic_wakeup_aged_out"
+        );
         assert_eq!(PUSH_NOTIFICATION_SEND, "tengu_push_notification_send");
-        assert_eq!(LOOP_DYNAMIC_WAKEUP_ENDS_TURN, "tengu_loop_dynamic_wakeup_ends_turn");
+        assert_eq!(
+            LOOP_DYNAMIC_WAKEUP_ENDS_TURN,
+            "tengu_loop_dynamic_wakeup_ends_turn"
+        );
     }
 }

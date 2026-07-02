@@ -19,7 +19,10 @@ fn batched_response(text: &str) -> LlmResponse {
     LlmResponse {
         id: "msg_eq".into(),
         model: "claude-opus-4-7".into(),
-        content: vec![LlmContentBlock::Text { text: text.into(), cache_control: None }],
+        content: vec![LlmContentBlock::Text {
+            text: text.into(),
+            cache_control: None,
+        }],
         stop_reason: Some("end_turn".into()),
         stop_details: None,
         usage: Usage::default(),
@@ -169,9 +172,9 @@ async fn batched_turn_injects_task_notification_reminder() {
         Arc::new(StaticMemoryProvider::empty()),
         PathBuf::from("/tmp"),
     )
-    .with_task_notifications(Arc::new(OnceTaskNotifications(std::sync::Mutex::new(vec![
-        one_task_notification(),
-    ]))));
+    .with_task_notifications(Arc::new(OnceTaskNotifications(std::sync::Mutex::new(
+        vec![one_task_notification()],
+    ))));
     orch.run_turn("ping").await.expect("batched");
     let calls = batched_mock.captured_msgs().await;
     let first = format!("{:?}", calls[0]);

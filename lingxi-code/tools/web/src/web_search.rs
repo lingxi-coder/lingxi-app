@@ -202,8 +202,7 @@ pub fn build_tool_block(input: &WebSearchInput) -> Value {
 /// query pipeline — see the module doc) and the hosted-search RESULTS are
 /// equivalent regardless, so only the observable framing is mirrored here.
 const WEB_SEARCH_USER_PREFIX: &str = "Perform a web search for the query: ";
-const WEB_SEARCH_SYSTEM_PROMPT: &str =
-    "You are an assistant for performing a web search tool use";
+const WEB_SEARCH_SYSTEM_PROMPT: &str = "You are an assistant for performing a web search tool use";
 
 #[must_use]
 pub fn build_request_body(model: &str, input: &WebSearchInput) -> Value {
@@ -326,15 +325,13 @@ pub fn parse_response_content(content: &[Value]) -> Vec<SearchResultEntry> {
                 }
                 // Error case — `content` is a `WebSearchToolResultError`.
                 other => {
-                    let code = other
-                        .and_then(|c| c.get("error_code"))
-                        .map_or_else(
-                            || "undefined".to_string(),
-                            |v| match v {
-                                Value::String(s) => s.clone(),
-                                _ => v.to_string(),
-                            },
-                        );
+                    let code = other.and_then(|c| c.get("error_code")).map_or_else(
+                        || "undefined".to_string(),
+                        |v| match v {
+                            Value::String(s) => s.clone(),
+                            _ => v.to_string(),
+                        },
+                    );
                     out.push(SearchResultEntry::Text(format!("Web search error: {code}")));
                 }
             },
@@ -490,10 +487,7 @@ impl StreamReassembler {
                     .get("partial_json")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                self.json_bufs
-                    .entry(index)
-                    .or_default()
-                    .push_str(partial);
+                self.json_bufs.entry(index).or_default().push_str(partial);
             }
             "citations_delta" => {
                 if let Some(citation) = delta.get("citation") {
@@ -586,15 +580,13 @@ pub fn build_model_content(query: &str, results: &[SearchResultEntry]) -> String
                 out.push_str(s);
                 out.push_str("\n\n");
             }
-            SearchResultEntry::Hit(v) => {
-                match v.get("content").and_then(Value::as_array) {
-                    Some(arr) if !arr.is_empty() => {
-                        let rendered = serde_json::to_string(arr).unwrap_or_default();
-                        out.push_str(&format!("Links: {rendered}\n\n"));
-                    }
-                    _ => out.push_str("No links found.\n\n"),
+            SearchResultEntry::Hit(v) => match v.get("content").and_then(Value::as_array) {
+                Some(arr) if !arr.is_empty() => {
+                    let rendered = serde_json::to_string(arr).unwrap_or_default();
+                    out.push_str(&format!("Links: {rendered}\n\n"));
                 }
-            }
+                _ => out.push_str("No links found.\n\n"),
+            },
         }
     }
     out.push_str(
@@ -711,10 +703,7 @@ impl WebSearchTool {
 
     /// Provider-agnostic client-side search path (non-Anthropic providers).
     /// Runs the search over `ctx.http` and returns markdown result blocks.
-    async fn run_client_side(
-        &self,
-        input: &WebSearchInput,
-    ) -> Result<ToolCallResult, ToolError> {
+    async fn run_client_side(&self, input: &WebSearchInput) -> Result<ToolCallResult, ToolError> {
         use crate::web_search_client::{
             format_results_for_model, resolve_client_search_provider_with_credentials,
             run_client_web_search, ClientSearchProvider, EnvSearchConfig, ResolvedWebCredentials,
@@ -726,7 +715,7 @@ impl WebSearchTool {
         self.emit_started(&invocation_id, &input.query, allowed.len(), blocked.len())
             .await;
         let started = Instant::now();
-        let provider = if let Some(loader) = &self.ctx.web_search_config {
+        let (web_cfg, providers) = if let Some(loader) = &self.ctx.web_search_config {
             let cfg = loader.load_web_search_config().await;
             let web_cfg = WebSearchConfig {
                 provider: cfg
@@ -740,23 +729,54 @@ impl WebSearchTool {
                 tavily_key: cfg.tavily_key,
                 brave_key: cfg.brave_key,
             };
-            resolve_client_search_provider_with_credentials(&web_cfg, &creds, &EnvSearchConfig::from_env())
-                .unwrap_or_else(|_| ClientSearchProvider::DuckDuckGo)
+            let env = EnvSearchConfig::from_env();
+            let providers = if web_cfg.provider == crate::web_search_config::WebSearchProvider::Auto
+            {
+                crate::web_search_client::resolve_client_search_candidates(&web_cfg, &creds, &env)
+            } else {
+                resolve_client_search_provider_with_credentials(&web_cfg, &creds, &env)
+                    .map(|p| vec![p])
+                    .unwrap_or_else(|_| vec![ClientSearchProvider::DuckDuckGo])
+            };
+            (web_cfg, providers)
         } else {
-            ClientSearchProvider::from_env()
+            let web_cfg = WebSearchConfig::default();
+            let creds = ResolvedWebCredentials::from_env();
+            let env = EnvSearchConfig::from_env();
+            (
+                web_cfg.clone(),
+                crate::web_search_client::resolve_client_search_candidates(&web_cfg, &creds, &env),
+            )
         };
-        let result = run_client_web_search(
-            &self.ctx.http,
-            &provider,
-            &input.query,
-            &allowed,
-            &blocked,
-            0,
-        )
-        .await;
+        let mut last_error = None;
+        let mut success = None;
+        for provider in providers {
+            let label = provider.label();
+            match run_client_web_search(
+                &self.ctx.http,
+                &provider,
+                &input.query,
+                &allowed,
+                &blocked,
+                0,
+            )
+            .await
+            {
+                Ok(hits) => {
+                    success = Some((provider, hits));
+                    break;
+                }
+                Err(msg) => {
+                    last_error = Some(format!("{label}: {msg}"));
+                    if web_cfg.provider != crate::web_search_config::WebSearchProvider::Auto {
+                        break;
+                    }
+                }
+            }
+        }
         let elapsed_ms = started.elapsed().as_millis() as u64;
-        match result {
-            Ok(hits) => {
+        match success {
+            Some((provider, hits)) => {
                 self.emit_completed(&invocation_id, hits.len() as u64, 0, 0, elapsed_ms)
                     .await;
                 let model_content = format_results_for_model(&input.query, &hits, provider.label());
@@ -773,7 +793,11 @@ impl WebSearchTool {
                     mcp_meta: None,
                 })
             }
-            Err(msg) => {
+            None => {
+                let msg = last_error.unwrap_or_else(|| {
+                    "No web search provider is configured and DuckDuckGo fallback was unavailable"
+                        .to_string()
+                });
                 self.emit_failed(&invocation_id, "client_search", None, elapsed_ms)
                     .await;
                 Ok(ToolCallResult {
@@ -1063,22 +1087,16 @@ impl Tool for WebSearchTool {
                 // Connected — drive the SSE stream to completion, reassembling
                 // the raw content-block array and emitting progress as blocks
                 // start. A mid-stream transport error aborts the search.
-                let (blocks, usage) = match Self::consume_stream(
-                    stream,
-                    &parsed_input.query,
-                    &ctx,
-                    &tx,
-                )
-                .await
-                {
-                    Ok(out) => out,
-                    Err(err) => {
-                        let elapsed_ms = started.elapsed().as_millis() as u64;
-                        return Err(self
-                            .map_stream_error(&invocation_id, err, elapsed_ms)
-                            .await);
-                    }
-                };
+                let (blocks, usage) =
+                    match Self::consume_stream(stream, &parsed_input.query, &ctx, &tx).await {
+                        Ok(out) => out,
+                        Err(err) => {
+                            let elapsed_ms = started.elapsed().as_millis() as u64;
+                            return Err(self
+                                .map_stream_error(&invocation_id, err, elapsed_ms)
+                                .await);
+                        }
+                    };
                 let elapsed_ms = started.elapsed().as_millis() as u64;
                 let search_count = count_searches(&blocks);
                 let results = parse_response_content(&blocks);
@@ -1290,8 +1308,13 @@ impl WebSearchTool {
                     .await)
             }
             Ok(http_resp) => {
-                self.emit_failed(invocation_id, "http_status", Some(http_resp.status), elapsed_ms)
-                    .await;
+                self.emit_failed(
+                    invocation_id,
+                    "http_status",
+                    Some(http_resp.status),
+                    elapsed_ms,
+                )
+                .await;
                 Err(ToolError::Transport(format!(
                     "WebSearch: HTTP {} from messages_create",
                     http_resp.status
@@ -1312,14 +1335,20 @@ mod tests {
         // Opening + the CRITICAL Sources requirement (byte-exact anchors). The
         // binary's literal starts with a leading newline and a `- ` on the first
         // bullet (`\n- Allows...`) and ends with a trailing newline.
-        assert!(d.starts_with("\n- Allows Claude to search the web and use the results to inform responses\n"));
+        assert!(d.starts_with(
+            "\n- Allows Claude to search the web and use the results to inform responses\n"
+        ));
         assert!(d.contains("CRITICAL REQUIREMENT - You MUST follow this:\n"));
-        assert!(d.contains("  - This is MANDATORY - never skip including sources in your response\n"));
+        assert!(
+            d.contains("  - This is MANDATORY - never skip including sources in your response\n")
+        );
         assert!(d.contains("  - Example format:\n"));
         assert!(d.contains("Usage notes:\n  - Domain filtering is supported to include or block specific websites\n  - Web search is only available in the US\n"));
         // Runtime month/year slot: "<Month> <Year>" (e.g. "June 2026").
         let my = chrono::Local::now().format("%B %Y").to_string();
-        assert!(d.contains(&format!("The current month is {my}. You MUST use this year")));
+        assert!(d.contains(&format!(
+            "The current month is {my}. You MUST use this year"
+        )));
         assert!(d.ends_with("with the current year, NOT last year\n"));
     }
 
@@ -1342,7 +1371,9 @@ mod tests {
             )
         );
         // No leading/trailing newline (distinct from the VERBOSE variant).
-        assert!(c.starts_with("Search the web. Returns result blocks with titles and URLs. US-only.\n"));
+        assert!(
+            c.starts_with("Search the web. Returns result blocks with titles and URLs. US-only.\n")
+        );
         assert!(c.ends_with("as markdown links."));
         // Real em-dash byte (e2 80 94), not a hyphen.
         assert!(c.contains(" \u{2014} use this when searching"));
@@ -1438,22 +1469,49 @@ mod tests {
 
     #[test]
     fn is_enabled_first_party_any_model() {
-        assert!(web_search_is_enabled(ApiProvider::FirstParty, "claude-sonnet-4-20250514"));
-        assert!(web_search_is_enabled(ApiProvider::FirstParty, "claude-3-5-haiku"));
-        assert!(web_search_is_enabled(ApiProvider::FirstParty, "literally-anything"));
+        assert!(web_search_is_enabled(
+            ApiProvider::FirstParty,
+            "claude-sonnet-4-20250514"
+        ));
+        assert!(web_search_is_enabled(
+            ApiProvider::FirstParty,
+            "claude-3-5-haiku"
+        ));
+        assert!(web_search_is_enabled(
+            ApiProvider::FirstParty,
+            "literally-anything"
+        ));
     }
 
     #[test]
     fn is_enabled_vertex_only_claude_4x() {
         // `claude-fable-5` is the first disjunct upstream (binary @202215129).
         assert!(web_search_is_enabled(ApiProvider::Vertex, "claude-fable-5"));
-        assert!(web_search_is_enabled(ApiProvider::Vertex, "claude-fable-5-20260101"));
-        assert!(web_search_is_enabled(ApiProvider::Vertex, "claude-opus-4-20250514"));
-        assert!(web_search_is_enabled(ApiProvider::Vertex, "claude-sonnet-4-5"));
-        assert!(web_search_is_enabled(ApiProvider::Vertex, "claude-haiku-4-5"));
+        assert!(web_search_is_enabled(
+            ApiProvider::Vertex,
+            "claude-fable-5-20260101"
+        ));
+        assert!(web_search_is_enabled(
+            ApiProvider::Vertex,
+            "claude-opus-4-20250514"
+        ));
+        assert!(web_search_is_enabled(
+            ApiProvider::Vertex,
+            "claude-sonnet-4-5"
+        ));
+        assert!(web_search_is_enabled(
+            ApiProvider::Vertex,
+            "claude-haiku-4-5"
+        ));
         // Pre-4.x and non-Claude models on Vertex are disabled.
-        assert!(!web_search_is_enabled(ApiProvider::Vertex, "claude-3-5-sonnet"));
-        assert!(!web_search_is_enabled(ApiProvider::Vertex, "gemini-2.5-pro"));
+        assert!(!web_search_is_enabled(
+            ApiProvider::Vertex,
+            "claude-3-5-sonnet"
+        ));
+        assert!(!web_search_is_enabled(
+            ApiProvider::Vertex,
+            "gemini-2.5-pro"
+        ));
     }
 
     #[test]
@@ -1463,7 +1521,10 @@ mod tests {
 
     #[test]
     fn is_enabled_other_provider_disabled() {
-        assert!(!web_search_is_enabled(ApiProvider::Other, "claude-opus-4-20250514"));
+        assert!(!web_search_is_enabled(
+            ApiProvider::Other,
+            "claude-opus-4-20250514"
+        ));
         assert!(!web_search_is_enabled(ApiProvider::Other, "anything"));
     }
 
@@ -1603,8 +1664,14 @@ mod tests {
                 let hits = v["content"].as_array().expect("content array");
                 assert_eq!(hits.len(), 2);
                 // Only `title` and `url` are projected (extra fields dropped).
-                assert_eq!(hits[0], json!({ "title": "Docs.rs", "url": "https://docs.rs" }));
-                assert_eq!(hits[1], json!({ "title": "crates.io", "url": "https://crates.io" }));
+                assert_eq!(
+                    hits[0],
+                    json!({ "title": "Docs.rs", "url": "https://docs.rs" })
+                );
+                assert_eq!(
+                    hits[1],
+                    json!({ "title": "crates.io", "url": "https://crates.io" })
+                );
             }
             SearchResultEntry::Text(_) => panic!("expected Hit"),
         }
@@ -1686,7 +1753,10 @@ mod tests {
             "input": {}
         })];
         let parsed = parse_response_content(&blocks);
-        assert!(parsed.is_empty(), "server_tool_use must not become a result");
+        assert!(
+            parsed.is_empty(),
+            "server_tool_use must not become a result"
+        );
     }
 
     #[test]
@@ -1795,7 +1865,8 @@ mod tests {
     #[derive(Default)]
     struct StreamingMockHttp {
         sse_events: std::sync::Mutex<Option<Vec<protocol::SseEvent>>>,
-        blocking: std::sync::Mutex<std::collections::VecDeque<Result<protocol::HttpResponse, HttpError>>>,
+        blocking:
+            std::sync::Mutex<std::collections::VecDeque<Result<protocol::HttpResponse, HttpError>>>,
         fail_stream: std::sync::atomic::AtomicBool,
         received: std::sync::Mutex<Vec<protocol::HttpRequest>>,
     }
@@ -1829,11 +1900,15 @@ mod tests {
             req: protocol::HttpRequest,
         ) -> Result<protocol::HttpResponse, HttpError> {
             self.received.lock().unwrap().push(req);
-            self.blocking.lock().unwrap().pop_front().unwrap_or_else(|| {
-                Err(HttpError::InvalidResponse(
-                    "StreamingMockHttp: no blocking response scripted".into(),
-                ))
-            })
+            self.blocking
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Err(HttpError::InvalidResponse(
+                        "StreamingMockHttp: no blocking response scripted".into(),
+                    ))
+                })
         }
         async fn stream_sse(
             &self,
@@ -1893,6 +1968,18 @@ mod tests {
         (ctx, sink)
     }
 
+    #[derive(Clone)]
+    struct StaticWebSearchConfig {
+        cfg: traits::WebSearchRuntimeConfig,
+    }
+
+    #[async_trait]
+    impl traits::WebSearchConfigProvider for StaticWebSearchConfig {
+        async fn load_web_search_config(&self) -> traits::WebSearchRuntimeConfig {
+            self.cfg.clone()
+        }
+    }
+
     /// A blocking-200 response wrapping `body`. Returns the `Result` shape that
     /// `enqueue_blocking` accepts (so a test may also enqueue an `Err`).
     #[allow(clippy::unnecessary_wraps)]
@@ -1902,6 +1989,46 @@ mod tests {
             headers: vec![],
             body: body.to_string(),
         })
+    }
+
+    #[tokio::test]
+    async fn client_side_auto_falls_back_after_bad_tavily_key() {
+        let http = Arc::new(StreamingMockHttp::new());
+        http.enqueue_blocking(ok_blocking(
+            401,
+            r#"{"detail":{"error":"Unauthorized: missing or invalid API key."}}"#,
+        ));
+        http.enqueue_blocking(ok_blocking(
+            200,
+            r#"<a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fweather" class="result-link">Weather</a><td class="result-snippet">Current forecast</td>"#,
+        ));
+        let (mut ctx, _sink) = make_streaming_ctx(http.clone());
+        ctx.provider = Arc::new(tool_api::AnthropicRequestBuilder::new(
+            "test-key",
+            Some("https://api.openai.example".into()),
+        ));
+        ctx.web_search_config = Some(Arc::new(StaticWebSearchConfig {
+            cfg: traits::WebSearchRuntimeConfig {
+                provider: Some("auto".into()),
+                searxng_url: None,
+                tavily_key: Some("bad-key".into()),
+                brave_key: None,
+            },
+        }));
+        let tool = WebSearchTool::new(ctx);
+        let (tx, _rx) = progress_channel();
+        let res = tool
+            .call(json!({ "query": "wuhan weather" }), fresh_ctx(), tx)
+            .await
+            .expect("auto fallback should succeed");
+
+        assert_eq!(res.data["provider"], "DuckDuckGo");
+        let mc = res.model_content.as_deref().expect("model content");
+        assert!(mc.contains("[Weather](https://example.com/weather)"));
+        let reqs = http.received_requests();
+        assert_eq!(reqs.len(), 2, "Tavily failure then DuckDuckGo fallback");
+        assert!(reqs[0].url.contains("api.tavily.com/search"));
+        assert!(reqs[1].url.contains("lite.duckduckgo.com/lite/"));
     }
 
     /// Drain a progress receiver synchronously (the channel is unbuffered-ish
@@ -1968,8 +2095,14 @@ mod tests {
         assert_eq!(arr[1]["tool_use_id"], "stu_1");
         let hits = arr[1]["content"].as_array().expect("hits");
         assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0], json!({ "title": "docs.rs", "url": "https://docs.rs" }));
-        assert_eq!(hits[1], json!({ "title": "crates.io", "url": "https://crates.io" }));
+        assert_eq!(
+            hits[0],
+            json!({ "title": "docs.rs", "url": "https://docs.rs" })
+        );
+        assert_eq!(
+            hits[1],
+            json!({ "title": "crates.io", "url": "https://crates.io" })
+        );
         assert_eq!(arr[2], "Done.");
 
         // `data` is pure metadata (1:1 with `V7p`): the camelCase
@@ -1994,11 +2127,12 @@ mod tests {
             ] }),
             json!({ "type": "text", "text": "Done." }),
         ];
-        let expected_mc = build_model_content(
-            "rust async",
-            &parse_response_content(&equivalent_blocks),
+        let expected_mc =
+            build_model_content("rust async", &parse_response_content(&equivalent_blocks));
+        assert_eq!(
+            mc, expected_mc,
+            "streamed output must equal blocking output"
         );
-        assert_eq!(mc, expected_mc, "streamed output must equal blocking output");
 
         // COMPLETED telemetry fired, with usage captured from the stream.
         let events = sink.events().await;
@@ -2161,8 +2295,9 @@ mod tests {
                         match self.0 {
                             1 => std::task::Poll::Ready(Some(Ok(protocol::SseEvent {
                                 event_type: Some("message_start".into()),
-                                data: json!({ "type": "message_start", "message": { "usage": {} } })
-                                    .to_string(),
+                                data:
+                                    json!({ "type": "message_start", "message": { "usage": {} } })
+                                        .to_string(),
                                 id: None,
                             }))),
                             2 => std::task::Poll::Ready(Some(Err(HttpError::Connection(
@@ -2338,7 +2473,9 @@ mod tests {
         let requests = http.received_requests();
         assert_eq!(requests.len(), 1);
         assert!(
-            requests[0].url.starts_with("https://lite.duckduckgo.com/lite/"),
+            requests[0]
+                .url
+                .starts_with("https://lite.duckduckgo.com/lite/"),
             "Copilot sessions must use client-side search, got {}",
             requests[0].url
         );

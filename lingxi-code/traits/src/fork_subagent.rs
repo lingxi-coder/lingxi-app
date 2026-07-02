@@ -247,7 +247,10 @@ mod tests {
         assert_eq!(FORK_DIRECTIVE_PREFIX, "Your directive: ");
         assert_eq!(FORK_SUBAGENT_TYPE, "fork");
         // em-dash, byte-exact (U+2014).
-        assert_eq!(FORK_PLACEHOLDER_RESULT, "Fork started — processing in background");
+        assert_eq!(
+            FORK_PLACEHOLDER_RESULT,
+            "Fork started — processing in background"
+        );
         assert!(FORK_PLACEHOLDER_RESULT.contains('\u{2014}'));
     }
 
@@ -263,11 +266,17 @@ mod tests {
     fn fork_gate_on_when_truthy_and_not_coordinator_not_noninteractive() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
-        assert!(is_fork_subagent_enabled(false, false), "truthy + interactive + non-coordinator ⇒ ON");
+        assert!(
+            is_fork_subagent_enabled(false, false),
+            "truthy + interactive + non-coordinator ⇒ ON"
+        );
         // coordinator → OFF (claude forkSubagent.ts:34).
         assert!(!is_fork_subagent_enabled(true, false), "coordinator ⇒ OFF");
         // non-interactive → OFF (claude forkSubagent.ts:35).
-        assert!(!is_fork_subagent_enabled(false, true), "non-interactive ⇒ OFF");
+        assert!(
+            !is_fork_subagent_enabled(false, true),
+            "non-interactive ⇒ OFF"
+        );
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
 
@@ -382,7 +391,11 @@ Your directive: Fix the bug in foo.rs";
 
         // (1) cloned assistant retains thinking + text + both tool_use blocks.
         match &msgs[0] {
-            ConversationMessage::Assistant { content, stop_reason, .. } => {
+            ConversationMessage::Assistant {
+                content,
+                stop_reason,
+                ..
+            } => {
                 assert_eq!(content.len(), 4);
                 assert!(matches!(content[0], ContentBlock::Thinking { .. }));
                 assert!(matches!(content[1], ContentBlock::Text { .. }));

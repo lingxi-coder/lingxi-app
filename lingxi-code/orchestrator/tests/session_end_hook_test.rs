@@ -144,10 +144,10 @@ fn orch_with(hooks: Arc<HookExecutorImpl>) -> ConversationOrchestrator {
 async fn fire_session_end_dispatches_session_end_with_reason() {
     let log = Arc::new(Mutex::new(Vec::<String>::new()));
     let registry = Arc::new(RwLock::new(HookRegistry::new()));
-    registry
-        .write()
-        .await
-        .register(builtin_hook("record-session-end", HookEventType::SessionEnd));
+    registry.write().await.register(builtin_hook(
+        "record-session-end",
+        HookEventType::SessionEnd,
+    ));
     let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
     exec.register_builtin(Arc::new(RecordingHandler { log: log.clone() }));
     let orch = orch_with(Arc::new(exec));
@@ -171,10 +171,10 @@ async fn fire_session_end_round_trips_each_clean_exit_reason() {
     for reason in ["prompt_input_exit", "other"] {
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
         let registry = Arc::new(RwLock::new(HookRegistry::new()));
-        registry
-            .write()
-            .await
-            .register(builtin_hook("record-session-end", HookEventType::SessionEnd));
+        registry.write().await.register(builtin_hook(
+            "record-session-end",
+            HookEventType::SessionEnd,
+        ));
         let mut exec =
             HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
         exec.register_builtin(Arc::new(RecordingHandler { log: log.clone() }));
@@ -197,10 +197,10 @@ async fn failing_session_end_hook_does_not_break_fire() {
     // `fire_session_end` discards the aggregate, so the call must STILL return
     // cleanly (best-effort: a failing SessionEnd hook never breaks shutdown).
     let registry = Arc::new(RwLock::new(HookRegistry::new()));
-    registry
-        .write()
-        .await
-        .register(builtin_hook("broken-session-end", HookEventType::SessionEnd));
+    registry.write().await.register(builtin_hook(
+        "broken-session-end",
+        HookEventType::SessionEnd,
+    ));
     let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
     exec.register_builtin(Arc::new(FailingHandler));
     let orch = orch_with(Arc::new(exec));

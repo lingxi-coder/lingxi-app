@@ -28,7 +28,9 @@ mod tests {
             format!("Permission to use Edit has been denied because LingXi is running in don't ask mode. {DENIAL_WORKAROUND_GUIDANCE}")
         );
         // The guidance text itself is byte-locked.
-        assert!(DENIAL_WORKAROUND_GUIDANCE.starts_with("IMPORTANT: You *may* attempt to accomplish this action using other tools"));
+        assert!(DENIAL_WORKAROUND_GUIDANCE.starts_with(
+            "IMPORTANT: You *may* attempt to accomplish this action using other tools"
+        ));
         assert!(DENIAL_WORKAROUND_GUIDANCE.ends_with("Let the user decide how to proceed."));
     }
 
@@ -67,7 +69,10 @@ mod tests {
 
     #[tokio::test]
     async fn allow_rule_short_circuits_without_prompting() {
-        let policy = policy_with(r#"{ "permissions": { "allow": ["Bash"] } }"#, PermissionMode::Default);
+        let policy = policy_with(
+            r#"{ "permissions": { "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
         let inner = RecordingInner::new(PermissionDecision::Deny {
             reason: "should not be reached".into(),
         });
@@ -81,7 +86,10 @@ mod tests {
 
     #[tokio::test]
     async fn deny_rule_denies_with_rendered_reason_without_prompting() {
-        let policy = policy_with(r#"{ "permissions": { "deny": ["Bash"] } }"#, PermissionMode::Default);
+        let policy = policy_with(
+            r#"{ "permissions": { "deny": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
         let inner = RecordingInner::new(PermissionDecision::Allow);
         let gate = PolicyPermissionGate::new(policy, inner.clone());
         match gate.check("Bash", &serde_json::json!({})).await {
@@ -146,8 +154,11 @@ mod tests {
         let inner = RecordingInner::new(PermissionDecision::Allow);
         let gate = PolicyPermissionGate::new(policy, inner.clone());
         assert_eq!(
-            gate.resolve_detailed("Read", &serde_json::json!({ "file_path": "./secrets/key.pem" }))
-                .await,
+            gate.resolve_detailed(
+                "Read",
+                &serde_json::json!({ "file_path": "./secrets/key.pem" })
+            )
+            .await,
             PermissionResolution::Ask,
             "a content ask rule surfaces as Ask, not an auto-allow"
         );
@@ -196,7 +207,12 @@ mod tests {
             )
             .await;
         assert_eq!(decision, PermissionDecision::Allow);
-        let seen = inner.worker.lock().unwrap().clone().expect("inner consulted");
+        let seen = inner
+            .worker
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("inner consulted");
         let w = seen.expect("worker forwarded to inner transport");
         assert_eq!(w.name, "researcher");
         assert_eq!(w.team.as_deref(), Some("alpha"));
@@ -212,7 +228,11 @@ mod tests {
             gate.check("Bash", &serde_json::json!({})).await,
             PermissionDecision::Allow // whatever the inner prompt returned
         );
-        assert_eq!(inner.calls(), 1, "non-read-only ask delegates to the inner gate");
+        assert_eq!(
+            inner.calls(),
+            1,
+            "non-read-only ask delegates to the inner gate"
+        );
     }
 
     #[tokio::test]
@@ -292,8 +312,10 @@ mod tests {
 
         // An explicit allow rule still short-circuits to Allow even with the
         // deny inner (rules are resolved before delegation).
-        let policy2 =
-            policy_with(r#"{ "permissions": { "allow": ["Bash"] } }"#, PermissionMode::Default);
+        let policy2 = policy_with(
+            r#"{ "permissions": { "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
         let gate2 = PolicyPermissionGate::new(policy2, Arc::new(DenyOnAskGate));
         assert_eq!(
             gate2.check("Bash", &serde_json::json!({})).await,
@@ -310,14 +332,16 @@ mod tests {
         // `checkRuleBasedPermissions`).
 
         // A deny RULE must still deny even after a hook approved the call.
-        let policy = policy_with(r#"{ "permissions": { "deny": ["Bash"] } }"#, PermissionMode::Default);
-        let gate = PolicyPermissionGate::new(
-            policy,
-            RecordingInner::new(PermissionDecision::Allow),
+        let policy = policy_with(
+            r#"{ "permissions": { "deny": ["Bash"] } }"#,
+            PermissionMode::Default,
         );
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
         assert!(
             matches!(
-                gate.check_after_hook_allow("Bash", &serde_json::json!({})).await,
+                gate.check_after_hook_allow("Bash", &serde_json::json!({}))
+                    .await,
                 PermissionDecision::Deny { .. }
             ),
             "a deny rule must override a hook 'allow'"
@@ -332,18 +356,29 @@ mod tests {
         let policy2 = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
         let gate2 = PolicyPermissionGate::new(policy2, inner.clone());
         assert_eq!(
-            gate2.check_after_hook_allow("Bash", &serde_json::json!({})).await,
+            gate2
+                .check_after_hook_allow("Bash", &serde_json::json!({}))
+                .await,
             PermissionDecision::Allow,
             "hook 'allow' skips the prompt for an un-ruled mutating tool"
         );
-        assert_eq!(inner.calls(), 0, "hook 'allow' must NOT delegate to the prompt");
+        assert_eq!(
+            inner.calls(),
+            0,
+            "hook 'allow' must NOT delegate to the prompt"
+        );
 
         // An explicit allow rule → Allow.
-        let policy3 =
-            policy_with(r#"{ "permissions": { "allow": ["Bash"] } }"#, PermissionMode::Default);
-        let gate3 = PolicyPermissionGate::new(policy3, RecordingInner::new(PermissionDecision::Allow));
+        let policy3 = policy_with(
+            r#"{ "permissions": { "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        let gate3 =
+            PolicyPermissionGate::new(policy3, RecordingInner::new(PermissionDecision::Allow));
         assert_eq!(
-            gate3.check_after_hook_allow("Bash", &serde_json::json!({})).await,
+            gate3
+                .check_after_hook_allow("Bash", &serde_json::json!({}))
+                .await,
             PermissionDecision::Allow
         );
     }
@@ -356,7 +391,8 @@ mod tests {
             reason: "default must not be consulted".into(),
         });
         assert_eq!(
-            gate.check_after_hook_allow("Bash", &serde_json::json!({})).await,
+            gate.check_after_hook_allow("Bash", &serde_json::json!({}))
+                .await,
             PermissionDecision::Allow,
             "a rule-less gate treats a hook 'allow' as a wholesale allow"
         );
@@ -375,7 +411,8 @@ mod tests {
         });
         let gate = PolicyPermissionGate::new(policy, inner.clone());
         assert_eq!(
-            gate.check_in_plan_mode("Read", &serde_json::json!({})).await,
+            gate.check_in_plan_mode("Read", &serde_json::json!({}))
+                .await,
             PermissionDecision::Allow
         );
         assert_eq!(inner.calls(), 0, "plan-safe read auto-allows, no prompt");
@@ -410,10 +447,15 @@ mod tests {
         let inner = RecordingInner::new(PermissionDecision::Allow);
         let gate = PolicyPermissionGate::new(policy, inner.clone());
         assert!(matches!(
-            gate.check_in_plan_mode("Edit", &serde_json::json!({})).await,
+            gate.check_in_plan_mode("Edit", &serde_json::json!({}))
+                .await,
             PermissionDecision::Deny { .. }
         ));
-        assert_eq!(inner.calls(), 0, "deny rule binds under plan mode, no prompt");
+        assert_eq!(
+            inner.calls(),
+            0,
+            "deny rule binds under plan mode, no prompt"
+        );
     }
 
     #[tokio::test]
@@ -428,10 +470,15 @@ mod tests {
         });
         let gate = PolicyPermissionGate::new(policy, inner.clone());
         assert_eq!(
-            gate.check_in_plan_mode("Edit", &serde_json::json!({})).await,
+            gate.check_in_plan_mode("Edit", &serde_json::json!({}))
+                .await,
             PermissionDecision::Allow
         );
-        assert_eq!(inner.calls(), 0, "allow rule wins under plan mode, no prompt");
+        assert_eq!(
+            inner.calls(),
+            0,
+            "allow rule wins under plan mode, no prompt"
+        );
     }
 
     #[tokio::test]
@@ -440,7 +487,8 @@ mod tests {
         // mode, so the default impl just delegates to check().
         let gate = RecordingInner::new(PermissionDecision::Allow);
         assert_eq!(
-            gate.check_in_plan_mode("Edit", &serde_json::json!({})).await,
+            gate.check_in_plan_mode("Edit", &serde_json::json!({}))
+                .await,
             PermissionDecision::Allow
         );
         assert_eq!(
@@ -466,7 +514,11 @@ mod tests {
             gate.resolve_detailed("Bash", &serde_json::json!({})).await,
             PermissionResolution::Allow
         );
-        assert_eq!(inner.calls(), 0, "resolve_detailed never consults the inner");
+        assert_eq!(
+            inner.calls(),
+            0,
+            "resolve_detailed never consults the inner"
+        );
     }
 
     #[tokio::test]
@@ -655,7 +707,10 @@ mod tests {
             ctx: &PermissionCheckContext,
         ) -> PermissionOutcome {
             *self.ctx.lock().unwrap() = Some(ctx.clone());
-            PermissionOutcome::Allow { updated_input: None, permission_updates: Vec::new() }
+            PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+            }
         }
     }
 
@@ -678,7 +733,13 @@ mod tests {
         let outcome = gate
             .check_with_context("Bash", &serde_json::json!({}), &ctx)
             .await;
-        assert_eq!(outcome, PermissionOutcome::Allow { updated_input: None, permission_updates: Vec::new() });
+        assert_eq!(
+            outcome,
+            PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new()
+            }
+        );
         let seen = inner.ctx.lock().unwrap().clone().expect("inner consulted");
         assert_eq!(
             seen.tool_use_id.as_deref(),
@@ -704,6 +765,98 @@ mod tests {
             }),
             PermissionDecisionSource::Classifier
         );
+    }
+
+    #[tokio::test]
+    async fn auto_mode_classifier_allows_safe_local_shell_without_prompt() {
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            PermissionMode::Auto,
+            std::iter::empty(),
+        ));
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "prompt should not run".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+
+        assert_eq!(
+            gate.check(
+                "Bash",
+                &serde_json::json!({ "command": "cargo test -p permission" })
+            )
+            .await,
+            PermissionDecision::Allow
+        );
+        assert_eq!(inner.calls(), 0, "classifier allow must skip prompt");
+    }
+
+    #[tokio::test]
+    async fn auto_mode_classifier_deny_has_classifier_source() {
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            PermissionMode::Auto,
+            std::iter::empty(),
+        ));
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+
+        match gate
+            .resolve_detailed(
+                "Bash",
+                &serde_json::json!({ "command": "git reset --hard" }),
+            )
+            .await
+        {
+            PermissionResolution::Deny { source, reason, .. } => {
+                assert_eq!(source, PermissionDecisionSource::Classifier);
+                assert!(
+                    reason.contains("Auto mode classifier blocked action"),
+                    "reason carries classifier block text: {reason}"
+                );
+            }
+            other => panic!("expected classifier deny, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_mode_explicit_ask_rule_still_prompts() {
+        let policy = policy_with(
+            r#"{ "permissions": { "ask": ["Bash"] } }"#,
+            PermissionMode::Auto,
+        );
+        let inner = RecordingInner::new(PermissionDecision::Allow);
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+
+        assert_eq!(
+            gate.check("Bash", &serde_json::json!({ "command": "cargo test" }))
+                .await,
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            inner.calls(),
+            1,
+            "explicit ask rule must delegate to prompt instead of classifier"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_mode_skips_dangerous_allow_rules_before_classifier() {
+        let rules = crate::loader::permission_rules_from_settings_json(
+            r#"{ "permissions": { "allow": ["Bash(python:*)"] } }"#,
+            PermissionRuleSource::UserSettings,
+        )
+        .unwrap();
+        let policy = Arc::new(PermissionPolicy::from_rules(PermissionMode::Auto, rules));
+        let gate = PolicyPermissionGate::new(
+            policy,
+            RecordingInner::new(PermissionDecision::Deny {
+                reason: "prompt-denied".into(),
+            }),
+        );
+
+        assert!(matches!(
+            gate.check("Bash", &serde_json::json!({ "command": "python evil.py" }))
+                .await,
+            PermissionDecision::Deny { .. }
+        ));
     }
 
     // ── set_permission_mode (live mode override) ─────────────────────────────
@@ -752,7 +905,9 @@ mod tests {
             reason: "prompt-denied".into(),
         });
         let gate = PolicyPermissionGate::new(policy, inner.clone());
-        gate.set_permission_mode("nonsense").await.expect("unknown mode acked, not errored");
+        gate.set_permission_mode("nonsense")
+            .await
+            .expect("unknown mode acked, not errored");
         // Mode unchanged → still delegates to the inner prompt transport.
         assert!(matches!(
             gate.check("Write", &serde_json::json!({})).await,
@@ -793,7 +948,10 @@ mod tests {
 
     #[test]
     fn parse_settable_mode_accepts_six_modes_noops_unknown() {
-        assert_eq!(parse_settable_mode("default"), Some(PermissionMode::Default));
+        assert_eq!(
+            parse_settable_mode("default"),
+            Some(PermissionMode::Default)
+        );
         assert_eq!(parse_settable_mode("plan"), Some(PermissionMode::Plan));
         assert_eq!(
             parse_settable_mode("acceptEdits"),
@@ -803,7 +961,10 @@ mod tests {
             parse_settable_mode("bypassPermissions"),
             Some(PermissionMode::BypassPermissions)
         );
-        assert_eq!(parse_settable_mode("dontAsk"), Some(PermissionMode::DontAsk));
+        assert_eq!(
+            parse_settable_mode("dontAsk"),
+            Some(PermissionMode::DontAsk)
+        );
         assert_eq!(parse_settable_mode("auto"), Some(PermissionMode::Auto));
         // Unknown → None (the caller acks + no-ops, matching the binary).
         assert_eq!(parse_settable_mode("bubble"), None);

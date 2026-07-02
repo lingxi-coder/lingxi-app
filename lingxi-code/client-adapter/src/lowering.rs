@@ -440,7 +440,10 @@ mod tests {
 
     #[test]
     fn mcp_error_to_struct_variant() {
-        assert_eq!(lower_mcp_status(&McpStatus::Connected), McpStatusDto::Connected);
+        assert_eq!(
+            lower_mcp_status(&McpStatus::Connected),
+            McpStatusDto::Connected
+        );
         assert_eq!(
             lower_mcp_status(&McpStatus::Disconnected),
             McpStatusDto::Disconnected
@@ -571,7 +574,10 @@ mod tests {
         let dto = lower_agent_info(&info);
         assert_eq!(dto.name, "reviewer");
         assert_eq!(dto.description, "Reviews code");
-        assert_eq!(dto.tools_allowed, vec!["Read".to_string(), "Grep".to_string()]);
+        assert_eq!(
+            dto.tools_allowed,
+            vec!["Read".to_string(), "Grep".to_string()]
+        );
     }
 
     #[test]

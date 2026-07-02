@@ -45,7 +45,8 @@ pub fn html_to_markdown(html: &str) -> String {
 
 /// Guidelines appended for a NON-preapproved domain (the strict default).
 /// Byte-faithful to `prompt.ts`.
-const GUIDELINES_STRICT: &str = "Provide a concise response based only on the content above. In your response:\n \
+const GUIDELINES_STRICT: &str =
+    "Provide a concise response based only on the content above. In your response:\n \
 - Enforce a strict 125-character maximum for quotes from any source document. \
 Open Source Software is ok as long as we respect the license.\n \
 - Use quotation marks for exact language from articles; any language outside of \
@@ -54,7 +55,8 @@ the quotation should never be word-for-word the same.\n \
 responses.\n - Never produce or reproduce exact song lyrics.";
 
 /// Guidelines appended for a preapproved domain. Byte-faithful to `prompt.ts`.
-const GUIDELINES_PREAPPROVED: &str = "Provide a concise response based on the content above. Include relevant \
+const GUIDELINES_PREAPPROVED: &str =
+    "Provide a concise response based on the content above. Include relevant \
 details, code examples, and documentation excerpts as needed.";
 
 /// Build the secondary-model prompt. Byte-faithful to `prompt.ts`
@@ -306,7 +308,10 @@ details, code examples, and documentation excerpts as needed."
     #[test]
     fn hostname_only_hosts_are_preapproved() {
         // Path is irrelevant for hostname-only entries.
-        assert!(is_preapproved_host("doc.rust-lang.org", "/std/vec/index.html"));
+        assert!(is_preapproved_host(
+            "doc.rust-lang.org",
+            "/std/vec/index.html"
+        ));
         assert!(is_preapproved_host("developer.mozilla.org", "/en-US/"));
         assert!(is_preapproved_host("react.dev", "/"));
         assert!(is_preapproved_host("learn.microsoft.com", "/anything")); // dedup'd dup entry
@@ -328,7 +333,10 @@ details, code examples, and documentation excerpts as needed."
         assert!(is_preapproved_host("vercel.com", "/docs"));
         assert!(is_preapproved_host("vercel.com", "/docs/functions"));
         // The exfil case from preapproved.ts:159-161 MUST be rejected.
-        assert!(!is_preapproved_host("github.com", "/anthropics-evil/malware"));
+        assert!(!is_preapproved_host(
+            "github.com",
+            "/anthropics-evil/malware"
+        ));
         assert!(!is_preapproved_host("github.com", "/anthropicsevil"));
         assert!(!is_preapproved_host("github.com", "/someoneelse"));
         assert!(!is_preapproved_host("vercel.com", "/docsource"));

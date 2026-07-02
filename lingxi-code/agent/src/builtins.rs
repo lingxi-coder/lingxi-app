@@ -65,10 +65,17 @@ pub const BUILTIN_AGENT_MAX_TURNS: u32 = 100;
 /// Tools the read-only built-ins (Explore, Plan, verification) must NOT have,
 /// mirroring claude-code's `disallowedTools` for those agents.
 fn read_only_disallowed() -> Vec<String> {
-    ["Agent", "Artifact", "ExitPlanMode", "Edit", "Write", "NotebookEdit"]
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect()
+    [
+        "Agent",
+        "Artifact",
+        "ExitPlanMode",
+        "Edit",
+        "Write",
+        "NotebookEdit",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
 }
 
 // ── Verbatim system prompts (claude-code built-in/*.ts, non-embedded branch) ──
@@ -605,7 +612,9 @@ mod tests {
     }
 
     fn find<'a>(defs: &'a [AgentDefinition], ty: &str) -> &'a AgentDefinition {
-        defs.iter().find(|d| d.agent_type == ty).expect("type present")
+        defs.iter()
+            .find(|d| d.agent_type == ty)
+            .expect("type present")
     }
 
     #[test]
@@ -614,7 +623,9 @@ mod tests {
         // general-purpose: all tools.
         assert!(matches!(
             find(&defs, "general-purpose").tools,
-            AgentToolPolicy::All { use_exact_tools: false }
+            AgentToolPolicy::All {
+                use_exact_tools: false
+            }
         ));
         // Read-only agents: Except the 5 write tools.
         for ty in ["Explore", "Plan", "verification"] {
@@ -639,9 +650,15 @@ mod tests {
     #[test]
     fn models_match_reference() {
         let defs = builtin_agent_definitions();
-        assert!(matches!(find(&defs, "general-purpose").model, AgentModel::Inherit));
+        assert!(matches!(
+            find(&defs, "general-purpose").model,
+            AgentModel::Inherit
+        ));
         assert!(matches!(find(&defs, "Plan").model, AgentModel::Inherit));
-        assert!(matches!(find(&defs, "verification").model, AgentModel::Inherit));
+        assert!(matches!(
+            find(&defs, "verification").model,
+            AgentModel::Inherit
+        ));
         assert!(matches!(
             &find(&defs, "Explore").model,
             AgentModel::Alias(m) if m == "haiku"
@@ -659,7 +676,11 @@ mod tests {
     #[test]
     fn all_carry_a_system_prompt_and_high_turn_cap() {
         for d in builtin_agent_definitions() {
-            assert!(d.system_prompt.is_some(), "{} has a system prompt", d.agent_type);
+            assert!(
+                d.system_prompt.is_some(),
+                "{} has a system prompt",
+                d.agent_type
+            );
             assert_eq!(d.max_turns, 100);
             assert!(matches!(d.permission_mode, AgentPermissionMode::Bubble));
         }
@@ -672,7 +693,9 @@ mod tests {
         assert_eq!(f.max_turns, 200);
         assert!(matches!(
             f.tools,
-            AgentToolPolicy::All { use_exact_tools: true }
+            AgentToolPolicy::All {
+                use_exact_tools: true
+            }
         ));
         assert!(matches!(f.model, AgentModel::Inherit));
         assert!(matches!(f.permission_mode, AgentPermissionMode::Bubble));
@@ -697,12 +720,18 @@ mod tests {
         // The 4 static agents carry real prompt text (no placeholder marker).
         for ty in ["general-purpose", "Explore", "Plan", "verification"] {
             let p = find(&defs, ty).system_prompt.as_deref().unwrap();
-            assert!(!p.contains("[NOTE: This is a placeholder"), "{ty} should be verbatim");
+            assert!(
+                !p.contains("[NOTE: This is a placeholder"),
+                "{ty} should be verbatim"
+            );
         }
         // The 2 dynamic agents are explicitly marked placeholders.
         for ty in ["claude-code-guide", "statusline-setup"] {
             let p = find(&defs, ty).system_prompt.as_deref().unwrap();
-            assert!(p.contains("[NOTE: This is a placeholder"), "{ty} should be a placeholder");
+            assert!(
+                p.contains("[NOTE: This is a placeholder"),
+                "{ty} should be a placeholder"
+            );
         }
     }
 
@@ -736,7 +765,12 @@ mod tests {
         let defs = builtin_agent_definitions();
         let d = find(&defs, "workflow-subagent");
         assert!(
-            matches!(d.tools, AgentToolPolicy::All { use_exact_tools: false }),
+            matches!(
+                d.tools,
+                AgentToolPolicy::All {
+                    use_exact_tools: false
+                }
+            ),
             "tools must be All (use_exact_tools: false), got {:?}",
             d.tools
         );
@@ -749,7 +783,10 @@ mod tests {
         let expected = "You are a subagent spawned by a workflow orchestration script. Use the tools available to complete the task.\n\nCRITICAL: Your final text response is returned **verbatim** as a string to the calling script \u{2014} it is your return value, not a message to a human.\n- Output the literal result (data, JSON, text). Do NOT output confirmations like \"Done.\" or \"Sent.\"\n- If asked for JSON, return ONLY the raw JSON \u{2014} no code fences, no prose, no markdown.\n- Do NOT use SendUserMessage to deliver your answer. Put your answer in your final text response.\n- Be concise. The script will parse your output.";
         let defs = builtin_agent_definitions();
         let d = find(&defs, "workflow-subagent");
-        let got = d.system_prompt.as_deref().expect("system_prompt must be Some");
+        let got = d
+            .system_prompt
+            .as_deref()
+            .expect("system_prompt must be Some");
         assert_eq!(
             got, expected,
             "workflow-subagent system prompt must equal kBp verbatim"

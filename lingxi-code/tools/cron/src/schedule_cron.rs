@@ -405,7 +405,8 @@ fn is_single_digit(s: &str) -> bool {
 
 /// Extract `N` from a `*/N` step field (mirrors the TS `/^\*\/(\d+)$/`).
 fn parse_step(s: &str) -> Option<u32> {
-    s.strip_prefix("*/").and_then(|rest| rest.parse::<u32>().ok())
+    s.strip_prefix("*/")
+        .and_then(|rest| rest.parse::<u32>().ok())
 }
 
 /// Format `hour:minute` (24h) as a 12-hour clock like "2:30pm".
@@ -553,7 +554,9 @@ fn build_result_content(
     };
     if recurring {
         let tail = if scheduler_active {
-            format!("Auto-expires after {DEFAULT_MAX_AGE_DAYS} days. Use CronDelete to cancel sooner.")
+            format!(
+                "Auto-expires after {DEFAULT_MAX_AGE_DAYS} days. Use CronDelete to cancel sooner."
+            )
         } else {
             "NOTE: this platform has no active cron scheduler, so the job will NOT fire automatically; use CronList to review or CronDelete to remove it.".to_string()
         };
@@ -958,7 +961,10 @@ mod tests {
         assert_eq!(cron_to_human("0 0 * * 0"), "Every Sunday at 12:00am");
         assert_eq!(cron_to_human("0 9 * * 1-5"), "Weekdays at 9:00am");
         assert_eq!(cron_to_human("30 14 28 2 *"), "February 28 at 2:30pm");
-        assert_eq!(cron_to_human("0 9 15 * *"), "Day 15 of every month at 9:00am");
+        assert_eq!(
+            cron_to_human("0 9 15 * *"),
+            "Day 15 of every month at 9:00am"
+        );
         // Unrecognized -> raw cron string.
         assert_eq!(cron_to_human("garbage"), "garbage");
         assert_eq!(cron_to_human("* * * * *"), "* * * * *");
@@ -1141,7 +1147,9 @@ mod tests {
             )
             .await
             .expect_err("garbage");
-        assert!(format!("{err}").contains("Invalid cron expression 'not a cron'. Expected 5 fields"));
+        assert!(
+            format!("{err}").contains("Invalid cron expression 'not a cron'. Expected 5 fields")
+        );
     }
 
     #[tokio::test]
@@ -1222,7 +1230,7 @@ mod tests {
         assert!(parse_cron("* * * 0 *").is_err()); // month min 1
         assert!(parse_cron("* * * 13 *").is_err()); // month max 12
         assert!(parse_cron("* * * * 8").is_err()); // dow max 7 (alias), 8 invalid
-        // Out-of-range hidden inside a list / range is rejected too.
+                                                   // Out-of-range hidden inside a list / range is rejected too.
         assert!(parse_cron("0,60 * * * *").is_err());
         assert!(parse_cron("* * * * 5-8").is_err());
         // Boundary values (including the dow 7 alias) are accepted.

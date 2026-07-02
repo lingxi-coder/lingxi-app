@@ -225,5 +225,8 @@ fn cron_path_template_matches_resolver() {
     );
     // The fixture template agrees with the production resolver.
     let resolved = cron::tasks_file::scheduled_tasks_path(std::path::Path::new("<project>"));
-    assert_eq!(resolved.to_string_lossy(), "<project>/.lingxi/scheduled_tasks.json");
+    assert_eq!(
+        resolved.to_string_lossy(),
+        "<project>/.lingxi/scheduled_tasks.json"
+    );
 }

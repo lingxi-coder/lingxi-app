@@ -331,20 +331,29 @@ mod tests {
         adapter.record_rate_limit_from_headers(&h, "client_xyz");
         assert_eq!(adapter.last_request_id(), Some("req_011abc".to_string()));
         // Server header present → server origin (client id ignored).
-        assert_eq!(adapter.last_request_id_origin(), Some(RequestIdOrigin::Server));
+        assert_eq!(
+            adapter.last_request_id_origin(),
+            Some(RequestIdOrigin::Server)
+        );
 
         // `x-request-id` (OpenAI/generic) is also a server header → server origin.
         let mut h2 = std::collections::BTreeMap::new();
         h2.insert("x-request-id".to_string(), "req_xfallback".to_string());
         adapter.record_rate_limit_from_headers(&h2, "client_xyz");
         assert_eq!(adapter.last_request_id(), Some("req_xfallback".to_string()));
-        assert_eq!(adapter.last_request_id_origin(), Some(RequestIdOrigin::Server));
+        assert_eq!(
+            adapter.last_request_id_origin(),
+            Some(RequestIdOrigin::Server)
+        );
 
         // No server id header → fall back to the client-generated id, marked
         // client-origin (correlation-only, not provider-lookupable).
         adapter.record_rate_limit_from_headers(&std::collections::BTreeMap::new(), "client_xyz");
         assert_eq!(adapter.last_request_id(), Some("client_xyz".to_string()));
-        assert_eq!(adapter.last_request_id_origin(), Some(RequestIdOrigin::Client));
+        assert_eq!(
+            adapter.last_request_id_origin(),
+            Some(RequestIdOrigin::Client)
+        );
 
         // Neither a server header nor a client id → cleared (no stale leak).
         adapter.record_rate_limit_from_headers(&std::collections::BTreeMap::new(), "");
@@ -399,7 +408,15 @@ mod tests {
         let adapter = make_adapter(transport);
         let build = |model: &str| {
             adapter
-                .build_request(model, None, None, vec![text_user_msg("hi")], vec![], false, None)
+                .build_request(
+                    model,
+                    None,
+                    None,
+                    vec![text_user_msg("hi")],
+                    vec![],
+                    false,
+                    None,
+                )
                 .expect("build_request")
                 .reasoning
         };
@@ -424,10 +441,23 @@ mod tests {
             budget_tokens: 4096,
         });
         let r = adapter_fixed
-            .build_request("gpt-5", None, None, vec![text_user_msg("hi")], vec![], false, None)
+            .build_request(
+                "gpt-5",
+                None,
+                None,
+                vec![text_user_msg("hi")],
+                vec![],
+                false,
+                None,
+            )
             .expect("build_request")
             .reasoning;
-        assert_eq!(r, Some(ReasoningConfig::Enabled { budget_tokens: 4096 }));
+        assert_eq!(
+            r,
+            Some(ReasoningConfig::Enabled {
+                budget_tokens: 4096
+            })
+        );
     }
 
     #[test]
@@ -1989,10 +2019,7 @@ mod tests {
             "retried-then-recovered 429 must not plant a rejected snapshot"
         );
         // The 429 message copy was likewise cleared on success.
-        assert_eq!(
-            adapter.last_rate_limit_error_message(),
-            None,
-        );
+        assert_eq!(adapter.last_rate_limit_error_message(), None,);
     }
 
     /// Cross-drive isolation, asserted on the OBSERVABLE promoted snapshot: a
@@ -2119,7 +2146,8 @@ mod tests {
 
         // The promoted snapshot must be DRIVE B's (five_hour), proving drive A's
         // orphaned seven_day slot did not survive into B's promote.
-        let info = adapter.last_rate_limit_info()
+        let info = adapter
+            .last_rate_limit_info()
             .expect("drive B promotes its own snapshot");
         assert_eq!(
             info.rate_limit_type.as_deref(),
@@ -2323,7 +2351,13 @@ mod tests {
         // No drive yet ⇒ zero.
         assert_eq!(adapter.last_retry_count(), 0);
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await;
         assert!(result.is_ok(), "429→200 must succeed");
         // Exactly one budget-consuming retry was performed.
@@ -2380,9 +2414,7 @@ mod tests {
     /// Empty frame-stream for scripted streaming errors.
     struct EmptyFrames;
     impl crate::FrameStream for EmptyFrames {
-        fn next_frame(
-            &mut self,
-        ) -> BoxFuture<'_, Result<Option<crate::RawStreamFrame>, LlmError>> {
+        fn next_frame(&mut self) -> BoxFuture<'_, Result<Option<crate::RawStreamFrame>, LlmError>> {
             Box::pin(async { Ok(None) })
         }
     }
@@ -2490,15 +2522,16 @@ mod tests {
         // The result will be an error (empty frame-stream on attempt 2) or Ok
         // depending on the codec — we only care that two open_stream calls were
         // made and that the elapsed time is ≥ 7 s (the retry-after delay).
-        let _result = adapter.stream(
-            "claude-sonnet-4-20250514",
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-            None,
-        )
-        .await;
+        let _result = adapter
+            .stream(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+            )
+            .await;
 
         let elapsed = before.elapsed();
         // The sleep was for exactly 7 s (retry-after value).  With time paused
@@ -2660,17 +2693,18 @@ mod tests {
         // Global fallback also points somewhere — per-model must win.
         adapter.fallback_model = Some("claude-sonnet-4-20250514".to_string());
 
-        let result = adapter.messages_create_with_fallback(
-            "claude-opus-4-6",
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-            None, // no explicit call-site fallback
-            false,
-            false,
-        )
-        .await;
+        let result = adapter
+            .messages_create_with_fallback(
+                "claude-opus-4-6",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None, // no explicit call-site fallback
+                false,
+                false,
+            )
+            .await;
 
         // Should succeed — 3 × 529 then haiku 200.
         assert!(
@@ -2716,17 +2750,18 @@ mod tests {
         adapter.fallback_model = Some("claude-haiku-4-20250307".to_string());
 
         // claude-opus-4-6 is_non_custom_opus=true → allow_fallback=true for non-subscriber.
-        let result = adapter.messages_create_with_fallback(
-            "claude-opus-4-6",
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-            None,
-            false,
-            false,
-        )
-        .await;
+        let result = adapter
+            .messages_create_with_fallback(
+                "claude-opus-4-6",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                false,
+                false,
+            )
+            .await;
 
         assert!(result.is_ok(), "global fallback should work: {result:?}");
         assert_eq!(transport.seen_count(), 4);
@@ -2768,17 +2803,18 @@ mod tests {
 
         // Request via ALIAS — the alias_to_display map must normalize this to
         // "claude-sonnet-4-20250514" before the fallback_overrides lookup.
-        let result = adapter.messages_create_with_fallback(
-            "claude", // alias of "claude-sonnet-4-20250514"
-            None,
-            Some("sys"),
-            Vec::new(),
-            Vec::new(),
-            None, // no explicit call-site fallback (per-model must activate)
-            false,
-            false,
-        )
-        .await;
+        let result = adapter
+            .messages_create_with_fallback(
+                "claude", // alias of "claude-sonnet-4-20250514"
+                None,
+                Some("sys"),
+                Vec::new(),
+                Vec::new(),
+                None, // no explicit call-site fallback (per-model must activate)
+                false,
+                false,
+            )
+            .await;
 
         assert!(
             result.is_ok(),
@@ -2837,17 +2873,18 @@ mod tests {
         let adapter =
             make_adapter_with_routing(transport.clone(), fallback_overrides, None, Some(0));
 
-        let result = adapter.messages_create_with_fallback(
-            "claude-opus-4-6",
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-            None,
-            false,
-            false,
-        )
-        .await;
+        let result = adapter
+            .messages_create_with_fallback(
+                "claude-opus-4-6",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                false,
+                false,
+            )
+            .await;
 
         assert!(
             result.is_ok(),
@@ -2907,17 +2944,18 @@ mod tests {
         let adapter =
             make_adapter_with_routing(transport.clone(), fallback_overrides, None, Some(0));
 
-        let result = adapter.messages_create_with_fallback(
-            "claude-opus-4-6",
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-            None,
-            false,
-            false,
-        )
-        .await;
+        let result = adapter
+            .messages_create_with_fallback(
+                "claude-opus-4-6",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                false,
+                false,
+            )
+            .await;
 
         assert!(
             result.is_err(),
@@ -2963,17 +3001,18 @@ mod tests {
         let adapter =
             make_adapter_with_routing(transport.clone(), fallback_overrides, None, Some(0));
 
-        let result = adapter.messages_create_with_fallback(
-            "claude-opus-4-6",
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-            None,
-            false,
-            false,
-        )
-        .await;
+        let result = adapter
+            .messages_create_with_fallback(
+                "claude-opus-4-6",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                false,
+                false,
+            )
+            .await;
 
         assert!(
             result.is_ok(),
@@ -3029,17 +3068,18 @@ mod tests {
         // Set global fallback only (no per-model chain).
         adapter.fallback_model = Some("claude-sonnet-4-20250514".to_string());
 
-        let result = adapter.messages_create_with_fallback(
-            "claude-opus-4-6",
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-            None,
-            false,
-            false,
-        )
-        .await;
+        let result = adapter
+            .messages_create_with_fallback(
+                "claude-opus-4-6",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                false,
+                false,
+            )
+            .await;
 
         assert!(result.is_ok(), "global fallback must work: {result:?}");
         assert_eq!(transport.seen_count(), 4);
@@ -3299,15 +3339,16 @@ mod tests {
         });
         let adapter = make_adapter(transport.clone());
 
-        let count = adapter.count_tokens(
-            "claude-sonnet-4-20250514",
-            None,
-            Some("you are helpful"),
-            Vec::new(),
-            Vec::new(),
-        )
-        .await
-        .expect("count_tokens ok");
+        let count = adapter
+            .count_tokens(
+                "claude-sonnet-4-20250514",
+                None,
+                Some("you are helpful"),
+                Vec::new(),
+                Vec::new(),
+            )
+            .await
+            .expect("count_tokens ok");
 
         assert_eq!(
             count, 2095,
@@ -3357,9 +3398,7 @@ mod tests {
     }
 
     impl crate::FrameStream for ScriptedFrames {
-        fn next_frame(
-            &mut self,
-        ) -> BoxFuture<'_, Result<Option<crate::RawStreamFrame>, LlmError>> {
+        fn next_frame(&mut self) -> BoxFuture<'_, Result<Option<crate::RawStreamFrame>, LlmError>> {
             let result = if self.idx < self.frames.len() {
                 let bytes = self.frames[self.idx].clone();
                 self.idx += 1;
@@ -3513,16 +3552,17 @@ mod tests {
         let transport = ScriptedStreamTransport::anthropic_success();
         let (adapter, sink) = make_stream_adapter_with_bus(transport).await;
 
-        let mut stream = adapter.stream(
-            "claude-sonnet-4-20250514",
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-            None,
-        )
-        .await
-        .expect("stream open ok");
+        let mut stream = adapter
+            .stream(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+            )
+            .await
+            .expect("stream open ok");
 
         // Drain all events.
         while stream.next().await.is_some() {}
@@ -3570,15 +3610,16 @@ mod tests {
         let transport = ScriptedStreamTransport::malformed_frame();
         let (adapter, sink) = make_stream_adapter_with_bus(transport).await;
 
-        let stream_result = adapter.stream(
-            "claude-sonnet-4-20250514",
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-            None,
-        )
-        .await;
+        let stream_result = adapter
+            .stream(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+            )
+            .await;
 
         // May error at open or during drain.
         if let Ok(mut stream) = stream_result {

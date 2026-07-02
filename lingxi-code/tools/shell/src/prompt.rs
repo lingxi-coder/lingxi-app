@@ -452,11 +452,21 @@ pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> String {
     let default_timeout_ms = bash_default_timeout_ms();
 
     let tool_preference_items = vec![
-        Bullet::Item(format!("File search: Use {GLOB_TOOL_NAME} (NOT find or ls)")),
-        Bullet::Item(format!("Content search: Use {GREP_TOOL_NAME} (NOT grep or rg)")),
-        Bullet::Item(format!("Read files: Use {FILE_READ_TOOL_NAME} (NOT cat/head/tail)")),
-        Bullet::Item(format!("Edit files: Use {FILE_EDIT_TOOL_NAME} (NOT sed/awk)")),
-        Bullet::Item(format!("Write files: Use {FILE_WRITE_TOOL_NAME} (NOT echo >/cat <<EOF)")),
+        Bullet::Item(format!(
+            "File search: Use {GLOB_TOOL_NAME} (NOT find or ls)"
+        )),
+        Bullet::Item(format!(
+            "Content search: Use {GREP_TOOL_NAME} (NOT grep or rg)"
+        )),
+        Bullet::Item(format!(
+            "Read files: Use {FILE_READ_TOOL_NAME} (NOT cat/head/tail)"
+        )),
+        Bullet::Item(format!(
+            "Edit files: Use {FILE_EDIT_TOOL_NAME} (NOT sed/awk)"
+        )),
+        Bullet::Item(format!(
+            "Write files: Use {FILE_WRITE_TOOL_NAME} (NOT echo >/cat <<EOF)"
+        )),
         Bullet::Item("Communication: Output text directly (NOT echo/printf)".into()),
     ];
 
@@ -1005,10 +1015,7 @@ mod tests {
 
     #[test]
     fn prepend_bullets_indentation() {
-        let items = vec![
-            Bullet::Item("top".into()),
-            Bullet::Sub(vec!["sub".into()]),
-        ];
+        let items = vec![Bullet::Item("top".into()), Bullet::Sub(vec!["sub".into()])];
         let out = prepend_bullets(&items);
         assert_eq!(out, vec![" - top".to_string(), "  - sub".to_string()]);
     }

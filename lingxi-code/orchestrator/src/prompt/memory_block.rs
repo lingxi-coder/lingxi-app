@@ -199,8 +199,14 @@ mod external_include_tests {
         assert!(include_external_for(User, true));
         // Managed/Project/Local: gated on the per-project approval flag.
         for tier in [Managed, Project, Local] {
-            assert!(!include_external_for(tier, false), "{tier:?} gated when unapproved");
-            assert!(include_external_for(tier, true), "{tier:?} allowed when approved");
+            assert!(
+                !include_external_for(tier, false),
+                "{tier:?} gated when unapproved"
+            );
+            assert!(
+                include_external_for(tier, true),
+                "{tier:?} allowed when approved"
+            );
         }
     }
 }
@@ -284,7 +290,9 @@ pub fn build_memdir_prefetch(
 ) -> Arc<memory::prefetch::MemoryPrefetch> {
     let roots = memory::memdir::memdir_path(home, false);
     let selector = Arc::new(memory::selector::MemorySelector::new(side_query_client));
-    Arc::new(memory::prefetch::MemoryPrefetch::new(selector, runtime, roots))
+    Arc::new(memory::prefetch::MemoryPrefetch::new(
+        selector, runtime, roots,
+    ))
 }
 
 /// Build a [`SessionMemoryHandle`](crate::SessionMemoryHandle) for the
@@ -347,8 +355,9 @@ pub fn build_memdir_prefetch_from_anthropic(
     runtime: Arc<dyn traits::RuntimeSpawner>,
     home: &std::path::Path,
 ) -> Arc<memory::prefetch::MemoryPrefetch> {
-    let client: Arc<dyn sidequery::SideQueryClient> =
-        Arc::new(sidequery::ProviderSideQueryClient::new(api_key, api_base, http));
+    let client: Arc<dyn sidequery::SideQueryClient> = Arc::new(
+        sidequery::ProviderSideQueryClient::new(api_key, api_base, http),
+    );
     build_memdir_prefetch(client, runtime, home)
 }
 

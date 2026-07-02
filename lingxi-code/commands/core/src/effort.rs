@@ -218,7 +218,11 @@ fn user_settings_path() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
         return Some(PathBuf::from(dir).join("settings.json"));
     }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(branding::DOT_DIR).join("settings.json"))
+    std::env::var_os("HOME").map(|h| {
+        PathBuf::from(h)
+            .join(branding::DOT_DIR)
+            .join("settings.json")
+    })
 }
 
 /// Persist `effortLevel` into the user `settings.json`, mirroring

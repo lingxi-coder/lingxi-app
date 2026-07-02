@@ -359,7 +359,9 @@ impl Tool for FileWriteTool {
             serde_json::json!([])
         } else {
             let prior = prior_decoded.as_deref().unwrap_or("");
-            serde_json::json!(crate::structured_patch::build_structured_patch(prior, content))
+            serde_json::json!(crate::structured_patch::build_structured_patch(
+                prior, content
+            ))
         };
 
         // `data` is byte-faithful to claude-code's Write result `data` object —
@@ -476,6 +478,7 @@ mod tests {
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: None,
+                model_profile: None,
             })
             .await;
         assert_eq!(long, WRITE_PROMPT_LONG);
@@ -486,12 +489,13 @@ mod tests {
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
+                model_profile: None,
             })
             .await;
         assert_eq!(short, WRITE_PROMPT_SHORT);
-        assert!(short.starts_with(
-            "Writes a file to the local filesystem, overwriting if one exists."
-        ));
+        assert!(
+            short.starts_with("Writes a file to the local filesystem, overwriting if one exists.")
+        );
         assert!(short.contains("For partial changes, use Edit instead."));
     }
 
@@ -604,7 +608,9 @@ mod tests {
         assert_eq!(result.data["content"], "alpha\nBETA\ngamma\n");
         // The structuredPatch is the jsdiff hunk array capturing the changed
         // middle line (1:1: context + `-beta`/`+BETA` + context).
-        let sp = result.data["structuredPatch"].as_array().expect("hunk array");
+        let sp = result.data["structuredPatch"]
+            .as_array()
+            .expect("hunk array");
         assert_eq!(sp.len(), 1, "one hunk");
         assert_eq!(sp[0]["oldStart"], 1);
         assert_eq!(sp[0]["oldLines"], 3);

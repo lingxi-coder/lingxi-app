@@ -163,7 +163,10 @@ mod tests {
         assert_eq!(result.data["filePath"], input_path);
         assert_eq!(result.data["oldString"], "world");
         assert_eq!(result.data["newString"], "Rust");
-        assert!(result.data["originalFile"].as_str().unwrap().starts_with("hello world"));
+        assert!(result.data["originalFile"]
+            .as_str()
+            .unwrap()
+            .starts_with("hello world"));
         assert_eq!(result.data["userModified"], false);
         assert_eq!(result.data["replaceAll"], false);
         assert!(result.data.get("content").is_none());
@@ -343,9 +346,8 @@ mod tests {
         // `ToolError::InvalidInput`'s Display prefixes "invalid input: "; the
         // byte-exact model-facing message is the contained substring.
         assert!(
-            err.to_string().ends_with(
-                "File is too large to edit (1GB). Maximum editable file size is 1GB."
-            ),
+            err.to_string()
+                .ends_with("File is too large to edit (1GB). Maximum editable file size is 1GB."),
             "unexpected error: {err}"
         );
         // File length unchanged (rejected before any write).
@@ -611,7 +613,9 @@ that bypasses Perforce tracking."
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("Cannot create new file - file already exists."));
+        assert!(err
+            .to_string()
+            .contains("Cannot create new file - file already exists."));
         // original content untouched
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "already here");
     }
@@ -942,7 +946,9 @@ that bypasses Perforce tracking."
             )
             .await
             .unwrap();
-        let sp = result.data["structuredPatch"].as_array().expect("hunk array");
+        let sp = result.data["structuredPatch"]
+            .as_array()
+            .expect("hunk array");
         assert!(!sp.is_empty(), "expected at least one hunk");
         let h0 = &sp[0];
         assert!(h0["oldStart"].is_number());
@@ -1391,6 +1397,7 @@ that bypasses Perforce tracking."
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: None,
+                model_profile: None,
             })
             .await;
         assert!(long.starts_with(
@@ -1405,9 +1412,8 @@ that bypasses Perforce tracking."
         // Locks the compact-format decision (line number + tab, not padded-arrow).
         assert!(long.contains("The line number prefix format is: line number + tab."));
         // Final bullet, with NO trailing newline.
-        assert!(long.ends_with(
-            "This parameter is useful if you want to rename a variable for instance."
-        ));
+        assert!(long
+            .ends_with("This parameter is useful if you want to rename a variable for instance."));
         // Locks `minimalUniquenessHint` empty (non-`ant` 3P build).
         assert!(!long.contains("smallest old_string"));
         // prompt(model:None) ⇒ Dh(undefined)=false ⇒ LONG.
@@ -1425,6 +1431,7 @@ that bypasses Perforce tracking."
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
+                model_profile: None,
             })
             .await;
         assert_eq!(p, EDIT_PROMPT_SHORT);

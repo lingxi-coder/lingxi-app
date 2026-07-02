@@ -19,7 +19,6 @@
 //! 4. No `SubagentStart` hook registered → the spawn is a strict no-op
 //!    (byte-identical: the turn still reaches `end_turn`).
 //! 5. A `SubagentStart` hook that itself fails does NOT break the turn.
-use llm_client::ContentBlock as LlmContentBlock;
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
 use hooks::events::{HookEvent, HookEventType};
@@ -27,8 +26,10 @@ use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookOutcome, HookResult};
 use hooks::HookExecutorImpl;
+use llm_client::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
-    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
@@ -587,7 +588,11 @@ async fn subagent_start_and_stop_share_the_same_real_child_id() {
     let outcome = orch.run_turn("spawn an agent").await.expect("turn ok");
     assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
 
-    let start = start_id.lock().unwrap().clone().expect("SubagentStart fired");
+    let start = start_id
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("SubagentStart fired");
     let stop = stop_id.lock().unwrap().clone().expect("SubagentStop fired");
     let expected = FAKE_AGENT_CHILD_ID.to_string();
     assert_eq!(start, expected, "SubagentStart carries the real child id");

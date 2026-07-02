@@ -174,7 +174,8 @@ mod tests {
         // `with_default` scopes the capturing subscriber to this async block.
         let fut = async {
             let q = MessageQueueManager::new();
-            q.set_recorder(Arc::new(TelemetryQueueRecorder::new())).await;
+            q.set_recorder(Arc::new(TelemetryQueueRecorder::new()))
+                .await;
 
             q.enqueue(user_cmd("a", QueuePriority::Now)).await;
             q.dequeue().await;

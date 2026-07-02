@@ -82,8 +82,17 @@ fn is_image_mime(mime: Option<&str>) -> bool {
     let Some(raw) = mime else {
         return false;
     };
-    let base = raw.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
-    let normalized = if base == "image/jpg" { "image/jpeg" } else { base.as_str() };
+    let base = raw
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let normalized = if base == "image/jpg" {
+        "image/jpeg"
+    } else {
+        base.as_str()
+    };
     IMAGE_MIME_TYPES.contains(&normalized)
 }
 
@@ -268,7 +277,11 @@ fn maybe_resize<'a>(data: &'a str, mime_type: Option<&str>) -> (&'a str, String)
         .to_ascii_lowercase();
     // `image/jpg` is not a valid wire media_type — the Anthropic API requires
     // `image/jpeg` (matches the `Ara` jpg→jpeg normalization).
-    let ext = if raw_ext == "jpg" { "jpeg".to_string() } else { raw_ext };
+    let ext = if raw_ext == "jpg" {
+        "jpeg".to_string()
+    } else {
+        raw_ext
+    };
     (data, ext)
 }
 
@@ -295,7 +308,9 @@ fn persist_blob_to_text_block(
     source_description: &str,
     ctx: PersistContext,
 ) -> Value {
-    let mime_label = mime_type.filter(|m| !m.is_empty()).unwrap_or("unknown type");
+    let mime_label = mime_type
+        .filter(|m| !m.is_empty())
+        .unwrap_or("unknown type");
 
     // Buffer.from(data, 'base64') — Node tolerates malformed base64 by decoding
     // what it can; our decoder is stricter. A decode failure surfaces the same
@@ -430,10 +445,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let content = json!([{ "type": "image", "data": "QUJD", "mimeType": "image/jpeg" }]);
         let got = transform_result_content(&content, "srv", ctx(dir.path()));
-        assert_eq!(
-            got[0]["source"]["media_type"],
-            json!("image/jpeg")
-        );
+        assert_eq!(got[0]["source"]["media_type"], json!("image/jpeg"));
         assert_eq!(got[0]["source"]["data"], json!("QUJD"));
     }
 
@@ -449,7 +461,10 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], json!("text"));
         assert!(
-            blocks[0]["text"].as_str().unwrap().starts_with("[Image from srv] "),
+            blocks[0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("[Image from srv] "),
             "got: {}",
             blocks[0]["text"]
         );
@@ -466,7 +481,11 @@ mod tests {
         assert_eq!(got[0]["text"], json!("hi"));
         assert_eq!(got[0]["_meta"], json!({ "k": "v" }));
         // A text block WITHOUT _meta stays bare (no null _meta key).
-        let bare = transform_result_content(&json!([{ "type": "text", "text": "x" }]), "srv", ctx(dir.path()));
+        let bare = transform_result_content(
+            &json!([{ "type": "text", "text": "x" }]),
+            "srv",
+            ctx(dir.path()),
+        );
         assert!(bare[0].get("_meta").is_none());
         assert_eq!(bare, json!([{ "type": "text", "text": "x" }]));
     }
@@ -486,7 +505,8 @@ mod tests {
     fn image_block_mime_with_params_stripped() {
         // `image/png; charset=binary` → params stripped, recognized as png.
         let dir = tempfile::tempdir().unwrap();
-        let content = json!([{ "type": "image", "data": "QUJD", "mimeType": "image/png; charset=binary" }]);
+        let content =
+            json!([{ "type": "image", "data": "QUJD", "mimeType": "image/png; charset=binary" }]);
         let got = transform_result_content(&content, "srv", ctx(dir.path()));
         assert_eq!(got[0]["type"], json!("image"));
         assert_eq!(got[0]["source"]["media_type"], json!("image/png"));
@@ -649,7 +669,9 @@ mod tests {
         let got = transform_result_content(&content, "s", ctx(dir.path()));
         let text = got[0]["text"].as_str().unwrap();
         assert!(
-            text.starts_with("[Audio from s] Binary content (audio/mpeg, 0 bytes) could not be saved to disk:"),
+            text.starts_with(
+                "[Audio from s] Binary content (audio/mpeg, 0 bytes) could not be saved to disk:"
+            ),
             "got {text}"
         );
     }
@@ -746,9 +768,6 @@ mod tests {
         assert_eq!(got, json!("ok"));
 
         let obj = json!({ "structuredContent": { "a": 1 } });
-        assert_eq!(
-            transform_result_content(&obj, "srv", ctx(dir.path())),
-            obj
-        );
+        assert_eq!(transform_result_content(&obj, "srv", ctx(dir.path())), obj);
     }
 }

@@ -619,8 +619,7 @@ impl ApiService {
         }
         // `firstParty` approximation at this layer: a Claude.ai subscriber (the
         // OAuth/first-party path). Opt-in env arms the otherwise-dormant feature.
-        cache_env_truthy("LINGXI_GLOBAL_CACHE_SCOPE")
-            && self.effective_subscriber().is_subscriber
+        cache_env_truthy("LINGXI_GLOBAL_CACHE_SCOPE") && self.effective_subscriber().is_subscriber
     }
 
     /// 1h-TTL gate — parity `should1hCacheTTL` (`services/api/claude.ts:393-434`).
@@ -716,7 +715,8 @@ impl ApiService {
                 global_scope: self.should_use_global_cache_scope(),
                 ttl_1h: self.should_1h_cache_ttl(),
             };
-            req.system = crate::prompt_format::split_system_blocks_with(s, enable_caching, split_opts);
+            req.system =
+                crate::prompt_format::split_system_blocks_with(s, enable_caching, split_opts);
         }
         req.messages = messages;
 
@@ -776,8 +776,10 @@ impl ApiService {
         // passes None → the model's binary-grounded max-output tokens, NOT the
         // codec's 4096 default.
         req.max_tokens = Some(max_tokens.unwrap_or_else(|| {
-            u32::try_from(crate::model::context_window::max_output_tokens_for_model(model))
-                .unwrap_or(u32::MAX)
+            u32::try_from(crate::model::context_window::max_output_tokens_for_model(
+                model,
+            ))
+            .unwrap_or(u32::MAX)
         }));
 
         // thinking (DIV-1) + temperature (DIV-4), mirroring claude.ts:1596-1630
@@ -785,8 +787,8 @@ impl ApiService {
         // budget cap clamps to max_tokens-1).
         {
             use crate::model::thinking::{
-                model_sends_temperature, model_supports_adaptive_thinking,
-                model_supports_thinking, ThinkingConfig,
+                model_sends_temperature, model_supports_adaptive_thinking, model_supports_thinking,
+                ThinkingConfig,
             };
             use crate::ReasoningConfig;
 
@@ -1480,7 +1482,10 @@ impl ApiService {
                     match prepared.route.codec.decode_response(provider_resp.clone()) {
                         Ok(mut response) => {
                             // Feed rate-limit headers from every 2xx success response.
-                            self.record_rate_limit_from_headers(&provider_resp.headers, &request_id);
+                            self.record_rate_limit_from_headers(
+                                &provider_resp.headers,
+                                &request_id,
+                            );
                             // 3c-T3: populate response.cost when an estimator is wired.
                             // Unpriced or unknown models leave response.cost = None — never an error.
                             if let Some(est) = &self.estimator {
@@ -1687,8 +1692,15 @@ impl ApiService {
         tools: Vec<serde_json::Value>,
         max_tokens: u32,
     ) -> Result<LlmResponse, LlmError> {
-        let req =
-            self.build_request(model, profile, system, messages, tools, false, Some(max_tokens))?;
+        let req = self.build_request(
+            model,
+            profile,
+            system,
+            messages,
+            tools,
+            false,
+            Some(max_tokens),
+        )?;
         let ctl = resolve_retry_control_with_settings(
             model,
             None,
@@ -2067,9 +2079,9 @@ impl ApiService {
                     // Success: wrap the LlmEventStream from the codec into a BoxStream.
                     // Build the event stream from the codec decoder + raw frames.
                     let mut decoder = prepared.route.codec.stream_decoder();
-                    decoder.set_provider_metadata(
-                        crate::stream_provider_metadata_from_headers(&streaming.headers),
-                    );
+                    decoder.set_provider_metadata(crate::stream_provider_metadata_from_headers(
+                        &streaming.headers,
+                    ));
                     let frames = streaming.frames;
 
                     // Clone analytics + metadata into the unfold state so

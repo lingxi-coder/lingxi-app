@@ -155,7 +155,11 @@ pub fn process_line(
     // Normalize camelCase keys.
     normalize_control_message_keys(&mut frame);
 
-    let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("").to_string();
+    let frame_type = frame
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
 
     match frame_type.as_str() {
         "keep_alive" => Ok(FrameAction::Consumed),
@@ -226,7 +230,10 @@ pub fn process_line(
                 .unwrap_or(Value::String(String::new()));
 
             // Original timestamp (echoed verbatim on a replay-ack when present).
-            let timestamp = frame.get("timestamp").and_then(Value::as_str).map(String::from);
+            let timestamp = frame
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .map(String::from);
 
             // UUID dedup.
             let uuid = frame.get("uuid").and_then(Value::as_str).map(String::from);
@@ -287,7 +294,9 @@ pub fn emit_replay_ack(uuid: &str, content: &Value, timestamp: Option<&str>, ses
         "isReplay": true
     });
     let s = serde_json::to_string(&frame).unwrap_or_default();
-    let s = s.replace('\u{2028}', "\\u2028").replace('\u{2029}', "\\u2029");
+    let s = s
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029");
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let _ = out.write_all(s.as_bytes());
@@ -353,7 +362,11 @@ pub fn read_input_turns(
             FrameAction::UserTurn(turn) => {
                 turns.push(turn);
             }
-            FrameAction::DuplicateUser { uuid, content, timestamp } => {
+            FrameAction::DuplicateUser {
+                uuid,
+                content,
+                timestamp,
+            } => {
                 eprintln!("Sending acknowledgment for duplicate user message: {uuid}");
                 if replay_user_messages {
                     emit_replay_ack(&uuid, &content, timestamp.as_deref(), session_id);
@@ -363,7 +376,9 @@ pub fn read_input_turns(
             // Control frames are silently dropped in the legacy batch reader
             // (used only by tests and non-streaming callers). The streaming
             // reader `spawn_stdin_router` routes them to their channels instead.
-            FrameAction::ControlRequest(_) | FrameAction::ControlResponse(_) | FrameAction::Consumed => {}
+            FrameAction::ControlRequest(_)
+            | FrameAction::ControlResponse(_)
+            | FrameAction::Consumed => {}
         }
     }
 
@@ -411,10 +426,7 @@ pub struct StdinChannels {
 /// block on `send`. This is intentional backpressure — the TS model also
 /// processes turns sequentially. Choose capacity > 1 so a burst of frames
 /// doesn't immediately stall, but < ∞ so a rogue flood can't OOM.
-pub fn spawn_stdin_router(
-    replay_user_messages: bool,
-    session_id: String,
-) -> StdinChannels {
+pub fn spawn_stdin_router(replay_user_messages: bool, session_id: String) -> StdinChannels {
     // Bounded channels: 64 buffered frames each. Turn channel is 64 (max burst
     // before the turn loop catches up). Control channels are 64 each.
     let (turn_tx, turn_rx) = mpsc::channel::<UserTurn>(64);
@@ -447,7 +459,11 @@ pub fn spawn_stdin_router(
                         break;
                     }
                 }
-                Ok(FrameAction::DuplicateUser { uuid, content, timestamp }) => {
+                Ok(FrameAction::DuplicateUser {
+                    uuid,
+                    content,
+                    timestamp,
+                }) => {
                     eprintln!("Sending acknowledgment for duplicate user message: {uuid}");
                     if replay_user_messages {
                         emit_replay_ack(&uuid, &content, timestamp.as_deref(), &session_id);
@@ -476,7 +492,11 @@ pub fn spawn_stdin_router(
         // All senders dropped here → all receiver channels close.
     });
 
-    StdinChannels { turn_rx, control_req_rx, control_resp_rx }
+    StdinChannels {
+        turn_rx,
+        control_req_rx,
+        control_resp_rx,
+    }
 }
 
 // ── Control-response frame builder ───────────────────────────────────────────
@@ -590,16 +610,23 @@ mod tests {
     fn normalize_top_level_request_id() {
         let mut v = json!({"requestId": "abc", "type": "user"});
         normalize_control_message_keys(&mut v);
-        assert!(v.get("request_id").is_some(), "requestId should become request_id");
+        assert!(
+            v.get("request_id").is_some(),
+            "requestId should become request_id"
+        );
         assert!(v.get("requestId").is_none(), "requestId should be removed");
     }
 
     #[test]
     fn normalize_nested_response_request_id() {
-        let mut v = json!({"type": "control_response", "response": {"requestId": "xyz", "data": 1}});
+        let mut v =
+            json!({"type": "control_response", "response": {"requestId": "xyz", "data": 1}});
         normalize_control_message_keys(&mut v);
         let resp = v.get("response").unwrap().as_object().unwrap();
-        assert!(resp.contains_key("request_id"), "response.requestId should become request_id");
+        assert!(
+            resp.contains_key("request_id"),
+            "response.requestId should become request_id"
+        );
         assert!(!resp.contains_key("requestId"));
     }
 
@@ -678,7 +705,10 @@ mod tests {
     fn user_frame_bad_role_error_string() {
         // Verify the exact error message format.
         let err = InputError::BadRole("assistant".to_string());
-        assert_eq!(err.to_string(), "Error: Expected message role 'user', got 'assistant'");
+        assert_eq!(
+            err.to_string(),
+            "Error: Expected message role 'user', got 'assistant'"
+        );
     }
 
     // ── UUID dedup ───────────────────────────────────────────────────────────
@@ -696,7 +726,9 @@ mod tests {
         // Second occurrence → DuplicateUser.
         let second = process_line(&line, &mut seen).unwrap();
         match second {
-            FrameAction::DuplicateUser { uuid: u, content, .. } => {
+            FrameAction::DuplicateUser {
+                uuid: u, content, ..
+            } => {
                 assert_eq!(u, uuid);
                 // The ack must echo the ORIGINAL content, not an empty string.
                 assert_eq!(content, serde_json::json!("hi"));
@@ -716,8 +748,14 @@ mod tests {
             r#"{{"type":"user","message":{{"role":"user","content":"b"}},"parent_tool_use_id":null,"uuid":"{uuid_b}"}}"#
         );
         let mut seen = fresh_seen();
-        assert!(matches!(process_line(&line_a, &mut seen).unwrap(), FrameAction::UserTurn(_)));
-        assert!(matches!(process_line(&line_b, &mut seen).unwrap(), FrameAction::UserTurn(_)));
+        assert!(matches!(
+            process_line(&line_a, &mut seen).unwrap(),
+            FrameAction::UserTurn(_)
+        ));
+        assert!(matches!(
+            process_line(&line_b, &mut seen).unwrap(),
+            FrameAction::UserTurn(_)
+        ));
     }
 
     // ── control_request ──────────────────────────────────────────────────────
@@ -739,25 +777,37 @@ mod tests {
         assert!(matches!(result, FrameAction::ControlRequest(_)));
         // Verify the frame carries the request field.
         if let FrameAction::ControlRequest(frame) = result {
-            assert!(frame.get("request").is_some(), "ControlRequest frame must carry the request field");
+            assert!(
+                frame.get("request").is_some(),
+                "ControlRequest frame must carry the request field"
+            );
         }
     }
 
     #[test]
     fn missing_request_error_string() {
-        assert_eq!(InputError::MissingRequest.to_string(), "Error: Missing request on control_request");
+        assert_eq!(
+            InputError::MissingRequest.to_string(),
+            "Error: Missing request on control_request"
+        );
     }
 
     // ── Phase 0: control_response_error builder ───────────────────────────────
 
     #[test]
     fn build_control_response_error_has_correct_shape() {
-        let resp = build_control_response_error("req_abc", "Unsupported control request subtype: get_status");
+        let resp = build_control_response_error(
+            "req_abc",
+            "Unsupported control request subtype: get_status",
+        );
         assert_eq!(resp["type"], "control_response");
         let inner = &resp["response"];
         assert_eq!(inner["subtype"], "error");
         assert_eq!(inner["request_id"], "req_abc");
-        assert_eq!(inner["error"], "Unsupported control request subtype: get_status");
+        assert_eq!(
+            inner["error"],
+            "Unsupported control request subtype: get_status"
+        );
     }
 
     #[test]
@@ -776,7 +826,10 @@ mod tests {
         let resp = build_control_response_success("req_xyz", None);
         let inner = &resp["response"];
         // When no payload, the "response" key must be ABSENT (not null).
-        assert!(inner.get("response").is_none(), "response key must be absent when payload is None");
+        assert!(
+            inner.get("response").is_none(),
+            "response key must be absent when payload is None"
+        );
     }
 
     #[test]
@@ -841,7 +894,8 @@ mod tests {
 {"type":"user","message":{"role":"user","content":"second"},"parent_tool_use_id":null}
 {"type":"user","message":{"role":"user","content":"third"},"parent_tool_use_id":null}
 "#;
-        let turns = read_input_turns(io::BufReader::new(input.as_bytes()), false, "sess-id").unwrap();
+        let turns =
+            read_input_turns(io::BufReader::new(input.as_bytes()), false, "sess-id").unwrap();
         assert_eq!(turns.len(), 3);
         assert_eq!(turns[0].content, Value::String("first".to_string()));
         assert_eq!(turns[1].content, Value::String("second".to_string()));
@@ -860,8 +914,12 @@ mod tests {
         let uuid = "cccccccc-cccc-cccc-cccc-cccccccccccc";
         let line = format!(
             "{}\n{}\n",
-            format!(r#"{{"type":"user","message":{{"role":"user","content":"a"}},"parent_tool_use_id":null,"uuid":"{uuid}"}}"#),
-            format!(r#"{{"type":"user","message":{{"role":"user","content":"b"}},"parent_tool_use_id":null,"uuid":"{uuid}"}}"#)
+            format!(
+                r#"{{"type":"user","message":{{"role":"user","content":"a"}},"parent_tool_use_id":null,"uuid":"{uuid}"}}"#
+            ),
+            format!(
+                r#"{{"type":"user","message":{{"role":"user","content":"b"}},"parent_tool_use_id":null,"uuid":"{uuid}"}}"#
+            )
         );
         // Without replay (no ack emitted to stdout in tests).
         let turns = read_input_turns(io::BufReader::new(line.as_bytes()), false, "sess").unwrap();
@@ -873,14 +931,16 @@ mod tests {
     #[test]
     fn read_input_turns_malformed_line_propagates_error() {
         let input = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"ok\"},\"parent_tool_use_id\":null}\n{bad json}\n";
-        let err = read_input_turns(io::BufReader::new(input.as_bytes()), false, "sess").unwrap_err();
+        let err =
+            read_input_turns(io::BufReader::new(input.as_bytes()), false, "sess").unwrap_err();
         assert_eq!(err, InputError::MalformedJson);
     }
 
     #[test]
     fn read_input_turns_bad_role_propagates_error() {
         let input = "{\"type\":\"user\",\"message\":{\"role\":\"assistant\",\"content\":\"x\"},\"parent_tool_use_id\":null}\n";
-        let err = read_input_turns(io::BufReader::new(input.as_bytes()), false, "sess").unwrap_err();
+        let err =
+            read_input_turns(io::BufReader::new(input.as_bytes()), false, "sess").unwrap_err();
         assert!(matches!(err, InputError::BadRole(_)));
     }
 
@@ -937,6 +997,9 @@ mod tests {
         assert_eq!(inner["subtype"], "success");
         assert_eq!(inner["request_id"], "req-3");
         // The inner "response" key must be absent when payload is None.
-        assert!(inner.get("response").is_none(), "response key must be absent when payload is None");
+        assert!(
+            inner.get("response").is_none(),
+            "response key must be absent when payload is None"
+        );
     }
 }

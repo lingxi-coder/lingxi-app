@@ -44,18 +44,15 @@ use crate::ssrf_guard::SsrfGuard;
 ///   header-injection hardening).
 fn interpolate_header_value(value: &str, allowed: &HashSet<&str>) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"\$\{([A-Z_][A-Z0-9_]*)\}|\$([A-Z_][A-Z0-9_]*)").unwrap()
-    });
+    let re =
+        RE.get_or_init(|| Regex::new(r"\$\{([A-Z_][A-Z0-9_]*)\}|\$([A-Z_][A-Z0-9_]*)").unwrap());
     let substituted = re.replace_all(value, |caps: &regex::Captures| {
         let name = caps
             .get(1)
             .or_else(|| caps.get(2))
             .map_or("", |m| m.as_str());
         if !allowed.contains(name) {
-            tracing::warn!(
-                "Hooks: env var ${name} not in allowedEnvVars, skipping interpolation"
-            );
+            tracing::warn!("Hooks: env var ${name} not in allowedEnvVars, skipping interpolation");
             return String::new();
         }
         std::env::var(name).unwrap_or_default()
@@ -304,15 +301,9 @@ mod tests {
             "secretvalue"
         );
         // `lHm` strips CR/LF/NUL from the final value even with no interpolation.
-        assert_eq!(
-            interpolate_header_value("a\u{0}b\r\nc", &allowed),
-            "abc"
-        );
+        assert_eq!(interpolate_header_value("a\u{0}b\r\nc", &allowed), "abc");
         // A name NOT in the allowlist resolves to empty string.
-        assert_eq!(
-            interpolate_header_value("a${OTHER_VAR}b", &allowed),
-            "ab"
-        );
+        assert_eq!(interpolate_header_value("a${OTHER_VAR}b", &allowed), "ab");
         // Lowercase `$var` does not match the [A-Z_] grammar — left verbatim.
         assert_eq!(
             interpolate_header_value("x$lowercase y", &allowed),

@@ -52,7 +52,6 @@ use serde::{Deserialize, Serialize};
 #[non_exhaustive]
 pub enum ClientCommand {
     // ── Turn driving ──────────────────────────────────────────────────────
-
     /// Submit a user prompt to drive a turn. Carries the text, an optional
     /// [`PromptModeDto`], inline image bytes (decision §0.8), and an optional
     /// client turn correlator. Carries NO `session_id` (decision §0.5).
@@ -83,7 +82,6 @@ pub enum ClientCommand {
     },
 
     // ── Permission resolution ─────────────────────────────────────────────
-
     /// Approve a parked permission request, correlated by `request_id`
     /// (the id-keyed gate, F1-14). The `response` distinguishes once / always.
     ApprovePermission {
@@ -102,7 +100,6 @@ pub enum ClientCommand {
     },
 
     // ── Model ─────────────────────────────────────────────────────────────
-
     /// Switch the active model. Confirmed by a
     /// [`ModelChanged`](crate::events::ClientEvent::ModelChanged) event.
     SetModel {
@@ -115,7 +112,6 @@ pub enum ClientCommand {
     ListModels,
 
     // ── Slash commands ────────────────────────────────────────────────────
-
     /// Run a raw slash-command line. **LOSSY at the dispatcher** — the reply is
     /// a [`CommandResultDto`] (display text + optional injected prompt), not a
     /// structured result.
@@ -125,7 +121,6 @@ pub enum ClientCommand {
     },
 
     // ── Listings ──────────────────────────────────────────────────────────
-
     /// Refresh a set of screen listings by kind. Each requested
     /// [`ListingKindDto`] produces its matching listing event
     /// ([`McpServers`](crate::events::ClientEvent::McpServers), etc.).
@@ -135,7 +130,6 @@ pub enum ClientCommand {
     },
 
     // ── Session lifecycle (decision §0.5) ─────────────────────────────────
-
     /// Start a fresh session on this connection (swaps the connection's inner
     /// orchestrator). Carries an optional working directory + model, but NO
     /// `session_id` — the new id is reported back via
@@ -170,7 +164,6 @@ pub enum ClientCommand {
     },
 
     // ── Auth + session control ────────────────────────────────────────────
-
     /// Begin the login flow. Auth state surfaces via
     /// [`AuthState`](crate::events::ClientEvent::AuthState).
     Login,
@@ -186,7 +179,6 @@ pub enum ClientCommand {
     ClearSession,
 
     // ── Tasks ─────────────────────────────────────────────────────────────
-
     /// List background tasks, optionally filtered by status. Each row arrives
     /// as a [`TaskRow`](crate::events::ClientEvent::TaskRow) event.
     TaskList {
@@ -211,7 +203,6 @@ pub enum ClientCommand {
     },
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
-
     /// Request a clean engine/connection shutdown.
     RequestExit,
 }

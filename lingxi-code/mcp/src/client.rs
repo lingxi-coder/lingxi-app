@@ -111,13 +111,11 @@ fn char_is_dangerous(c: char) -> bool {
     let cp = c as u32;
     // Cn (unassigned noncharacters): U+FDD0–U+FDEF and the per-plane
     // noncharacters U+xFFFE / U+xFFFF.
-    let is_noncharacter = matches!(cp, 0xFDD0..=0xFDEF)
-        || (cp & 0xFFFF) == 0xFFFE
-        || (cp & 0xFFFF) == 0xFFFF;
+    let is_noncharacter =
+        matches!(cp, 0xFDD0..=0xFDEF) || (cp & 0xFFFF) == 0xFFFE || (cp & 0xFFFF) == 0xFFFF;
     // Co (private-use): BMP U+E000–U+F8FF, plane-15 U+F0000–U+FFFFF,
     // plane-16 U+100000–U+10FFFF.
-    let is_private_use =
-        matches!(cp, 0xE000..=0xF8FF | 0xF0000..=0xFFFFF | 0x100000..=0x10FFFF);
+    let is_private_use = matches!(cp, 0xE000..=0xF8FF | 0xF0000..=0xFFFFF | 0x100000..=0x10FFFF);
     // Cf (format controls): a stable enumerated set. Key members:
     // soft-hyphen, directional controls, joiners, tags, variation selectors,
     // interlinear annotation, Arabic/Hebrew specials, etc.
@@ -161,9 +159,7 @@ fn char_is_dangerous(c: char) -> bool {
 #[must_use]
 pub fn recursively_sanitize_unicode(value: serde_json::Value) -> serde_json::Value {
     match value {
-        serde_json::Value::String(s) => {
-            serde_json::Value::String(partially_sanitize_unicode(&s))
-        }
+        serde_json::Value::String(s) => serde_json::Value::String(partially_sanitize_unicode(&s)),
         serde_json::Value::Array(arr) => {
             serde_json::Value::Array(arr.into_iter().map(recursively_sanitize_unicode).collect())
         }
@@ -483,8 +479,14 @@ impl McpClient {
         tool_use_id: Option<&str>,
         on_progress: Option<McpProgressCallback>,
     ) -> Result<McpToolResultDto, McpClientError> {
-        self.call_tool_with_meta(full_name, input, mcp_tool_timeout(), tool_use_id, on_progress)
-            .await
+        self.call_tool_with_meta(
+            full_name,
+            input,
+            mcp_tool_timeout(),
+            tool_use_id,
+            on_progress,
+        )
+        .await
     }
 
     /// Core `tools/call` path with the optional `_meta` / progress wiring.
@@ -1317,10 +1319,7 @@ mod constructor_tests {
         });
         let mut nbytes = serde_json::to_vec(&notif).expect("encode notif");
         nbytes.push(b'\n');
-        peer_tx
-            .send(Bytes::from(nbytes))
-            .await
-            .expect("send notif");
+        peer_tx.send(Bytes::from(nbytes)).await.expect("send notif");
 
         // Poll until the forwarder delivers the event.
         let mut delivered = false;
@@ -1403,10 +1402,7 @@ mod constructor_tests {
         });
         let mut nbytes = serde_json::to_vec(&notif).expect("encode notif");
         nbytes.push(b'\n');
-        peer_tx
-            .send(Bytes::from(nbytes))
-            .await
-            .expect("send notif");
+        peer_tx.send(Bytes::from(nbytes)).await.expect("send notif");
 
         // Give the forwarder a chance to (incorrectly) deliver.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1434,15 +1430,16 @@ mod constructor_tests {
 
 #[cfg(test)]
 mod timeout_tests {
-    use super::{
-        parse_int_base10_prefix, resolve_tool_timeout, DEFAULT_CALL_TOOL_TIMEOUT,
-    };
+    use super::{parse_int_base10_prefix, resolve_tool_timeout, DEFAULT_CALL_TOOL_TIMEOUT};
     use std::time::Duration;
 
     #[test]
     fn default_value_is_byte_locked_to_claude_code() {
         // DEFAULT_MCP_TOOL_TIMEOUT_MS = 100_000_000 (client.ts:211).
-        assert_eq!(DEFAULT_CALL_TOOL_TIMEOUT, Duration::from_millis(100_000_000));
+        assert_eq!(
+            DEFAULT_CALL_TOOL_TIMEOUT,
+            Duration::from_millis(100_000_000)
+        );
     }
 
     #[test]
@@ -1465,8 +1462,14 @@ mod timeout_tests {
         assert_eq!(resolve_tool_timeout(Some("abc")), DEFAULT_CALL_TOOL_TIMEOUT);
         assert_eq!(resolve_tool_timeout(Some("0")), DEFAULT_CALL_TOOL_TIMEOUT);
         // a positive integer (ms) is honored.
-        assert_eq!(resolve_tool_timeout(Some("30000")), Duration::from_millis(30_000));
-        assert_eq!(resolve_tool_timeout(Some("250abc")), Duration::from_millis(250));
+        assert_eq!(
+            resolve_tool_timeout(Some("30000")),
+            Duration::from_millis(30_000)
+        );
+        assert_eq!(
+            resolve_tool_timeout(Some("250abc")),
+            Duration::from_millis(250)
+        );
     }
 }
 
@@ -1482,7 +1485,10 @@ mod sanitization_tests {
         // to the model). Injecting these encodes a hidden prompt.
         let malicious = "\u{E0048}\u{E0065}\u{E006C}\u{E006C}\u{E006F}";
         let clean = partially_sanitize_unicode(malicious);
-        assert!(clean.is_empty(), "tag chars must be fully stripped, got: {clean:?}");
+        assert!(
+            clean.is_empty(),
+            "tag chars must be fully stripped, got: {clean:?}"
+        );
     }
 
     #[test]

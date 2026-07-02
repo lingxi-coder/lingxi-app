@@ -26,14 +26,19 @@ struct EchoSpawner {
 #[async_trait]
 impl SubagentSpawner for EchoSpawner {
     async fn agent_listing(&self) -> Vec<traits::subagent_spawn::SubagentListingEntry> {
-        ["general-purpose", "Explore", "code-reviewer", "workflow-subagent"]
-            .iter()
-            .map(|t| traits::subagent_spawn::SubagentListingEntry {
-                agent_type: (*t).to_string(),
-                when_to_use: String::new(),
-                tools_description: String::new(),
-            })
-            .collect()
+        [
+            "general-purpose",
+            "Explore",
+            "code-reviewer",
+            "workflow-subagent",
+        ]
+        .iter()
+        .map(|t| traits::subagent_spawn::SubagentListingEntry {
+            agent_type: (*t).to_string(),
+            when_to_use: String::new(),
+            tools_description: String::new(),
+        })
+        .collect()
     }
     async fn spawn(
         &self,
@@ -146,8 +151,7 @@ impl FileSystem for InMemoryFs {
     async fn watch(
         &self,
         _: &str,
-    ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = FileEvent> + Send>>, FsError>
-    {
+    ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = FileEvent> + Send>>, FsError> {
         Err(FsError::Io("not supported".into()))
     }
     async fn append_file(&self, path: &str, body: &str) -> Result<(), FsError> {
@@ -415,8 +419,7 @@ async fn budget_ceiling_throws_when_turn_spend_exceeds_total() {
     .await;
     let err = result.expect_err("over-budget agent() must throw");
     assert!(
-        format!("{err}")
-            .contains("Workflow token budget exceeded (150 / 100 output tokens)"),
+        format!("{err}").contains("Workflow token budget exceeded (150 / 100 output tokens)"),
         "got: {err}"
     );
 }
@@ -490,7 +493,10 @@ async fn parallel_agents_round_trip_through_spawner_in_order() {
     assert_eq!(logs(&outcome), vec!["R:echo:a,echo:b,echo:c".to_string()]);
     let mut seen = spawner.seen.lock().unwrap().clone();
     seen.sort();
-    assert_eq!(seen, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    assert_eq!(
+        seen,
+        vec!["a".to_string(), "b".to_string(), "c".to_string()]
+    );
 }
 
 #[test]
@@ -648,7 +654,10 @@ async fn workflow_runs_a_nested_scriptpath_inline_sharing_the_runtime() {
     .await
     .unwrap();
     // The nested workflow's agent() went through the PARENT's spawner.
-    assert_eq!(*spawner.seen.lock().unwrap(), vec!["child-task".to_string()]);
+    assert_eq!(
+        *spawner.seen.lock().unwrap(),
+        vec!["child-task".to_string()]
+    );
     // Its return value (incl. its own args) flowed back to the parent.
     assert_eq!(logs(&outcome), vec!["got=echo:child-task n=9".to_string()]);
     assert_eq!(
@@ -673,7 +682,10 @@ async fn handler_runs_workflow_and_spools_the_return_value() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let spawner = Arc::new(EchoSpawner::default());
     let dir = tempdir().unwrap();
-    let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
     let sink = Arc::new(RecordingSink::default());
 
     let handler = make_handler(spawner.clone(), mgr.clone(), sink.clone());
@@ -688,7 +700,10 @@ async fn handler_runs_workflow_and_spools_the_return_value() {
         .await
         .expect("spawn should succeed");
 
-    assert!(handle.task_id.starts_with('w'), "LocalWorkflow id prefix 'w'");
+    assert!(
+        handle.task_id.starts_with('w'),
+        "LocalWorkflow id prefix 'w'"
+    );
     assert!(handle.cleanup.is_some(), "cleanup seam present");
 
     assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
@@ -707,7 +722,8 @@ async fn handler_runs_workflow_and_spools_the_return_value() {
         .unwrap();
     assert!(read.content.starts_with("runId: wf_"), "{}", read.content);
     assert!(
-        read.content.contains(r#"{"confirmed":["echo:a","echo:b"]}"#),
+        read.content
+            .contains(r#"{"confirmed":["echo:a","echo:b"]}"#),
         "{}",
         read.content
     );
@@ -718,7 +734,10 @@ async fn handler_spools_live_progress_then_the_result() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let spawner = Arc::new(EchoSpawner::default());
     let dir = tempdir().unwrap();
-    let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
     let sink = Arc::new(RecordingSink::default());
     let handler = make_handler(spawner, mgr.clone(), sink.clone());
 
@@ -740,17 +759,36 @@ async fn handler_spools_live_progress_then_the_result() {
         .unwrap();
     // phase/log were spooled live, followed by the return value.
     // Phase now renders as "[N] === Title ===" (index-prefixed).
-    assert!(read.content.contains("=== Scan ==="), "phase: {}", read.content);
-    assert!(read.content.contains("[1]"), "phase index: {}", read.content);
-    assert!(read.content.contains("found 2 things"), "log: {}", read.content);
-    assert!(read.content.contains(r#"{"ok":true}"#), "result: {}", read.content);
+    assert!(
+        read.content.contains("=== Scan ==="),
+        "phase: {}",
+        read.content
+    );
+    assert!(
+        read.content.contains("[1]"),
+        "phase index: {}",
+        read.content
+    );
+    assert!(
+        read.content.contains("found 2 things"),
+        "log: {}",
+        read.content
+    );
+    assert!(
+        read.content.contains(r#"{"ok":true}"#),
+        "result: {}",
+        read.content
+    );
 }
 
 #[tokio::test]
 async fn resume_replays_journaled_agent_results_without_respawning() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let dir = tempdir().unwrap();
-    let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
     let script = r#"
         const a = await agent('a');
         const b = await agent('b');
@@ -835,7 +873,10 @@ async fn resume_with_a_changed_prefix_reruns_from_the_edit_onward() {
     // the now-misaligned journaled results by a flat (prompt,opts) match.
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let dir = tempdir().unwrap();
-    let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
 
     // Run 1: journal agents 'a' then 'b'.
     let script1 = "const a = await agent('a'); const b = await agent('b'); return { a, b };";
@@ -892,10 +933,12 @@ async fn budget_total_and_own_spend_drive_the_budget_global() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let spawner = Arc::new(EchoSpawner::default());
     let dir = tempdir().unwrap();
-    let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
     let sink = Arc::new(RecordingSink::default());
-    let handler =
-        make_handler(spawner, mgr.clone(), sink.clone()).with_token_budget(Some(500));
+    let handler = make_handler(spawner, mgr.clone(), sink.clone()).with_token_budget(Some(500));
 
     // Each echo agent reports 100 output tokens; two agents ⇒ spent 200.
     let script = r#"
@@ -924,7 +967,10 @@ async fn handler_maps_a_script_error_to_failed() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let spawner = Arc::new(EchoSpawner::default());
     let dir = tempdir().unwrap();
-    let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
     let sink = Arc::new(RecordingSink::default());
 
     let handler = make_handler(spawner, mgr, sink.clone());
@@ -943,7 +989,10 @@ async fn handler_maps_a_script_error_to_failed() {
 async fn handler_rejects_a_non_workflow_input() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let dir = tempdir().unwrap();
-    let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
     let handler = make_handler(
         Arc::new(EchoSpawner::default()),
         mgr,
@@ -987,9 +1036,18 @@ async fn name_and_type_are_local_workflow() {
 fn bare_agent_routes_to_workflow_subagent_with_kbp() {
     let req = make_request(DEFAULT_WORKFLOW_SUBAGENT, "do something", "{}");
     assert_eq!(req.subagent_type, "workflow-subagent");
-    assert!(req.system_prompt_override.is_none(), "no prompt override for bare agent()");
-    assert!(req.system_prompt_addendum.is_none(), "no addendum for bare agent()");
-    assert!(req.additional_disallowed_tools.is_empty(), "no extra disallowed for bare agent()");
+    assert!(
+        req.system_prompt_override.is_none(),
+        "no prompt override for bare agent()"
+    );
+    assert!(
+        req.system_prompt_addendum.is_none(),
+        "no addendum for bare agent()"
+    );
+    assert!(
+        req.additional_disallowed_tools.is_empty(),
+        "no extra disallowed for bare agent()"
+    );
 }
 
 /// Case 2: `agent(prompt, {schema})` (no agentType) → workflow-subagent +
@@ -1003,10 +1061,22 @@ fn bare_schema_agent_uses_xbp() {
     );
     assert_eq!(req.subagent_type, "workflow-subagent");
     // Override must be the xBp string (WORKFLOW_SUBAGENT_SCHEMA_PROMPT).
-    let override_prompt = req.system_prompt_override.as_deref().expect("override must be set for schema agent()");
-    assert_eq!(override_prompt, agent::builtins::WORKFLOW_SUBAGENT_SCHEMA_PROMPT);
-    assert!(req.system_prompt_addendum.is_none(), "no addendum when no explicit agentType");
-    assert!(req.additional_disallowed_tools.is_empty(), "no extra disallowed for bare schema agent()");
+    let override_prompt = req
+        .system_prompt_override
+        .as_deref()
+        .expect("override must be set for schema agent()");
+    assert_eq!(
+        override_prompt,
+        agent::builtins::WORKFLOW_SUBAGENT_SCHEMA_PROMPT
+    );
+    assert!(
+        req.system_prompt_addendum.is_none(),
+        "no addendum when no explicit agentType"
+    );
+    assert!(
+        req.additional_disallowed_tools.is_empty(),
+        "no extra disallowed for bare schema agent()"
+    );
 }
 
 /// Case 3: `agent(prompt, {agentType})` (no schema) → that agentType, HBp
@@ -1019,14 +1089,32 @@ fn user_agenttype_gets_hbp_addendum_and_disallow_union() {
         r#"{"agentType":"general-purpose"}"#,
     );
     assert_eq!(req.subagent_type, "general-purpose");
-    assert!(req.system_prompt_override.is_none(), "no prompt override for user agentType");
-    let addendum = req.system_prompt_addendum.as_deref().expect("HBp addendum must be set");
-    assert_eq!(addendum, agent::builtins::WORKFLOW_SUBAGENT_NON_SCHEMA_ADDENDUM);
+    assert!(
+        req.system_prompt_override.is_none(),
+        "no prompt override for user agentType"
+    );
+    let addendum = req
+        .system_prompt_addendum
+        .as_deref()
+        .expect("HBp addendum must be set");
+    assert_eq!(
+        addendum,
+        agent::builtins::WORKFLOW_SUBAGENT_NON_SCHEMA_ADDENDUM
+    );
     // Must request union with {SendUserMessage, Agent, Workflow}.
     let disallowed = &req.additional_disallowed_tools;
-    assert!(disallowed.contains(&"SendUserMessage".to_string()), "SendUserMessage must be disallowed: {disallowed:?}");
-    assert!(disallowed.contains(&"Agent".to_string()), "Agent must be disallowed: {disallowed:?}");
-    assert!(disallowed.contains(&"Workflow".to_string()), "Workflow must be disallowed: {disallowed:?}");
+    assert!(
+        disallowed.contains(&"SendUserMessage".to_string()),
+        "SendUserMessage must be disallowed: {disallowed:?}"
+    );
+    assert!(
+        disallowed.contains(&"Agent".to_string()),
+        "Agent must be disallowed: {disallowed:?}"
+    );
+    assert!(
+        disallowed.contains(&"Workflow".to_string()),
+        "Workflow must be disallowed: {disallowed:?}"
+    );
 }
 
 /// Case 4: `agent(prompt, {agentType, schema})` → that agentType, IBp
@@ -1039,14 +1127,29 @@ fn user_agenttype_with_schema_gets_ibp_and_disallow_union() {
         r#"{"agentType":"code-reviewer","schema":{"type":"object"}}"#,
     );
     assert_eq!(req.subagent_type, "code-reviewer");
-    assert!(req.system_prompt_override.is_none(), "no prompt override for user agentType");
-    let addendum = req.system_prompt_addendum.as_deref().expect("IBp addendum must be set");
+    assert!(
+        req.system_prompt_override.is_none(),
+        "no prompt override for user agentType"
+    );
+    let addendum = req
+        .system_prompt_addendum
+        .as_deref()
+        .expect("IBp addendum must be set");
     assert_eq!(addendum, agent::builtins::WORKFLOW_SUBAGENT_SCHEMA_ADDENDUM);
     // Must request union with {SendUserMessage, Agent, Workflow}.
     let disallowed = &req.additional_disallowed_tools;
-    assert!(disallowed.contains(&"SendUserMessage".to_string()), "SendUserMessage must be disallowed: {disallowed:?}");
-    assert!(disallowed.contains(&"Agent".to_string()), "Agent must be disallowed: {disallowed:?}");
-    assert!(disallowed.contains(&"Workflow".to_string()), "Workflow must be disallowed: {disallowed:?}");
+    assert!(
+        disallowed.contains(&"SendUserMessage".to_string()),
+        "SendUserMessage must be disallowed: {disallowed:?}"
+    );
+    assert!(
+        disallowed.contains(&"Agent".to_string()),
+        "Agent must be disallowed: {disallowed:?}"
+    );
+    assert!(
+        disallowed.contains(&"Workflow".to_string()),
+        "Workflow must be disallowed: {disallowed:?}"
+    );
 }
 
 // ---- chain_key / normalize_opts_for_chain_key ---------------------------
@@ -1067,7 +1170,10 @@ fn chain_key_ignores_display_only_opts() {
         "do something",
         &normalize_opts_for_chain_key(&serde_json::from_str(opts_b).unwrap()),
     );
-    assert_eq!(key_a, key_b, "display-only fields must not affect the chain key");
+    assert_eq!(
+        key_a, key_b,
+        "display-only fields must not affect the chain key"
+    );
 }
 
 /// Changing `model` (an identity key) MUST produce a different chain key.
@@ -1085,7 +1191,10 @@ fn chain_key_differs_on_model_change() {
         "do something",
         &normalize_opts_for_chain_key(&serde_json::from_str(opts_b).unwrap()),
     );
-    assert_ne!(key_a, key_b, "different model must produce different chain key");
+    assert_ne!(
+        key_a, key_b,
+        "different model must produce different chain key"
+    );
 }
 
 /// Key order in the raw opts JSON must NOT matter — normalization sorts keys.
@@ -1103,7 +1212,10 @@ fn chain_key_stable_regardless_of_input_key_order() {
         "do something",
         &normalize_opts_for_chain_key(&serde_json::from_str(opts_b).unwrap()),
     );
-    assert_eq!(key_a, key_b, "key order in opts JSON must not affect the chain key");
+    assert_eq!(
+        key_a, key_b,
+        "key order in opts JSON must not affect the chain key"
+    );
 }
 
 /// Verify the concurrency cap formula: Math.min(16, Math.max(2, cpus-2)).
@@ -1155,7 +1267,9 @@ async fn telemetry_no_phase_events_without_phase_calls() {
 
     let events = sink.events().await;
     assert!(
-        !events.iter().any(|e| e.name == telemetry::tengu::workflow::PHASE_COMPLETED),
+        !events
+            .iter()
+            .any(|e| e.name == telemetry::tengu::workflow::PHASE_COMPLETED),
         "no phase_completed for a script with no phase() calls; events: {events:?}"
     );
 }
@@ -1202,7 +1316,11 @@ async fn telemetry_phase_completed_fires_per_phase_for_named_workflow() {
         .iter()
         .filter(|e| e.name == telemetry::tengu::workflow::PHASE_COMPLETED)
         .collect();
-    assert_eq!(phase_events.len(), 2, "one event per phase() for named workflow; got {phase_events:?}");
+    assert_eq!(
+        phase_events.len(),
+        2,
+        "one event per phase() for named workflow; got {phase_events:?}"
+    );
     assert!(
         matches!(phase_events[0].metadata.get("phase_title"), Some(AnalyticsValue::String(s)) if s == "Step 1"),
         "first phase title"
@@ -1210,7 +1328,10 @@ async fn telemetry_phase_completed_fires_per_phase_for_named_workflow() {
     // phase_index is 0-based in telemetry (oracle §7). Contrast with workflow_agent
     // phaseIndex which is 1-based (oracle §8).
     assert!(
-        matches!(phase_events[0].metadata.get("phase_index"), Some(AnalyticsValue::Int(0))),
+        matches!(
+            phase_events[0].metadata.get("phase_index"),
+            Some(AnalyticsValue::Int(0))
+        ),
         "first phase index (0-based in telemetry, oracle §7)"
     );
     assert!(
@@ -1218,7 +1339,10 @@ async fn telemetry_phase_completed_fires_per_phase_for_named_workflow() {
         "second phase title"
     );
     assert!(
-        matches!(phase_events[1].metadata.get("phase_index"), Some(AnalyticsValue::Int(1))),
+        matches!(
+            phase_events[1].metadata.get("phase_index"),
+            Some(AnalyticsValue::Int(1))
+        ),
         "second phase index (0-based in telemetry, oracle §7)"
     );
 }
@@ -1386,7 +1510,10 @@ async fn telemetry_budget_cap_fires() {
     let cap_event = events
         .iter()
         .find(|e| e.name == telemetry::tengu::workflow::BUDGET_CAP_EXCEEDED);
-    assert!(cap_event.is_some(), "tengu_workflow_budget_cap_exceeded must fire; events: {events:?}");
+    assert!(
+        cap_event.is_some(),
+        "tengu_workflow_budget_cap_exceeded must fire; events: {events:?}"
+    );
     let md = &cap_event.unwrap().metadata;
     assert!(
         matches!(md.get("spent"), Some(AnalyticsValue::Int(150))),
@@ -1430,7 +1557,10 @@ async fn telemetry_agent_cap_fires() {
     let cap_event = events
         .iter()
         .find(|e| e.name == telemetry::tengu::workflow::AGENT_CAP_EXCEEDED);
-    assert!(cap_event.is_some(), "tengu_workflow_agent_cap_exceeded must fire; events: {events:?}");
+    assert!(
+        cap_event.is_some(),
+        "tengu_workflow_agent_cap_exceeded must fire; events: {events:?}"
+    );
     let md = &cap_event.unwrap().metadata;
     assert!(
         matches!(md.get("agentCount"), Some(AnalyticsValue::Int(1000))),
@@ -1473,8 +1603,15 @@ async fn workflow_agent_progress_start_and_done_emitted() {
     }
 
     // Must have at least a `start` and a `done` agent event, plus a log.
-    let agent_lines: Vec<&str> = lines.iter().filter(|l| l.starts_with("[workflow_agent]")).map(|l| l.as_str()).collect();
-    assert!(agent_lines.len() >= 2, "expected start+done events; got: {lines:?}");
+    let agent_lines: Vec<&str> = lines
+        .iter()
+        .filter(|l| l.starts_with("[workflow_agent]"))
+        .map(|l| l.as_str())
+        .collect();
+    assert!(
+        agent_lines.len() >= 2,
+        "expected start+done events; got: {lines:?}"
+    );
 
     // Parse the start event.
     let start_json_str = agent_lines[0].trim_start_matches("[workflow_agent] ");
@@ -1484,7 +1621,10 @@ async fn workflow_agent_progress_start_and_done_emitted() {
     assert_eq!(start["label"], "my-label", "label from opts.label");
     assert_eq!(start["state"], "start", "first event is start");
     let tool_use_id = start["toolUseID"].as_str().expect("toolUseID present");
-    assert!(tool_use_id.starts_with("workflow_agent_0_"), "toolUseID format: {tool_use_id}");
+    assert!(
+        tool_use_id.starts_with("workflow_agent_0_"),
+        "toolUseID format: {tool_use_id}"
+    );
 
     // Parse the done event.
     let done_json_str = agent_lines[1].trim_start_matches("[workflow_agent] ");
@@ -1527,15 +1667,22 @@ async fn workflow_phase_and_log_progress_format() {
 
     // Phase lines render as "[index] === title ===".
     assert!(
-        lines.iter().any(|l| l.contains("[1]") && l.contains("=== Analysis ===")),
+        lines
+            .iter()
+            .any(|l| l.contains("[1]") && l.contains("=== Analysis ===")),
         "first phase: {lines:?}"
     );
     assert!(
-        lines.iter().any(|l| l.contains("[2]") && l.contains("=== Report ===")),
+        lines
+            .iter()
+            .any(|l| l.contains("[2]") && l.contains("=== Report ===")),
         "second phase: {lines:?}"
     );
     // Log line renders as bare text.
-    assert!(lines.iter().any(|l| l == "hello world"), "log line: {lines:?}");
+    assert!(
+        lines.iter().any(|l| l == "hello world"),
+        "log line: {lines:?}"
+    );
 }
 
 /// Agent index increments monotonically across sequential agent() calls.
@@ -1633,7 +1780,10 @@ async fn workflow_agent_carries_phase_context() {
 async fn workflow_agent_cached_event_on_journal_replay() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let dir = tempdir().unwrap();
-    let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+    let mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
 
     let script = "const r = await agent('task'); log('r=' + r);";
 
@@ -1647,13 +1797,23 @@ async fn workflow_agent_cached_event_on_journal_replay() {
     assert_eq!(await_terminal(&sink1).await, TaskStatus::Completed);
     let spool1 = dir.path().join(format!("{}.output", handle1.task_id));
     let out1 = mgr.read(&spool1, Default::default()).await.unwrap();
-    let run_id = out1.content.lines().find_map(|l| l.strip_prefix("runId: ")).expect("runId").to_string();
+    let run_id = out1
+        .content
+        .lines()
+        .find_map(|l| l.strip_prefix("runId: "))
+        .expect("runId")
+        .to_string();
 
     // Run 2: resume — agent replays from journal, should see `cached` event.
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let journal_path = dir.path().join(format!("workflow-{run_id}.json"));
-    let journal_content = fs.read_file(journal_path.to_str().unwrap(), None, None).await.unwrap().content;
-    let cache: std::collections::HashMap<String, String> = serde_json::from_str(&journal_content).expect("journal JSON");
+    let journal_content = fs
+        .read_file(journal_path.to_str().unwrap(), None, None)
+        .await
+        .unwrap()
+        .content;
+    let cache: std::collections::HashMap<String, String> =
+        serde_json::from_str(&journal_content).expect("journal JSON");
     let journal = Arc::new(std::sync::Mutex::new(cache));
 
     run_workflow_script(
@@ -1689,7 +1849,10 @@ async fn workflow_agent_cached_event_on_journal_replay() {
             let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
             (v["state"] == "cached").then_some(v)
         });
-    assert!(cached_event.is_some(), "cached event must be emitted on journal replay; lines: {lines:?}");
+    assert!(
+        cached_event.is_some(),
+        "cached event must be emitted on journal replay; lines: {lines:?}"
+    );
     let ev = cached_event.unwrap();
     assert_eq!(ev["index"], 0, "cached agent has index 0");
     let tuid = ev["toolUseID"].as_str().expect("toolUseID");
@@ -1700,7 +1863,10 @@ async fn workflow_agent_cached_event_on_journal_replay() {
 #[tokio::test]
 async fn workflow_agent_error_event_on_failure() {
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    let spawner = Arc::new(EchoSpawner { fail: true, ..Default::default() });
+    let spawner = Arc::new(EchoSpawner {
+        fail: true,
+        ..Default::default()
+    });
     run_workflow_script(
         "const r = await agent('task'); log('r=' + r);",
         DEFAULT_WORKFLOW_SUBAGENT,
@@ -1734,5 +1900,8 @@ async fn workflow_agent_error_event_on_failure() {
             let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
             (v["state"] == "error").then_some(v)
         });
-    assert!(error_event.is_some(), "error event must be emitted for failed agent; lines: {lines:?}");
+    assert!(
+        error_event.is_some(),
+        "error event must be emitted for failed agent; lines: {lines:?}"
+    );
 }

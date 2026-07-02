@@ -63,8 +63,12 @@ fn unpack_mcpb_limited(
         let rel = entry
             .enclosed_name()
             .filter(|p| {
-                !p.components()
-                    .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+                !p.components().any(|c| {
+                    matches!(
+                        c,
+                        Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                    )
+                })
             })
             .ok_or_else(|| format!("Path traversal attempt detected: {}", entry.name()))?;
         let out = dest.join(&rel);
@@ -122,8 +126,8 @@ pub fn ensure_plugin_manifest(dir: &Path) -> Result<(), String> {
     let manifest_path = dir.join("manifest.json");
     let raw = std::fs::read_to_string(&manifest_path)
         .map_err(|_| format!("MCPB manifest invalid at {}", dir.display()))?;
-    let json: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("Invalid JSON in manifest.json: {e}"))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("Invalid JSON in manifest.json: {e}"))?;
     let name = json
         .get("name")
         .and_then(serde_json::Value::as_str)
@@ -172,7 +176,10 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let err = unpack_mcpb_limited(&buf, tmp.path(), 10_000, 100).unwrap_err();
-        assert!(err.contains("Archive total size is too large"), "got: {err}");
+        assert!(
+            err.contains("Archive total size is too large"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -182,14 +189,20 @@ mod tests {
         {
             let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
             for i in 0..5 {
-                w.start_file(format!("f{i}.txt"), zip::write::SimpleFileOptions::default())
-                    .unwrap();
+                w.start_file(
+                    format!("f{i}.txt"),
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
                 w.write_all(b"x").unwrap();
             }
             w.finish().unwrap();
         }
         let tmp = tempfile::tempdir().unwrap();
         let err = unpack_mcpb_limited(&buf, tmp.path(), 2, 1 << 30).unwrap_err();
-        assert!(err.contains("Archive contains too many files"), "got: {err}");
+        assert!(
+            err.contains("Archive contains too many files"),
+            "got: {err}"
+        );
     }
 }

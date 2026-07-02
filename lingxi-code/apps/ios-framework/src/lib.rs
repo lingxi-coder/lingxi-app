@@ -606,7 +606,10 @@ impl traits::Clipboard for IosClipboardBridge {
             .map_err(clipboard_error_from_ffi)
     }
     async fn get_text(&self) -> Result<Option<String>, traits::ClipboardError> {
-        self.inner.get_text().await.map_err(clipboard_error_from_ffi)
+        self.inner
+            .get_text()
+            .await
+            .map_err(clipboard_error_from_ffi)
     }
 }
 
@@ -785,8 +788,7 @@ pub trait IosSecureStorage: Send + Sync {
         account: String,
     ) -> Result<Option<Vec<u8>>, SecureStorageFfiError>;
     /// Remove `(service, account)` (removing a non-existent entry is not an error).
-    async fn delete(&self, service: String, account: String)
-        -> Result<(), SecureStorageFfiError>;
+    async fn delete(&self, service: String, account: String) -> Result<(), SecureStorageFfiError>;
     /// List every `account` stored under `service`.
     async fn list(&self, service: String) -> Result<Vec<String>, SecureStorageFfiError>;
 }
@@ -1115,8 +1117,9 @@ pub fn build_ios_engine(
                 inner: notifications,
             })),
             clipboard: Some(Arc::new(IosClipboardBridge { inner: clipboard })),
-            secure_storage: secure_storage
-                .map(|s| Arc::new(IosSecureStorageBridge { inner: s }) as Arc<dyn traits::SecureStorage>),
+            secure_storage: secure_storage.map(|s| {
+                Arc::new(IosSecureStorageBridge { inner: s }) as Arc<dyn traits::SecureStorage>
+            }),
         }));
         let permission_sink: Arc<dyn PermissionRequestSink> =
             Arc::new(IosPermissionSinkBridge { inner: permissions });
@@ -1245,14 +1248,11 @@ mod tests {
     #[async_trait]
     impl PermissionRequestSink for RecordingPermissionSink {
         async fn emit_request(&self, _request: PermissionRequestDto) {
-            self.count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
-    fn build_handle(
-        root: &std::path::Path,
-    ) -> Arc<engine_mobile::MobileEngineHandle> {
+    fn build_handle(root: &std::path::Path) -> Arc<engine_mobile::MobileEngineHandle> {
         let platform: Arc<dyn Platform> = Arc::new(HostFakePlatform::new(root.to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let perm_sink: Arc<dyn PermissionRequestSink> =

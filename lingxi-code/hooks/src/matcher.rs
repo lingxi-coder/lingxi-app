@@ -262,13 +262,11 @@ fn matches_content_rule(tool_name: &str, content: &str, input: &serde_json::Valu
         }
         // File tools match the content as a wildcard against the RAW `file_path`
         // string (`matchWildcardPattern(pattern, file_path)`).
-        "Edit" | "Write" | "Read" => {
-            string_field(input, "file_path").is_some_and(|p| match_wildcard_pattern(content, p, false))
-        }
+        "Edit" | "Write" | "Read" => string_field(input, "file_path")
+            .is_some_and(|p| match_wildcard_pattern(content, p, false)),
         // Glob / Grep match against the SEARCH `pattern` field, not a path.
-        "Glob" | "Grep" => {
-            string_field(input, "pattern").is_some_and(|p| match_wildcard_pattern(content, p, false))
-        }
+        "Glob" | "Grep" => string_field(input, "pattern")
+            .is_some_and(|p| match_wildcard_pattern(content, p, false)),
         // Every other tool (PowerShell, NotebookEdit, MCP, …) has no
         // `preparePermissionMatcher` in claude-code, so a content rule cannot
         // match (TS `patternMatcher` is `undefined` → the closure returns false).
@@ -374,7 +372,10 @@ mod tests {
         assert_eq!(normalize_legacy_tool_name("Agent"), "Agent");
         // Reverse map (insertion order matters for the two-alias TaskOutput).
         assert_eq!(get_legacy_tool_names("Agent"), vec!["Task".to_string()]);
-        assert_eq!(get_legacy_tool_names("TaskStop"), vec!["KillShell".to_string()]);
+        assert_eq!(
+            get_legacy_tool_names("TaskStop"),
+            vec!["KillShell".to_string()]
+        );
         assert_eq!(
             get_legacy_tool_names("TaskOutput"),
             vec!["AgentOutputTool".to_string(), "BashOutputTool".to_string()]
@@ -484,7 +485,11 @@ mod tests {
         assert!(matches_if_condition("Edit(*main.rs)", "Edit", &input));
         assert!(matches_if_condition("Edit(/proj/src/*)", "Edit", &input));
         assert!(matches_if_condition("Write(/proj/*)", "Write", &input));
-        assert!(matches_if_condition("Read(/proj/src/main.rs)", "Read", &input));
+        assert!(matches_if_condition(
+            "Read(/proj/src/main.rs)",
+            "Read",
+            &input
+        ));
         // Non-matching path.
         assert!(!matches_if_condition("Edit(*.py)", "Edit", &input));
         // A bare unanchored relative pattern does NOT match an absolute path
@@ -508,10 +513,18 @@ mod tests {
         // CONTENT rule never matches (patternMatcher undefined → false). The bare
         // tool-name form still matches on tool agreement.
         let ps = json!({ "command": "Get-ChildItem" });
-        assert!(!matches_if_condition("PowerShell(Get-ChildItem:*)", "PowerShell", &ps));
+        assert!(!matches_if_condition(
+            "PowerShell(Get-ChildItem:*)",
+            "PowerShell",
+            &ps
+        ));
         assert!(matches_if_condition("PowerShell", "PowerShell", &ps));
         let nb = json!({ "notebook_path": "/a.ipynb" });
-        assert!(!matches_if_condition("NotebookEdit(/a.ipynb)", "NotebookEdit", &nb));
+        assert!(!matches_if_condition(
+            "NotebookEdit(/a.ipynb)",
+            "NotebookEdit",
+            &nb
+        ));
         assert!(matches_if_condition("NotebookEdit", "NotebookEdit", &nb));
     }
 
@@ -531,8 +544,18 @@ mod tests {
     fn comma_mode_splits_on_comma_and_pipe() {
         // In comma-mode a list may use commas, pipes, or both, with spaces.
         assert!(matches_pattern_with("Edit", "Write, Edit", true, None));
-        assert!(matches_pattern_with("Read", "Write | Edit | Read", true, None));
-        assert!(matches_pattern_with("Read", "Write, Edit | Read", true, None));
+        assert!(matches_pattern_with(
+            "Read",
+            "Write | Edit | Read",
+            true,
+            None
+        ));
+        assert!(matches_pattern_with(
+            "Read",
+            "Write, Edit | Read",
+            true,
+            None
+        ));
         assert!(!matches_pattern_with("Bash", "Write, Edit", true, None));
         // Empty segments (trailing/double separators) are dropped, not matched.
         assert!(matches_pattern_with("Edit", "Write,,Edit,", true, None));
@@ -553,7 +576,12 @@ mod tests {
     fn comma_mode_hyphen_is_simple_match() {
         // The v2.1.195 hyphen: a hyphenated name (e.g. an MCP server) is a
         // SIMPLE list entry in comma-mode (exact match), not a regex.
-        assert!(matches_pattern_with("mcp__my-server", "mcp__my-server", true, None));
+        assert!(matches_pattern_with(
+            "mcp__my-server",
+            "mcp__my-server",
+            true,
+            None
+        ));
         assert!(matches_pattern_with(
             "mcp__my-server",
             "Bash, mcp__my-server",
@@ -561,10 +589,20 @@ mod tests {
             None
         ));
         // Exact, not substring (simple pattern ⇒ exact).
-        assert!(!matches_pattern_with("mcp__my-server__tool", "mcp__my-server", true, None));
+        assert!(!matches_pattern_with(
+            "mcp__my-server__tool",
+            "mcp__my-server",
+            true,
+            None
+        ));
         // With comma-mode OFF the hyphen pattern is NOT simple → regex branch,
         // where `mcp__my-server` matches as an unanchored substring.
-        assert!(matches_pattern_with("x_mcp__my-server_y", "mcp__my-server", false, None));
+        assert!(matches_pattern_with(
+            "x_mcp__my-server_y",
+            "mcp__my-server",
+            false,
+            None
+        ));
     }
 
     #[test]
@@ -577,12 +615,27 @@ mod tests {
         // "Bash" query.
         assert!(matches_pattern_with("Bash", "Deploy", true, Some(&aliases)));
         // Still matches the literal name too.
-        assert!(matches_pattern_with("Deploy", "Deploy", true, Some(&aliases)));
+        assert!(matches_pattern_with(
+            "Deploy",
+            "Deploy",
+            true,
+            Some(&aliases)
+        ));
         // Unrelated query does not match.
-        assert!(!matches_pattern_with("Read", "Deploy", true, Some(&aliases)));
+        assert!(!matches_pattern_with(
+            "Read",
+            "Deploy",
+            true,
+            Some(&aliases)
+        ));
         // Regex branch reverse lookup (`sfn`): a regex over the query "Bash"
         // also matches the alias key "Deploy" that maps to it.
-        assert!(matches_pattern_with("Bash", "^Deploy$", true, Some(&aliases)));
+        assert!(matches_pattern_with(
+            "Bash",
+            "^Deploy$",
+            true,
+            Some(&aliases)
+        ));
     }
 
     #[test]
@@ -591,7 +644,7 @@ mod tests {
         assert!(is_bare_mcp_server_matcher("mcp__github"));
         assert!(is_bare_mcp_server_matcher("Bash, mcp__github"));
         assert!(is_bare_mcp_server_matcher("mcp__my-server")); // hyphen ok
-        // A fully-qualified MCP tool matcher is NOT bare.
+                                                               // A fully-qualified MCP tool matcher is NOT bare.
         assert!(!is_bare_mcp_server_matcher("mcp__github__create_issue"));
         // Non-MCP matchers are never bare.
         assert!(!is_bare_mcp_server_matcher("Write|Edit"));

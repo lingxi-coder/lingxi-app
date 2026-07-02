@@ -50,9 +50,8 @@ fn handles_crlf_delimiters() {
 fn ignores_comments_and_non_data_fields() {
     let mut splitter = SseFrameSplitter::default();
 
-    let frames = splitter.push(
-        b": keep-alive\nevent: content_block_delta\nid: 7\nretry: 100\ndata: payload\n\n",
-    );
+    let frames = splitter
+        .push(b": keep-alive\nevent: content_block_delta\nid: 7\nretry: 100\ndata: payload\n\n");
 
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].bytes, b"payload");

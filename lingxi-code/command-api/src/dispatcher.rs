@@ -796,7 +796,10 @@ mod tests {
     async fn recording_expansion_executor() -> (Arc<HookExecutorImpl>, Arc<ExpansionLog>) {
         let log: Arc<ExpansionLog> = Arc::new(std::sync::Mutex::new(Vec::new()));
         let registry = Arc::new(RwLock::new(HookRegistry::new()));
-        registry.write().await.register(user_prompt_expansion_hook());
+        registry
+            .write()
+            .await
+            .register(user_prompt_expansion_hook());
         let mut exec =
             HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
         exec.register_builtin(Arc::new(RecordingExpansionHandler { log: log.clone() }));

@@ -95,16 +95,10 @@ impl UserAgentEnv {
 #[must_use]
 pub fn user_agent(env: &UserAgentEnv, version: &str) -> String {
     // USER_TYPE: raw value; "undefined" when unset (JS semantics).
-    let user_type = env
-        .user_type
-        .as_deref()
-        .unwrap_or("undefined");
+    let user_type = env.user_type.as_deref().unwrap_or("undefined");
 
     // CLAUDE_CODE_ENTRYPOINT: default "cli".
-    let entrypoint = env
-        .entrypoint
-        .as_deref()
-        .unwrap_or("cli");
+    let entrypoint = env.entrypoint.as_deref().unwrap_or("cli");
 
     // Optional suffixes — each prefixed with ", " when present (http.ts:20,25,33).
     let agent_sdk = env
@@ -125,9 +119,7 @@ pub fn user_agent(env: &UserAgentEnv, version: &str) -> String {
         .map(|w| format!(", workload/{w}"))
         .unwrap_or_default();
 
-    format!(
-        "claude-cli/{version} ({user_type}, {entrypoint}{agent_sdk}{client_app}{workload})"
-    )
+    format!("claude-cli/{version} ({user_type}, {entrypoint}{agent_sdk}{client_app}{workload})")
 }
 
 // ---------------------------------------------------------------------------
@@ -149,7 +141,10 @@ mod tests {
             client_app: None,
             workload: None,
         };
-        assert_eq!(user_agent(&env, "1.2.3"), "claude-cli/1.2.3 (external, cli)");
+        assert_eq!(
+            user_agent(&env, "1.2.3"),
+            "claude-cli/1.2.3 (external, cli)"
+        );
     }
 
     /// All three optional suffixes present, in order: agent-sdk → client-app →

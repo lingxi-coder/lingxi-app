@@ -286,6 +286,7 @@ mod tests {
             debug: false,
             verbose: false,
             main_loop_model: "test".into(),
+            model_profile: None,
             max_budget_nano_usd: None,
             mcp_clients: vec![],
             is_non_interactive_session: false,
@@ -360,7 +361,12 @@ mod tests {
         assert_eq!(result.usage.tokens.output, 22);
 
         // Request mapping: assert the exact SideQueryRequest the runner built.
-        let sent = client.seen.lock().unwrap().clone().expect("client called once");
+        let sent = client
+            .seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("client called once");
 
         assert_eq!(sent.model, "claude-opus-4-6");
         assert_eq!(sent.system_prompt.as_deref(), Some("PARENT SYSTEM PROMPT"));
@@ -387,11 +393,13 @@ mod tests {
         let client = Arc::new(FailingClient {
             message: "boom".into(),
         });
-        let runner = ForkedAgentRunner::new()
-            .with_side_query_client(client, "m".into());
+        let runner = ForkedAgentRunner::new().with_side_query_client(client, "m".into());
 
         let req = request_with(vec![user_msg("prefix")], vec![user_msg("prompt")], None);
-        let err = runner.run(req).await.expect_err("failing client surfaces error");
+        let err = runner
+            .run(req)
+            .await
+            .expect_err("failing client surfaces error");
 
         match err {
             ForkError::Internal(msg) => {
@@ -409,8 +417,7 @@ mod tests {
             canned_text: String::new(),
             canned_usage: Usage::default(),
         });
-        let runner = ForkedAgentRunner::new()
-            .with_side_query_client(client.clone(), "m".into());
+        let runner = ForkedAgentRunner::new().with_side_query_client(client.clone(), "m".into());
 
         let req = request_with(vec![], vec![user_msg("only-prompt")], None);
         let result = runner.run(req).await.expect("run succeeds");

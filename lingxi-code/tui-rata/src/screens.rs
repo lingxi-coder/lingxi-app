@@ -50,6 +50,20 @@ impl FullScreen {
         }
     }
 
+    /// The title + body of this screen as plain text (used to print the screen
+    /// into the inline-viewport scrollback instead of a full-page overlay).
+    #[must_use]
+    pub fn plain_text(&self) -> String {
+        let mut out = self.title.clone();
+        for line in &self.lines {
+            out.push('\n');
+            for span in &line.spans {
+                out.push_str(&span.content);
+            }
+        }
+        out
+    }
+
     /// The `/help` screen (shortcuts + slash commands).
     #[must_use]
     pub fn help() -> Self {

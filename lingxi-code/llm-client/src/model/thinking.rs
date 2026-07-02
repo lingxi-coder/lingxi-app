@@ -216,7 +216,10 @@ mod tests {
             "claude-3-5-haiku-20241022",
             "claude-3-7-sonnet-20250219",
         ] {
-            assert!(!model_supports_thinking(m), "{m} should NOT support thinking");
+            assert!(
+                !model_supports_thinking(m),
+                "{m} should NOT support thinking"
+            );
         }
     }
 

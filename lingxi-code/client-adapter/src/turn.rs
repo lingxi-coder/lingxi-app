@@ -85,7 +85,9 @@ pub fn lower_content_block(block: &ContentBlock) -> Option<MessageBlockDto> {
             thinking: thinking.clone(),
             signature: signature.clone(),
         }),
-        ContentBlock::ToolUse { id, name, input, .. } => Some(MessageBlockDto::ToolUse {
+        ContentBlock::ToolUse {
+            id, name, input, ..
+        } => Some(MessageBlockDto::ToolUse {
             id: id.to_string(),
             tool: name.clone(),
             input_json: value_to_json_string(input),
@@ -281,8 +283,14 @@ mod tests {
     fn each_orchestrator_error_maps_to_error_kind() {
         let cases: Vec<(OrchestratorError, ErrorKindDto)> = vec![
             // Transport: both the streaming and batched API-failure variants.
-            (OrchestratorError::Streaming(api_error()), ErrorKindDto::Transport),
-            (OrchestratorError::ApiCall(api_error()), ErrorKindDto::Transport),
+            (
+                OrchestratorError::Streaming(api_error()),
+                ErrorKindDto::Transport,
+            ),
+            (
+                OrchestratorError::ApiCall(api_error()),
+                ErrorKindDto::Transport,
+            ),
             // Task 6 (batch 5): terminal-429 limits copy — same coarse class
             // as the ApiCall(RateLimited) it replaces.
             (
@@ -294,9 +302,7 @@ mod tests {
             // Server: a `StreamingProtocol` carrying the `streaming_loop.rs:93`
             // server-emitted-error prefix.
             (
-                OrchestratorError::StreamingProtocol(format!(
-                    "{SERVER_ERROR_PREFIX}overloaded"
-                )),
+                OrchestratorError::StreamingProtocol(format!("{SERVER_ERROR_PREFIX}overloaded")),
                 ErrorKindDto::Server,
             ),
             // Protocol: any other `StreamingProtocol` (a per-block wire violation).
@@ -310,11 +316,23 @@ mod tests {
                 ErrorKindDto::MaxTurns,
             ),
             // Internal: stream cut, orchestrator invariant, compaction.
-            (OrchestratorError::StreamEndedWithoutStop, ErrorKindDto::Internal),
-            (OrchestratorError::Internal("boom".into()), ErrorKindDto::Internal),
-            (OrchestratorError::CompactionCancelled, ErrorKindDto::Internal),
+            (
+                OrchestratorError::StreamEndedWithoutStop,
+                ErrorKindDto::Internal,
+            ),
+            (
+                OrchestratorError::Internal("boom".into()),
+                ErrorKindDto::Internal,
+            ),
+            (
+                OrchestratorError::CompactionCancelled,
+                ErrorKindDto::Internal,
+            ),
             // Task 7: exhausted 529 retries with no fallback model configured.
-            (OrchestratorError::RepeatedOverloaded, ErrorKindDto::Internal),
+            (
+                OrchestratorError::RepeatedOverloaded,
+                ErrorKindDto::Internal,
+            ),
         ];
 
         for (err, expected) in &cases {
@@ -345,9 +363,8 @@ mod tests {
     /// `Server` class, while a bare protocol violation stays `Protocol`.
     #[test]
     fn streaming_protocol_splits_server_from_protocol() {
-        let server = OrchestratorError::StreamingProtocol(format!(
-            "{SERVER_ERROR_PREFIX}rate limited"
-        ));
+        let server =
+            OrchestratorError::StreamingProtocol(format!("{SERVER_ERROR_PREFIX}rate limited"));
         let protocol = OrchestratorError::StreamingProtocol("double stop on block 1".into());
         assert_eq!(error_kind_for(&server), ErrorKindDto::Server);
         assert_eq!(error_kind_for(&protocol), ErrorKindDto::Protocol);
@@ -413,7 +430,9 @@ mod tests {
                         url: "https://example.test/x.png".into(),
                     },
                 },
-                ContentBlock::Text { text: "caption".into() },
+                ContentBlock::Text {
+                    text: "caption".into(),
+                },
             ],
             tool_uses: Vec::new(),
             stop_reason: None,

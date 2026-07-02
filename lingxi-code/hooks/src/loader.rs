@@ -342,10 +342,7 @@ pub fn parse_hooks_from_settings_json_gated(
 }
 
 /// Shared projection used by both the ungated and gated entry points.
-fn parse_into(
-    raw: &str,
-    source: HookSource,
-) -> Result<Vec<HookDefinition>, serde_json::Error> {
+fn parse_into(raw: &str, source: HookSource) -> Result<Vec<HookDefinition>, serde_json::Error> {
     let top: SettingsTop = serde_json::from_str(raw)?;
     let mut out = Vec::new();
     for (event_name, groups) in top.hooks {
@@ -432,9 +429,7 @@ fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)> {
                 allowed_env_vars: entry.allowed_env_vars.clone().unwrap_or_default(),
                 // A `timeout: 0` (or omitted) defers to the executor's HTTP
                 // default; the parsed seconds value is the per-hook override.
-                timeout: entry
-                    .timeout
-                    .map_or(Duration::ZERO, Duration::from_secs),
+                timeout: entry.timeout.map_or(Duration::ZERO, Duration::from_secs),
             };
             Some((url, executor))
         }
@@ -688,7 +683,10 @@ mod tests {
         }"#;
         let hooks = parse_hooks_from_settings_json(raw, HookSource::User).unwrap();
         assert_eq!(hooks.len(), 1);
-        assert!(hooks[0].once, "once:true must be carried onto the definition");
+        assert!(
+            hooks[0].once,
+            "once:true must be carried onto the definition"
+        );
         assert_eq!(hooks[0].status_message, None);
     }
 
@@ -768,7 +766,10 @@ mod tests {
         assert_eq!(url, "https://hooks.example.com/pre");
         // claude-code always POSTs the hook input JSON.
         assert_eq!(method, "POST");
-        assert_eq!(headers.get("Authorization").map(String::as_str), Some("Bearer t"));
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("Bearer t")
+        );
         assert_eq!(headers.get("X-Env").map(String::as_str), Some("prod"));
         // The per-hook timeout is mirrored onto the executor's `timeout`.
         assert_eq!(*timeout, Duration::from_secs(12));
@@ -800,7 +801,10 @@ mod tests {
         else {
             panic!("expected Http executor");
         };
-        assert_eq!(allowed_env_vars, &vec!["MY_TOKEN".to_string(), "OTHER".to_string()]);
+        assert_eq!(
+            allowed_env_vars,
+            &vec!["MY_TOKEN".to_string(), "OTHER".to_string()]
+        );
     }
 
     #[test]
@@ -894,7 +898,10 @@ mod tests {
             { "type": "agent", "timeout": 30 }
         ]}]}}"#;
         let hooks = parse_hooks_from_settings_json(raw, HookSource::User).unwrap();
-        assert!(hooks.is_empty(), "an agent entry without a prompt is skipped");
+        assert!(
+            hooks.is_empty(),
+            "an agent entry without a prompt is skipped"
+        );
     }
 
     // ---- prompt hook parsing (schemas/hooks.ts:67-95) + mixed batches ------
@@ -949,7 +956,10 @@ mod tests {
             { "type": "prompt", "model": "claude-sonnet-4-6" }
         ]}]}}"#;
         let hooks = parse_hooks_from_settings_json(raw, HookSource::User).unwrap();
-        assert!(hooks.is_empty(), "a prompt entry without a prompt is skipped");
+        assert!(
+            hooks.is_empty(),
+            "a prompt entry without a prompt is skipped"
+        );
     }
 
     #[test]
@@ -1015,7 +1025,10 @@ mod tests {
         let gate = HookPolicyGate::from_policy_settings_json(Some(policy), false, false);
         assert!(gate.policy_disable_all_hooks);
         for src in [HookSource::User, HookSource::Project, HookSource::Managed] {
-            assert!(!gate.allows_source(src), "disableAllHooks must block {src:?}");
+            assert!(
+                !gate.allows_source(src),
+                "disableAllHooks must block {src:?}"
+            );
         }
     }
 
@@ -1109,9 +1122,11 @@ mod tests {
             false,
         );
         let raw = one_stop_command();
-        let hooks =
-            parse_hooks_from_settings_json_gated(&raw, HookSource::User, gate).unwrap();
-        assert!(hooks.is_empty(), "disableAllHooks must suppress the user tier");
+        let hooks = parse_hooks_from_settings_json_gated(&raw, HookSource::User, gate).unwrap();
+        assert!(
+            hooks.is_empty(),
+            "disableAllHooks must suppress the user tier"
+        );
     }
 
     #[test]
@@ -1128,8 +1143,7 @@ mod tests {
         assert_eq!(managed.len(), 1);
         assert_eq!(managed[0].source, HookSource::Managed);
         // User tier is suppressed.
-        let user =
-            parse_hooks_from_settings_json_gated(&raw, HookSource::User, gate).unwrap();
+        let user = parse_hooks_from_settings_json_gated(&raw, HookSource::User, gate).unwrap();
         assert!(user.is_empty());
     }
 
@@ -1138,12 +1152,9 @@ mod tests {
         // With the default (no-policy) gate, the gated entry point is
         // byte-identical to the ungated one.
         let raw = one_stop_command();
-        let gated = parse_hooks_from_settings_json_gated(
-            &raw,
-            HookSource::User,
-            HookPolicyGate::default(),
-        )
-        .unwrap();
+        let gated =
+            parse_hooks_from_settings_json_gated(&raw, HookSource::User, HookPolicyGate::default())
+                .unwrap();
         let ungated = parse_hooks_from_settings_json(&raw, HookSource::User).unwrap();
         assert_eq!(gated.len(), ungated.len());
         assert_eq!(gated.len(), 1);

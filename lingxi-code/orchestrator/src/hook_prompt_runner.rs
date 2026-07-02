@@ -92,7 +92,9 @@ impl ApiClientHookPromptRunner {
     /// (`outcome: 'non_blocking_error'`).
     fn map_error(err: LlmError) -> PromptHookError {
         match err {
-            LlmError::Transport { ref message } if message.contains("timeout") || message.contains("Timeout") => {
+            LlmError::Transport { ref message }
+                if message.contains("timeout") || message.contains("Timeout") =>
+            {
                 // Best-effort: `LlmError::Transport` doesn't carry a Duration,
                 // so we synthesize a zero-duration timeout for the hook error.
                 PromptHookError::Timeout(std::time::Duration::ZERO)
@@ -113,7 +115,13 @@ impl HookPromptRunner for ApiClientHookPromptRunner {
         let messages = vec![ConversationMessage::user(MessageId::new(), req.prompt)];
         let response = self
             .api
-            .messages_create(&model, None, Some(req.system_prompt.as_str()), messages, Vec::new())
+            .messages_create(
+                &model,
+                None,
+                Some(req.system_prompt.as_str()),
+                messages,
+                Vec::new(),
+            )
             .await
             .map_err(Self::map_error)?;
         Ok(Self::extract_text(&response))
@@ -133,7 +141,10 @@ mod tests {
         LlmResponse {
             id: "msg_1".into(),
             model: "claude-haiku-4-5".into(),
-            content: vec![LlmContentBlock::Text { text: body.into(), cache_control: None }],
+            content: vec![LlmContentBlock::Text {
+                text: body.into(),
+                cache_control: None,
+            }],
             stop_reason: Some("end_turn".into()),
             stop_details: None,
             usage: Usage::default(),
@@ -166,15 +177,18 @@ mod tests {
             msgs: Vec<ConversationMessage>,
             _tools: Vec<serde_json::Value>,
         ) -> Result<LlmResponse, LlmError> {
-            self.recorded
-                .lock()
-                .unwrap()
-                .push((model.to_string(), system.map(str::to_owned), msgs));
+            self.recorded.lock().unwrap().push((
+                model.to_string(),
+                system.map(str::to_owned),
+                msgs,
+            ));
             self.response
                 .lock()
                 .unwrap()
                 .take()
-                .unwrap_or(Err(LlmError::Transport { message: "exhausted".into() }))
+                .unwrap_or(Err(LlmError::Transport {
+                    message: "exhausted".into(),
+                }))
         }
     }
 
@@ -221,7 +235,10 @@ mod tests {
         let api = MockApi::text("x", r#"{"ok": true}"#);
         let runner = ApiClientHookPromptRunner::new(api.clone());
 
-        let _ = runner.run(req("p", Some("claude-sonnet-4-6"))).await.unwrap();
+        let _ = runner
+            .run(req("p", Some("claude-sonnet-4-6")))
+            .await
+            .unwrap();
 
         let recorded = api.recorded.lock().unwrap();
         assert_eq!(recorded[0].0, "claude-sonnet-4-6");

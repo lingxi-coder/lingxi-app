@@ -15,7 +15,6 @@
 
 pub mod config;
 pub mod conversation;
-pub mod model;
 pub mod cost_wiring;
 pub mod cwd_changed_firer;
 pub mod diagnostics;
@@ -25,19 +24,20 @@ pub mod handle_impl;
 pub mod hook_prompt_runner;
 pub mod image_input;
 pub mod mcp_hook_dispatcher;
+pub mod model;
 pub mod prompt;
 pub mod provider_adapter;
 pub mod resume;
 pub(crate) mod schema_validation;
 pub mod sse;
-pub mod streaming_loop;
+pub mod stop_hook_snapshot;
 pub(crate) mod streaming_executor;
+pub mod streaming_loop;
 pub mod structured_output;
 pub mod task_completed_firer;
 pub mod task_created_firer;
 pub mod task_lifecycle_hook_firer;
 pub mod task_notifications_provider;
-pub mod stop_hook_snapshot;
 pub mod teammate_idle_firer;
 pub mod todo_reminder_tasks_provider;
 pub mod token_budget;
@@ -63,22 +63,22 @@ pub use conversation::{
     ConversationOrchestrator, ConversationOutcome, OrchestratorApiClient, SessionMemoryHandle,
     StreamingApiClient, TurnOutcome,
 };
+pub use cwd_changed_firer::OrchestratorCwdChangedFirer;
 pub use error::OrchestratorError;
+pub use file_changed_firer::OrchestratorFileChangedFirer;
 pub use hook_prompt_runner::ApiClientHookPromptRunner;
 pub use mcp_hook_dispatcher::OrchestratorHookDispatcher;
-pub use cwd_changed_firer::OrchestratorCwdChangedFirer;
-pub use file_changed_firer::OrchestratorFileChangedFirer;
-pub use task_completed_firer::OrchestratorTaskCompletedFirer;
-pub use task_created_firer::OrchestratorTaskCreatedFirer;
-pub use task_lifecycle_hook_firer::OrchestratorTaskLifecycleHookFirer;
-pub use task_notifications_provider::RegistryTaskNotifications;
-pub use stop_hook_snapshot::{
-    build_background_tasks, build_session_crons, CronSnapshotInput, StopHookSnapshotProvider,
-};
-pub use teammate_idle_firer::OrchestratorTeammateIdleFirer;
-pub use todo_reminder_tasks_provider::TodoStoreReminderTasks;
 pub use prompt::{
     assemble_system_prompt, FileTree, FileTreeEntry, GitStatus, MemoryFile, SystemPromptContext,
 };
 pub use provider_adapter::ProviderApiAdapter;
 pub use resume::{replay_session_state, state_from_messages, ReplayedSession, ResumeError};
+pub use stop_hook_snapshot::{
+    build_background_tasks, build_session_crons, CronSnapshotInput, StopHookSnapshotProvider,
+};
+pub use task_completed_firer::OrchestratorTaskCompletedFirer;
+pub use task_created_firer::OrchestratorTaskCreatedFirer;
+pub use task_lifecycle_hook_firer::OrchestratorTaskLifecycleHookFirer;
+pub use task_notifications_provider::RegistryTaskNotifications;
+pub use teammate_idle_firer::OrchestratorTeammateIdleFirer;
+pub use todo_reminder_tasks_provider::TodoStoreReminderTasks;

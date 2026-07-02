@@ -8,11 +8,11 @@
 #![allow(clippy::unwrap_used)]
 
 use super::initial_history::InitialHistory;
+use super::record::{RolloutItem, RolloutLine, SessionSource, ThreadId};
 use super::recorder::{
     append_rollout_item_to_path, RolloutConfig, RolloutRecorder, RolloutRecorderParams,
     RolloutWriterStateForTest,
 };
-use super::record::{RolloutItem, RolloutLine, SessionSource, ThreadId};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
@@ -145,13 +145,16 @@ async fn load_rollout_items_preserves_legacy_event_lines() -> std::io::Result<()
     let RolloutItem::EventMsg(payload) = &items[1] else {
         panic!("expected event_msg rollout item");
     };
-    assert_eq!(payload.get("id").and_then(|v| v.as_str()), Some("guardian-1"));
+    assert_eq!(
+        payload.get("id").and_then(|v| v.as_str()),
+        Some("guardian-1")
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn load_rollout_items_filters_legacy_ghost_snapshots_from_compaction_history()
--> std::io::Result<()> {
+async fn load_rollout_items_filters_legacy_ghost_snapshots_from_compaction_history(
+) -> std::io::Result<()> {
     let home = TempDir::new().expect("temp dir");
     let rollout_path = home.path().join("rollout.jsonl");
     let mut file = File::create(&rollout_path)?;
@@ -261,7 +264,10 @@ async fn get_rollout_history_builds_resumed_history() -> std::io::Result<()> {
     };
     assert_eq!(resumed.conversation_id, thread_id);
     assert_eq!(resumed.history.len(), 2);
-    assert_eq!(resumed.rollout_path.as_deref(), Some(rollout_path.as_path()));
+    assert_eq!(
+        resumed.rollout_path.as_deref(),
+        Some(rollout_path.as_path())
+    );
     Ok(())
 }
 

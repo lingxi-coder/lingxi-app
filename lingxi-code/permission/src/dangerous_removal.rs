@@ -423,7 +423,11 @@ pub struct DangerousRemoval {
 /// dangerous `rm` hidden behind a benign one (`echo ok && rm -rf /`) is still
 /// caught.
 #[must_use]
-pub fn check_dangerous_removal(command: &str, cwd: &Path, home: Option<&str>) -> Option<DangerousRemoval> {
+pub fn check_dangerous_removal(
+    command: &str,
+    cwd: &Path,
+    home: Option<&str>,
+) -> Option<DangerousRemoval> {
     for sub in crate::shell_command::split_command(command) {
         let tokens = split_argv(&sub);
         let Some((base, rest)) = tokens.split_first() else {
@@ -521,14 +525,13 @@ fn evaluate_removal_target(
     // contains a shell expansion. Critical `…/*` globs are NOT flagged here;
     // they fall to branch 3 on the stripped base (so `/etc/*` → "critical", and
     // a benign `build/*` is auto-allowed — matching `x0n`).
-    if f
-        && (q6r(d)
-            || contains_command_substitution(&p)
-            || d.starts_with('~')
-            || starts_with_two_seps(d)
-            || (!d_abs && has_dotdot_segment(d) && ends_with_sep_star(&p))
-            || (cmd_name == "rmdir" && ends_with_sep_star(&p) && args.iter().any(|h| has_p_flag(h)))
-            || (!d_abs && ends_with_star_seps(d) && ends_with_sep_star(&p)))
+    if f && (q6r(d)
+        || contains_command_substitution(&p)
+        || d.starts_with('~')
+        || starts_with_two_seps(d)
+        || (!d_abs && has_dotdot_segment(d) && ends_with_sep_star(&p))
+        || (cmd_name == "rmdir" && ends_with_sep_star(&p) && args.iter().any(|h| has_p_flag(h)))
+        || (!d_abs && ends_with_star_seps(d) && ends_with_sep_star(&p)))
     {
         return Some(unresolvable_removal(cmd_name, &p));
     }
@@ -548,10 +551,7 @@ fn evaluate_removal_target(
     // ── Branch 4: glob pattern traverses non-enumerable directories. ──
     if f && ends_with_sep_star(&p) {
         let seg_delta = count_real_segments(&p) - count_real_segments(&m);
-        let glob_segments = a
-            .split(['/', '\\'])
-            .filter(|s| has_glob_char(s))
-            .count();
+        let glob_segments = a.split(['/', '\\']).filter(|s| has_glob_char(s)).count();
         if seg_delta + glob_segments > 1 {
             return Some(traversal_removal(cmd_name, &p));
         }
@@ -654,7 +654,9 @@ fn has_p_flag(arg: &str) -> bool {
 
 /// Count non-empty, non-`.` path segments (TS `Wn(split(/[\\/]+/), s => s && s !== ".")`).
 fn count_real_segments(p: &str) -> usize {
-    p.split(['/', '\\']).filter(|s| !s.is_empty() && *s != ".").count()
+    p.split(['/', '\\'])
+        .filter(|s| !s.is_empty() && *s != ".")
+        .count()
 }
 
 fn critical_removal(cmd_name: &str, p: &str) -> DangerousRemoval {
@@ -731,7 +733,7 @@ mod tests {
         assert!(is_dangerous_removal_path("/usr", HOME));
         assert!(is_dangerous_removal_path("/tmp", HOME));
         assert!(is_dangerous_removal_path("/etc/", HOME)); // trailing slash stripped
-        // A grandchild is NOT a direct child of root.
+                                                           // A grandchild is NOT a direct child of root.
         assert!(!is_dangerous_removal_path("/usr/local", HOME));
         assert!(!is_dangerous_removal_path("/etc/nginx/conf.d", HOME));
     }
@@ -766,7 +768,7 @@ mod tests {
             assert!(is_dangerous_removal_path("/private/home", None));
             assert!(is_dangerous_removal_path("/private/etc/", None));
             assert!(is_dangerous_removal_path("/Private/Etc", None)); // regex `/i`
-            // Children of a normalized critical dir are not themselves critical.
+                                                                      // Children of a normalized critical dir are not themselves critical.
             assert!(!is_dangerous_removal_path("/private/etc/nginx", None));
             // A /private subdir not in the list is untouched.
             assert!(!is_dangerous_removal_path("/private/foo", None));
@@ -807,7 +809,9 @@ mod tests {
     fn rm_rf_root_is_dangerous() {
         let d = check_dangerous_removal("rm -rf /", &cwd(), HOME).unwrap();
         assert_eq!(d.resolved_path, "/");
-        assert!(d.message.starts_with("Dangerous rm operation detected: '/'"));
+        assert!(d
+            .message
+            .starts_with("Dangerous rm operation detected: '/'"));
         assert!(d
             .message
             .contains("cannot be auto-allowed by permission rules"));
@@ -957,7 +961,11 @@ mod tests {
         // does NOT expand `~`, auto-allows it). A child of home is fine.
         let d = check_dangerous_removal("rm -rf ~", &cwd(), HOME).unwrap();
         assert_eq!(d.resolved_path, "/home/u");
-        assert!(d.message.contains("critical system directory"), "{}", d.message);
+        assert!(
+            d.message.contains("critical system directory"),
+            "{}",
+            d.message
+        );
         assert!(check_dangerous_removal("rm -rf ~/project", &cwd(), HOME).is_none());
     }
 
@@ -966,7 +974,11 @@ mod tests {
         // `/etc/*` strips to `/etc` (critical) → branch 3 "critical" (NOT branch 2).
         let d = check_dangerous_removal("rm -rf /etc/*", &cwd(), HOME).unwrap();
         assert_eq!(d.resolved_path, "/etc/*");
-        assert!(d.message.contains("critical system directory"), "{}", d.message);
+        assert!(
+            d.message.contains("critical system directory"),
+            "{}",
+            d.message
+        );
     }
 
     #[test]
@@ -999,7 +1011,8 @@ mod tests {
             let d = check_dangerous_removal(cmd, &cwd(), HOME)
                 .unwrap_or_else(|| panic!("{cmd} should ask"));
             assert!(
-                d.message.contains("cannot be statically resolved to a directory"),
+                d.message
+                    .contains("cannot be statically resolved to a directory"),
                 "{cmd}: {}",
                 d.message
             );
@@ -1011,7 +1024,8 @@ mod tests {
         // `~/*` → branch 2 (`d.startsWith("~")`), NOT the critical superset.
         let d = check_dangerous_removal("rm -rf ~/*", &cwd(), HOME).unwrap();
         assert!(
-            d.message.contains("cannot be statically resolved to a directory"),
+            d.message
+                .contains("cannot be statically resolved to a directory"),
             "{}",
             d.message
         );
@@ -1034,7 +1048,8 @@ mod tests {
         // `rmdir -p foo/*` → branch 2 (rmdir + `-p` + trailing `/*`).
         let d = check_dangerous_removal("rmdir -p foo/*", &cwd(), HOME).unwrap();
         assert!(
-            d.message.contains("cannot be statically resolved to a directory"),
+            d.message
+                .contains("cannot be statically resolved to a directory"),
             "{}",
             d.message
         );

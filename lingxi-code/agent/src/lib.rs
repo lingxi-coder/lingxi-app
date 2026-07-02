@@ -49,12 +49,12 @@ pub use handle::{
 pub use traits::subagent_spawn::{format_agent_line, should_inject_agent_list_in_messages};
 // Fork-subagent helpers live in the leaf `traits` crate (reachable by both
 // `tool-agent` and `agent`); re-export under `agent::` for ergonomic access.
+pub use model_resolution::resolve_agent_model;
+pub use tool_resolver::resolve_subagent_tools;
 pub use traits::fork_subagent::{
     build_child_message, build_forked_messages, build_worktree_notice, is_fork_subagent_enabled,
     is_in_fork_child, FORK_SUBAGENT_TYPE,
 };
-pub use model_resolution::resolve_agent_model;
-pub use tool_resolver::resolve_subagent_tools;
 // Re-export `ToolRegistry` (from `tool_api`, an existing `agent` dep) so the
 // `tasks` in-process-teammate handler can hold one for per-spawn tool resolution
 // without widening its own dep graph.
@@ -62,8 +62,8 @@ pub use tool_api::ToolRegistry;
 // Re-export `PermissionMode` (lives in the `permission` crate, which `agent`
 // already depends on) so the `tasks` crate can reference `agent::PermissionMode`
 // for `resolve_agent_model`'s seam without widening its own dep graph.
-pub use permission::PermissionMode;
 pub use multi_dispatch::{MultiAgentDispatcher, MultiAgentSpawnSpec};
+pub use permission::PermissionMode;
 pub use pool::{StateMachinePool, StateMachineSlot};
 pub use runner::SubagentEvent;
 pub use tool_resolver::AgentToolResolver;

@@ -27,9 +27,7 @@
 
 use crate::file::MemoryError;
 use protocol::{ConversationMessage, MessageId};
-use sidequery::{
-    CacheSafeParams, ForkPurpose, ForkedAgentRequest, ForkedAgentRunner, QuerySource,
-};
+use sidequery::{CacheSafeParams, ForkPurpose, ForkedAgentRequest, ForkedAgentRunner, QuerySource};
 use std::path::{Path, PathBuf};
 
 /// Configuration for the standalone session-memory extractor (spec §6.5).
@@ -302,7 +300,10 @@ mod tests {
     #[test]
     fn default_config_is_inert() {
         let c = SessionMemoryConfig::default();
-        assert!(!c.enabled, "must be off by default (locked fixtures stay byte-identical)");
+        assert!(
+            !c.enabled,
+            "must be off by default (locked fixtures stay byte-identical)"
+        );
         assert_eq!(c.extraction_model, "claude-haiku-4-5");
     }
 
@@ -371,8 +372,8 @@ mod tests {
 
     #[tokio::test]
     async fn extract_writes_file_and_advances_watermark() {
-        use sidequery::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
         use async_trait::async_trait;
+        use sidequery::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
         use tool_api::context::ToolUseOptions;
 
         // A side-query client that returns the distilled notes verbatim.
@@ -404,6 +405,7 @@ mod tests {
                 debug: false,
                 verbose: false,
                 main_loop_model: "claude-haiku-4-5".into(),
+                model_profile: None,
                 max_budget_nano_usd: None,
                 mcp_clients: vec![],
                 is_non_interactive_session: false,

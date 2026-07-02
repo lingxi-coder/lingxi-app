@@ -54,7 +54,11 @@ pub async fn run(_cli: &Cli) -> i32 {
     println!(
         "Config directory: {} ({})",
         config_home.display(),
-        if config_home_exists { "found" } else { "missing" }
+        if config_home_exists {
+            "found"
+        } else {
+            "missing"
+        }
     );
 
     let global_config = migrations::global_config::global_config_path();
@@ -78,7 +82,9 @@ pub async fn run(_cli: &Cli) -> i32 {
     // `load_mcp_servers` tolerates missing files; when there is no global
     // config path point its global slot at the (possibly absent) project file
     // so only project-scope `.mcp.json` servers are reported.
-    let global_for_load = global_config.clone().unwrap_or_else(|| project_mcp_path.clone());
+    let global_for_load = global_config
+        .clone()
+        .unwrap_or_else(|| project_mcp_path.clone());
     let servers = mcp::json_config::load_mcp_servers(&project_mcp_path, &global_for_load, &cwd);
     report_mcp_servers(&servers);
 

@@ -180,7 +180,11 @@ pub fn auto_compact_threshold(model: &str, betas: &[String]) -> u64 {
         if let Ok(parsed) = raw.trim().parse::<f64>() {
             if parsed.is_finite() && parsed > 0.0 && parsed <= 100.0 {
                 // Math.floor(effective * (pct / 100)).
-                #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                #[allow(
+                    clippy::cast_precision_loss,
+                    clippy::cast_sign_loss,
+                    clippy::cast_possible_truncation
+                )]
                 let percentage_threshold =
                     (effective_context_window as f64 * (parsed / 100.0)).floor() as u64;
                 return percentage_threshold.min(autocompact_threshold);
@@ -352,9 +356,13 @@ mod tests {
     /// then restore. Holds [`ENV_LOCK`] for the duration so tests don't race on
     /// the shared process environment.
     fn with_clean_env(body: impl FnOnce()) {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let saved: Vec<(&str, Option<String>)> =
-            ENV_VARS.iter().map(|&k| (k, std::env::var(k).ok())).collect();
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved: Vec<(&str, Option<String>)> = ENV_VARS
+            .iter()
+            .map(|&k| (k, std::env::var(k).ok()))
+            .collect();
         for &k in ENV_VARS {
             std::env::remove_var(k);
         }
@@ -427,9 +435,15 @@ mod tests {
     #[test]
     fn error_threshold_boundaries() {
         with_clean_env(|| {
-            assert!(!calculate_token_warning_state(146_999, MODEL, &[], true).is_above_error_threshold);
-            assert!(calculate_token_warning_state(147_000, MODEL, &[], true).is_above_error_threshold);
-            assert!(calculate_token_warning_state(160_000, MODEL, &[], true).is_above_error_threshold);
+            assert!(
+                !calculate_token_warning_state(146_999, MODEL, &[], true).is_above_error_threshold
+            );
+            assert!(
+                calculate_token_warning_state(147_000, MODEL, &[], true).is_above_error_threshold
+            );
+            assert!(
+                calculate_token_warning_state(160_000, MODEL, &[], true).is_above_error_threshold
+            );
         });
     }
 
@@ -467,9 +481,13 @@ mod tests {
             // blocking limit = effective(180_000) - MANUAL_COMPACT_BUFFER(3_000) = 177_000.
             let limit = EFFECTIVE - MANUAL_COMPACT_BUFFER_TOKENS;
             assert_eq!(limit, 177_000);
-            assert!(!calculate_token_warning_state(limit - 1, MODEL, &[], true).is_at_blocking_limit);
+            assert!(
+                !calculate_token_warning_state(limit - 1, MODEL, &[], true).is_at_blocking_limit
+            );
             assert!(calculate_token_warning_state(limit, MODEL, &[], true).is_at_blocking_limit);
-            assert!(calculate_token_warning_state(limit + 1, MODEL, &[], true).is_at_blocking_limit);
+            assert!(
+                calculate_token_warning_state(limit + 1, MODEL, &[], true).is_at_blocking_limit
+            );
         });
     }
 
@@ -588,10 +606,12 @@ mod tests {
             );
             // warning threshold = 180_000 - 20_000 = 160_000.
             assert!(
-                !calculate_token_warning_state(159_999, MODEL, &[], false).is_above_warning_threshold
+                !calculate_token_warning_state(159_999, MODEL, &[], false)
+                    .is_above_warning_threshold
             );
             assert!(
-                calculate_token_warning_state(160_000, MODEL, &[], false).is_above_warning_threshold
+                calculate_token_warning_state(160_000, MODEL, &[], false)
+                    .is_above_warning_threshold
             );
         });
     }

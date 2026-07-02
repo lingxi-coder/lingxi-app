@@ -176,10 +176,7 @@ async fn fire_instructions_loaded_dispatches_one_event_per_file() {
         "record-instructions-loaded",
         HookEventType::InstructionsLoaded,
     ));
-    let exec = exec_with_recorder(
-        registry,
-        Arc::new(RecordingHandler { log: log.clone() }),
-    );
+    let exec = exec_with_recorder(registry, Arc::new(RecordingHandler { log: log.clone() }));
 
     // A repo LINGXI.md (Project) and a repo LINGXI.local.md (Local). The
     // `memory_type` is now taken straight from each file's tier.
@@ -232,10 +229,7 @@ async fn managed_tier_file_reports_memory_type_managed() {
         "record-instructions-loaded",
         HookEventType::InstructionsLoaded,
     ));
-    let exec = exec_with_recorder(
-        registry,
-        Arc::new(RecordingHandler { log: log.clone() }),
-    );
+    let exec = exec_with_recorder(registry, Arc::new(RecordingHandler { log: log.clone() }));
 
     let cwd = PathBuf::from("/work/repo");
     let managed = MemoryFile {
@@ -294,10 +288,7 @@ async fn fire_instructions_loaded_is_noop_without_a_registered_hook() {
     // even when instruction files ARE present.
     let log = Arc::new(Mutex::new(Vec::new()));
     let registry = Arc::new(RwLock::new(HookRegistry::new()));
-    let exec = exec_with_recorder(
-        registry,
-        Arc::new(RecordingHandler { log: log.clone() }),
-    );
+    let exec = exec_with_recorder(registry, Arc::new(RecordingHandler { log: log.clone() }));
     let cwd = PathBuf::from("/work/repo");
     let file = MemoryFile {
         path: cwd.join("LINGXI.md"),
@@ -326,10 +317,7 @@ async fn fire_instructions_loaded_is_noop_with_no_memory_files() {
         "record-instructions-loaded",
         HookEventType::InstructionsLoaded,
     ));
-    let exec = exec_with_recorder(
-        registry,
-        Arc::new(RecordingHandler { log: log.clone() }),
-    );
+    let exec = exec_with_recorder(registry, Arc::new(RecordingHandler { log: log.clone() }));
     let orch = orch_with(exec, Vec::new(), PathBuf::from("/work/repo"));
 
     orch.fire_instructions_loaded().await;

@@ -266,4 +266,3 @@ pub struct CorruptedPayload {
     /// Whitelisted error description (no PII).
     pub error: Verified,
 }
-

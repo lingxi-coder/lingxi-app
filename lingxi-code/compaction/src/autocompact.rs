@@ -372,6 +372,7 @@ mod tests {
             debug: false,
             verbose: false,
             main_loop_model: "test".into(),
+            model_profile: None,
             max_budget_nano_usd: None,
             mcp_clients: vec![],
             is_non_interactive_session: false,
@@ -489,8 +490,11 @@ mod tests {
         // Spec test plan: mock SideQueryClient returning
         // `<analysis>x</analysis><summary>S</summary>` → wrapped output
         // contains `Summary:\nS` and the continuation sentence.
-        let (compactor, _client) =
-            wired("<analysis>scratch thoughts</analysis><summary>S</summary>", vec![]).await;
+        let (compactor, _client) = wired(
+            "<analysis>scratch thoughts</analysis><summary>S</summary>",
+            vec![],
+        )
+        .await;
 
         let result = compactor
             .compact(vec![user_msg("hello"), user_msg("world")])
@@ -507,10 +511,22 @@ mod tests {
         let text = msg.text_content();
 
         // <analysis> stripped, <summary> → Summary:\nS.
-        assert!(!text.contains("scratch thoughts"), "analysis not stripped: {text}");
-        assert!(!text.contains("<analysis>"), "raw analysis tag leaked: {text}");
-        assert!(!text.contains("<summary>"), "raw summary tag leaked: {text}");
-        assert!(text.contains("Summary:\nS"), "missing unwrapped summary: {text}");
+        assert!(
+            !text.contains("scratch thoughts"),
+            "analysis not stripped: {text}"
+        );
+        assert!(
+            !text.contains("<analysis>"),
+            "raw analysis tag leaked: {text}"
+        );
+        assert!(
+            !text.contains("<summary>"),
+            "raw summary tag leaked: {text}"
+        );
+        assert!(
+            text.contains("Summary:\nS"),
+            "missing unwrapped summary: {text}"
+        );
 
         // Continuation preamble + suppress-follow-up sentence are byte-faithful.
         assert!(text.starts_with(
@@ -524,8 +540,7 @@ mod tests {
 
     #[tokio::test]
     async fn compact_sends_byte_faithful_compact_prompt_after_cache_prefix() {
-        let (compactor, client) =
-            wired("<summary>ok</summary>", vec![user_msg("PREFIX-A")]).await;
+        let (compactor, client) = wired("<summary>ok</summary>", vec![user_msg("PREFIX-A")]).await;
 
         compactor
             .compact(vec![user_msg("hello")])
@@ -565,10 +580,7 @@ mod tests {
             seen: Mutex::new(None),
             canned_text: "<summary>S</summary>".into(),
         });
-        let runner = Arc::new(
-            ForkedAgentRunner::new()
-                .with_side_query_client(client, "m".into()),
-        );
+        let runner = Arc::new(ForkedAgentRunner::new().with_side_query_client(client, "m".into()));
         // Empty slot — never saved.
         let slot = Arc::new(CacheSafeParamsSlot::new());
         let compactor = Autocompactor::with_forked_runner(runner, slot);
@@ -579,7 +591,10 @@ mod tests {
             .expect_err("empty slot surfaces an error");
         match err {
             CompactionError::Internal(msg) => {
-                assert!(msg.contains("no cache-safe params"), "unexpected msg: {msg}");
+                assert!(
+                    msg.contains("no cache-safe params"),
+                    "unexpected msg: {msg}"
+                );
             }
             other => panic!("expected Internal, got {other:?}"),
         }
@@ -617,7 +632,10 @@ mod tests {
     #[test]
     fn default_config_uses_byte_faithful_compact_prompt() {
         let cfg = AutocompactConfig::default();
-        assert_eq!(cfg.compact_user_prompt, crate::prompt::get_compact_prompt(None));
+        assert_eq!(
+            cfg.compact_user_prompt,
+            crate::prompt::get_compact_prompt(None)
+        );
         // Sanity: the prior placeholder prompt is gone.
         assert!(!cfg.compact_user_prompt.contains("Output ONLY the summary."));
         assert!(cfg

@@ -182,7 +182,8 @@ impl CostEstimator {
         let cache_write_cost = price(tokens.cache_write, pricing.cache_write_per_million);
         let cache_read_cost = price(tokens.cache_read, pricing.cache_read_per_million);
         let reasoning_cost = price(tokens.reasoning_output, pricing.reasoning_per_million);
-        let total_cost = input_cost + output_cost + cache_write_cost + cache_read_cost + reasoning_cost;
+        let total_cost =
+            input_cost + output_cost + cache_write_cost + cache_read_cost + reasoning_cost;
 
         Ok(CostEstimate {
             pricing_model,

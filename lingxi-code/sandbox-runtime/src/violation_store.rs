@@ -81,7 +81,9 @@ impl SandboxViolationStore {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// `addViolation`: push, bump `total_count`, truncate to the last
@@ -208,12 +210,21 @@ mod tests {
         assert_eq!(store.get_total_count(), 150);
         // The retained tail is the LAST 100 (cmd-50..cmd-149).
         let all = store.get_violations(None);
-        assert_eq!(all.first().unwrap().encoded_command, encode_sandboxed_command("cmd-50"));
-        assert_eq!(all.last().unwrap().encoded_command, encode_sandboxed_command("cmd-149"));
+        assert_eq!(
+            all.first().unwrap().encoded_command,
+            encode_sandboxed_command("cmd-50")
+        );
+        assert_eq!(
+            all.last().unwrap().encoded_command,
+            encode_sandboxed_command("cmd-149")
+        );
         // limit returns the last N.
         let last3 = store.get_violations(Some(3));
         assert_eq!(last3.len(), 3);
-        assert_eq!(last3[2].encoded_command, encode_sandboxed_command("cmd-149"));
+        assert_eq!(
+            last3[2].encoded_command,
+            encode_sandboxed_command("cmd-149")
+        );
     }
 
     #[test]
@@ -224,7 +235,9 @@ mod tests {
         store.add_violation(v("git status"));
         let git = store.get_violations_for_command("git status");
         assert_eq!(git.len(), 2);
-        assert!(git.iter().all(|x| x.encoded_command == encode_sandboxed_command("git status")));
+        assert!(git
+            .iter()
+            .all(|x| x.encoded_command == encode_sandboxed_command("git status")));
         assert_eq!(store.get_violations_for_command("nothing here").len(), 0);
     }
 

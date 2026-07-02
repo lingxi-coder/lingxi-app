@@ -27,11 +27,11 @@
 use crate::jsonl::path::{project_dir_name, session_path};
 use crate::jsonl::reader::{JsonlReader, LoadedTranscript};
 use crate::jsonl::schema::JsonlMessage;
-use serde_json::Value;
 use crate::jsonl::title::{extract_title, truncate_title};
-use std::collections::HashSet;
+use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -340,7 +340,11 @@ async fn collect_dir(
             //   `if(i.sessionKind==="daemon"||i.sessionKind==="daemon-worker") return C(...),null`
             // Binary log: `"$ filtered from /resume: sessionKind="` @ 113414433.
             // `sessionKind` is carried in `extra` (outer field, not a named struct field).
-            let session_kind = first.extra.get("sessionKind").and_then(|v| v.as_str()).unwrap_or("");
+            let session_kind = first
+                .extra
+                .get("sessionKind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if session_kind == "daemon" || session_kind == "daemon-worker" {
                 continue;
             }
@@ -457,7 +461,11 @@ fn is_visible_message(m: &JsonlMessage) -> bool {
     match m.message_type.as_str() {
         "user" => {
             // Skip isMeta user lines.
-            if m.extra.get("isMeta").and_then(Value::as_bool).unwrap_or(false) {
+            if m.extra
+                .get("isMeta")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
                 return false;
             }
             has_visible_content(content, /* assistant = */ false)
@@ -598,12 +606,7 @@ async fn list_recent_sessions_inner(
                             source,
                         })?
                 {
-                    if !entry
-                        .file_type()
-                        .await
-                        .map(|t| t.is_dir())
-                        .unwrap_or(false)
-                    {
+                    if !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
                         continue;
                     }
                     let name = entry.file_name();
@@ -930,10 +933,7 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
                 leaf_uuids.insert(node.uuid.clone());
                 break;
             }
-            current = node
-                .parent_uuid
-                .as_deref()
-                .and_then(|p| by_uuid.get(p));
+            current = node.parent_uuid.as_deref().and_then(|p| by_uuid.get(p));
         }
     }
 
@@ -1052,9 +1052,9 @@ fn carries_tool_result(m: &JsonlMessage) -> bool {
         .get("content")
         .and_then(Value::as_array)
         .is_some_and(|blocks| {
-            blocks.iter().any(|b| {
-                b.get("type").and_then(Value::as_str) == Some("tool_result")
-            })
+            blocks
+                .iter()
+                .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
         })
 }
 
@@ -1136,8 +1136,11 @@ fn recover_orphaned_parallel_tool_results(
             .cloned()
             .unwrap_or_else(|| vec![*asst]);
 
-        let mut orphaned_siblings: Vec<&JsonlMessage> =
-            group.iter().filter(|s| !seen.contains(&s.uuid)).copied().collect();
+        let mut orphaned_siblings: Vec<&JsonlMessage> = group
+            .iter()
+            .filter(|s| !seen.contains(&s.uuid))
+            .copied()
+            .collect();
         let mut orphaned_trs: Vec<&JsonlMessage> = Vec::new();
         for member in &group {
             if let Some(trs) = tool_results_by_asst.get(member.uuid.as_str()) {
@@ -1265,11 +1268,7 @@ mod tests {
     /// `(tempdir, lingxi_home, cwd, project_subdir)`.
     fn setup() -> (TempDir, PathBuf, String, PathBuf) {
         let temp = TempDir::new().expect("tempdir");
-        let cwd = temp
-            .path()
-            .join("workproj")
-            .to_string_lossy()
-            .into_owned();
+        let cwd = temp.path().join("workproj").to_string_lossy().into_owned();
         let lingxi_home = temp.path().join("home");
         let project_subdir = lingxi_home.join("projects").join(project_dir_name(&cwd));
         std::fs::create_dir_all(&project_subdir).expect("mkdir");
@@ -1428,7 +1427,7 @@ mod tests {
         // `dirName === prefix` and `dirName.startsWith(prefix + '-')` match…
         assert!(worktree_dir_matches("-x-repo", "-x-repo")); // exact
         assert!(worktree_dir_matches("-x-repo-sub", "-x-repo")); // subdir (prefix + '-')
-        // …but a bare prefix-extension (no `-` boundary) must NOT match.
+                                                                 // …but a bare prefix-extension (no `-` boundary) must NOT match.
         assert!(!worktree_dir_matches("-x-repository", "-x-repo"));
         assert!(!worktree_dir_matches("-y-other", "-x-repo"));
     }
@@ -1501,7 +1500,13 @@ mod tests {
         // Exact-prefix match for worktree B.
         let dir_b = projects.join(&prefix_b);
         let b_root = Uuid::new_v4();
-        write_session_id(&dir_b, b_root, wt_b, "beta-root", base + Duration::from_secs(2));
+        write_session_id(
+            &dir_b,
+            b_root,
+            wt_b,
+            "beta-root",
+            base + Duration::from_secs(2),
+        );
 
         // Boundary guard: "-wt-alphax" starts with prefix_a but the next char is
         // not '-', so it must be EXCLUDED.
@@ -1541,7 +1546,10 @@ mod tests {
         let ids: std::collections::HashSet<Uuid> = rows.iter().map(|r| r.uuid).collect();
         assert!(ids.contains(&a_root), "alpha-root included (exact prefix)");
         assert!(ids.contains(&a_sub), "alpha-sub included (prefix + '-')");
-        assert!(ids.contains(&b_root), "beta-root included (sibling worktree)");
+        assert!(
+            ids.contains(&b_root),
+            "beta-root included (sibling worktree)"
+        );
         assert!(ids.contains(&dup), "dup session present");
         assert!(
             !ids.contains(&ghost_boundary),
@@ -1551,8 +1559,15 @@ mod tests {
 
         // Dedupe by id: exactly one dup row, and it is the newer one.
         let dup_rows: Vec<_> = rows.iter().filter(|r| r.uuid == dup).collect();
-        assert_eq!(dup_rows.len(), 1, "dedupe collapses the duplicate session id");
-        assert_eq!(dup_rows[0].title, "dup-new", "dedupe keeps the newest mtime");
+        assert_eq!(
+            dup_rows.len(),
+            1,
+            "dedupe collapses the duplicate session id"
+        );
+        assert_eq!(
+            dup_rows[0].title, "dup-new",
+            "dedupe keeps the newest mtime"
+        );
 
         // Distinct surviving sessions: a_root, a_sub, b_root, dup.
         assert_eq!(rows.len(), 4);

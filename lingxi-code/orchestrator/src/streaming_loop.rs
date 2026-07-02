@@ -90,8 +90,16 @@ fn merge_usage(seed: &LlmUsage, delta: &LlmUsage) -> LlmUsage {
         billable_tokens: TokenUsage {
             input: if bd.input > 0 { bd.input } else { bs.input },
             output: bd.output,
-            cache_write: if bd.cache_write > 0 { bd.cache_write } else { bs.cache_write },
-            cache_read: if bd.cache_read > 0 { bd.cache_read } else { bs.cache_read },
+            cache_write: if bd.cache_write > 0 {
+                bd.cache_write
+            } else {
+                bs.cache_write
+            },
+            cache_read: if bd.cache_read > 0 {
+                bd.cache_read
+            } else {
+                bs.cache_read
+            },
             reasoning_output: if bd.reasoning_output > 0 {
                 bd.reasoning_output
             } else {
@@ -248,9 +256,7 @@ async fn pump_stream_inner(
                         provider_id.clone(),
                         p.assistant_id,
                     );
-                    let aborted = p
-                        .user_cancel
-                        .is_some_and(CancellationToken::is_cancelled);
+                    let aborted = p.user_cancel.is_some_and(CancellationToken::is_cancelled);
                     if !aborted {
                         p.executor.process_queue();
                     }
@@ -287,7 +293,10 @@ async fn pump_stream_inner(
                     (None, seed) => seed.cloned(),
                 };
             }
-            RouterAction::RecordUsage { output_tokens, usage } => {
+            RouterAction::RecordUsage {
+                output_tokens,
+                usage,
+            } => {
                 // Usage-only delta (no stop_reason yet): keep the latest count.
                 turn.output_tokens = output_tokens;
                 turn.usage = match (usage.as_ref(), message_start_usage.as_ref()) {
@@ -548,12 +557,20 @@ mod tests {
 
         let usage = turn.usage.expect("usage must be recorded");
         let bt = usage.billable_tokens;
-        assert_eq!(bt.input, 1_000, "input tokens must come from MessageStart; got {}", bt.input);
+        assert_eq!(
+            bt.input, 1_000,
+            "input tokens must come from MessageStart; got {}",
+            bt.input
+        );
         assert_eq!(
             bt.cache_read, 200,
             "cache_read tokens must come from MessageStart; got {}",
             bt.cache_read
         );
-        assert_eq!(bt.output, 500, "output tokens must come from MessageDelta; got {}", bt.output);
+        assert_eq!(
+            bt.output, 500,
+            "output tokens must come from MessageDelta; got {}",
+            bt.output
+        );
     }
 }

@@ -45,7 +45,10 @@ mod tests {
         let gate = DenyOnAskGate;
         match gate.check("Bash", &serde_json::json!({})).await {
             PermissionDecision::Deny { reason } => {
-                assert!(reason.contains("Bash"), "reason should name the tool: {reason}");
+                assert!(
+                    reason.contains("Bash"),
+                    "reason should name the tool: {reason}"
+                );
                 assert!(
                     reason.contains("non-interactive"),
                     "reason should explain the non-interactive denial: {reason}"

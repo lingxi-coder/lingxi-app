@@ -314,11 +314,14 @@ mod tests {
         // The slot is still present (not deallocated) but the runner's
         // receiver is gone -> send fails with AgentGone.
         let err = pool
-            .send_event(&aid, engine::Event::UserMessage {
-                message_id: protocol::MessageId::new(),
-                request_id: protocol::RequestId::new(),
-                content: "hello".into(),
-            })
+            .send_event(
+                &aid,
+                engine::Event::UserMessage {
+                    message_id: protocol::MessageId::new(),
+                    request_id: protocol::RequestId::new(),
+                    content: "hello".into(),
+                },
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, PoolError::AgentGone), "got {err:?}");

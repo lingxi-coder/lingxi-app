@@ -58,9 +58,9 @@ fn count_nudge_user_messages(snapshot: &[ConversationMessage]) -> usize {
     snapshot
         .iter()
         .filter(|m| match m {
-            ConversationMessage::User { content, .. } => content.iter().any(|b| {
-                matches!(b, protocol::ContentBlock::Text { text } if text == NUDGE)
-            }),
+            ConversationMessage::User { content, .. } => content
+                .iter()
+                .any(|b| matches!(b, protocol::ContentBlock::Text { text } if text == NUDGE)),
             _ => false,
         })
         .count()
@@ -70,7 +70,9 @@ fn count_nudge_user_messages(snapshot: &[ConversationMessage]) -> usize {
 async fn budget_off_stops_at_first_end_turn_noop() {
     // Gate OFF (default): even with a tiny output_tokens vs a budget, the loop
     // must NOT continue past the first end_turn.
-    let api = Arc::new(MockApiClient::new(vec![end_turn_with_output_tokens(100_000)]));
+    let api = Arc::new(MockApiClient::new(vec![end_turn_with_output_tokens(
+        100_000,
+    )]));
     let cfg = OrchestratorConfig {
         // budget set but gate OFF → no-op.
         token_budget: Some(500_000),
@@ -91,7 +93,9 @@ async fn budget_off_stops_at_first_end_turn_noop() {
 #[tokio::test]
 async fn budget_none_stops_at_first_end_turn_noop() {
     // Gate ON but no budget → still a no-op.
-    let api = Arc::new(MockApiClient::new(vec![end_turn_with_output_tokens(100_000)]));
+    let api = Arc::new(MockApiClient::new(vec![end_turn_with_output_tokens(
+        100_000,
+    )]));
     let cfg = OrchestratorConfig {
         token_budget: None,
         enable_token_budget: true,
@@ -219,5 +223,8 @@ async fn budget_on_resets_recovery_count_on_continuation() {
             )
         })
         .count();
-    assert_eq!(nudges, 2, "expected two continuation nudges in final snapshot");
+    assert_eq!(
+        nudges, 2,
+        "expected two continuation nudges in final snapshot"
+    );
 }

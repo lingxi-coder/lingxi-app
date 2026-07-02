@@ -34,7 +34,8 @@ use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookOutcome, HookResult};
 use hooks::HookExecutorImpl;
 use orchestrator::test_support::{
-    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
@@ -255,7 +256,10 @@ impl BuiltinHookHandler for RecordingHandler {
         "record-subagent-stop"
     }
     async fn handle(&self, event: &HookEvent, ctx: &HookContext) -> HookResult {
-        if let HookEvent::SubagentStop { agent_id, status, .. } = event {
+        if let HookEvent::SubagentStop {
+            agent_id, status, ..
+        } = event
+        {
             self.log.lock().unwrap().push(SeenStop {
                 agent_id: agent_id.to_string(),
                 status: status.clone(),

@@ -75,13 +75,14 @@ pub fn split_command_with_operators(command: &str) -> Vec<String> {
 
     // Flush the in-progress word into `cur` as a completed token, joining with a
     // space if `cur` already has content (adjacent-string collapse).
-    let push_operator = |parts: &mut Vec<String>, cur: &mut String, has_word: &mut bool, op: &str| {
-        if *has_word {
-            parts.push(std::mem::take(cur));
-            *has_word = false;
-        }
-        parts.push(op.to_string());
-    };
+    let push_operator =
+        |parts: &mut Vec<String>, cur: &mut String, has_word: &mut bool, op: &str| {
+            if *has_word {
+                parts.push(std::mem::take(cur));
+                *has_word = false;
+            }
+            parts.push(op.to_string());
+        };
 
     while i < chars.len() {
         let c = chars[i];
@@ -400,10 +401,7 @@ mod tests {
             split_command_with_operators("a && b | c"),
             vec!["a", "&&", "b", "|", "c"]
         );
-        assert_eq!(
-            split_command_with_operators("a >> b"),
-            vec!["a", ">>", "b"]
-        );
+        assert_eq!(split_command_with_operators("a >> b"), vec!["a", ">>", "b"]);
     }
 
     #[test]

@@ -293,7 +293,10 @@ async fn compaction_safety_gate() {
     let response = LlmResponse {
         id: "msg_gate".into(),
         model: "claude-opus-4-7".into(),
-        content: vec![LlmContentBlock::Text { text: "ack".into(), cache_control: None }],
+        content: vec![LlmContentBlock::Text {
+            text: "ack".into(),
+            cache_control: None,
+        }],
         stop_reason: Some("end_turn".into()),
         stop_details: None,
         usage: Usage::default(),

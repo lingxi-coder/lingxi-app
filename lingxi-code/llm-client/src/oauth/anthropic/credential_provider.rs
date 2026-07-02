@@ -42,7 +42,8 @@ impl OAuthCredentialProvider {
 
 impl fmt::Debug for OAuthCredentialProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OAuthCredentialProvider").finish_non_exhaustive()
+        f.debug_struct("OAuthCredentialProvider")
+            .finish_non_exhaustive()
     }
 }
 
@@ -73,13 +74,13 @@ impl CredentialProvider for OAuthCredentialProvider {
             // Expired → single-flight refresh (double-check-after-acquire lives
             // inside `RefreshDriver::refresh`).  Map any failure to
             // LlmError::Authentication with NO secret material in the message.
-            let bearer = self.driver.refresh(token_hash)
+            let bearer = self
+                .driver
+                .refresh(token_hash)
                 .await
                 .map_err(|_| LlmError::Authentication)?;
 
-            Ok(Credential::BearerToken(
-                bearer.0.expose_secret().clone(),
-            ))
+            Ok(Credential::BearerToken(bearer.0.expose_secret().clone()))
         })
     }
 }

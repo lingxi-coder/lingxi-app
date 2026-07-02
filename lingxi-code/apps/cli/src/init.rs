@@ -138,13 +138,11 @@ pub struct TuiBuild {
     /// spawned streaming turn's spinner + completion render through the one
     /// bridge pump. `UnboundedSender` is `Clone`, so cloning it here does not
     /// disturb the `BridgeOutputStream` that owns the original.
-    pub turn_tx:
-        tokio::sync::mpsc::UnboundedSender<tui::events::orchestrator_bridge::TurnEvent>,
+    pub turn_tx: tokio::sync::mpsc::UnboundedSender<tui::events::orchestrator_bridge::TurnEvent>,
     /// (TUI-PERM) Receiver for the injected `TuiPermissionGate`'s exchanges.
     /// Threaded into `session::Runtime::with_permission_rx` so the TUI's
     /// permission pump drives the interactive dialog.
-    pub permission_rx:
-        tokio::sync::mpsc::Receiver<tui::permission_bridge::PermissionExchange>,
+    pub permission_rx: tokio::sync::mpsc::Receiver<tui::permission_bridge::PermissionExchange>,
 }
 
 /// Errors surfaced while building a [`Runtime`].
@@ -218,12 +216,13 @@ pub(crate) fn setting_source_flags(setting_sources: Option<&str>) -> (bool, bool
     match setting_sources {
         None => (true, true),
         Some(s) => {
-            let listed: Vec<String> =
-                s.split(',').map(|x| x.trim().to_ascii_lowercase()).collect();
+            let listed: Vec<String> = s
+                .split(',')
+                .map(|x| x.trim().to_ascii_lowercase())
+                .collect();
             let include_user = listed.iter().any(|x| x == "user");
             // `local` has no distinct lingxi layer → fold onto `project`.
-            let include_project =
-                listed.iter().any(|x| x == "project" || x == "local");
+            let include_project = listed.iter().any(|x| x == "project" || x == "local");
             (include_user, include_project)
         }
     }
@@ -272,7 +271,10 @@ pub(crate) fn parse_cli_mcp_servers(entries: Option<&Vec<String>>) -> Vec<mcp::M
 /// reads the same dir as the hook loader. Returns `None` on any load failure or
 /// when no `providers` block is set; callers then fall back to built-in
 /// profiles only.
-fn load_provider_profiles(include_user: bool, include_project: bool) -> Option<std::collections::BTreeMap<String, serde_json::Value>> {
+fn load_provider_profiles(
+    include_user: bool,
+    include_project: bool,
+) -> Option<std::collections::BTreeMap<String, serde_json::Value>> {
     let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
     let inputs = engine::settings::LoadInputs {
@@ -427,7 +429,11 @@ pub(crate) fn resolve_desktop_config(
     // leaves both unset, so the orchestrator's turn / cost caps stay inert outside
     // `--print` (the flags still PARSE regardless — honoring is the consumer's job).
     let max_turns = if argv.print { argv.max_turns } else { None };
-    let max_budget_usd = if argv.print { argv.max_budget_usd } else { None };
+    let max_budget_usd = if argv.print {
+        argv.max_budget_usd
+    } else {
+        None
+    };
     // `--json-schema` is structured-output, "only works with --print". Parse the
     // schema string to a JSON value (print-gated). An unparseable schema is
     // dropped → structured output simply does not activate (the turn runs normally).
@@ -537,7 +543,6 @@ pub(crate) fn resolve_desktop_config(
     // build` unions into the permission policy's working-dir set (parity with a
     // settings `permissions.additionalDirectories` entry).
 }
-
 
 /// Build the full runtime from parsed argv + the chosen output stream.
 ///
@@ -679,7 +684,10 @@ mod tests {
         // try_recv on an empty-but-open channel returns Empty, not Disconnected.
         let mut rx = build.permission_rx;
         assert!(
-            matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+            matches!(
+                rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
             "permission_rx must be wired + open (gate holds the sender)"
         );
     }

@@ -102,8 +102,9 @@ mod tests {
 
     #[test]
     fn parses_canonical_message() {
-        let (actual, limit) =
-            parse_prompt_too_long_token_counts("prompt is too long: 137500 tokens > 135000 maximum");
+        let (actual, limit) = parse_prompt_too_long_token_counts(
+            "prompt is too long: 137500 tokens > 135000 maximum",
+        );
         assert_eq!(actual, Some(137_500));
         assert_eq!(limit, Some(135_000));
     }
@@ -119,7 +120,8 @@ mod tests {
     #[test]
     fn parses_singular_token_and_json_envelope() {
         // Singular "token" (the `tokens?` quantifier) inside a JSON envelope.
-        let body = r#"{"type":"error","error":{"message":"prompt is too long: 5 token > 4 maximum"}}"#;
+        let body =
+            r#"{"type":"error","error":{"message":"prompt is too long: 5 token > 4 maximum"}}"#;
         let (actual, limit) = parse_prompt_too_long_token_counts(body);
         assert_eq!(actual, Some(5));
         assert_eq!(limit, Some(4));
@@ -146,7 +148,10 @@ mod tests {
     #[test]
     fn token_gap_zero_when_unknown_or_not_over() {
         // Unparseable → 0 (the truncator reads this as "unknown → 20% fallback").
-        assert_eq!(prompt_too_long_token_gap("prompt is too long for this model"), 0);
+        assert_eq!(
+            prompt_too_long_token_gap("prompt is too long for this model"),
+            0
+        );
         // actual <= limit (shouldn't happen for a real PTL) → 0, not underflow.
         assert_eq!(
             prompt_too_long_token_gap("prompt is too long: 100 tokens > 200 maximum"),

@@ -61,7 +61,10 @@ fn send_prompt_optional_fields_skip_when_none() {
         json.get("prompt_mode").is_none(),
         "None prompt_mode must be skipped"
     );
-    assert!(json.get("turn_id").is_none(), "None turn_id must be skipped");
+    assert!(
+        json.get("turn_id").is_none(),
+        "None turn_id must be skipped"
+    );
     assert!(
         json["images"].is_array(),
         "images Vec is always present (not optional)"
@@ -114,7 +117,10 @@ fn cancel_round_trips() {
         let json = serde_json::to_value(&cmd).expect("serialize Cancel");
         assert_eq!(json["type"], "cancel");
         if turn_id.is_none() {
-            assert!(json.get("turn_id").is_none(), "None turn_id must be skipped");
+            assert!(
+                json.get("turn_id").is_none(),
+                "None turn_id must be skipped"
+            );
         }
         let back: ClientCommand = serde_json::from_value(json).expect("deserialize Cancel");
         assert_eq!(back, cmd);
@@ -195,7 +201,10 @@ fn command_result_round_trips() {
     };
     let json = serde_json::to_value(&result).expect("serialize CommandResultDto");
     assert_eq!(json["display"], "Switched model to opus");
-    assert!(json.get("injected").is_none(), "None injected must be skipped");
+    assert!(
+        json.get("injected").is_none(),
+        "None injected must be skipped"
+    );
     let back: CommandResultDto =
         serde_json::from_value(json).expect("deserialize CommandResultDto");
     assert_eq!(back, result);
@@ -215,7 +224,11 @@ fn command_result_round_trips() {
 #[test]
 fn refresh_listings_round_trips() {
     let cmd = ClientCommand::RefreshListings {
-        which: vec![ListingKindDto::Mcp, ListingKindDto::Agents, ListingKindDto::Sessions],
+        which: vec![
+            ListingKindDto::Mcp,
+            ListingKindDto::Agents,
+            ListingKindDto::Sessions,
+        ],
     };
     let json = serde_json::to_value(&cmd).expect("serialize RefreshListings");
     assert_eq!(json["type"], "refresh_listings");
@@ -247,7 +260,8 @@ fn listing_kind_variants_round_trip() {
     for (kind, tag) in cases {
         let json = serde_json::to_value(kind).expect("serialize ListingKindDto");
         assert_eq!(json["type"], tag, "ListingKindDto::{kind:?} tag mismatch");
-        let back: ListingKindDto = serde_json::from_value(json).expect("deserialize ListingKindDto");
+        let back: ListingKindDto =
+            serde_json::from_value(json).expect("deserialize ListingKindDto");
         assert_eq!(back, kind);
     }
 }
@@ -290,7 +304,10 @@ fn new_session_round_trips() {
     };
     let json_min = serde_json::to_value(&minimal).expect("serialize minimal NewSession");
     assert!(json_min.get("cwd").is_none(), "None cwd must be skipped");
-    assert!(json_min.get("model").is_none(), "None model must be skipped");
+    assert!(
+        json_min.get("model").is_none(),
+        "None model must be skipped"
+    );
     let back_min: ClientCommand =
         serde_json::from_value(json_min).expect("deserialize minimal NewSession");
     assert_eq!(back_min, minimal);
@@ -464,15 +481,16 @@ fn no_live_command_carries_session_id() {
 
     for cmd in &commands {
         let json = serde_json::to_value(cmd).expect("serialize command");
-        let obj = json.as_object().expect("command serializes to a JSON object");
+        let obj = json
+            .as_object()
+            .expect("command serializes to a JSON object");
         assert!(
             !obj.contains_key("session_id"),
             "live command {cmd:?} must NOT carry session_id (decision §0.5) — \
              session_id is a connection attribute; only ResumeSession names a target"
         );
         // Sanity: it actually round-trips too.
-        let back: ClientCommand =
-            serde_json::from_value(json).expect("deserialize command");
+        let back: ClientCommand = serde_json::from_value(json).expect("deserialize command");
         assert_eq!(&back, cmd);
     }
 

@@ -28,7 +28,9 @@ use orchestrator::test_support::{
 use orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use protocol::{HookId, HttpRequest, HttpResponse, ContentBlock, ConversationMessage, MessageId, ToolUseId};
+use protocol::{
+    ContentBlock, ConversationMessage, HookId, HttpRequest, HttpResponse, MessageId, ToolUseId,
+};
 use serde_json::json;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -364,7 +366,9 @@ async fn streaming_replays_tool_injected_new_messages_into_history() {
                 "injected message must sit directly after the tool_result user message"
             );
         }
-        other => panic!("expected a tool_result User message before the injected one, got {other:?}"),
+        other => {
+            panic!("expected a tool_result User message before the injected one, got {other:?}")
+        }
     }
 
     // The message AFTER the injected one is the next turn's assistant text.
@@ -496,12 +500,14 @@ async fn streaming_pre_tool_additional_context_is_a_separate_message_after_tool_
     let before = &s.history[ctx_pos - 1];
     match before {
         ConversationMessage::User { content, .. } => assert!(
-            content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if *tool_use_id == tu)),
+            content.iter().any(
+                |b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if *tool_use_id == tu)
+            ),
             "the context message must sit directly after the tool_result user message"
         ),
-        other => panic!("expected a tool_result User message before the context one, got {other:?}"),
+        other => {
+            panic!("expected a tool_result User message before the context one, got {other:?}")
+        }
     }
 
     // Tagged with the dispatching tool's tool_use_id (TS toolUseID).

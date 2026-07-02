@@ -39,7 +39,10 @@ fn tool_use_started_round_trips() {
     assert_eq!(json["id"], "tu_01");
     assert_eq!(json["tool"], "Read");
     // The payload is a JSON String on the wire, NOT a nested object.
-    assert!(json["input_json"].is_string(), "input_json must be a String");
+    assert!(
+        json["input_json"].is_string(),
+        "input_json must be a String"
+    );
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize ToolUseStarted");
     assert_eq!(back, ev);
 }
@@ -58,7 +61,10 @@ fn tool_use_result_round_trips() {
     assert_eq!(json["type"], "tool_use_result");
     assert_eq!(json["id"], "tu_01");
     assert_eq!(json["tool"], "Read");
-    assert!(json["result_json"].is_string(), "result_json must be a String");
+    assert!(
+        json["result_json"].is_string(),
+        "result_json must be a String"
+    );
     assert_eq!(json["is_error"], false);
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize ToolUseResult");
     assert_eq!(back, ev);
@@ -106,7 +112,10 @@ fn message_complete_omits_none_fields() {
         json.get("stop_reason").is_none(),
         "None stop_reason must be skipped"
     );
-    assert!(json.get("message").is_none(), "None message must be skipped");
+    assert!(
+        json.get("message").is_none(),
+        "None message must be skipped"
+    );
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize MessageComplete");
     assert_eq!(back, ev);
 }
@@ -191,8 +200,7 @@ fn compaction_completed_round_trips() {
     assert_eq!(json["messages_before"], 50);
     assert_eq!(json["messages_after"], 12);
     assert_eq!(json["bytes_saved"], 4096);
-    let back: ClientEvent =
-        serde_json::from_value(json).expect("deserialize CompactionCompleted");
+    let back: ClientEvent = serde_json::from_value(json).expect("deserialize CompactionCompleted");
     assert_eq!(back, ev);
 }
 
@@ -256,7 +264,10 @@ fn end_turn_outcome_variants() {
     ];
     for (outcome, tag) in cases {
         let json = serde_json::to_value(&outcome).expect("serialize TurnOutcomeDto");
-        assert_eq!(json["type"], tag, "TurnOutcomeDto::{outcome:?} tag mismatch");
+        assert_eq!(
+            json["type"], tag,
+            "TurnOutcomeDto::{outcome:?} tag mismatch"
+        );
         let back: TurnOutcomeDto =
             serde_json::from_value(json).expect("deserialize TurnOutcomeDto");
         assert_eq!(back, outcome);

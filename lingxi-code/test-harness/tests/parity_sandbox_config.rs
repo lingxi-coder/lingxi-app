@@ -27,8 +27,7 @@ fn sandbox_config_conversion_matches_claude_code() {
 
     let settings: SettingsJson =
         serde_json::from_value(fx.input_settings).expect("input settings parse");
-    let runtime =
-        convert_settings_to_runtime_config(&settings, &SandboxConvertContext::default());
+    let runtime = convert_settings_to_runtime_config(&settings, &SandboxConvertContext::default());
     let got = serde_json::to_value(&runtime).expect("runtime serializes");
     let want = fx.expected_runtime_config;
 

@@ -188,7 +188,10 @@ fn parse_user_specified_model(model_input: &str) -> String {
         // `ANTHROPIC_DEFAULT_*_MODEL` overrides + the 3P Sonnet default take effect
         // on the skill `model:` path.
         "opusplan" | "sonnet" => format!("{}{suffix}", default_sonnet_model()),
-        "haiku" => format!("{}{suffix}", env_default("ANTHROPIC_DEFAULT_HAIKU_MODEL", "haiku")),
+        "haiku" => format!(
+            "{}{suffix}",
+            env_default("ANTHROPIC_DEFAULT_HAIKU_MODEL", "haiku")
+        ),
         // #2: Opus is provider-aware in 2.1.193 (firstParty→4-8, 3P→4-6).
         "opus" => format!("{}{suffix}", default_opus_model()),
         _ => {

@@ -610,14 +610,32 @@ mod tests {
         let props = &schema["properties"];
 
         // Field named `timeout` (not `timeout_ms`), type `number` (not integer), no minimum/maximum.
-        assert!(props.get("timeout").is_some(), "schema must expose `timeout`");
-        assert!(props.get("timeout_ms").is_none(), "schema must NOT expose `timeout_ms`");
-        assert_eq!(props["timeout"]["type"], "number", "timeout type must be number");
-        assert!(props["timeout"].get("minimum").is_none(), "timeout must have no minimum");
-        assert!(props["timeout"].get("maximum").is_none(), "timeout must have no maximum");
+        assert!(
+            props.get("timeout").is_some(),
+            "schema must expose `timeout`"
+        );
+        assert!(
+            props.get("timeout_ms").is_none(),
+            "schema must NOT expose `timeout_ms`"
+        );
+        assert_eq!(
+            props["timeout"]["type"], "number",
+            "timeout type must be number"
+        );
+        assert!(
+            props["timeout"].get("minimum").is_none(),
+            "timeout must have no minimum"
+        );
+        assert!(
+            props["timeout"].get("maximum").is_none(),
+            "timeout must have no maximum"
+        );
 
         // dangerouslyDisableSandbox present with boolean type and byte-exact description.
-        assert!(props.get("dangerouslyDisableSandbox").is_some(), "dangerouslyDisableSandbox must be present");
+        assert!(
+            props.get("dangerouslyDisableSandbox").is_some(),
+            "dangerouslyDisableSandbox must be present"
+        );
         assert_eq!(props["dangerouslyDisableSandbox"]["type"], "boolean");
         assert_eq!(
             props["dangerouslyDisableSandbox"]["description"],
@@ -625,12 +643,24 @@ mod tests {
         );
 
         // additionalProperties:false (strictObject).
-        assert_eq!(schema["additionalProperties"], false, "must have additionalProperties:false");
+        assert_eq!(
+            schema["additionalProperties"], false,
+            "must have additionalProperties:false"
+        );
 
         // Per-field descriptions present.
-        assert_eq!(props["command"]["description"], "The PowerShell command to execute");
-        assert_eq!(props["description"]["description"], "Clear, concise description of what this command does in active voice.");
-        assert_eq!(props["run_in_background"]["description"], "Set to true to run this command in the background.");
+        assert_eq!(
+            props["command"]["description"],
+            "The PowerShell command to execute"
+        );
+        assert_eq!(
+            props["description"]["description"],
+            "Clear, concise description of what this command does in active voice."
+        );
+        assert_eq!(
+            props["run_in_background"]["description"],
+            "Set to true to run this command in the background."
+        );
     }
 
     /// Bash gap: timeout must be type:number (not integer) and have no minimum constraint.

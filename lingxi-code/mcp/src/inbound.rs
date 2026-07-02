@@ -115,7 +115,10 @@ impl ElicitationCreateHandler {
             // `elicitation_id`. Accept either so the seam is robust to both.
             elicitation_id: str_field("elicitationId").or_else(|| str_field("elicitation_id")),
             requested_schema: p
-                .and_then(|o| o.get("requestedSchema").or_else(|| o.get("requested_schema")))
+                .and_then(|o| {
+                    o.get("requestedSchema")
+                        .or_else(|| o.get("requested_schema"))
+                })
                 .cloned(),
         }
     }
@@ -245,9 +248,7 @@ mod tests {
 
     // --- Hook-dispatch seam (Elicitation hook fire + resolve) --------------
 
-    use crate::hook_dispatch::{
-        ElicitationHookOutcome, ElicitationHookRequest, HookDispatcher,
-    };
+    use crate::hook_dispatch::{ElicitationHookOutcome, ElicitationHookRequest, HookDispatcher};
     use std::sync::Mutex;
 
     /// Records the request it received and returns a canned outcome. Used to
@@ -321,9 +322,7 @@ mod tests {
             "linear",
             Some(mock as Arc<dyn HookDispatcher>),
         );
-        let resp = handler
-            .handle(elicit_req(json!({"message": "Pick"})))
-            .await;
+        let resp = handler.handle(elicit_req(json!({"message": "Pick"}))).await;
         let result = resp.result.expect("success result");
         assert_eq!(result, answer);
     }
@@ -337,9 +336,7 @@ mod tests {
             "linear",
             Some(mock as Arc<dyn HookDispatcher>),
         );
-        let resp = handler
-            .handle(elicit_req(json!({"message": "Pick"})))
-            .await;
+        let resp = handler.handle(elicit_req(json!({"message": "Pick"}))).await;
         let result = resp.result.expect("success result");
         let obj = result.as_object().expect("object");
         assert_eq!(obj.len(), 1);
@@ -355,9 +352,7 @@ mod tests {
             "linear",
             Some(mock as Arc<dyn HookDispatcher>),
         );
-        let resp = handler
-            .handle(elicit_req(json!({"message": "Pick"})))
-            .await;
+        let resp = handler.handle(elicit_req(json!({"message": "Pick"}))).await;
         let result = resp.result.expect("success result");
         assert_eq!(result, json!({"action": "cancel"}));
     }
@@ -367,9 +362,7 @@ mod tests {
         // (d) No dispatcher => current default unchanged (strict no-op): the
         // handler never even looks at the params, returns {"action":"cancel"}.
         let handler = ElicitationCreateHandler::with_dispatcher("github", None);
-        let resp = handler
-            .handle(elicit_req(json!({"message": "Pick"})))
-            .await;
+        let resp = handler.handle(elicit_req(json!({"message": "Pick"}))).await;
         let result = resp.result.expect("success result");
         let bytes = serde_json::to_vec(&result).unwrap();
         assert_eq!(bytes, br#"{"action":"cancel"}"#);

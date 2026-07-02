@@ -1,5 +1,8 @@
-use llm_client::{AnthropicMessagesCodec, ContentBlock, LlmError, LlmRequest, ResponseFormat, ToolChoice, ToolDeclaration, WireCodec};
 use llm_client::providers::{GeminiCodec, OpenAiChatCodec};
+use llm_client::{
+    AnthropicMessagesCodec, ContentBlock, LlmError, LlmRequest, ResponseFormat, ToolChoice,
+    ToolDeclaration, WireCodec,
+};
 
 fn openai_codec() -> OpenAiChatCodec {
     OpenAiChatCodec::new("https://api.openai.com/v1")
@@ -45,9 +48,14 @@ fn openai_encodes_stream_true() {
 #[test]
 fn openai_encodes_response_format_variants() {
     let cases = [
-        (ResponseFormat::JsonObject, serde_json::json!({"type": "json_object"})),
         (
-            ResponseFormat::JsonSchema { schema: serde_json::json!({"type": "object", "properties": {"answer": {"type": "string"}}}) },
+            ResponseFormat::JsonObject,
+            serde_json::json!({"type": "json_object"}),
+        ),
+        (
+            ResponseFormat::JsonSchema {
+                schema: serde_json::json!({"type": "object", "properties": {"answer": {"type": "string"}}}),
+            },
             serde_json::json!({"type": "json_schema", "json_schema": {"name": "response", "strict": true, "schema": {"type": "object", "properties": {"answer": {"type": "string"}}}}}),
         ),
     ];
@@ -66,7 +74,9 @@ fn openai_encodes_response_format_variants() {
 fn gemini_rejects_response_format_requests() {
     let cases = [
         ResponseFormat::JsonObject,
-        ResponseFormat::JsonSchema { schema: serde_json::json!({"type": "object"}) },
+        ResponseFormat::JsonSchema {
+            schema: serde_json::json!({"type": "object"}),
+        },
     ];
 
     for response_format in cases {
@@ -75,7 +85,10 @@ fn gemini_rejects_response_format_requests() {
 
         let err = gemini_codec().encode_request(&request).unwrap_err();
 
-        assert!(matches!(err, LlmError::InvalidRequest { .. } | LlmError::UnsupportedCapability { .. }));
+        assert!(matches!(
+            err,
+            LlmError::InvalidRequest { .. } | LlmError::UnsupportedCapability { .. }
+        ));
     }
 }
 
@@ -86,7 +99,9 @@ fn openai_encodes_tool_choice_variants() {
         (ToolChoice::None, serde_json::json!("none")),
         (ToolChoice::Required, serde_json::json!("required")),
         (
-            ToolChoice::Tool { name: "Read".to_string() },
+            ToolChoice::Tool {
+                name: "Read".to_string(),
+            },
             serde_json::json!({"type": "function", "function": {"name": "Read"}}),
         ),
     ];
@@ -114,7 +129,9 @@ fn gemini_encodes_tool_choice_variants() {
         ToolChoice::Auto,
         ToolChoice::None,
         ToolChoice::Required,
-        ToolChoice::Tool { name: "Read".to_string() },
+        ToolChoice::Tool {
+            name: "Read".to_string(),
+        },
     ];
 
     for tool_choice in cases {
@@ -135,10 +152,16 @@ fn gemini_encodes_tool_choice_variants() {
 #[test]
 fn openai_rejects_unsupported_content_blocks() {
     // Image, ImageUrl, and Document are now supported. Remaining reject: Reasoning.
-    let block = ContentBlock::Reasoning { text: "thought".to_string(), signature: None };
+    let block = ContentBlock::Reasoning {
+        text: "thought".to_string(),
+        signature: None,
+    };
     let request = request_with_block("gpt-4o", block);
     let err = openai_codec().encode_request(&request).unwrap_err();
-    assert!(matches!(err, LlmError::InvalidRequest { .. } | LlmError::UnsupportedCapability { .. }));
+    assert!(matches!(
+        err,
+        LlmError::InvalidRequest { .. } | LlmError::UnsupportedCapability { .. }
+    ));
 }
 
 #[test]
@@ -149,24 +172,34 @@ fn openai_now_accepts_image_image_url_and_document_blocks() {
             media_type: "image/png".to_string(),
             bytes: vec![1, 2, 3],
         },
-        ContentBlock::ImageUrl { url: "https://example.com/img.png".to_string() },
+        ContentBlock::ImageUrl {
+            url: "https://example.com/img.png".to_string(),
+        },
         ContentBlock::Document {
             media_type: "application/pdf".to_string(),
             bytes: vec![0x25, 0x50, 0x44, 0x46],
         },
     ] {
         let request = request_with_block("gpt-4o", block);
-        openai_codec().encode_request(&request).expect("image/imageurl/document should be accepted");
+        openai_codec()
+            .encode_request(&request)
+            .expect("image/imageurl/document should be accepted");
     }
 }
 
 #[test]
 fn gemini_rejects_unsupported_content_blocks() {
     // Image, Document, and ImageUrl are now supported. Remaining reject: Reasoning.
-    let block = ContentBlock::Reasoning { text: "thought".to_string(), signature: None };
+    let block = ContentBlock::Reasoning {
+        text: "thought".to_string(),
+        signature: None,
+    };
     let request = request_with_block("gemini-2.0-flash", block);
     let err = gemini_codec().encode_request(&request).unwrap_err();
-    assert!(matches!(err, LlmError::InvalidRequest { .. } | LlmError::UnsupportedCapability { .. }));
+    assert!(matches!(
+        err,
+        LlmError::InvalidRequest { .. } | LlmError::UnsupportedCapability { .. }
+    ));
 }
 
 #[test]
@@ -181,9 +214,13 @@ fn gemini_now_accepts_image_document_and_image_url_blocks() {
             media_type: "application/pdf".to_string(),
             bytes: vec![0x25, 0x50, 0x44, 0x46],
         },
-        ContentBlock::ImageUrl { url: "https://example.com/img.png".to_string() },
+        ContentBlock::ImageUrl {
+            url: "https://example.com/img.png".to_string(),
+        },
     ] {
         let request = request_with_block("gemini-2.0-flash", block);
-        gemini_codec().encode_request(&request).expect("image/document/imageurl should be accepted");
+        gemini_codec()
+            .encode_request(&request)
+            .expect("image/document/imageurl should be accepted");
     }
 }

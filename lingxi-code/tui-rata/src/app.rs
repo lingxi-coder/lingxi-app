@@ -11,18 +11,14 @@
 //! receives the prompt + a per-turn `CancellationToken` (the caller spawns the
 //! real turn; the app cancels it on Ctrl-C).
 
-use std::collections::HashSet;
-use std::collections::HashMap;
 use std::io;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui_image::picker::Picker;
-use ratatui_image::protocol::StatefulProtocol;
-use ratatui_image::StatefulImage;
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use permission::gate::{PermissionRequest, PermissionResponse};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 use tokio::sync::oneshot;
@@ -30,23 +26,22 @@ use tokio_util::sync::CancellationToken;
 use tui_core::message::RenderedMessage;
 use tui_core::orchestrator_bridge::TurnEvent;
 use tui_core::permission_bridge::PermissionExchange;
-use tui_core::render::{NamedColor, SpanStyle, StyleColor, StyledSpan};
 use tui_core::theme::Theme;
 
 use crate::composer::Composer;
 use crate::overlay::{Dialog, DialogOutcome};
 use crate::palette::{command_items, CompletionPopup};
 use crate::picker::{ModelPicker, PickerOutcome};
-use crate::screens::{FullScreen, ScreenOutcome};
+use crate::screens::FullScreen;
 use crate::session::SessionInfo;
 use crate::vim::{VimOutcome, VimState};
-use crate::{render, restore_terminal, setup_terminal, RataTerminal};
-
-/// Lines moved per PageUp / PageDown.
-const PAGE: u16 = 10;
+use crate::{render, RataTerminal};
 
 /// Maximum composer content height before it stops growing and scrolls.
 const COMPOSER_MAX_LINES: usize = 6;
+
+/// How long an idle Ctrl-C stays "armed" before a second press quits.
+const CTRL_C_EXIT_WINDOW: Duration = Duration::from_secs(2);
 
 /// What a key press means to the event loop.
 enum KeyOutcome {
@@ -73,36 +68,34 @@ pub struct RataApp {
     messages: Vec<RenderedMessage>,
     composer: Composer,
     theme: Theme,
-    /// Lines scrolled up from the bottom (`0` = stuck to the latest output).
-    scroll_up: u16,
+    /// Count of `messages` already committed (inserted) into the terminal's
+    /// native scrollback; the tail beyond this is pending or actively streaming.
+    committed: usize,
     /// Cancellation token for the in-flight turn, if any.
     current_turn: Option<CancellationToken>,
     /// Active permission prompt, if any (owns the keyboard while open).
     pending_permission: Option<PendingPermission>,
-    /// Active full-page screen (e.g. `/help`), if any (owns the keyboard).
-    active_screen: Option<FullScreen>,
     /// Active `/model` picker, if any (owns the keyboard).
     active_model_picker: Option<ModelPicker>,
     /// Command/file completion popup shown while a `/command` or `@file` token
     /// is being typed.
     completion: Option<CompletionPopup>,
     /// `true` → expand collapsible messages (thinking body, tool-use JSON,
-    /// grouped children). Toggled by Ctrl-O.
+    /// grouped children) when committing them to scrollback. Toggled by Ctrl-O.
     verbose: bool,
     /// Vim editing state when `/vim` is enabled (`None` → plain editor).
     vim: Option<VimState>,
-    /// Selected scrollback message index while browsing (`None` → composer
-    /// focused). Ctrl-Up enters; Ctrl-Down past the end exits.
-    selected_msg: Option<usize>,
-    /// Message indices individually expanded via the selection cursor (an
-    /// override on top of the global `verbose` flag).
-    expanded_msgs: HashSet<usize>,
-    /// Terminal graphics picker (kitty/iTerm2/sixel), set after terminal setup;
-    /// `None` in tests and non-tty sessions.
-    picker: Option<Picker>,
-    /// Lazily-built inline-image protocols, keyed by message index.
-    image_previews: HashMap<usize, StatefulProtocol>,
-    /// Startup snapshot the full-page screens render from.
+    /// Wall-clock start, used to advance the streaming spinner animation.
+    start: std::time::Instant,
+    /// When the in-flight turn began, for the spinner's elapsed-seconds counter.
+    turn_started_at: Option<std::time::Instant>,
+    /// Human label for what the turn is currently doing (e.g. `Running Bash`),
+    /// set from `ToolUseStart` and shown by the spinner instead of a bare verb.
+    activity: Option<String>,
+    /// First unconfirmed idle Ctrl-C, for claude-code's press-twice-to-exit. A
+    /// second Ctrl-C within [`CTRL_C_EXIT_WINDOW`] quits; otherwise it re-arms.
+    ctrl_c_at: Option<std::time::Instant>,
+    /// Startup snapshot the read-only screens render from.
     session: SessionInfo,
 }
 
@@ -114,18 +107,17 @@ impl RataApp {
             messages,
             composer: Composer::default(),
             theme: Theme::dark(),
-            scroll_up: 0,
+            committed: 0,
             current_turn: None,
             pending_permission: None,
-            active_screen: None,
             active_model_picker: None,
             completion: None,
             verbose: false,
             vim: None,
-            selected_msg: None,
-            expanded_msgs: HashSet::new(),
-            picker: None,
-            image_previews: HashMap::new(),
+            start: std::time::Instant::now(),
+            turn_started_at: None,
+            activity: None,
+            ctrl_c_at: None,
             session: SessionInfo::default(),
         }
     }
@@ -142,9 +134,6 @@ impl RataApp {
         if self.pending_permission.is_some() {
             return self.on_permission_key(key.code);
         }
-        if self.active_screen.is_some() {
-            return self.on_screen_key(key.code);
-        }
         if self.active_model_picker.is_some() {
             return self.on_picker_key(key.code);
         }
@@ -152,18 +141,6 @@ impl RataApp {
             if let Some(outcome) = self.on_completion_key(key.code) {
                 return outcome;
             }
-        }
-        // Scrollback selection mode owns the keyboard once active.
-        if self.selected_msg.is_some() {
-            return self.on_selection_key(key.code);
-        }
-        // Ctrl-Up enters selection mode on the last message.
-        if key.code == KeyCode::Up && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if !self.messages.is_empty() {
-                self.selected_msg = Some(self.messages.len() - 1);
-                self.scroll_up = 0;
-            }
-            return KeyOutcome::Continue;
         }
         // When vim is enabled, the vim layer sees the key first. It fully
         // handles Normal-mode motions/edits; Insert-mode typing + all Ctrl
@@ -203,7 +180,6 @@ impl RataApp {
         if let Some(outcome) = self.handle_slash(&text) {
             return outcome;
         }
-        self.scroll_up = 0;
         self.messages.push(RenderedMessage::UserText {
             body: text.clone(),
             timestamp: 0,
@@ -213,17 +189,52 @@ impl RataApp {
         KeyOutcome::Submit(text, token)
     }
 
+    /// Handle a bracketed paste. An image file path (existing `.png`/`.jpg`/…)
+    /// becomes an image message (auto-selected for preview); anything else is
+    /// inserted into the composer at the cursor.
+    fn on_paste(&mut self, text: &str) {
+        let trimmed = text.trim();
+        if is_image_path(trimmed) {
+            let name = std::path::Path::new(trimmed)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(String::from);
+            self.messages.push(RenderedMessage::UserImage {
+                image_id: None,
+                metadata: name,
+                source_path: Some(trimmed.to_string()),
+            });
+        } else {
+            self.composer.insert_str(text);
+            self.sync_completion();
+        }
+    }
+
     fn on_composer_key(&mut self, key: KeyEvent) -> KeyOutcome {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let is_ctrl_c = ctrl && matches!(key.code, KeyCode::Char('c'));
+        // Any key other than a repeat Ctrl-C disarms the press-twice-to-exit.
+        if !is_ctrl_c {
+            self.ctrl_c_at = None;
+        }
         match key.code {
             KeyCode::Esc => KeyOutcome::Quit,
-            // Ctrl-C cancels an in-flight turn; with nothing running it exits.
+            // Ctrl-C interrupts an in-flight turn; when idle it arms, and a second
+            // press within the window quits (claude-code parity).
             KeyCode::Char('c') if ctrl => {
                 if let Some(token) = self.current_turn.take() {
                     token.cancel();
+                    self.turn_started_at = None;
+                    self.activity = None;
                     KeyOutcome::Continue
-                } else {
+                } else if self
+                    .ctrl_c_at
+                    .is_some_and(|t| t.elapsed() <= CTRL_C_EXIT_WINDOW)
+                {
                     KeyOutcome::Quit
+                } else {
+                    self.ctrl_c_at = Some(std::time::Instant::now());
+                    KeyOutcome::Continue
                 }
             }
             // Emacs-style composer edits.
@@ -254,22 +265,6 @@ impl RataApp {
                 KeyOutcome::Continue
             }
             KeyCode::Enter => self.submit_composer(),
-            KeyCode::PageUp => {
-                self.scroll_up = self.scroll_up.saturating_add(PAGE);
-                KeyOutcome::Continue
-            }
-            KeyCode::PageDown => {
-                self.scroll_up = self.scroll_up.saturating_sub(PAGE);
-                KeyOutcome::Continue
-            }
-            KeyCode::Home if ctrl => {
-                self.scroll_up = u16::MAX;
-                KeyOutcome::Continue
-            }
-            KeyCode::End if ctrl => {
-                self.scroll_up = 0;
-                KeyOutcome::Continue
-            }
             KeyCode::Home => {
                 self.composer.home();
                 KeyOutcome::Continue
@@ -325,6 +320,8 @@ impl RataApp {
     pub fn apply_turn_event(&mut self, event: TurnEvent) {
         match event {
             TurnEvent::TurnStarted => {
+                self.turn_started_at = Some(std::time::Instant::now());
+                self.activity = None;
                 self.messages.push(RenderedMessage::AssistantText {
                     body: String::new(),
                     timestamp: 0,
@@ -340,8 +337,16 @@ impl RataApp {
                     });
                 }
             }
+            TurnEvent::ToolUseStart { tool, .. } => {
+                self.activity = Some(activity_label(&tool));
+            }
+            TurnEvent::ToolUseResult { .. } => {
+                self.activity = None;
+            }
             TurnEvent::TurnEnded(_) => {
                 self.current_turn = None;
+                self.turn_started_at = None;
+                self.activity = None;
             }
             _ => {}
         }
@@ -426,21 +431,19 @@ impl RataApp {
                 metadata: name,
                 source_path: Some(path),
             });
-            self.selected_msg = Some(self.messages.len() - 1);
-            self.scroll_up = 0;
             return Some(KeyOutcome::Continue);
         }
         match trimmed {
             "/help" => {
-                self.active_screen = Some(FullScreen::help());
+                self.push_screen_text(&FullScreen::help());
                 Some(KeyOutcome::Continue)
             }
             "/doctor" => {
-                self.active_screen = Some(FullScreen::doctor(&self.session.doctor));
+                self.push_screen_text(&FullScreen::doctor(&self.session.doctor));
                 Some(KeyOutcome::Continue)
             }
             "/mcp" => {
-                self.active_screen = Some(FullScreen::from_rows(
+                self.push_screen_text(&FullScreen::from_rows(
                     "MCP servers",
                     "MCP servers",
                     &self.session.mcp,
@@ -449,7 +452,7 @@ impl RataApp {
                 Some(KeyOutcome::Continue)
             }
             "/hooks" => {
-                self.active_screen = Some(FullScreen::from_rows(
+                self.push_screen_text(&FullScreen::from_rows(
                     "Hooks",
                     "Hooks",
                     &self.session.hooks,
@@ -458,7 +461,7 @@ impl RataApp {
                 Some(KeyOutcome::Continue)
             }
             "/agents" => {
-                self.active_screen = Some(FullScreen::from_rows(
+                self.push_screen_text(&FullScreen::from_rows(
                     "Agents",
                     "Agents",
                     &self.session.agents,
@@ -468,7 +471,7 @@ impl RataApp {
             }
             "/clear" => {
                 self.messages.clear();
-                self.scroll_up = 0;
+                self.committed = 0;
                 Some(KeyOutcome::Continue)
             }
             "/model" => {
@@ -499,13 +502,14 @@ impl RataApp {
         }
     }
 
-    fn on_screen_key(&mut self, code: KeyCode) -> KeyOutcome {
-        if let Some(screen) = self.active_screen.as_mut() {
-            if screen.on_key(code) == ScreenOutcome::Close {
-                self.active_screen = None;
-            }
-        }
-        KeyOutcome::Continue
+    /// Push a read-only screen's content into the conversation scrollback as a
+    /// plain-text system message (inline-viewport model: no full-page overlay).
+    fn push_screen_text(&mut self, screen: &FullScreen) {
+        self.messages.push(RenderedMessage::SystemText {
+            body: screen.plain_text(),
+            timestamp: 0,
+            is_error: false,
+        });
     }
 
     fn on_picker_key(&mut self, code: KeyCode) -> KeyOutcome {
@@ -581,133 +585,117 @@ impl RataApp {
         self.completion = None;
     }
 
-    /// Handle a key while a scrollback message is selected: Up/Down move the
-    /// selection (down past the end exits), Enter/Space toggle its expansion,
-    /// Esc exits back to the composer.
-    fn on_selection_key(&mut self, code: KeyCode) -> KeyOutcome {
-        let Some(sel) = self.selected_msg else {
-            return KeyOutcome::Continue;
+    /// Desired inline-viewport height: status + composer, grown to fit an
+    /// active overlay (permission dialog / model picker / completion popup).
+    fn viewport_height(&self) -> u16 {
+        let composer =
+            u16::try_from(self.composer.lines().len().clamp(1, COMPOSER_MAX_LINES)).unwrap_or(1);
+        let base = 1 + composer + 2; // status + composer content + border
+        let overlay = if self.pending_permission.is_some() {
+            9
+        } else if self.active_model_picker.is_some() {
+            u16::try_from(self.session.models.len()).unwrap_or(0).min(12) + 4
+        } else if self.completion.is_some() {
+            base + 8
+        } else {
+            0
         };
-        match code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.selected_msg = Some(sel.saturating_sub(1));
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if sel + 1 < self.messages.len() {
-                    self.selected_msg = Some(sel + 1);
-                } else {
-                    self.selected_msg = None;
-                }
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                if !self.expanded_msgs.remove(&sel) {
-                    self.expanded_msgs.insert(sel);
-                }
-            }
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.selected_msg = None;
-            }
-            _ => {}
-        }
-        KeyOutcome::Continue
+        base.max(overlay).clamp(4, 20)
     }
 
-    fn scrollback_lines(&self, width: usize) -> Vec<Line<'static>> {
-        let mut out = Vec::new();
-        for (i, m) in self.messages.iter().enumerate() {
-            let verbose = self.verbose || self.expanded_msgs.contains(&i);
-            let mut lines = crate::message::render_message(m, width, &self.theme, verbose);
-            if Some(i) == self.selected_msg {
-                mark_selected(&mut lines);
+    /// Commit finalized `messages` into the terminal's native scrollback via
+    /// `insert_before`. The actively-streaming last message is held back until
+    /// the turn ends (it still grows), so it commits once as a whole.
+    fn flush_scrollback(&mut self, terminal: &mut RataTerminal) -> io::Result<()> {
+        let width = usize::from(terminal.size()?.width.max(1));
+        while self.committed < self.messages.len() {
+            let is_last = self.committed + 1 == self.messages.len();
+            if is_last && self.current_turn.is_some() {
+                break;
             }
-            out.extend(lines.iter().map(render::styled_line_to_ratatui));
+            let lines: Vec<Line<'static>> = crate::message::render_message(
+                &self.messages[self.committed],
+                width,
+                &self.theme,
+                self.verbose,
+            )
+            .iter()
+            .map(render::styled_line_to_ratatui)
+            .collect();
+            self.committed += 1;
+            let h = u16::try_from(lines.len()).unwrap_or(0);
+            if h == 0 {
+                continue;
+            }
+            terminal.insert_before(h, move |buf| {
+                Paragraph::new(lines).render(buf.area, buf);
+            })?;
         }
-        out
+        Ok(())
     }
 
-    /// Draw the selected image message's real pixels in a centered preview
-    /// pane (graphics terminals only; no-op otherwise). Lazily decodes the file
-    /// into a protocol on first display.
-    fn render_image_preview(&mut self, frame: &mut ratatui::Frame) {
-        let Some(sel) = self.selected_msg else {
-            return;
-        };
-        // Extract the path, releasing the borrow on `messages`.
-        let path = match self.messages.get(sel) {
-            Some(RenderedMessage::UserImage {
-                source_path: Some(p),
-                ..
-            }) => p.clone(),
-            _ => return,
-        };
-        // Lazily decode the image into a protocol the first time it's shown.
-        if !self.image_previews.contains_key(&sel) {
-            let Some(picker) = self.picker.as_ref() else {
-                return;
-            };
-            match crate::image_view::load_protocol(picker, std::path::Path::new(&path)) {
-                Some(proto) => {
-                    self.image_previews.insert(sel, proto);
-                }
-                None => return,
-            }
-        }
-        let Some(proto) = self.image_previews.get_mut(&sel) else {
-            return;
-        };
-        let a = frame.area();
-        let area = crate::overlay::centered_rect(a.width * 3 / 4, a.height * 3 / 4, a);
-        frame.render_widget(Clear, area);
-        let block = Block::new()
-            .borders(Borders::ALL)
-            .title("Image preview · Esc: close");
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        frame.render_stateful_widget(StatefulImage::new(), inner, proto);
+    /// The current streaming-spinner text: an animated Claude-accent glyph, the
+    /// live activity (`Running Bash` from `ToolUseStart`, else `Working`), and an
+    /// elapsed-seconds counter with an interrupt hint — claude-code status parity.
+    fn spinner_text(&self) -> String {
+        const FRAMES: &[&str] = &[
+            "·", "✢", "✳", "✶", "✻", "✽", "✽", "✻", "✶", "✳", "✢", "·",
+        ];
+        let idx =
+            usize::try_from(self.start.elapsed().as_millis() / 120).unwrap_or(0) % FRAMES.len();
+        let verb = self.activity.as_deref().unwrap_or("Working");
+        let secs = self
+            .turn_started_at
+            .map_or(0, |t| t.elapsed().as_secs());
+        format!("{} {verb}… ({secs}s · esc to interrupt)", FRAMES[idx])
     }
 
-    fn render(&mut self, frame: &mut ratatui::Frame) {
-        // The composer grows with its line count (capped), so compute its
-        // height before splitting the layout.
-        let composer_lines = self.composer.lines();
-        let content_h = u16::try_from(composer_lines.len().clamp(1, COMPOSER_MAX_LINES))
-            .unwrap_or(1);
+    /// Draw the bottom inline viewport (history lives in the terminal's native
+    /// scrollback via [`Self::flush_scrollback`]): a status line + the composer
+    /// box, with any active overlay (completion / model picker / permission)
+    /// drawn on top.
+    fn render_viewport(&mut self, frame: &mut ratatui::Frame) {
         let zones = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(1),
-                Constraint::Length(content_h + 2),
-            ])
+            .constraints([Constraint::Length(1), Constraint::Min(3)])
             .split(frame.area());
 
-        let width = zones[0].width as usize;
-        let lines = self.scrollback_lines(width.max(1));
-        let view_h = zones[0].height as usize;
-        let max_scroll = u16::try_from(lines.len().saturating_sub(view_h)).unwrap_or(u16::MAX);
-        let scroll = max_scroll.saturating_sub(self.scroll_up);
-        frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), zones[0]);
-
-        let base = if self.current_turn.is_some() {
-            "streaming…  ·  Ctrl-C: cancel  ·  PgUp/PgDn: scroll  ·  Esc: quit"
-        } else if self.selected_msg.is_some() {
-            "↑/↓: select  ·  Enter/Space: expand  ·  Esc: back to composer"
-        } else if self.completion.is_some() {
-            "↑/↓: pick  ·  Tab: complete  ·  Esc: dismiss  ·  Enter: run"
-        } else if self.verbose {
-            "Enter: send  ·  Ctrl-O: collapse  ·  ↑/↓: history  ·  Esc: quit"
+        let dim = crate::style_adapter::to_ratatui(self.theme.dim);
+        let status: Line = if self.current_turn.is_some() {
+            let claude = crate::style_adapter::to_ratatui(self.theme.claude);
+            Line::from(vec![
+                Span::styled(self.spinner_text(), Style::default().fg(claude)),
+                Span::styled("   ·  Ctrl-C: cancel  ·  Esc: quit", Style::default().fg(dim)),
+            ])
+        } else if self
+            .ctrl_c_at
+            .is_some_and(|t| t.elapsed() <= CTRL_C_EXIT_WINDOW)
+        {
+            let claude = crate::style_adapter::to_ratatui(self.theme.claude);
+            Line::from(Span::styled(
+                "Press Ctrl-C again to exit",
+                Style::default().fg(claude),
+            ))
         } else {
-            "Enter: send  ·  Alt+Enter: newline  ·  Ctrl-O: expand  ·  Esc: quit"
+            let base = if self.completion.is_some() {
+                "↑/↓: pick  ·  Tab: complete  ·  Esc: dismiss  ·  Enter: run"
+            } else if self.verbose {
+                "Enter: send  ·  Ctrl-O: collapse  ·  ↑/↓: history  ·  Esc: quit"
+            } else {
+                "Enter: send  ·  Alt+Enter: newline  ·  Ctrl-O: verbose  ·  Esc: quit"
+            };
+            let text = match &self.vim {
+                Some(vim) => format!("[{}]  {base}", vim.label()),
+                None => base.to_string(),
+            };
+            Line::from(Span::styled(text, Style::default().fg(dim)))
         };
-        let status = match &self.vim {
-            Some(vim) => format!("[{}]  {base}", vim.label()),
-            None => base.to_string(),
-        };
-        frame.render_widget(Paragraph::new(status), zones[1]);
+        frame.render_widget(Paragraph::new(status), zones[0]);
 
         let block = Block::new().borders(Borders::ALL);
-        let inner = block.inner(zones[2]);
-        frame.render_widget(block, zones[2]);
+        let inner = block.inner(zones[1]);
+        frame.render_widget(block, zones[1]);
+        let composer_lines = self.composer.lines();
         // The first line carries the "> " prompt; wrapped lines align under it.
         let body: Vec<Line> = composer_lines
             .iter()
@@ -725,25 +713,21 @@ impl RataApp {
             inner,
         );
         let cursor_y = inner.y + u16::try_from(crow - first_row).unwrap_or(0);
-        let cursor_x = inner.x + 2 + u16::try_from(ccol).unwrap_or(0);
+        // Cursor X in DISPLAY columns (CJK/wide chars are 2 cols), not char count.
+        let before_cursor: String = composer_lines
+            .get(crow)
+            .map(|l| l.chars().take(ccol).collect())
+            .unwrap_or_default();
+        let disp_w = unicode_width::UnicodeWidthStr::width(before_cursor.as_str());
+        let cursor_x = inner.x + 2 + u16::try_from(disp_w).unwrap_or(0);
         frame.set_cursor_position((
             cursor_x.min(inner.x + inner.width.saturating_sub(1)),
             cursor_y.min(inner.y + inner.height.saturating_sub(1)),
         ));
 
-        // The completion popup sits just above the composer box.
+        // Overlays draw over the viewport.
         if let Some(popup) = &self.completion {
-            popup.render(frame, zones[2]);
-        }
-
-        // A selected image message displays its real pixels in a preview pane
-        // (graphics terminals only); everything else draws on top.
-        self.render_image_preview(frame);
-
-        // A full-page screen (e.g. /help) draws over the base layout; a
-        // permission prompt draws over everything and owns the keyboard.
-        if let Some(screen) = &self.active_screen {
-            screen.render(frame);
+            popup.render(frame, zones[1]);
         }
         if let Some(picker) = &self.active_model_picker {
             picker.render(frame);
@@ -754,24 +738,39 @@ impl RataApp {
     }
 }
 
-/// Prefix a selected message's lines with a bright gutter marker (`▸ ` on the
-/// first line, `│ ` on wrapped lines) so the selection is visible in the flat
-/// scrollback.
-fn mark_selected(lines: &mut [tui_core::render::StyledLine]) {
-    let style = SpanStyle {
-        fg: StyleColor::Named(NamedColor::BrightCyan),
-        bold: true,
-        ..SpanStyle::default()
-    };
-    for (i, line) in lines.iter_mut().enumerate() {
-        let marker = if i == 0 { "▸ " } else { "│ " };
-        line.spans.insert(0, StyledSpan::styled(marker, style));
+/// Human label shown in the spinner for an in-flight tool call, mapping the
+/// tool name to a claude-code-style gerund (`Bash` → `Running Bash`).
+fn activity_label(tool: &str) -> String {
+    match tool {
+        "Bash" | "BashOutput" => "Running Bash".to_string(),
+        "Read" => "Reading".to_string(),
+        "Write" => "Writing".to_string(),
+        "Edit" | "MultiEdit" => "Editing".to_string(),
+        "Grep" | "Glob" => "Searching".to_string(),
+        "WebFetch" | "WebSearch" => "Browsing".to_string(),
+        "Task" => "Delegating".to_string(),
+        other => format!("Running {other}"),
     }
 }
 
-/// Run the interactive chat app: set up the terminal, loop until the user
-/// quits — draining `events_rx` each tick and invoking `on_submit(prompt,
-/// token)` when the user sends a message — then restore the terminal.
+/// Whether `s` is a single existing image file path (used to route pastes to an
+/// image message vs composer text).
+fn is_image_path(s: &str) -> bool {
+    if s.is_empty() || s.contains('\n') {
+        return false;
+    }
+    let lower = s.to_ascii_lowercase();
+    let has_img_ext = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]
+        .iter()
+        .any(|e| lower.ends_with(e));
+    has_img_ext && std::path::Path::new(s).is_file()
+}
+
+/// Run the interactive chat app on an INLINE viewport: history is committed to
+/// the terminal's native scrollback via [`RataApp::flush_scrollback`]; the
+/// bottom viewport (status + composer + overlays) is redrawn each tick. The
+/// viewport is recreated when its desired height changes (composer growth /
+/// overlay open). Restores the terminal on exit.
 ///
 /// # Errors
 /// Propagates the first terminal IO error (after restoring the terminal).
@@ -783,25 +782,25 @@ pub fn run_app(
     mut on_submit: impl FnMut(String, CancellationToken),
     mut on_switch_model: impl FnMut(String, Option<String>),
 ) -> io::Result<()> {
-    let mut terminal = setup_terminal()?;
     let mut app = RataApp::new(messages).with_session(session);
-    // Query the terminal for graphics support now that raw mode is on, so
-    // selected image messages can display real pixels.
-    app.picker = Some(crate::image_view::make_picker());
+    let mut height = app.viewport_height();
+    let mut terminal = crate::setup_terminal(height)?;
     let result = app_loop(
         &mut terminal,
+        &mut height,
         &mut app,
         &mut events_rx,
         &mut permission_rx,
         &mut on_submit,
         &mut on_switch_model,
     );
-    restore_terminal(&mut terminal)?;
+    crate::restore_terminal(&mut terminal)?;
     result
 }
 
 fn app_loop(
     terminal: &mut RataTerminal,
+    height: &mut u16,
     app: &mut RataApp,
     events_rx: &mut UnboundedReceiver<TurnEvent>,
     permission_rx: &mut Receiver<PermissionExchange>,
@@ -809,7 +808,6 @@ fn app_loop(
     on_switch_model: &mut impl FnMut(String, Option<String>),
 ) -> io::Result<()> {
     loop {
-        terminal.draw(|frame| app.render(frame))?;
         while let Ok(event) = events_rx.try_recv() {
             app.apply_turn_event(event);
         }
@@ -819,16 +817,25 @@ fn app_loop(
                 app.open_permission(exchange);
             }
         }
+        // Commit finalized history into the terminal's native scrollback.
+        app.flush_scrollback(terminal)?;
+        // Recreate the inline viewport if its desired height changed.
+        let desired = app.viewport_height();
+        if desired != *height {
+            *terminal = crate::resize_inline_viewport(desired)?;
+            *height = desired;
+        }
+        terminal.draw(|frame| app.render_viewport(frame))?;
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    match app.on_key(key) {
-                        KeyOutcome::Quit => return Ok(()),
-                        KeyOutcome::Submit(prompt, token) => on_submit(prompt, token),
-                        KeyOutcome::SwitchModel(model, profile) => on_switch_model(model, profile),
-                        KeyOutcome::Continue => {}
-                    }
-                }
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => match app.on_key(key) {
+                    KeyOutcome::Quit => return Ok(()),
+                    KeyOutcome::Submit(prompt, token) => on_submit(prompt, token),
+                    KeyOutcome::SwitchModel(model, profile) => on_switch_model(model, profile),
+                    KeyOutcome::Continue => {}
+                },
+                Event::Paste(text) => app.on_paste(&text),
+                _ => {}
             }
         }
     }
@@ -934,28 +941,33 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_cancels_turn_then_quits() {
+    fn ctrl_c_cancels_turn_then_needs_two_presses_to_quit() {
         let mut app = RataApp::new(Vec::new());
         app.on_key(press(KeyCode::Char('x')));
         app.on_key(press(KeyCode::Enter));
         let token = app.current_turn.clone().unwrap();
         assert!(!token.is_cancelled());
-        // First Ctrl-C cancels the in-flight turn.
+        // Ctrl-C during a turn interrupts it (does NOT quit) and clears activity.
         assert!(matches!(app.on_key(ctrl(KeyCode::Char('c'))), KeyOutcome::Continue));
         assert!(token.is_cancelled());
         assert!(app.current_turn.is_none());
-        // Second Ctrl-C (nothing running) quits.
+        // First idle Ctrl-C only arms the exit; it does not quit.
+        assert!(matches!(app.on_key(ctrl(KeyCode::Char('c'))), KeyOutcome::Continue));
+        assert!(app.ctrl_c_at.is_some());
+        // Second idle Ctrl-C within the window quits.
         assert!(matches!(app.on_key(ctrl(KeyCode::Char('c'))), KeyOutcome::Quit));
     }
 
     #[test]
-    fn page_keys_move_scroll_offset() {
+    fn typing_disarms_ctrl_c_exit() {
         let mut app = RataApp::new(Vec::new());
-        app.on_key(press(KeyCode::PageUp));
-        assert_eq!(app.scroll_up, PAGE);
-        // Scroll-to-bottom moved to Ctrl+End (bare End is composer line-end now).
-        app.on_key(ctrl(KeyCode::End));
-        assert_eq!(app.scroll_up, 0);
+        // Arm the exit with an idle Ctrl-C, then type: the arm must reset so a
+        // later single Ctrl-C does not quit unexpectedly.
+        app.on_key(ctrl(KeyCode::Char('c')));
+        assert!(app.ctrl_c_at.is_some());
+        app.on_key(press(KeyCode::Char('h')));
+        assert!(app.ctrl_c_at.is_none());
+        assert!(matches!(app.on_key(ctrl(KeyCode::Char('c'))), KeyOutcome::Continue));
     }
 
     #[test]
@@ -985,59 +997,29 @@ mod tests {
         assert!(!app.verbose);
     }
 
-    fn app_with_messages(n: usize) -> RataApp {
-        let msgs = (0..n)
-            .map(|i| RenderedMessage::SystemText {
-                body: format!("msg {i}"),
-                timestamp: 0,
-                is_error: false,
-            })
-            .collect();
-        RataApp::new(msgs)
+    #[test]
+    fn viewport_height_grows_for_overlays() {
+        let mut app = RataApp::new(Vec::new());
+        let base = app.viewport_height();
+        // Opening the completion popup grows the viewport.
+        typ(&mut app, "/");
+        assert!(app.completion.is_some());
+        assert!(app.viewport_height() > base);
     }
 
     #[test]
-    fn ctrl_up_enters_selection_on_last_message() {
-        let mut app = app_with_messages(3);
-        assert!(app.selected_msg.is_none());
-        app.on_key(ctrl(KeyCode::Up));
-        assert_eq!(app.selected_msg, Some(2));
+    fn paste_non_image_inserts_into_composer() {
+        let mut app = RataApp::new(Vec::new());
+        typ(&mut app, "pre ");
+        app.on_paste("hello world");
+        assert_eq!(app.composer.text(), "pre hello world");
+        // A non-existent image path is treated as text, not an image message.
+        app.on_paste(" /no/such/file.png ");
+        assert!(app.messages.is_empty());
     }
 
     #[test]
-    fn selection_moves_and_exits_at_bottom() {
-        let mut app = app_with_messages(3);
-        app.on_key(ctrl(KeyCode::Up)); // select 2
-        app.on_key(press(KeyCode::Up)); // → 1
-        assert_eq!(app.selected_msg, Some(1));
-        app.on_key(press(KeyCode::Down)); // → 2
-        app.on_key(press(KeyCode::Down)); // past end → exit
-        assert!(app.selected_msg.is_none());
-    }
-
-    #[test]
-    fn enter_toggles_selected_message_expansion() {
-        let mut app = app_with_messages(2);
-        app.on_key(ctrl(KeyCode::Up)); // select 1
-        assert!(!app.expanded_msgs.contains(&1));
-        app.on_key(press(KeyCode::Enter));
-        assert!(app.expanded_msgs.contains(&1));
-        app.on_key(press(KeyCode::Enter));
-        assert!(!app.expanded_msgs.contains(&1));
-    }
-
-    #[test]
-    fn esc_exits_selection_without_quitting() {
-        let mut app = app_with_messages(2);
-        app.on_key(ctrl(KeyCode::Up));
-        assert!(app.selected_msg.is_some());
-        let outcome = app.on_key(press(KeyCode::Esc));
-        assert!(matches!(outcome, KeyOutcome::Continue));
-        assert!(app.selected_msg.is_none());
-    }
-
-    #[test]
-    fn slash_image_pushes_image_message_and_selects_it() {
+    fn slash_image_pushes_image_message() {
         let mut app = RataApp::new(Vec::new());
         let outcome = submit_command(&mut app, "/image /tmp/pic.png");
         assert!(matches!(outcome, KeyOutcome::Continue));
@@ -1053,8 +1035,6 @@ mod tests {
             }
             other => panic!("expected UserImage, got {other:?}"),
         }
-        // It is auto-selected so a graphics terminal previews it immediately.
-        assert_eq!(app.selected_msg, Some(0));
     }
 
     #[test]
@@ -1212,37 +1192,18 @@ mod tests {
     }
 
     #[test]
-    fn slash_help_opens_screen_without_sending_a_prompt() {
+    fn slash_help_prints_into_scrollback_without_sending_a_prompt() {
         let mut app = RataApp::new(Vec::new());
         for c in "/help".chars() {
             app.on_key(press(KeyCode::Char(c)));
         }
         let outcome = app.on_key(press(KeyCode::Enter));
-        // Recognized screen command: no Submit, no user message pushed.
+        // Recognized command: no Submit; help text pushed into scrollback.
         assert!(matches!(outcome, KeyOutcome::Continue));
-        assert!(app.active_screen.is_some());
         assert_eq!(app.composer.text(), "");
-        assert!(app.messages.is_empty());
+        assert_eq!(app.messages.len(), 1);
+        assert!(matches!(app.messages[0], RenderedMessage::SystemText { .. }));
         assert!(app.current_turn.is_none());
-    }
-
-    #[test]
-    fn open_screen_owns_keyboard_and_esc_closes() {
-        let mut app = RataApp::new(Vec::new());
-        for c in "/help".chars() {
-            app.on_key(press(KeyCode::Char(c)));
-        }
-        app.on_key(press(KeyCode::Enter));
-        assert!(app.active_screen.is_some());
-        // Typing is swallowed by the screen, never reaching the composer.
-        app.on_key(press(KeyCode::Char('x')));
-        assert_eq!(app.composer.text(), "");
-        // Esc closes the screen (does NOT quit the app).
-        let outcome = app.on_key(press(KeyCode::Esc));
-        assert!(matches!(outcome, KeyOutcome::Continue));
-        assert!(app.active_screen.is_none());
-        // With the screen closed, Esc now quits as normal.
-        assert!(matches!(app.on_key(press(KeyCode::Esc)), KeyOutcome::Quit));
     }
 
     #[test]
@@ -1254,7 +1215,6 @@ mod tests {
         let outcome = app.on_key(press(KeyCode::Enter));
         // Unrecognized slash command falls through as a normal prompt.
         assert!(matches!(outcome, KeyOutcome::Submit(ref p, _) if p == "/frobnicate"));
-        assert!(app.active_screen.is_none());
         assert_eq!(app.messages.len(), 1);
     }
 
@@ -1266,7 +1226,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_clear_empties_scrollback_without_a_screen() {
+    fn slash_clear_empties_messages() {
         let mut app = RataApp::new(vec![RenderedMessage::SystemText {
             body: "old".to_string(),
             timestamp: 0,
@@ -1275,7 +1235,7 @@ mod tests {
         let outcome = submit_command(&mut app, "/clear");
         assert!(matches!(outcome, KeyOutcome::Continue));
         assert!(app.messages.is_empty());
-        assert!(app.active_screen.is_none());
+        assert_eq!(app.committed, 0);
     }
 
     #[test]
@@ -1285,16 +1245,16 @@ mod tests {
     }
 
     #[test]
-    fn slash_doctor_and_mcp_open_screens() {
+    fn slash_doctor_and_mcp_print_into_scrollback() {
         let mut app = RataApp::new(Vec::new());
         assert!(matches!(submit_command(&mut app, "/doctor"), KeyOutcome::Continue));
-        assert!(app.active_screen.is_some());
-        // Close, then open another data screen.
-        app.on_key(press(KeyCode::Esc));
-        assert!(app.active_screen.is_none());
         assert!(matches!(submit_command(&mut app, "/mcp"), KeyOutcome::Continue));
-        assert!(app.active_screen.is_some());
-        assert!(app.messages.is_empty());
+        // Both commands print their content into scrollback as system messages.
+        assert_eq!(app.messages.len(), 2);
+        assert!(app
+            .messages
+            .iter()
+            .all(|m| matches!(m, RenderedMessage::SystemText { .. })));
     }
 
     fn app_with_models() -> RataApp {

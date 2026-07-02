@@ -153,7 +153,10 @@ mod tests {
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = CompactHandler::new(mock);
         assert_eq!(h.name(), "compact");
-        assert_eq!(h.description(), "Free up context by summarizing the conversation so far");
+        assert_eq!(
+            h.description(),
+            "Free up context by summarizing the conversation so far"
+        );
     }
 
     /// M6-08 Task 12: end-to-end smoke through the real
@@ -220,6 +223,9 @@ mod tests {
         // seeded 40), proving the handler is wired to the live compactor — the
         // delta itself now rides on telemetry / the session, not the display.
         let remaining = orch.session().lock().await.history.len();
-        assert_ne!(remaining, 40, "expected the real compactor to mutate history");
+        assert_ne!(
+            remaining, 40,
+            "expected the real compactor to mutate history"
+        );
     }
 }

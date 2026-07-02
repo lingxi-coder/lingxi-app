@@ -37,8 +37,7 @@ fn tool_use_confirm_round_trips() {
         json["tool_input_json"].is_string(),
         "tool_input_json must be a String"
     );
-    let back: PermissionKindDto =
-        serde_json::from_value(json).expect("deserialize ToolUseConfirm");
+    let back: PermissionKindDto = serde_json::from_value(json).expect("deserialize ToolUseConfirm");
     assert_eq!(back, kind);
 }
 
@@ -116,11 +115,17 @@ fn permission_kind_variants_present() {
             },
             "exit_plan_mode",
         ),
-        (PermissionKindDto::BypassPermissionsMode, "bypass_permissions_mode"),
+        (
+            PermissionKindDto::BypassPermissionsMode,
+            "bypass_permissions_mode",
+        ),
     ];
     for (kind, tag) in cases {
         let json = serde_json::to_value(&kind).expect("serialize PermissionKindDto");
-        assert_eq!(json["type"], tag, "PermissionKindDto::{kind:?} tag mismatch");
+        assert_eq!(
+            json["type"], tag,
+            "PermissionKindDto::{kind:?} tag mismatch"
+        );
         let back: PermissionKindDto =
             serde_json::from_value(json).expect("deserialize PermissionKindDto");
         assert_eq!(back, kind);
@@ -144,7 +149,8 @@ fn permission_request_round_trips() {
     let json = serde_json::to_value(&req).expect("serialize PermissionRequest");
     assert_eq!(json["request_id"], 42);
     assert_eq!(json["kind"]["type"], "tool_use_confirm");
-    let back: PermissionRequest = serde_json::from_value(json).expect("deserialize PermissionRequest");
+    let back: PermissionRequest =
+        serde_json::from_value(json).expect("deserialize PermissionRequest");
     assert_eq!(back, req);
 }
 
@@ -186,7 +192,8 @@ fn worker_is_optional_and_defaults_none() {
             team: Some("alpha".to_string()),
         }),
     };
-    let json_w = serde_json::to_value(&req_with_worker).expect("serialize PermissionRequest worker");
+    let json_w =
+        serde_json::to_value(&req_with_worker).expect("serialize PermissionRequest worker");
     assert_eq!(json_w["worker"]["name"], "researcher");
     assert_eq!(json_w["worker"]["color"], "cyan");
     assert_eq!(json_w["worker"]["team"], "alpha");
@@ -224,7 +231,10 @@ fn permission_response_variants_round_trip() {
     for (resp, tag) in cases {
         // `PermissionResponseDto` is `Copy`, so pass by value (no needless borrow).
         let json = serde_json::to_value(resp).expect("serialize PermissionResponseDto");
-        assert_eq!(json["type"], tag, "PermissionResponseDto::{resp:?} tag mismatch");
+        assert_eq!(
+            json["type"], tag,
+            "PermissionResponseDto::{resp:?} tag mismatch"
+        );
         let back: PermissionResponseDto =
             serde_json::from_value(json).expect("deserialize PermissionResponseDto");
         assert_eq!(back, resp);

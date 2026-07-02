@@ -55,9 +55,9 @@ fn llm_provider_to_cost_provider(provider: &llm_client::ProviderId) -> ProviderI
         | llm_client::ProviderId::VertexGemini
         | llm_client::ProviderId::VertexClaude => ProviderId::GoogleGemini,
         llm_client::ProviderId::BedrockClaude => ProviderId::AmazonBedrock,
-        llm_client::ProviderId::OpenAICompatible { name } => ProviderId::OpenAICompatible {
-            name: name.clone(),
-        },
+        llm_client::ProviderId::OpenAICompatible { name } => {
+            ProviderId::OpenAICompatible { name: name.clone() }
+        }
         llm_client::ProviderId::Custom { name } => ProviderId::Custom { name: name.clone() },
     }
 }
@@ -110,9 +110,9 @@ fn cost_provider_to_llm_provider(p: &ProviderId) -> llm_client::ProviderId {
         ProviderId::OpenAI => llm_client::ProviderId::OpenAI,
         ProviderId::GoogleGemini => llm_client::ProviderId::Gemini,
         ProviderId::AmazonBedrock => llm_client::ProviderId::BedrockClaude,
-        ProviderId::OpenAICompatible { name } => llm_client::ProviderId::OpenAICompatible {
-            name: name.clone(),
-        },
+        ProviderId::OpenAICompatible { name } => {
+            llm_client::ProviderId::OpenAICompatible { name: name.clone() }
+        }
         ProviderId::Custom { name } => llm_client::ProviderId::Custom { name: name.clone() },
     }
 }
@@ -213,7 +213,10 @@ mod tests {
     }
 
     fn make_llm_usage(
-        input: u64, output: u64, cache_write: u64, cache_read: u64,
+        input: u64,
+        output: u64,
+        cache_write: u64,
+        cache_read: u64,
         server_tool_use: Option<LlmServerToolUsage>,
         speed: Option<String>,
     ) -> LlmUsage {
@@ -261,7 +264,16 @@ mod tests {
     fn web_search_requests_thread_through_and_bill_one_cent_each() {
         // COST.5: usage.server_tool_use.web_search_requests on the wire → cost
         // Usage → billed at $0.01 (10_000_000 nano-USD) per request.
-        let usage = make_llm_usage(0, 0, 0, 0, Some(LlmServerToolUsage { web_search_requests: 3 }), None);
+        let usage = make_llm_usage(
+            0,
+            0,
+            0,
+            0,
+            Some(LlmServerToolUsage {
+                web_search_requests: 3,
+            }),
+            None,
+        );
         let u = llm_usage_to_cost_usage(&usage);
         assert_eq!(u.server_tool_use.unwrap().web_search_requests, 3);
         // No tokens → only the web-search charge: 3 × $0.01 = 30_000_000 nano-USD.
@@ -359,7 +371,7 @@ mod tests {
     #[test]
     fn bridge_opus_4_6_converts_exact_rates() {
         use cost::pricing::PricingCatalog as CostCatalog;
-        use llm_client::{CostEstimator, PricingPolicy, Usage as LlmUsage, TokenUsage};
+        use llm_client::{CostEstimator, PricingPolicy, TokenUsage, Usage as LlmUsage};
 
         let cost_cat = CostCatalog::builtin_reference();
         let llm_cat = llm_catalog_from_cost(&cost_cat);
@@ -385,9 +397,13 @@ mod tests {
             },
             ..Default::default()
         };
-        let estimate = estimator.estimate(pricing_ref, &usage).expect("opus-4-6 must be priced");
+        let estimate = estimator
+            .estimate(pricing_ref, &usage)
+            .expect("opus-4-6 must be priced");
         // 1M input × $5.0/M = $5.0
-        let total = estimate.total_cost_usd.expect("total_cost_usd must be Some");
+        let total = estimate
+            .total_cost_usd
+            .expect("total_cost_usd must be Some");
         let expected = 5.0 + 25.0; // input + output
         assert!(
             (total - expected).abs() < 1e-9,
@@ -429,14 +445,17 @@ mod tests {
             estimate.total_cost_usd.is_none(),
             "unpriced model must yield None total_cost_usd"
         );
-        assert!(!estimate.estimated, "estimated flag must be false for unpriced");
+        assert!(
+            !estimate.estimated,
+            "estimated flag must be false for unpriced"
+        );
     }
 
     /// Provider mapping: `OpenAI` `gpt-4o` converts at the expected rates.
     #[test]
     fn bridge_openai_gpt4o_maps_to_correct_provider() {
         use cost::pricing::PricingCatalog as CostCatalog;
-        use llm_client::{CostEstimator, PricingPolicy, Usage as LlmUsage, TokenUsage};
+        use llm_client::{CostEstimator, PricingPolicy, TokenUsage, Usage as LlmUsage};
 
         let cost_cat = CostCatalog::builtin_reference();
         let llm_cat = llm_catalog_from_cost(&cost_cat);
@@ -455,9 +474,13 @@ mod tests {
             },
             ..Default::default()
         };
-        let estimate = estimator.estimate(pricing_ref, &usage).expect("gpt-4o must be priced");
+        let estimate = estimator
+            .estimate(pricing_ref, &usage)
+            .expect("gpt-4o must be priced");
         // gpt-4o input = 2_500 nano_usd/token → 2.5 usd/M
-        let input = estimate.input_cost_usd.expect("input_cost_usd must be Some");
+        let input = estimate
+            .input_cost_usd
+            .expect("input_cost_usd must be Some");
         assert!(
             (input - 2.5).abs() < 1e-9,
             "gpt-4o input must be $2.5/M, got ${input}"

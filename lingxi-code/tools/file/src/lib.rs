@@ -314,7 +314,10 @@ mod staleness_guard_tests {
                 from_read: true,
             },
         );
-        assert_err_msg(check_read_before_write(&map, &p, 100, "c"), FILE_NOT_READ_ERROR);
+        assert_err_msg(
+            check_read_before_write(&map, &p, 100, "c"),
+            FILE_NOT_READ_ERROR,
+        );
         // limit present (offset None) ⇒ also partial.
         set(
             &map,
@@ -327,7 +330,10 @@ mod staleness_guard_tests {
                 from_read: true,
             },
         );
-        assert_err_msg(check_read_before_write(&map, &p, 100, "c"), FILE_NOT_READ_ERROR);
+        assert_err_msg(
+            check_read_before_write(&map, &p, 100, "c"),
+            FILE_NOT_READ_ERROR,
+        );
     }
 
     #[test]

@@ -32,9 +32,7 @@ pub mod xaa_idp;
 pub use client::{truncate_description, McpClient, McpClientError, MAX_MCP_DESCRIPTION_LENGTH};
 pub use connection::{ConfigScope, McpConnectionState, McpServerConfig};
 pub use env_expansion::{expand_env_vars_in_string, EnvExpansion};
-pub use hook_dispatch::{
-    ElicitationHookOutcome, ElicitationHookRequest, HookDispatcher,
-};
+pub use hook_dispatch::{ElicitationHookOutcome, ElicitationHookRequest, HookDispatcher};
 pub use identity::{
     ClientInfo, CLIENT_DESCRIPTION, CLIENT_INFO, CLIENT_NAME, CLIENT_TITLE, CLIENT_VERSION,
     MCP_WEBSITE_URL,
@@ -52,6 +50,4 @@ pub use mcp_output_storage::{
 };
 pub use raw_conn::RawConnectionProvider;
 pub use registry::McpRegistry;
-pub use xaa_idp::{
-    MapServerOAuthLookup, ServerOAuthLookup, XaaIdpConfigProvider, XaaIdpSettings,
-};
+pub use xaa_idp::{MapServerOAuthLookup, ServerOAuthLookup, XaaIdpConfigProvider, XaaIdpSettings};

@@ -480,10 +480,8 @@ mod tests {
     fn build_spec_uses_bundled_path_as_filename() {
         // A BundledHelper plan must exec the bundled path, not /system/bin/sh.
         let plan = bundled_helper_plan("mksh", "/nl/libmksh.so".into(), "deadbeef");
-        let spec = AndroidMinijailProcessRunner::build_spec(
-            &plan,
-            &sandboxed_with_plan(plan.clone()),
-        );
+        let spec =
+            AndroidMinijailProcessRunner::build_spec(&plan, &sandboxed_with_plan(plan.clone()));
         assert_eq!(spec.filename, "/nl/libmksh.so");
         assert_eq!(spec.argv[0], "sh");
 
@@ -513,10 +511,7 @@ mod tests {
 
         // WRONG hash → identity check fires before run_jailed, naming hash/identity.
         let wrong = bundled_helper_plan("mksh", path.clone(), "00deadbeef00");
-        let err = runner()
-            .run(&sandboxed_with_plan(wrong))
-            .await
-            .unwrap_err();
+        let err = runner().run(&sandboxed_with_plan(wrong)).await.unwrap_err();
         match err {
             ProcessError::SandboxEnforcementFailed(ref m) => {
                 assert!(

@@ -201,7 +201,10 @@ mod tests {
     #[test]
     fn parse_dispatches() {
         assert_eq!(parse_shell_rule("npm:*"), ShellRule::Prefix("npm".into()));
-        assert_eq!(parse_shell_rule("git *"), ShellRule::Wildcard("git *".into()));
+        assert_eq!(
+            parse_shell_rule("git *"),
+            ShellRule::Wildcard("git *".into())
+        );
         assert_eq!(
             parse_shell_rule("npm run build"),
             ShellRule::Exact("npm run build".into())
@@ -213,7 +216,11 @@ mod tests {
         // `git *` matches both `git add` and bare `git`.
         assert!(match_wildcard_pattern("git *", "git add", false));
         assert!(match_wildcard_pattern("git *", "git", false));
-        assert!(match_wildcard_pattern("git *", "git push origin main", false));
+        assert!(match_wildcard_pattern(
+            "git *",
+            "git push origin main",
+            false
+        ));
         assert!(!match_wildcard_pattern("git *", "gitk", false)); // word boundary
     }
 
@@ -235,8 +242,16 @@ mod tests {
 
     #[test]
     fn wildcard_mid_pattern() {
-        assert!(match_wildcard_pattern("docker * ps", "docker -H x ps", false));
-        assert!(!match_wildcard_pattern("docker * ps", "docker ps now", false));
+        assert!(match_wildcard_pattern(
+            "docker * ps",
+            "docker -H x ps",
+            false
+        ));
+        assert!(!match_wildcard_pattern(
+            "docker * ps",
+            "docker ps now",
+            false
+        ));
     }
 
     #[test]

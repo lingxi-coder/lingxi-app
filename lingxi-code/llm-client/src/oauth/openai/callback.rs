@@ -69,7 +69,10 @@ impl CallbackListener {
                         .local_addr()
                         .map_err(|e| CallbackError::Bind(e.to_string()))?
                         .port();
-                    return Ok(Self { listener, port: bound_port });
+                    return Ok(Self {
+                        listener,
+                        port: bound_port,
+                    });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                     // Try next candidate.
@@ -217,7 +220,9 @@ mod tests {
     }
 
     async fn send_get(port: u16, path_and_query: &str) -> String {
-        let mut client = TcpStream::connect(("127.0.0.1", port)).await.expect("connect");
+        let mut client = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
         let req = format!("GET {path_and_query} HTTP/1.1\r\nHost: localhost\r\n\r\n");
         client.write_all(req.as_bytes()).await.expect("write");
         let mut resp = Vec::new();

@@ -492,8 +492,7 @@ fn format_uri(uri: Option<&str>, cwd: &Path) -> String {
     let cwd_str = cwd.to_string_lossy();
     if !cwd_str.is_empty() {
         let relative_path = path_relative(&cwd_str, &file_path).replace('\\', "/");
-        if utf16_len(&relative_path) < utf16_len(&file_path)
-            && !relative_path.starts_with("../../")
+        if utf16_len(&relative_path) < utf16_len(&file_path) && !relative_path.starts_with("../../")
         {
             return relative_path;
         }
@@ -686,7 +685,12 @@ fn format_hover_result(result: &Value) -> String {
     let content = extract_markup_text(result.get("contents").unwrap_or(&Value::Null));
     if let Some(range) = result.get("range").filter(|r| !r.is_null()) {
         let (line, character) = range_start(Some(range));
-        return format!("Hover info at {}:{}:\n\n{}", line + 1, character + 1, content);
+        return format!(
+            "Hover info at {}:{}:\n\n{}",
+            line + 1,
+            character + 1,
+            content
+        );
     }
     content
 }
@@ -756,7 +760,9 @@ fn format_workspace_symbol_result(result: &Value, cwd: &Path) -> String {
     )];
     let by_file = group_by_file(&valid, |sym| {
         Some(format_uri(
-            sym.get("location").and_then(|l| l.get("uri")).and_then(Value::as_str),
+            sym.get("location")
+                .and_then(|l| l.get("uri"))
+                .and_then(Value::as_str),
             cwd,
         ))
     });
@@ -778,7 +784,10 @@ fn format_workspace_symbol_result(result: &Value, cwd: &Path) -> String {
 /// `formatters.ts:formatCallHierarchyItem`.
 fn format_call_hierarchy_item(item: &Value, cwd: &Path) -> String {
     let kind = symbol_kind_to_string(item);
-    let uri = item.get("uri").and_then(Value::as_str).filter(|u| !u.is_empty());
+    let uri = item
+        .get("uri")
+        .and_then(Value::as_str)
+        .filter(|u| !u.is_empty());
     let Some(uri) = uri else {
         return format!("{} ({kind}) - <unknown location>", name_of(item));
     };
@@ -961,9 +970,8 @@ fn format_result(operation: &str, result: &Value, cwd: &Path) -> (String, u64, u
         "documentSymbol" => {
             let formatted = format_document_symbol_result(result, cwd);
             let symbols = result.as_array().map(Vec::as_slice).unwrap_or_default();
-            let is_document_symbol = !symbols.is_empty()
-                && symbols[0].is_object()
-                && symbols[0].get("range").is_some();
+            let is_document_symbol =
+                !symbols.is_empty() && symbols[0].is_object() && symbols[0].get("range").is_some();
             let count = if is_document_symbol {
                 count_symbols(symbols)
             } else {
@@ -998,7 +1006,11 @@ fn format_result(operation: &str, result: &Value, cwd: &Path) -> (String, u64, u
             let file_count = if items.is_empty() {
                 0
             } else {
-                unique_uri_count(items.iter().filter_map(|i| i.get("uri").and_then(Value::as_str)))
+                unique_uri_count(
+                    items
+                        .iter()
+                        .filter_map(|i| i.get("uri").and_then(Value::as_str)),
+                )
             };
             (formatted, result_count, file_count)
         }
@@ -1010,7 +1022,9 @@ fn format_result(operation: &str, result: &Value, cwd: &Path) -> (String, u64, u
                 0
             } else {
                 unique_uri_count(calls.iter().filter_map(|c| {
-                    c.get("from").and_then(|f| f.get("uri")).and_then(Value::as_str)
+                    c.get("from")
+                        .and_then(|f| f.get("uri"))
+                        .and_then(Value::as_str)
                 }))
             };
             (formatted, result_count, file_count)
@@ -1023,17 +1037,15 @@ fn format_result(operation: &str, result: &Value, cwd: &Path) -> (String, u64, u
                 0
             } else {
                 unique_uri_count(calls.iter().filter_map(|c| {
-                    c.get("to").and_then(|t| t.get("uri")).and_then(Value::as_str)
+                    c.get("to")
+                        .and_then(|t| t.get("uri"))
+                        .and_then(Value::as_str)
                 }))
             };
             (formatted, result_count, file_count)
         }
         // Unreachable: `call` validates the operation before dispatch.
-        _ => (
-            serde_json::to_string(result).unwrap_or_default(),
-            0,
-            0,
-        ),
+        _ => (serde_json::to_string(result).unwrap_or_default(), 0, 0),
     }
 }
 
@@ -1506,10 +1518,7 @@ mod tests {
 
     #[test]
     fn uri_to_file_path_decodes_percent_encoding() {
-        assert_eq!(
-            uri_to_file_path("file:///tmp/a%20b/c.rs"),
-            "/tmp/a b/c.rs"
-        );
+        assert_eq!(uri_to_file_path("file:///tmp/a%20b/c.rs"), "/tmp/a b/c.rs");
         // Malformed percent escape → fall back to the un-decoded body.
         assert_eq!(uri_to_file_path("file:///tmp/x%2"), "/tmp/x%2");
     }
@@ -1671,10 +1680,7 @@ mod tests {
     #[test]
     fn format_uri_keeps_absolute_when_relative_climbs_two_levels() {
         // ../../ outside cwd → keep the absolute path.
-        assert_eq!(
-            format_uri(Some("file:///etc/hosts"), &cwd()),
-            "/etc/hosts"
-        );
+        assert_eq!(format_uri(Some("file:///etc/hosts"), &cwd()), "/etc/hosts");
     }
 
     #[test]

@@ -40,10 +40,7 @@ const CWD_NOTE_PREFIX: &str = "Note: your current working directory is";
 /// byte-exact claude-code error when the path is missing (errorCode 1) or is a
 /// non-directory (errorCode 2); `Ok(())` when the path is absent, a UNC path, a
 /// real directory, or fails `stat` for a non-ENOENT reason.
-pub(crate) fn validate_search_directory(
-    path: &str,
-    cwd: &Path,
-) -> Result<(), ValidationError> {
+pub(crate) fn validate_search_directory(path: &str, cwd: &Path) -> Result<(), ValidationError> {
     // claude-code `Pt()` (Node `process.cwd()`) is the realpath, and `moe`
     // realpath's the candidate's dirname — so both sides of its containment
     // check are canonical. Canonicalize the cwd here so they agree even when the
@@ -112,7 +109,10 @@ fn suggest_sibling_dir(resolved: &Path, cwd: &Path) -> Option<PathBuf> {
     // `r = join(realpath(dirname(e)), basename(e))`, falling back to `e` when the
     // dirname can't be realpath'd (claude-code's `catch{}`).
     let resolved_dir = resolved.parent();
-    let r = match (resolved_dir.and_then(|d| std::fs::canonicalize(d).ok()), resolved.file_name()) {
+    let r = match (
+        resolved_dir.and_then(|d| std::fs::canonicalize(d).ok()),
+        resolved.file_name(),
+    ) {
         (Some(real_parent), Some(base)) => real_parent.join(base),
         _ => resolved.to_path_buf(),
     };
@@ -137,11 +137,7 @@ mod tests {
         // No path argument is handled by the caller (only calls when present);
         // an existing directory passes.
         let tmp = TempDir::new().unwrap();
-        assert!(validate_search_directory(
-            tmp.path().to_str().unwrap(),
-            tmp.path()
-        )
-        .is_ok());
+        assert!(validate_search_directory(tmp.path().to_str().unwrap(), tmp.path()).is_ok());
     }
 
     #[test]
@@ -164,7 +160,10 @@ mod tests {
         let file = tmp.path().join("a.txt");
         std::fs::write(&file, b"x").unwrap();
         let err = validate_search_directory(file.to_str().unwrap(), tmp.path()).unwrap_err();
-        assert_eq!(err.0, format!("Path is not a directory: {}", file.display()));
+        assert_eq!(
+            err.0,
+            format!("Path is not a directory: {}", file.display())
+        );
     }
 
     #[test]
@@ -189,11 +188,8 @@ mod tests {
         // to exercise the suggestion we query a NON-existent parent/sib name that
         // maps to an existing cwd/<name>. Use "../nope" with cwd/nope present:
         std::fs::create_dir(cwd.join("nope")).unwrap();
-        let err = validate_search_directory(
-            parent.path().join("nope").to_str().unwrap(),
-            &cwd,
-        )
-        .unwrap_err();
+        let err = validate_search_directory(parent.path().join("nope").to_str().unwrap(), &cwd)
+            .unwrap_err();
         assert!(
             err.0.contains("Did you mean") && err.0.contains("nope"),
             "got: {}",

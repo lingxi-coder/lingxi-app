@@ -20,9 +20,7 @@ use async_trait::async_trait;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::Command;
-use traits::{
-    WorktreeChangeSummary, WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager,
-};
+use traits::{WorktreeChangeSummary, WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
 
 /// Maximum allowed total length of a worktree slug.
 ///
@@ -95,7 +93,12 @@ fn parse_prune_v_stdout(stdout: &str, repo_root: &std::path::Path) -> Vec<PathBu
             if name.is_empty() {
                 return None;
             }
-            Some(repo_root.join(branding::DOT_DIR).join("worktrees").join(name))
+            Some(
+                repo_root
+                    .join(branding::DOT_DIR)
+                    .join("worktrees")
+                    .join(name),
+            )
         })
         .collect()
 }
@@ -430,8 +433,8 @@ mod slug_tests {
     #[test]
     fn validate_rejects_dot_dotdot_and_dotgit_segments() {
         for bad in [
-            ".", "..", "foo/.", "foo/..", "../x", ".git", ".GIT", ".git.", ".git...",
-            "a/.git", "a/.git/b",
+            ".", "..", "foo/.", "foo/..", "../x", ".git", ".GIT", ".git.", ".git...", "a/.git",
+            "a/.git/b",
         ] {
             assert!(
                 matches!(

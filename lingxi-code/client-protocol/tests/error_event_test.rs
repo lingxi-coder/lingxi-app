@@ -25,7 +25,10 @@ fn error_event_round_trips() {
     let json = serde_json::to_value(&ev).expect("serialize ClientEvent::Error");
 
     // Internally tagged on `type`, snake_case variant name.
-    assert_eq!(json["type"], "error", "variant tag must be snake_case `error`");
+    assert_eq!(
+        json["type"], "error",
+        "variant tag must be snake_case `error`"
+    );
     // Nested error-kind enum is also `type`-tagged + snake_case.
     assert_eq!(json["kind"]["type"], "transport");
     assert_eq!(json["message"], "connection reset");

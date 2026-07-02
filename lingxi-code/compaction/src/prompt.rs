@@ -503,12 +503,12 @@ mod tests {
             Some("/tmp/transcript.jsonl"),
             false,
         );
-        assert!(msg.contains(
-            "read the full transcript at: /tmp/transcript.jsonl"
-        ));
+        assert!(msg.contains("read the full transcript at: /tmp/transcript.jsonl"));
         // Transcript line precedes the continuation sentence.
         let t = msg.find("read the full transcript at:").unwrap();
-        let c = msg.find("Continue the conversation from where it left off").unwrap();
+        let c = msg
+            .find("Continue the conversation from where it left off")
+            .unwrap();
         assert!(t < c);
     }
 
@@ -516,8 +516,7 @@ mod tests {
 
     #[test]
     fn user_summary_message_recent_preserved_appends_sentence() {
-        let msg =
-            get_compact_user_summary_message("<summary>S</summary>", false, None, true);
+        let msg = get_compact_user_summary_message("<summary>S</summary>", false, None, true);
         assert!(msg.contains("Summary:\nS"));
         // Byte-exact preserved-tail sentence (binary K9t joins with `\n\n`).
         assert!(msg.contains("\n\nRecent messages are preserved verbatim."));
@@ -526,18 +525,17 @@ mod tests {
     #[test]
     fn user_summary_message_recent_preserved_ordering() {
         // Order: base → transcript → recent-preserved → continuation.
-        let msg = get_compact_user_summary_message(
-            "<summary>S</summary>",
-            true,
-            Some("/t.jsonl"),
-            true,
-        );
+        let msg =
+            get_compact_user_summary_message("<summary>S</summary>", true, Some("/t.jsonl"), true);
         let transcript = msg.find("read the full transcript at:").unwrap();
         let preserved = msg.find("Recent messages are preserved verbatim.").unwrap();
         let cont = msg
             .find("Continue the conversation from where it left off")
             .unwrap();
-        assert!(transcript < preserved, "transcript precedes preserved sentence");
+        assert!(
+            transcript < preserved,
+            "transcript precedes preserved sentence"
+        );
         assert!(preserved < cont, "preserved sentence precedes continuation");
     }
 

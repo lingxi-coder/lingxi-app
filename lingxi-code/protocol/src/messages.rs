@@ -248,12 +248,20 @@ impl ConversationMessage {
         for source in images {
             content.push(ContentBlock::Image { source });
         }
-        Self::User { id, content, is_meta: false }
+        Self::User {
+            id,
+            content,
+            is_meta: false,
+        }
     }
 
     /// Like [`Self::user_with_images`] but for document sources (P4a).
     #[must_use]
-    pub fn user_with_documents(id: MessageId, text: String, documents: Vec<DocumentSource>) -> Self {
+    pub fn user_with_documents(
+        id: MessageId,
+        text: String,
+        documents: Vec<DocumentSource>,
+    ) -> Self {
         let mut content = Vec::new();
         if !text.is_empty() {
             content.push(ContentBlock::Text { text });
@@ -261,7 +269,11 @@ impl ConversationMessage {
         for source in documents {
             content.push(ContentBlock::Document { source });
         }
-        Self::User { id, content, is_meta: false }
+        Self::User {
+            id,
+            content,
+            is_meta: false,
+        }
     }
 
     /// Return the role of this message.
@@ -456,10 +468,13 @@ mod tests {
             },
         };
         let v = serde_json::to_value(&block).unwrap();
-        assert_eq!(v, serde_json::json!({
-            "type": "document",
-            "source": { "type": "base64", "media_type": "application/pdf", "data": "JVBERi0=" }
-        }));
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "type": "document",
+                "source": { "type": "base64", "media_type": "application/pdf", "data": "JVBERi0=" }
+            })
+        );
         let back: ContentBlock = serde_json::from_value(v).unwrap();
         assert_eq!(back, block);
     }
@@ -467,7 +482,9 @@ mod tests {
     #[test]
     fn image_url_block_matches_anthropic_wire() {
         let block = ContentBlock::Image {
-            source: ImageSource::Url { url: "https://x/y.png".to_string() },
+            source: ImageSource::Url {
+                url: "https://x/y.png".to_string(),
+            },
         };
         let v = serde_json::to_value(&block).unwrap();
         assert_eq!(
@@ -491,7 +508,10 @@ mod tests {
         let line = serde_json::to_string(&m).unwrap();
         // A non-meta user message must NOT serialize an `is_meta` field
         // (`skip_serializing_if`), keeping the wire/JSONL shape byte-unchanged.
-        assert!(!line.contains("is_meta"), "non-meta user must omit is_meta: {line}");
+        assert!(
+            !line.contains("is_meta"),
+            "non-meta user must omit is_meta: {line}"
+        );
         let back: ConversationMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(back, m);
     }
@@ -505,7 +525,10 @@ mod tests {
         assert!(!ConversationMessage::user(MessageId::new(), "hi".to_string()).is_meta());
         // Meta messages serialize the flag and round-trip it back.
         let line = serde_json::to_string(&m).unwrap();
-        assert!(line.contains("\"is_meta\":true"), "meta user must emit is_meta: {line}");
+        assert!(
+            line.contains("\"is_meta\":true"),
+            "meta user must emit is_meta: {line}"
+        );
         let back: ConversationMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(back, m);
         assert!(back.is_meta());
@@ -558,7 +581,10 @@ mod tests {
             provider_id: Some("toolu_01ABC".into()),
         };
         let v = serde_json::to_value(&block).unwrap();
-        assert_eq!(v.get("provider_id").and_then(|x| x.as_str()), Some("toolu_01ABC"));
+        assert_eq!(
+            v.get("provider_id").and_then(|x| x.as_str()),
+            Some("toolu_01ABC")
+        );
         // Round-trips back identically.
         let back: ContentBlock = serde_json::from_value(v).unwrap();
         assert_eq!(back, block);

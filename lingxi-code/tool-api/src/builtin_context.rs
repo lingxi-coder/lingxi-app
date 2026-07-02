@@ -15,6 +15,7 @@ use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
 use telemetry::AnalyticsBus;
+use traits::agent_name_registry::AgentNameRegistry;
 use traits::budget::BudgetEnforcerHandle;
 use traits::camera::CameraControl;
 use traits::clipboard::Clipboard;
@@ -30,7 +31,6 @@ use traits::process::ProcessRunner;
 use traits::sandbox::Sandbox;
 use traits::share::SharingService;
 use traits::stt::SpeechToText;
-use traits::agent_name_registry::AgentNameRegistry;
 use traits::subagent_spawn::SubagentSpawner;
 use traits::task_registry::TaskRegistryHandle;
 use traits::tts::TextToSpeech;
@@ -380,11 +380,17 @@ pub trait GitCredentialProvider: Send + Sync {
 impl std::fmt::Debug for AndroidGitSecret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AndroidGitSecret")
-            .field("credential_provider", &self.credential_provider.as_ref().map(|_| "<provider>"))
+            .field(
+                "credential_provider",
+                &self.credential_provider.as_ref().map(|_| "<provider>"),
+            )
             .field("ca_dir", &self.ca_dir)
             .field("ssh_private_key_path", &self.ssh_private_key_path)
             .field("ssh_public_key_path", &self.ssh_public_key_path)
-            .field("ssh_known_hosts_sha256_hex", &self.ssh_known_hosts_sha256_hex)
+            .field(
+                "ssh_known_hosts_sha256_hex",
+                &self.ssh_known_hosts_sha256_hex,
+            )
             .finish()
     }
 }
@@ -408,11 +414,13 @@ mod tests {
     }
     impl GitCredentialProvider for MockProvider {
         fn https_token(&self) -> Option<String> {
-            self.token_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.token_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.token.clone()
         }
         fn ssh_passphrase(&self) -> Option<String> {
-            self.pass_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.pass_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.passphrase.clone()
         }
     }
@@ -420,10 +428,13 @@ mod tests {
     #[test]
     #[allow(clippy::default_trait_access)] // prescribed test body uses Default::default()
     fn android_git_secret_carries_provider_and_debug_has_no_secret() {
-        let provider: std::sync::Arc<dyn GitCredentialProvider> = std::sync::Arc::new(MockProvider {
-            token: Some("tok".into()), passphrase: Some("pp".into()),
-            token_calls: Default::default(), pass_calls: Default::default(),
-        });
+        let provider: std::sync::Arc<dyn GitCredentialProvider> =
+            std::sync::Arc::new(MockProvider {
+                token: Some("tok".into()),
+                passphrase: Some("pp".into()),
+                token_calls: Default::default(),
+                pass_calls: Default::default(),
+            });
         let s = AndroidGitSecret {
             credential_provider: Some(provider.clone()),
             ca_dir: Some("/system/etc/security/cacerts".into()),
@@ -431,10 +442,20 @@ mod tests {
             ..Default::default()
         };
         // The provider is reachable and returns the secret on demand.
-        assert_eq!(s.credential_provider.as_ref().unwrap().https_token().as_deref(), Some("tok"));
+        assert_eq!(
+            s.credential_provider
+                .as_ref()
+                .unwrap()
+                .https_token()
+                .as_deref(),
+            Some("tok")
+        );
         // Debug shows NO secret value and an opaque provider marker.
         let dbg = format!("{s:?}");
-        assert!(!dbg.contains("tok") && !dbg.contains("pp"), "no secret in Debug: {dbg}");
+        assert!(
+            !dbg.contains("tok") && !dbg.contains("pp"),
+            "no secret in Debug: {dbg}"
+        );
         assert!(dbg.contains("ca_dir"), "non-secrets still shown: {dbg}");
     }
 

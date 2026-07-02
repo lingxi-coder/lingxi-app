@@ -28,7 +28,10 @@ mod tests {
     // Binary description normalization `replace(/\s+/g," ").trim()`.
     #[test]
     fn normalize_description_ws_collapses_and_trims() {
-        assert_eq!(normalize_description_ws("  hi   there \n you "), "hi there you");
+        assert_eq!(
+            normalize_description_ws("  hi   there \n you "),
+            "hi there you"
+        );
         assert_eq!(normalize_description_ws("plain"), "plain");
         assert_eq!(normalize_description_ws("   "), "");
         assert_eq!(normalize_description_ws(""), "");
@@ -126,6 +129,7 @@ mod tests {
                 debug: false,
                 verbose: false,
                 main_loop_model: "test".into(),
+                model_profile: None,
                 max_budget_nano_usd: None,
                 mcp_clients: vec![],
                 is_non_interactive_session: false,
@@ -405,7 +409,15 @@ mod tests {
         // model-facing schema must NOT expose context_paths (removed; TS has no
         // such field) but must expose the new optional params.
         assert!(!props.contains_key("context_paths"));
-        for k in ["model", "run_in_background", "name", "team_name", "mode", "isolation", "cwd"] {
+        for k in [
+            "model",
+            "run_in_background",
+            "name",
+            "team_name",
+            "mode",
+            "isolation",
+            "cwd",
+        ] {
             assert!(props.contains_key(k), "schema exposes {k}");
         }
         // `model` + `isolation` carry the TS enum constraint.
@@ -506,7 +518,9 @@ mod tests {
         // Acquire the fork-gate lock + clear the var: with the gate ON an omitted
         // subagent_type would take the FORK path, not general-purpose. Serialize
         // against the gate-ON tests so this default-OFF assertion is stable.
-        let _g = AGENT_LIST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
 
         let spawner = arc_mock_spawner();
@@ -545,7 +559,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn async_launch_payload_has_resolved_model_and_threads_tool_use_id() {
-        let _g = BG_DISABLE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = BG_DISABLE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         let spawner = arc_mock_spawner();
         let bctx = wired_ctx(
@@ -563,7 +579,10 @@ mod tests {
             "prompt": "go",
             "run_in_background": true
         });
-        let result = tool.call(input, ctx, fresh_tx()).await.expect("async launch ok");
+        let result = tool
+            .call(input, ctx, fresh_tx())
+            .await
+            .expect("async launch ok");
         assert_eq!(result.data["status"], "async_launched");
         assert_eq!(result.data["isAsync"], true);
         assert!(
@@ -586,7 +605,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn disable_background_tasks_env_forces_sync() {
-        let _g = BG_DISABLE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = BG_DISABLE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
         let spawner = arc_mock_spawner();
         let bctx = wired_ctx(
@@ -676,7 +697,9 @@ mod tests {
     // test never flips the env under it.)
     #[tokio::test]
     async fn fork_gate_off_omitted_spawns_general_purpose_no_fork_fields() {
-        let _g = AGENT_LIST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
 
         let spawner = arc_mock_spawner();
@@ -707,7 +730,9 @@ mod tests {
     // fork_context_messages == [assistant_clone, user(tool_results + directive)].
     #[tokio::test]
     async fn fork_gate_on_omitted_takes_fork_path() {
-        let _g = AGENT_LIST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
 
         let spawner = arc_mock_spawner();
@@ -725,7 +750,9 @@ mod tests {
             vec![parent_assistant_with_tool_use()],
         );
         let input = serde_json::json!({ "description": "fork it", "prompt": "Do the subtask" });
-        tool.call(input, ctx, fresh_tx()).await.expect("fork spawns");
+        tool.call(input, ctx, fresh_tx())
+            .await
+            .expect("fork spawns");
 
         let inv = spawner.invocations();
         assert_eq!(inv.len(), 1);
@@ -737,13 +764,23 @@ mod tests {
             .fork_context_messages
             .as_ref()
             .expect("fork_context_messages set on fork path");
-        assert_eq!(fc.len(), 2, "[assistant_clone, user(tool_results+directive)]");
-        assert!(matches!(fc[0], protocol::ConversationMessage::Assistant { .. }));
+        assert_eq!(
+            fc.len(),
+            2,
+            "[assistant_clone, user(tool_results+directive)]"
+        );
+        assert!(matches!(
+            fc[0],
+            protocol::ConversationMessage::Assistant { .. }
+        ));
         match &fc[1] {
             protocol::ConversationMessage::User { content, .. } => {
                 // 1 tool_result (one tool_use) + the directive Text block.
                 assert_eq!(content.len(), 2);
-                assert!(matches!(content[0], protocol::ContentBlock::ToolResult { .. }));
+                assert!(matches!(
+                    content[0],
+                    protocol::ContentBlock::ToolResult { .. }
+                ));
                 match &content[1] {
                     protocol::ContentBlock::Text { text } => {
                         assert!(text.starts_with("<fork-boilerplate>"));
@@ -764,7 +801,9 @@ mod tests {
     // `override.systemPrompt = forkParentSystemPrompt`, AgentTool.tsx:622-623).
     #[tokio::test]
     async fn fork_threads_parent_system_prompt_onto_request() {
-        let _g = AGENT_LIST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
 
         let spawner = arc_mock_spawner();
@@ -782,7 +821,9 @@ mod tests {
         );
         ctx.fork_parent_system_prompt = Some(parent_bytes.to_string());
         let input = serde_json::json!({ "description": "fork it", "prompt": "Do the subtask" });
-        tool.call(input, ctx, fresh_tx()).await.expect("fork spawns");
+        tool.call(input, ctx, fresh_tx())
+            .await
+            .expect("fork spawns");
 
         let inv = spawner.invocations();
         assert_eq!(inv.len(), 1);
@@ -801,7 +842,9 @@ mod tests {
     // and the spawner is NOT invoked.
     #[tokio::test]
     async fn fork_recursion_guard_rejects_inside_fork_child() {
-        let _g = AGENT_LIST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
 
         let spawner = arc_mock_spawner();
@@ -832,7 +875,10 @@ mod tests {
             ),
             "byte-exact recursion-guard message; got: {msg}"
         );
-        assert!(spawner.invocations().is_empty(), "spawner must NOT be invoked");
+        assert!(
+            spawner.invocations().is_empty(),
+            "spawner must NOT be invoked"
+        );
 
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
@@ -841,7 +887,9 @@ mod tests {
     // an explicit type never forks).
     #[tokio::test]
     async fn fork_gate_on_explicit_type_does_not_fork() {
-        let _g = AGENT_LIST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
 
         let spawner = arc_mock_spawner();
@@ -861,10 +909,15 @@ mod tests {
             "subagent_type": "Explore",
             "prompt": "look around"
         });
-        tool.call(input, ctx, fresh_tx()).await.expect("explicit dispatch");
+        tool.call(input, ctx, fresh_tx())
+            .await
+            .expect("explicit dispatch");
         let inv = spawner.invocations();
         assert_eq!(inv.len(), 1);
-        assert_eq!(inv[0].request.subagent_type, "Explore", "explicit wins; no fork");
+        assert_eq!(
+            inv[0].request.subagent_type, "Explore",
+            "explicit wins; no fork"
+        );
         assert!(inv[0].request.fork_context_messages.is_none());
 
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
@@ -932,6 +985,7 @@ mod tests {
             .prompt(&PromptOptions {
                 include_examples: true,
                 model: None,
+                model_profile: None,
             })
             .await;
         std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
@@ -992,6 +1046,7 @@ mod tests {
             .prompt(&PromptOptions {
                 include_examples: true,
                 model: None,
+                model_profile: None,
             })
             .await;
         std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
@@ -1106,9 +1161,7 @@ mod tests {
         // The block sits right after the catalog pointer line (DOUBLE `\n`,
         // binary `…conversation.${d}…` with `d` starting `\n\n`), before the
         // subagent_type sentence.
-        assert!(p_pro.contains(
-            "conversation.\n\n**Do not spawn agents unless the user asks.**"
-        ));
+        assert!(p_pro.contains("conversation.\n\n**Do not spawn agents unless the user asks.**"));
         // The four bullets are NOT gated on the plan.
         assert!(p_pro.contains("- `run_in_background: true` runs the agent asynchronously"));
     }
@@ -1156,9 +1209,9 @@ mod tests {
         // Default (fork env OFF): non-fork subagent_type sentence, no addendum.
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
         let p_off = AgentTool::build_prompt(&agents, &[], false);
-        assert!(p_off.contains(
-            "specify a subagent_type parameter to select which agent type to use"
-        ));
+        assert!(
+            p_off.contains("specify a subagent_type parameter to select which agent type to use")
+        );
         assert!(!p_off.contains("forks yourself"));
         assert!(!p_off.contains("A fork runs in the background"));
 
@@ -1187,9 +1240,9 @@ mod tests {
             "SendMessage fork qualifier missing"
         );
         // The non-fork sentence must be GONE in the fork variant.
-        assert!(!p_on.contains(
-            "specify a subagent_type parameter to select which agent type to use"
-        ));
+        assert!(
+            !p_on.contains("specify a subagent_type parameter to select which agent type to use")
+        );
     }
 
     // The fork gate is OFF in a non-interactive session even with the env set
@@ -1209,7 +1262,10 @@ mod tests {
         let p = AgentTool::build_prompt(&agents, &[], false);
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
         traits::session_flags::set_non_interactive_session(false);
-        assert!(!p.contains("forks yourself"), "non-interactive disables fork text");
+        assert!(
+            !p.contains("forks yourself"),
+            "non-interactive disables fork text"
+        );
         assert!(p.contains("specify a subagent_type parameter to select which agent type to use"));
     }
 
@@ -1392,19 +1448,28 @@ mod tests {
         // (agentToolUtils.ts:243-256), emitted as `null` when absent — present
         // as keys (NOT omitted), null-valued (NOT zero-faked).
         assert!(
-            data["usage"].get("server_tool_use").is_some_and(serde_json::Value::is_null),
+            data["usage"]
+                .get("server_tool_use")
+                .is_some_and(serde_json::Value::is_null),
             "usage.server_tool_use must be present and null"
         );
         assert!(
-            data["usage"].get("service_tier").is_some_and(serde_json::Value::is_null),
+            data["usage"]
+                .get("service_tier")
+                .is_some_and(serde_json::Value::is_null),
             "usage.service_tier must be present and null"
         );
         assert!(
-            data["usage"].get("cache_creation").is_some_and(serde_json::Value::is_null),
+            data["usage"]
+                .get("cache_creation")
+                .is_some_and(serde_json::Value::is_null),
             "usage.cache_creation must be present and null"
         );
         // The DROPPED legacy keys claude does not emit.
-        assert!(data.get("subagent_type").is_none(), "subagent_type key dropped");
+        assert!(
+            data.get("subagent_type").is_none(),
+            "subagent_type key dropped"
+        );
         assert!(data.get("result").is_none(), "result key dropped");
         // model_content: content text + agentId/SendMessage hint + <usage>.
         let mc = data["model_content"].as_str().unwrap();
@@ -1451,8 +1516,14 @@ mod tests {
         let mc = result.data["model_content"].as_str().unwrap();
         // Exactly the content text — NO trailer.
         assert_eq!(mc, "explored");
-        assert!(!mc.contains("<usage>"), "one-shot must skip the <usage> trailer");
-        assert!(!mc.contains("agentId:"), "one-shot must skip the agentId hint");
+        assert!(
+            !mc.contains("<usage>"),
+            "one-shot must skip the <usage> trailer"
+        );
+        assert!(
+            !mc.contains("agentId:"),
+            "one-shot must skip the agentId hint"
+        );
     }
 
     #[tokio::test]
@@ -1573,7 +1644,10 @@ mod tests {
 
     #[test]
     fn g9_search_hint_byte_locked() {
-        assert_eq!(bare_agent_tool().search_hint(), Some("delegate work to a subagent"));
+        assert_eq!(
+            bare_agent_tool().search_hint(),
+            Some("delegate work to a subagent")
+        );
     }
 
     #[test]
@@ -1609,7 +1683,10 @@ mod tests {
             Some("Explore".to_string())
         );
         // missing → "Agent" (UI.tsx:774).
-        assert_eq!(tool.user_facing_name_for_input(&json!({})), Some("Agent".to_string()));
+        assert_eq!(
+            tool.user_facing_name_for_input(&json!({})),
+            Some("Agent".to_string())
+        );
     }
 
     #[test]
@@ -1633,15 +1710,13 @@ mod tests {
         spawner: Arc<MockSubagentSpawner>,
         bus: Arc<AnalyticsBus>,
     ) -> BuiltinToolContext {
-        let mut bctx =
-            ctx_for_file_tools(make_dummy_fs(), bus, vec![PathBuf::from("/tmp")]);
+        let mut bctx = ctx_for_file_tools(make_dummy_fs(), bus, vec![PathBuf::from("/tmp")]);
         bctx.subagent_spawner = Some(spawner as Arc<dyn SubagentSpawner>);
         bctx.task_registry =
             Some(arc_mock_task_registry() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
         bctx.mailbox_router =
             Some(arc_mock_mailbox() as Arc<dyn traits::mailbox::MailboxRouterHandle>);
-        bctx.budget_enforcer =
-            Some(arc_mock_budget(u64::MAX) as Arc<dyn BudgetEnforcerHandle>);
+        bctx.budget_enforcer = Some(arc_mock_budget(u64::MAX) as Arc<dyn BudgetEnforcerHandle>);
         bctx
     }
 
@@ -1665,11 +1740,11 @@ mod tests {
             protocol::AgentId::new(),
             json!({ "content": [{ "type": "text", "text": "hi there" }] }),
             traits::subagent_spawn::SubagentUsage::default(),
-            3,    // total_tool_use_count
-            42,   // total_duration_ms
-            123,  // total_tokens
-            5,    // assistant_message_count
-            1,    // response_char_count = content.length (1 text block)
+            3,   // total_tool_use_count
+            42,  // total_duration_ms
+            123, // total_tokens
+            5,   // assistant_message_count
+            1,   // response_char_count = content.length (1 text block)
             Some("req_abc".into()),
         );
 
@@ -1788,7 +1863,10 @@ mod tests {
             .await
             .expect_err("async unwired → clear error, not a sync result");
         let msg = format!("{err}");
-        assert!(msg.contains("async spawn failed"), "clear async error: {msg}");
+        assert!(
+            msg.contains("async spawn failed"),
+            "clear async error: {msg}"
+        );
         // The SYNC spawn must NOT have been invoked (no silent fallback).
         assert!(
             spawner.invocations().is_empty(),

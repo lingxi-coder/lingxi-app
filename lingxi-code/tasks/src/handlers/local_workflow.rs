@@ -122,8 +122,10 @@ fn sort_value(v: Value) -> Value {
             // non-deterministic across different construction paths.
             let mut pairs: Vec<(String, Value)> = map.into_iter().collect();
             pairs.sort_by(|a, b| a.0.cmp(&b.0));
-            let sorted: serde_json::Map<String, Value> =
-                pairs.into_iter().map(|(k, cv)| (k, sort_value(cv))).collect();
+            let sorted: serde_json::Map<String, Value> = pairs
+                .into_iter()
+                .map(|(k, cv)| (k, sort_value(cv)))
+                .collect();
             Value::Object(sorted)
         }
         Value::Array(arr) => Value::Array(arr.into_iter().map(sort_value).collect()),
@@ -329,7 +331,9 @@ impl LocalWorkflowHandler {
         for (task_id, rec) in pending {
             rec.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             let _ = rec.runtime.cancel(&rec.handle).await;
-            self.status_sink.set_status(&task_id, TaskStatus::Killed).await;
+            self.status_sink
+                .set_status(&task_id, TaskStatus::Killed)
+                .await;
         }
     }
 }
@@ -352,7 +356,11 @@ fn concurrency_cap() -> usize {
 /// groups the agent in claude's /workflows progress tree, for which LingXi has
 /// no per-agent progress surface — only `phase()`/`log()` lines — so it has no
 /// mapping target here.)
-fn make_request(default_subagent_type: &str, prompt: &str, opts_json: &str) -> SubagentSpawnRequest {
+fn make_request(
+    default_subagent_type: &str,
+    prompt: &str,
+    opts_json: &str,
+) -> SubagentSpawnRequest {
     let opts: Value = serde_json::from_str(opts_json).unwrap_or(Value::Null);
     let opt_str = |k: &str| {
         opts.get(k)
@@ -500,7 +508,10 @@ fn format_progress(p: &workflow::Progress) -> String {
                     obj_map.insert("model".to_string(), serde_json::json!(m));
                 }
             }
-            format!("[workflow_agent] {}", serde_json::to_string(&obj).unwrap_or_default())
+            format!(
+                "[workflow_agent] {}",
+                serde_json::to_string(&obj).unwrap_or_default()
+            )
         }
     }
 }
@@ -755,17 +766,20 @@ pub async fn run_workflow_script(
             // This phase_index is 1-based (oracle §8: `workflow_phase` toolUseID uses `Q`
             // which auto-increments from 1). Contrast with the `phase_index` field in
             // `tengu_workflow_phase_completed` telemetry, which is 0-based (oracle §7).
-            let (phase_index, phase_title) = if let Some(ph) = opts.as_object_mut().and_then(|o| o.remove("__wf_phase")) {
-                let idx = ph.get("index").and_then(Value::as_u64).map(|v| v as u32);
-                let title = ph.get("title").and_then(Value::as_str).map(str::to_string);
-                (idx, title)
-            } else {
-                (None, None)
-            };
+            let (phase_index, phase_title) =
+                if let Some(ph) = opts.as_object_mut().and_then(|o| o.remove("__wf_phase")) {
+                    let idx = ph.get("index").and_then(Value::as_u64).map(|v| v as u32);
+                    let title = ph.get("title").and_then(Value::as_str).map(str::to_string);
+                    (idx, title)
+                } else {
+                    (None, None)
+                };
             // Compute the clean opts_json (without __wf_phase) for the spawner.
-            let clean_opts_json = serde_json::to_string(&opts).unwrap_or_else(|_| opts_json.clone());
+            let clean_opts_json =
+                serde_json::to_string(&opts).unwrap_or_else(|_| opts_json.clone());
             // Extract label: `opts.label ?? prompt.slice(0, 60)` (oracle §8).
-            let label = opts.get("label")
+            let label = opts
+                .get("label")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
@@ -1054,7 +1068,8 @@ pub async fn run_workflow_script(
                         "phase_title".to_string(),
                         AnalyticsValue::String(title.clone()),
                     );
-                    bus.log_event(telemetry::tengu::workflow::PHASE_COMPLETED, md).await;
+                    bus.log_event(telemetry::tengu::workflow::PHASE_COMPLETED, md)
+                        .await;
                     phase_idx += 1;
                 }
             }
@@ -1212,224 +1227,260 @@ impl Task for LocalWorkflowHandler {
         let worker = Box::pin({
             let shared_agent_count = shared_agent_count.clone();
             async move {
-            status_sink
-                .set_status(&worker_task_id, TaskStatus::Running)
-                .await;
+                status_sink
+                    .set_status(&worker_task_id, TaskStatus::Running)
+                    .await;
 
-            // Resume journal: a stable `wf_…` run id keys a per-(prompt, opts)
-            // `agent()` result cache. A new run mints one; a resume reuses the
-            // caller's id and pre-loads its journal so unchanged agents replay
-            // instead of re-spawning. The id is surfaced to the task output so a
-            // later call can pass it back as `resumeFromRunId`.
-            // A resume reuses the caller's id; a fresh run uses the
-            // launcher-minted id (so the Workflow tool result can return it)
-            // and only mints one here as a last resort (direct test spawns).
-            // Fresh-mint shape matches claude-code 2.1.195
-            // `wf_${randomUUID().slice(0,12)}` = `wf_` + 8 hex + `-` + 3 hex.
-            let run_id = resume_from_run_id
-                .clone()
-                .or(provided_run_id)
-                .unwrap_or_else(|| {
-                    let r = rand::random::<u64>();
-                    format!("wf_{:08x}-{:03x}", (r >> 32) as u32, (r as u32) & 0xfff)
-                });
+                // Resume journal: a stable `wf_…` run id keys a per-(prompt, opts)
+                // `agent()` result cache. A new run mints one; a resume reuses the
+                // caller's id and pre-loads its journal so unchanged agents replay
+                // instead of re-spawning. The id is surfaced to the task output so a
+                // later call can pass it back as `resumeFromRunId`.
+                // A resume reuses the caller's id; a fresh run uses the
+                // launcher-minted id (so the Workflow tool result can return it)
+                // and only mints one here as a last resort (direct test spawns).
+                // Fresh-mint shape matches claude-code 2.1.195
+                // `wf_${randomUUID().slice(0,12)}` = `wf_` + 8 hex + `-` + 3 hex.
+                let run_id = resume_from_run_id
+                    .clone()
+                    .or(provided_run_id)
+                    .unwrap_or_else(|| {
+                        let r = rand::random::<u64>();
+                        format!("wf_{:08x}-{:03x}", (r >> 32) as u32, (r as u32) & 0xfff)
+                    });
 
-            // tengu_workflow_launched — oracle §7 exact payload.
-            // NOTE: `workflow_run_id` is NOT present on `launched` (oracle §7 shows
-            // it only on `completed` and `phase_completed`). `invocation_mode`,
-            // `workflow_source`, `workflow_name`, `workflow_description`,
-            // `phase_count`, `launched_from_subagent`, `has_args`, `is_resume`,
-            // and `script_size_chars` are all present.
-            // `launched_from_subagent`: oracle `t.agentId != null`. LingXi does not
-            // thread the calling agent id to the task handler — this field comes
-            // from the spawn input where it was set by the launcher.
-            {
-                let mut md: LogEventMetadata = HashMap::new();
-                md.insert(
-                    "invocation_mode".to_string(),
-                    AnalyticsValue::String(
-                        invocation_mode.clone().unwrap_or_else(|| "inline".to_string()),
-                    ),
-                );
-                md.insert(
-                    "workflow_source".to_string(),
-                    AnalyticsValue::String(
-                        workflow_source.clone().unwrap_or_else(|| "inline".to_string()),
-                    ),
-                );
-                if let Some(ref name) = meta_name {
-                    md.insert("workflow_name".to_string(), AnalyticsValue::String(name.clone()));
-                }
-                if let Some(ref desc) = meta_description {
+                // tengu_workflow_launched — oracle §7 exact payload.
+                // NOTE: `workflow_run_id` is NOT present on `launched` (oracle §7 shows
+                // it only on `completed` and `phase_completed`). `invocation_mode`,
+                // `workflow_source`, `workflow_name`, `workflow_description`,
+                // `phase_count`, `launched_from_subagent`, `has_args`, `is_resume`,
+                // and `script_size_chars` are all present.
+                // `launched_from_subagent`: oracle `t.agentId != null`. LingXi does not
+                // thread the calling agent id to the task handler — this field comes
+                // from the spawn input where it was set by the launcher.
+                {
+                    let mut md: LogEventMetadata = HashMap::new();
                     md.insert(
-                        "workflow_description".to_string(),
-                        AnalyticsValue::String(desc.clone()),
+                        "invocation_mode".to_string(),
+                        AnalyticsValue::String(
+                            invocation_mode
+                                .clone()
+                                .unwrap_or_else(|| "inline".to_string()),
+                        ),
                     );
+                    md.insert(
+                        "workflow_source".to_string(),
+                        AnalyticsValue::String(
+                            workflow_source
+                                .clone()
+                                .unwrap_or_else(|| "inline".to_string()),
+                        ),
+                    );
+                    if let Some(ref name) = meta_name {
+                        md.insert(
+                            "workflow_name".to_string(),
+                            AnalyticsValue::String(name.clone()),
+                        );
+                    }
+                    if let Some(ref desc) = meta_description {
+                        md.insert(
+                            "workflow_description".to_string(),
+                            AnalyticsValue::String(desc.clone()),
+                        );
+                    }
+                    md.insert(
+                        "phase_count".to_string(),
+                        AnalyticsValue::Int(meta_phase_count),
+                    );
+                    md.insert(
+                        "launched_from_subagent".to_string(),
+                        AnalyticsValue::Bool(launched_from_subagent),
+                    );
+                    md.insert(
+                        "has_args".to_string(),
+                        AnalyticsValue::Bool(workflow_args.is_some()),
+                    );
+                    md.insert(
+                        "is_resume".to_string(),
+                        AnalyticsValue::Bool(resume_from_run_id.is_some()),
+                    );
+                    md.insert(
+                        "script_size_chars".to_string(),
+                        AnalyticsValue::Int(script_size_chars),
+                    );
+                    worker_bus
+                        .log_event(telemetry::tengu::workflow::LAUNCHED, md)
+                        .await;
                 }
-                md.insert("phase_count".to_string(), AnalyticsValue::Int(meta_phase_count));
-                md.insert(
-                    "launched_from_subagent".to_string(),
-                    AnalyticsValue::Bool(launched_from_subagent),
-                );
-                md.insert(
-                    "has_args".to_string(),
-                    AnalyticsValue::Bool(workflow_args.is_some()),
-                );
-                md.insert(
-                    "is_resume".to_string(),
-                    AnalyticsValue::Bool(resume_from_run_id.is_some()),
-                );
-                md.insert(
-                    "script_size_chars".to_string(),
-                    AnalyticsValue::Int(script_size_chars),
-                );
-                worker_bus.log_event(telemetry::tengu::workflow::LAUNCHED, md).await;
-            }
 
-            let journal_path = worker_spool_path
-                .parent()
-                .map(|d| d.join(format!("workflow-{run_id}.json")));
-            let mut cache: HashMap<String, String> = HashMap::new();
-            if resume_from_run_id.is_some() {
-                if let Some(p) = journal_path.as_ref().and_then(|p| p.to_str()) {
-                    if let Ok(fc) = fs.read_file(p, None, None).await {
-                        if let Ok(loaded) =
-                            serde_json::from_str::<HashMap<String, String>>(&fc.content)
-                        {
-                            cache = loaded;
+                let journal_path = worker_spool_path
+                    .parent()
+                    .map(|d| d.join(format!("workflow-{run_id}.json")));
+                let mut cache: HashMap<String, String> = HashMap::new();
+                if resume_from_run_id.is_some() {
+                    if let Some(p) = journal_path.as_ref().and_then(|p| p.to_str()) {
+                        if let Ok(fc) = fs.read_file(p, None, None).await {
+                            if let Ok(loaded) =
+                                serde_json::from_str::<HashMap<String, String>>(&fc.content)
+                            {
+                                cache = loaded;
+                            }
                         }
                     }
+                    // tengu_workflow_journal_started_hit_respawn — resume loaded a
+                    // non-empty journal: previously-started agents will be replayed.
+                    if !cache.is_empty() {
+                        let mut md: LogEventMetadata = HashMap::new();
+                        md.insert(
+                            "attempts".to_string(),
+                            AnalyticsValue::Int(cache.len() as i64),
+                        );
+                        worker_bus
+                            .log_event(telemetry::tengu::workflow::JOURNAL_STARTED_HIT_RESPAWN, md)
+                            .await;
+                    }
                 }
-                // tengu_workflow_journal_started_hit_respawn — resume loaded a
-                // non-empty journal: previously-started agents will be replayed.
-                if !cache.is_empty() {
-                    let mut md: LogEventMetadata = HashMap::new();
-                    md.insert("attempts".to_string(), AnalyticsValue::Int(cache.len() as i64));
-                    worker_bus.log_event(telemetry::tengu::workflow::JOURNAL_STARTED_HIT_RESPAWN, md).await;
-                }
-            }
-            let journal = Arc::new(std::sync::Mutex::new(cache));
-            let _ = output_manager
-                .append(&worker_spool_path, &format!("runId: {run_id}\n"))
-                .await;
+                let journal = Arc::new(std::sync::Mutex::new(cache));
+                let _ = output_manager
+                    .append(&worker_spool_path, &format!("runId: {run_id}\n"))
+                    .await;
 
-            // Live progress: `phase()`/`log()` lines are spooled to the task
-            // output as they happen (drained concurrently with the run), so a
-            // long workflow's progress is visible via TaskOutput before it
-            // finishes. The drainer ends when `run_workflow_script` drops its
-            // sender on return.
-            let (ptx, mut prx) = mpsc::unbounded_channel::<String>();
-            let prog_output = output_manager.clone();
-            let prog_spool = worker_spool_path.clone();
-            let drain = async move {
-                while let Some(line) = prx.recv().await {
-                    let _ = prog_output.append(&prog_spool, &format!("{line}\n")).await;
-                }
-            };
-            let run_start = std::time::Instant::now();
-            let run = run_workflow_script(
-                &script,
-                DEFAULT_WORKFLOW_SUBAGENT,
-                spawner,
-                tool_invoker,
-                budget,
-                Some(ptx),
-                Some(journal.clone()),
-                token_budget_total,
-                shared_pool,
-                turn_start_baseline,
-                NestedConfig {
-                    allow_nested: true,
-                    args: workflow_args,
-                    fs: Some(fs.clone()),
-                },
-                worker_cancel,
-                worker_bus.clone(),
-                Some(shared_agent_count.clone()),
-                // Pass the phase telemetry context so run_workflow_script can
-                // emit tengu_workflow_phase_completed with the correct run_id,
-                // workflow_source, workflow_name, and the invocation_mode gate
-                // (oracle §7: only "named" sources emit phase_completed).
-                Some(PhaseTelemetryCtx {
-                    run_id: run_id.clone(),
-                    workflow_source: workflow_source.clone(),
-                    workflow_name: meta_name.clone(),
-                    invocation_mode: invocation_mode.clone(),
-                }),
-            );
-            let (outcome, ()) = tokio::join!(run, drain);
-            let elapsed_ms = run_start.elapsed().as_millis() as i64;
-
-            // tengu_workflow_completed — oracle §7 exact payload.
-            // `status` derivation: `abortController?.signal.aborted ? "killed"
-            //   : k.error ? "failed" : "completed"` (oracle §7).
-            // `agent_count`: real final count from the shared_agent_count Arc.
-            // `total_tokens` / `total_tool_calls`: UNAVAILABLE — LingXi's
-            //   `RunOutcome` carries no per-run token/tool-call aggregates; these
-            //   fields are omitted rather than emitted as 0. `SubagentResult` per-
-            //   agent usage is only available inside `run_workflow_script`'s worker
-            //   future and is not propagated to `RunOutcome`. A future refactor that
-            //   accumulates these into the outcome struct can add them here.
-            {
-                let agent_count_val = shared_agent_count.load(std::sync::atomic::Ordering::Relaxed) as i64;
-                let status_str = if completed_cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                    "killed"
-                } else {
-                    match &outcome {
-                        Ok(_) => "completed",
-                        Err(_) => "failed",
+                // Live progress: `phase()`/`log()` lines are spooled to the task
+                // output as they happen (drained concurrently with the run), so a
+                // long workflow's progress is visible via TaskOutput before it
+                // finishes. The drainer ends when `run_workflow_script` drops its
+                // sender on return.
+                let (ptx, mut prx) = mpsc::unbounded_channel::<String>();
+                let prog_output = output_manager.clone();
+                let prog_spool = worker_spool_path.clone();
+                let drain = async move {
+                    while let Some(line) = prx.recv().await {
+                        let _ = prog_output.append(&prog_spool, &format!("{line}\n")).await;
                     }
                 };
-                let mut md: LogEventMetadata = HashMap::new();
-                md.insert("workflow_run_id".to_string(), AnalyticsValue::String(run_id.clone()));
-                md.insert(
-                    "workflow_source".to_string(),
-                    AnalyticsValue::String(
-                        workflow_source.clone().unwrap_or_else(|| "inline".to_string()),
-                    ),
+                let run_start = std::time::Instant::now();
+                let run = run_workflow_script(
+                    &script,
+                    DEFAULT_WORKFLOW_SUBAGENT,
+                    spawner,
+                    tool_invoker,
+                    budget,
+                    Some(ptx),
+                    Some(journal.clone()),
+                    token_budget_total,
+                    shared_pool,
+                    turn_start_baseline,
+                    NestedConfig {
+                        allow_nested: true,
+                        args: workflow_args,
+                        fs: Some(fs.clone()),
+                    },
+                    worker_cancel,
+                    worker_bus.clone(),
+                    Some(shared_agent_count.clone()),
+                    // Pass the phase telemetry context so run_workflow_script can
+                    // emit tengu_workflow_phase_completed with the correct run_id,
+                    // workflow_source, workflow_name, and the invocation_mode gate
+                    // (oracle §7: only "named" sources emit phase_completed).
+                    Some(PhaseTelemetryCtx {
+                        run_id: run_id.clone(),
+                        workflow_source: workflow_source.clone(),
+                        workflow_name: meta_name.clone(),
+                        invocation_mode: invocation_mode.clone(),
+                    }),
                 );
-                if let Some(ref name) = meta_name {
-                    md.insert("workflow_name".to_string(), AnalyticsValue::String(name.clone()));
-                }
-                if let Some(ref desc) = meta_description {
+                let (outcome, ()) = tokio::join!(run, drain);
+                let elapsed_ms = run_start.elapsed().as_millis() as i64;
+
+                // tengu_workflow_completed — oracle §7 exact payload.
+                // `status` derivation: `abortController?.signal.aborted ? "killed"
+                //   : k.error ? "failed" : "completed"` (oracle §7).
+                // `agent_count`: real final count from the shared_agent_count Arc.
+                // `total_tokens` / `total_tool_calls`: UNAVAILABLE — LingXi's
+                //   `RunOutcome` carries no per-run token/tool-call aggregates; these
+                //   fields are omitted rather than emitted as 0. `SubagentResult` per-
+                //   agent usage is only available inside `run_workflow_script`'s worker
+                //   future and is not propagated to `RunOutcome`. A future refactor that
+                //   accumulates these into the outcome struct can add them here.
+                {
+                    let agent_count_val =
+                        shared_agent_count.load(std::sync::atomic::Ordering::Relaxed) as i64;
+                    let status_str = if completed_cancel.load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        "killed"
+                    } else {
+                        match &outcome {
+                            Ok(_) => "completed",
+                            Err(_) => "failed",
+                        }
+                    };
+                    let mut md: LogEventMetadata = HashMap::new();
                     md.insert(
-                        "workflow_description".to_string(),
-                        AnalyticsValue::String(desc.clone()),
+                        "workflow_run_id".to_string(),
+                        AnalyticsValue::String(run_id.clone()),
                     );
+                    md.insert(
+                        "workflow_source".to_string(),
+                        AnalyticsValue::String(
+                            workflow_source
+                                .clone()
+                                .unwrap_or_else(|| "inline".to_string()),
+                        ),
+                    );
+                    if let Some(ref name) = meta_name {
+                        md.insert(
+                            "workflow_name".to_string(),
+                            AnalyticsValue::String(name.clone()),
+                        );
+                    }
+                    if let Some(ref desc) = meta_description {
+                        md.insert(
+                            "workflow_description".to_string(),
+                            AnalyticsValue::String(desc.clone()),
+                        );
+                    }
+                    md.insert(
+                        "status".to_string(),
+                        AnalyticsValue::String(status_str.to_string()),
+                    );
+                    md.insert(
+                        "agent_count".to_string(),
+                        AnalyticsValue::Int(agent_count_val),
+                    );
+                    md.insert("duration_ms".to_string(), AnalyticsValue::Int(elapsed_ms));
+                    worker_bus
+                        .log_event(telemetry::tengu::workflow::COMPLETED, md)
+                        .await;
                 }
-                md.insert("status".to_string(), AnalyticsValue::String(status_str.to_string()));
-                md.insert("agent_count".to_string(), AnalyticsValue::Int(agent_count_val));
-                md.insert("duration_ms".to_string(), AnalyticsValue::Int(elapsed_ms));
-                worker_bus.log_event(telemetry::tengu::workflow::COMPLETED, md).await;
-            }
-            // Note: tengu_workflow_phase_completed is emitted inside
-            // run_workflow_script with the PhaseTelemetryCtx passed above.
+                // Note: tengu_workflow_phase_completed is emitted inside
+                // run_workflow_script with the PhaseTelemetryCtx passed above.
 
-            // Persist the journal (new + replayed results) under the run id so a
-            // later resume can replay them. Serialise before any await so the std
-            // Mutex guard never crosses an await point.
-            let serialized = serde_json::to_string(&*journal.lock().unwrap()).ok();
-            if let (Some(p), Some(s)) = (
-                journal_path.as_ref().and_then(|p| p.to_str()),
-                serialized.as_ref(),
-            ) {
-                let _ = fs.write_file(p, s).await;
-            }
+                // Persist the journal (new + replayed results) under the run id so a
+                // later resume can replay them. Serialise before any await so the std
+                // Mutex guard never crosses an await point.
+                let serialized = serde_json::to_string(&*journal.lock().unwrap()).ok();
+                if let (Some(p), Some(s)) = (
+                    journal_path.as_ref().and_then(|p| p.to_str()),
+                    serialized.as_ref(),
+                ) {
+                    let _ = fs.write_file(p, s).await;
+                }
 
-            // The Workflow tool result is the script's return value; spool it.
-            // A script-level error spools its message and fails the task. Spool
-            // I/O is best-effort — a write failure must not mask the result.
-            let (payload, status) = match outcome {
-                Ok(out) => (out.result.unwrap_or_default(), TaskStatus::Completed),
-                Err(e) => (e.to_string(), TaskStatus::Failed),
-            };
-            if !payload.is_empty() {
-                let _ = output_manager.append(&worker_spool_path, &payload).await;
-            }
+                // The Workflow tool result is the script's return value; spool it.
+                // A script-level error spools its message and fails the task. Spool
+                // I/O is best-effort — a write failure must not mask the result.
+                let (payload, status) = match outcome {
+                    Ok(out) => (out.result.unwrap_or_default(), TaskStatus::Completed),
+                    Err(e) => (e.to_string(), TaskStatus::Failed),
+                };
+                if !payload.is_empty() {
+                    let _ = output_manager.append(&worker_spool_path, &payload).await;
+                }
 
-            status_sink.set_status(&worker_task_id, status).await;
-            workers.lock().await.remove(&worker_task_id);
-        }});
+                status_sink.set_status(&worker_task_id, status).await;
+                workers.lock().await.remove(&worker_task_id);
+            }
+        });
 
         let bg_handle = ctx
             .runtime
@@ -1483,7 +1534,9 @@ impl Task for LocalWorkflowHandler {
                 .await
                 .map_err(|e| TaskError::Io(e.to_string()))?;
         }
-        self.status_sink.set_status(task_id, TaskStatus::Killed).await;
+        self.status_sink
+            .set_status(task_id, TaskStatus::Killed)
+            .await;
         Ok(())
     }
 }

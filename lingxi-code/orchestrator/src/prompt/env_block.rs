@@ -69,7 +69,12 @@ pub fn format(ctx: &SystemPromptContext) -> String {
     // Each subsequent element is one ` - ` bullet on its own line.
     // `cwd` uses display() — paths with non-UTF8 bytes get lossy-rendered
     // (claude-code is JS, always UTF-8).
-    write!(&mut s, "\n - Primary working directory: {}", ctx.cwd.display()).unwrap();
+    write!(
+        &mut s,
+        "\n - Primary working directory: {}",
+        ctx.cwd.display()
+    )
+    .unwrap();
 
     // Worktree notice: present when `hf()!==null` (cwd is a git worktree).
     // Binary `c?"This is a git worktree — an isolated copy…":null` (offset 206671709).
@@ -108,12 +113,7 @@ pub fn format(ctx: &SystemPromptContext) -> String {
             .unwrap();
         }
         None => {
-            write!(
-                &mut s,
-                "\n - You are powered by the model {}.",
-                ctx.model
-            )
-            .unwrap();
+            write!(&mut s, "\n - You are powered by the model {}.", ctx.model).unwrap();
         }
     }
 
@@ -177,7 +177,9 @@ mod tests {
     #[test]
     fn env_block_id_only_model_no_cutoff() {
         let out = format(&ctx());
-        assert!(out.starts_with("# Environment\nYou have been invoked in the following environment: "));
+        assert!(
+            out.starts_with("# Environment\nYou have been invoked in the following environment: ")
+        );
         assert!(out.contains("\n - Primary working directory: /x"));
         assert!(out.contains("\n - Is a git repository: false"));
         assert!(out.contains("\n - Platform: linux"));
@@ -205,9 +207,9 @@ mod tests {
 The exact model ID is claude-opus-4-8[1m]."
         ));
         // Cutoff is a SEPARATE bullet immediately after the model line.
-        assert!(out.contains(
-            "claude-opus-4-8[1m].\n - Assistant knowledge cutoff is January 2026."
-        ));
+        assert!(
+            out.contains("claude-opus-4-8[1m].\n - Assistant knowledge cutoff is January 2026.")
+        );
     }
 
     #[test]
@@ -228,9 +230,7 @@ Run all commands from this directory. Do NOT `cd` to the original repository roo
         );
         // Notice sits between the two fixed lines.
         let i_pwd = out.find("Primary working directory:").expect("pwd line");
-        let i_notice = out
-            .find("This is a git worktree")
-            .expect("notice present");
+        let i_notice = out.find("This is a git worktree").expect("notice present");
         let i_git = out.find("Is a git repository:").expect("git line");
         assert!(i_pwd < i_notice);
         assert!(i_notice < i_git);
@@ -246,8 +246,6 @@ Run all commands from this directory. Do NOT `cd` to the original repository roo
         );
         // The `Primary working directory:` and `Is a git repository:` lines are
         // still present and adjacent (no inserted line between them).
-        assert!(out.contains(
-            "\n - Primary working directory: /x\n - Is a git repository: false"
-        ));
+        assert!(out.contains("\n - Primary working directory: /x\n - Is a git repository: false"));
     }
 }

@@ -9,8 +9,8 @@
 //!   resolved → `PermissionRequest` does NOT fire for it.
 //! - `PermissionDenied` (`executePermissionDeniedHooks`, `toolExecution.ts:1075`)
 //!   fires ONLY on an auto-mode CLASSIFIER deny — NOT on a rule/mode/plan deny.
-//!   The auto-mode classifier is unwired in the public build, so this is dormant
-//!   there, matching claude-code's public build (`TRANSCRIPT_CLASSIFIER` off).
+//!   The auto-mode classifier is wired in this build, so classifier-source denies
+//!   can trigger the retry meta path by default.
 //!
 //! Scenarios:
 //! 1. A gate that ALLOWS fires NEITHER event; the tool runs.
@@ -28,7 +28,8 @@ use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
 use hooks::HookExecutorImpl;
 use orchestrator::test_support::{
-    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
@@ -836,7 +837,8 @@ fn deny_result_blocks<'a>(
     history: &'a [ConversationMessage],
     tu: &ToolUseId,
 ) -> Option<&'a Vec<ContentBlock>> {
-    history.iter().find_map(|m| match m {
+    history.iter().find_map(|m| {
+        match m {
         ConversationMessage::User { content, .. }
             if content.iter().any(|b| matches!(
                 b,
@@ -846,6 +848,7 @@ fn deny_result_blocks<'a>(
             Some(content)
         }
         _ => None,
+    }
     })
 }
 
@@ -906,7 +909,11 @@ async fn ask_behavior_deny_appends_image_blocks_at_top_level() {
         "the ask-rejection image rides at top level: {:?}",
         content.get(1)
     );
-    assert_eq!(content.len(), 2, "exactly [tool_result, image]: {content:?}");
+    assert_eq!(
+        content.len(),
+        2,
+        "exactly [tool_result, image]: {content:?}"
+    );
 }
 
 #[tokio::test]
@@ -1012,17 +1019,22 @@ async fn permission_denied_retry_pushes_meta_when_classifier_gate_forced_on() {
     let retry_pos = s
         .history
         .iter()
-        .position(|m| matches!(m, ConversationMessage::User { content, .. }
-            if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == verbatim))))
+        .position(|m| {
+            matches!(m, ConversationMessage::User { content, .. }
+            if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == verbatim)))
+        })
         .expect("retry meta present");
-    assert!(retry_pos > deny_pos, "retry meta must follow the deny result");
+    assert!(
+        retry_pos > deny_pos,
+        "retry meta must follow the deny result"
+    );
 }
 
 #[tokio::test]
-async fn permission_denied_retry_no_meta_when_gate_off() {
-    // DORMANT default: with the `TRANSCRIPT_CLASSIFIER` feature OFF (the parity
-    // default config), a classifier-deny whose PermissionDenied hook returns
-    // {retry:true} does NOT push the retry message — the denial stands.
+async fn permission_denied_retry_meta_when_classifier_enabled_by_default() {
+    // With classifier permissions enabled, a classifier-deny whose
+    // PermissionDenied hook returns {retry:true} pushes the retry message even
+    // without forcing the test-only config bit.
     let tool_use_id = ToolUseId::new();
     let api = two_turn_api(tool_use_id.clone(), "Echo", json!({ "cmd": "rm -rf /" }));
     let hooks = exec_with_retry_hook().await;
@@ -1031,7 +1043,8 @@ async fn permission_denied_retry_no_meta_when_gate_off() {
     let gate = Arc::new(ClassifierDenyGate {
         reason: "classifier blocked it",
     });
-    // Default config → transcript_classifier_enabled = false.
+    // Default config → transcript_classifier_enabled = false, but the
+    // permission classifier itself is now enabled.
     let orch = orch_with_gate(api, hooks, tools, gate);
 
     let outcome = orch.run_turn("run echo").await.expect("turn ok");
@@ -1040,7 +1053,7 @@ async fn permission_denied_retry_no_meta_when_gate_off() {
     let session = orch.session();
     let s = session.lock().await;
     assert!(
-        !retry_meta_present(&s.history),
-        "no retry meta message on the dormant default path (gate off)"
+        retry_meta_present(&s.history),
+        "retry meta message should be present on the classifier-enabled default path"
     );
 }

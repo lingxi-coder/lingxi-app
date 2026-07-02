@@ -22,10 +22,10 @@ use crate::oauth::anthropic::client::OAuthError;
 use crate::oauth::anthropic::config::ClaudeAiOAuthConfig;
 use async_trait::async_trait;
 use protocol::{HttpMethod, HttpRequest, Secret};
-use thiserror::Error;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 
 // ---------------------------------------------------------------------------
@@ -294,7 +294,10 @@ impl AuthState {
             Ok(Some(prev)) => (prev.email, prev.org_id),
             _ => (String::new(), String::new()),
         };
-        let refresh = info.refresh_token.as_ref().map(|s| s.expose_secret().clone());
+        let refresh = info
+            .refresh_token
+            .as_ref()
+            .map(|s| s.expose_secret().clone());
         cm.store_oauth_tokens(
             info.access_token.expose_secret(),
             refresh.as_deref(),
@@ -388,10 +391,7 @@ impl RefreshDriver {
     /// double-checks the `prev_token_hash`. If another task already rotated
     /// the token under the lock, returns the current token without making an
     /// HTTP call.
-    pub async fn refresh(
-        &self,
-        prev_token_hash: TokenHash,
-    ) -> Result<BearerToken, OAuthHookError> {
+    pub async fn refresh(&self, prev_token_hash: TokenHash) -> Result<BearerToken, OAuthHookError> {
         // 1. Acquire the single-flight lock (v3 §16.3).
         let _guard = self.state.refresh_lock.lock().await;
 
@@ -683,7 +683,9 @@ async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn traits::RuntimeS
 #[cfg(test)]
 mod wire_and_persist_tests {
     use super::*;
-    use crate::oauth::anthropic::testsupport::{mem_credential_manager, Canned, MemStorage, MockHttp, TestClock};
+    use crate::oauth::anthropic::testsupport::{
+        mem_credential_manager, Canned, MemStorage, MockHttp, TestClock,
+    };
 
     /// Reactive refresh must send a JSON body carrying the `scope` param and
     /// persist the rotated tokens to the attached `CredentialManager`.
@@ -748,7 +750,10 @@ mod wire_and_persist_tests {
         let persisted = cm.get_oauth_tokens().await.expect("get").expect("present");
         assert_eq!(persisted.access_token.expose_secret(), "NEW_ACCESS");
         assert_eq!(
-            persisted.refresh_token.as_ref().map(|s| s.expose_secret().clone()),
+            persisted
+                .refresh_token
+                .as_ref()
+                .map(|s| s.expose_secret().clone()),
             Some("NEW_REFRESH".to_string())
         );
         assert_eq!(persisted.email, "user@example.com");
@@ -788,9 +793,12 @@ mod wire_and_persist_tests {
             None,
         );
         let spawner = InstantSpawner::new();
-        RefreshDriver::spawn_proactive(state.clone(), spawner.clone() as Arc<dyn traits::RuntimeSpawner>)
-            .await
-            .expect("spawn ok");
+        RefreshDriver::spawn_proactive(
+            state.clone(),
+            spawner.clone() as Arc<dyn traits::RuntimeSpawner>,
+        )
+        .await
+        .expect("spawn ok");
 
         // Advance the clock to the wake instant so `remaining` collapses and the
         // loop reaches its refresh attempt.

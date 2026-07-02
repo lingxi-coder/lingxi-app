@@ -360,7 +360,9 @@ pub async fn init_refresh_driver(
 #[cfg(test)]
 mod exchange_tests {
     use super::*;
-    use crate::oauth::anthropic::testsupport::{mem_credential_manager, Canned, MemStorage, MockHttp, TestClock};
+    use crate::oauth::anthropic::testsupport::{
+        mem_credential_manager, Canned, MemStorage, MockHttp, TestClock,
+    };
 
     fn client_with(http: Arc<MockHttp>, clock_secs: u64) -> ClaudeAiOAuthClient {
         let clock = TestClock::new(clock_secs);
@@ -395,7 +397,10 @@ mod exchange_tests {
 
         assert_eq!(tokens.access_token.expose_secret(), "acc-1");
         assert_eq!(
-            tokens.refresh_token.as_ref().map(|s| s.expose_secret().clone()),
+            tokens
+                .refresh_token
+                .as_ref()
+                .map(|s| s.expose_secret().clone()),
             Some("ref-1".to_string())
         );
         // expires_at = clock.now() (1000s) + 3600s
@@ -404,7 +409,10 @@ mod exchange_tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(1_000 + 3_600)
         );
         assert_eq!(tokens.scopes, vec!["read:user", "write:messages"]);
-        assert_eq!(tokens.account.as_ref().unwrap().email_address, "u@example.com");
+        assert_eq!(
+            tokens.account.as_ref().unwrap().email_address,
+            "u@example.com"
+        );
         assert_eq!(tokens.organization.as_ref().unwrap().uuid, "org-uuid");
 
         // Assert the wire shape: POST, JSON content-type, authorization_code grant.

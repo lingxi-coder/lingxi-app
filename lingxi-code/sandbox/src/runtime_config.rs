@@ -41,9 +41,7 @@ pub enum Platform {
 /// loader's `if let Ok(parsed)=from_str(..) else continue`
 /// (engine-desktop/src/lib.rs:250,339) would silently DROP the ENTIRE tier (and
 /// its `sandbox.enabled` / `failIfUnavailable`) on a single malformed element.
-fn deserialize_enabled_platforms<'de, D>(
-    deserializer: D,
-) -> Result<Option<Vec<Platform>>, D::Error>
+fn deserialize_enabled_platforms<'de, D>(deserializer: D) -> Result<Option<Vec<Platform>>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -426,6 +424,9 @@ mod enabled_platforms_tests {
     fn unknown_string_dropped() {
         let json = r#"{"enabledPlatforms": ["windows", "linux"]}"#;
         let cfg: SandboxRuntimeConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.enabled_platforms.as_deref(), Some(&[Platform::Linux][..]));
+        assert_eq!(
+            cfg.enabled_platforms.as_deref(),
+            Some(&[Platform::Linux][..])
+        );
     }
 }

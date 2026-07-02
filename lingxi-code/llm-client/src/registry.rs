@@ -50,7 +50,11 @@ pub struct ModelRegistry {
 impl ModelRegistry {
     /// Build a registry from validated client config.
     pub fn from_config(config: ClientConfig) -> Result<Self, LlmError> {
-        if config.providers.iter().any(|provider| provider.models.is_empty()) {
+        if config
+            .providers
+            .iter()
+            .any(|provider| provider.models.is_empty())
+        {
             return Err(LlmError::InvalidRequest {
                 message: "provider profile must declare at least one model".to_string(),
             });
@@ -123,8 +127,10 @@ impl ModelRegistry {
                 capabilities: model.capabilities,
             }),
             multiple => {
-                let profiles: Vec<&str> =
-                    multiple.iter().map(|(p, _)| p.profile_name.as_str()).collect();
+                let profiles: Vec<&str> = multiple
+                    .iter()
+                    .map(|(p, _)| p.profile_name.as_str())
+                    .collect();
                 let suggestions = profiles
                     .iter()
                     .map(|p| format!("{p}/{requested}"))

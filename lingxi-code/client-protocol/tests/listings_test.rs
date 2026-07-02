@@ -57,7 +57,10 @@ fn session_row_carries_path() {
         path: "/abs/path/to/s.jsonl".to_string(),
     };
     let json = serde_json::to_value(&row).expect("serialize SessionRowDto");
-    assert!(json.get("path").is_some(), "SessionRowDto must carry `path`");
+    assert!(
+        json.get("path").is_some(),
+        "SessionRowDto must carry `path`"
+    );
     assert_eq!(json["path"], "/abs/path/to/s.jsonl");
     let back: SessionRowDto = serde_json::from_value(json).expect("deserialize SessionRowDto");
     assert_eq!(back, row);
@@ -112,7 +115,10 @@ fn session_lifecycle_events_round_trip() {
 #[test]
 fn model_list_and_changed_round_trip() {
     let list = ClientEvent::ModelList {
-        models: vec!["claude-opus-4-7".to_string(), "claude-sonnet-4-6".to_string()],
+        models: vec![
+            "claude-opus-4-7".to_string(),
+            "claude-sonnet-4-6".to_string(),
+        ],
         current: "claude-opus-4-7".to_string(),
     };
     let json = serde_json::to_value(&list).expect("serialize ModelList");
@@ -540,7 +546,8 @@ fn check_status_variants_round_trip() {
         // `CheckStatusDto` is `Copy`, so pass by value (no needless borrow).
         let json = serde_json::to_value(status).expect("serialize CheckStatusDto");
         assert_eq!(json["type"], tag, "CheckStatusDto::{status:?} tag mismatch");
-        let back: CheckStatusDto = serde_json::from_value(json).expect("deserialize CheckStatusDto");
+        let back: CheckStatusDto =
+            serde_json::from_value(json).expect("deserialize CheckStatusDto");
         assert_eq!(back, status);
     }
 }
@@ -655,7 +662,10 @@ fn coordinator_worker_dto_roundtrip() {
         status: "working".to_string(),
     };
     let json = serde_json::to_value(&dto).expect("serialize CoordinatorWorkerDto");
-    assert_eq!(json["agent_id"], "agent:00000000-0000-0000-0000-000000000001");
+    assert_eq!(
+        json["agent_id"],
+        "agent:00000000-0000-0000-0000-000000000001"
+    );
     assert_eq!(json["name"], "alpha");
     assert_eq!(json["agent_type"], "explorer");
     assert_eq!(json["status"], "working");
@@ -678,7 +688,10 @@ fn coordinator_worker_event_round_trips() {
     };
     let json = serde_json::to_value(&ev).expect("serialize CoordinatorWorker");
     assert_eq!(json["type"], "coordinator_worker");
-    assert_eq!(json["worker"]["agent_id"], "agent:00000000-0000-0000-0000-000000000001");
+    assert_eq!(
+        json["worker"]["agent_id"],
+        "agent:00000000-0000-0000-0000-000000000001"
+    );
     assert_eq!(json["worker"]["agent_type"], "explorer");
     assert_eq!(json["worker"]["status"], "working");
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize CoordinatorWorker");

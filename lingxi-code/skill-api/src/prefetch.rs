@@ -229,7 +229,11 @@ impl SkillDiscoveryPrefetch {
     /// - Otherwise, when a source is wired ([`Self::new`]), the background task
     ///   runs the source over the turn `query` and ships the chosen skills.
     /// - With neither, it ships an EMPTY set (inert surfacing reminder).
-    pub async fn start(&self, query: String, is_write_pivot: bool) -> PendingSkillDiscoveryPrefetch {
+    pub async fn start(
+        &self,
+        query: String,
+        is_write_pivot: bool,
+    ) -> PendingSkillDiscoveryPrefetch {
         let (tx, rx) = oneshot::channel();
 
         // findWritePivot early-return: non-write iterations surface nothing.
@@ -462,7 +466,10 @@ mod tests {
             vec![skill("a", "da", None)],
         );
         let out = p.start("q".into(), false).await.take().await;
-        assert!(out.is_empty(), "non-write iteration surfaces nothing: {out:?}");
+        assert!(
+            out.is_empty(),
+            "non-write iteration surfaces nothing: {out:?}"
+        );
     }
 
     // (D.5) neither source nor fixed ⇒ empty.

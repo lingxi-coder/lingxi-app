@@ -51,9 +51,9 @@ use agent::display::{AgentColor, AgentDisplay};
 use agent::pool::{PoolError, StateMachinePool};
 // `PermissionMode` is re-exported from the `agent` crate (which depends on
 // `permission`) so `tasks` can reference it without a new `permission` dep.
-use agent::PermissionMode;
 use agent::resolve_agent_model;
 use agent::runner::SubagentEvent;
+use agent::PermissionMode;
 use agent::SubagentApiClient;
 
 /// Handler name reported by [`Task::name`] and used as the runtime task-name
@@ -286,9 +286,7 @@ impl InProcessTeammateHandler {
 
     /// Return a clone of the set-once skill-loader cell.
     #[must_use]
-    pub fn skill_loader_handle(
-        &self,
-    ) -> Arc<OnceLock<Arc<dyn traits::skill_loader::SkillLoader>>> {
+    pub fn skill_loader_handle(&self) -> Arc<OnceLock<Arc<dyn traits::skill_loader::SkillLoader>>> {
         self.skill_loader.clone()
     }
 
@@ -365,10 +363,7 @@ impl InProcessTeammateHandler {
     /// `TeammateIdle` hook — claude-code `executeTeammateIdleHooks`
     /// (`stopHooks.ts:403`).
     #[must_use]
-    pub fn with_teammate_idle_firer(
-        mut self,
-        firer: Arc<dyn hooks::TeammateIdleFirer>,
-    ) -> Self {
+    pub fn with_teammate_idle_firer(mut self, firer: Arc<dyn hooks::TeammateIdleFirer>) -> Self {
         self.teammate_idle_firer = Some(firer);
         self
     }
@@ -585,10 +580,9 @@ impl Task for InProcessTeammateHandler {
             .to_string();
 
         // 3. Resolve the definition and build a persistent SubagentContext.
-        let definition = self
-            .definitions
-            .resolve(&agent_id, &name)
-            .ok_or_else(|| TaskError::Internal(format!("no agent definition for teammate {name}")))?;
+        let definition = self.definitions.resolve(&agent_id, &name).ok_or_else(|| {
+            TaskError::Internal(format!("no agent definition for teammate {name}"))
+        })?;
         let subagent_ctx = self
             .build_context(agent_id, &name, &team_name, &description, definition)
             .await;
@@ -762,7 +756,9 @@ impl Task for InProcessTeammateHandler {
             .await
             .map_err(|e| TaskError::Internal(e.to_string()))?;
 
-        self.status_sink.set_status(task_id, TaskStatus::Killed).await;
+        self.status_sink
+            .set_status(task_id, TaskStatus::Killed)
+            .await;
         Ok(())
     }
 }

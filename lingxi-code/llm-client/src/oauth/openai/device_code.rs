@@ -57,7 +57,10 @@ struct UserCodeResp {
     #[serde(alias = "user_code", alias = "usercode")]
     user_code: String,
     /// Server may return interval as a string or number; we handle both.
-    #[serde(default = "default_interval", deserialize_with = "deserialize_interval")]
+    #[serde(
+        default = "default_interval",
+        deserialize_with = "deserialize_interval"
+    )]
     interval: u64,
 }
 
@@ -109,8 +112,10 @@ pub async fn request_device_code(
     cfg: &OpenAiOAuthConfig,
     http: Arc<dyn HttpTransport>,
 ) -> Result<DeviceUserCode, OAuthError> {
-    let body = serde_json::to_string(&UserCodeReq { client_id: &cfg.client_id })
-        .map_err(|e| OAuthError::DeviceCode(format!("encode: {e}")))?;
+    let body = serde_json::to_string(&UserCodeReq {
+        client_id: &cfg.client_id,
+    })
+    .map_err(|e| OAuthError::DeviceCode(format!("encode: {e}")))?;
     let req = HttpRequest {
         method: HttpMethod::Post,
         url: cfg.device_usercode_url.clone(),
@@ -155,8 +160,11 @@ pub async fn poll_for_token(
     device_auth_id: &str,
     user_code: &str,
 ) -> Result<PollOutcome, OAuthError> {
-    let body = serde_json::to_string(&TokenPollReq { device_auth_id, user_code })
-        .map_err(|e| OAuthError::DeviceCode(format!("encode: {e}")))?;
+    let body = serde_json::to_string(&TokenPollReq {
+        device_auth_id,
+        user_code,
+    })
+    .map_err(|e| OAuthError::DeviceCode(format!("encode: {e}")))?;
     let req = HttpRequest {
         method: HttpMethod::Post,
         url: cfg.device_token_url.clone(),
@@ -225,15 +233,16 @@ pub async fn run_device_code_login(
         }
 
         match poll_for_token(&cfg, http.clone(), &uc.device_auth_id, &uc.user_code).await? {
-            PollOutcome::Ready { authorization_code, code_verifier } => {
+            PollOutcome::Ready {
+                authorization_code,
+                code_verifier,
+            } => {
                 // Device-code redirect URI is `{issuer}/deviceauth/callback` —
                 // note NO `/api/accounts/` prefix (that prefix is only on the
                 // usercode/token endpoints). Byte-aligned with codex
                 // `login/src/device_code_auth.rs:194`.
-                let redirect_uri = format!(
-                    "{}/deviceauth/callback",
-                    cfg.issuer.trim_end_matches('/')
-                );
+                let redirect_uri =
+                    format!("{}/deviceauth/callback", cfg.issuer.trim_end_matches('/'));
                 let client = OpenAiOAuthClient::new(cfg, http.clone());
                 return client
                     .exchange_code_with_redirect(&authorization_code, &code_verifier, &redirect_uri)
@@ -268,7 +277,10 @@ mod device_code_tests {
         }"#;
         let http = MockHttp::new(vec![(
             "deviceauth/usercode",
-            Canned { status: 200, body: body.into() },
+            Canned {
+                status: 200,
+                body: body.into(),
+            },
         )]);
         let cfg = OpenAiOAuthConfig::default();
         let uc = request_device_code(&cfg, http as Arc<dyn HttpTransport>)
@@ -289,7 +301,10 @@ mod device_code_tests {
         }"#;
         let http = MockHttp::new(vec![(
             "deviceauth/usercode",
-            Canned { status: 200, body: body.into() },
+            Canned {
+                status: 200,
+                body: body.into(),
+            },
         )]);
         let cfg = OpenAiOAuthConfig::default();
         let uc = request_device_code(&cfg, http as Arc<dyn HttpTransport>)
@@ -303,7 +318,10 @@ mod device_code_tests {
     async fn usercode_non_200_returns_error() {
         let http = MockHttp::new(vec![(
             "deviceauth/usercode",
-            Canned { status: 404, body: "not found".into() },
+            Canned {
+                status: 404,
+                body: "not found".into(),
+            },
         )]);
         let cfg = OpenAiOAuthConfig::default();
         let err = request_device_code(&cfg, http as Arc<dyn HttpTransport>)
@@ -323,7 +341,10 @@ mod device_code_tests {
     async fn poll_pending_on_403() {
         let http = MockHttp::new(vec![(
             "deviceauth/token",
-            Canned { status: 403, body: r#"{"error":"authorization_pending"}"#.into() },
+            Canned {
+                status: 403,
+                body: r#"{"error":"authorization_pending"}"#.into(),
+            },
         )]);
         let cfg = OpenAiOAuthConfig::default();
         let outcome = poll_for_token(&cfg, http as Arc<dyn HttpTransport>, "auth-id", "user-code")
@@ -336,7 +357,10 @@ mod device_code_tests {
     async fn poll_pending_on_404() {
         let http = MockHttp::new(vec![(
             "deviceauth/token",
-            Canned { status: 404, body: "not found".into() },
+            Canned {
+                status: 404,
+                body: "not found".into(),
+            },
         )]);
         let cfg = OpenAiOAuthConfig::default();
         let outcome = poll_for_token(&cfg, http as Arc<dyn HttpTransport>, "auth-id", "user-code")
@@ -354,14 +378,20 @@ mod device_code_tests {
         }"#;
         let http = MockHttp::new(vec![(
             "deviceauth/token",
-            Canned { status: 200, body: body.into() },
+            Canned {
+                status: 200,
+                body: body.into(),
+            },
         )]);
         let cfg = OpenAiOAuthConfig::default();
         let outcome = poll_for_token(&cfg, http as Arc<dyn HttpTransport>, "auth-id", "user-code")
             .await
             .expect("poll ok");
         match outcome {
-            PollOutcome::Ready { authorization_code, code_verifier } => {
+            PollOutcome::Ready {
+                authorization_code,
+                code_verifier,
+            } => {
                 assert_eq!(authorization_code, "auth-code-abc");
                 assert_eq!(code_verifier, "verifier-xyz");
             }
@@ -373,7 +403,10 @@ mod device_code_tests {
     async fn poll_error_on_unexpected_status() {
         let http = MockHttp::new(vec![(
             "deviceauth/token",
-            Canned { status: 500, body: "server error".into() },
+            Canned {
+                status: 500,
+                body: "server error".into(),
+            },
         )]);
         let cfg = OpenAiOAuthConfig::default();
         let err = poll_for_token(&cfg, http as Arc<dyn HttpTransport>, "auth-id", "user-code")
@@ -416,9 +449,10 @@ mod device_code_tests {
         ]);
         let cfg = OpenAiOAuthConfig::default();
         let clock = TestClock::new(0);
-        let tokens = run_device_code_login(cfg, http as Arc<dyn HttpTransport>, clock as Arc<dyn Clock>)
-            .await
-            .expect("login ok");
+        let tokens =
+            run_device_code_login(cfg, http as Arc<dyn HttpTransport>, clock as Arc<dyn Clock>)
+                .await
+                .expect("login ok");
 
         assert_eq!(tokens.access_token.expose_secret(), "ACCESS");
         assert!(tokens.refresh_token.is_some());

@@ -187,7 +187,10 @@ mod tests {
     #[test]
     fn default_config_is_inert() {
         let c = SessionMemoryConfig::default();
-        assert!(!c.enabled, "session memory must be off by default (fixtures stay byte-identical)");
+        assert!(
+            !c.enabled,
+            "session memory must be off by default (fixtures stay byte-identical)"
+        );
         assert!(!c.compact_extracts_memory);
         // Extraction model defaults to the Haiku-class selector model.
         assert_eq!(c.extraction_model, "claude-haiku-4-5");
@@ -196,7 +199,9 @@ mod tests {
     #[test]
     fn should_use_requires_both_enabled_and_compact_extracts() {
         // Off entirely.
-        assert!(!SessionMemoryCompactor::should_use(&SessionMemoryConfig::default()));
+        assert!(!SessionMemoryCompactor::should_use(
+            &SessionMemoryConfig::default()
+        ));
         // enabled but dual-extraction not opted in.
         assert!(!SessionMemoryCompactor::should_use(&enabled_config(false)));
         // Both on => active.
@@ -225,7 +230,9 @@ mod tests {
         let compactor = SessionMemoryCompactor::new(enabled_config(true));
         let msgs = vec![user("only")];
         // No tags at all.
-        assert!(compactor.try_extract_memory("just a plain summary", &msgs).is_none());
+        assert!(compactor
+            .try_extract_memory("just a plain summary", &msgs)
+            .is_none());
         // Open tag without a close.
         assert!(compactor
             .try_extract_memory("<session_memory>unterminated", &msgs)
@@ -250,6 +257,9 @@ mod tests {
     fn extract_section_is_first_match_non_greedy() {
         // First open .. first close after it; a later block is ignored.
         let s = "<session_memory>one</session_memory>X<session_memory>two</session_memory>";
-        assert_eq!(extract_section(s, "<session_memory>", "</session_memory>"), Some("one"));
+        assert_eq!(
+            extract_section(s, "<session_memory>", "</session_memory>"),
+            Some("one")
+        );
     }
 }

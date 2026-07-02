@@ -41,11 +41,10 @@
 //! are applied later by the `authenticate` step in `client.rs`.  No suppression
 //! is needed in this wrapper.
 
-use crate::{
-    LlmError, LlmRequest, LlmResponse, ProviderRequest, ProviderResponse,
-    StreamDecoder, WireCodec,
-};
 use super::GeminiCodec;
+use crate::{
+    LlmError, LlmRequest, LlmResponse, ProviderRequest, ProviderResponse, StreamDecoder, WireCodec,
+};
 
 /// Vertex AI Gemini codec.
 ///
@@ -126,7 +125,8 @@ impl WireCodec for VertexGeminiCodec {
 mod tests {
     use super::*;
 
-    const BASE: &str = "https://us-central1-aiplatform.googleapis.com/v1/projects/my-proj/locations/us-central1";
+    const BASE: &str =
+        "https://us-central1-aiplatform.googleapis.com/v1/projects/my-proj/locations/us-central1";
 
     // ── Codec encode shape ─────────────────────────────────────────────────────
 
@@ -157,7 +157,9 @@ mod tests {
 
         assert_eq!(
             provider_req.url,
-            format!("{BASE}/publishers/google/models/gemini-2.0-flash:streamGenerateContent?alt=sse"),
+            format!(
+                "{BASE}/publishers/google/models/gemini-2.0-flash:streamGenerateContent?alt=sse"
+            ),
             "streaming URL must end with :streamGenerateContent?alt=sse"
         );
     }

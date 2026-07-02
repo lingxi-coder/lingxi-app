@@ -156,10 +156,7 @@ impl LocalAgentHandler {
     /// a backgrounded spawn runs PERSISTENT (comes to rest + resumable) instead
     /// of one-shot. Production passes the same `PoolSubagentSpawner`.
     #[must_use]
-    pub fn with_streaming_spawner(
-        mut self,
-        streaming: Arc<dyn StreamingSubagentSpawner>,
-    ) -> Self {
+    pub fn with_streaming_spawner(mut self, streaming: Arc<dyn StreamingSubagentSpawner>) -> Self {
         self.streaming_spawner = Some(streaming);
         self
     }
@@ -189,7 +186,9 @@ impl LocalAgentHandler {
         let pending: Vec<(String, WorkerCancel)> = self.pending_kill.lock().await.drain().collect();
         for (task_id, rec) in pending {
             let _ = rec.runtime.cancel(&rec.handle).await;
-            self.status_sink.set_status(&task_id, TaskStatus::Killed).await;
+            self.status_sink
+                .set_status(&task_id, TaskStatus::Killed)
+                .await;
         }
     }
 }
@@ -323,7 +322,10 @@ impl Task for LocalAgentHandler {
                             }
                         };
                     // Register the live agent id so `send_message` can resume it.
-                    agent_ids.lock().await.insert(worker_task_id.clone(), agent_id);
+                    agent_ids
+                        .lock()
+                        .await
+                        .insert(worker_task_id.clone(), agent_id);
                     loop {
                         match rx.recv().await {
                             Some(SubagentEvent::Completed {
@@ -400,49 +402,51 @@ impl Task for LocalAgentHandler {
                 })
             } else {
                 Box::pin(async move {
-            status_sink
-                .set_status(&worker_task_id, TaskStatus::Running)
-                .await;
+                    status_sink
+                        .set_status(&worker_task_id, TaskStatus::Running)
+                        .await;
 
-            let result = spawner.spawn(request, inherit).await;
+                    let result = spawner.spawn(request, inherit).await;
 
-            // Map the terminal SubagentResult onto a spool payload + status.
-            // Spool I/O is best-effort — a spool write failure must not mask
-            // the subagent result (mirrors local_bash). The shared
-            // `TaskStatusSink` has no token-usage method (it is defined in
-            // `local_bash`, which this handler must not modify), so token usage
-            // is surfaced by spooling a `<usage><total_tokens>…` footer —
-            // byte-aligned with the TS `registerAsyncAgent` notification shape.
-            let (payload, status) = match &result {
-                Ok(SubagentResult::Completed { content, usage, .. }) => {
-                    // Pretty-print the JSON payload; fall back to the compact
-                    // Display form if serialization somehow fails.
-                    let body = serde_json::to_string_pretty(content)
-                        .unwrap_or_else(|_| content.to_string());
-                    let body = format!(
-                        "{body}\n<usage><total_tokens>{}</total_tokens></usage>\n",
-                        usage.total_tokens
-                    );
-                    (body, TaskStatus::Completed)
-                }
-                Ok(SubagentResult::Failed { reason, .. }) => (reason.clone(), TaskStatus::Failed),
-                Ok(SubagentResult::Killed { .. }) => (String::new(), TaskStatus::Killed),
-                Err(e) => (e.to_string(), TaskStatus::Failed),
-            };
+                    // Map the terminal SubagentResult onto a spool payload + status.
+                    // Spool I/O is best-effort — a spool write failure must not mask
+                    // the subagent result (mirrors local_bash). The shared
+                    // `TaskStatusSink` has no token-usage method (it is defined in
+                    // `local_bash`, which this handler must not modify), so token usage
+                    // is surfaced by spooling a `<usage><total_tokens>…` footer —
+                    // byte-aligned with the TS `registerAsyncAgent` notification shape.
+                    let (payload, status) = match &result {
+                        Ok(SubagentResult::Completed { content, usage, .. }) => {
+                            // Pretty-print the JSON payload; fall back to the compact
+                            // Display form if serialization somehow fails.
+                            let body = serde_json::to_string_pretty(content)
+                                .unwrap_or_else(|_| content.to_string());
+                            let body = format!(
+                                "{body}\n<usage><total_tokens>{}</total_tokens></usage>\n",
+                                usage.total_tokens
+                            );
+                            (body, TaskStatus::Completed)
+                        }
+                        Ok(SubagentResult::Failed { reason, .. }) => {
+                            (reason.clone(), TaskStatus::Failed)
+                        }
+                        Ok(SubagentResult::Killed { .. }) => (String::new(), TaskStatus::Killed),
+                        Err(e) => (e.to_string(), TaskStatus::Failed),
+                    };
 
-            // Routed through the output manager's `append` so the per-file 5GB
-            // disk cap is enforced (T17). The write uses O_NOFOLLOW (claude-code
-            // `diskOutput.ts`) so a symlink planted at the spool path from inside
-            // the sandbox cannot redirect the write (T18).
-            if !payload.is_empty() {
-                let _ = output_manager.append(&worker_spool_path, &payload).await;
-            }
+                    // Routed through the output manager's `append` so the per-file 5GB
+                    // disk cap is enforced (T17). The write uses O_NOFOLLOW (claude-code
+                    // `diskOutput.ts`) so a symlink planted at the spool path from inside
+                    // the sandbox cannot redirect the write (T18).
+                    if !payload.is_empty() {
+                        let _ = output_manager.append(&worker_spool_path, &payload).await;
+                    }
 
-            status_sink.set_status(&worker_task_id, status).await;
+                    status_sink.set_status(&worker_task_id, status).await;
 
-            // The subagent has terminated; drop the cancel record so a late
-            // kill is a graceful no-op (claude-code `status !== 'running'`).
-            workers.lock().await.remove(&worker_task_id);
+                    // The subagent has terminated; drop the cancel record so a late
+                    // kill is a graceful no-op (claude-code `status !== 'running'`).
+                    workers.lock().await.remove(&worker_task_id);
                 })
             };
 
@@ -503,7 +507,9 @@ impl Task for LocalAgentHandler {
         }
         // Flip status to Killed regardless (best-effort; a worker that already
         // reported a terminal status simply gets a redundant Killed).
-        self.status_sink.set_status(task_id, TaskStatus::Killed).await;
+        self.status_sink
+            .set_status(task_id, TaskStatus::Killed)
+            .await;
         Ok(())
     }
 
@@ -558,9 +564,7 @@ mod tests {
     use tokio::sync::Mutex as TokioMutex;
     use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
     use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-    use traits::{
-        BudgetError, SubagentSpawnError, SubagentUsage,
-    };
+    use traits::{BudgetError, SubagentSpawnError, SubagentUsage};
 
     // ---- In-memory FileSystem (mirrors local_bash test fixture) ------------
 
@@ -815,13 +819,8 @@ mod tests {
         mgr: Arc<TaskOutputManager>,
         sink: Arc<dyn TaskStatusSink>,
     ) -> LocalAgentHandler {
-        LocalAgentHandler::new(
-            spawner,
-            Arc::new(MockInvoker),
-            Arc::new(MockBudget),
-            mgr,
-        )
-        .with_status_sink(sink)
+        LocalAgentHandler::new(spawner, Arc::new(MockInvoker), Arc::new(MockBudget), mgr)
+            .with_status_sink(sink)
     }
 
     fn local_agent_input(prompt: &str) -> TaskSpawnInput {
@@ -918,7 +917,10 @@ mod tests {
     async fn persistent_agent_rests_after_each_turn_set_and_resumes_on_message() {
         let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
         let dir = tempdir().unwrap();
-        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+        let mgr = Arc::new(TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
         let sink = Arc::new(RecordingSink::default());
         let tx_slot: Arc<StdMutex<Option<tokio::sync::mpsc::Sender<SubagentEvent>>>> =
             Arc::new(StdMutex::new(None));
@@ -929,10 +931,16 @@ mod tests {
         });
 
         // The one-shot spawner is present but UNUSED on the persistent path.
-        let handler =
-            make_handler(MockSpawner::new(CannedResult::Pending), mgr.clone(), sink.clone())
-                .with_streaming_spawner(streaming);
-        assert!(handler.supports_messages(), "streaming seam ⇒ messages supported");
+        let handler = make_handler(
+            MockSpawner::new(CannedResult::Pending),
+            mgr.clone(),
+            sink.clone(),
+        )
+        .with_streaming_spawner(streaming);
+        assert!(
+            handler.supports_messages(),
+            "streaming seam ⇒ messages supported"
+        );
 
         let ctx = make_ctx(fs);
         let handle = handler
@@ -985,7 +993,11 @@ mod tests {
             Some(TaskStatus::Running),
             "rests again after the second turn-set"
         );
-        assert_eq!(sink.rest_count(), 2, "second rest re-armed the notification");
+        assert_eq!(
+            sink.rest_count(),
+            2,
+            "second rest re-armed the notification"
+        );
 
         // ── Channel close ⇒ the agent terminates (final Completed). ──
         // Drop EVERY Sender — the one the slot still holds plus our handle.
@@ -1003,13 +1015,19 @@ mod tests {
     async fn send_message_requires_seam_and_live_agent() {
         let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
         let dir = tempdir().unwrap();
-        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+        let mgr = Arc::new(TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
         let sink = Arc::new(RecordingSink::default());
         let ctx = make_ctx(fs);
 
         // No streaming seam ⇒ one-shot ⇒ messaging unsupported.
-        let one_shot =
-            make_handler(MockSpawner::new(CannedResult::Pending), mgr.clone(), sink.clone());
+        let one_shot = make_handler(
+            MockSpawner::new(CannedResult::Pending),
+            mgr.clone(),
+            sink.clone(),
+        );
         assert!(!one_shot.supports_messages());
         assert!(matches!(
             one_shot.send_message("any", "hi".into(), ctx.clone()).await,
@@ -1038,7 +1056,10 @@ mod tests {
             1234,
         ));
         let dir = tempdir().unwrap();
-        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+        let mgr = Arc::new(TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
         let sink = Arc::new(RecordingSink::default());
 
         let handler = make_handler(spawner.clone(), mgr.clone(), sink.clone());
@@ -1048,15 +1069,25 @@ mod tests {
             .await
             .expect("spawn should succeed");
 
-        assert!(handle.task_id.starts_with('a'), "LocalAgent id prefix is 'a'");
+        assert!(
+            handle.task_id.starts_with('a'),
+            "LocalAgent id prefix is 'a'"
+        );
         assert!(handle.cleanup.is_some(), "cleanup seam is present");
 
         let status = await_terminal(&sink).await;
-        assert_eq!(status, TaskStatus::Completed, "Completed result ⇒ Completed");
+        assert_eq!(
+            status,
+            TaskStatus::Completed,
+            "Completed result ⇒ Completed"
+        );
 
         // The request carried the resolved subagent_type + prompt, empty context.
         let req = spawner.request().expect("spawner must have been called");
-        assert_eq!(req.subagent_type, "general-purpose", "default type fallback");
+        assert_eq!(
+            req.subagent_type, "general-purpose",
+            "default type fallback"
+        );
         assert_eq!(req.prompt, "do the thing");
         assert!(req.context_paths.is_empty());
 
@@ -1080,7 +1111,10 @@ mod tests {
         let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
         let spawner = MockSpawner::new(CannedResult::Failed("model refused".into()));
         let dir = tempdir().unwrap();
-        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+        let mgr = Arc::new(TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
         let sink = Arc::new(RecordingSink::default());
 
         let handler = make_handler(spawner, mgr.clone(), sink.clone());
@@ -1125,7 +1159,10 @@ mod tests {
         let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
         let spawner = MockSpawner::new(CannedResult::Err("pool full".into()));
         let dir = tempdir().unwrap();
-        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+        let mgr = Arc::new(TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
         let sink = Arc::new(RecordingSink::default());
 
         let handler = make_handler(spawner, mgr.clone(), sink.clone());

@@ -156,7 +156,12 @@ pub fn get_srt_win_path_with(
         }
     }
     let candidates = [
-        repo_root.join("vendor").join("srt-win").join("target").join("release").join("srt-win.exe"),
+        repo_root
+            .join("vendor")
+            .join("srt-win")
+            .join("target")
+            .join("release")
+            .join("srt-win.exe"),
         repo_root
             .join("dist")
             .join("vendor")
@@ -275,8 +280,13 @@ pub fn wrap_command_with_sandbox_windows(p: &WindowsWrapParams) -> WindowsInvoca
     // Generated proxy vars, TMPDIR removed (the POSIX tmp path serves no purpose
     // on Windows and breaks msys2 tools). `tmpdir` is passed empty because the
     // TMPDIR pair is immediately stripped.
-    let mut env =
-        generate_proxy_env_vars(p.http_proxy_port, p.socks_proxy_port, None, Platform::Windows, "");
+    let mut env = generate_proxy_env_vars(
+        p.http_proxy_port,
+        p.socks_proxy_port,
+        None,
+        Platform::Windows,
+        "",
+    );
     env.retain(|(k, _)| k != "TMPDIR");
 
     WindowsInvocation { argv, env }
@@ -581,9 +591,9 @@ pub fn map_install_status(status: Option<i32>, out: &str) -> InstallDecision {
     match status {
         Some(0) => InstallDecision::Succeeded,
         Some(10) => InstallDecision::Cancelled,
-        Some(11) => {
-            InstallDecision::Failed(WindowsError(format!("srt-win install: group create failed: {out}")))
-        }
+        Some(11) => InstallDecision::Failed(WindowsError(format!(
+            "srt-win install: group create failed: {out}"
+        ))),
         Some(12) => InstallDecision::Failed(WindowsError(format!(
             "srt-win install: WFP filter install failed: {out}"
         ))),
@@ -613,9 +623,9 @@ fn elevation_error(template: ElevationTemplate, status: Option<i32>, out: &str) 
     let code = status.map_or_else(|| "null".to_string(), |c| c.to_string());
     let msg = match template {
         // `deleteWindowsGroup` (`windows-sandbox-utils.js:236-237`).
-        ElevationTemplate::GroupDelete => format!(
-            "srt-win group delete failed (exit {code}). Requires elevation. Output: {out}"
-        ),
+        ElevationTemplate::GroupDelete => {
+            format!("srt-win group delete failed (exit {code}). Requires elevation. Output: {out}")
+        }
         // `createWindowsGroup` (`windows-sandbox-utils.js:254-256`).
         ElevationTemplate::GroupCreate => format!(
             "srt-win group create failed (exit {code}). \
@@ -676,7 +686,9 @@ pub fn install_windows_sandbox(
     }
     #[cfg(not(target_os = "windows"))]
     {
-        Err(WindowsError("Windows sandbox backend is Windows-only".to_string()))
+        Err(WindowsError(
+            "Windows sandbox backend is Windows-only".to_string(),
+        ))
     }
 }
 
@@ -707,13 +719,17 @@ pub fn uninstall_windows_sandbox(
             Some(0) => Ok(WindowsUninstallResult { cancelled: false }),
             other => {
                 let code = other.map_or_else(|| "null".to_string(), |c| c.to_string());
-                Err(WindowsError(format!("srt-win uninstall failed (exit {code}): {out}")))
+                Err(WindowsError(format!(
+                    "srt-win uninstall failed (exit {code}): {out}"
+                )))
             }
         }
     }
     #[cfg(not(target_os = "windows"))]
     {
-        Err(WindowsError("Windows sandbox backend is Windows-only".to_string()))
+        Err(WindowsError(
+            "Windows sandbox backend is Windows-only".to_string(),
+        ))
     }
 }
 
@@ -737,12 +753,18 @@ pub fn delete_windows_group(ref_: &WindowsGroupRef, repo_root: &Path) -> Windows
         if status == Some(0) {
             Ok(())
         } else {
-            Err(elevation_error(ElevationTemplate::GroupDelete, status, &out))
+            Err(elevation_error(
+                ElevationTemplate::GroupDelete,
+                status,
+                &out,
+            ))
         }
     }
     #[cfg(not(target_os = "windows"))]
     {
-        Err(WindowsError("Windows sandbox backend is Windows-only".to_string()))
+        Err(WindowsError(
+            "Windows sandbox backend is Windows-only".to_string(),
+        ))
     }
 }
 
@@ -768,12 +790,18 @@ pub fn create_windows_group(
         if status == Some(0) {
             Ok(())
         } else {
-            Err(elevation_error(ElevationTemplate::GroupCreate, status, &out))
+            Err(elevation_error(
+                ElevationTemplate::GroupCreate,
+                status,
+                &out,
+            ))
         }
     }
     #[cfg(not(target_os = "windows"))]
     {
-        Err(WindowsError("Windows sandbox backend is Windows-only".to_string()))
+        Err(WindowsError(
+            "Windows sandbox backend is Windows-only".to_string(),
+        ))
     }
 }
 
@@ -802,7 +830,9 @@ pub fn create_windows_wfp(opts: &WindowsCreateWfpOptions, repo_root: &Path) -> W
     }
     #[cfg(not(target_os = "windows"))]
     {
-        Err(WindowsError("Windows sandbox backend is Windows-only".to_string()))
+        Err(WindowsError(
+            "Windows sandbox backend is Windows-only".to_string(),
+        ))
     }
 }
 
@@ -828,7 +858,9 @@ pub fn windows_install_instructions(
     } else {
         format!(
             "--name {}",
-            ref_.group_name.as_deref().unwrap_or(DEFAULT_WINDOWS_GROUP_NAME)
+            ref_.group_name
+                .as_deref()
+                .unwrap_or(DEFAULT_WINDOWS_GROUP_NAME)
         )
     };
     let sl = sublayer_guid.map_or(String::new(), |g| format!(" --sublayer-guid {g}"));
@@ -882,12 +914,17 @@ pub fn evaluate_windows_dependencies(
     let gs = match group {
         Ok(gs) => gs,
         Err(e) => {
-            report.errors.push(format!("srt-win group status failed: {e}"));
+            report
+                .errors
+                .push(format!("srt-win group status failed: {e}"));
             return report;
         }
     };
     if gs.state != "ready" {
-        let sid_suffix = gs.sid.as_ref().map_or(String::new(), |s| format!(" (sid={s})"));
+        let sid_suffix = gs
+            .sid
+            .as_ref()
+            .map_or(String::new(), |s| format!(" (sid={s})"));
         report.errors.push(format!(
             "Discriminator group is {}{}. {}",
             gs.state,
@@ -903,7 +940,9 @@ pub fn evaluate_windows_dependencies(
     let ws = match wfp {
         Ok(ws) => ws,
         Err(e) => {
-            report.errors.push(format!("srt-win wfp status failed: {e}"));
+            report
+                .errors
+                .push(format!("srt-win wfp status failed: {e}"));
             return report;
         }
     };
@@ -943,7 +982,10 @@ pub fn check_windows_dependencies(
         let exe = match get_srt_win_path(repo_root) {
             Ok(p) => p,
             Err(e) => {
-                return WindowsDependencyReport { errors: vec![e.0], warnings: Vec::new() };
+                return WindowsDependencyReport {
+                    errors: vec![e.0],
+                    warnings: Vec::new(),
+                };
             }
         };
 
@@ -975,7 +1017,10 @@ pub fn check_windows_dependencies(
 
 /// Run `srt-win group status` and parse its JSON output.
 #[cfg(target_os = "windows")]
-fn run_srt_win_group_status(exe: &Path, ref_: &WindowsGroupRef) -> Result<WindowsGroupStatus, String> {
+fn run_srt_win_group_status(
+    exe: &Path,
+    ref_: &WindowsGroupRef,
+) -> Result<WindowsGroupStatus, String> {
     let out = run_srt_win(exe, &group_status_args(ref_))?;
     parse_group_status(&out).map_err(|e| e.0)
 }
@@ -1003,7 +1048,10 @@ fn run_srt_win_wfp_status(
 fn run_srt_win_capture(exe: &Path, args: &[String]) -> WindowsResult<(Option<i32>, String)> {
     use std::process::Command;
     let output = Command::new(exe).args(args).output().map_err(|e| {
-        WindowsError(format!("srt-win {}: spawn failed: {e}", args.first().map_or("", |s| s)))
+        WindowsError(format!(
+            "srt-win {}: spawn failed: {e}",
+            args.first().map_or("", |s| s)
+        ))
     })?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -1022,9 +1070,12 @@ fn install_status_result(
 ) -> WindowsResult<WindowsInstallResult> {
     let group_ref = opts.group_ref();
     let group = run_srt_win_group_status(exe, &group_ref).map_err(WindowsError)?;
-    let wfp =
-        run_srt_win_wfp_status(exe, opts.sublayer_guid.as_deref()).map_err(WindowsError)?;
-    Ok(WindowsInstallResult { group, wfp, cancelled })
+    let wfp = run_srt_win_wfp_status(exe, opts.sublayer_guid.as_deref()).map_err(WindowsError)?;
+    Ok(WindowsInstallResult {
+        group,
+        wfp,
+        cancelled,
+    })
 }
 
 /// Spawn `srt-win <args>` and return trimmed stdout, erroring on spawn failure
@@ -1032,16 +1083,21 @@ fn install_status_result(
 #[cfg(target_os = "windows")]
 fn run_srt_win(exe: &Path, args: &[String]) -> Result<String, String> {
     use std::process::Command;
-    let output = Command::new(exe)
-        .args(args)
-        .output()
-        .map_err(|e| format!("srt-win {}: spawn failed: {e}", args.first().map_or("", |s| s)))?;
+    let output = Command::new(exe).args(args).output().map_err(|e| {
+        format!(
+            "srt-win {}: spawn failed: {e}",
+            args.first().map_or("", |s| s)
+        )
+    })?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if !output.status.success() {
         let code = output.status.code().unwrap_or(-1);
         let detail = if stderr.is_empty() { &stdout } else { &stderr };
-        return Err(format!("srt-win {} exited {code}: {detail}", args.join(" ")));
+        return Err(format!(
+            "srt-win {} exited {code}: {detail}",
+            args.join(" ")
+        ));
     }
     Ok(stdout)
 }
@@ -1081,8 +1137,12 @@ mod tests {
     #[test]
     fn srt_win_path_falls_back_to_vendor() {
         let repo = Path::new("/repo");
-        let vendor =
-            repo.join("vendor").join("srt-win").join("target").join("release").join("srt-win.exe");
+        let vendor = repo
+            .join("vendor")
+            .join("srt-win")
+            .join("target")
+            .join("release")
+            .join("srt-win.exe");
         let vendor2 = vendor.clone();
         // env set but missing → skip; first candidate exists.
         let p = get_srt_win_path_with(Some("/missing/srt-win.exe"), repo, move |path| {
@@ -1103,7 +1163,8 @@ mod tests {
             .join("release")
             .join("srt-win.exe");
         let dist2 = dist.clone();
-        let p = get_srt_win_path_with(None, repo, move |path| path == dist2).expect("dist fallback");
+        let p =
+            get_srt_win_path_with(None, repo, move |path| path == dist2).expect("dist fallback");
         assert_eq!(p, dist);
     }
 
@@ -1114,9 +1175,7 @@ mod tests {
             .expect_err("none exist");
         let msg = err.0;
         assert!(msg.starts_with("srt-win.exe not found. Set SRT_WIN_PATH or build with"));
-        assert!(msg.contains(
-            "`cargo build --release --manifest-path vendor/srt-win/Cargo.toml`"
-        ));
+        assert!(msg.contains("`cargo build --release --manifest-path vendor/srt-win/Cargo.toml`"));
         // env path (truthy) listed, then both candidates.
         assert!(msg.contains("Looked in: /set/but/missing.exe, "));
         assert!(msg.contains("vendor/srt-win/target/release/srt-win.exe"));
@@ -1144,7 +1203,10 @@ mod tests {
 
     #[test]
     fn group_ref_name_override() {
-        let r = WindowsGroupRef { group_name: Some("my-group".into()), group_sid: None };
+        let r = WindowsGroupRef {
+            group_name: Some("my-group".into()),
+            group_sid: None,
+        };
         assert_eq!(group_ref_args(&r), vec!["--name", "my-group"]);
     }
 
@@ -1231,15 +1293,17 @@ mod tests {
         let mut p = base_params(None);
         p.system_root = Some("D:\\WinDir".into());
         let inv = wrap_command_with_sandbox_windows(&p);
-        assert!(inv.argv.contains(&"D:\\WinDir\\System32\\cmd.exe".to_string()));
+        assert!(inv
+            .argv
+            .contains(&"D:\\WinDir\\System32\\cmd.exe".to_string()));
     }
 
     #[test]
     fn wrap_shell_case_insensitive() {
         let inv = wrap_command_with_sandbox_windows(&base_params(Some("PowerShell")));
-        assert!(inv
-            .argv
-            .contains(&"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe".to_string()));
+        assert!(inv.argv.contains(
+            &"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe".to_string()
+        ));
     }
 
     #[test]
@@ -1263,7 +1327,10 @@ mod tests {
     #[test]
     fn wrap_group_sid_in_argv() {
         let mut p = base_params(None);
-        p.group = WindowsGroupRef { group_name: None, group_sid: Some("S-1-5-32".into()) };
+        p.group = WindowsGroupRef {
+            group_name: None,
+            group_sid: Some("S-1-5-32".into()),
+        };
         let inv = wrap_command_with_sandbox_windows(&p);
         assert_eq!(&inv.argv[1..5], &["exec", "--group-sid", "S-1-5-32", "--"]);
     }
@@ -1273,7 +1340,10 @@ mod tests {
     #[test]
     fn group_status_args_shape() {
         let r = WindowsGroupRef::default();
-        assert_eq!(group_status_args(&r), vec!["group", "status", "--name", "sandbox-runtime-net"]);
+        assert_eq!(
+            group_status_args(&r),
+            vec!["group", "status", "--name", "sandbox-runtime-net"]
+        );
     }
 
     #[test]
@@ -1297,10 +1367,9 @@ mod tests {
 
     #[test]
     fn parse_group_status_with_warning() {
-        let gs = parse_group_status(
-            r#"{"state":"created-not-on-token","warning":"log out needed"}"#,
-        )
-        .expect("parse");
+        let gs =
+            parse_group_status(r#"{"state":"created-not-on-token","warning":"log out needed"}"#)
+                .expect("parse");
         assert_eq!(gs.state, "created-not-on-token");
         assert_eq!(gs.warning.as_deref(), Some("log out needed"));
     }
@@ -1313,8 +1382,9 @@ mod tests {
 
     #[test]
     fn parse_wfp_status_sample_with_port_range() {
-        let ws = parse_wfp_status(r#"{"state":"installed","filters":3,"port_range":[60080,60089]}"#)
-            .expect("parse");
+        let ws =
+            parse_wfp_status(r#"{"state":"installed","filters":3,"port_range":[60080,60089]}"#)
+                .expect("parse");
         assert_eq!(ws.state, "installed");
         assert_eq!(ws.filters, Some(3));
         assert_eq!(ws.port_range, Some((60080, 60089)));
@@ -1345,7 +1415,11 @@ mod tests {
 
     #[test]
     fn deps_all_ready_no_errors() {
-        let gs = WindowsGroupStatus { state: "ready".into(), sid: None, warning: None };
+        let gs = WindowsGroupStatus {
+            state: "ready".into(),
+            sid: None,
+            warning: None,
+        };
         let ws = WindowsWfpStatus {
             state: "installed".into(),
             filters: Some(2),
@@ -1368,7 +1442,11 @@ mod tests {
             sid: Some("S-1-5-21-9".into()),
             warning: None,
         };
-        let ws = WindowsWfpStatus { state: "absent".into(), filters: None, port_range: None };
+        let ws = WindowsWfpStatus {
+            state: "absent".into(),
+            filters: None,
+            port_range: None,
+        };
         let r = evaluate_windows_dependencies(
             &WindowsGroupRef::default(),
             None,
@@ -1386,8 +1464,16 @@ mod tests {
 
     #[test]
     fn deps_group_ready_but_wfp_absent_emits_wfp_error() {
-        let gs = WindowsGroupStatus { state: "ready".into(), sid: None, warning: None };
-        let ws = WindowsWfpStatus { state: "absent".into(), filters: None, port_range: None };
+        let gs = WindowsGroupStatus {
+            state: "ready".into(),
+            sid: None,
+            warning: None,
+        };
+        let ws = WindowsWfpStatus {
+            state: "absent".into(),
+            filters: None,
+            port_range: None,
+        };
         let r = evaluate_windows_dependencies(
             &WindowsGroupRef::default(),
             Some("GUID-7"),
@@ -1439,7 +1525,10 @@ mod tests {
     #[test]
     fn install_args_minimal_default_group() {
         let opts = WindowsInstallOptions::default();
-        assert_eq!(install_args(&opts), vec!["install", "--name", "sandbox-runtime-net"]);
+        assert_eq!(
+            install_args(&opts),
+            vec!["install", "--name", "sandbox-runtime-net"]
+        );
     }
 
     #[test]
@@ -1482,7 +1571,10 @@ mod tests {
 
     #[test]
     fn install_args_omits_force_when_false() {
-        let opts = WindowsInstallOptions { force: false, ..Default::default() };
+        let opts = WindowsInstallOptions {
+            force: false,
+            ..Default::default()
+        };
         assert!(!install_args(&opts).contains(&"--force".to_string()));
     }
 
@@ -1498,9 +1590,18 @@ mod tests {
     #[test]
     fn group_delete_args_shape() {
         let r = WindowsGroupRef::default();
-        assert_eq!(group_delete_args(&r), vec!["group", "delete", "--name", "sandbox-runtime-net"]);
-        let r2 = WindowsGroupRef { group_name: None, group_sid: Some("S-1-5-1".into()) };
-        assert_eq!(group_delete_args(&r2), vec!["group", "delete", "--group-sid", "S-1-5-1"]);
+        assert_eq!(
+            group_delete_args(&r),
+            vec!["group", "delete", "--name", "sandbox-runtime-net"]
+        );
+        let r2 = WindowsGroupRef {
+            group_name: None,
+            group_sid: Some("S-1-5-1".into()),
+        };
+        assert_eq!(
+            group_delete_args(&r2),
+            vec!["group", "delete", "--group-sid", "S-1-5-1"]
+        );
     }
 
     #[test]
@@ -1524,7 +1625,10 @@ mod tests {
     #[test]
     fn wfp_install_args_with_and_without_flags() {
         let opts = WindowsCreateWfpOptions::default();
-        assert_eq!(wfp_install_args(&opts), vec!["wfp", "install", "--name", "sandbox-runtime-net"]);
+        assert_eq!(
+            wfp_install_args(&opts),
+            vec!["wfp", "install", "--name", "sandbox-runtime-net"]
+        );
         let opts2 = WindowsCreateWfpOptions {
             group_name: None,
             group_sid: Some("S-1-5-9".into()),
@@ -1550,33 +1654,47 @@ mod tests {
 
     #[test]
     fn map_install_status_0_succeeded() {
-        assert_eq!(map_install_status(Some(0), "ok"), InstallDecision::Succeeded);
+        assert_eq!(
+            map_install_status(Some(0), "ok"),
+            InstallDecision::Succeeded
+        );
     }
 
     #[test]
     fn map_install_status_10_cancelled() {
-        assert_eq!(map_install_status(Some(10), "user cancelled"), InstallDecision::Cancelled);
+        assert_eq!(
+            map_install_status(Some(10), "user cancelled"),
+            InstallDecision::Cancelled
+        );
     }
 
     #[test]
     fn map_install_status_11_group_create_failed() {
         let d = map_install_status(Some(11), "boom");
-        let InstallDecision::Failed(e) = d else { panic!("expected Failed: {d:?}") };
+        let InstallDecision::Failed(e) = d else {
+            panic!("expected Failed: {d:?}")
+        };
         assert_eq!(e.0, "srt-win install: group create failed: boom");
     }
 
     #[test]
     fn map_install_status_12_wfp_failed() {
         let d = map_install_status(Some(12), "wfp boom");
-        let InstallDecision::Failed(e) = d else { panic!("expected Failed: {d:?}") };
+        let InstallDecision::Failed(e) = d else {
+            panic!("expected Failed: {d:?}")
+        };
         assert_eq!(e.0, "srt-win install: WFP filter install failed: wfp boom");
     }
 
     #[test]
     fn map_install_status_13_already_exists_use_force() {
         let d = map_install_status(Some(13), "conflict");
-        let InstallDecision::Failed(e) = d else { panic!("expected Failed: {d:?}") };
-        assert!(e.0.contains("filters already exist under this sublayer with different configuration"));
+        let InstallDecision::Failed(e) = d else {
+            panic!("expected Failed: {d:?}")
+        };
+        assert!(e
+            .0
+            .contains("filters already exist under this sublayer with different configuration"));
         assert!(e.0.contains("(group SID or port range)"));
         assert!(e.0.contains("Pass {force: true} to replace"));
         assert!(e.0.ends_with("Output: conflict"));
@@ -1585,11 +1703,15 @@ mod tests {
     #[test]
     fn map_install_status_other_exit_and_signal() {
         let d = map_install_status(Some(1), "other err");
-        let InstallDecision::Failed(e) = d else { panic!("expected Failed") };
+        let InstallDecision::Failed(e) = d else {
+            panic!("expected Failed")
+        };
         assert_eq!(e.0, "srt-win install failed (exit 1): other err");
         // Signal-killed (no code) → "exit null", matching the TS null status.
         let d2 = map_install_status(None, "killed");
-        let InstallDecision::Failed(e2) = d2 else { panic!("expected Failed") };
+        let InstallDecision::Failed(e2) = d2 else {
+            panic!("expected Failed")
+        };
         assert_eq!(e2.0, "srt-win install failed (exit null): killed");
     }
 
@@ -1636,9 +1758,14 @@ mod tests {
 
     #[test]
     fn install_instructions_with_sid_and_sublayer() {
-        let r = WindowsGroupRef { group_name: None, group_sid: Some("S-1-5-21-3".into()) };
+        let r = WindowsGroupRef {
+            group_name: None,
+            group_sid: Some("S-1-5-21-3".into()),
+        };
         let txt = windows_install_instructions(&r, Some("GUID-9"), "absent");
-        assert!(txt.contains("`srt-win.exe install --group-sid S-1-5-21-3 --sublayer-guid GUID-9` directly"));
+        assert!(txt.contains(
+            "`srt-win.exe install --group-sid S-1-5-21-3 --sublayer-guid GUID-9` directly"
+        ));
     }
 
     // ── Windows-only guards on this (non-Windows) host ───────────────
@@ -1648,7 +1775,9 @@ mod tests {
     fn install_flow_is_windows_only_off_windows() {
         let repo = Path::new("/repo");
         assert_eq!(
-            install_windows_sandbox(&WindowsInstallOptions::default(), repo).unwrap_err().0,
+            install_windows_sandbox(&WindowsInstallOptions::default(), repo)
+                .unwrap_err()
+                .0,
             "Windows sandbox backend is Windows-only"
         );
         assert_eq!(
@@ -1656,15 +1785,21 @@ mod tests {
             "Windows sandbox backend is Windows-only"
         );
         assert_eq!(
-            delete_windows_group(&WindowsGroupRef::default(), repo).unwrap_err().0,
+            delete_windows_group(&WindowsGroupRef::default(), repo)
+                .unwrap_err()
+                .0,
             "Windows sandbox backend is Windows-only"
         );
         assert_eq!(
-            create_windows_group(&WindowsCreateGroupOptions::default(), repo).unwrap_err().0,
+            create_windows_group(&WindowsCreateGroupOptions::default(), repo)
+                .unwrap_err()
+                .0,
             "Windows sandbox backend is Windows-only"
         );
         assert_eq!(
-            create_windows_wfp(&WindowsCreateWfpOptions::default(), repo).unwrap_err().0,
+            create_windows_wfp(&WindowsCreateWfpOptions::default(), repo)
+                .unwrap_err()
+                .0,
             "Windows sandbox backend is Windows-only"
         );
     }
@@ -1674,7 +1809,8 @@ mod tests {
         // On this macOS host the cfg(not(windows)) branch runs.
         #[cfg(not(target_os = "windows"))]
         {
-            let r = check_windows_dependencies(&WindowsGroupRef::default(), None, Path::new("/repo"));
+            let r =
+                check_windows_dependencies(&WindowsGroupRef::default(), None, Path::new("/repo"));
             assert_eq!(r.errors, vec!["Windows sandbox backend is Windows-only"]);
         }
     }

@@ -15,7 +15,10 @@ use telemetry::AnalyticsBus;
 #[must_use]
 pub fn is_env_truthy(value: Option<&str>) -> bool {
     let Some(v) = value else { return false };
-    matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    matches!(
+        v.trim().to_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 /// Read + truthy-test an env var in one go.
@@ -141,7 +144,11 @@ mod tests {
     #[test]
     fn first_party_unless_third_party_env() {
         let _g = env_lock();
-        for var in ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"] {
+        for var in [
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+        ] {
             std::env::remove_var(var);
         }
         assert!(MigrationContext::from_env().first_party);

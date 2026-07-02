@@ -621,15 +621,13 @@ mod tests {
             },
             LlmEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::TextDelta {
-                    text: "llo".into(),
-                },
+                delta: ContentDelta::TextDelta { text: "llo".into() },
             },
             LlmEvent::ContentBlockStop { index: 0 },
             LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("end_turn".into()),
-                stop_details: None,
+                    stop_details: None,
                 },
                 usage: None,
             },
@@ -674,7 +672,7 @@ mod tests {
             LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("tool_use".into()),
-                stop_details: None,
+                    stop_details: None,
                 },
                 usage: None,
             },
@@ -720,7 +718,7 @@ mod tests {
             LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("end_turn".into()),
-                stop_details: None,
+                    stop_details: None,
                 },
                 usage: None,
             },
@@ -763,7 +761,7 @@ mod tests {
             LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("end_turn".into()),
-                stop_details: None,
+                    stop_details: None,
                 },
                 usage: Some(Usage {
                     billable_tokens: TokenUsage {

@@ -123,7 +123,11 @@ async fn detects_skill_subdirs_mcp_and_lsp_configs() {
     assert_eq!(discovered.len(), 1);
     let comps = &discovered[0].1.components;
 
-    assert_eq!(comps.skills.len(), 1, "only skills/greeter/SKILL.md is a skill");
+    assert_eq!(
+        comps.skills.len(),
+        1,
+        "only skills/greeter/SKILL.md is a skill"
+    );
     assert!(comps.skills[0].path.ends_with("greeter/SKILL.md"));
     assert!(
         comps.mcp_servers.contains_key("echo"),

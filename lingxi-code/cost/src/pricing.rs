@@ -907,10 +907,22 @@ mod tests {
     fn with_entry_adds_a_resolvable_model() {
         // A non-Anthropic provider model can be added and resolves exactly.
         let mut rates: HashMap<TokenClass, MoneyPerToken> = HashMap::new();
-        rates.insert(TokenClass::Input, MoneyPerToken { nano_usd_per_token: 270 });
-        rates.insert(TokenClass::Output, MoneyPerToken { nano_usd_per_token: 1_100 });
+        rates.insert(
+            TokenClass::Input,
+            MoneyPerToken {
+                nano_usd_per_token: 270,
+            },
+        );
+        rates.insert(
+            TokenClass::Output,
+            MoneyPerToken {
+                nano_usd_per_token: 1_100,
+            },
+        );
         let mr = ModelRef {
-            provider: ProviderId::OpenAICompatible { name: "deepseek".to_string() },
+            provider: ProviderId::OpenAICompatible {
+                name: "deepseek".to_string(),
+            },
             model: "deepseek-chat".to_string(),
         };
         let cat = PricingCatalog::builtin_reference().with_entry(ModelPricing {
@@ -924,7 +936,10 @@ mod tests {
         assert!(matches!(res, PricingResolution::ExactModel { .. }));
         assert_eq!(p.token_rates[&TokenClass::Input].nano_usd_per_token, 270);
         // Anthropic builtins survive.
-        let opus = ModelRef { provider: ProviderId::Anthropic, model: "claude-opus-4-6".to_string() };
+        let opus = ModelRef {
+            provider: ProviderId::Anthropic,
+            model: "claude-opus-4-6".to_string(),
+        };
         assert!(cat.resolve(&opus).is_ok());
     }
 
@@ -1196,7 +1211,10 @@ mod tests {
             p.token_rates[&TokenClass::CacheWrite].nano_usd_per_token,
             6_250
         );
-        assert_eq!(p.token_rates[&TokenClass::CacheRead].nano_usd_per_token, 500);
+        assert_eq!(
+            p.token_rates[&TokenClass::CacheRead].nano_usd_per_token,
+            500
+        );
     }
 
     // ----- New model entries: opus-4-7, opus-4-8, fable-5, mythos-5 -----
@@ -1212,11 +1230,23 @@ mod tests {
         assert!(matches!(res, PricingResolution::ExactModel { .. }));
         // Voe tier: $5/$25.
         assert_eq!(p.token_rates[&TokenClass::Input].nano_usd_per_token, 5_000);
-        assert_eq!(p.token_rates[&TokenClass::Output].nano_usd_per_token, 25_000);
-        assert_eq!(p.token_rates[&TokenClass::CacheWrite].nano_usd_per_token, 6_250);
-        assert_eq!(p.token_rates[&TokenClass::CacheRead].nano_usd_per_token, 500);
+        assert_eq!(
+            p.token_rates[&TokenClass::Output].nano_usd_per_token,
+            25_000
+        );
+        assert_eq!(
+            p.token_rates[&TokenClass::CacheWrite].nano_usd_per_token,
+            6_250
+        );
+        assert_eq!(
+            p.token_rates[&TokenClass::CacheRead].nano_usd_per_token,
+            500
+        );
         // 1h cache-write: Voe → $10/Mtok.
-        assert_eq!(p.token_rates[&TokenClass::CacheWrite1h].nano_usd_per_token, 10_000);
+        assert_eq!(
+            p.token_rates[&TokenClass::CacheWrite1h].nano_usd_per_token,
+            10_000
+        );
     }
 
     #[test]
@@ -1230,10 +1260,22 @@ mod tests {
         assert!(matches!(res, PricingResolution::ExactModel { .. }));
         // Voe tier: $5/$25.
         assert_eq!(p.token_rates[&TokenClass::Input].nano_usd_per_token, 5_000);
-        assert_eq!(p.token_rates[&TokenClass::Output].nano_usd_per_token, 25_000);
-        assert_eq!(p.token_rates[&TokenClass::CacheWrite].nano_usd_per_token, 6_250);
-        assert_eq!(p.token_rates[&TokenClass::CacheRead].nano_usd_per_token, 500);
-        assert_eq!(p.token_rates[&TokenClass::CacheWrite1h].nano_usd_per_token, 10_000);
+        assert_eq!(
+            p.token_rates[&TokenClass::Output].nano_usd_per_token,
+            25_000
+        );
+        assert_eq!(
+            p.token_rates[&TokenClass::CacheWrite].nano_usd_per_token,
+            6_250
+        );
+        assert_eq!(
+            p.token_rates[&TokenClass::CacheRead].nano_usd_per_token,
+            500
+        );
+        assert_eq!(
+            p.token_rates[&TokenClass::CacheWrite1h].nano_usd_per_token,
+            10_000
+        );
     }
 
     #[test]
@@ -1252,11 +1294,23 @@ mod tests {
             );
             // Ypn tier: $10/$50.
             assert_eq!(p.token_rates[&TokenClass::Input].nano_usd_per_token, 10_000);
-            assert_eq!(p.token_rates[&TokenClass::Output].nano_usd_per_token, 50_000);
-            assert_eq!(p.token_rates[&TokenClass::CacheWrite].nano_usd_per_token, 12_500);
-            assert_eq!(p.token_rates[&TokenClass::CacheRead].nano_usd_per_token, 1_000);
+            assert_eq!(
+                p.token_rates[&TokenClass::Output].nano_usd_per_token,
+                50_000
+            );
+            assert_eq!(
+                p.token_rates[&TokenClass::CacheWrite].nano_usd_per_token,
+                12_500
+            );
+            assert_eq!(
+                p.token_rates[&TokenClass::CacheRead].nano_usd_per_token,
+                1_000
+            );
             // 1h cache-write: Ypn → $20/Mtok.
-            assert_eq!(p.token_rates[&TokenClass::CacheWrite1h].nano_usd_per_token, 20_000);
+            assert_eq!(
+                p.token_rates[&TokenClass::CacheWrite1h].nano_usd_per_token,
+                20_000
+            );
         }
     }
 
@@ -1271,10 +1325,22 @@ mod tests {
         assert!(matches!(res, PricingResolution::ExactModel { .. }));
         // Ypn tier: $10/$50.
         assert_eq!(p.token_rates[&TokenClass::Input].nano_usd_per_token, 10_000);
-        assert_eq!(p.token_rates[&TokenClass::Output].nano_usd_per_token, 50_000);
-        assert_eq!(p.token_rates[&TokenClass::CacheWrite].nano_usd_per_token, 12_500);
-        assert_eq!(p.token_rates[&TokenClass::CacheRead].nano_usd_per_token, 1_000);
-        assert_eq!(p.token_rates[&TokenClass::CacheWrite1h].nano_usd_per_token, 20_000);
+        assert_eq!(
+            p.token_rates[&TokenClass::Output].nano_usd_per_token,
+            50_000
+        );
+        assert_eq!(
+            p.token_rates[&TokenClass::CacheWrite].nano_usd_per_token,
+            12_500
+        );
+        assert_eq!(
+            p.token_rates[&TokenClass::CacheRead].nano_usd_per_token,
+            1_000
+        );
+        assert_eq!(
+            p.token_rates[&TokenClass::CacheWrite1h].nano_usd_per_token,
+            20_000
+        );
     }
 
     #[test]
@@ -1300,10 +1366,22 @@ mod tests {
         };
         let p = PricingCatalog::opus_4_8_fast_pricing(&mr);
         assert_eq!(p.token_rates[&TokenClass::Input].nano_usd_per_token, 10_000);
-        assert_eq!(p.token_rates[&TokenClass::Output].nano_usd_per_token, 50_000);
-        assert_eq!(p.token_rates[&TokenClass::CacheWrite].nano_usd_per_token, 12_500);
-        assert_eq!(p.token_rates[&TokenClass::CacheRead].nano_usd_per_token, 1_000);
-        assert_eq!(p.token_rates[&TokenClass::CacheWrite1h].nano_usd_per_token, 20_000);
+        assert_eq!(
+            p.token_rates[&TokenClass::Output].nano_usd_per_token,
+            50_000
+        );
+        assert_eq!(
+            p.token_rates[&TokenClass::CacheWrite].nano_usd_per_token,
+            12_500
+        );
+        assert_eq!(
+            p.token_rates[&TokenClass::CacheRead].nano_usd_per_token,
+            1_000
+        );
+        assert_eq!(
+            p.token_rates[&TokenClass::CacheWrite1h].nano_usd_per_token,
+            20_000
+        );
     }
 
     #[test]
@@ -1314,16 +1392,34 @@ mod tests {
             model: "claude-opus-4-6".into(),
         };
         let p = PricingCatalog::opus_4_6_fast_pricing(&mr);
-        assert_eq!(p.token_rates[&TokenClass::CacheWrite1h].nano_usd_per_token, 60_000);
+        assert_eq!(
+            p.token_rates[&TokenClass::CacheWrite1h].nano_usd_per_token,
+            60_000
+        );
     }
 
     #[test]
     fn canonicalize_new_models() {
-        assert_eq!(first_party_name_to_canonical("claude-opus-4-7-20260101"), "claude-opus-4-7");
-        assert_eq!(first_party_name_to_canonical("claude-opus-4-8"), "claude-opus-4-8");
-        assert_eq!(first_party_name_to_canonical("claude-fable-5-20261001"), "claude-fable-5");
-        assert_eq!(first_party_name_to_canonical("claude-mythos-5"), "claude-mythos-5");
+        assert_eq!(
+            first_party_name_to_canonical("claude-opus-4-7-20260101"),
+            "claude-opus-4-7"
+        );
+        assert_eq!(
+            first_party_name_to_canonical("claude-opus-4-8"),
+            "claude-opus-4-8"
+        );
+        assert_eq!(
+            first_party_name_to_canonical("claude-fable-5-20261001"),
+            "claude-fable-5"
+        );
+        assert_eq!(
+            first_party_name_to_canonical("claude-mythos-5"),
+            "claude-mythos-5"
+        );
         // Must not collide with claude-opus-4 (bare).
-        assert_eq!(first_party_name_to_canonical("claude-opus-4-20250514"), "claude-opus-4");
+        assert_eq!(
+            first_party_name_to_canonical("claude-opus-4-20250514"),
+            "claude-opus-4"
+        );
     }
 }

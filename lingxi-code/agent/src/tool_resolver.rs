@@ -419,8 +419,14 @@ mod tests {
         // subagents — neither is in the disallowed set (claude `_qd`). The
         // plan-mode / agent-management tools + non-ant `Workflow` ARE.
         let set = AgentToolResolver::all_agent_disallowed_tools(false);
-        assert!(!set.contains(&"Agent"), "Agent is depth-gated, not flat-denied");
-        assert!(!set.contains(&"TaskStop"), "TaskStop is allowed to subagents");
+        assert!(
+            !set.contains(&"Agent"),
+            "Agent is depth-gated, not flat-denied"
+        );
+        assert!(
+            !set.contains(&"TaskStop"),
+            "TaskStop is allowed to subagents"
+        );
         assert!(set.contains(&"TaskOutput"));
         assert!(set.contains(&"ExitPlanMode"));
         assert!(set.contains(&"EnterPlanMode"));
@@ -449,10 +455,16 @@ mod tests {
     #[test]
     fn core_ant_omits_agent_and_workflow_keeps_rest() {
         let set = AgentToolResolver::all_agent_disallowed_tools(true);
-        assert!(!set.contains(&"Agent"), "Agent is depth-gated, never flat-denied");
+        assert!(
+            !set.contains(&"Agent"),
+            "Agent is depth-gated, never flat-denied"
+        );
         // ant: Workflow is kept (allowed for ant subagents), like Agent.
         assert!(!set.contains(&"Workflow"));
-        assert!(!set.contains(&"TaskStop"), "TaskStop is allowed to subagents");
+        assert!(
+            !set.contains(&"TaskStop"),
+            "TaskStop is allowed to subagents"
+        );
         assert!(set.contains(&"TaskOutput"));
     }
 
@@ -468,7 +480,10 @@ mod tests {
         let parent = pool(&["Read", "Bash", "Agent"]);
         let resolved = AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], 0, false);
         let got = names(&resolved);
-        assert!(got.contains(&"Agent".to_string()), "Agent kept at depth 0 (< 5)");
+        assert!(
+            got.contains(&"Agent".to_string()),
+            "Agent kept at depth 0 (< 5)"
+        );
         assert!(got.contains(&"Read".to_string()));
         assert!(got.contains(&"Bash".to_string()));
     }
@@ -501,7 +516,10 @@ mod tests {
         let resolved = AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], 0, false);
         // The plan-mode / agent-management tools are stripped; `TaskStop` is NOT
         // in the disallowed set (allowed to subagents), so it survives.
-        assert_eq!(names(&resolved), vec!["Read".to_string(), "TaskStop".to_string()]);
+        assert_eq!(
+            names(&resolved),
+            vec!["Read".to_string(), "TaskStop".to_string()]
+        );
     }
 
     #[test]
@@ -510,7 +528,8 @@ mod tests {
         // parent-pool Agent tool is kept at depth 0 (depth-gated, not flat-denied).
         let parent = pool(&["Read", "Agent"]);
         let mcp = pool(&["mcp__x__y"]);
-        let resolved = AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &mcp, 0, false);
+        let resolved =
+            AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &mcp, 0, false);
         let got = names(&resolved);
         assert!(got.contains(&"mcp__x__y".to_string()));
         assert!(got.contains(&"Agent".to_string()), "Agent kept at depth 0");
@@ -529,7 +548,11 @@ mod tests {
         let kept = AgentToolResolver::resolve(&def, &parent, &[], 0, false);
         assert_eq!(names(&kept), vec!["Read".to_string(), "Agent".to_string()]);
         let gated = AgentToolResolver::resolve(&def, &parent, &[], 5, false);
-        assert_eq!(names(&gated), vec!["Read".to_string()], "Agent gated at depth 5");
+        assert_eq!(
+            names(&gated),
+            vec!["Read".to_string()],
+            "Agent gated at depth 5"
+        );
     }
 
     // ── resolve(): per-definition disallowed_tools subtraction ──
@@ -606,7 +629,8 @@ mod tests {
             "AskUserQuestion",
             "TaskStop",
         ]);
-        let resolved = AgentToolResolver::resolve(&agent_def(exact_policy()), &parent, &[], 0, false);
+        let resolved =
+            AgentToolResolver::resolve(&agent_def(exact_policy()), &parent, &[], 0, false);
         // Child pool == parent pool, byte-for-byte (same order, same set).
         assert_eq!(names(&resolved), names(&parent));
     }

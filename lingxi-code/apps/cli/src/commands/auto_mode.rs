@@ -14,14 +14,13 @@
 //!   to merge — the effective config equals the defaults. This is byte-
 //!   identical to what claude prints on a machine with no auto-mode settings
 //!   configured (verified against the installed 2.1.191 binary).
-//! * `critique` — AI feedback on custom rules. NOT IMPLEMENTED: it needs an
-//!   LLM turn, which this surface never starts. Parsed faithfully (incl.
-//!   `--model`), then prints a not-yet-implemented notice and exits
-//!   `NOT_IMPLEMENTED`.
+//! * `critique` — local structural feedback on the effective auto-mode rules.
+//!   Claude's command labels this as AI feedback; LingXi keeps the command
+//!   offline in the CLI layer and reports deterministic issues instead.
 
 use clap::{Args, Subcommand};
 
-use crate::exit_codes::{NOT_IMPLEMENTED, RUNTIME_ERROR, SUCCESS};
+use crate::exit_codes::{RUNTIME_ERROR, SUCCESS};
 
 /// The default auto-mode rule set, embedded verbatim from claude 2.1.191's
 /// `auto-mode defaults` output. Parsed + re-serialised at runtime so the
@@ -132,10 +131,7 @@ pub async fn run(cli: &Cli) -> i32 {
         }
         Some(Sub::Defaults) => print_rules(),
         Some(Sub::Config) => print_rules(),
-        Some(Sub::Critique(_args)) => {
-            eprintln!("lingxi-cli auto-mode critique: not yet implemented");
-            NOT_IMPLEMENTED
-        }
+        Some(Sub::Critique(args)) => critique_rules(args),
     }
 }
 
@@ -145,12 +141,8 @@ pub async fn run(cli: &Cli) -> i32 {
 /// schema there are no overrides to merge, so the effective config equals the
 /// defaults — byte-identical to claude on a clean machine.
 fn print_rules() -> i32 {
-    let value: serde_json::Value = match serde_json::from_str(DEFAULT_RULES_JSON) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("lingxi-cli auto-mode: failed to parse embedded defaults: {e}");
-            return RUNTIME_ERROR;
-        }
+    let Some(value) = default_rules_value() else {
+        return RUNTIME_ERROR;
     };
     match serde_json::to_string_pretty(&value) {
         Ok(s) => {
@@ -164,6 +156,32 @@ fn print_rules() -> i32 {
     }
 }
 
+fn default_rules_value() -> Option<serde_json::Value> {
+    let value: serde_json::Value = match serde_json::from_str(DEFAULT_RULES_JSON) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("lingxi-cli auto-mode: failed to parse embedded defaults: {e}");
+            return None;
+        }
+    };
+    Some(value)
+}
+
+fn critique_rules(args: &CritiqueArgs) -> i32 {
+    let Some(value) = default_rules_value() else {
+        return RUNTIME_ERROR;
+    };
+    let findings = permission::classifier::critique_rules(&value);
+    if let Some(model) = args.model.as_deref() {
+        println!("Model override: {model}");
+    }
+    println!("Auto-mode critique");
+    for finding in findings {
+        println!("- {finding}");
+    }
+    SUCCESS
+}
+
 /// One-line hint for a bare `auto-mode` invocation (defensive — clap normally
 /// prints full help first).
 fn print_help_hint() {
@@ -173,4 +191,35 @@ fn print_help_hint() {
     eprintln!("  config     Print the effective auto mode config as JSON");
     eprintln!("  critique   Get AI feedback on your custom auto mode rules");
     eprintln!("  defaults   Print the default auto mode rules as JSON");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_rules_parse() {
+        let value = default_rules_value().expect("embedded defaults parse");
+        assert!(value
+            .get("allow")
+            .and_then(serde_json::Value::as_array)
+            .is_some());
+        assert!(value
+            .get("soft_deny")
+            .and_then(serde_json::Value::as_array)
+            .is_some());
+        assert!(value
+            .get("hard_deny")
+            .and_then(serde_json::Value::as_array)
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn critique_succeeds() {
+        let code = run(&Cli {
+            command: Some(Sub::Critique(CritiqueArgs { model: None })),
+        })
+        .await;
+        assert_eq!(code, SUCCESS);
+    }
 }

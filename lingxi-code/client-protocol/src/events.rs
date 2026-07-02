@@ -46,7 +46,6 @@ pub enum ClientEvent {
     },
 
     // ── Live-turn streaming events (F1-03) ────────────────────────────────
-
     /// Plain assistant text. 1:1 `OutputStream::emit_text`.
     TextDelta {
         /// The text payload emitted.
@@ -141,7 +140,6 @@ pub enum ClientEvent {
     // payload structs live in `crate::listings`. Name reconciliation (plan
     // line 149): the design spec §4.1 says `AgentList`, but the WIRE name is
     // `Agents`.
-
     /// Session lifecycle: a session began on this connection. Carries the
     /// `session_id` as a CONNECTION ATTRIBUTE (decision §0.5) — it travels on
     /// this event, never as a per-live-command param.
@@ -286,7 +284,6 @@ pub enum ClientEvent {
     },
 
     // ── Live thinking/usage (§0.7 follow-up) + reserved (§0.9) ────────────
-
     /// Coordinator/team status. **LIVE-FED** (§0.9 coordinator-activation):
     /// a coordinator-mode desktop session constructs one `TeamRegistry` per
     /// `build()` and a `CoordinatorStatusSink` pushes the current

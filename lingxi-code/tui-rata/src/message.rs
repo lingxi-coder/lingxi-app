@@ -2,30 +2,36 @@
 //!
 //! This is the `tui-rata` side of message rendering: it consumes the neutral
 //! `tui_core` message model + render primitives and produces `StyledLine`s that
-//! [`crate::render::styled_line_to_ratatui`] turns into ratatui text. The core
-//! variants (user/assistant text, prompt/command/bash echoes, system text and
-//! errors, tool use/result/output/folds) live in the per-variant history cells
-//! under [`crate::history_cell`] — [`render_message`] delegates to those same
+//! [`crate::render::styled_line_to_ratatui`] turns into ratatui text. Every
+//! variant renders through the per-variant history cells under
+//! [`crate::history_cell`] — [`render_message`] delegates to those same
 //! renderers, so this dispatcher stays the line-identity oracle across every
-//! variant. The remaining variants (thinking/team/advisor/plan/attachment/
-//! image) are still rendered inline here and move into cells in the second
-//! message-cells phase.
+//! variant (the `ported_cells_render_line_identical_to_render_message` test
+//! locks it against [`crate::history_cell::cell_for_message`]).
 
-use tui_core::message::{AdvisorKind, PlanApprovalKind, RenderedMessage, UserTeammateKind};
-use tui_core::render::{agent_color_from_name, SpanStyle, StyledLine, StyledSpan};
+use tui_core::message::RenderedMessage;
+use tui_core::render::StyledLine;
 use tui_core::theme::Theme;
 
+use crate::history_cell::attachments::{attachment_lines, resource_update_lines, user_image_lines};
 use crate::history_cell::message::{
-    assistant_lines, user_bash_input_lines, user_command_lines, user_prompt_lines, user_text_lines,
+    advisor_lines, assistant_lines, redacted_thinking_lines, thinking_lines, user_bash_input_lines,
+    user_command_lines, user_memory_input_lines, user_plan_lines, user_prompt_lines,
+    user_text_lines,
 };
 use crate::history_cell::system::{
-    rate_limit_lines, system_api_error_lines, system_text_lines, system_text_rich_lines,
+    compact_boundary_lines, rate_limit_lines, system_api_error_lines, system_text_lines,
+    system_text_rich_lines,
+};
+use crate::history_cell::team::{
+    agent_notification_lines, channel_message_lines, hook_progress_lines, plan_approval_lines,
+    shutdown_lines, task_assignment_lines, teammate_lines,
 };
 use crate::history_cell::tool::{
     collapsed_read_search_lines, command_output_lines, group_tool_use_lines, tool_result_lines,
     tool_use_lines,
 };
-use crate::history_cell::{colored_lines, plain_lines, truncate, DEFAULT_WIDTH};
+use crate::history_cell::DEFAULT_WIDTH;
 
 /// Render one message into styled lines for the scrollback. Every variant has
 /// an explicit arm (no wildcard): visible variants produce lines; the only
@@ -76,23 +82,15 @@ pub fn render_message(
             args,
             is_skill,
         } => user_command_lines(command, args, *is_skill),
-        RenderedMessage::UserMemoryInput { input } => {
-            colored_lines(&format!("# {input}"), theme.dim)
-        }
-        RenderedMessage::UserPlan { plan_content } => plain_lines(plan_content),
+        RenderedMessage::UserMemoryInput { input } => user_memory_input_lines(input, theme),
+        RenderedMessage::UserPlan { plan_content } => user_plan_lines(plan_content),
         RenderedMessage::UserPrompt { text } => user_prompt_lines(text),
-        RenderedMessage::AgentNotification { summary, .. } => colored_lines(summary, theme.dim),
-        RenderedMessage::CompactBoundary { .. } => {
-            colored_lines("✻ Conversation compacted (ctrl+o for history)", theme.dim)
+        RenderedMessage::AgentNotification { summary, .. } => {
+            agent_notification_lines(summary, theme)
         }
+        RenderedMessage::CompactBoundary { .. } => compact_boundary_lines(theme),
         RenderedMessage::AssistantThinking { thinking, .. } => {
-            if verbose {
-                let mut out = colored_lines("✻ Thinking…", theme.dim);
-                out.extend(colored_lines(thinking, theme.dim));
-                out
-            } else {
-                colored_lines("✻ Thinking (ctrl+o to expand)", theme.dim)
-            }
+            thinking_lines(thinking, verbose, theme)
         }
         RenderedMessage::SystemApiError {
             error,
@@ -104,206 +102,46 @@ pub fn render_message(
             rate_limit_lines(text, upsell.as_deref(), theme)
         }
         RenderedMessage::Shutdown { from, reason, .. } => {
-            let msg = match reason {
-                Some(r) => format!("{from} shut down: {r}"),
-                None => format!("{from} shut down"),
-            };
-            colored_lines(&msg, theme.dim)
+            shutdown_lines(from, reason.as_deref(), theme)
         }
         RenderedMessage::TaskAssignment {
             subject,
             description,
             ..
-        } => {
-            let mut out = vec![StyledLine::plain(format!("Task: {subject}"))];
-            if let Some(d) = description {
-                out.extend(colored_lines(d, theme.dim));
-            }
-            out
-        }
+        } => task_assignment_lines(subject, description.as_deref(), theme),
         RenderedMessage::ChannelMessage {
             server,
             user,
             content,
-        } => {
-            let who = user.as_deref().unwrap_or("system");
-            vec![StyledLine::plain(format!("[{server}] {who}: {content}"))]
-        }
+        } => channel_message_lines(server, user.as_deref(), content),
         RenderedMessage::UserTeammate {
             display_name,
             color,
             kind,
         } => teammate_lines(display_name, color.as_deref(), kind, theme),
         RenderedMessage::HookProgress { event, count, .. } => {
-            colored_lines(&format!("hook: {event} (×{count})"), theme.dim)
+            hook_progress_lines(event, *count, theme)
         }
-        RenderedMessage::UserResourceUpdate { updates } => updates
-            .iter()
-            .map(|(server, target, _)| {
-                StyledLine::plain(format!("resource updated: {server}/{target}"))
-            })
-            .collect(),
+        RenderedMessage::UserResourceUpdate { updates } => resource_update_lines(updates),
         RenderedMessage::UserImage {
             image_id, metadata, ..
-        } => {
-            let head = match image_id {
-                Some(n) => format!("[Image #{n}]"),
-                None => "[Image]".to_string(),
-            };
-            let text = match metadata {
-                Some(m) => format!("{head} ({m})"),
-                None => head,
-            };
-            vec![StyledLine::plain(text)]
-        }
+        } => user_image_lines(*image_id, metadata.as_deref()),
         RenderedMessage::GroupedToolUse { tool, entries, .. } => {
             group_tool_use_lines(tool, entries, theme, verbose)
         }
         RenderedMessage::CollapsedReadSearch { entries, .. } => {
             collapsed_read_search_lines(entries, theme, verbose)
         }
-        RenderedMessage::Attachment { attachment } => attachment_lines(attachment),
+        RenderedMessage::Attachment { attachment } => attachment_lines(attachment, theme),
         RenderedMessage::Advisor { kind, verbose } => advisor_lines(kind, *verbose, theme),
         RenderedMessage::PlanApproval { kind } => plan_approval_lines(kind, theme),
-        RenderedMessage::AssistantRedactedThinking => colored_lines("✻ Thinking…", theme.dim),
-    }
-}
-
-/// A one-line summary of a user attachment (directory listing / file read /
-/// generic fallback).
-fn attachment_lines(attachment: &tui_core::message::Attachment) -> Vec<StyledLine> {
-    use tui_core::message::Attachment;
-    let text = match attachment {
-        Attachment::Directory { display_path } => format!("Listed directory {display_path}/"),
-        Attachment::File { display_path, .. } => format!("Read {display_path}"),
-        Attachment::CompactFileReference { display_path }
-        | Attachment::NestedMemory { display_path } => format!("Loaded {display_path}"),
-        _ => "[attachment]".to_string(),
-    };
-    vec![StyledLine::plain(text)]
-}
-
-/// A teammate message: an agent-colored `@name` header then the kind-specific
-/// body — a completed-task line (success) or a plain note (summary + optional
-/// content). `color` is the teammate's claude-code color name.
-fn teammate_lines(
-    display_name: &str,
-    color: Option<&str>,
-    kind: &UserTeammateKind,
-    theme: &Theme,
-) -> Vec<StyledLine> {
-    let name_color = agent_color_from_name(color.unwrap_or(""));
-    let name_span = |text: String| {
-        StyledSpan::styled(
-            text,
-            SpanStyle {
-                fg: name_color,
-                ..SpanStyle::default()
-            },
-        )
-    };
-    match kind {
-        UserTeammateKind::TaskCompleted {
-            task_id,
-            task_subject,
-        } => {
-            let subject = task_subject
-                .as_deref()
-                .map(|s| format!(" ({s})"))
-                .unwrap_or_default();
-            vec![StyledLine {
-                spans: vec![
-                    name_span(format!("@{display_name}: ")),
-                    StyledSpan::styled(
-                        format!("✓ Completed task #{task_id}{subject}"),
-                        SpanStyle {
-                            fg: theme.success,
-                            ..SpanStyle::default()
-                        },
-                    ),
-                ],
-            }]
-        }
-        UserTeammateKind::Note {
-            summary,
-            content,
-            is_transcript_mode,
-        } => {
-            let mut out = vec![StyledLine {
-                spans: vec![name_span(format!("@{display_name}"))],
-            }];
-            if let Some(s) = summary {
-                out.extend(colored_lines(s, theme.dim));
-            }
-            if *is_transcript_mode {
-                if let Some(c) = content {
-                    out.extend(colored_lines(c, theme.dim));
-                }
-            }
-            out
-        }
-    }
-}
-
-/// An advisor block: a `✻ Advisor…` marker line whose text depends on the kind.
-fn advisor_lines(kind: &AdvisorKind, verbose: bool, theme: &Theme) -> Vec<StyledLine> {
-    match kind {
-        AdvisorKind::ServerToolUse { model, input } => {
-            let mut header = "✻ Advising".to_string();
-            if let Some(m) = model {
-                header.push_str(&format!(" ({m})"));
-            }
-            let mut out = colored_lines(&header, theme.dim);
-            if let Some(i) = input {
-                out.extend(colored_lines(&format!("  {}", truncate(i, 100)), theme.dim));
-            }
-            out
-        }
-        AdvisorKind::Result { text } => {
-            let mut out = colored_lines("✻ Advisor", theme.dim);
-            let body = if verbose {
-                text.clone()
-            } else {
-                truncate(text, 100)
-            };
-            out.extend(colored_lines(&format!("  {body}"), theme.dim));
-            out
-        }
-        AdvisorKind::RedactedResult => colored_lines("✻ Advisor", theme.dim),
-        AdvisorKind::Error { error_code } => colored_lines(
-            &format!("✻ Advisor unavailable ({error_code})"),
-            theme.error,
-        ),
-    }
-}
-
-/// A plan-approval request/response line.
-fn plan_approval_lines(kind: &PlanApprovalKind, theme: &Theme) -> Vec<StyledLine> {
-    match kind {
-        PlanApprovalKind::Request {
-            from, plan_content, ..
-        } => {
-            let mut out =
-                colored_lines(&format!("Plan approval requested by {from}"), theme.warning);
-            out.extend(plain_lines(plan_content));
-            out
-        }
-        PlanApprovalKind::Approved { name } => {
-            colored_lines(&format!("✓ Plan approved by {name}"), theme.success)
-        }
-        PlanApprovalKind::Rejected { name, feedback } => {
-            let mut out = colored_lines(&format!("✗ Plan rejected by {name}"), theme.error);
-            if let Some(f) = feedback {
-                out.extend(colored_lines(&format!("  {f}"), theme.dim));
-            }
-            out
-        }
+        RenderedMessage::AssistantRedactedThinking => redacted_thinking_lines(theme),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use tui_core::message::SystemLevel;
+    use tui_core::message::{AdvisorKind, PlanApprovalKind, SystemLevel};
 
     use super::*;
     use crate::history_cell::message::ASSISTANT_MARKER;
@@ -1174,14 +1012,13 @@ mod tests {
         );
     }
 
-    // Confirmed failing on 2026-07-02 (pre-refactor baseline). The message
-    // -cells split fixed `UserCommand { is_skill: true }` (now `Skill(name)`);
-    // the one remaining blocker is the `attachment_lines` sub-wildcard, which
-    // still flattens PdfReference/SelectedLines/McpResource/PlanFileReference/
-    // InvokedSkills to "[attachment]". The second message-cells phase replaces
-    // that fallback and removes this ignore.
+    // Failed from Phase 0 (2026-07-02) until the message-cells phases ported
+    // every variant: `UserCommand { is_skill: true }` now renders
+    // `Skill(name)`, and the `attachment_lines` sub-wildcard that flattened
+    // PdfReference/SelectedLines/McpResource/PlanFileReference/InvokedSkills
+    // to "[attachment]" was replaced by the explicit per-kind renderer in
+    // `history_cell::attachments`.
     #[test]
-    #[ignore = "attachment sub-wildcard hides variants; un-ignored in message-cells II"]
     fn every_rendered_message_variant_renders_visibly_or_is_documented_hidden() {
         let theme = Theme::dark();
         let mut failures = Vec::new();

@@ -1,5 +1,5 @@
 //! Per-variant history cells for the system-side messages: plain/level-aware
-//! system text, API errors, and rate-limit notices.
+//! system text, API errors, rate-limit notices, and the compaction boundary.
 //!
 //! Split out of `message.rs` in the message-cells phase (plan Phase 9). The
 //! styled-line renderers here are the single source for these variants: the
@@ -53,6 +53,12 @@ pub(crate) fn rate_limit_lines(text: &str, upsell: Option<&str>, theme: &Theme) 
         out.extend(colored_lines(upsell, theme.dim));
     }
     out
+}
+
+/// Compaction boundary marker. The before/after counts are intentionally not
+/// rendered (claude-code parity — the boundary line carries no numbers).
+pub(crate) fn compact_boundary_lines(theme: &Theme) -> Vec<StyledLine> {
+    colored_lines("✻ Conversation compacted (ctrl+o for history)", theme.dim)
 }
 
 /// [`RenderedMessage::SystemText`](tui_core::message::RenderedMessage::SystemText)
@@ -166,6 +172,18 @@ impl StyledCell for RateLimitCell {
     }
 }
 
+/// [`RenderedMessage::CompactBoundary`](tui_core::message::RenderedMessage::CompactBoundary)
+/// — the dim compaction marker line. The message's before/after counts are
+/// intentionally not rendered (claude-code parity).
+#[derive(Debug)]
+pub struct CompactBoundaryCell;
+
+impl StyledCell for CompactBoundaryCell {
+    fn styled_lines(&self, _width: usize, theme: &Theme, _verbose: bool) -> Vec<StyledLine> {
+        compact_boundary_lines(theme)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{HistoryCell, RenderMode};
@@ -241,5 +259,15 @@ mod tests {
         // Without an upsell it is a single line.
         let bare = RateLimitCell::new("Rate limited".to_string(), None);
         assert_eq!(plain(&bare), vec!["Rate limited".to_string()]);
+    }
+
+    #[test]
+    fn compact_boundary_cell_renders_dim_marker_without_counts() {
+        let cell = CompactBoundaryCell;
+        assert_eq!(
+            plain(&cell),
+            vec!["✻ Conversation compacted (ctrl+o for history)".to_string()]
+        );
+        assert_eq!(first_fg(&cell), Some(rata(Theme::dark().dim)));
     }
 }

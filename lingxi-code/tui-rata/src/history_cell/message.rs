@@ -1,17 +1,19 @@
 //! Per-variant history cells for the plain conversation messages: user text,
-//! assistant text (markdown), and the user prompt/command/bash-input echoes.
+//! assistant text (markdown), thinking blocks, advisor blocks, plan/memory
+//! echoes, and the user prompt/command/bash-input echoes.
 //!
-//! Split out of `message.rs` in the message-cells phase (plan Phase 9). The
+//! Split out of `message.rs` in the message-cells phases (plan Phase 9). The
 //! styled-line renderers here are the single source for these variants: the
 //! cells consume them through [`StyledCell`], and the legacy
 //! [`crate::message::render_message`] dispatcher delegates to them so its
 //! output stays line-identical to the pre-split renderer.
 
+use tui_core::message::AdvisorKind;
 use tui_core::render::markdown::{render_with_width, MarkdownTheme};
 use tui_core::render::{StyleColor, StyledLine, StyledSpan};
 use tui_core::theme::{Theme, ThemeName};
 
-use super::{colored_lines, plain_lines, StyledCell};
+use super::{colored_lines, plain_lines, truncate, StyledCell};
 
 /// Assistant dot marker (iocraft `assistant_text::MARKER` parity): `⏺ `
 /// (U+23FA) on macOS — renders as the reddish record glyph — `● ` (U+25CF)
@@ -83,6 +85,67 @@ pub(crate) fn user_command_lines(command: &str, args: &str, is_skill: bool) -> V
 /// Bash-mode command echo: dim `! {command}`.
 pub(crate) fn user_bash_input_lines(command: &str, theme: &Theme) -> Vec<StyledLine> {
     colored_lines(&format!("! {command}"), theme.dim)
+}
+
+/// Assistant thinking block: collapsed → the dim expand hint; verbose → the
+/// dim `✻ Thinking…` marker + the thinking body.
+pub(crate) fn thinking_lines(thinking: &str, verbose: bool, theme: &Theme) -> Vec<StyledLine> {
+    if verbose {
+        let mut out = colored_lines("✻ Thinking…", theme.dim);
+        out.extend(colored_lines(thinking, theme.dim));
+        out
+    } else {
+        colored_lines("✻ Thinking (ctrl+o to expand)", theme.dim)
+    }
+}
+
+/// Redacted thinking: the bare dim `✻ Thinking…` marker (no expandable body).
+pub(crate) fn redacted_thinking_lines(theme: &Theme) -> Vec<StyledLine> {
+    colored_lines("✻ Thinking…", theme.dim)
+}
+
+/// An advisor block: a `✻ Advisor…` marker line whose text depends on the
+/// kind. `verbose` is the MESSAGE-level flag baked at construction (claude
+/// -code transcript mode), not the Ctrl-O render toggle.
+pub(crate) fn advisor_lines(kind: &AdvisorKind, verbose: bool, theme: &Theme) -> Vec<StyledLine> {
+    match kind {
+        AdvisorKind::ServerToolUse { model, input } => {
+            let mut header = "✻ Advising".to_string();
+            if let Some(m) = model {
+                header.push_str(&format!(" ({m})"));
+            }
+            let mut out = colored_lines(&header, theme.dim);
+            if let Some(i) = input {
+                out.extend(colored_lines(&format!("  {}", truncate(i, 100)), theme.dim));
+            }
+            out
+        }
+        AdvisorKind::Result { text } => {
+            let mut out = colored_lines("✻ Advisor", theme.dim);
+            let body = if verbose {
+                text.clone()
+            } else {
+                truncate(text, 100)
+            };
+            out.extend(colored_lines(&format!("  {body}"), theme.dim));
+            out
+        }
+        AdvisorKind::RedactedResult => colored_lines("✻ Advisor", theme.dim),
+        AdvisorKind::Error { error_code } => colored_lines(
+            &format!("✻ Advisor unavailable ({error_code})"),
+            theme.error,
+        ),
+    }
+}
+
+/// Plan-mode plan body, echoed as plain lines.
+pub(crate) fn user_plan_lines(plan_content: &str) -> Vec<StyledLine> {
+    plain_lines(plan_content)
+}
+
+/// Memory write echo: dim `# {input}`.
+pub(crate) fn user_memory_input_lines(input: &str, theme: &Theme) -> Vec<StyledLine> {
+    colored_lines(&format!("# {input}"), theme.dim)
 }
 
 /// [`RenderedMessage::UserText`](tui_core::message::RenderedMessage::UserText)
@@ -233,6 +296,111 @@ impl StyledCell for UserBashInputCell {
     }
 }
 
+/// [`RenderedMessage::AssistantThinking`](tui_core::message::RenderedMessage::AssistantThinking)
+/// — collapsed expand hint / verbose body, driven by the render mode's
+/// verbose toggle (Ctrl-O), not the message's own `expanded` flag (pre-split
+/// behavior: the dispatcher ignores that flag).
+#[derive(Debug)]
+pub struct ThinkingCell {
+    thinking: String,
+}
+
+impl ThinkingCell {
+    /// Wrap the thinking text.
+    #[must_use]
+    pub fn new(thinking: String) -> Self {
+        Self { thinking }
+    }
+
+    /// The thinking body text.
+    #[must_use]
+    pub fn thinking(&self) -> &str {
+        &self.thinking
+    }
+}
+
+impl StyledCell for ThinkingCell {
+    fn styled_lines(&self, _width: usize, theme: &Theme, verbose: bool) -> Vec<StyledLine> {
+        thinking_lines(&self.thinking, verbose, theme)
+    }
+}
+
+/// [`RenderedMessage::AssistantRedactedThinking`](tui_core::message::RenderedMessage::AssistantRedactedThinking)
+/// — the bare dim `✻ Thinking…` marker.
+#[derive(Debug)]
+pub struct RedactedThinkingCell;
+
+impl StyledCell for RedactedThinkingCell {
+    fn styled_lines(&self, _width: usize, theme: &Theme, _verbose: bool) -> Vec<StyledLine> {
+        redacted_thinking_lines(theme)
+    }
+}
+
+/// [`RenderedMessage::Advisor`](tui_core::message::RenderedMessage::Advisor)
+/// — the `✻ Advisor…` block. Expansion follows the message's own baked
+/// `verbose` flag, not the Ctrl-O render toggle (pre-split behavior).
+#[derive(Debug)]
+pub struct AdvisorCell {
+    kind: AdvisorKind,
+    verbose: bool,
+}
+
+impl AdvisorCell {
+    /// Wrap an advisor block (`verbose` is the message-level flag).
+    #[must_use]
+    pub fn new(kind: AdvisorKind, verbose: bool) -> Self {
+        Self { kind, verbose }
+    }
+}
+
+impl StyledCell for AdvisorCell {
+    fn styled_lines(&self, _width: usize, theme: &Theme, _verbose: bool) -> Vec<StyledLine> {
+        advisor_lines(&self.kind, self.verbose, theme)
+    }
+}
+
+/// [`RenderedMessage::UserPlan`](tui_core::message::RenderedMessage::UserPlan)
+/// — the plan-mode plan body echoed as plain lines.
+#[derive(Debug)]
+pub struct UserPlanCell {
+    plan_content: String,
+}
+
+impl UserPlanCell {
+    /// Wrap the plan content.
+    #[must_use]
+    pub fn new(plan_content: String) -> Self {
+        Self { plan_content }
+    }
+}
+
+impl StyledCell for UserPlanCell {
+    fn styled_lines(&self, _width: usize, _theme: &Theme, _verbose: bool) -> Vec<StyledLine> {
+        user_plan_lines(&self.plan_content)
+    }
+}
+
+/// [`RenderedMessage::UserMemoryInput`](tui_core::message::RenderedMessage::UserMemoryInput)
+/// — the dim `# {input}` memory-write echo.
+#[derive(Debug)]
+pub struct UserMemoryInputCell {
+    input: String,
+}
+
+impl UserMemoryInputCell {
+    /// Wrap the memory input text.
+    #[must_use]
+    pub fn new(input: String) -> Self {
+        Self { input }
+    }
+}
+
+impl StyledCell for UserMemoryInputCell {
+    fn styled_lines(&self, _width: usize, theme: &Theme, _verbose: bool) -> Vec<StyledLine> {
+        user_memory_input_lines(&self.input, theme)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{HistoryCell, RenderMode};
@@ -337,6 +505,137 @@ mod tests {
             styled[0].spans[0].style.fg,
             Some(crate::style_adapter::to_ratatui(Theme::dark().dim)),
             "dim color preserved"
+        );
+    }
+
+    #[test]
+    fn thinking_cell_collapses_by_default_and_expands_with_render_verbose() {
+        let cell = ThinkingCell::new("step one\nstep two".to_string());
+        assert_eq!(cell.thinking(), "step one\nstep two");
+        assert_eq!(
+            plain(&cell),
+            vec!["✻ Thinking (ctrl+o to expand)".to_string()],
+            "collapsed shows only the hint"
+        );
+        let expanded: Vec<String> = cell
+            .display_lines(
+                80,
+                &Theme::dark(),
+                RenderMode {
+                    raw: false,
+                    verbose: true,
+                },
+            )
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            expanded,
+            vec![
+                "✻ Thinking…".to_string(),
+                "step one".to_string(),
+                "step two".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn redacted_thinking_cell_renders_the_bare_dim_marker() {
+        let cell = RedactedThinkingCell;
+        assert_eq!(plain(&cell), vec!["✻ Thinking…".to_string()]);
+        let styled = cell.display_lines(80, &Theme::dark(), RenderMode::default());
+        assert_eq!(
+            styled[0].spans[0].style.fg,
+            Some(crate::style_adapter::to_ratatui(Theme::dark().dim))
+        );
+        // No expandable body: verbose renders the same single line.
+        let verbose = cell.display_lines(
+            80,
+            &Theme::dark(),
+            RenderMode {
+                raw: false,
+                verbose: true,
+            },
+        );
+        assert_eq!(verbose.len(), 1);
+    }
+
+    #[test]
+    fn advisor_cell_renders_every_kind() {
+        let server = AdvisorCell::new(
+            AdvisorKind::ServerToolUse {
+                model: Some("gpt-5".to_string()),
+                input: Some("review diff".to_string()),
+            },
+            false,
+        );
+        assert_eq!(
+            plain(&server),
+            vec![
+                "✻ Advising (gpt-5)".to_string(),
+                "  review diff".to_string()
+            ]
+        );
+
+        let redacted = AdvisorCell::new(AdvisorKind::RedactedResult, false);
+        assert_eq!(plain(&redacted), vec!["✻ Advisor".to_string()]);
+
+        let error = AdvisorCell::new(
+            AdvisorKind::Error {
+                error_code: "503".to_string(),
+            },
+            false,
+        );
+        assert_eq!(
+            plain(&error),
+            vec!["✻ Advisor unavailable (503)".to_string()]
+        );
+        let styled = error.display_lines(80, &Theme::dark(), RenderMode::default());
+        assert_eq!(
+            styled[0].spans[0].style.fg,
+            Some(crate::style_adapter::to_ratatui(Theme::dark().error))
+        );
+    }
+
+    #[test]
+    fn advisor_cell_expansion_follows_the_message_flag_not_render_verbose() {
+        let long = "x".repeat(150);
+        let kind = AdvisorKind::Result { text: long.clone() };
+
+        // Message flag off: truncated to 100 chars even when the render mode
+        // is verbose (pre-split dispatcher behavior).
+        let collapsed = AdvisorCell::new(kind.clone(), false);
+        let render_verbose = RenderMode {
+            raw: false,
+            verbose: true,
+        };
+        let body = collapsed.display_lines(80, &Theme::dark(), render_verbose)[1].to_string();
+        assert!(body.ends_with('…'), "truncated: {body:?}");
+        assert!(body.len() < long.len());
+
+        // Message flag on: the full text, even in a non-verbose render.
+        let expanded = AdvisorCell::new(kind, true);
+        let body = expanded.display_lines(80, &Theme::dark(), RenderMode::default())[1].to_string();
+        assert_eq!(body, format!("  {long}"));
+    }
+
+    #[test]
+    fn user_plan_cell_renders_plain_plan_lines() {
+        let cell = UserPlanCell::new("step 1\nstep 2".to_string());
+        assert_eq!(
+            plain(&cell),
+            vec!["step 1".to_string(), "step 2".to_string()]
+        );
+    }
+
+    #[test]
+    fn user_memory_input_cell_renders_dim_hash_line() {
+        let cell = UserMemoryInputCell::new("remember this".to_string());
+        assert_eq!(plain(&cell), vec!["# remember this".to_string()]);
+        let styled = cell.display_lines(80, &Theme::dark(), RenderMode::default());
+        assert_eq!(
+            styled[0].spans[0].style.fg,
+            Some(crate::style_adapter::to_ratatui(Theme::dark().dim))
         );
     }
 }

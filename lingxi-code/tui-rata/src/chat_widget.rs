@@ -582,7 +582,7 @@ mod tests {
     use super::*;
     use crate::bottom_pane::model_picker_view::ModelPickerView;
     use crate::bottom_pane::{BottomPaneView, ViewOutcome};
-    use crate::history_cell::MessageHistoryCell;
+    use crate::history_cell::attachments::UserImageCell;
     use crate::session::ModelRow;
     use crate::terminal::test_support::TestWriteBackend;
     use crate::terminal::Terminal;
@@ -820,18 +820,9 @@ mod tests {
         let outcome = submit_command(&mut widget, "/image /tmp/pic.png");
         assert!(matches!(outcome, ChatOutcome::Continue));
         assert_eq!(cells(&widget).len(), 1);
-        // UserImage is not yet a per-variant cell: it still rides the adapter.
-        match cell::<MessageHistoryCell>(&widget, 0).message() {
-            RenderedMessage::UserImage {
-                source_path: Some(p),
-                metadata,
-                ..
-            } => {
-                assert_eq!(p, "/tmp/pic.png");
-                assert_eq!(metadata.as_deref(), Some("pic.png"));
-            }
-            other => panic!("expected UserImage, got {other:?}"),
-        }
+        let image = cell::<UserImageCell>(&widget, 0);
+        assert_eq!(image.source_path(), Some("/tmp/pic.png"));
+        assert_eq!(image.metadata(), Some("pic.png"));
     }
 
     #[test]

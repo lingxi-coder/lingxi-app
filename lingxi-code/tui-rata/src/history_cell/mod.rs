@@ -7,19 +7,21 @@
 //! mutate in place while streaming and is rendered as the live tail until it
 //! is finalized (see [`crate::transcript::Transcript`]).
 //!
-//! The core `RenderedMessage` variants render through concrete per-variant
-//! cells (plan Phase 9, "message cells"): [`message`] (user/assistant text,
-//! prompt/command/bash input), [`system`] (system text/rich/api-error/rate
-//! -limit), and [`tool`] (tool use/result, bash/local command output,
-//! grouped/collapsed folds). [`cell_for_message`] picks the concrete cell;
-//! variants not yet split keep flowing through the adapter cell
-//! [`MessageHistoryCell`], which wraps a whole
-//! [`tui_core::message::RenderedMessage`] and delegates to
-//! [`crate::message::render_message`] so their output is byte-identical to
-//! the pre-transcript flush path (the second message-cells phase ports them).
+//! Every `RenderedMessage` variant renders through a concrete per-variant
+//! cell (plan Phase 9, "message cells"): [`message`] (user/assistant text,
+//! thinking/advisor blocks, prompt/command/bash/plan/memory echoes),
+//! [`system`] (system text/rich/api-error/rate-limit/compact boundary),
+//! [`tool`] (tool use/result, bash/local command output, grouped/collapsed
+//! folds), [`team`] (task/notification/channel/teammate/shutdown/hook/plan
+//! -approval), and [`attachments`] (attachment summaries, resource updates,
+//! images). [`cell_for_message`] picks the concrete cell — the match is
+//! exhaustive with no fallback, so a new `RenderedMessage` variant fails
+//! compilation here until it gets a cell.
 
+pub mod attachments;
 pub mod message;
 pub mod system;
+pub mod team;
 pub mod tool;
 
 use std::any::Any;
@@ -152,34 +154,33 @@ impl<T: StyledCell> HistoryCell for T {
     }
 }
 
-/// Convert one [`RenderedMessage`] into its concrete [`HistoryCell`]: the
-/// core variants map to the per-variant cells in [`message`]/[`system`]/
-/// [`tool`]; every not-yet-ported variant falls back to the
-/// [`MessageHistoryCell`] adapter (removed once the second message-cells
-/// phase covers them all).
+/// Convert one [`RenderedMessage`] into its concrete [`HistoryCell`]. Every
+/// variant maps to a per-variant cell in [`message`]/[`system`]/[`tool`]/
+/// [`team`]/[`attachments`] — the match is exhaustive with NO wildcard, so
+/// adding a `RenderedMessage` variant breaks this build until a cell exists.
 #[must_use]
 pub fn cell_for_message(message: RenderedMessage) -> Box<dyn HistoryCell> {
+    use RenderedMessage as M;
     match message {
-        RenderedMessage::UserText { body, .. } => Box::new(message::UserTextCell::new(body)),
-        RenderedMessage::AssistantText { body, .. } => {
-            Box::new(message::AssistantTextCell::new(body))
-        }
-        RenderedMessage::UserPrompt { text } => Box::new(message::UserPromptCell::new(text)),
-        RenderedMessage::UserCommand {
+        M::UserText { body, .. } => Box::new(message::UserTextCell::new(body)),
+        M::AssistantText { body, .. } => Box::new(message::AssistantTextCell::new(body)),
+        M::UserPrompt { text } => Box::new(message::UserPromptCell::new(text)),
+        M::UserCommand {
             command,
             args,
             is_skill,
         } => Box::new(message::UserCommandCell::new(command, args, is_skill)),
-        RenderedMessage::UserBashInput { command } => {
-            Box::new(message::UserBashInputCell::new(command))
-        }
-        RenderedMessage::SystemText { body, is_error, .. } => {
+        M::UserBashInput { command } => Box::new(message::UserBashInputCell::new(command)),
+        M::AssistantThinking { thinking, .. } => Box::new(message::ThinkingCell::new(thinking)),
+        M::AssistantRedactedThinking => Box::new(message::RedactedThinkingCell),
+        M::Advisor { kind, verbose } => Box::new(message::AdvisorCell::new(kind, verbose)),
+        M::UserPlan { plan_content } => Box::new(message::UserPlanCell::new(plan_content)),
+        M::UserMemoryInput { input } => Box::new(message::UserMemoryInputCell::new(input)),
+        M::SystemText { body, is_error, .. } => {
             Box::new(system::SystemTextCell::new(body, is_error))
         }
-        RenderedMessage::SystemTextRich { body, level } => {
-            Box::new(system::SystemTextRichCell::new(body, level))
-        }
-        RenderedMessage::SystemApiError {
+        M::SystemTextRich { body, level } => Box::new(system::SystemTextRichCell::new(body, level)),
+        M::SystemApiError {
             error,
             retry_attempt,
             max_retries,
@@ -189,13 +190,10 @@ pub fn cell_for_message(message: RenderedMessage) -> Box<dyn HistoryCell> {
             retry_attempt,
             max_retries,
         )),
-        RenderedMessage::RateLimit { text, upsell } => {
-            Box::new(system::RateLimitCell::new(text, upsell))
-        }
-        RenderedMessage::AssistantToolUse { tool, input, .. } => {
-            Box::new(tool::ToolUseCell::new(tool, input))
-        }
-        RenderedMessage::UserToolResult {
+        M::RateLimit { text, upsell } => Box::new(system::RateLimitCell::new(text, upsell)),
+        M::CompactBoundary { .. } => Box::new(system::CompactBoundaryCell),
+        M::AssistantToolUse { tool, input, .. } => Box::new(tool::ToolUseCell::new(tool, input)),
+        M::UserToolResult {
             result,
             old_string,
             new_string,
@@ -204,17 +202,47 @@ pub fn cell_for_message(message: RenderedMessage) -> Box<dyn HistoryCell> {
         } => Box::new(tool::ToolResultCell::new(
             result, old_string, new_string, file_path,
         )),
-        RenderedMessage::UserBashOutput { stdout, stderr }
-        | RenderedMessage::UserLocalCommandOutput { stdout, stderr } => {
+        M::UserBashOutput { stdout, stderr } | M::UserLocalCommandOutput { stdout, stderr } => {
             Box::new(tool::CommandOutputCell::new(stdout, stderr))
         }
-        RenderedMessage::GroupedToolUse { tool, entries, .. } => {
+        M::GroupedToolUse { tool, entries, .. } => {
             Box::new(tool::GroupedToolUseCell::new(tool, entries))
         }
-        RenderedMessage::CollapsedReadSearch { entries, .. } => {
+        M::CollapsedReadSearch { entries, .. } => {
             Box::new(tool::CollapsedReadSearchCell::new(entries))
         }
-        other => Box::new(MessageHistoryCell::new(other)),
+        M::Shutdown { from, reason, .. } => Box::new(team::ShutdownCell::new(from, reason)),
+        M::TaskAssignment {
+            subject,
+            description,
+            ..
+        } => Box::new(team::TaskAssignmentCell::new(subject, description)),
+        M::AgentNotification { summary, .. } => Box::new(team::AgentNotificationCell::new(summary)),
+        M::ChannelMessage {
+            server,
+            user,
+            content,
+        } => Box::new(team::ChannelMessageCell::new(server, user, content)),
+        M::UserTeammate {
+            display_name,
+            color,
+            kind,
+        } => Box::new(team::UserTeammateCell::new(display_name, color, kind)),
+        M::HookProgress { event, count, .. } => Box::new(team::HookProgressCell::new(event, count)),
+        M::PlanApproval { kind } => Box::new(team::PlanApprovalCell::new(kind)),
+        M::UserResourceUpdate { updates } => {
+            Box::new(attachments::UserResourceUpdateCell::new(updates))
+        }
+        M::UserImage {
+            image_id,
+            metadata,
+            source_path,
+        } => Box::new(attachments::UserImageCell::new(
+            image_id,
+            metadata,
+            source_path,
+        )),
+        M::Attachment { attachment } => Box::new(attachments::AttachmentCell::new(attachment)),
     }
 }
 
@@ -270,54 +298,18 @@ pub(crate) fn dim_span(text: String, theme: &Theme) -> StyledSpan {
     )
 }
 
-/// The adapter [`HistoryCell`] over a whole [`RenderedMessage`], delegating
-/// to [`crate::message::render_message`], so rendering of the variants not
-/// yet split into per-variant cells is byte-identical to the pre-transcript
-/// renderer (plan Phase 3 step 5; the second message-cells phase retires it).
-#[derive(Debug)]
-pub struct MessageHistoryCell {
-    message: RenderedMessage,
-}
-
-impl MessageHistoryCell {
-    /// Wrap one rendered message.
-    #[must_use]
-    pub fn new(message: RenderedMessage) -> Self {
-        Self { message }
-    }
-
-    /// The wrapped message.
-    #[must_use]
-    pub fn message(&self) -> &RenderedMessage {
-        &self.message
-    }
-
-    /// Mutable access to the wrapped message (streaming deltas append to the
-    /// active cell's body in place).
-    pub fn message_mut(&mut self) -> &mut RenderedMessage {
-        &mut self.message
-    }
-}
-
-impl StyledCell for MessageHistoryCell {
-    fn styled_lines(&self, width: usize, theme: &Theme, verbose: bool) -> Vec<StyledLine> {
-        crate::message::render_message(&self.message, width, theme, verbose)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn assistant(body: &str) -> MessageHistoryCell {
-        MessageHistoryCell::new(RenderedMessage::AssistantText {
-            body: body.to_string(),
-            timestamp: 0,
-        })
+    fn assistant(body: &str) -> message::AssistantTextCell {
+        message::AssistantTextCell::new(body.to_string())
     }
 
-    /// The adapter's rich lines must be byte-identical to the pre-transcript
-    /// flush path: `render_message` → `styled_line_to_ratatui`.
+    /// Factory-routed cells render byte-identically to the pre-transcript
+    /// flush path: `render_message` → `styled_line_to_ratatui`. (The full
+    /// fixture sweep lives in `crate::message::tests::
+    /// ported_cells_render_line_identical_to_render_message`.)
     #[test]
     fn display_lines_match_legacy_render_message_pipeline() {
         let theme = Theme::dark();
@@ -347,7 +339,7 @@ mod tests {
                         .iter()
                         .map(crate::render::styled_line_to_ratatui)
                         .collect();
-                let cell = MessageHistoryCell::new(message.clone());
+                let cell = cell_for_message(message.clone());
                 let got = cell.display_lines(
                     80,
                     &theme,
@@ -394,7 +386,7 @@ mod tests {
 
     #[test]
     fn verbose_mode_expands_thinking_body() {
-        let cell = MessageHistoryCell::new(RenderedMessage::AssistantThinking {
+        let cell = cell_for_message(RenderedMessage::AssistantThinking {
             thinking: "secret reasoning".to_string(),
             expanded: false,
         });
@@ -426,11 +418,7 @@ mod tests {
     #[test]
     fn desired_height_counts_wrapped_rows_not_logical_lines() {
         // One 100-char logical line: 1 row at width 100+, 10 rows at width 10.
-        let cell = MessageHistoryCell::new(RenderedMessage::SystemText {
-            body: "a".repeat(100),
-            timestamp: 0,
-            is_error: false,
-        });
+        let cell = system::SystemTextCell::new("a".repeat(100), false);
         // Width passes through to the renderer, but this variant does not
         // wrap by itself — the Paragraph measurement must account for it.
         assert_eq!(cell.desired_height(120, RenderMode::default()), 1);
@@ -439,10 +427,7 @@ mod tests {
 
     #[test]
     fn is_visible_reflects_empty_render() {
-        let empty = MessageHistoryCell::new(RenderedMessage::UserText {
-            body: String::new(),
-            timestamp: 0,
-        });
+        let empty = message::UserTextCell::new(String::new());
         assert!(!empty.is_visible(80), "empty user text renders nothing");
         assert!(assistant("hello").is_visible(80));
     }
@@ -512,11 +497,103 @@ mod tests {
                 upsell: None,
             }
         ));
-        // Not yet ported: falls back to the adapter cell.
-        assert!(maps_to::<MessageHistoryCell>(
+        assert!(maps_to::<system::CompactBoundaryCell>(
+            RenderedMessage::CompactBoundary {
+                messages_before: 4,
+                messages_after: 1,
+            }
+        ));
+        assert!(maps_to::<message::ThinkingCell>(
             RenderedMessage::AssistantThinking {
                 thinking: "t".into(),
                 expanded: false,
+            }
+        ));
+        assert!(maps_to::<message::RedactedThinkingCell>(
+            RenderedMessage::AssistantRedactedThinking
+        ));
+        assert!(maps_to::<message::AdvisorCell>(RenderedMessage::Advisor {
+            kind: tui_core::message::AdvisorKind::RedactedResult,
+            verbose: false,
+        }));
+        assert!(maps_to::<message::UserPlanCell>(
+            RenderedMessage::UserPlan {
+                plan_content: "p".into(),
+            }
+        ));
+        assert!(maps_to::<message::UserMemoryInputCell>(
+            RenderedMessage::UserMemoryInput { input: "m".into() }
+        ));
+    }
+
+    #[test]
+    fn factory_maps_team_and_attachment_variants_to_concrete_cells() {
+        assert!(maps_to::<team::ShutdownCell>(RenderedMessage::Shutdown {
+            from: "w".into(),
+            reason: None,
+            rejected: false,
+        }));
+        assert!(maps_to::<team::TaskAssignmentCell>(
+            RenderedMessage::TaskAssignment {
+                task_id: "1".into(),
+                assigned_by: "lead".into(),
+                subject: "s".into(),
+                description: None,
+            }
+        ));
+        assert!(maps_to::<team::AgentNotificationCell>(
+            RenderedMessage::AgentNotification {
+                summary: "s".into(),
+                status: None,
+            }
+        ));
+        assert!(maps_to::<team::ChannelMessageCell>(
+            RenderedMessage::ChannelMessage {
+                server: "slack".into(),
+                user: None,
+                content: "c".into(),
+            }
+        ));
+        assert!(maps_to::<team::UserTeammateCell>(
+            RenderedMessage::UserTeammate {
+                display_name: "n".into(),
+                color: None,
+                kind: tui_core::message::UserTeammateKind::Note {
+                    summary: None,
+                    content: None,
+                    is_transcript_mode: false,
+                },
+            }
+        ));
+        assert!(maps_to::<team::HookProgressCell>(
+            RenderedMessage::HookProgress {
+                event: "PreToolUse".into(),
+                count: 1,
+                transcript_summary: true,
+            }
+        ));
+        assert!(maps_to::<team::PlanApprovalCell>(
+            RenderedMessage::PlanApproval {
+                kind: tui_core::message::PlanApprovalKind::Approved { name: "a".into() },
+            }
+        ));
+        assert!(maps_to::<attachments::AttachmentCell>(
+            RenderedMessage::Attachment {
+                attachment: tui_core::message::Attachment::Directory {
+                    display_path: "src".into(),
+                },
+            }
+        ));
+        assert!(maps_to::<attachments::UserResourceUpdateCell>(
+            RenderedMessage::UserResourceUpdate {
+                updates: Vec::new(),
+            }
+        ));
+        assert!(maps_to::<attachments::UserImageCell>(
+            RenderedMessage::UserImage {
+                image_id: None,
+                metadata: None,
+                source_path: None,
             }
         ));
     }
@@ -576,23 +653,25 @@ mod tests {
 
     #[test]
     fn animation_key_defaults_to_none_and_downcast_roundtrips() {
-        let mut cell = assistant("hi");
+        let mut cell: Box<dyn HistoryCell> = cell_for_message(RenderedMessage::AssistantText {
+            body: "hi".to_string(),
+            timestamp: 0,
+        });
         assert_eq!(
-            HistoryCell::animation_key(&cell, Instant::now()),
+            cell.animation_key(Instant::now()),
             None,
             "static cells are time-invariant"
         );
         // as_any / as_any_mut expose the concrete cell for in-place mutation.
-        let concrete = cell
-            .as_any_mut()
-            .downcast_mut::<MessageHistoryCell>()
-            .expect("downcast");
-        if let RenderedMessage::AssistantText { body, .. } = concrete.message_mut() {
-            body.push_str(" there");
-        }
-        assert!(matches!(
-            cell.as_any().downcast_ref::<MessageHistoryCell>().map(MessageHistoryCell::message),
-            Some(RenderedMessage::AssistantText { body, .. }) if body == "hi there"
-        ));
+        cell.as_any_mut()
+            .downcast_mut::<message::AssistantTextCell>()
+            .expect("downcast")
+            .append(" there");
+        assert_eq!(
+            cell.as_any()
+                .downcast_ref::<message::AssistantTextCell>()
+                .map(message::AssistantTextCell::body),
+            Some("hi there")
+        );
     }
 }

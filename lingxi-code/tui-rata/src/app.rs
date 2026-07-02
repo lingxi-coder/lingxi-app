@@ -223,8 +223,8 @@ mod tests {
     use super::*;
     use crate::bottom_pane::model_picker_view::ModelPickerView;
     use crate::bottom_pane::screen_view::ScreenView;
+    use crate::history_cell::attachments::UserImageCell;
     use crate::history_cell::message::{AssistantTextCell, UserTextCell};
-    use crate::history_cell::MessageHistoryCell;
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -479,18 +479,9 @@ mod tests {
         let outcome = submit_command(&mut app, "/image /tmp/pic.png");
         assert!(matches!(outcome, ChatOutcome::Continue));
         assert_eq!(cells(&app).len(), 1);
-        // UserImage is not yet a per-variant cell: it still rides the adapter.
-        match cell::<MessageHistoryCell>(&app, 0).message() {
-            RenderedMessage::UserImage {
-                source_path: Some(p),
-                metadata,
-                ..
-            } => {
-                assert_eq!(p, "/tmp/pic.png");
-                assert_eq!(metadata.as_deref(), Some("pic.png"));
-            }
-            other => panic!("expected UserImage, got {other:?}"),
-        }
+        let image = cell::<UserImageCell>(&app, 0);
+        assert_eq!(image.source_path(), Some("/tmp/pic.png"));
+        assert_eq!(image.metadata(), Some("pic.png"));
     }
 
     #[test]
@@ -1181,18 +1172,16 @@ mod tests {
         );
         assert_eq!(cells(&app).len(), 1);
         let file_name = path.file_name().unwrap().to_str().unwrap();
-        // UserImage is not yet a per-variant cell: it still rides the adapter.
-        match cell::<MessageHistoryCell>(&app, 0).message() {
-            RenderedMessage::UserImage {
-                source_path: Some(p),
-                metadata: Some(name),
-                ..
-            } => {
-                assert_eq!(p, &path.display().to_string());
-                assert_eq!(name, file_name, "metadata is the file name");
-            }
-            other => panic!("expected UserImage, got {other:?}"),
-        }
+        let image = cell::<UserImageCell>(&app, 0);
+        assert_eq!(
+            image.source_path(),
+            Some(path.display().to_string().as_str())
+        );
+        assert_eq!(
+            image.metadata(),
+            Some(file_name),
+            "metadata is the file name"
+        );
     }
 
     #[test]

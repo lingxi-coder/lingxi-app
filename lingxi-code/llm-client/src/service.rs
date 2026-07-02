@@ -301,6 +301,15 @@ pub struct ApiService {
     /// subsequent success — so a retried-then-recovered 429 never plants a
     /// rejected snapshot (the prior per-attempt-write divergence, CLOSED).
     pending_429: Mutex<Option<Pending429>>,
+    /// Optional AWS auth-refresh driver (2.1.198 `ZBd`, `awsAuthRefresh`).
+    ///
+    /// When set, an AWS-auth failure (401/403) on the Bedrock provider runs
+    /// the client-side refresh flow and retries the request, bounded at
+    /// [`crate::aws_auth::AWS_AUTH_MAX_ATTEMPTS`] (`Ygf = 2`). `None` (the
+    /// default) keeps every error path unchanged. Provider-gated inside
+    /// [`crate::aws_auth::is_aws_auth_error`] — non-AWS providers never
+    /// reach the refresh.
+    aws_auth: Option<Arc<dyn crate::aws_auth::AwsAuthRefresh>>,
     /// Conversation-session scoped OpenAI Responses WebSocket connection/cache.
     ///
     /// The adapter is used by one conversation runtime; mobile already enforces
@@ -481,8 +490,17 @@ impl ApiService {
             last_raw_utilization: Mutex::new(None),
             last_429_message: Mutex::new(None),
             pending_429: Mutex::new(None),
+            aws_auth: None,
             responses_ws_session: tokio::sync::Mutex::new(ResponsesWebSocketSession::new()),
         }
+    }
+
+    /// Attach the AWS auth-refresh driver (2.1.198 `awsAuthRefresh` flow).
+    /// Builder-style; the default is `None` (no refresh, errors stay terminal).
+    #[must_use]
+    pub fn with_aws_auth(mut self, aws_auth: Arc<dyn crate::aws_auth::AwsAuthRefresh>) -> Self {
+        self.aws_auth = Some(aws_auth);
+        self
     }
 
     /// Attach the live subscription slot (batch-5 Task 3). When present and
@@ -1424,6 +1442,8 @@ impl ApiService {
         // After a Fallback step, chain_idx advances to point at the next entry.
         // When chain_idx >= chain.len(), the chain is exhausted.
         let mut chain_idx: usize = 0;
+        // 2.1.198 `u`/`Ygf`: AWS-auth-triggered retries taken this drive.
+        let mut aws_auth_attempts: u32 = 0;
 
         loop {
             // prepare → inject headers → execute.
@@ -1541,6 +1561,31 @@ impl ApiService {
                             } else {
                                 decode_err.clone()
                             };
+
+                            // 2.1.198 `V_c`/`G_c`/`s_f` + `Ygf`: an AWS-auth
+                            // failure (401/403) on the Bedrock provider runs
+                            // the awsAuthRefresh flow (`ZBd`) and retries,
+                            // bounded at AWS_AUTH_MAX_ATTEMPTS (Ygf=2). The
+                            // binary clears the memoized credential resolver
+                            // (`xce()`) and lets the retry's credential
+                            // resolve run ZBd; lingxi resolves credentials
+                            // inside `prepare()`, so the flow runs inline
+                            // before the re-prepare. Once the bound is hit
+                            // the error falls through to the normal driver
+                            // (Authentication ⇒ Terminal — the binary's
+                            // `api_request_aws_auth_exhausted` throw).
+                            if let Some(aws) = &self.aws_auth {
+                                if aws_auth_attempts < crate::aws_auth::AWS_AUTH_MAX_ATTEMPTS
+                                    && crate::aws_auth::is_aws_auth_error(
+                                        &decode_err,
+                                        &prepared.route.resolved_route.provider_id,
+                                    )
+                                {
+                                    aws_auth_attempts += 1;
+                                    aws.refresh().await;
+                                    continue;
+                                }
+                            }
 
                             let step = next_step_with_backoff(
                                 &mut state,
@@ -1942,6 +1987,8 @@ impl ApiService {
             self.settings_max_retries,
         );
         let thinking_budget: u32 = reasoning_budget(req.reasoning);
+        // 2.1.198 `u`/`Ygf`: AWS-auth-triggered retries taken this drive.
+        let mut aws_auth_attempts: u32 = 0;
 
         loop {
             // Prepare so we can inject headers, then call execute_stream via
@@ -2024,6 +2071,22 @@ impl ApiService {
                         } else {
                             decode_err.clone()
                         };
+
+                        // 2.1.198 `V_c`/`G_c`/`s_f` + `Ygf` — stream connect
+                        // twin of the non-stream AWS auth-refresh hook (see
+                        // `drive_non_stream_seeded_with_chain`).
+                        if let Some(aws) = &self.aws_auth {
+                            if aws_auth_attempts < crate::aws_auth::AWS_AUTH_MAX_ATTEMPTS
+                                && crate::aws_auth::is_aws_auth_error(
+                                    &decode_err,
+                                    &prepared.route.resolved_route.provider_id,
+                                )
+                            {
+                                aws_auth_attempts += 1;
+                                aws.refresh().await;
+                                continue;
+                            }
+                        }
 
                         let step = next_step_with_backoff(
                             &mut state,

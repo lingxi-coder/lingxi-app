@@ -2587,6 +2587,56 @@ pub async fn build(
     )
     .with_subscription(subscription.clone())
     .with_request_metadata(request_metadata);
+    // M2 (2.1.198): attach the AWS auth-refresh driver (`ZBd`/`t2d`) when an
+    // `awsAuthRefresh` / `awsCredentialExport` command is configured. Resolves
+    // the merged settings value + its Project provenance (binary `mqe`: a
+    // project/local-sourced command is refused before workspace trust) and the
+    // workspace-trust state (`yd()`: `hasTrustDialogAccepted` parent-walk in
+    // the global config). With the driver attached, a Bedrock 401/403
+    // (expired STS) runs the refresh script and retries instead of
+    // dead-ending — bounded at Ygf=2 inside the drive loops.
+    let service_built = {
+        let env_vars: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+        let aws_settings = engine::settings::Settings::load(engine::settings::LoadInputs {
+            env: &env_vars,
+            project_dir: &cwd,
+            defaults: engine::settings::schema::SettingsJson::default(),
+        })
+        .ok()
+        .map(|eff| {
+            let from_project = |field: &str| {
+                eff.effective_for(field).is_some_and(|p| {
+                    p.contributors.last() == Some(&engine::settings::tracer::Source::Project)
+                })
+            };
+            llm_client::AwsAuthSettings {
+                aws_auth_refresh: eff.settings.aws_auth_refresh.clone(),
+                aws_auth_refresh_from_project: from_project("awsAuthRefresh"),
+                aws_credential_export: eff.settings.aws_credential_export.clone(),
+                aws_credential_export_from_project: from_project("awsCredentialExport"),
+                // No global config path ⇒ the CLI trust gate proceeds
+                // (mode.rs `trust_gate_should_prompt` — nothing to check
+                // against), so treat as trusted like the gate does.
+                workspace_trusted: match migrations::global_config::global_config_path() {
+                    Some(p) => migrations::global_config::check_has_trust_dialog_accepted(
+                        &p, &cwd,
+                    ),
+                    None => true,
+                },
+            }
+        })
+        .unwrap_or_default();
+        if aws_settings.aws_auth_refresh.is_some() || aws_settings.aws_credential_export.is_some()
+        {
+            service_built.with_aws_auth(Arc::new(llm_client::AwsAuthRefresher::new(
+                aws_settings,
+                Arc::new(llm_client::ShellAwsAuthProcess),
+                Some(analytics_bus.clone()),
+            )))
+        } else {
+            service_built
+        }
+    };
     // `--json-schema` structured output: FORCE the `StructuredOutput` tool so the
     // model returns its final result through it (1:1 with claude-code). Untouched
     // for every normal turn (`json_schema` is `None`).

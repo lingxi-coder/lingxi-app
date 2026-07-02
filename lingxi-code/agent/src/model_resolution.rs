@@ -1015,6 +1015,57 @@ mod tests {
         assert_eq!(get_default_haiku_model(), haiku_fp);
     }
 
+    // ---- M2 Part B: 2.1.198 registry pins (anthropicAws provider identity) --
+    //
+    // Verified against the REAL 2.1.198 binary registry (extracted 2026-07-02):
+    // - alias table `sonnet.per_provider.anthropic_aws = "claude-sonnet-4-6"`
+    //   (bedrock/vertex/foundry/mantle → "claude-sonnet-4-5",
+    //   gateway → "claude-sonnet-4-6"; default "claude-sonnet-5").
+    // - alias table `opus.per_provider.anthropic_aws = "claude-opus-4-7"`
+    //   (bedrock/vertex/foundry → "claude-opus-4-6"; mantle/gateway →
+    //   "claude-opus-4-7"; default "claude-opus-4-8").
+    // - sonnet-5 `provider_ids.anthropic_aws = "claude-sonnet-5"` (same string
+    //   as first_party — the id does not diverge for anthropicAws).
+    //
+    // LingXi's provider detection is 2-way (firstParty vs the env-detected
+    // Bedrock/Vertex/Foundry), so the anthropic_aws / mantle / gateway arms
+    // have no runtime representation — the ids they'd resolve to are pinned
+    // here so a future anthropicAws-aware host wires the RIGHT values (and any
+    // upstream alias-table change shows up as a deliberate test edit).
+
+    #[test]
+    fn registry_2_1_198_pins_match_binary() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        // Defaults (firstParty arm) — shared with the anthropic_aws sonnet-5
+        // provider id, which is byte-identical to first_party.
+        assert_eq!(family_default_id("sonnet"), Some("claude-sonnet-5"));
+        assert_eq!(family_default_id("opus"), Some("claude-opus-4-8"));
+        assert_eq!(family_default_id("haiku"), Some("claude-haiku-4-5"));
+        // 3P arms the port models (bedrock/vertex/foundry per_provider).
+        assert_eq!(OPUS_3P_DEFAULT_ID, "claude-opus-4-6");
+        assert_eq!(SONNET_3P_DEFAULT_ID, "claude-sonnet-4-5-20250929");
+    }
+
+    #[test]
+    fn registry_2_1_198_anthropic_aws_alias_targets_pass_through() {
+        // The anthropic_aws per_provider alias targets (sonnet →
+        // claude-sonnet-4-6, opus → claude-opus-4-7) are real catalog ids: an
+        // explicit request for either must pass through verbatim so an
+        // anthropicAws-configured profile can route them unmodified.
+        for id in ["claude-sonnet-4-6", "claude-opus-4-7"] {
+            assert_eq!(
+                resolve_agent_model(
+                    &AgentModel::Explicit(id.to_string()),
+                    "claude-opus-4-8",
+                    DEFAULT,
+                    None,
+                ),
+                id
+            );
+        }
+    }
+
     // ---- Tier3#14: alias arms honor ANTHROPIC_DEFAULT_*_MODEL env overrides --
     //
     // claude-code's parseUserSpecifiedModel routes its alias arms through

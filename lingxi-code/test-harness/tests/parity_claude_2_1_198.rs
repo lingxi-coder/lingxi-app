@@ -48,8 +48,8 @@ const CHECKLIST: &[Entry] = &[
     Entry { version: "2.1.198", item: "Claude in Chrome generally available", disposition: Divergence("browser extension + Anthropic cloud service; not portable") },
     Entry { version: "2.1.198", item: "Notification hook agent_needs_input/agent_completed for claude agents sessions", disposition: Mission("M8") },
     Entry { version: "2.1.198", item: "/dataviz bundled skill", disposition: Divergence("bundled skill content, not core behavior") },
-    Entry { version: "2.1.198", item: "Gateway: anthropicAws upstream provider", disposition: Mission("M2") },
-    Entry { version: "2.1.198", item: "Gateway: model-not-found advances failover chain", disposition: Mission("M2") },
+    Entry { version: "2.1.198", item: "Gateway: anthropicAws upstream provider", disposition: Divergence("no enterprise gateway runtime in lingxi; client-side model fallback (tengu_model_fallback_triggered) already ported") },
+    Entry { version: "2.1.198", item: "Gateway: model-not-found advances failover chain", disposition: Divergence("no enterprise gateway runtime in lingxi; client-side model fallback (tengu_model_fallback_triggered) already ported") },
     Entry { version: "2.1.198", item: "Background agents auto commit/push/draft PR on worktree completion", disposition: Mission("M8") },
     Entry { version: "2.1.198", item: "Explore agent inherits session model capped at opus", disposition: Mission("M10") },
     Entry { version: "2.1.198", item: "Subagents + compaction inherit extended thinking config", disposition: Mission("M10") },
@@ -59,7 +59,11 @@ const CHECKLIST: &[Entry] = &[
     Entry { version: "2.1.198", item: "Teammate API-error reports failed to lead; stuck teammate wake-retries on message", disposition: Mission("M9") },
     Entry { version: "2.1.198", item: "/diff panel refreshes on external branch switch/commit", disposition: Mission("M13") },
     Entry { version: "2.1.198", item: "Markdown tables no longer overflow right border in fullscreen", disposition: Mission("M6") },
-    Entry { version: "2.1.198", item: "awsAuthRefresh runs automatically on STS expiry (anthropicAws/Mantle)", disposition: Mission("M2") },
+    // M2 landed: llm_client::aws_auth (ZBd/gIn/t2d port: trust gate + STS
+    // probe + QBd=30s cooldown + 3-min timeout) + the V_c/G_c/s_f drive-loop
+    // trigger (Ygf=2) in ApiService; settings keys awsAuthRefresh /
+    // awsCredentialExport / gcpAuthRefresh in engine SettingsJson.
+    Entry { version: "2.1.198", item: "awsAuthRefresh runs automatically on STS expiry (anthropicAws/Mantle)", disposition: Disposition::Implemented },
     Entry { version: "2.1.198", item: "macOS Local Network entitlements for background agent sessions", disposition: Divergence("macOS app packaging/entitlements, not core runtime") },
     Entry { version: "2.1.198", item: "/desktop cwd after entering+exiting a worktree", disposition: Mission("M13") },
     Entry { version: "2.1.198", item: "Agents view: no Reconnecting spam every ~52s", disposition: Mission("M7") },

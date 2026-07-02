@@ -167,4 +167,14 @@ mod tests {
         assert!(is_early_access_model("claude-opus-4-7-eap[foo]"));
         assert!(!is_early_access_model("claude-opus-4-8"));
     }
+
+    #[test]
+    fn anthropic_aws_alias_targets_are_long() {
+        // M2 Part B pin: the 2.1.198 alias table's anthropic_aws per_provider
+        // targets — sonnet → "claude-sonnet-4-6", opus → "claude-opus-4-7"
+        // (verified against the real binary registry) — are both UWu-standard
+        // models, so an anthropicAws-routed session keeps the LONG prompt.
+        assert!(!dh_simple_system_prompt(Some("claude-sonnet-4-6")));
+        assert!(!dh_simple_system_prompt(Some("claude-opus-4-7")));
+    }
 }

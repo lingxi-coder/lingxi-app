@@ -38,6 +38,32 @@ pub(crate) const NAMES: &[&str] = &[
     PKCE_FAILED,
 ];
 
+// ── AWS auth-refresh trust-gate events (2.1.198) ────────────────────────────
+//
+// Kept OUT of the `tengu_oauth_` prefix block above (the
+// category_ordering_preserved test locks per-block prefixes); appended at the
+// GLOBAL TAIL of `ALL_EVENT_NAMES` like `tool::FILE_READ_ANALYTICS_NAMES`.
+// Both events carry an EMPTY payload — the binary emits
+// `G("tengu_awsAuthRefresh_missing_trust",{})` — so no `*Payload` struct.
+
+/// `tengu_awsAuthRefresh_missing_trust` — the `awsAuthRefresh` command resolved
+/// from project/local settings before workspace trust was confirmed; execution
+/// refused (2.1.198 `ZBd` security gate). Emitted by
+/// `llm_client::aws_auth::AwsAuthRefresher::refresh`.
+pub const AWS_AUTH_REFRESH_MISSING_TRUST: &str = "tengu_awsAuthRefresh_missing_trust";
+
+/// `tengu_awsCredentialExport_missing_trust` — same trust gate for the
+/// `awsCredentialExport` command (2.1.198 `t2d`). Emitted by
+/// `llm_client::aws_auth::AwsAuthRefresher::export_credentials`.
+pub const AWS_CREDENTIAL_EXPORT_MISSING_TRUST: &str = "tengu_awsCredentialExport_missing_trust";
+
+/// Global-tail block for the two AWS auth trust-gate events. Public so the
+/// completeness test can assert the tail slice against this list.
+pub const AWS_AUTH_NAMES: &[&str] = &[
+    AWS_AUTH_REFRESH_MISSING_TRUST,
+    AWS_CREDENTIAL_EXPORT_MISSING_TRUST,
+];
+
 /// OAuth refresh trigger.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

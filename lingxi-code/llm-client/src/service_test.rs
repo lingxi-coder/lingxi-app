@@ -3604,4 +3604,167 @@ mod tests {
             "succeeded must NOT fire on error; got {names:?}"
         );
     }
+
+    // ── AWS auth refresh trigger (2.1.198 V_c/G_c/s_f + Ygf) ─────────────────
+
+    /// Counting stand-in for the `ZBd` driver — the drive loop only needs the
+    /// object-safe `AwsAuthRefresh` seam.
+    #[derive(Debug, Default)]
+    struct CountingAwsRefresh {
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    impl crate::aws_auth::AwsAuthRefresh for CountingAwsRefresh {
+        fn refresh(&self) -> BoxFuture<'_, bool> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { true })
+        }
+    }
+
+    /// Bedrock-provider adapter with the AWS auth-refresh seam attached.
+    fn make_bedrock_adapter_with_aws(
+        transport: Arc<dyn Transport>,
+        aws: Arc<CountingAwsRefresh>,
+    ) -> ApiService {
+        let client = Arc::new(
+            DefaultLlmClient::from_config(ClientConfig {
+                providers: vec![ProviderProfile {
+                    provider_id: ProviderId::BedrockClaude,
+                    profile_name: "bedrock".to_string(),
+                    base_url: "https://bedrock-runtime.us-east-1.amazonaws.com".to_string(),
+                    protocol: ProtocolFamily::BedrockClaude,
+                    // Auth None so prepare() succeeds without SigV4 material —
+                    // the refresh trigger keys off the RESPONSE error + the
+                    // route's provider_id, not the auth strategy.
+                    auth: AuthStrategy::None,
+                    credential: CredentialConfig::None,
+                    models: vec![ModelProfile {
+                        display_model: "model".to_string(),
+                        request_model: "model".to_string(),
+                        billing_model: "model".to_string(),
+                        aliases: Vec::new(),
+                        description: None,
+                        capabilities: Capabilities {
+                            streaming: true,
+                            tools: true,
+                            reasoning: true,
+                            ..Default::default()
+                        },
+                    }],
+                    pricing: PricingConfig::default(),
+                    signing: None,
+                    azure: None,
+                    supports_websockets: false,
+                    supports_websocket_compression: false,
+                    websocket_connect_timeout_ms: None,
+                }],
+            })
+            .expect("client"),
+        );
+        ApiService::new(
+            client,
+            transport,
+            SubscriberState::default(),
+            UserAgentEnv {
+                user_type: Some("external".to_string()),
+                entrypoint: Some("cli".to_string()),
+                ..Default::default()
+            },
+            "0.0.0",
+            None,
+            None,
+        )
+        .with_aws_auth(aws)
+    }
+
+    /// 401 `authentication_error` body (decodes to `LlmError::Authentication`
+    /// through the Bedrock codec's Anthropic-shape error decode) — the
+    /// expired-STS terminal the 2.1.198 trigger classifies via `V_c`.
+    fn expired_sts_response() -> ProviderResponse {
+        ProviderResponse::json(
+            401,
+            serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "authentication_error",
+                    "message": "The security token included in the request is expired"
+                }
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn aws_auth_error_refreshes_and_retries_once() {
+        // 401 (expired STS) then 200: the hook must run ZBd once and the retry
+        // must succeed — the 2.1.198 behavior replacing the "/login" dead end.
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(expired_sts_response()),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let aws = Arc::new(CountingAwsRefresh::default());
+        let adapter = make_bedrock_adapter_with_aws(transport.clone(), aws.clone());
+
+        let out = adapter
+            .messages_create("model", None, None, Vec::new(), Vec::new())
+            .await;
+        assert!(out.is_ok(), "retry after refresh must succeed: {out:?}");
+        assert_eq!(
+            aws.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "exactly one refresh"
+        );
+        assert_eq!(transport.seen_count(), 2, "original + one retry");
+    }
+
+    #[tokio::test]
+    async fn aws_auth_retries_bounded_at_ygf_two() {
+        // Every attempt 401s: the hook may fire at most AWS_AUTH_MAX_ATTEMPTS
+        // (Ygf=2) times, then the error goes terminal (the binary's
+        // `api_request_aws_auth_exhausted` throw).
+        let transport = FakeTransport::sequence(vec![FakeResponse::Ok(expired_sts_response())]);
+        let aws = Arc::new(CountingAwsRefresh::default());
+        let adapter = make_bedrock_adapter_with_aws(transport.clone(), aws.clone());
+
+        let out = adapter
+            .messages_create("model", None, None, Vec::new(), Vec::new())
+            .await;
+        assert!(
+            matches!(out, Err(LlmError::Authentication)),
+            "exhausted refresh budget surfaces the auth error: {out:?}"
+        );
+        assert_eq!(
+            aws.calls.load(std::sync::atomic::Ordering::SeqCst),
+            crate::aws_auth::AWS_AUTH_MAX_ATTEMPTS,
+            "refresh bounded at Ygf=2"
+        );
+        assert_eq!(transport.seen_count(), 3, "initial attempt + 2 refresh retries");
+    }
+
+    #[tokio::test]
+    async fn non_aws_provider_never_triggers_refresh() {
+        // Provider gate (multi-provider structure is sacrosanct): the SAME 401
+        // on the Anthropic first-party provider must NOT touch the refresher.
+        let transport = FakeTransport::sequence(vec![FakeResponse::Ok(expired_sts_response())]);
+        let aws = Arc::new(CountingAwsRefresh::default());
+        let adapter = make_adapter(transport.clone());
+        let adapter = adapter.with_aws_auth(aws.clone());
+
+        let out = adapter
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
+            .await;
+        assert!(matches!(out, Err(LlmError::Authentication)));
+        assert_eq!(
+            aws.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "refresh must never run for a non-AWS provider"
+        );
+        assert_eq!(transport.seen_count(), 1, "401 stays terminal, no retry");
+    }
 }

@@ -1,6 +1,7 @@
 //! Read-only full-frame screens (`/help`, `/doctor`, `/mcp`, `/hooks`,
-//! `/agents`), ported from the former `screens::FullScreen` into a stacked
-//! [`BottomPaneView`] (plan Phase 4).
+//! `/agents`, `/skills`, `/memory`, `/status`, `/config`), ported from the
+//! former `screens::FullScreen` into a stacked [`BottomPaneView`] (plan
+//! Phase 4; completed by the Phase 8 command registry).
 //!
 //! A [`ScreenView`] is a scrollable, read-only page drawn over the whole
 //! bottom viewport: a bold title, a body of pre-styled [`Line`]s, and a dim
@@ -23,9 +24,11 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 
+use tui_core::theme::ThemeName;
+
 use crate::bottom_pane::view::{BottomPaneView, ViewOutcome};
 use crate::renderable::Renderable;
-use crate::session::{DoctorInfo, InfoRow};
+use crate::session::{DoctorInfo, InfoRow, ModelRow};
 
 /// Column width the shortcut/command key is padded to (iocraft `help::KEY_WIDTH`).
 const KEY_WIDTH: usize = 16;
@@ -69,6 +72,41 @@ impl ScreenView {
     #[must_use]
     pub fn doctor(d: &DoctorInfo) -> Self {
         Self::new("Doctor", doctor_lines(d), "esc to close · ↑/↓ scroll")
+    }
+
+    /// The `/status` screen: session facts from the startup snapshot plus the
+    /// live editor toggles (plan Phase 8).
+    #[must_use]
+    pub fn status(
+        d: &DoctorInfo,
+        model: Option<&ModelRow>,
+        vim: bool,
+        verbose: bool,
+        theme: ThemeName,
+    ) -> Self {
+        Self::new(
+            "Status",
+            status_lines(d, model, vim, verbose, theme),
+            "esc to close · ↑/↓ scroll",
+        )
+    }
+
+    /// The `/config` screen: the session-scoped settings this backend owns
+    /// plus the on-disk settings files (read-only; plan Phase 8 — no
+    /// settings-write API reaches the TUI, so the view is honest about it).
+    #[must_use]
+    pub fn settings(
+        theme: ThemeName,
+        vim: bool,
+        verbose: bool,
+        lingxi_home: &str,
+        cwd: &str,
+    ) -> Self {
+        Self::new(
+            "Settings",
+            settings_lines(theme, vim, verbose, lingxi_home, cwd),
+            "esc to close · ↑/↓ scroll",
+        )
     }
 
     /// A read-only listing screen (`/mcp`, `/hooks`, `/agents`): a section
@@ -224,17 +262,28 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("ctrl + c", "to cancel (twice quits)"),
 ];
 
-fn doctor_lines(d: &DoctorInfo) -> Vec<Line<'static>> {
-    let mcp = if d.mcp_configured == 0 {
+/// The human MCP-server summary shared by `/doctor` and `/status`.
+fn mcp_clause(configured: u32, connected: u32) -> String {
+    if configured == 0 {
         "none configured".to_string()
-    } else if d.mcp_connected == 0 {
-        format!("{} configured, not connected", d.mcp_configured)
+    } else if connected == 0 {
+        format!("{configured} configured, not connected")
     } else {
-        format!(
-            "{} configured, {} connected",
-            d.mcp_configured, d.mcp_connected
-        )
-    };
+        format!("{configured} configured, {connected} connected")
+    }
+}
+
+/// `"on"` / `"off"` for the editor-toggle rows.
+fn on_off(enabled: bool) -> &'static str {
+    if enabled {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+fn doctor_lines(d: &DoctorInfo) -> Vec<Line<'static>> {
+    let mcp = mcp_clause(d.mcp_configured, d.mcp_connected);
     vec![
         header("Diagnostics"),
         row("└ Version", &d.cli_version),
@@ -250,6 +299,80 @@ fn doctor_lines(d: &DoctorInfo) -> Vec<Line<'static>> {
         ),
         row("└ Inline images", &d.image_protocol),
     ]
+}
+
+/// `/status` body: session facts + editor toggles.
+fn status_lines(
+    d: &DoctorInfo,
+    model: Option<&ModelRow>,
+    vim: bool,
+    verbose: bool,
+    theme: ThemeName,
+) -> Vec<Line<'static>> {
+    let model_label = model.map_or_else(
+        || "unknown".to_string(),
+        |m| {
+            if m.provider_label.is_empty() {
+                m.display.clone()
+            } else {
+                format!("{} ({})", m.display, m.provider_label)
+            }
+        },
+    );
+    vec![
+        header("Session"),
+        row("└ Version", &d.cli_version),
+        row("└ Model", &model_label),
+        row("└ Working dir", &d.cwd),
+        row("└ LingXi home", &d.lingxi_home),
+        row(
+            "└ MCP servers",
+            &mcp_clause(d.mcp_configured, d.mcp_connected),
+        ),
+        Line::from(""),
+        header("Editor"),
+        row("└ Theme", theme.as_wire()),
+        row("└ Vim mode", on_off(vim)),
+        row("└ Verbose", on_off(verbose)),
+    ]
+}
+
+/// `/config` body: session-scoped settings plus the on-disk settings files
+/// (existence probed at open time, mirroring the capture-at-open contract).
+fn settings_lines(
+    theme: ThemeName,
+    vim: bool,
+    verbose: bool,
+    lingxi_home: &str,
+    cwd: &str,
+) -> Vec<Line<'static>> {
+    let mut out = vec![
+        header("Session settings"),
+        row("└ Theme", theme.as_wire()),
+        row("└ Vim mode", on_off(vim)),
+        row("└ Verbose", on_off(verbose)),
+        Line::from(""),
+        header("Settings files"),
+    ];
+    let files = [
+        format!("{lingxi_home}/settings.json"),
+        format!("{cwd}/.lingxi/settings.json"),
+        format!("{cwd}/.lingxi/settings.local.json"),
+    ];
+    for file in files {
+        let state = if std::path::Path::new(&file).is_file() {
+            "present"
+        } else {
+            "absent"
+        };
+        out.push(row(&format!("└ {state}"), &file));
+    }
+    out.push(Line::from(""));
+    out.push(Line::from(Span::styled(
+        "Read-only view — edit the files above to change persisted settings.",
+        Style::default().add_modifier(Modifier::DIM),
+    )));
+    out
 }
 
 /// The `/help` body: a static shortcuts section plus the slash-command
@@ -316,6 +439,58 @@ mod tests {
         assert!(text.contains("Terminal"));
         assert!(text.contains("120x40"));
         assert!(text.contains("2 configured, not connected"));
+    }
+
+    #[test]
+    fn status_screen_renders_session_facts_and_editor_toggles() {
+        let d = crate::session::DoctorInfo {
+            cli_version: "lingxi-cli v0.12.0".to_string(),
+            lingxi_home: "/home/u/.lingxi".to_string(),
+            cwd: "/work".to_string(),
+            mcp_configured: 3,
+            mcp_connected: 2,
+            truecolor: true,
+            term_size: (80, 24),
+            image_protocol: "none".to_string(),
+        };
+        let model = ModelRow {
+            display: "Opus".into(),
+            request_model: "claude-opus".into(),
+            profile: None,
+            provider_label: "Anthropic".into(),
+            is_current: true,
+        };
+        let lines = status_lines(&d, Some(&model), true, false, ThemeName::Dark);
+        let text = text_of(&lines);
+        assert!(text.contains("Session"), "{text}");
+        assert!(text.contains("Opus (Anthropic)"), "{text}");
+        assert!(text.contains("3 configured, 2 connected"), "{text}");
+        assert!(text.contains("Vim mode"), "{text}");
+        assert!(text.contains("dark"), "{text}");
+        // No current model degrades to "unknown", never panics.
+        let no_model = status_lines(&d, None, false, true, ThemeName::LightAnsi);
+        let text = text_of(&no_model);
+        assert!(text.contains("unknown"), "{text}");
+        assert!(text.contains("light-ansi"), "{text}");
+    }
+
+    #[test]
+    fn settings_screen_probes_files_and_declares_itself_read_only() {
+        let dir = std::env::temp_dir().join(format!("tui-rata-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tempdir");
+        std::fs::write(dir.join("settings.json"), b"{}").expect("write settings");
+        let home = dir.display().to_string();
+        let lines = settings_lines(ThemeName::Dark, false, true, &home, "/no/such/project");
+        std::fs::remove_dir_all(&dir).ok();
+        let text = text_of(&lines);
+        assert!(text.contains("Session settings"), "{text}");
+        assert!(
+            text.contains(&format!("present {home}/settings.json")) || text.contains("present"),
+            "{text}"
+        );
+        assert!(text.contains("absent"), "{text}");
+        assert!(text.contains("Read-only view"), "{text}");
+        assert!(text.contains("Verbose") && text.contains("on"), "{text}");
     }
 
     #[test]

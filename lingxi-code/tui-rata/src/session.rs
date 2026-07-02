@@ -112,6 +112,11 @@ pub struct SessionInfo {
     pub hooks: Vec<InfoRow>,
     /// `/agents` rows.
     pub agents: Vec<InfoRow>,
+    /// `/skills` rows (on-disk `.lingxi/skills/` discovery, captured at
+    /// launch like the other listings).
+    pub skills: Vec<InfoRow>,
+    /// `/memory` rows (the LINGXI.md memory-file tiers, captured at launch).
+    pub memory: Vec<InfoRow>,
     /// `/model` picker rows.
     pub models: Vec<ModelRow>,
 }

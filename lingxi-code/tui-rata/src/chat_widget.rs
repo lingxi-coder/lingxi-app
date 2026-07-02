@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 use tui_core::message::RenderedMessage;
 use tui_core::orchestrator_bridge::TurnEvent;
 use tui_core::permission_bridge::PermissionExchange;
-use tui_core::theme::Theme;
+use tui_core::theme::{Theme, ThemeName};
 
 use crate::bottom_pane::permission_view::PermissionView;
 use crate::bottom_pane::screen_view::ScreenView;
@@ -69,6 +69,9 @@ pub struct ChatWidget {
     session: SessionInfo,
     /// Theme for transcript rendering (native-scrollback flush).
     theme: Theme,
+    /// Name of the active theme (drives the `/theme` picker's current marker
+    /// and the `/status`/`/config` rows).
+    theme_name: ThemeName,
     /// Cancellation token for the in-flight turn, if any.
     current_turn: Option<CancellationToken>,
     /// When the in-flight turn began, for the spinner's elapsed-seconds counter.
@@ -94,6 +97,7 @@ impl ChatWidget {
             bottom_pane: BottomPane::new(theme),
             session,
             theme,
+            theme_name: ThemeName::Dark,
             current_turn: None,
             turn_started_at: None,
             activity: None,
@@ -377,6 +381,58 @@ impl ChatWidget {
             &self.session.agents,
             "No agents configured.",
         )));
+        ChatOutcome::Continue
+    }
+
+    /// `/skills`: open the skills listing (captured at launch from the
+    /// on-disk `.lingxi/skills/` directories).
+    pub(crate) fn cmd_skills(&mut self, _args: &str) -> ChatOutcome {
+        self.bottom_pane.show_view(Box::new(ScreenView::from_rows(
+            "Skills",
+            "Skills",
+            &self.session.skills,
+            "No skills found. Create skills in .lingxi/skills/ or ~/.lingxi/skills/",
+        )));
+        ChatOutcome::Continue
+    }
+
+    /// `/memory`: open the LINGXI.md memory-file listing (the tiers captured
+    /// at launch; read-only — this backend has no in-TUI editor).
+    pub(crate) fn cmd_memory(&mut self, _args: &str) -> ChatOutcome {
+        self.bottom_pane.show_view(Box::new(ScreenView::from_rows(
+            "Memory files",
+            "LINGXI.md memory files",
+            &self.session.memory,
+            "No memory files found.",
+        )));
+        ChatOutcome::Continue
+    }
+
+    /// `/status`: open the session status screen (snapshot facts + live
+    /// editor toggles).
+    pub(crate) fn cmd_status(&mut self, _args: &str) -> ChatOutcome {
+        let view = ScreenView::status(
+            &self.session.doctor,
+            self.session.models.iter().find(|m| m.is_current),
+            self.bottom_pane.vim_enabled(),
+            self.transcript.verbose(),
+            self.theme_name,
+        );
+        self.bottom_pane.show_view(Box::new(view));
+        ChatOutcome::Continue
+    }
+
+    /// `/config`: open the read-only settings screen (session-scoped
+    /// settings + on-disk settings files).
+    pub(crate) fn cmd_config(&mut self, _args: &str) -> ChatOutcome {
+        let view = ScreenView::settings(
+            self.theme_name,
+            self.bottom_pane.vim_enabled(),
+            self.transcript.verbose(),
+            &self.session.doctor.lingxi_home,
+            &self.session.doctor.cwd,
+        );
+        self.bottom_pane.show_view(Box::new(view));
         ChatOutcome::Continue
     }
 
@@ -885,6 +941,43 @@ mod tests {
         // The switch is echoed as a system message.
         let body = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0).body();
         assert!(body.contains("Switching model to claude-opus"), "{body}");
+    }
+
+    #[test]
+    fn skills_memory_status_config_open_focused_views_not_scrollback_dumps() {
+        // Criterion 18: each command opens a focused ScreenView and leaves
+        // the transcript untouched (no scrollback dump), then Esc returns to
+        // the composer.
+        let session = SessionInfo {
+            skills: vec![crate::session::InfoRow::new(
+                "brainstorming",
+                Some("Project skills · explore ideas".to_string()),
+            )],
+            memory: vec![crate::session::InfoRow::new(
+                "Project memory",
+                Some("Checked in at ./LINGXI.md".to_string()),
+            )],
+            ..Default::default()
+        };
+        for cmd in ["/skills", "/memory", "/status", "/config"] {
+            let mut widget = ChatWidget::new(Vec::new(), session.clone());
+            let outcome = submit_command(&mut widget, cmd);
+            assert!(matches!(outcome, ChatOutcome::Continue), "{cmd}");
+            assert!(
+                widget.bottom_pane().view_stack().contains::<ScreenView>(),
+                "{cmd} opens a focused view"
+            );
+            assert!(
+                widget.transcript().is_empty(),
+                "{cmd} must not dump into scrollback"
+            );
+            assert!(!widget.turn_running(), "{cmd} starts no turn");
+            widget.handle_key(press(KeyCode::Esc));
+            assert!(
+                widget.bottom_pane().view_stack().is_empty(),
+                "{cmd} closes back to the composer"
+            );
+        }
     }
 
     #[test]

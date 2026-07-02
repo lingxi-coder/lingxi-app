@@ -15,12 +15,8 @@ use std::io;
 use std::io::Write;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
 use ratatui::backend::{Backend, CrosstermBackend};
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 use tokio_util::sync::CancellationToken;
 use tui_core::message::RenderedMessage;
@@ -28,22 +24,15 @@ use tui_core::orchestrator_bridge::TurnEvent;
 use tui_core::permission_bridge::PermissionExchange;
 use tui_core::theme::Theme;
 
-use crate::bottom_pane::completion_view::{command_items, CompletionView};
-use crate::bottom_pane::model_picker_view::ModelPickerView;
 use crate::bottom_pane::permission_view::PermissionView;
 use crate::bottom_pane::screen_view::ScreenView;
-use crate::bottom_pane::{CommandAction, ViewOutcome, ViewStack};
-use crate::composer::{Composer, ComposerView, MAX_VISIBLE_LINES};
+use crate::bottom_pane::{BottomPane, BottomPaneOutcome, BottomPaneStatus, CommandAction};
 use crate::history_cell::MessageHistoryCell;
 use crate::renderable::Renderable;
 use crate::session::SessionInfo;
 use crate::terminal::TerminalSession;
 use crate::transcript::Transcript;
-use crate::vim::{VimOutcome, VimState};
 use crate::RataTerminal;
-
-/// How long an idle Ctrl-C stays "armed" before a second press quits.
-const CTRL_C_EXIT_WINDOW: Duration = Duration::from_secs(2);
 
 /// What a key press means to the event loop.
 enum KeyOutcome {
@@ -64,20 +53,13 @@ pub struct RataApp {
     /// Conversation history: committed cells + the active streaming cell +
     /// the native-scrollback commit cursor + verbose/render mode.
     transcript: Transcript,
-    composer: Composer,
+    /// The interactive footer: composer + completion + vim + status hints +
+    /// the transient view stack (plan Phase 5). The pane routes local input;
+    /// process-level intents come back as [`BottomPaneOutcome`]s.
+    bottom_pane: BottomPane,
     theme: Theme,
     /// Cancellation token for the in-flight turn, if any.
     current_turn: Option<CancellationToken>,
-    /// Transient keyboard-owning views stacked over the composer: permission
-    /// prompt, `/model` picker, read-only screens (plan Phase 4). The top
-    /// view sees every key/paste until it pops itself via its outcome.
-    view_stack: ViewStack,
-    /// Command/file completion popup shown while a `/command` or `@file` token
-    /// is being typed. NOT a stacked view — it coexists with the composer
-    /// (typing keeps filtering); plan Phase 5 moves it into `BottomPane`.
-    completion: Option<CompletionView>,
-    /// Vim editing state when `/vim` is enabled (`None` → plain editor).
-    vim: Option<VimState>,
     /// Wall-clock start, used to advance the streaming spinner animation.
     start: std::time::Instant,
     /// When the in-flight turn began, for the spinner's elapsed-seconds counter.
@@ -85,9 +67,6 @@ pub struct RataApp {
     /// Human label for what the turn is currently doing (e.g. `Running Bash`),
     /// set from `ToolUseStart` and shown by the spinner instead of a bare verb.
     activity: Option<String>,
-    /// First unconfirmed idle Ctrl-C, for claude-code's press-twice-to-exit. A
-    /// second Ctrl-C within [`CTRL_C_EXIT_WINDOW`] quits; otherwise it re-arms.
-    ctrl_c_at: Option<std::time::Instant>,
     /// Startup snapshot the read-only screens render from.
     session: SessionInfo,
 }
@@ -96,18 +75,15 @@ impl RataApp {
     /// Build an app seeded with an initial conversation (may be empty).
     #[must_use]
     pub fn new(messages: Vec<RenderedMessage>) -> Self {
+        let theme = Theme::dark();
         Self {
             transcript: Transcript::from_messages(messages),
-            composer: Composer::default(),
-            theme: Theme::dark(),
+            bottom_pane: BottomPane::new(theme),
+            theme,
             current_turn: None,
-            view_stack: ViewStack::new(),
-            completion: None,
-            vim: None,
             start: std::time::Instant::now(),
             turn_started_at: None,
             activity: None,
-            ctrl_c_at: None,
             session: SessionInfo::default(),
         }
     }
@@ -120,85 +96,50 @@ impl RataApp {
         self
     }
 
+    /// The pane's task-status input, recomputed from the app's turn state
+    /// (the pane holds no turn state of its own — plan Phase 5 boundary).
+    fn pane_status(&self) -> BottomPaneStatus {
+        BottomPaneStatus {
+            running: self.current_turn.is_some(),
+            text: self.spinner_text(),
+        }
+    }
+
     fn on_key(&mut self, key: KeyEvent) -> KeyOutcome {
-        // An active view owns the keyboard until it resolves (layered
-        // routing: view stack first, then completion/vim/composer).
-        if let Some(outcome) = self.view_stack.route_key(key) {
-            return self.on_view_outcome(outcome);
-        }
-        if self.completion.is_some() {
-            if let Some(outcome) = self.on_completion_key(key.code) {
-                return outcome;
-            }
-        }
-        // When vim is enabled, the vim layer sees the key first. It fully
-        // handles Normal-mode motions/edits; Insert-mode typing + all Ctrl
-        // chords fall through to the normal composer handling below.
-        if self.vim.is_some() {
-            let vim_outcome = {
-                let vim = self.vim.as_mut().expect("vim is Some");
-                crate::vim::handle_key(vim, &mut self.composer, key)
-            };
-            match vim_outcome {
-                VimOutcome::Consumed => {
-                    self.sync_completion();
-                    return KeyOutcome::Continue;
+        // Feed the pane the current turn status (Ctrl-C routing depends on
+        // it), then route the key through the pane's layered input handling:
+        // active view first, then completion, then vim, then the composer.
+        self.bottom_pane.set_task_running(self.pane_status());
+        let outcome = self.bottom_pane.handle_key(key);
+        self.on_pane_outcome(outcome)
+    }
+
+    /// Execute the app-level intent the pane returned from a key or paste.
+    fn on_pane_outcome(&mut self, outcome: BottomPaneOutcome) -> KeyOutcome {
+        match outcome {
+            BottomPaneOutcome::Consumed => KeyOutcome::Continue,
+            BottomPaneOutcome::Quit => KeyOutcome::Quit,
+            BottomPaneOutcome::Interrupt => {
+                if let Some(token) = self.current_turn.take() {
+                    token.cancel();
                 }
-                VimOutcome::Submit => {
-                    let outcome = self.submit_composer();
-                    self.sync_completion();
+                self.turn_started_at = None;
+                self.activity = None;
+                KeyOutcome::Continue
+            }
+            BottomPaneOutcome::ToggleVerbose => {
+                self.transcript.toggle_verbose();
+                self.bottom_pane.set_verbose(self.transcript.verbose());
+                KeyOutcome::Continue
+            }
+            BottomPaneOutcome::Submitted(text) => {
+                if let Some(outcome) = self.handle_slash(&text) {
                     return outcome;
                 }
-                VimOutcome::Passthrough => {}
+                self.submit_prompt(text)
             }
-        }
-        let outcome = self.on_composer_key(key);
-        self.sync_completion();
-        outcome
-    }
-
-    /// Take the composer buffer and either run a slash command or emit a
-    /// `Submit` for the caller to drive a turn. Shared by the Enter key and
-    /// vim's Normal-mode `Enter`.
-    fn submit_composer(&mut self) -> KeyOutcome {
-        if self.composer.is_blank() {
-            return KeyOutcome::Continue;
-        }
-        let text = self.composer.take();
-        let text = text.trim().to_string();
-        if let Some(outcome) = self.handle_slash(&text) {
-            return outcome;
-        }
-        self.submit_prompt(text)
-    }
-
-    /// Record `text` as the user's prompt and hand it to the caller with a
-    /// fresh per-turn cancellation token. Shared by the composer submit path
-    /// and [`ViewOutcome::SubmitPrompt`].
-    fn submit_prompt(&mut self, text: String) -> KeyOutcome {
-        self.transcript.push_message(RenderedMessage::UserText {
-            body: text.clone(),
-            timestamp: 0,
-        });
-        let token = CancellationToken::new();
-        self.current_turn = Some(token.clone());
-        KeyOutcome::Submit(text, token)
-    }
-
-    /// Act on the outcome the view stack returned after routing a key/paste
-    /// (the stack has already done its own pop/push bookkeeping; only
-    /// app-level effects are left).
-    fn on_view_outcome(&mut self, outcome: ViewOutcome) -> KeyOutcome {
-        match outcome {
-            // `OpenView` is consumed inside the stack and never surfaces here;
-            // the remaining variants carry no app-level effect.
-            ViewOutcome::Pending
-            | ViewOutcome::Cancelled
-            | ViewOutcome::Accepted(_)
-            | ViewOutcome::PermissionResponse(_)
-            | ViewOutcome::OpenView(_) => KeyOutcome::Continue,
-            ViewOutcome::SubmitPrompt(prompt) => self.submit_prompt(prompt),
-            ViewOutcome::SwitchModel {
+            BottomPaneOutcome::SubmitPrompt(prompt) => self.submit_prompt(prompt),
+            BottomPaneOutcome::SwitchModel {
                 request_model,
                 profile,
             } => {
@@ -209,12 +150,37 @@ impl RataApp {
                 });
                 KeyOutcome::SwitchModel(request_model, profile)
             }
-            ViewOutcome::RunCommand(action) => self.run_command(action),
+            BottomPaneOutcome::RunCommand(action) => self.run_command(action),
+            BottomPaneOutcome::PastedImage(path) => {
+                let name = std::path::Path::new(&path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(String::from);
+                self.transcript.push_message(RenderedMessage::UserImage {
+                    image_id: None,
+                    metadata: name,
+                    source_path: Some(path),
+                });
+                KeyOutcome::Continue
+            }
         }
     }
 
+    /// Record `text` as the user's prompt and hand it to the caller with a
+    /// fresh per-turn cancellation token. Shared by the composer submit path
+    /// and [`BottomPaneOutcome::SubmitPrompt`].
+    fn submit_prompt(&mut self, text: String) -> KeyOutcome {
+        self.transcript.push_message(RenderedMessage::UserText {
+            body: text.clone(),
+            timestamp: 0,
+        });
+        let token = CancellationToken::new();
+        self.current_turn = Some(token.clone());
+        KeyOutcome::Submit(text, token)
+    }
+
     /// Execute a command effect a view requested via
-    /// [`ViewOutcome::RunCommand`].
+    /// [`BottomPaneOutcome::RunCommand`].
     fn run_command(&mut self, action: CommandAction) -> KeyOutcome {
         match action {
             CommandAction::ClearTranscript => {
@@ -225,137 +191,11 @@ impl RataApp {
         }
     }
 
-    /// Handle a bracketed paste. An active view owns the paste stream (modal
-    /// views swallow it by default). Otherwise an image file path (existing
-    /// `.png`/`.jpg`/…) becomes an image message (auto-selected for preview);
-    /// anything else is inserted into the composer at the cursor.
+    /// Handle a bracketed paste by routing it through the pane (active view
+    /// first, then image-path detection, then composer insertion).
     fn on_paste(&mut self, text: &str) -> KeyOutcome {
-        if let Some(outcome) = self.view_stack.route_paste(text) {
-            return self.on_view_outcome(outcome);
-        }
-        let trimmed = text.trim();
-        if is_image_path(trimmed) {
-            let name = std::path::Path::new(trimmed)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(String::from);
-            self.transcript.push_message(RenderedMessage::UserImage {
-                image_id: None,
-                metadata: name,
-                source_path: Some(trimmed.to_string()),
-            });
-        } else {
-            self.composer.insert_str(text);
-            self.sync_completion();
-        }
-        KeyOutcome::Continue
-    }
-
-    fn on_composer_key(&mut self, key: KeyEvent) -> KeyOutcome {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let is_ctrl_c = ctrl && matches!(key.code, KeyCode::Char('c'));
-        // Any key other than a repeat Ctrl-C disarms the press-twice-to-exit.
-        if !is_ctrl_c {
-            self.ctrl_c_at = None;
-        }
-        match key.code {
-            KeyCode::Esc => KeyOutcome::Quit,
-            // Ctrl-C interrupts an in-flight turn; when idle it arms, and a second
-            // press within the window quits (claude-code parity).
-            KeyCode::Char('c') if ctrl => {
-                if let Some(token) = self.current_turn.take() {
-                    token.cancel();
-                    self.turn_started_at = None;
-                    self.activity = None;
-                    KeyOutcome::Continue
-                } else if self
-                    .ctrl_c_at
-                    .is_some_and(|t| t.elapsed() <= CTRL_C_EXIT_WINDOW)
-                {
-                    KeyOutcome::Quit
-                } else {
-                    self.ctrl_c_at = Some(std::time::Instant::now());
-                    KeyOutcome::Continue
-                }
-            }
-            // Emacs-style composer edits.
-            KeyCode::Char('a') if ctrl => {
-                self.composer.home();
-                KeyOutcome::Continue
-            }
-            KeyCode::Char('e') if ctrl => {
-                self.composer.end();
-                KeyOutcome::Continue
-            }
-            KeyCode::Char('w') if ctrl => {
-                self.composer.delete_word();
-                KeyOutcome::Continue
-            }
-            KeyCode::Char('u') if ctrl => {
-                self.composer.kill_to_line_start();
-                KeyOutcome::Continue
-            }
-            // Ctrl-O toggles verbose (expand thinking/tool-use/grouped blocks).
-            KeyCode::Char('o') if ctrl => {
-                self.transcript.toggle_verbose();
-                KeyOutcome::Continue
-            }
-            // Modified Enter (Alt/Shift) inserts a newline; plain Enter submits.
-            KeyCode::Enter
-                if key
-                    .modifiers
-                    .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
-            {
-                self.composer.insert_newline();
-                KeyOutcome::Continue
-            }
-            KeyCode::Enter => self.submit_composer(),
-            KeyCode::Home => {
-                self.composer.home();
-                KeyOutcome::Continue
-            }
-            KeyCode::End => {
-                self.composer.end();
-                KeyOutcome::Continue
-            }
-            KeyCode::Left if ctrl => {
-                self.composer.move_word_left();
-                KeyOutcome::Continue
-            }
-            KeyCode::Right if ctrl => {
-                self.composer.move_word_right();
-                KeyOutcome::Continue
-            }
-            KeyCode::Left => {
-                self.composer.move_left();
-                KeyOutcome::Continue
-            }
-            KeyCode::Right => {
-                self.composer.move_right();
-                KeyOutcome::Continue
-            }
-            KeyCode::Up => {
-                self.composer.up();
-                KeyOutcome::Continue
-            }
-            KeyCode::Down => {
-                self.composer.down();
-                KeyOutcome::Continue
-            }
-            KeyCode::Backspace => {
-                self.composer.backspace();
-                KeyOutcome::Continue
-            }
-            KeyCode::Delete => {
-                self.composer.delete();
-                KeyOutcome::Continue
-            }
-            KeyCode::Char(c) if !ctrl => {
-                self.composer.insert(c);
-                KeyOutcome::Continue
-            }
-            _ => KeyOutcome::Continue,
-        }
+        let outcome = self.bottom_pane.handle_paste(text);
+        self.on_pane_outcome(outcome)
     }
 
     /// Fold one streaming event from the orchestrator bridge into the
@@ -425,14 +265,13 @@ impl RataApp {
     /// (Enter/1-3 approve or deny, Esc denies) and delivers the response
     /// through the exchange's one-shot channel exactly once.
     pub fn open_permission(&mut self, exchange: PermissionExchange) {
-        self.view_stack
-            .push(Box::new(PermissionView::new(exchange)));
+        self.bottom_pane.show_permission(exchange);
     }
 
     /// Whether a permission prompt is anywhere on the view stack (the event
     /// loop defers further permission requests until it resolves).
     fn has_open_permission(&self) -> bool {
-        self.view_stack.contains::<PermissionView>()
+        self.bottom_pane.view_stack().contains::<PermissionView>()
     }
 
     /// Route a recognized slash command. Returns `Some(outcome)` when the input
@@ -457,16 +296,16 @@ impl RataApp {
         }
         match trimmed {
             "/help" => {
-                self.view_stack.push(Box::new(ScreenView::help()));
+                self.bottom_pane.show_view(Box::new(ScreenView::help()));
                 Some(KeyOutcome::Continue)
             }
             "/doctor" => {
-                self.view_stack
-                    .push(Box::new(ScreenView::doctor(&self.session.doctor)));
+                self.bottom_pane
+                    .show_view(Box::new(ScreenView::doctor(&self.session.doctor)));
                 Some(KeyOutcome::Continue)
             }
             "/mcp" => {
-                self.view_stack.push(Box::new(ScreenView::from_rows(
+                self.bottom_pane.show_view(Box::new(ScreenView::from_rows(
                     "MCP servers",
                     "MCP servers",
                     &self.session.mcp,
@@ -475,7 +314,7 @@ impl RataApp {
                 Some(KeyOutcome::Continue)
             }
             "/hooks" => {
-                self.view_stack.push(Box::new(ScreenView::from_rows(
+                self.bottom_pane.show_view(Box::new(ScreenView::from_rows(
                     "Hooks",
                     "Hooks",
                     &self.session.hooks,
@@ -484,7 +323,7 @@ impl RataApp {
                 Some(KeyOutcome::Continue)
             }
             "/agents" => {
-                self.view_stack.push(Box::new(ScreenView::from_rows(
+                self.bottom_pane.show_view(Box::new(ScreenView::from_rows(
                     "Agents",
                     "Agents",
                     &self.session.agents,
@@ -504,15 +343,14 @@ impl RataApp {
                         is_error: false,
                     });
                 } else {
-                    self.view_stack
-                        .push(Box::new(ModelPickerView::new(self.session.models.clone())));
+                    self.bottom_pane
+                        .show_model_picker(self.session.models.clone());
                 }
                 Some(KeyOutcome::Continue)
             }
             "/exit" | "/quit" => Some(KeyOutcome::Quit),
             "/vim" => {
-                let now_on = self.vim.is_none();
-                self.vim = if now_on { Some(VimState::new()) } else { None };
+                let now_on = self.bottom_pane.toggle_vim();
                 self.transcript.push_message(RenderedMessage::SystemText {
                     body: format!("Vim mode {}.", if now_on { "enabled" } else { "disabled" }),
                     timestamp: 0,
@@ -524,72 +362,11 @@ impl RataApp {
         }
     }
 
-    /// Handle a key while the completion popup is open. Returns `Some(outcome)`
-    /// when the popup consumes the key (nav / complete / dismiss), or `None` to
-    /// let it fall through to the composer (so typing keeps filtering).
-    fn on_completion_key(&mut self, code: KeyCode) -> Option<KeyOutcome> {
-        match code {
-            KeyCode::Up => {
-                self.completion.as_mut()?.prev();
-                Some(KeyOutcome::Continue)
-            }
-            KeyCode::Down => {
-                self.completion.as_mut()?.next();
-                Some(KeyOutcome::Continue)
-            }
-            KeyCode::Tab => {
-                let insert = self.completion.as_ref()?.selected_insert().to_string();
-                // An `@file` token completes in place; a `/command` replaces the
-                // whole buffer.
-                if let Some((at, _)) = self.composer.at_fragment() {
-                    self.composer.complete_at(at, &insert);
-                } else {
-                    self.composer.replace_all(&insert);
-                }
-                self.sync_completion();
-                Some(KeyOutcome::Continue)
-            }
-            KeyCode::Esc => {
-                self.completion = None;
-                Some(KeyOutcome::Continue)
-            }
-            _ => None,
-        }
-    }
-
-    /// Recompute the completion popup from the current composer text: a
-    /// `/command` fragment (whole buffer) shows command matches; an `@file`
-    /// token at the cursor shows file matches; anything else closes it.
-    fn sync_completion(&mut self) {
-        let text = self.composer.text();
-        let is_command =
-            text.starts_with('/') && !text.contains('\n') && !text.contains(char::is_whitespace);
-        if is_command {
-            self.completion = CompletionView::new(command_items(&text));
-            return;
-        }
-        if let Some((_, fragment)) = self.composer.at_fragment() {
-            self.completion = CompletionView::new(crate::files::file_completions(&fragment));
-            return;
-        }
-        self.completion = None;
-    }
-
-    /// Desired inline-viewport height at `width` columns: status + composer,
-    /// grown to fit the active stacked view (which reports its own height
-    /// through [`Renderable::desired_height`]) or the completion popup.
+    /// Desired inline-viewport height at `width` columns: the pane reports
+    /// its own height (status + composer, grown to fit the active stacked
+    /// view or the completion popup); the app applies the viewport clamp.
     fn viewport_height(&self, width: u16) -> u16 {
-        let composer =
-            u16::try_from(self.composer.lines().len().clamp(1, MAX_VISIBLE_LINES)).unwrap_or(1);
-        let base = 1 + composer + 2; // status + composer content + border
-        let overlay = if let Some(view) = self.view_stack.active() {
-            view.desired_height(width)
-        } else if self.completion.is_some() {
-            base + 8
-        } else {
-            0
-        };
-        base.max(overlay).clamp(4, 20)
+        self.bottom_pane.desired_height(width).clamp(4, 20)
     }
 
     /// Commit finalized transcript cells into the terminal's native scrollback
@@ -623,92 +400,24 @@ impl RataApp {
     }
 
     /// Draw the bottom viewport (history lives in the terminal's native
-    /// scrollback via [`Self::flush_scrollback`]): a status line + the composer
-    /// box, with any active overlay (completion / model picker / permission)
-    /// drawn on top.
+    /// scrollback via [`Self::flush_scrollback`]): the [`BottomPane`] renders
+    /// the status line + composer box + overlays through the `(Rect, &mut
+    /// Buffer)` [`Renderable`] contract.
     ///
-    /// The [`crate::terminal::Frame`] is only the terminal draw BOUNDARY: all
-    /// widgets render through the `(Rect, &mut Buffer)` [`Renderable`]
-    /// contract into the frame's buffer, and the composer's cursor
-    /// position/style are copied back onto the frame at the end.
+    /// The [`crate::terminal::Frame`] is only the terminal draw BOUNDARY: the
+    /// pane draws into the frame's buffer, and the pane's cursor claim
+    /// (composer cursor, or a full-frame view's) is copied back onto the
+    /// frame at the end (no claim → cursor hidden).
     fn render_viewport(&mut self, frame: &mut crate::terminal::Frame) {
+        // Refresh the pane's status input so the spinner text/animation
+        // reflect this tick's turn state.
+        self.bottom_pane.set_task_running(self.pane_status());
         let area = frame.area();
-
-        // A full-frame view (e.g. `/help`) owns the whole viewport: no status
-        // row, no composer, and the cursor is the view's to claim (hidden by
-        // default).
-        if let Some(view) = self.view_stack.active() {
-            if !view.wants_status_line() {
-                view.render(area, frame.buffer_mut());
-                if let Some(pos) = view.cursor_pos(area) {
-                    frame.set_cursor_position(pos);
-                    frame.set_cursor_style(view.cursor_style(area));
-                }
-                return;
-            }
-        }
-
-        let zones = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(3)])
-            .split(area);
-
-        let dim = crate::style_adapter::to_ratatui(self.theme.dim);
-        let status: Line = if self.current_turn.is_some() {
-            let claude = crate::style_adapter::to_ratatui(self.theme.claude);
-            Line::from(vec![
-                Span::styled(self.spinner_text(), Style::default().fg(claude)),
-                Span::styled(
-                    "   ·  Ctrl-C: cancel  ·  Esc: quit",
-                    Style::default().fg(dim),
-                ),
-            ])
-        } else if self
-            .ctrl_c_at
-            .is_some_and(|t| t.elapsed() <= CTRL_C_EXIT_WINDOW)
-        {
-            let claude = crate::style_adapter::to_ratatui(self.theme.claude);
-            Line::from(Span::styled(
-                "Press Ctrl-C again to exit",
-                Style::default().fg(claude),
-            ))
-        } else {
-            let base = if self.completion.is_some() {
-                "↑/↓: pick  ·  Tab: complete  ·  Esc: dismiss  ·  Enter: run"
-            } else if self.transcript.verbose() {
-                "Enter: send  ·  Ctrl-O: collapse  ·  ↑/↓: history  ·  Esc: quit"
-            } else {
-                "Enter: send  ·  Alt+Enter: newline  ·  Ctrl-O: verbose  ·  Esc: quit"
-            };
-            let text = match &self.vim {
-                Some(vim) => format!("[{}]  {base}", vim.label()),
-                None => base.to_string(),
-            };
-            Line::from(Span::styled(text, Style::default().fg(dim)))
-        };
-        let composer_view = ComposerView::new(&self.composer);
-        let cursor_pos = composer_view.cursor_pos(zones[1]);
-        let cursor_style = composer_view.cursor_style(zones[1]);
-
-        let buf = frame.buffer_mut();
-        Paragraph::new(status).render(zones[0], buf);
-        composer_view.render(zones[1], buf);
-
-        // Overlays draw over the viewport: the completion popup anchored
-        // above the composer, then the stacked views bottom-to-top (each a
-        // centered modal over the full area).
-        if let Some(popup) = &self.completion {
-            popup.render(zones[1], buf);
-        }
-        for view in self.view_stack.views() {
-            view.render(area, buf);
-        }
-
-        // Frame adapter: copy the composer's cursor claim onto the frame.
-        if let Some(pos) = cursor_pos {
+        self.bottom_pane.render(area, frame.buffer_mut());
+        if let Some(pos) = self.bottom_pane.cursor_pos(area) {
             frame.set_cursor_position(pos);
+            frame.set_cursor_style(self.bottom_pane.cursor_style(area));
         }
-        frame.set_cursor_style(cursor_style);
     }
 }
 
@@ -725,19 +434,6 @@ fn activity_label(tool: &str) -> String {
         "Task" => "Delegating".to_string(),
         other => format!("Running {other}"),
     }
-}
-
-/// Whether `s` is a single existing image file path (used to route pastes to an
-/// image message vs composer text).
-fn is_image_path(s: &str) -> bool {
-    if s.is_empty() || s.contains('\n') {
-        return false;
-    }
-    let lower = s.to_ascii_lowercase();
-    let has_img_ext = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]
-        .iter()
-        .any(|e| lower.ends_with(e));
-    has_img_ext && std::path::Path::new(s).is_file()
 }
 
 /// Run the interactive chat app on the bottom-anchored custom terminal:
@@ -818,10 +514,12 @@ fn app_loop(
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::{KeyCode, KeyModifiers};
     use permission::gate::{PermissionRequest, PermissionResponse};
     use tokio::sync::oneshot;
 
     use super::*;
+    use crate::bottom_pane::model_picker_view::ModelPickerView;
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -870,11 +568,11 @@ mod tests {
         let outcome = app.on_key(alt(KeyCode::Enter));
         assert!(matches!(outcome, KeyOutcome::Continue));
         typ(&mut app, "line two");
-        assert_eq!(app.composer.text(), "line one\nline two");
+        assert_eq!(app.bottom_pane.composer().text(), "line one\nline two");
         // Plain Enter submits the full multi-line buffer.
         let outcome = app.on_key(press(KeyCode::Enter));
         assert!(matches!(outcome, KeyOutcome::Submit(ref p, _) if p == "line one\nline two"));
-        assert_eq!(app.composer.text(), "");
+        assert_eq!(app.bottom_pane.composer().text(), "");
     }
 
     #[test]
@@ -886,9 +584,9 @@ mod tests {
         app.on_key(press(KeyCode::Enter));
         // Composer is empty; Up walks newest → oldest.
         app.on_key(press(KeyCode::Up));
-        assert_eq!(app.composer.text(), "second prompt");
+        assert_eq!(app.bottom_pane.composer().text(), "second prompt");
         app.on_key(press(KeyCode::Up));
-        assert_eq!(app.composer.text(), "first prompt");
+        assert_eq!(app.bottom_pane.composer().text(), "first prompt");
     }
 
     #[test]
@@ -897,7 +595,7 @@ mod tests {
         typ(&mut app, "ac");
         app.on_key(press(KeyCode::Left)); // between a|c
         app.on_key(press(KeyCode::Char('b')));
-        assert_eq!(app.composer.text(), "abc");
+        assert_eq!(app.bottom_pane.composer().text(), "abc");
     }
 
     #[test]
@@ -906,10 +604,10 @@ mod tests {
         for c in "hi".chars() {
             app.on_key(press(KeyCode::Char(c)));
         }
-        assert_eq!(app.composer.text(), "hi");
+        assert_eq!(app.bottom_pane.composer().text(), "hi");
         let outcome = app.on_key(press(KeyCode::Enter));
         assert!(matches!(outcome, KeyOutcome::Submit(ref p, _) if p == "hi"));
-        assert_eq!(app.composer.text(), "");
+        assert_eq!(app.bottom_pane.composer().text(), "");
         assert!(app.current_turn.is_some());
         let msgs = messages(&app);
         assert_eq!(msgs.len(), 1);
@@ -962,7 +660,7 @@ mod tests {
             app.on_key(ctrl(KeyCode::Char('c'))),
             KeyOutcome::Continue
         ));
-        assert!(app.ctrl_c_at.is_some());
+        assert!(app.bottom_pane.ctrl_c_armed());
         // Second idle Ctrl-C within the window quits.
         assert!(matches!(
             app.on_key(ctrl(KeyCode::Char('c'))),
@@ -976,9 +674,9 @@ mod tests {
         // Arm the exit with an idle Ctrl-C, then type: the arm must reset so a
         // later single Ctrl-C does not quit unexpectedly.
         app.on_key(ctrl(KeyCode::Char('c')));
-        assert!(app.ctrl_c_at.is_some());
+        assert!(app.bottom_pane.ctrl_c_armed());
         app.on_key(press(KeyCode::Char('h')));
-        assert!(app.ctrl_c_at.is_none());
+        assert!(!app.bottom_pane.ctrl_c_armed());
         assert!(matches!(
             app.on_key(ctrl(KeyCode::Char('c'))),
             KeyOutcome::Continue
@@ -991,15 +689,15 @@ mod tests {
         typ(&mut app, "foo bar");
         // Bare Home/End move the composer cursor (not scrollback).
         app.on_key(press(KeyCode::Home));
-        assert_eq!(app.composer.cursor_row_col(), (0, 0));
+        assert_eq!(app.bottom_pane.composer().cursor_row_col(), (0, 0));
         app.on_key(press(KeyCode::End));
-        assert_eq!(app.composer.cursor_row_col(), (0, 7));
+        assert_eq!(app.bottom_pane.composer().cursor_row_col(), (0, 7));
         // Ctrl+W deletes the previous word.
         app.on_key(ctrl(KeyCode::Char('w')));
-        assert_eq!(app.composer.text(), "foo ");
+        assert_eq!(app.bottom_pane.composer().text(), "foo ");
         // Ctrl+U kills to line start.
         app.on_key(ctrl(KeyCode::Char('u')));
-        assert_eq!(app.composer.text(), "");
+        assert_eq!(app.bottom_pane.composer().text(), "");
     }
 
     #[test]
@@ -1018,7 +716,7 @@ mod tests {
         let base = app.viewport_height(80);
         // Opening the completion popup grows the viewport.
         typ(&mut app, "/");
-        assert!(app.completion.is_some());
+        assert!(app.bottom_pane.completion().is_some());
         assert!(app.viewport_height(80) > base);
     }
 
@@ -1027,7 +725,7 @@ mod tests {
         let mut app = RataApp::new(Vec::new());
         typ(&mut app, "pre ");
         app.on_paste("hello world");
-        assert_eq!(app.composer.text(), "pre hello world");
+        assert_eq!(app.bottom_pane.composer().text(), "pre hello world");
         // A non-existent image path is treated as text, not an image message.
         app.on_paste(" /no/such/file.png ");
         assert!(messages(&app).is_empty());
@@ -1056,11 +754,11 @@ mod tests {
     #[test]
     fn slash_vim_toggles_vim_mode() {
         let mut app = RataApp::new(Vec::new());
-        assert!(app.vim.is_none());
+        assert!(!app.bottom_pane.vim_enabled());
         submit_command(&mut app, "/vim");
-        assert!(app.vim.is_some());
+        assert!(app.bottom_pane.vim_enabled());
         submit_command(&mut app, "/vim");
-        assert!(app.vim.is_none());
+        assert!(!app.bottom_pane.vim_enabled());
     }
 
     #[test]
@@ -1074,11 +772,11 @@ mod tests {
         // In Normal mode, `0` moves to line start and `x` deletes — not typed.
         app.on_key(press(KeyCode::Char('0')));
         app.on_key(press(KeyCode::Char('x')));
-        assert_eq!(app.composer.text(), "ello");
+        assert_eq!(app.bottom_pane.composer().text(), "ello");
         // `i` returns to Insert; typing inserts again.
         app.on_key(press(KeyCode::Char('i')));
         typ(&mut app, "H");
-        assert_eq!(app.composer.text(), "Hello");
+        assert_eq!(app.bottom_pane.composer().text(), "Hello");
     }
 
     #[test]
@@ -1096,31 +794,31 @@ mod tests {
         let mut app = RataApp::new(Vec::new());
         typ(&mut app, "alpha beta");
         app.on_key(ctrl(KeyCode::Left)); // to start of "beta"
-        assert_eq!(app.composer.cursor_row_col(), (0, 6));
+        assert_eq!(app.bottom_pane.composer().cursor_row_col(), (0, 6));
         app.on_key(ctrl(KeyCode::Left)); // to start of "alpha"
-        assert_eq!(app.composer.cursor_row_col(), (0, 0));
+        assert_eq!(app.bottom_pane.composer().cursor_row_col(), (0, 0));
     }
 
     #[test]
     fn typing_slash_opens_and_filters_command_palette() {
         let mut app = RataApp::new(Vec::new());
         app.on_key(press(KeyCode::Char('/')));
-        assert!(app.completion.is_some());
+        assert!(app.bottom_pane.completion().is_some());
         typ(&mut app, "m"); // "/m" narrows to /model + /mcp
-        let p = app.completion.as_ref().unwrap();
+        let p = app.bottom_pane.completion().unwrap();
         assert_eq!(p.selected_insert(), "/model");
         // A space ends the command token and closes the popup.
         typ(&mut app, " x");
-        assert!(app.completion.is_none());
+        assert!(app.bottom_pane.completion().is_none());
     }
 
     #[test]
     fn tab_completes_selected_command_into_composer() {
         let mut app = RataApp::new(Vec::new());
         typ(&mut app, "/mc");
-        assert!(app.completion.is_some());
+        assert!(app.bottom_pane.completion().is_some());
         app.on_key(press(KeyCode::Tab));
-        assert_eq!(app.composer.text(), "/mcp");
+        assert_eq!(app.bottom_pane.composer().text(), "/mcp");
     }
 
     #[test]
@@ -1130,9 +828,9 @@ mod tests {
         app.on_key(press(KeyCode::Down)); // navigate the popup, not history
         let outcome = app.on_key(press(KeyCode::Esc));
         assert!(matches!(outcome, KeyOutcome::Continue));
-        assert!(app.completion.is_none());
+        assert!(app.bottom_pane.completion().is_none());
         // Composer text is untouched by the dismiss.
-        assert_eq!(app.composer.text(), "/");
+        assert_eq!(app.bottom_pane.composer().text(), "/");
     }
 
     #[test]
@@ -1140,13 +838,19 @@ mod tests {
         let mut app = RataApp::new(Vec::new());
         // `@Carg` should match Cargo.toml in the tui-rata crate cwd.
         typ(&mut app, "see @Carg");
-        assert!(app.completion.is_some(), "@ token opens file completion");
+        assert!(
+            app.bottom_pane.completion().is_some(),
+            "@ token opens file completion"
+        );
         app.on_key(press(KeyCode::Tab));
         // The @token is replaced in place, leaving the prefix intact.
         assert!(
-            app.composer.text().starts_with("see @Cargo.toml"),
+            app.bottom_pane
+                .composer()
+                .text()
+                .starts_with("see @Cargo.toml"),
             "got: {}",
-            app.composer.text()
+            app.bottom_pane.composer().text()
         );
     }
 
@@ -1183,7 +887,7 @@ mod tests {
         // While a prompt is open, normal keys are swallowed by the dialog and
         // never reach the composer.
         app.on_key(press(KeyCode::Char('x')));
-        assert_eq!(app.composer.text(), "");
+        assert_eq!(app.bottom_pane.composer().text(), "");
 
         // Enter selects the highlighted option (index 0 = AllowOnce).
         let outcome = app.on_key(press(KeyCode::Enter));
@@ -1227,8 +931,8 @@ mod tests {
         // Recognized command: no Submit; a focused ScreenView opens instead
         // of dumping text into scrollback (plan Phase 4 view-stack routing).
         assert!(matches!(outcome, KeyOutcome::Continue));
-        assert_eq!(app.composer.text(), "");
-        assert!(app.view_stack.contains::<ScreenView>());
+        assert_eq!(app.bottom_pane.composer().text(), "");
+        assert!(app.bottom_pane.view_stack().contains::<ScreenView>());
         assert!(messages(&app).is_empty(), "no scrollback dump");
         assert!(app.current_turn.is_none());
     }
@@ -1237,14 +941,15 @@ mod tests {
     fn screen_view_owns_keys_scrolls_and_esc_closes_without_quitting() {
         let mut app = RataApp::new(Vec::new());
         submit_command(&mut app, "/help");
-        assert!(app.view_stack.contains::<ScreenView>());
+        assert!(app.bottom_pane.view_stack().contains::<ScreenView>());
         // Keys go to the view, not the composer.
         app.on_key(press(KeyCode::Char('x')));
-        assert_eq!(app.composer.text(), "");
+        assert_eq!(app.bottom_pane.composer().text(), "");
         // Down scrolls the screen body.
         app.on_key(press(KeyCode::Down));
         let scroll = app
-            .view_stack
+            .bottom_pane
+            .view_stack()
             .active()
             .and_then(|v| v.as_any().downcast_ref::<ScreenView>())
             .expect("help screen active")
@@ -1253,9 +958,9 @@ mod tests {
         // Esc closes the view (does NOT quit the app) and returns the keys.
         let outcome = app.on_key(press(KeyCode::Esc));
         assert!(matches!(outcome, KeyOutcome::Continue));
-        assert!(app.view_stack.is_empty());
+        assert!(app.bottom_pane.view_stack().is_empty());
         app.on_key(press(KeyCode::Char('h')));
-        assert_eq!(app.composer.text(), "h");
+        assert_eq!(app.bottom_pane.composer().text(), "h");
     }
 
     #[test]
@@ -1264,7 +969,7 @@ mod tests {
         submit_command(&mut app, "/help");
         let outcome = app.on_key(press(KeyCode::Char('q')));
         assert!(matches!(outcome, KeyOutcome::Continue));
-        assert!(app.view_stack.is_empty());
+        assert!(app.bottom_pane.view_stack().is_empty());
     }
 
     #[test]
@@ -1315,14 +1020,14 @@ mod tests {
             submit_command(&mut app, "/doctor"),
             KeyOutcome::Continue
         ));
-        assert!(app.view_stack.contains::<ScreenView>());
+        assert!(app.bottom_pane.view_stack().contains::<ScreenView>());
         app.on_key(press(KeyCode::Esc)); // close /doctor
-        assert!(app.view_stack.is_empty());
+        assert!(app.bottom_pane.view_stack().is_empty());
         assert!(matches!(
             submit_command(&mut app, "/mcp"),
             KeyOutcome::Continue
         ));
-        assert!(app.view_stack.contains::<ScreenView>());
+        assert!(app.bottom_pane.view_stack().contains::<ScreenView>());
         // Focused views, not scrollback dumps; and no prompt turn started.
         assert!(messages(&app).is_empty());
         assert!(app.current_turn.is_none());
@@ -1357,7 +1062,7 @@ mod tests {
             submit_command(&mut app, "/model"),
             KeyOutcome::Continue
         ));
-        assert!(!app.view_stack.contains::<ModelPickerView>());
+        assert!(!app.bottom_pane.view_stack().contains::<ModelPickerView>());
         assert_eq!(messages(&app).len(), 1);
     }
 
@@ -1368,7 +1073,7 @@ mod tests {
             submit_command(&mut app, "/model"),
             KeyOutcome::Continue
         ));
-        assert!(app.view_stack.contains::<ModelPickerView>());
+        assert!(app.bottom_pane.view_stack().contains::<ModelPickerView>());
         // Picker owns the keyboard: move up to the first (Opus) row and confirm.
         app.on_key(press(KeyCode::Up));
         let outcome = app.on_key(press(KeyCode::Enter));
@@ -1377,29 +1082,29 @@ mod tests {
             KeyOutcome::SwitchModel(ref m, ref p)
                 if m == "claude-opus" && p.as_deref() == Some("anthropic")
         ));
-        assert!(!app.view_stack.contains::<ModelPickerView>());
+        assert!(!app.bottom_pane.view_stack().contains::<ModelPickerView>());
     }
 
     #[test]
     fn model_picker_esc_cancels_without_switching() {
         let mut app = app_with_models();
         submit_command(&mut app, "/model");
-        assert!(app.view_stack.contains::<ModelPickerView>());
+        assert!(app.bottom_pane.view_stack().contains::<ModelPickerView>());
         let outcome = app.on_key(press(KeyCode::Esc));
         assert!(matches!(outcome, KeyOutcome::Continue));
-        assert!(!app.view_stack.contains::<ModelPickerView>());
+        assert!(!app.bottom_pane.view_stack().contains::<ModelPickerView>());
     }
 
     #[test]
     fn permission_stacks_over_picker_and_returns_keys_to_it() {
         let mut app = app_with_models();
         submit_command(&mut app, "/model");
-        assert!(app.view_stack.contains::<ModelPickerView>());
+        assert!(app.bottom_pane.view_stack().contains::<ModelPickerView>());
         // A permission request arriving while the picker is open stacks on
         // top and owns the keyboard.
         let (exchange, resp_rx) = tool_exchange();
         app.open_permission(exchange);
-        assert_eq!(app.view_stack.len(), 2);
+        assert_eq!(app.bottom_pane.view_stack().len(), 2);
         let outcome = app.on_key(press(KeyCode::Enter)); // resolves permission
         assert!(matches!(outcome, KeyOutcome::Continue));
         assert_eq!(
@@ -1407,7 +1112,7 @@ mod tests {
             PermissionResponse::AllowOnce
         );
         // The picker beneath survives and gets the keyboard back.
-        assert!(app.view_stack.contains::<ModelPickerView>());
+        assert!(app.bottom_pane.view_stack().contains::<ModelPickerView>());
         app.on_key(press(KeyCode::Up));
         let outcome = app.on_key(press(KeyCode::Enter));
         assert!(matches!(outcome, KeyOutcome::SwitchModel(ref m, _) if m == "claude-opus"));
@@ -1431,10 +1136,11 @@ mod tests {
         }
 
         impl crate::bottom_pane::BottomPaneView for CommandStub {
-            fn handle_key(&mut self, _key: KeyEvent) -> ViewOutcome {
-                self.0
-                    .take()
-                    .map_or(ViewOutcome::Pending, ViewOutcome::RunCommand)
+            fn handle_key(&mut self, _key: KeyEvent) -> crate::bottom_pane::ViewOutcome {
+                self.0.take().map_or(
+                    crate::bottom_pane::ViewOutcome::Pending,
+                    crate::bottom_pane::ViewOutcome::RunCommand,
+                )
             }
 
             fn as_any(&self) -> &dyn Any {
@@ -1448,19 +1154,22 @@ mod tests {
             timestamp: 0,
             is_error: false,
         }]);
-        app.view_stack
-            .push(Box::new(CommandStub(Some(CommandAction::ClearTranscript))));
+        app.bottom_pane
+            .show_view(Box::new(CommandStub(Some(CommandAction::ClearTranscript))));
         assert!(matches!(
             app.on_key(press(KeyCode::Enter)),
             KeyOutcome::Continue
         ));
         assert!(messages(&app).is_empty());
-        assert!(app.view_stack.is_empty(), "completed view popped");
+        assert!(
+            app.bottom_pane.view_stack().is_empty(),
+            "completed view popped"
+        );
 
         // Quit surfaces as KeyOutcome::Quit.
         let mut app = RataApp::new(Vec::new());
-        app.view_stack
-            .push(Box::new(CommandStub(Some(CommandAction::Quit))));
+        app.bottom_pane
+            .show_view(Box::new(CommandStub(Some(CommandAction::Quit))));
         assert!(matches!(
             app.on_key(press(KeyCode::Enter)),
             KeyOutcome::Quit
@@ -1545,13 +1254,13 @@ mod tests {
             submit_command(&mut app, "/hooks"),
             KeyOutcome::Continue
         ));
-        assert!(app.view_stack.contains::<ScreenView>());
+        assert!(app.bottom_pane.view_stack().contains::<ScreenView>());
         app.on_key(press(KeyCode::Esc)); // close /hooks
         assert!(matches!(
             submit_command(&mut app, "/agents"),
             KeyOutcome::Continue
         ));
-        assert!(app.view_stack.contains::<ScreenView>());
+        assert!(app.bottom_pane.view_stack().contains::<ScreenView>());
         app.on_key(press(KeyCode::Esc)); // close /agents
         assert!(messages(&app).is_empty(), "views, not scrollback dumps");
         assert!(app.current_turn.is_none(), "no prompt turn for commands");
@@ -1591,7 +1300,7 @@ mod tests {
         // …after which the keyboard belongs to the composer again; further keys
         // cannot re-resolve the consumed exchange (its sender is gone).
         app.on_key(press(KeyCode::Char('x')));
-        assert_eq!(app.composer.text(), "x");
+        assert_eq!(app.bottom_pane.composer().text(), "x");
         assert!(matches!(
             app.on_key(press(KeyCode::Enter)),
             KeyOutcome::Submit(ref p, _) if p == "x"
@@ -1608,7 +1317,7 @@ mod tests {
         app.on_paste(&format!(" {} ", path.display()));
         std::fs::remove_file(&path).ok();
         assert_eq!(
-            app.composer.text(),
+            app.bottom_pane.composer().text(),
             "",
             "image paste must not touch composer"
         );
@@ -1749,7 +1458,7 @@ mod tests {
     fn layout_completion_popup_grows_viewport_and_draws_over_it() {
         let mut app = RataApp::new(Vec::new());
         typ(&mut app, "/");
-        assert!(app.completion.is_some());
+        assert!(app.bottom_pane.completion().is_some());
         assert_eq!(app.viewport_height(80), 12, "completion viewport height");
         let terminal = draw_viewport(&mut app);
         let all = buffer_rows(&terminal).join("\n");

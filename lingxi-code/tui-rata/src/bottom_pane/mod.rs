@@ -1,27 +1,603 @@
-//! The bottom pane of the chat UI: transient [`BottomPaneView`]s stacked over
-//! the composer (plan Phase 4).
+//! The bottom pane of the chat UI: the composer plus every transient surface
+//! layered over it (plan Phase 5).
 //!
-//! Modeled on codex-rs `tui/src/bottom_pane/mod.rs`: the pane owns a stack of
-//! keyboard-owning views (permission prompt, model picker, read-only screens)
-//! that temporarily take input away from the composer. Input routing is
-//! layered — the stack decides which local surface receives a key (top view
-//! vs composer), while higher-level intent (interrupt/quit, turn submission,
-//! model switching) is decided by the owner acting on the returned
-//! [`ViewOutcome`].
+//! Modeled on codex-rs `tui/src/bottom_pane/mod.rs`: [`BottomPane`] owns the
+//! composer (editable prompt input), the command/file completion popup, the
+//! vim editing layer, the status hint row (including the armed-Ctrl-C visual
+//! hint), the queued-input preview, and a stack of keyboard-owning
+//! [`BottomPaneView`]s (permission prompt, model picker, read-only screens)
+//! that temporarily take input away from the composer.
 //!
-//! This phase introduces the view stack itself ([`ViewStack`]); plan Phase 5
-//! adds the full `BottomPane` (composer + completion + status ownership)
-//! around it.
+//! Input routing is layered — active view first, then the completion popup,
+//! then vim, then the composer — while higher-level intent (interrupt/quit
+//! policy, turn submission, slash dispatch, model switching) is decided by
+//! the owner acting on the returned [`BottomPaneOutcome`]. The pane never
+//! cancels a turn or exits the process by itself.
 
 pub mod completion_view;
 pub mod dialog_view;
 pub mod model_picker_view;
+pub mod pending_input_preview;
 pub mod permission_view;
 pub mod screen_view;
 pub mod view;
 
-use crossterm::event::KeyEvent;
+use std::time::{Duration, Instant};
+
+use crossterm::cursor::SetCursorStyle;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, Widget};
+use tui_core::permission_bridge::PermissionExchange;
+use tui_core::theme::Theme;
+
+use crate::bottom_pane::completion_view::{command_items, CompletionView};
+use crate::bottom_pane::model_picker_view::ModelPickerView;
+use crate::bottom_pane::pending_input_preview::PendingInputPreview;
+use crate::bottom_pane::permission_view::PermissionView;
+use crate::composer::{Composer, ComposerView, MAX_VISIBLE_LINES};
+use crate::renderable::Renderable;
+use crate::session::ModelRow;
+use crate::vim::{VimOutcome, VimState};
 pub use view::{BottomPaneView, CommandAction, ViewAction, ViewOutcome};
+
+/// How long an idle Ctrl-C stays "armed" before a second press quits.
+const CTRL_C_EXIT_WINDOW: Duration = Duration::from_secs(2);
+
+/// The owner-computed task status the pane renders while a turn is running.
+/// The pane holds NO turn state itself (`current_turn`/`turn_started_at`/
+/// `activity` stay with the owner); this input struct carries the display
+/// result plus the running flag the pane needs for Ctrl-C routing.
+#[derive(Debug, Clone, Default)]
+pub struct BottomPaneStatus {
+    /// Whether a turn is in flight (drives the spinner row and routes Ctrl-C
+    /// to [`BottomPaneOutcome::Interrupt`] instead of the arm-to-quit chord).
+    pub running: bool,
+    /// The spinner/status text shown while running (owner-computed from its
+    /// turn state: activity label, elapsed seconds, animation frame).
+    pub text: String,
+}
+
+/// What the owner must do after the pane routed one key or paste. Local
+/// editing/navigation is fully consumed inside the pane; these variants carry
+/// only the app-level intents the pane is not allowed to decide itself.
+#[derive(Debug)]
+pub enum BottomPaneOutcome {
+    /// The pane consumed the input; nothing for the owner to do.
+    Consumed,
+    /// The composer submitted this (trimmed) buffer text. Slash-command
+    /// routing versus prompt submission is the owner's decision.
+    Submitted(String),
+    /// A stacked view asks the owner to submit `String` as a user prompt.
+    SubmitPrompt(String),
+    /// The user picked a model — the exact `(request_model, profile)` args
+    /// `OrchestratorHandle::switch_model` accepts.
+    SwitchModel {
+        /// The wire model id to switch to.
+        request_model: String,
+        /// The provider profile the model routes through, when qualified.
+        profile: Option<String>,
+    },
+    /// A view asks the owner to run a command effect on its behalf.
+    RunCommand(CommandAction),
+    /// Ctrl-O: the owner should toggle transcript verbose mode (and reflect
+    /// the new state back via [`BottomPane::set_verbose`]).
+    ToggleVerbose,
+    /// Ctrl-C while a task is running: the owner should cancel the turn.
+    Interrupt,
+    /// The user asked to quit (Esc with no local surface to consume it, or a
+    /// second idle Ctrl-C inside the arm window). The owner's quit policy
+    /// applies.
+    Quit,
+    /// A pasted path to an existing image file: the owner should record it as
+    /// an image message (the composer text is untouched).
+    PastedImage(String),
+}
+
+/// The interactive footer of the chat UI: composer + completion + vim +
+/// status hints + queued-input preview + the transient view stack.
+pub struct BottomPane {
+    /// The multi-line input buffer. Retained even while a view is displayed
+    /// so input state survives the view closing.
+    composer: Composer,
+    /// Command/file completion popup shown while a `/command` or `@file`
+    /// token is being typed. NOT a stacked view — it coexists with the
+    /// composer (typing keeps filtering).
+    completion: Option<CompletionView>,
+    /// Vim editing state when `/vim` is enabled (`None` → plain editor).
+    vim: Option<VimState>,
+    /// First unconfirmed idle Ctrl-C, for claude-code's press-twice-to-exit.
+    /// Pane-local: it drives the "Press Ctrl-C again to exit" status hint; a
+    /// second press within [`CTRL_C_EXIT_WINDOW`] surfaces
+    /// [`BottomPaneOutcome::Quit`].
+    ctrl_c_at: Option<Instant>,
+    /// Transient keyboard-owning views stacked over the composer.
+    view_stack: ViewStack,
+    /// Owner-fed task status (spinner text + running flag).
+    status: BottomPaneStatus,
+    /// Mirror of the transcript's verbose mode, for the status hint text.
+    verbose: bool,
+    /// Preview of queued inputs (empty seam until a queue source exists).
+    pending_input_preview: PendingInputPreview,
+    /// Theme for status-row styling.
+    theme: Theme,
+}
+
+impl BottomPane {
+    /// An idle pane with an empty composer.
+    #[must_use]
+    pub fn new(theme: Theme) -> Self {
+        Self {
+            composer: Composer::default(),
+            completion: None,
+            vim: None,
+            ctrl_c_at: None,
+            view_stack: ViewStack::new(),
+            status: BottomPaneStatus::default(),
+            verbose: false,
+            pending_input_preview: PendingInputPreview::new(),
+            theme,
+        }
+    }
+
+    /// Route one key press. Layered: the active view owns the keyboard until
+    /// it resolves, then the completion popup, then vim, then the composer.
+    pub fn handle_key(&mut self, key: KeyEvent) -> BottomPaneOutcome {
+        if let Some(outcome) = self.view_stack.route_key(key) {
+            return Self::map_view_outcome(outcome);
+        }
+        if self.completion.is_some() {
+            if let Some(outcome) = self.on_completion_key(key.code) {
+                return outcome;
+            }
+        }
+        // When vim is enabled, the vim layer sees the key first. It fully
+        // handles Normal-mode motions/edits; Insert-mode typing + all Ctrl
+        // chords fall through to the normal composer handling below.
+        if self.vim.is_some() {
+            let vim_outcome = {
+                let vim = self.vim.as_mut().expect("vim is Some");
+                crate::vim::handle_key(vim, &mut self.composer, key)
+            };
+            match vim_outcome {
+                VimOutcome::Consumed => {
+                    self.sync_completion();
+                    return BottomPaneOutcome::Consumed;
+                }
+                VimOutcome::Submit => {
+                    let outcome = self
+                        .take_submission_state()
+                        .map_or(BottomPaneOutcome::Consumed, BottomPaneOutcome::Submitted);
+                    self.sync_completion();
+                    return outcome;
+                }
+                VimOutcome::Passthrough => {}
+            }
+        }
+        let outcome = self.on_composer_key(key);
+        self.sync_completion();
+        outcome
+    }
+
+    /// Route a bracketed paste. An active view owns the paste stream (modal
+    /// views swallow it by default). Otherwise an image file path (existing
+    /// `.png`/`.jpg`/…) surfaces as [`BottomPaneOutcome::PastedImage`];
+    /// anything else is inserted into the composer at the cursor.
+    pub fn handle_paste(&mut self, text: &str) -> BottomPaneOutcome {
+        if let Some(outcome) = self.view_stack.route_paste(text) {
+            return Self::map_view_outcome(outcome);
+        }
+        let trimmed = text.trim();
+        if is_image_path(trimmed) {
+            return BottomPaneOutcome::PastedImage(trimmed.to_string());
+        }
+        self.composer.insert_str(text);
+        self.sync_completion();
+        BottomPaneOutcome::Consumed
+    }
+
+    /// Push a transient view; it becomes the active (keyboard-owning) view.
+    pub fn show_view(&mut self, view: Box<dyn BottomPaneView>) {
+        self.view_stack.push(view);
+    }
+
+    /// Open a permission prompt for `exchange`: it owns the keyboard until
+    /// the user resolves it and delivers the response through the exchange's
+    /// one-shot channel exactly once.
+    pub fn show_permission(&mut self, exchange: PermissionExchange) {
+        self.view_stack
+            .push(Box::new(PermissionView::new(exchange)));
+    }
+
+    /// Open the model picker over `rows` (the caller ensures it is non-empty).
+    pub fn show_model_picker(&mut self, rows: Vec<ModelRow>) {
+        self.view_stack.push(Box::new(ModelPickerView::new(rows)));
+    }
+
+    /// Feed the owner-computed task status (spinner text + running flag).
+    /// Called before routing/rendering so Ctrl-C routing and the status row
+    /// reflect the owner's current turn state.
+    pub fn set_task_running(&mut self, status: BottomPaneStatus) {
+        self.status = status;
+    }
+
+    /// Mirror the transcript's verbose mode for the status hint text.
+    pub fn set_verbose(&mut self, enabled: bool) {
+        self.verbose = enabled;
+    }
+
+    /// Whether the composer is empty (ignoring surrounding whitespace).
+    #[must_use]
+    pub fn composer_is_empty(&self) -> bool {
+        self.composer.is_blank()
+    }
+
+    /// Take the composer's submission: pushes non-blank text to history,
+    /// clears the buffer, and returns the trimmed text. `None` (buffer
+    /// untouched) when the composer is blank.
+    pub fn take_submission_state(&mut self) -> Option<String> {
+        if self.composer.is_blank() {
+            return None;
+        }
+        let text = self.composer.take();
+        Some(text.trim().to_string())
+    }
+
+    /// Toggle vim editing mode; returns whether vim is now enabled.
+    pub fn toggle_vim(&mut self) -> bool {
+        let now_on = self.vim.is_none();
+        self.vim = if now_on { Some(VimState::new()) } else { None };
+        now_on
+    }
+
+    /// Whether vim editing mode is enabled.
+    #[must_use]
+    pub fn vim_enabled(&self) -> bool {
+        self.vim.is_some()
+    }
+
+    /// Read-only access to the composer (rendering/tests; owners must not
+    /// mutate composer internals directly).
+    #[must_use]
+    pub fn composer(&self) -> &Composer {
+        &self.composer
+    }
+
+    /// The completion popup, when open.
+    #[must_use]
+    pub fn completion(&self) -> Option<&CompletionView> {
+        self.completion.as_ref()
+    }
+
+    /// The transient view stack (queries like "is a permission prompt open?").
+    #[must_use]
+    pub fn view_stack(&self) -> &ViewStack {
+        &self.view_stack
+    }
+
+    /// Whether an idle Ctrl-C is currently armed (a second press quits).
+    #[must_use]
+    pub fn ctrl_c_armed(&self) -> bool {
+        self.ctrl_c_at
+            .is_some_and(|t| t.elapsed() <= CTRL_C_EXIT_WINDOW)
+    }
+
+    /// Replace the queued-input preview contents (the future `ChatWidget`
+    /// queue seam; empty in the current data path).
+    pub fn set_queued_messages(&mut self, messages: Vec<String>) {
+        self.pending_input_preview.set_queued_messages(messages);
+    }
+
+    /// Map a completed view's outcome to the pane boundary: view-local
+    /// resolutions are consumed here; app-level requests pass through.
+    fn map_view_outcome(outcome: ViewOutcome) -> BottomPaneOutcome {
+        match outcome {
+            // `OpenView` is consumed inside the stack and never surfaces here;
+            // the other variants carry no app-level effect (a resolved
+            // permission has already answered through its one-shot channel).
+            ViewOutcome::Pending
+            | ViewOutcome::Cancelled
+            | ViewOutcome::Accepted(_)
+            | ViewOutcome::PermissionResponse(_)
+            | ViewOutcome::OpenView(_) => BottomPaneOutcome::Consumed,
+            ViewOutcome::SubmitPrompt(prompt) => BottomPaneOutcome::SubmitPrompt(prompt),
+            ViewOutcome::SwitchModel {
+                request_model,
+                profile,
+            } => BottomPaneOutcome::SwitchModel {
+                request_model,
+                profile,
+            },
+            ViewOutcome::RunCommand(action) => BottomPaneOutcome::RunCommand(action),
+        }
+    }
+
+    /// Handle a key while the completion popup is open. Returns
+    /// `Some(outcome)` when the popup consumes the key (nav / complete /
+    /// dismiss), or `None` to let it fall through to the composer (so typing
+    /// keeps filtering).
+    fn on_completion_key(&mut self, code: KeyCode) -> Option<BottomPaneOutcome> {
+        match code {
+            KeyCode::Up => {
+                self.completion.as_mut()?.prev();
+                Some(BottomPaneOutcome::Consumed)
+            }
+            KeyCode::Down => {
+                self.completion.as_mut()?.next();
+                Some(BottomPaneOutcome::Consumed)
+            }
+            KeyCode::Tab => {
+                let insert = self.completion.as_ref()?.selected_insert().to_string();
+                // An `@file` token completes in place; a `/command` replaces
+                // the whole buffer.
+                if let Some((at, _)) = self.composer.at_fragment() {
+                    self.composer.complete_at(at, &insert);
+                } else {
+                    self.composer.replace_all(&insert);
+                }
+                self.sync_completion();
+                Some(BottomPaneOutcome::Consumed)
+            }
+            KeyCode::Esc => {
+                self.completion = None;
+                Some(BottomPaneOutcome::Consumed)
+            }
+            _ => None,
+        }
+    }
+
+    /// Recompute the completion popup from the current composer text: a
+    /// `/command` fragment (whole buffer) shows command matches; an `@file`
+    /// token at the cursor shows file matches; anything else closes it.
+    fn sync_completion(&mut self) {
+        let text = self.composer.text();
+        let is_command =
+            text.starts_with('/') && !text.contains('\n') && !text.contains(char::is_whitespace);
+        if is_command {
+            self.completion = CompletionView::new(command_items(&text));
+            return;
+        }
+        if let Some((_, fragment)) = self.composer.at_fragment() {
+            self.completion = CompletionView::new(crate::files::file_completions(&fragment));
+            return;
+        }
+        self.completion = None;
+    }
+
+    /// Composer-level key handling: editing keys are consumed locally; Esc,
+    /// Ctrl-C, Ctrl-O, and Enter surface owner-level outcomes.
+    fn on_composer_key(&mut self, key: KeyEvent) -> BottomPaneOutcome {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let is_ctrl_c = ctrl && matches!(key.code, KeyCode::Char('c'));
+        // Any key other than a repeat Ctrl-C disarms the press-twice-to-exit.
+        if !is_ctrl_c {
+            self.ctrl_c_at = None;
+        }
+        match key.code {
+            KeyCode::Esc => BottomPaneOutcome::Quit,
+            // Ctrl-C interrupts an in-flight turn; when idle it arms, and a
+            // second press within the window quits (claude-code parity).
+            KeyCode::Char('c') if ctrl => {
+                if self.status.running {
+                    BottomPaneOutcome::Interrupt
+                } else if self.ctrl_c_armed() {
+                    BottomPaneOutcome::Quit
+                } else {
+                    self.ctrl_c_at = Some(Instant::now());
+                    BottomPaneOutcome::Consumed
+                }
+            }
+            // Emacs-style composer edits.
+            KeyCode::Char('a') if ctrl => {
+                self.composer.home();
+                BottomPaneOutcome::Consumed
+            }
+            KeyCode::Char('e') if ctrl => {
+                self.composer.end();
+                BottomPaneOutcome::Consumed
+            }
+            KeyCode::Char('w') if ctrl => {
+                self.composer.delete_word();
+                BottomPaneOutcome::Consumed
+            }
+            KeyCode::Char('u') if ctrl => {
+                self.composer.kill_to_line_start();
+                BottomPaneOutcome::Consumed
+            }
+            // Ctrl-O toggles verbose (expand thinking/tool-use/grouped
+            // blocks) — transcript state, so the owner executes it.
+            KeyCode::Char('o') if ctrl => BottomPaneOutcome::ToggleVerbose,
+            // Modified Enter (Alt/Shift) inserts a newline; plain Enter submits.
+            KeyCode::Enter
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
+            {
+                self.composer.insert_newline();
+                BottomPaneOutcome::Consumed
+            }
+            KeyCode::Enter => self
+                .take_submission_state()
+                .map_or(BottomPaneOutcome::Consumed, BottomPaneOutcome::Submitted),
+            KeyCode::Home => {
+                self.composer.home();
+                BottomPaneOutcome::Consumed
+            }
+            KeyCode::End => {
+                self.composer.end();
+                BottomPaneOutcome::Consumed
+            }
+            KeyCode::Left if ctrl => {
+                self.composer.move_word_left();
+                BottomPaneOutcome::Consumed
+            }
+            KeyCode::Right if ctrl => {
+                self.composer.move_word_right();
+                BottomPaneOutcome::Consumed
+            }
+            KeyCode::Left => {
+                self.composer.move_left();
+                BottomPaneOutcome::Consumed
+            }
+            KeyCode::Right => {
+                self.composer.move_right();
+                BottomPaneOutcome::Consumed
+            }
+            KeyCode::Up => {
+                self.composer.up();
+                BottomPaneOutcome::Consumed
+            }
+            KeyCode::Down => {
+                self.composer.down();
+                BottomPaneOutcome::Consumed
+            }
+            KeyCode::Backspace => {
+                self.composer.backspace();
+                BottomPaneOutcome::Consumed
+            }
+            KeyCode::Delete => {
+                self.composer.delete();
+                BottomPaneOutcome::Consumed
+            }
+            KeyCode::Char(c) if !ctrl => {
+                self.composer.insert(c);
+                BottomPaneOutcome::Consumed
+            }
+            _ => BottomPaneOutcome::Consumed,
+        }
+    }
+
+    /// The status row: the running spinner (owner-fed text), the armed-Ctrl-C
+    /// hint, or the idle key hints (with the vim mode label when enabled).
+    fn status_line(&self) -> Line<'static> {
+        let dim = crate::style_adapter::to_ratatui(self.theme.dim);
+        if self.status.running {
+            let claude = crate::style_adapter::to_ratatui(self.theme.claude);
+            return Line::from(vec![
+                Span::styled(self.status.text.clone(), Style::default().fg(claude)),
+                Span::styled(
+                    "   ·  Ctrl-C: cancel  ·  Esc: quit",
+                    Style::default().fg(dim),
+                ),
+            ]);
+        }
+        if self.ctrl_c_armed() {
+            let claude = crate::style_adapter::to_ratatui(self.theme.claude);
+            return Line::from(Span::styled(
+                "Press Ctrl-C again to exit",
+                Style::default().fg(claude),
+            ));
+        }
+        let base = if self.completion.is_some() {
+            "↑/↓: pick  ·  Tab: complete  ·  Esc: dismiss  ·  Enter: run"
+        } else if self.verbose {
+            "Enter: send  ·  Ctrl-O: collapse  ·  ↑/↓: history  ·  Esc: quit"
+        } else {
+            "Enter: send  ·  Alt+Enter: newline  ·  Ctrl-O: verbose  ·  Esc: quit"
+        };
+        let text = match &self.vim {
+            Some(vim) => format!("[{}]  {base}", vim.label()),
+            None => base.to_string(),
+        };
+        Line::from(Span::styled(text, Style::default().fg(dim)))
+    }
+
+    /// The pane's vertical zones within `area`: status row, queued-input
+    /// preview, and the composer (which keeps the full remainder so
+    /// overlay-grown frames look identical to the pre-pane renderer).
+    fn zones(&self, area: Rect) -> std::rc::Rc<[Rect]> {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(self.pending_input_preview.desired_height(area.width)),
+                Constraint::Min(3),
+            ])
+            .split(area)
+    }
+
+    /// A full-frame active view (e.g. `/help`), which owns the whole pane
+    /// area: no status row, no composer, cursor is the view's to claim.
+    fn full_frame_view(&self) -> Option<&dyn BottomPaneView> {
+        self.view_stack
+            .active()
+            .filter(|view| !view.wants_status_line())
+    }
+}
+
+impl Renderable for BottomPane {
+    /// Draw the pane: status row + queued-input preview + composer box, with
+    /// the completion popup anchored above the composer and stacked views
+    /// painted bottom-to-top over the full area — unless the active view owns
+    /// the whole frame.
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        if let Some(view) = self.full_frame_view() {
+            view.render(area, buf);
+            return;
+        }
+        let zones = self.zones(area);
+        Paragraph::new(self.status_line()).render(zones[0], buf);
+        self.pending_input_preview.render(zones[1], buf);
+        ComposerView::new(&self.composer).render(zones[2], buf);
+        if let Some(popup) = &self.completion {
+            popup.render(zones[2], buf);
+        }
+        for view in self.view_stack.views() {
+            view.render(area, buf);
+        }
+    }
+
+    /// Desired pane height at `width` columns: status + preview + composer,
+    /// grown to fit the active stacked view (which reports its own height) or
+    /// the completion popup. The owner applies the viewport min/max clamp.
+    fn desired_height(&self, width: u16) -> u16 {
+        let composer =
+            u16::try_from(self.composer.lines().len().clamp(1, MAX_VISIBLE_LINES)).unwrap_or(1);
+        let preview = self.pending_input_preview.desired_height(width);
+        let base = 1 + preview + composer + 2; // status + preview + composer content + border
+        let overlay = if let Some(view) = self.view_stack.active() {
+            view.desired_height(width)
+        } else if self.completion.is_some() {
+            base + 8
+        } else {
+            0
+        };
+        base.max(overlay)
+    }
+
+    /// The composer's cursor (claimed even while centered modals are open —
+    /// pre-pane behavior preserved), or the full-frame view's cursor (hidden
+    /// by default) when one owns the whole area.
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        if let Some(view) = self.full_frame_view() {
+            return view.cursor_pos(area);
+        }
+        ComposerView::new(&self.composer).cursor_pos(self.zones(area)[2])
+    }
+
+    fn cursor_style(&self, area: Rect) -> SetCursorStyle {
+        if let Some(view) = self.full_frame_view() {
+            return view.cursor_style(area);
+        }
+        ComposerView::new(&self.composer).cursor_style(self.zones(area)[2])
+    }
+}
+
+/// Whether `s` is a single existing image file path (used to route pastes to
+/// an image message vs composer text).
+fn is_image_path(s: &str) -> bool {
+    if s.is_empty() || s.contains('\n') {
+        return false;
+    }
+    let lower = s.to_ascii_lowercase();
+    let has_img_ext = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]
+        .iter()
+        .any(|e| lower.ends_with(e));
+    has_img_ext && std::path::Path::new(s).is_file()
+}
 
 /// The transient view stack: the TOP view owns the keyboard; views pop
 /// themselves off through the [`ViewOutcome`] they return.
@@ -353,5 +929,308 @@ mod tests {
         stack.push(Box::new(OtherView));
         assert!(stack.contains::<StubView>(), "buried view is still found");
         assert!(stack.contains::<OtherView>());
+    }
+
+    // ===== BottomPane (plan Phase 5) =====
+
+    use ratatui::layout::Position;
+
+    fn pane() -> BottomPane {
+        BottomPane::new(Theme::dark())
+    }
+
+    fn typ(pane: &mut BottomPane, s: &str) {
+        for c in s.chars() {
+            let _ = pane.handle_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    fn buffer_row(buf: &Buffer, y: u16) -> String {
+        (buf.area.left()..buf.area.right())
+            .map(|x| {
+                buf.cell(Position::new(x, y))
+                    .map_or(" ", ratatui::buffer::Cell::symbol)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn key_routing_order_active_view_before_completion_before_composer() {
+        let mut pane = pane();
+        // Completion open: Down navigates the popup, not the composer/history.
+        typ(&mut pane, "/");
+        assert!(pane.completion().is_some());
+        let _ = pane.handle_key(key(KeyCode::Down));
+        assert_eq!(pane.completion().unwrap().selected(), 1);
+        assert_eq!(pane.composer().text(), "/", "composer untouched");
+        // A stacked view covers the completion popup AND the composer.
+        pane.show_view(Box::new(StubView::returning(Vec::new())));
+        let _ = pane.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            pane.completion().unwrap().selected(),
+            1,
+            "view swallowed the key before completion"
+        );
+        let _ = pane.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(pane.composer().text(), "/", "view swallowed typing too");
+    }
+
+    #[test]
+    fn completion_falls_through_to_composer_so_typing_keeps_filtering() {
+        let mut pane = pane();
+        typ(&mut pane, "/m");
+        let popup = pane.completion().expect("popup open");
+        assert_eq!(popup.selected_insert(), "/model");
+        // Tab replaces the whole buffer for a /command.
+        let _ = pane.handle_key(key(KeyCode::Tab));
+        assert_eq!(pane.composer().text(), "/model");
+    }
+
+    #[test]
+    fn at_file_completion_replaces_token_in_place() {
+        let mut pane = pane();
+        typ(&mut pane, "see @Carg");
+        assert!(pane.completion().is_some(), "@ token opens file completion");
+        let _ = pane.handle_key(key(KeyCode::Tab));
+        assert!(
+            pane.composer().text().starts_with("see @Cargo.toml"),
+            "got: {}",
+            pane.composer().text()
+        );
+    }
+
+    #[test]
+    fn history_recall_via_up_and_down() {
+        let mut pane = pane();
+        typ(&mut pane, "first");
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Enter)),
+            BottomPaneOutcome::Submitted(ref p) if p == "first"
+        ));
+        typ(&mut pane, "second");
+        let _ = pane.handle_key(key(KeyCode::Enter));
+        let _ = pane.handle_key(key(KeyCode::Up));
+        assert_eq!(pane.composer().text(), "second");
+        let _ = pane.handle_key(key(KeyCode::Up));
+        assert_eq!(pane.composer().text(), "first");
+        let _ = pane.handle_key(key(KeyCode::Down));
+        assert_eq!(pane.composer().text(), "second");
+    }
+
+    #[test]
+    fn take_submission_state_trims_and_ignores_blank() {
+        let mut pane = pane();
+        assert!(pane.composer_is_empty());
+        assert_eq!(pane.take_submission_state(), None);
+        typ(&mut pane, "   ");
+        assert_eq!(pane.take_submission_state(), None, "blank stays put");
+        assert_eq!(pane.composer().text(), "   ", "blank buffer untouched");
+        let mut pane = super::BottomPane::new(Theme::dark());
+        typ(&mut pane, "  hi there  ");
+        assert_eq!(pane.take_submission_state().as_deref(), Some("hi there"));
+        assert!(pane.composer_is_empty());
+        // The submission was pushed to history.
+        let _ = pane.handle_key(key(KeyCode::Up));
+        assert_eq!(pane.composer().text(), "  hi there  ");
+    }
+
+    #[test]
+    fn vim_routing_normal_mode_edits_and_enter_submits() {
+        let mut pane = pane();
+        assert!(!pane.vim_enabled());
+        assert!(pane.toggle_vim());
+        typ(&mut pane, "hello");
+        // Esc → Normal mode (consumed by vim; NOT a Quit outcome).
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Esc)),
+            BottomPaneOutcome::Consumed
+        ));
+        // `0` + `x` edit instead of typing.
+        let _ = pane.handle_key(key(KeyCode::Char('0')));
+        let _ = pane.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(pane.composer().text(), "ello");
+        // Normal-mode Enter submits through the same take path.
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Enter)),
+            BottomPaneOutcome::Submitted(ref p) if p == "ello"
+        ));
+        assert!(!pane.toggle_vim(), "second toggle disables vim");
+    }
+
+    #[test]
+    fn esc_quits_and_ctrl_o_toggles_verbose_via_owner() {
+        let mut pane = pane();
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Esc)),
+            BottomPaneOutcome::Quit
+        ));
+        assert!(matches!(
+            pane.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+            BottomPaneOutcome::ToggleVerbose
+        ));
+    }
+
+    #[test]
+    fn ctrl_c_interrupts_when_running_and_arms_then_quits_when_idle() {
+        let mut pane = pane();
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        pane.set_task_running(BottomPaneStatus {
+            running: true,
+            text: "Working…".to_string(),
+        });
+        assert!(matches!(
+            pane.handle_key(ctrl_c),
+            BottomPaneOutcome::Interrupt
+        ));
+        assert!(
+            !pane.ctrl_c_armed(),
+            "interrupt does not arm the quit chord"
+        );
+        pane.set_task_running(BottomPaneStatus::default());
+        assert!(matches!(
+            pane.handle_key(ctrl_c),
+            BottomPaneOutcome::Consumed
+        ));
+        assert!(pane.ctrl_c_armed());
+        assert!(matches!(pane.handle_key(ctrl_c), BottomPaneOutcome::Quit));
+    }
+
+    #[test]
+    fn any_other_key_disarms_the_ctrl_c_quit_chord() {
+        let mut pane = pane();
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let _ = pane.handle_key(ctrl_c);
+        assert!(pane.ctrl_c_armed());
+        let _ = pane.handle_key(key(KeyCode::Char('h')));
+        assert!(!pane.ctrl_c_armed());
+        assert!(matches!(
+            pane.handle_key(ctrl_c),
+            BottomPaneOutcome::Consumed
+        ));
+    }
+
+    #[test]
+    fn paste_inserts_text_and_routes_image_paths_to_the_owner() {
+        let mut pane = pane();
+        typ(&mut pane, "pre ");
+        assert!(matches!(
+            pane.handle_paste("hello world"),
+            BottomPaneOutcome::Consumed
+        ));
+        assert_eq!(pane.composer().text(), "pre hello world");
+        // A non-existent image path is plain text.
+        assert!(matches!(
+            pane.handle_paste("/no/such/file.png"),
+            BottomPaneOutcome::Consumed
+        ));
+        // An existing image file surfaces as PastedImage (trimmed).
+        let path =
+            std::env::temp_dir().join(format!("tui-rata-pane-paste-{}.png", std::process::id()));
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\n").expect("write fixture image");
+        let before = pane.composer().text();
+        let outcome = pane.handle_paste(&format!(" {} ", path.display()));
+        std::fs::remove_file(&path).ok();
+        assert!(matches!(
+            outcome,
+            BottomPaneOutcome::PastedImage(ref p) if *p == path.display().to_string()
+        ));
+        assert_eq!(pane.composer().text(), before, "image paste skips composer");
+    }
+
+    #[test]
+    fn render_cjk_cursor_uses_display_columns_below_the_status_row() {
+        let mut pane = pane();
+        typ(&mut pane, "你好");
+        let area = Rect::new(0, 0, 80, pane.desired_height(80).max(4));
+        // x = border(1) + "> "(2) + two wide chars × 2 columns = 7; y = status
+        // row (1) + composer border (1) = 2.
+        assert_eq!(pane.cursor_pos(area), Some((7, 2)));
+    }
+
+    #[test]
+    fn render_multiline_composer_scrolls_to_keep_cursor_visible() {
+        let mut pane = pane();
+        typ(&mut pane, "l0");
+        for i in 1..8 {
+            let _ = pane.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+            typ(&mut pane, &format!("l{i}"));
+        }
+        // 8 content lines clamp at MAX_VISIBLE_LINES: 1 + 6 + 2 = 9 rows.
+        assert_eq!(pane.desired_height(80), 9);
+        let area = Rect::new(0, 0, 80, 9);
+        let mut buf = Buffer::empty(area);
+        pane.render(area, &mut buf);
+        // Status row, then the composer scrolled so l7 (cursor row) is the
+        // bottom visible content row: l2..l7 fill the 6 content rows.
+        assert!(buffer_row(&buf, 0).contains("Enter: send"));
+        assert!(
+            buffer_row(&buf, 2).starts_with("│  l2"),
+            "{}",
+            buffer_row(&buf, 2)
+        );
+        assert!(
+            buffer_row(&buf, 7).starts_with("│  l7"),
+            "{}",
+            buffer_row(&buf, 7)
+        );
+        let (x, y) = pane.cursor_pos(area).expect("composer cursor");
+        assert_eq!((x, y), (5, 7), "cursor on the bottom visible content row");
+    }
+
+    #[test]
+    fn queued_input_preview_seam_grows_the_pane_and_renders_between_status_and_composer() {
+        let mut pane = pane();
+        assert_eq!(pane.desired_height(80), 4, "empty preview adds no rows");
+        pane.set_queued_messages(vec!["queued draft".to_string()]);
+        assert_eq!(pane.desired_height(80), 6, "header + 1 queued row");
+        let area = Rect::new(0, 0, 80, 6);
+        let mut buf = Buffer::empty(area);
+        pane.render(area, &mut buf);
+        assert!(buffer_row(&buf, 0).contains("Enter: send"), "status first");
+        assert!(buffer_row(&buf, 1).starts_with("Queued messages:"));
+        assert!(buffer_row(&buf, 2).starts_with("  ↳ queued draft"));
+        assert!(
+            buffer_row(&buf, 3).starts_with('┌'),
+            "composer below preview"
+        );
+        // Cursor moves down with the composer: border row is now y=3.
+        assert_eq!(pane.cursor_pos(area), Some((3, 4)));
+    }
+
+    #[test]
+    fn status_line_variants_running_armed_and_vim_label() {
+        let mut pane = pane();
+        pane.set_task_running(BottomPaneStatus {
+            running: true,
+            text: "✻ Working… (3s · esc to interrupt)".to_string(),
+        });
+        let area = Rect::new(0, 0, 80, 4);
+        let mut buf = Buffer::empty(area);
+        pane.render(area, &mut buf);
+        assert!(buffer_row(&buf, 0).contains("esc to interrupt"));
+        assert!(buffer_row(&buf, 0).contains("Ctrl-C: cancel"));
+
+        pane.set_task_running(BottomPaneStatus::default());
+        let _ = pane.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let mut buf = Buffer::empty(area);
+        pane.render(area, &mut buf);
+        assert!(buffer_row(&buf, 0).contains("Press Ctrl-C again to exit"));
+
+        // Vim label prefixes the idle hints once enabled ('c' above disarmed…
+        // actually ctrl-c armed; type to disarm, then enable vim).
+        let _ = pane.handle_key(key(KeyCode::Backspace));
+        assert!(pane.toggle_vim());
+        let mut buf = Buffer::empty(area);
+        pane.render(area, &mut buf);
+        assert!(
+            buffer_row(&buf, 0).contains("[INSERT]"),
+            "{}",
+            buffer_row(&buf, 0)
+        );
+
+        pane.set_verbose(true);
+        let mut buf = Buffer::empty(area);
+        pane.render(area, &mut buf);
+        assert!(buffer_row(&buf, 0).contains("Ctrl-O: collapse"));
     }
 }

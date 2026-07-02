@@ -375,18 +375,13 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
-    /// `/model`: open the model picker (or report when no models exist).
+    /// `/model`: open the model picker over [`SessionInfo::models`]. An empty
+    /// model list still opens the picker — the view renders its own
+    /// user-facing empty message (plan Phase 11 step 5; previously an
+    /// app-side transcript dump).
     pub(crate) fn cmd_model(&mut self, _args: &str) -> ChatOutcome {
-        if self.session.models.is_empty() {
-            self.transcript.push_message(RenderedMessage::SystemText {
-                body: "No models available.".to_string(),
-                timestamp: 0,
-                is_error: false,
-            });
-        } else {
-            self.bottom_pane
-                .show_model_picker(self.session.models.clone());
-        }
+        self.bottom_pane
+            .show_model_picker(self.session.models.clone());
         ChatOutcome::Continue
     }
 

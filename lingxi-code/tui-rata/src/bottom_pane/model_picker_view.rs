@@ -1,13 +1,14 @@
 //! Scrollable model picker view for `/model`: a centered, bordered selection
 //! list over the session's [`ModelRow`]s (ported from the former
-//! `picker::ModelPicker`, plan Phase 4).
+//! `picker::ModelPicker`, plan Phases 4 + 11).
 //!
 //! Unlike the read-only [`crate::bottom_pane::screen_view::ScreenView`] it is
 //! INTERACTIVE — arrow keys move a highlight (the viewport follows), `Enter`
 //! confirms the model ([`ViewOutcome::SwitchModel`]), `Esc` cancels. The
-//! currently active model is marked with a `●`. Modeled on codex's
-//! `list_selection_view` + the modal contract of
-//! [`crate::bottom_pane::dialog_view::DialogView`].
+//! currently active model is marked with a `●`. An empty model list renders
+//! its explanation INSIDE the view (plan Phase 11 step 5 — previously an
+//! app-side transcript message). Modeled on codex's `list_selection_view` +
+//! the modal contract of [`crate::bottom_pane::dialog_view::DialogView`].
 
 use std::any::Any;
 
@@ -25,6 +26,11 @@ use crate::session::ModelRow;
 
 /// Rows shown in the picker viewport before it scrolls.
 const VIEWPORT: usize = 12;
+
+/// What the picker shows when the session has no models (plan Phase 11
+/// step 5: the empty state lives IN the view, not in the transcript). The
+/// first sentence is the pre-Phase-11 app-side message, byte-preserved.
+const EMPTY_MESSAGE: &str = "No models available. Configure a provider to enable /model.";
 
 /// An interactive, scrollable model selection list.
 pub struct ModelPickerView {
@@ -74,7 +80,7 @@ impl ModelPickerView {
             .iter()
             .map(|r| r.display.chars().count() + r.provider_label.chars().count() + 3)
             .max()
-            .unwrap_or(20)
+            .unwrap_or(EMPTY_MESSAGE.chars().count())
     }
 }
 
@@ -97,7 +103,10 @@ impl Renderable for ModelPickerView {
         block.render(rect, buf);
 
         let end = (self.offset + VIEWPORT).min(self.rows.len());
-        let mut lines: Vec<Line> = Vec::with_capacity(visible + 1);
+        let mut lines: Vec<Line> = Vec::with_capacity(visible + 2);
+        if self.rows.is_empty() {
+            lines.push(Line::from(EMPTY_MESSAGE));
+        }
         for (i, row) in self.rows[self.offset..end].iter().enumerate() {
             let idx = self.offset + i;
             let marker = if row.is_current { "● " } else { "  " };
@@ -117,15 +126,21 @@ impl Renderable for ModelPickerView {
                 style,
             )));
         }
+        let hint = if self.rows.is_empty() {
+            "Esc close"
+        } else {
+            "↑/↓ select · Enter switch · Esc cancel"
+        };
         lines.push(Line::from(Span::styled(
-            "↑/↓ select · Enter switch · Esc cancel",
+            hint,
             Style::default().add_modifier(Modifier::DIM),
         )));
         Paragraph::new(lines).render(inner, buf);
     }
 
     /// The bottom-viewport rows the picker claims: its visible rows + modal
-    /// chrome (locked layout value: 2 models → 6 rows at 80x24).
+    /// chrome (locked layout value: 2 models → 6 rows at 80x24). Empty lists
+    /// keep the 4-row chrome, which fits the in-view empty message + hint.
     fn desired_height(&self, _width: u16) -> u16 {
         u16::try_from(self.rows.len()).unwrap_or(0).min(12) + 4
     }
@@ -222,12 +237,14 @@ mod tests {
     }
 
     #[test]
-    fn arrows_clamp_at_both_ends() {
+    fn model_picker_navigation_clamps_at_edges_by_design() {
+        // Plan Phase 12 decision: clamp-at-edges is the deliberate LingXi
+        // navigation behavior (no wrap-around) across dialog/picker/completion.
         let mut p = ModelPickerView::new(rows());
         p.handle_key(press(KeyCode::Down)); // already last (index 1), clamps
         assert_eq!(p.selected(), 1);
         p.handle_key(press(KeyCode::Up));
-        p.handle_key(press(KeyCode::Up)); // clamps at 0
+        p.handle_key(press(KeyCode::Up)); // clamps at 0 — does NOT wrap
         assert_eq!(p.selected(), 0);
     }
 
@@ -238,6 +255,118 @@ mod tests {
         assert!(matches!(
             p.handle_key(press(KeyCode::Enter)),
             ViewOutcome::Cancelled
+        ));
+    }
+
+    #[test]
+    fn empty_picker_renders_its_explanation_in_the_view() {
+        // Plan Phase 11 step 5: the empty state is a user-facing message
+        // INSIDE the picker, not an app-side transcript dump.
+        let p = ModelPickerView::new(Vec::new());
+        assert_eq!(p.desired_height(80), 4, "chrome fits message + hint");
+        let area = Rect::new(0, 0, 80, 6);
+        let text = render_text(&p, area);
+        assert!(text.contains("Select model"), "{text}");
+        assert!(
+            text.contains("No models available. Configure a provider to enable /model."),
+            "{text}"
+        );
+        assert!(text.contains("Esc close"), "empty-state hint: {text}");
+        assert!(!text.contains("Enter switch"), "no switch hint: {text}");
+    }
+
+    fn many_rows(n: usize, current: Option<usize>) -> Vec<ModelRow> {
+        (0..n)
+            .map(|i| ModelRow {
+                display: format!("model-{i:02}"),
+                request_model: format!("model-{i:02}"),
+                profile: None,
+                provider_label: String::new(),
+                is_current: Some(i) == current,
+            })
+            .collect()
+    }
+
+    fn render_text(p: &ModelPickerView, area: Rect) -> String {
+        let mut buf = Buffer::empty(area);
+        p.render(area, &mut buf);
+        (area.top()..area.bottom())
+            .map(|y| {
+                (area.left()..area.right())
+                    .map(|x| {
+                        buf.cell(ratatui::layout::Position::new(x, y))
+                            .map_or(" ", ratatui::buffer::Cell::symbol)
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn long_list_scrolls_to_keep_the_highlight_visible() {
+        // 30 rows, 12 visible: walking to the end scrolls the window so the
+        // highlighted row is always rendered; walking back scrolls it up.
+        let mut p = ModelPickerView::new(many_rows(30, None));
+        for _ in 0..29 {
+            p.handle_key(press(KeyCode::Down));
+        }
+        assert_eq!(p.selected(), 29);
+        let area = Rect::new(0, 0, 60, 20);
+        let text = render_text(&p, area);
+        assert!(text.contains("›   model-29"), "highlight visible: {text}");
+        assert!(!text.contains("model-00"), "top rows scrolled out: {text}");
+        for _ in 0..29 {
+            p.handle_key(press(KeyCode::Up));
+        }
+        let text = render_text(&p, area);
+        assert!(text.contains("›   model-00"), "{text}");
+        assert!(
+            !text.contains("model-29"),
+            "bottom rows scrolled out: {text}"
+        );
+    }
+
+    #[test]
+    fn starts_scrolled_to_a_current_model_deep_in_a_long_list() {
+        let p = ModelPickerView::new(many_rows(30, Some(25)));
+        assert_eq!(p.selected(), 25);
+        let text = render_text(&p, Rect::new(0, 0, 60, 20));
+        assert!(
+            text.contains("› ● model-25"),
+            "current model highlighted and visible: {text}"
+        );
+    }
+
+    #[test]
+    fn wide_layout_centers_the_picker_within_the_area() {
+        let p = ModelPickerView::new(rows());
+        let area = Rect::new(0, 0, 120, 40);
+        let text = render_text(&p, area);
+        let title_row = text
+            .lines()
+            .find(|l| l.contains("Select model"))
+            .expect("title row");
+        let border = title_row.find('┌').expect("left border");
+        assert!(
+            border > 30,
+            "modal centered in a 120-col frame (left border at {border})"
+        );
+        assert!(text.contains("› ● Sonnet (Anthropic)"), "{text}");
+    }
+
+    #[test]
+    fn narrow_layout_clips_rows_without_panicking() {
+        let p = ModelPickerView::new(many_rows(30, Some(5)));
+        let area = Rect::new(0, 0, 40, 12);
+        let text = render_text(&p, area);
+        assert!(text.contains("Select model"), "{text}");
+        assert!(text.contains("› ● model-05"), "{text}");
+        // Keys still work at narrow sizes.
+        let mut p = p;
+        assert!(matches!(
+            p.handle_key(press(KeyCode::Enter)),
+            ViewOutcome::SwitchModel { ref request_model, .. } if request_model == "model-05"
         ));
     }
 

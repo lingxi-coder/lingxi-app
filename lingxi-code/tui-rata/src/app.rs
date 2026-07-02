@@ -943,18 +943,34 @@ mod tests {
     }
 
     #[test]
-    fn slash_model_with_no_models_reports_instead_of_opening() {
+    fn slash_model_with_no_models_opens_picker_with_in_view_empty_message() {
+        // Plan Phase 11 step 5 (deliberate behavior change from the Phase 0
+        // lock): the empty state moved INTO the picker view — `/model` with
+        // no models opens the picker showing its own message instead of
+        // dumping a transcript line.
         let mut app = test_app(Vec::new());
         assert!(matches!(
             submit_command(&mut app, "/model"),
             ChatOutcome::Continue
         ));
-        assert!(!app
+        assert!(app
             .chat_widget
             .bottom_pane()
             .view_stack()
             .contains::<ModelPickerView>());
-        assert_eq!(cells(&app).len(), 1);
+        assert!(cells(&app).is_empty(), "no scrollback dump");
+        let terminal = draw_viewport(&mut app);
+        let all = buffer_rows(&terminal).join("\n");
+        assert!(
+            all.contains("No models available. Configure a provider to enable /model."),
+            "{all}"
+        );
+        // Esc closes back to the composer without switching anything.
+        assert!(matches!(
+            app.on_key(press(KeyCode::Esc)),
+            ChatOutcome::Continue
+        ));
+        assert!(app.chat_widget.bottom_pane().view_stack().is_empty());
     }
 
     #[test]

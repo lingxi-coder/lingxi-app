@@ -219,7 +219,8 @@ impl BottomPane {
             .push(Box::new(PermissionView::new(exchange)));
     }
 
-    /// Open the model picker over `rows` (the caller ensures it is non-empty).
+    /// Open the model picker over `rows` (an empty list renders the picker's
+    /// own empty-state message — plan Phase 11 step 5).
     pub fn show_model_picker(&mut self, rows: Vec<ModelRow>) {
         self.view_stack.push(Box::new(ModelPickerView::new(rows)));
     }

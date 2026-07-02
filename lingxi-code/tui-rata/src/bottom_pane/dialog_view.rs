@@ -56,15 +56,17 @@ impl DialogView {
         self.selected
     }
 
-    /// Route a key: arrows move the highlight, `Enter` confirms, `Esc`
-    /// cancels, `1`–`9` jump-select.
+    /// Route a key: arrows (and `Tab`/`BackTab`, iocraft dialog parity) move
+    /// the highlight, `Enter` confirms, `Esc` cancels, `1`–`9` jump-select.
+    /// Navigation clamps at the list edges — the deliberate `LingXi` behavior
+    /// (plan Phase 12 decision), NOT the iocraft dialogs' wrap-around.
     pub fn on_key(&mut self, code: KeyCode) -> DialogOutcome {
         match code {
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::BackTab => {
                 self.selected = self.selected.saturating_sub(1);
                 DialogOutcome::Pending
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Tab => {
                 if self.selected + 1 < self.options.len() {
                     self.selected += 1;
                 }
@@ -184,15 +186,29 @@ mod tests {
     }
 
     #[test]
-    fn arrows_move_and_clamp() {
+    fn dialog_navigation_clamps_at_edges_by_design() {
+        // Plan Phase 12 decision: clamp-at-edges is the deliberate LingXi
+        // navigation behavior (no wrap-around) across dialog/picker/completion.
         let mut d = dialog();
         assert_eq!(d.selected(), 0);
-        d.on_key(KeyCode::Up); // clamps at 0
+        d.on_key(KeyCode::Up); // clamps at 0 — does NOT wrap to the last option
         assert_eq!(d.selected(), 0);
         d.on_key(KeyCode::Down);
         d.on_key(KeyCode::Down);
-        d.on_key(KeyCode::Down); // clamps at last
+        d.on_key(KeyCode::Down); // clamps at last — does NOT wrap to the first
         assert_eq!(d.selected(), 2);
+    }
+
+    #[test]
+    fn tab_and_backtab_navigate_like_arrows() {
+        let mut d = dialog();
+        d.on_key(KeyCode::Tab);
+        assert_eq!(d.selected(), 1);
+        d.on_key(KeyCode::Tab);
+        d.on_key(KeyCode::Tab); // clamps at last
+        assert_eq!(d.selected(), 2);
+        d.on_key(KeyCode::BackTab);
+        assert_eq!(d.selected(), 1);
     }
 
     #[test]

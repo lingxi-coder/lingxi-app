@@ -1090,6 +1090,46 @@ mod tests {
     }
 
     #[test]
+    fn queued_permissions_serialize_across_variants_and_drop_closes_channels() {
+        let mut widget = widget();
+        let (first, first_rx) = tool_exchange();
+        let (plan_tx, plan_rx) = oneshot::channel();
+        let plan = PermissionExchange {
+            request: PermissionRequest::ExitPlanMode {
+                plan: "1. Foo".to_string(),
+            },
+            resp_tx: plan_tx,
+            worker: None,
+        };
+        widget.open_permission(first);
+        widget.open_permission(plan);
+        assert_eq!(widget.pending_permissions.len(), 1);
+        // Resolve the first; the queued plan-approval prompt surfaces with its
+        // own variant-specific keyboard ('2' = auto-accept edits).
+        widget.handle_key(press(KeyCode::Esc));
+        assert_eq!(first_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
+        assert!(widget.has_open_permission(), "queued plan prompt surfaced");
+        widget.handle_key(press(KeyCode::Char('2')));
+        assert_eq!(
+            plan_rx.blocking_recv().unwrap(),
+            PermissionResponse::AllowAlways
+        );
+        assert!(!widget.has_open_permission());
+
+        // Dropping the widget with an open AND a queued exchange closes both
+        // channels unsent (the gate maps a dropped resp_tx to a deny) instead
+        // of leaking unanswerable prompts.
+        let mut widget = ChatWidget::new(Vec::new(), SessionInfo::default());
+        let (open, open_rx) = tool_exchange();
+        let (queued, queued_rx) = tool_exchange();
+        widget.open_permission(open);
+        widget.open_permission(queued);
+        drop(widget);
+        assert!(open_rx.blocking_recv().is_err());
+        assert!(queued_rx.blocking_recv().is_err());
+    }
+
+    #[test]
     fn model_switch_reports_request_model_and_profile() {
         let mut widget = widget_with_models();
         assert!(matches!(

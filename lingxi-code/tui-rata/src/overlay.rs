@@ -6,10 +6,11 @@
 //! `Clear`, arrow-navigated options, `Enter`/`Esc`, and `1`–`9` shortcuts.
 
 use crossterm::event::KeyCode;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 
 /// A modal dialog: title + body lines + a selectable option list.
 pub struct Dialog {
@@ -75,9 +76,9 @@ impl Dialog {
         }
     }
 
-    /// Draw the dialog centered over `frame`, clearing the area beneath it.
-    pub fn render(&self, frame: &mut crate::terminal::Frame) {
-        let area = frame.area();
+    /// Draw the dialog centered over `area`, clearing the buffer beneath it
+    /// (`(Rect, &mut Buffer)` contract — no frame ownership).
+    pub fn render(&self, area: Rect, buf: &mut Buffer) {
         let content_w = self
             .body
             .iter()
@@ -96,10 +97,10 @@ impl Dialog {
             .min(area.height);
         let rect = centered_rect(width, height, area);
 
-        frame.render_widget(Clear, rect);
+        Clear.render(rect, buf);
         let block = Block::new().borders(Borders::ALL).title(self.title.clone());
         let inner = block.inner(rect);
-        frame.render_widget(block, rect);
+        block.render(rect, buf);
 
         let mut lines: Vec<Line> = self.body.iter().map(|b| Line::from(b.clone())).collect();
         if !self.body.is_empty() {
@@ -120,7 +121,7 @@ impl Dialog {
             Style::default().add_modifier(Modifier::DIM),
         )));
 
-        frame.render_widget(Paragraph::new(lines), inner);
+        Paragraph::new(lines).render(inner, buf);
     }
 }
 
@@ -189,6 +190,29 @@ mod tests {
     fn esc_cancels() {
         let mut d = dialog();
         assert!(matches!(d.on_key(KeyCode::Esc), DialogOutcome::Cancelled));
+    }
+
+    #[test]
+    fn render_draws_title_body_and_options_into_buffer() {
+        let area = Rect::new(0, 0, 60, 12);
+        let mut buf = Buffer::empty(area);
+        dialog().render(area, &mut buf);
+        let text: String = (area.top()..area.bottom())
+            .map(|y| {
+                (area.left()..area.right())
+                    .map(|x| {
+                        buf.cell(ratatui::layout::Position::new(x, y))
+                            .map_or(" ", ratatui::buffer::Cell::symbol)
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Approve?"), "{text}");
+        assert!(text.contains("Run `ls`?"), "{text}");
+        assert!(text.contains("› Yes"), "highlight marker: {text}");
+        // The dialog width is content-driven, so the footer hint clips to it.
+        assert!(text.contains("↑/↓ select"), "{text}");
     }
 
     #[test]

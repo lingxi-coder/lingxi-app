@@ -23,6 +23,7 @@ pub mod overlay;
 pub mod palette;
 pub mod picker;
 pub mod render;
+pub mod renderable;
 pub mod screens;
 pub mod session;
 pub mod style_adapter;

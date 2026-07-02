@@ -8,9 +8,11 @@
 //! [`crate::overlay::Dialog`].
 
 use crossterm::event::KeyCode;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 
 use crate::overlay::centered_rect;
 use crate::session::ModelRow;
@@ -100,9 +102,9 @@ impl ModelPicker {
         }
     }
 
-    /// Draw the picker centered over `frame`, clearing the area beneath it.
-    pub fn render(&self, frame: &mut crate::terminal::Frame) {
-        let area = frame.area();
+    /// Draw the picker centered over `area`, clearing the buffer beneath it
+    /// (`(Rect, &mut Buffer)` contract — no frame ownership).
+    pub fn render(&self, area: Rect, buf: &mut Buffer) {
         let width = u16::try_from(self.max_width() + 6)
             .unwrap_or(u16::MAX)
             .min(area.width.saturating_sub(4))
@@ -113,10 +115,10 @@ impl ModelPicker {
             .min(area.height);
         let rect = centered_rect(width, height, area);
 
-        frame.render_widget(Clear, rect);
+        Clear.render(rect, buf);
         let block = Block::new().borders(Borders::ALL).title("Select model");
         let inner = block.inner(rect);
-        frame.render_widget(block, rect);
+        block.render(rect, buf);
 
         let end = (self.offset + VIEWPORT).min(self.rows.len());
         let mut lines: Vec<Line> = Vec::with_capacity(visible + 1);
@@ -143,7 +145,7 @@ impl ModelPicker {
             "↑/↓ select · Enter switch · Esc cancel",
             Style::default().add_modifier(Modifier::DIM),
         )));
-        frame.render_widget(Paragraph::new(lines), inner);
+        Paragraph::new(lines).render(inner, buf);
     }
 
     fn max_width(&self) -> usize {
@@ -216,5 +218,30 @@ mod tests {
         let mut p = ModelPicker::new(Vec::new());
         assert!(p.is_empty());
         assert_eq!(p.on_key(KeyCode::Enter), PickerOutcome::Cancelled);
+    }
+
+    #[test]
+    fn render_centers_list_with_current_marker_into_buffer() {
+        let p = ModelPicker::new(rows());
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        p.render(area, &mut buf);
+        let text: String = (area.top()..area.bottom())
+            .map(|y| {
+                (area.left()..area.right())
+                    .map(|x| {
+                        buf.cell(ratatui::layout::Position::new(x, y))
+                            .map_or(" ", ratatui::buffer::Cell::symbol)
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Select model"), "{text}");
+        assert!(text.contains("Opus (Anthropic)"), "{text}");
+        // Sonnet is both current (●) and the starting highlight (›).
+        assert!(text.contains("› ● Sonnet (Anthropic)"), "{text}");
+        // The picker width is content-driven, so the footer hint clips to it.
+        assert!(text.contains("↑/↓ select"), "{text}");
     }
 }

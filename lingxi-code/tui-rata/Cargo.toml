@@ -16,10 +16,16 @@ tui-core = { path = "../tui-core" }
 permission = { path = "../permission" }
 # Ratatui 0.29 uses crossterm 0.28 — the SAME major the workspace pins — so only
 # one crossterm version links (verified via `cargo tree -p tui-rata -i crossterm`).
-# `scrolling-regions` (dependency-free feature, also enabled by codex-rs/tui)
-# unlocks `Backend::scroll_region_up/down`, which the bottom-anchored custom
-# terminal uses to make room when the viewport grows past the screen bottom.
-ratatui = { version = "0.29", features = ["scrolling-regions"] }
+# All three features are dependency-free cfg gates, also enabled by codex-rs/tui:
+# `scrolling-regions` unlocks `Backend::scroll_region_up/down` (bottom-anchored
+# custom terminal room-making); `unstable-widget-ref` unlocks `WidgetRef` and
+# `unstable-rendered-line-info` unlocks `Paragraph::line_count`, both needed by
+# the `renderable` height/render contract ported from codex.
+ratatui = { version = "0.29", features = [
+    "scrolling-regions",
+    "unstable-rendered-line-info",
+    "unstable-widget-ref",
+] }
 crossterm = { workspace = true }
 # Inline-image widget (kitty/iTerm2/sixel). v5 targets ratatui 0.29. Its default
 # `image-defaults` feature enables `image/default`, which pulls the AVIF codec

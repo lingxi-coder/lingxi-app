@@ -9,6 +9,21 @@
 //! Multi-line: `Enter` submits, a modified `Enter` (Alt/Shift) inserts a
 //! newline. `Up`/`Down` move the cursor between lines, and recall history only
 //! when already on the first/last line — the standard CLI composer feel.
+//!
+//! Rendering lives in the separate [`ComposerView`] (the model above stays
+//! backend-neutral): a [`Renderable`] that draws the bordered `"> "` prompt box
+//! into `(Rect, &mut Buffer)` and reports the CJK-aware cursor position.
+
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Borders, Paragraph, Widget};
+
+use crate::renderable::Renderable;
+
+/// Maximum composer content lines shown before the box stops growing and the
+/// content scrolls to follow the cursor.
+pub const MAX_VISIBLE_LINES: usize = 6;
 
 /// The input buffer + cursor + submitted-prompt history.
 #[derive(Debug, Default)]
@@ -426,6 +441,83 @@ impl Composer {
     }
 }
 
+/// The composer's [`Renderable`] view: a bordered box whose first content line
+/// carries the `"> "` prompt (wrapped lines align under it), scrolled so the
+/// cursor row stays visible. The cursor position is reported in DISPLAY
+/// columns (CJK/wide chars are 2 columns), clamped inside the box.
+///
+/// Extracted from `RataApp::render_viewport`'s composer zone (plan Phase 2):
+/// the view renders into `(Rect, &mut Buffer)`; only the terminal draw
+/// boundary adapts a [`crate::terminal::Frame`].
+pub struct ComposerView<'a> {
+    composer: &'a Composer,
+}
+
+impl<'a> ComposerView<'a> {
+    /// A view over `composer`.
+    #[must_use]
+    pub fn new(composer: &'a Composer) -> Self {
+        Self { composer }
+    }
+
+    /// The first content row shown when only `visible_rows` rows fit: scrolls
+    /// just enough to keep the cursor row inside the window.
+    fn first_visible_row(&self, visible_rows: usize) -> usize {
+        let (crow, _) = self.composer.cursor_row_col();
+        crow.saturating_sub(visible_rows.saturating_sub(1))
+    }
+}
+
+impl Renderable for ComposerView<'_> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let block = Block::new().borders(Borders::ALL);
+        let inner = block.inner(area);
+        block.render(area, buf);
+        // The first line carries the "> " prompt; wrapped lines align under it.
+        let body: Vec<Line> = self
+            .composer
+            .lines()
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                let prefix = if i == 0 { "> " } else { "  " };
+                Line::from(format!("{prefix}{l}"))
+            })
+            .collect();
+        let first_row = self.first_visible_row(usize::from(inner.height));
+        Paragraph::new(body)
+            .scroll((u16::try_from(first_row).unwrap_or(0), 0))
+            .render(inner, buf);
+    }
+
+    /// Content lines clamped to [`MAX_VISIBLE_LINES`] plus the 2 border rows.
+    /// Width is unused: composer lines never soft-wrap (they scroll).
+    fn desired_height(&self, _width: u16) -> u16 {
+        let content = self.composer.lines().len().clamp(1, MAX_VISIBLE_LINES);
+        u16::try_from(content + 2).unwrap_or(u16::MAX)
+    }
+
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        let inner = Block::new().borders(Borders::ALL).inner(area);
+        let (crow, ccol) = self.composer.cursor_row_col();
+        let first_row = self.first_visible_row(usize::from(inner.height));
+        let cursor_y = inner.y + u16::try_from(crow - first_row).unwrap_or(0);
+        // Cursor X in DISPLAY columns (CJK/wide chars are 2 cols), not chars.
+        let before_cursor: String = self
+            .composer
+            .lines()
+            .get(crow)
+            .map(|l| l.chars().take(ccol).collect())
+            .unwrap_or_default();
+        let disp_w = unicode_width::UnicodeWidthStr::width(before_cursor.as_str());
+        let cursor_x = inner.x + 2 + u16::try_from(disp_w).unwrap_or(0);
+        Some((
+            cursor_x.min(inner.x + inner.width.saturating_sub(1)),
+            cursor_y.min(inner.y + inner.height.saturating_sub(1)),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,5 +774,78 @@ mod tests {
         c.home();
         c.insert_str(&removed);
         assert_eq!(c.text(), "hello world");
+    }
+
+    // ===== ComposerView (Renderable contract, plan Phase 2) =====
+
+    use ratatui::layout::Position;
+
+    fn buffer_row(buf: &Buffer, y: u16) -> String {
+        (buf.area.left()..buf.area.right())
+            .map(|x| {
+                buf.cell(Position::new(x, y))
+                    .map_or(" ", ratatui::buffer::Cell::symbol)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn view_renders_bordered_prompt_box_with_continuation_alignment() {
+        let mut c = typed("first");
+        c.insert_newline();
+        c.insert_str("second");
+        let view = ComposerView::new(&c);
+        let area = Rect::new(0, 0, 12, 4);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+        assert!(buffer_row(&buf, 0).starts_with('┌'));
+        assert!(buffer_row(&buf, 1).starts_with("│> first"));
+        assert!(buffer_row(&buf, 2).starts_with("│  second"));
+        assert!(buffer_row(&buf, 3).starts_with('└'));
+    }
+
+    #[test]
+    fn view_desired_height_is_content_plus_border_clamped_to_cap() {
+        let mut c = typed("one");
+        assert_eq!(
+            ComposerView::new(&c).desired_height(80),
+            3,
+            "1 line + border"
+        );
+        for _ in 0..9 {
+            c.insert_newline();
+        }
+        // 10 content lines clamp at MAX_VISIBLE_LINES (6): 6 + 2 = 8.
+        assert_eq!(ComposerView::new(&c).desired_height(80), 8);
+    }
+
+    #[test]
+    fn view_cursor_pos_uses_display_columns_for_cjk() {
+        let c = typed("你好");
+        let view = ComposerView::new(&c);
+        // x = border(1) + "> "(2) + two wide chars × 2 columns = 7; y = row 1.
+        assert_eq!(view.cursor_pos(Rect::new(0, 0, 20, 3)), Some((7, 1)));
+        // An offset area shifts the reported cursor with it.
+        assert_eq!(view.cursor_pos(Rect::new(0, 5, 20, 3)), Some((7, 6)));
+    }
+
+    #[test]
+    fn view_scrolls_to_keep_cursor_row_visible_and_clamps_cursor_inside() {
+        let mut c = typed("l0");
+        for i in 1..8 {
+            c.insert_newline();
+            c.insert_str(&format!("l{i}"));
+        }
+        let view = ComposerView::new(&c);
+        // 3 visible content rows for 8 lines with the cursor on the last one:
+        // the window scrolls so l7 is the bottom visible row.
+        let area = Rect::new(0, 0, 10, 5);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+        assert!(buffer_row(&buf, 1).starts_with("│  l5"));
+        assert!(buffer_row(&buf, 3).starts_with("│  l7"));
+        let (x, y) = view.cursor_pos(area).expect("cursor");
+        assert_eq!((x, y), (5, 3), "cursor on the bottom visible row");
+        assert!(y < area.bottom() - 1, "cursor stays inside the border");
     }
 }

@@ -6,10 +6,11 @@
 //! token). Modeled on codex's `bottom_pane` completion popup, anchored above
 //! the composer rather than a full-screen modal.
 
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 
 /// Rows shown in the popup before it stops growing.
 const MAX_ROWS: usize = 6;
@@ -101,8 +102,9 @@ impl CompletionPopup {
     }
 
     /// Draw the popup anchored just above `composer` (bordered list, cleared
-    /// beneath). Grows upward from the composer's top edge.
-    pub fn render(&self, frame: &mut crate::terminal::Frame, composer: Rect) {
+    /// beneath), rendering into `buf` (`(Rect, &mut Buffer)` contract). Grows
+    /// upward from the composer's top edge.
+    pub fn render(&self, composer: Rect, buf: &mut Buffer) {
         let rows = self.items.len().min(MAX_ROWS);
         let height = u16::try_from(rows + 2).unwrap_or(u16::MAX);
         let y = composer.y.saturating_sub(height);
@@ -112,10 +114,10 @@ impl CompletionPopup {
             width: composer.width,
             height: height.min(composer.y),
         };
-        frame.render_widget(Clear, rect);
+        Clear.render(rect, buf);
         let block = Block::new().borders(Borders::ALL).title("Complete");
         let inner = block.inner(rect);
-        frame.render_widget(block, rect);
+        block.render(rect, buf);
 
         let lines: Vec<Line> = self
             .items
@@ -139,7 +141,7 @@ impl CompletionPopup {
                 Line::from(spans)
             })
             .collect();
-        frame.render_widget(Paragraph::new(lines), inner);
+        Paragraph::new(lines).render(inner, buf);
     }
 }
 
@@ -176,5 +178,44 @@ mod tests {
         p.next();
         assert_eq!(p.selected(), 1);
         assert_eq!(p.selected_insert(), COMMANDS[1].0);
+    }
+
+    #[test]
+    fn render_anchors_above_composer_rect_in_buffer() {
+        let p = CompletionPopup::new(command_items("/m")).unwrap();
+        let screen = Rect::new(0, 0, 40, 12);
+        // Composer occupies the bottom rows; the popup grows upward from its top.
+        let composer = Rect::new(0, 8, 40, 4);
+        let mut buf = Buffer::empty(screen);
+        p.render(composer, &mut buf);
+        let text: String = (screen.top()..screen.bottom())
+            .map(|y| {
+                (screen.left()..screen.right())
+                    .map(|x| {
+                        buf.cell(ratatui::layout::Position::new(x, y))
+                            .map_or(" ", ratatui::buffer::Cell::symbol)
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Complete"), "{text}");
+        assert!(text.contains("› /model"), "highlighted match: {text}");
+        assert!(text.contains("/mcp"), "{text}");
+        // Everything the popup drew sits strictly above the composer rows.
+        let composer_rows: String = (composer.top()..screen.bottom())
+            .map(|y| {
+                (screen.left()..screen.right())
+                    .map(|x| {
+                        buf.cell(ratatui::layout::Position::new(x, y))
+                            .map_or(" ", ratatui::buffer::Cell::symbol)
+                    })
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            composer_rows.trim().is_empty(),
+            "popup stays above composer"
+        );
     }
 }

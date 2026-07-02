@@ -11,9 +11,11 @@
 //! `keybindings.json` resolution) — a documented scaffold simplification.
 
 use crossterm::event::KeyCode;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 
 use crate::session::{DoctorInfo, InfoRow};
 
@@ -156,10 +158,10 @@ impl FullScreen {
         }
     }
 
-    /// Draw the screen over the whole `frame`, clearing beneath it.
-    pub fn render(&self, frame: &mut crate::terminal::Frame) {
-        let area = frame.area();
-        frame.render_widget(Clear, area);
+    /// Draw the screen over the whole `area`, clearing the buffer beneath it
+    /// (`(Rect, &mut Buffer)` contract — no frame ownership).
+    pub fn render(&self, area: Rect, buf: &mut Buffer) {
+        Clear.render(area, buf);
         let block = Block::new()
             .borders(Borders::ALL)
             .title(Span::styled(
@@ -171,11 +173,10 @@ impl FullScreen {
                 Style::default().add_modifier(Modifier::DIM),
             )));
         let inner = block.inner(area);
-        frame.render_widget(block, area);
-        frame.render_widget(
-            Paragraph::new(self.lines.clone()).scroll((self.scroll, 0)),
-            inner,
-        );
+        block.render(area, buf);
+        Paragraph::new(self.lines.clone())
+            .scroll((self.scroll, 0))
+            .render(inner, buf);
     }
 }
 
@@ -364,6 +365,32 @@ mod tests {
         assert_eq!(s.scroll(), bottom);
         s.on_key(KeyCode::Home);
         assert_eq!(s.scroll(), 0);
+    }
+
+    #[test]
+    fn render_draws_title_body_and_footer_into_buffer() {
+        let s = FullScreen::new(
+            "My screen",
+            vec![Line::from("body line one")],
+            "esc to close",
+        );
+        let area = Rect::new(0, 0, 40, 6);
+        let mut buf = Buffer::empty(area);
+        s.render(area, &mut buf);
+        let text: String = (area.top()..area.bottom())
+            .map(|y| {
+                (area.left()..area.right())
+                    .map(|x| {
+                        buf.cell(ratatui::layout::Position::new(x, y))
+                            .map_or(" ", ratatui::buffer::Cell::symbol)
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("My screen"), "{text}");
+        assert!(text.contains("body line one"), "{text}");
+        assert!(text.contains("esc to close"), "{text}");
     }
 
     #[test]

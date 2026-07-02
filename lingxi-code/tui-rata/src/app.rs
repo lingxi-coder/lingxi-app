@@ -21,7 +21,7 @@ use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Paragraph, Widget};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -30,18 +30,16 @@ use tui_core::orchestrator_bridge::TurnEvent;
 use tui_core::permission_bridge::PermissionExchange;
 use tui_core::theme::Theme;
 
-use crate::composer::Composer;
+use crate::composer::{Composer, ComposerView, MAX_VISIBLE_LINES};
 use crate::overlay::{Dialog, DialogOutcome};
 use crate::palette::{command_items, CompletionPopup};
 use crate::picker::{ModelPicker, PickerOutcome};
+use crate::renderable::Renderable;
 use crate::screens::FullScreen;
 use crate::session::SessionInfo;
 use crate::terminal::TerminalSession;
 use crate::vim::{VimOutcome, VimState};
 use crate::{render, RataTerminal};
-
-/// Maximum composer content height before it stops growing and scrolls.
-const COMPOSER_MAX_LINES: usize = 6;
 
 /// How long an idle Ctrl-C stays "armed" before a second press quits.
 const CTRL_C_EXIT_WINDOW: Duration = Duration::from_secs(2);
@@ -596,7 +594,7 @@ impl RataApp {
     /// active overlay (permission dialog / model picker / completion popup).
     fn viewport_height(&self) -> u16 {
         let composer =
-            u16::try_from(self.composer.lines().len().clamp(1, COMPOSER_MAX_LINES)).unwrap_or(1);
+            u16::try_from(self.composer.lines().len().clamp(1, MAX_VISIBLE_LINES)).unwrap_or(1);
         let base = 1 + composer + 2; // status + composer content + border
         let overlay = if self.pending_permission.is_some() {
             9
@@ -663,13 +661,18 @@ impl RataApp {
     /// Draw the bottom viewport (history lives in the terminal's native
     /// scrollback via [`Self::flush_scrollback`]): a status line + the composer
     /// box, with any active overlay (completion / model picker / permission)
-    /// drawn on top. Draws into the custom terminal's absolute-rect
-    /// [`crate::terminal::Frame`].
+    /// drawn on top.
+    ///
+    /// The [`crate::terminal::Frame`] is only the terminal draw BOUNDARY: all
+    /// widgets render through the `(Rect, &mut Buffer)` [`Renderable`]
+    /// contract into the frame's buffer, and the composer's cursor
+    /// position/style are copied back onto the frame at the end.
     fn render_viewport(&mut self, frame: &mut crate::terminal::Frame) {
+        let area = frame.area();
         let zones = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(3)])
-            .split(frame.area());
+            .split(area);
 
         let dim = crate::style_adapter::to_ratatui(self.theme.dim);
         let status: Line = if self.current_turn.is_some() {
@@ -704,51 +707,30 @@ impl RataApp {
             };
             Line::from(Span::styled(text, Style::default().fg(dim)))
         };
-        frame.render_widget(Paragraph::new(status), zones[0]);
+        let composer_view = ComposerView::new(&self.composer);
+        let cursor_pos = composer_view.cursor_pos(zones[1]);
+        let cursor_style = composer_view.cursor_style(zones[1]);
 
-        let block = Block::new().borders(Borders::ALL);
-        let inner = block.inner(zones[1]);
-        frame.render_widget(block, zones[1]);
-        let composer_lines = self.composer.lines();
-        // The first line carries the "> " prompt; wrapped lines align under it.
-        let body: Vec<Line> = composer_lines
-            .iter()
-            .enumerate()
-            .map(|(i, l)| {
-                let prefix = if i == 0 { "> " } else { "  " };
-                Line::from(format!("{prefix}{l}"))
-            })
-            .collect();
-        let (crow, ccol) = self.composer.cursor_row_col();
-        let visible_rows = inner.height as usize;
-        let first_row = crow.saturating_sub(visible_rows.saturating_sub(1));
-        frame.render_widget(
-            Paragraph::new(body).scroll((u16::try_from(first_row).unwrap_or(0), 0)),
-            inner,
-        );
-        let cursor_y = inner.y + u16::try_from(crow - first_row).unwrap_or(0);
-        // Cursor X in DISPLAY columns (CJK/wide chars are 2 cols), not char count.
-        let before_cursor: String = composer_lines
-            .get(crow)
-            .map(|l| l.chars().take(ccol).collect())
-            .unwrap_or_default();
-        let disp_w = unicode_width::UnicodeWidthStr::width(before_cursor.as_str());
-        let cursor_x = inner.x + 2 + u16::try_from(disp_w).unwrap_or(0);
-        frame.set_cursor_position((
-            cursor_x.min(inner.x + inner.width.saturating_sub(1)),
-            cursor_y.min(inner.y + inner.height.saturating_sub(1)),
-        ));
+        let buf = frame.buffer_mut();
+        Paragraph::new(status).render(zones[0], buf);
+        composer_view.render(zones[1], buf);
 
         // Overlays draw over the viewport.
         if let Some(popup) = &self.completion {
-            popup.render(frame, zones[1]);
+            popup.render(zones[1], buf);
         }
         if let Some(picker) = &self.active_model_picker {
-            picker.render(frame);
+            picker.render(area, buf);
         }
         if let Some(pending) = &self.pending_permission {
-            pending.dialog.render(frame);
+            pending.dialog.render(area, buf);
         }
+
+        // Frame adapter: copy the composer's cursor claim onto the frame.
+        if let Some(pos) = cursor_pos {
+            frame.set_cursor_position(pos);
+        }
+        frame.set_cursor_style(cursor_style);
     }
 }
 
@@ -1574,7 +1556,7 @@ mod tests {
         for _ in 0..9 {
             app.on_key(alt(KeyCode::Enter));
         }
-        // 10 content lines clamp at COMPOSER_MAX_LINES (6): 1 + 6 + 2 = 9.
+        // 10 content lines clamp at composer::MAX_VISIBLE_LINES (6): 1 + 6 + 2 = 9.
         assert_eq!(app.viewport_height(), 9);
     }
 

@@ -183,15 +183,25 @@ mod tests {
     }
 
     #[test]
-    fn nav_clamps_and_reports_selected_insert() {
+    fn completion_navigation_clamps_at_edges_by_design() {
+        // Plan Phase 12 decision: clamp-at-edges is the deliberate LingXi
+        // navigation behavior (no wrap-around) across dialog/picker/completion.
+        let total = crate::command::advertised().count();
         let mut p = CompletionView::new(command_items("/")).unwrap();
         assert_eq!(p.selected(), 0);
-        p.prev(); // clamps at 0
+        p.prev(); // clamps at 0 — does NOT wrap to the last item
         assert_eq!(p.selected(), 0);
         p.next();
         assert_eq!(p.selected(), 1);
         let second = crate::command::advertised().nth(1).unwrap().name;
         assert_eq!(p.selected_insert(), second);
+        // Walk past the end: the highlight clamps on the last item.
+        for _ in 0..total {
+            p.next();
+        }
+        assert_eq!(p.selected(), total - 1);
+        let last = crate::command::advertised().last().unwrap().name;
+        assert_eq!(p.selected_insert(), last);
     }
 
     #[test]

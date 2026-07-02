@@ -1024,6 +1024,56 @@ mod tests {
     }
 
     #[test]
+    fn bare_slash_opens_completion_listing_the_whole_registry() {
+        // Plan Phase 12 step 1: command completion is sourced from the ONE
+        // command registry — a bare "/" lists every advertised command in
+        // registry order, and navigation clamps at the list edges (the
+        // deliberate LingXi behavior, plan Phase 12 step 4).
+        let mut pane = pane();
+        typ(&mut pane, "/");
+        let first = crate::command::advertised().next().unwrap().name;
+        assert_eq!(
+            pane.completion().expect("popup open").selected_insert(),
+            first
+        );
+        // Walk to the last advertised command; further Downs clamp there.
+        let total = crate::command::advertised().count();
+        for _ in 0..total + 3 {
+            let _ = pane.handle_key(key(KeyCode::Down));
+        }
+        let popup = pane.completion().expect("popup still open");
+        assert_eq!(popup.selected(), total - 1, "clamped at the last item");
+        let last = crate::command::advertised().last().unwrap().name;
+        assert_eq!(popup.selected_insert(), last);
+        // Tab completes the highlighted registry command into the buffer.
+        let _ = pane.handle_key(key(KeyCode::Tab));
+        assert_eq!(pane.composer().text(), last);
+    }
+
+    #[test]
+    fn unknown_command_and_empty_file_results_close_the_popup() {
+        // Empty results close the popup (BottomPane owns open/close): an
+        // unknown /command fragment…
+        let mut pane = pane();
+        typ(&mut pane, "/m");
+        assert!(pane.completion().is_some());
+        typ(&mut pane, "z"); // "/mz" matches nothing in the registry
+        assert!(pane.completion().is_none(), "no matches → popup closed");
+        // …typing on keeps it closed, and Enter falls through as a normal
+        // submission (the unknown command is the owner's routing decision).
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Enter)),
+            BottomPaneOutcome::Submitted(ref p) if p == "/mz"
+        ));
+        // …and an @file fragment with no matching entries.
+        let mut pane = super::BottomPane::new(Theme::dark());
+        typ(&mut pane, "see @Carg");
+        assert!(pane.completion().is_some());
+        typ(&mut pane, "zzz"); // "@Cargzzz" matches no file
+        assert!(pane.completion().is_none(), "no files → popup closed");
+    }
+
+    #[test]
     fn at_file_completion_replaces_token_in_place() {
         let mut pane = pane();
         typ(&mut pane, "see @Carg");

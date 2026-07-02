@@ -108,7 +108,9 @@ filetime = "0.2"
 # — unlike the workspace's `deny` — cannot be locally overridden). See
 # `apps/cli/src/bypass_env.rs`. Pinned to the same 0.27 series `platforms/posix`
 # already uses.
-nix = { version = "0.27", default-features = false, features = ["user"] }
+# `signal` adds the safe `kill(pid, 0)` wrapper for the agents live-session
+# registry's liveness probe (`agents_registry::process_alive`, M7 cc2.1.198).
+nix = { version = "0.27", default-features = false, features = ["user", "signal"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"

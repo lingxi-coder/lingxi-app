@@ -1,0 +1,841 @@
+//! Cross-process live-session registry + background-job store readers — the
+//! data source for `lingxi-cli agents --json` and the interactive agent view.
+//!
+//! (M7 cc2.1.198) Ports the real binary's `printAgentsJson` pipeline
+//! (2.1.198 @223853400, module `mXc`/`pGf`):
+//!
+//! * **Live sessions** — every running claude process registers itself as
+//!   `<config-home>/sessions/<pid>.json` (observed shape: `{pid, sessionId,
+//!   cwd, startedAt, procStart, version, peerProtocol, kind, entrypoint,
+//!   name, nameSource, status, updatedAt, statusUpdatedAt}`; bg workers also
+//!   carry `jobId`). `bKe()` reads the dir and drops entries whose pid is no
+//!   longer alive. lingxi mirrors the same layout under
+//!   `$LINGXI_CONFIG_DIR`/`~/.lingxi/sessions/`.
+//! * **Background jobs** — `<config-home>/jobs/<short>/state.json` (observed
+//!   shape: `{state, tempo, name, sessionId, cwd, originCwd, createdAt,
+//!   intent, displayIntent, template, respawnFlags, inFlight, …}`). lingxi
+//!   does not yet WRITE jobs (`--bg` dispatch is M8); the reader is landed
+//!   now so `agents --json` picks them up the moment the writer exists.
+//! * **Merge** — jobs first (live worker matched by `jobId`), then live
+//!   sessions not consumed by a job; sorted by `startedAt` ascending; output
+//!   keys in the binary's exact insertion order (`preserve_order` keeps
+//!   `serde_json::Map` faithful): `{pid?, id, cwd, kind, startedAt,
+//!   sessionId, name?, status?, waitingFor?, state}` for job rows and
+//!   `{pid, cwd, kind, startedAt, sessionId?, name?, status?, waitingFor?}`
+//!   for live-only rows.
+//!
+//! State model (binary `mGf`/`$re`/`FI`/`Xg`/`lDe`, @209972919): see
+//! [`merged_state`]. The 2.1.196 "no Done↔Needs-input flip" fix is exactly
+//! the terminal-outcome precedence in `mGf` — once a job is terminal it
+//! reports `done`/`failed`/`stopped` even if its tempo is still `blocked`.
+
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+/// `sessions/` under the config home — one `<pid>.json` per live process.
+#[must_use]
+pub fn sessions_dir(config_home: &Path) -> PathBuf {
+    config_home.join("sessions")
+}
+
+/// `jobs/` under the config home — one `<short>/state.json` per background job.
+#[must_use]
+pub fn jobs_dir(config_home: &Path) -> PathBuf {
+    config_home.join("jobs")
+}
+
+/// One live-process registration (`sessions/<pid>.json`). Field order matches
+/// the observed on-disk order of the real 2.1.198 binary byte-for-byte (the
+/// registration file is itself a parity surface).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveSessionRecord {
+    /// Registering process id.
+    pub pid: i32,
+    /// Session UUID (absent for processes that never minted a session).
+    #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Process working directory.
+    pub cwd: String,
+    /// Epoch milliseconds the session started.
+    #[serde(rename = "startedAt")]
+    pub started_at: i64,
+    /// `ps -o lstart` string of the registering process — pid-reuse guard.
+    #[serde(rename = "procStart", skip_serializing_if = "Option::is_none")]
+    pub proc_start: Option<String>,
+    /// CLI version that wrote the record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Peer protocol version (binary writes `1`).
+    #[serde(rename = "peerProtocol", skip_serializing_if = "Option::is_none")]
+    pub peer_protocol: Option<u32>,
+    /// `"interactive"` or `"bg"` (binary `CLAUDE_CODE_SESSION_KIND`).
+    pub kind: String,
+    /// Job short id for bg workers (`jobs/<jobId>/`).
+    #[serde(rename = "jobId", skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    /// Entry point that started the process (binary writes `"cli"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<String>,
+    /// Display name (binary derives one from the project dir).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `"derived"` / `"user"` — where `name` came from.
+    #[serde(rename = "nameSource", skip_serializing_if = "Option::is_none")]
+    pub name_source: Option<String>,
+    /// Live status: `"idle"` / `"busy"` / `"waiting"` / `"shell"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// What a `"waiting"` session is waiting for.
+    #[serde(rename = "waitingFor", skip_serializing_if = "Option::is_none")]
+    pub waiting_for: Option<String>,
+    /// Epoch ms of the last record refresh.
+    #[serde(rename = "updatedAt", skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
+    /// Epoch ms of the last `status` change.
+    #[serde(rename = "statusUpdatedAt", skip_serializing_if = "Option::is_none")]
+    pub status_updated_at: Option<i64>,
+}
+
+/// In-flight task counters inside a job's `state.json`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct JobInFlight {
+    /// Running task count.
+    #[serde(default)]
+    pub tasks: u32,
+    /// Queued task count.
+    #[serde(default)]
+    pub queued: u32,
+    /// Kinds of in-flight tasks (e.g. `"session_cron"`).
+    #[serde(default)]
+    pub kinds: Vec<String>,
+}
+
+/// A background job's persisted state (`jobs/<short>/state.json`). Only the
+/// fields `printAgentsJson` consumes are modeled; unknown fields are ignored
+/// so richer binary-written stores still parse.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct JobState {
+    /// Job lifecycle state: `working`/`blocked`/`done`/`failed`/`stopped`/….
+    #[serde(default)]
+    pub state: String,
+    /// Job tempo: `active`/`blocked`/`idle`.
+    #[serde(default)]
+    pub tempo: Option<String>,
+    /// Display name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Original dispatch intent.
+    #[serde(default)]
+    pub intent: Option<String>,
+    /// Overridden display intent.
+    #[serde(rename = "displayIntent", default)]
+    pub display_intent: Option<String>,
+    /// First prompt of the job session.
+    #[serde(rename = "initialPrompt", default)]
+    pub initial_prompt: Option<String>,
+    /// Session UUID of the worker.
+    #[serde(rename = "sessionId", default)]
+    pub session_id: Option<String>,
+    /// Worker cwd (often a managed worktree).
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Where the job was dispatched from (pre-worktree cwd).
+    #[serde(rename = "originCwd", default)]
+    pub origin_cwd: Option<String>,
+    /// ISO-8601 creation timestamp.
+    #[serde(rename = "createdAt", default)]
+    pub created_at: Option<String>,
+    /// Attached routine name, if the job runs one.
+    #[serde(default)]
+    pub routine: Option<serde_json::Value>,
+    /// In-flight task counters.
+    #[serde(rename = "inFlight", default)]
+    pub in_flight: Option<JobInFlight>,
+    /// Job detail line (may reference a PR — surfaced in the agent view).
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+/// `dXc` — sanitize a display name: strip C0/C1 control chars
+/// (`[\x00-\x08\x0E-\x1F\x7F-\x9F]`), collapse runs of whitespace to one
+/// space, trim. Returns `None` when nothing survives (the binary omits the
+/// `name` key via `...f&&{name:f}`).
+#[must_use]
+pub fn sanitize_name(raw: &str) -> Option<String> {
+    let stripped: String = raw
+        .chars()
+        .filter(|c| {
+            !matches!(*c,
+                '\u{0}'..='\u{8}' | '\u{e}'..='\u{1f}' | '\u{7f}'..='\u{9f}')
+        })
+        .collect();
+    let collapsed = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        None
+    } else {
+        Some(collapsed)
+    }
+}
+
+/// `pXc` — normalize a live status for output: `idle` and `waiting` pass
+/// through, anything else (busy/shell/…) reports as `busy`.
+#[must_use]
+pub fn normalize_status(status: &str) -> &'static str {
+    match status {
+        "idle" => "idle",
+        "waiting" => "waiting",
+        _ => "busy",
+    }
+}
+
+/// `$re` — map a terminal job state to its outcome; `None` for live states.
+#[must_use]
+pub fn terminal_outcome(state: &str) -> Option<&'static str> {
+    match state {
+        "done" => Some("success"),
+        "failed" => Some("failure"),
+        "stopped" => Some("stopped"),
+        _ => None,
+    }
+}
+
+/// `Xg` — a job is terminal when its state has a terminal outcome AND its
+/// tempo is no longer `active`.
+#[must_use]
+pub fn job_is_terminal(job: &JobState) -> bool {
+    terminal_outcome(&job.state).is_some() && job.tempo.as_deref() != Some("active")
+}
+
+/// `lDe` — "loopish" jobs (routine attached, `session_cron` in flight, or a
+/// `/loop` intent) stay listed even after a `success` outcome.
+#[must_use]
+pub fn job_is_loopish(job: &JobState) -> bool {
+    let loop_intent = |s: &Option<String>| {
+        s.as_deref()
+            .is_some_and(|v| v.trim().to_lowercase().starts_with("/loop"))
+    };
+    job.routine.is_some()
+        || job
+            .in_flight
+            .as_ref()
+            .is_some_and(|f| f.kinds.iter().any(|k| k == "session_cron"))
+        || loop_intent(&job.intent)
+        || loop_intent(&job.initial_prompt)
+}
+
+/// `mGf` — merge a job's persisted state with its live worker status into the
+/// reported `state`: `working` / `blocked` / `done` / `failed` / `stopped`.
+///
+/// Terminal outcomes take precedence over a stale `blocked` tempo — the
+/// 2.1.196 "sessions no longer flip between Done and Needs-input" fix: a
+/// `done` job with `tempo: "blocked"` still reports `done`.
+#[must_use]
+pub fn merged_state(job: &JobState, live_status: Option<&str>) -> &'static str {
+    if live_status == Some("busy") {
+        return "working";
+    }
+    let outcome = terminal_outcome(&job.state);
+    if job_is_terminal(job) && !(outcome == Some("success") && job_is_loopish(job)) {
+        return match outcome {
+            Some("success") => "done",
+            Some("failure") => "failed",
+            _ => "stopped",
+        };
+    }
+    if job.tempo.as_deref() == Some("blocked") || live_status == Some("waiting") {
+        return "blocked";
+    }
+    "working"
+}
+
+/// `HSe` — the cwd a job is grouped under: `originCwd`, else the worktree
+/// prefix stripped from `cwd` (`^(.+?)/<DOT_DIR>/worktrees/…` → the project
+/// root), else `cwd` as-is.
+#[must_use]
+pub fn job_origin_cwd(job: &JobState) -> String {
+    if let Some(origin) = job.origin_cwd.as_deref() {
+        if !origin.is_empty() {
+            return origin.to_string();
+        }
+    }
+    let cwd = job.cwd.as_deref().unwrap_or("");
+    for sep in ['/', '\\'] {
+        let marker = format!("{sep}{}{sep}worktrees{sep}", branding::DOT_DIR);
+        if let Some(idx) = cwd.find(&marker) {
+            return cwd[..idx].to_string();
+        }
+    }
+    cwd.to_string()
+}
+
+/// The `--cwd <path>` filter (`r(d)` in `pGf`): keep entries whose cwd is the
+/// filter root or beneath it — `path.relative(root, d)` must not start with
+/// `..` and must not be absolute. `None` filter keeps everything.
+#[must_use]
+pub fn cwd_matches(filter: Option<&Path>, cwd: &str) -> bool {
+    let Some(root) = filter else { return true };
+    Path::new(cwd).strip_prefix(root).is_ok()
+}
+
+/// Parse an ISO-8601 `createdAt` into epoch milliseconds (`Date.parse`).
+/// Unparseable input degrades to `0` (sorts first) rather than dropping the
+/// row.
+#[must_use]
+pub fn parse_created_at_ms(created_at: Option<&str>) -> i64 {
+    created_at
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map_or(0, |dt| dt.timestamp_millis())
+}
+
+/// Build the `agents --json` array — the faithful `printAgentsJson` merge.
+///
+/// * `live` — live-session records (already liveness-filtered).
+/// * `jobs` — `(short_id, state)` pairs from the jobs store.
+/// * `cwd_filter` — resolved `--cwd` root.
+/// * `all` — with `--all`, completed (terminal, workerless) jobs are kept;
+///   without it only `working`/`blocked` or live-backed rows survive.
+#[must_use]
+// One function = one faithful `pGf` port; splitting the two merge loops apart
+// would scatter the binary's field-order/filter contract across helpers.
+#[allow(clippy::too_many_lines)]
+pub fn build_agents_json(
+    live: &[LiveSessionRecord],
+    jobs: &[(String, JobState)],
+    cwd_filter: Option<&Path>,
+    all: bool,
+) -> Vec<serde_json::Value> {
+    use serde_json::{json, Map, Value};
+
+    // Live bg workers keyed by jobId (`a` in pGf).
+    let mut worker_by_job: std::collections::HashMap<&str, &LiveSessionRecord> =
+        std::collections::HashMap::new();
+    for rec in live {
+        if rec.kind == "bg" {
+            if let Some(job_id) = rec.job_id.as_deref() {
+                worker_by_job.insert(job_id, rec);
+            }
+        }
+    }
+
+    let mut rows: Vec<Value> = Vec::new();
+    let mut consumed_pids: std::collections::HashSet<i32> = std::collections::HashSet::new();
+
+    // Job rows first.
+    for (short, job) in jobs {
+        let worker = worker_by_job.get(short.as_str()).copied();
+        if let Some(w) = worker {
+            consumed_pids.insert(w.pid);
+        }
+        if !cwd_matches(cwd_filter, &job_origin_cwd(job)) {
+            continue;
+        }
+        let state = merged_state(job, worker.and_then(|w| w.status.as_deref()));
+        if !all && worker.is_none() && state != "working" && state != "blocked" {
+            continue;
+        }
+        let name = worker
+            .and_then(|w| w.name.as_deref())
+            .or(job.name.as_deref())
+            .or(job.display_intent.as_deref())
+            .or(job.intent.as_deref())
+            .and_then(sanitize_name);
+
+        // Exact binary key order: pid?, id, cwd, kind, startedAt, sessionId,
+        // name?, status?, waitingFor?, state.
+        let mut m = Map::new();
+        if let Some(w) = worker {
+            m.insert("pid".into(), json!(w.pid));
+        }
+        m.insert("id".into(), json!(short));
+        let cwd = worker
+            .map(|w| w.cwd.clone())
+            .or_else(|| job.cwd.clone())
+            .unwrap_or_default();
+        m.insert("cwd".into(), json!(cwd));
+        m.insert("kind".into(), json!("background"));
+        let started_at = worker.map_or_else(
+            || parse_created_at_ms(job.created_at.as_deref()),
+            |w| w.started_at,
+        );
+        m.insert("startedAt".into(), json!(started_at));
+        let session_id = worker
+            .and_then(|w| w.session_id.clone())
+            .or_else(|| job.session_id.clone())
+            .unwrap_or_default();
+        m.insert("sessionId".into(), json!(session_id));
+        if let Some(n) = name {
+            m.insert("name".into(), json!(n));
+        }
+        if let Some(status) = worker.and_then(|w| w.status.as_deref()) {
+            m.insert("status".into(), json!(normalize_status(status)));
+            if status == "waiting" {
+                if let Some(wf) = worker.and_then(|w| w.waiting_for.as_deref()) {
+                    m.insert("waitingFor".into(), json!(wf));
+                }
+            }
+        }
+        m.insert("state".into(), json!(state));
+        rows.push(Value::Object(m));
+    }
+
+    // Live-only rows (interactive sessions + orphan bg workers).
+    for rec in live {
+        if rec.kind != "interactive" && rec.kind != "bg" {
+            continue;
+        }
+        if consumed_pids.contains(&rec.pid) {
+            continue;
+        }
+        if rec.kind == "bg" && rec.job_id.is_some() {
+            continue;
+        }
+        if !cwd_matches(cwd_filter, &rec.cwd) {
+            continue;
+        }
+        let mut m = Map::new();
+        m.insert("pid".into(), json!(rec.pid));
+        m.insert("cwd".into(), json!(rec.cwd));
+        m.insert(
+            "kind".into(),
+            json!(if rec.kind == "bg" {
+                "background"
+            } else {
+                "interactive"
+            }),
+        );
+        m.insert("startedAt".into(), json!(rec.started_at));
+        if let Some(sid) = &rec.session_id {
+            m.insert("sessionId".into(), json!(sid));
+        }
+        if let Some(n) = rec.name.as_deref().and_then(sanitize_name) {
+            m.insert("name".into(), json!(n));
+        }
+        if let Some(status) = rec.status.as_deref() {
+            m.insert("status".into(), json!(normalize_status(status)));
+            if status == "waiting" {
+                if let Some(wf) = rec.waiting_for.as_deref() {
+                    m.insert("waitingFor".into(), json!(wf));
+                }
+            }
+        }
+        rows.push(Value::Object(m));
+    }
+
+    // `c.sort((d,p)=>d.startedAt-p.startedAt)` — ascending, stable.
+    rows.sort_by_key(|v| v.get("startedAt").and_then(serde_json::Value::as_i64));
+    rows
+}
+
+/// Whether `pid` is a live process (`kill(pid, 0)` — signal 0 probes without
+/// sending). `EPERM` still means alive (a process we can't signal exists).
+#[cfg(unix)]
+#[must_use]
+pub fn process_alive(pid: i32) -> bool {
+    // EPERM still means a live process (one we may not signal).
+    matches!(
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
+        Ok(()) | Err(nix::errno::Errno::EPERM)
+    )
+}
+
+/// Non-unix hosts have no cheap probe wired — treat records as live (the
+/// registry is best-effort there; stale rows age out on rewrite).
+#[cfg(not(unix))]
+#[must_use]
+pub fn process_alive(_pid: i32) -> bool {
+    true
+}
+
+/// Read all live-session records under `dir`, dropping records whose pid is
+/// dead (and best-effort unlinking those stale files, mirroring the binary's
+/// reaper). Unreadable/unparseable files are skipped.
+#[must_use]
+pub fn read_live_sessions(dir: &Path) -> Vec<LiveSessionRecord> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(rec) = serde_json::from_str::<LiveSessionRecord>(&bytes) else {
+            continue;
+        };
+        if !process_alive(rec.pid) {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        out.push(rec);
+    }
+    // Deterministic order for the downstream stable sort (read_dir order is
+    // platform-dependent).
+    out.sort_by_key(|r| r.pid);
+    out
+}
+
+/// Read all background jobs under `dir` (`<short>/state.json`), sorted by
+/// short id for determinism. Missing/unparseable state files are skipped.
+#[must_use]
+pub fn read_jobs(dir: &Path) -> Vec<(String, JobState)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(short) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read_to_string(path.join("state.json")) else {
+            continue;
+        };
+        let Ok(state) = serde_json::from_str::<JobState>(&bytes) else {
+            continue;
+        };
+        out.push((short.to_string(), state));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Register the current process in the live-session registry and remove the
+/// record on drop. Best-effort on both sides: registration failure is
+/// swallowed (a session must never die for lack of a registry write), and a
+/// failed unlink leaves a stale record the next reader reaps via the
+/// liveness probe.
+pub struct SessionRegistration {
+    path: Option<PathBuf>,
+}
+
+impl SessionRegistration {
+    /// Write `<config-home>/sessions/<pid>.json` for this process.
+    #[must_use]
+    pub fn register(config_home: &Path, session_id: Option<&str>, name: Option<&str>) -> Self {
+        let pid = std::process::id();
+        let pid = i32::try_from(pid).unwrap_or(i32::MAX);
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let record = LiveSessionRecord {
+            pid,
+            session_id: session_id.map(str::to_string),
+            cwd,
+            started_at: now_ms,
+            proc_start: None,
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            peer_protocol: Some(1),
+            kind: "interactive".to_string(),
+            job_id: None,
+            entrypoint: Some("cli".to_string()),
+            name: name.map(str::to_string),
+            name_source: name.map(|_| "derived".to_string()),
+            status: Some("idle".to_string()),
+            waiting_for: None,
+            updated_at: Some(now_ms),
+            status_updated_at: Some(now_ms),
+        };
+        let dir = sessions_dir(config_home);
+        let path = dir.join(format!("{pid}.json"));
+        let ok = std::fs::create_dir_all(&dir).is_ok()
+            && serde_json::to_string(&record)
+                .ok()
+                .is_some_and(|s| std::fs::write(&path, s).is_ok());
+        Self {
+            path: ok.then_some(path),
+        }
+    }
+}
+
+impl Drop for SessionRegistration {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn job(state: &str, tempo: Option<&str>) -> JobState {
+        JobState {
+            state: state.to_string(),
+            tempo: tempo.map(str::to_string),
+            ..JobState::default()
+        }
+    }
+
+    #[test]
+    fn sanitize_name_strips_controls_and_collapses_whitespace() {
+        // dXc: control-strip → whitespace-collapse → trim.
+        assert_eq!(
+            sanitize_name(" a\u{7}b \t\n c "),
+            Some("ab c".to_string())
+        );
+        assert_eq!(sanitize_name("\u{1}\u{2} \t "), None);
+    }
+
+    #[test]
+    fn normalize_status_maps_everything_else_to_busy() {
+        assert_eq!(normalize_status("idle"), "idle");
+        assert_eq!(normalize_status("waiting"), "waiting");
+        assert_eq!(normalize_status("busy"), "busy");
+        assert_eq!(normalize_status("shell"), "busy");
+    }
+
+    #[test]
+    fn merged_state_busy_worker_is_working() {
+        // mGf line 1: a busy live worker overrides everything.
+        assert_eq!(merged_state(&job("done", None), Some("busy")), "working");
+    }
+
+    #[test]
+    fn merged_state_terminal_beats_blocked_tempo_no_done_needs_input_flip() {
+        // The 2.1.196 stable-status fix: a terminal job with a stale
+        // `blocked` tempo reports its terminal outcome, NOT "blocked" — so
+        // the agent view can't flip Done ↔ Needs-input.
+        assert_eq!(merged_state(&job("done", Some("blocked")), None), "done");
+        assert_eq!(
+            merged_state(&job("failed", Some("blocked")), None),
+            "failed"
+        );
+        assert_eq!(
+            merged_state(&job("stopped", Some("blocked")), None),
+            "stopped"
+        );
+    }
+
+    #[test]
+    fn merged_state_active_tempo_keeps_terminal_state_live() {
+        // Xg requires tempo !== "active": a done-state job whose tempo is
+        // still active is not terminal yet.
+        assert_eq!(merged_state(&job("done", Some("active")), None), "working");
+    }
+
+    #[test]
+    fn merged_state_blocked_tempo_and_waiting_worker() {
+        assert_eq!(
+            merged_state(&job("working", Some("blocked")), None),
+            "blocked"
+        );
+        assert_eq!(
+            merged_state(&job("working", None), Some("waiting")),
+            "blocked"
+        );
+        assert_eq!(merged_state(&job("working", None), None), "working");
+    }
+
+    #[test]
+    fn merged_state_loopish_success_stays_live() {
+        // lDe: a routine-backed success job falls through to blocked/working.
+        let mut j = job("done", Some("blocked"));
+        j.routine = Some(json!("nightly"));
+        assert_eq!(merged_state(&j, None), "blocked");
+        let mut k = job("done", None);
+        k.intent = Some("/loop 5m check builds".to_string());
+        assert_eq!(merged_state(&k, None), "working");
+        // …but a FAILED loopish job is still terminal.
+        let mut f = job("failed", None);
+        f.routine = Some(json!("nightly"));
+        assert_eq!(merged_state(&f, None), "failed");
+    }
+
+    #[test]
+    fn job_origin_cwd_strips_managed_worktree() {
+        let mut j = JobState {
+            cwd: Some(format!(
+                "/home/u/proj/{}/worktrees/fix-thing",
+                branding::DOT_DIR
+            )),
+            ..JobState::default()
+        };
+        assert_eq!(job_origin_cwd(&j), "/home/u/proj");
+        j.origin_cwd = Some("/home/u/elsewhere".to_string());
+        assert_eq!(job_origin_cwd(&j), "/home/u/elsewhere");
+    }
+
+    #[test]
+    fn cwd_filter_keeps_root_and_descendants_only() {
+        let root = Path::new("/home/u/proj");
+        assert!(cwd_matches(Some(root), "/home/u/proj"));
+        assert!(cwd_matches(Some(root), "/home/u/proj/sub"));
+        assert!(!cwd_matches(Some(root), "/home/u/other"));
+        assert!(!cwd_matches(Some(root), "/home/u"));
+        assert!(cwd_matches(None, "/anywhere"));
+    }
+
+    fn live(pid: i32, kind: &str, started_at: i64) -> LiveSessionRecord {
+        LiveSessionRecord {
+            pid,
+            session_id: Some(format!("sess-{pid}")),
+            cwd: "/home/u/proj".to_string(),
+            started_at,
+            proc_start: None,
+            version: None,
+            peer_protocol: None,
+            kind: kind.to_string(),
+            job_id: None,
+            entrypoint: None,
+            name: Some(format!("name-{pid}")),
+            name_source: None,
+            status: Some("idle".to_string()),
+            waiting_for: None,
+            updated_at: None,
+            status_updated_at: None,
+        }
+    }
+
+    #[test]
+    fn build_json_merges_jobs_and_live_in_binary_key_order() {
+        let mut worker = live(51658, "bg", 2_000);
+        worker.job_id = Some("bc7c6b33".to_string());
+        worker.status = Some("busy".to_string());
+        let interactive = live(32272, "interactive", 3_000);
+        let job_state = JobState {
+            state: "working".to_string(),
+            tempo: Some("active".to_string()),
+            name: Some("token calculation boundary".to_string()),
+            session_id: Some("7169-...".to_string()),
+            cwd: Some("/home/u/proj/wt".to_string()),
+            created_at: Some("2026-07-02T00:00:00.000Z".to_string()),
+            ..JobState::default()
+        };
+        let rows = build_agents_json(
+            &[worker, interactive],
+            &[("bc7c6b33".to_string(), job_state)],
+            None,
+            false,
+        );
+        assert_eq!(rows.len(), 2);
+        // Job row: exact key order pid, id, cwd, kind, startedAt, sessionId,
+        // name, status, state (preserve_order keeps the Map faithful).
+        let keys: Vec<&str> = rows[0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "pid",
+                "id",
+                "cwd",
+                "kind",
+                "startedAt",
+                "sessionId",
+                "name",
+                "status",
+                "state"
+            ]
+        );
+        assert_eq!(rows[0]["kind"], "background");
+        assert_eq!(rows[0]["state"], "working");
+        assert_eq!(rows[0]["status"], "busy");
+        // Live-only interactive row: pid, cwd, kind, startedAt, sessionId,
+        // name, status.
+        let keys: Vec<&str> = rows[1]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            ["pid", "cwd", "kind", "startedAt", "sessionId", "name", "status"]
+        );
+        assert_eq!(rows[1]["kind"], "interactive");
+    }
+
+    #[test]
+    fn build_json_default_hides_completed_all_shows_them() {
+        let done = JobState {
+            state: "done".to_string(),
+            tempo: Some("idle".to_string()),
+            session_id: Some("s".to_string()),
+            cwd: Some("/p".to_string()),
+            created_at: Some("2026-07-01T00:00:00.000Z".to_string()),
+            ..JobState::default()
+        };
+        let jobs = vec![("aaaa1111".to_string(), done)];
+        assert!(build_agents_json(&[], &jobs, None, false).is_empty());
+        let all = build_agents_json(&[], &jobs, None, true);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0]["state"], "done");
+        // Workerless job rows carry no pid key at all.
+        assert!(all[0].get("pid").is_none());
+    }
+
+    #[test]
+    fn build_json_sorts_by_started_at_ascending() {
+        let a = live(2, "interactive", 5_000);
+        let b = live(1, "interactive", 1_000);
+        let rows = build_agents_json(&[a, b], &[], None, false);
+        assert_eq!(rows[0]["startedAt"], 1_000);
+        assert_eq!(rows[1]["startedAt"], 5_000);
+    }
+
+    #[test]
+    fn registration_writes_and_drop_removes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = SessionRegistration::register(tmp.path(), Some("sid-1"), Some("proj"));
+        let path = sessions_dir(tmp.path()).join(format!("{}.json", std::process::id()));
+        assert!(path.exists());
+        // Own pid is alive → the reader keeps the record.
+        let recs = read_live_sessions(&sessions_dir(tmp.path()));
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].session_id.as_deref(), Some("sid-1"));
+        assert_eq!(recs[0].kind, "interactive");
+        drop(reg);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn read_live_sessions_reaps_dead_pids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = sessions_dir(tmp.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        // A pid that can't be alive (kernel-reserved huge pid on macOS/Linux
+        // test hosts).
+        let rec = live(i32::MAX - 7, "interactive", 1);
+        std::fs::write(
+            dir.join("weird.json"),
+            serde_json::to_string(&rec).unwrap(),
+        )
+        .unwrap();
+        let recs = read_live_sessions(&dir);
+        assert!(recs.is_empty());
+        assert!(!dir.join("weird.json").exists());
+    }
+
+    #[test]
+    fn read_jobs_reads_state_json_per_short_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = jobs_dir(tmp.path());
+        std::fs::create_dir_all(dir.join("ad612c16")).unwrap();
+        std::fs::write(
+            dir.join("ad612c16/state.json"),
+            r#"{"state":"blocked","tempo":"blocked","name":"wf audit","sessionId":"ad61-1","cwd":"/p","createdAt":"2026-06-26T03:31:58.390Z"}"#,
+        )
+        .unwrap();
+        let jobs = read_jobs(&dir);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].0, "ad612c16");
+        assert_eq!(merged_state(&jobs[0].1, None), "blocked");
+        assert_eq!(
+            parse_created_at_ms(jobs[0].1.created_at.as_deref()),
+            1_782_444_718_390
+        );
+    }
+}

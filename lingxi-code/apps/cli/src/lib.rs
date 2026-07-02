@@ -54,6 +54,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agents_registry;
 pub mod argv;
 mod bypass_env;
 pub mod commands;

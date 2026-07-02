@@ -70,7 +70,15 @@ const CHECKLIST: &[Entry] = &[
     Entry { version: "2.1.198", item: "awsAuthRefresh runs automatically on STS expiry (anthropicAws/Mantle)", disposition: Disposition::Implemented },
     Entry { version: "2.1.198", item: "macOS Local Network entitlements for background agent sessions", disposition: Divergence("macOS app packaging/entitlements, not core runtime") },
     Entry { version: "2.1.198", item: "/desktop cwd after entering+exiting a worktree", disposition: Mission("M13") },
-    Entry { version: "2.1.198", item: "Agents view: no Reconnecting spam every ~52s", disposition: Mission("M7") },
+    // M7 N/A-with-evidence: the cc fix was in the remote-session WS transport
+    // (`useRemoteSession`/`updateReconnectingStatus`, binary strings
+    // @206609/221616 regions). lingxi's agents view
+    // (apps/cli/commands/agents.rs + tui-rata agents_screen) reads the LOCAL
+    // sessions/jobs registry and attaches by respawning `lingxi-cli --resume`
+    // — no socket, no timed reconnect loop. The only "Reconnecting" strings
+    // in lingxi live in the MCP client (mcp/src/{registry,connection}.rs), a
+    // different subsystem.
+    Entry { version: "2.1.198", item: "Agents view: no Reconnecting spam every ~52s", disposition: Divergence("no remote-session transport in lingxi's agents view; the ~52s reconnect log loop cannot exist (attach = local respawn, registry = local files)") },
     // M3 landed: `Argv::validate_background_args` rejects --bg/--background ×
     // --print/-p up front in `run_cli` (byte-locked `pof` message @218854391,
     // stderr + exit 1); e2e-locked in apps/cli/tests/cli_argv_errors.rs.
@@ -93,6 +101,11 @@ const CHECKLIST: &[Entry] = &[
     // wired into the tui-rata footer and locked by key_hint + app.rs tests.
     Entry { version: "2.1.198", item: "opt/cmd hints instead of alt/super for Mac over SSH", disposition: Disposition::Implemented },
     Entry { version: "2.1.198", item: "Retry UX: error reason after 2nd attempt; status page link when overloaded", disposition: Mission("M12") },
+    // M7 seam: the standalone agents view (tui-rata `agents_screen`) has no
+    // mountable sign-in dialog yet — the OAuth `/connect`/login flow lives in
+    // the full TUI runtime. Seam = a `/login` key route in
+    // `AgentsScreenState::on_key` once an auth dialog is mountable from the
+    // thin view loop.
     Entry { version: "2.1.198", item: "/login opens sign-in dialog from claude agents view", disposition: Mission("M7") },
     Entry { version: "2.1.198", item: "Launcher-agent messages are task direction, never user approval", disposition: Mission("M10") },
     // M4 landed: `/agents` now returns the binary's removed-wizard guidance
@@ -116,8 +129,23 @@ const CHECKLIST: &[Entry] = &[
     Entry { version: "2.1.196", item: "Rate-limit warning flicker + over-counted telemetry with parallel requests", disposition: Mission("M12") },
     Entry { version: "2.1.196", item: "No duplicate recap after schema-rejected StructuredOutput retry", disposition: Mission("M9") },
     Entry { version: "2.1.196", item: "PowerShell git diff/grep, egrep/fgrep, quoted | patterns: exit 1 is not failure", disposition: Mission("M13") },
+    // M7 seam: this is the IN-APP side panel (task panel inside the running
+    // TUI), not the standalone `claude agents` view M7 landed. lingxi's
+    // in-app background-task footer/dialog reads `tui::multiagent::
+    // PollerFeed`; focus/subagent-type/running-status fixes apply there once
+    // the ratatui app grows the panel.
     Entry { version: "2.1.196", item: "Agents side panel: focus, subagent types, running status fixes", disposition: Mission("M7") },
-    Entry { version: "2.1.196", item: "claude agents --dangerously-skip-permissions shows disclaimer, applies bypass", disposition: Mission("M7") },
+    // M7 landed: `agents::run` gates the interactive view on the bypass
+    // request (`Cli::bypass_requested` = binary `nis`), runs the root
+    // refusal (`permission::enforce_bypass_safety`, byte-locked message =
+    // binary `refuseBypassUnderRoot` @223855350) and mounts the byte-locked
+    // `tui::startup_bypass` disclaimer unless
+    // `skipDangerousModePermissionPrompt` is already set
+    // (`ensureAgentsBypassConsent` parity); the attach respawn forwards
+    // `--dangerously-skip-permissions`/`--permission-mode` to the dispatched
+    // session (locked by `commands::agents::tests::
+    // attach_forwards_bypass_to_dispatched_session`).
+    Entry { version: "2.1.196", item: "claude agents --dangerously-skip-permissions shows disclaimer, applies bypass", disposition: Disposition::Implemented },
     Entry { version: "2.1.196", item: "Remote sessions auto-resume after server restart", disposition: Divergence("Anthropic cloud/remote infra; LingXi has no remote-session backend") },
     Entry { version: "2.1.196", item: "/cd moved sessions don't reappear in old dir's resume list (special chars)", disposition: Mission("M13") },
     Entry { version: "2.1.196", item: "plugin validate: local '.' plugins included; all error classes reported", disposition: Mission("M13") },
@@ -134,7 +162,15 @@ const CHECKLIST: &[Entry] = &[
     Entry { version: "2.1.196", item: "/context shows real token counts on Bedrock", disposition: Mission("M13") },
     Entry { version: "2.1.196", item: "/deep-research verifier failures reported as unverified, not all-refuted", disposition: Divergence("bundled skill content, not core behavior") },
     Entry { version: "2.1.196", item: "Plugin dependency pins honored for local-folder git-backed marketplaces", disposition: Mission("M13") },
-    Entry { version: "2.1.196", item: "Agents view status: no Done/Needs-input flip; Needs attention; PR link", disposition: Mission("M7") },
+    // M7 landed: `cli::agents_registry::merged_state` ports the binary's
+    // `mGf` (@223855350) — a terminal outcome beats a stale `blocked` tempo,
+    // so a row can never flip Done ↔ Needs-input (locked by
+    // `merged_state_terminal_beats_blocked_tempo_no_done_needs_input_flip`);
+    // tui-rata `agents_screen` bands/labels are byte-locked to `NZo`/`MFc`
+    // (@222792125: "Ready for review"/"Needs input"/"Working"/"Completed")
+    // and result rows referencing a PR show `PR #N` via the `Hon` token-scan
+    // port (`extract_pr_number`, locked by `lines_show_pr_reference_on_row`).
+    Entry { version: "2.1.196", item: "Agents view status: no Done/Needs-input flip; Needs attention; PR link", disposition: Disposition::Implemented },
     Entry { version: "2.1.196", item: "Voice dictation: no swallowed spaces / spurious recording on fast typing", disposition: Divergence("platform voice input; LingXi voice stack differs (sherpa)") },
     Entry { version: "2.1.196", item: "Background sessions survive process stop/restart/update (incl. Windows handoff)", disposition: Mission("M8") },
     Entry { version: "2.1.196", item: "Workers killed by daemon restart auto-resume when agents view opens", disposition: Mission("M8") },
@@ -142,6 +178,14 @@ const CHECKLIST: &[Entry] = &[
     Entry { version: "2.1.196", item: "Per-frame rendering skips no-op subtree walks during streaming", disposition: Disposition::Implemented },
     Entry { version: "2.1.196", item: "Streaming idle watchdog on by default (5 min, env kill-switch)", disposition: Mission("M12") },
     Entry { version: "2.1.196", item: "Remote Control disabled when ANTHROPIC_BASE_URL is non-Anthropic", disposition: Mission("M13") },
+    // M7 seam: lingxi's foreground TUI composer has no ←-on-empty entry
+    // point yet (the binary's `[PERF:bg-leftarrow-start]` path respawns
+    // `claude agents`). What DID land is the attach side: leaving an
+    // attached session returns to the agents view instead of the shell
+    // (`agents::run_agents_view` remounts with fresh rows after the resumed
+    // child exits — the 2.1.198 half of the fix). Remaining seam: a Left-key
+    // route in the tui-rata composer that suspends the session and execs
+    // `lingxi-cli agents`.
     Entry { version: "2.1.196", item: "Agents view opens with single ← from foreground sessions", disposition: Mission("M7") },
 ];
 

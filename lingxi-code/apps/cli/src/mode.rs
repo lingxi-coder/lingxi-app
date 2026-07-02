@@ -160,6 +160,27 @@ pub async fn dispatch(
                     }
                 }
             }
+            // (M7 cc2.1.198) Register this interactive session in the
+            // cross-process live-session registry
+            // (`~/.lingxi/sessions/<pid>.json`) so `lingxi-cli agents --json`
+            // and the agents view can list it — the binary registers every
+            // process the same way (observed `sessions/<pid>.json` shape).
+            // Best-effort: a write failure never blocks the session; the
+            // guard unlinks the record when the TUI returns. Live status
+            // refreshes (idle↔busy, `updatedAt`) are an M8 seam — the record
+            // registers as `idle`.
+            let _session_registration = {
+                let session_id =
+                    tui_build.runtime.orchestrator.current_session_id().await;
+                let name = std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+                crate::agents_registry::SessionRegistration::register(
+                    &crate::run::lingxi_home_dir(),
+                    Some(session_id.to_string()).as_deref(),
+                    name.as_deref(),
+                )
+            };
             // FRESH launch: no replayed scrollback. `build_tui_runtime` with an
             // empty `resumed_messages` vec is byte-identical to the pre-refactor
             // inline assembly — `Runtime::with_resumed_messages([])` is a no-op
@@ -523,7 +544,7 @@ fn read_status_line_config() -> Option<tui::components::status_line_command::Sta
 /// settings — the `hasSkipDangerousModePermissionPrompt` user+local check
 /// (claude-code `settings.ts:882-889`; the flag/policy tiers have no Rust
 /// substrate). On any read failure the tier degrades to `false`.
-fn read_skip_dangerous_prompt() -> bool {
+pub(crate) fn read_skip_dangerous_prompt() -> bool {
     use migrations::settings_update::{read_settings_map, settings_path, SettingsSource};
     let (lingxi_home, project_dir) = settings_dirs();
     [SettingsSource::User, SettingsSource::Local]
@@ -544,7 +565,7 @@ fn read_skip_dangerous_prompt() -> bool {
 /// `settings.json` (`onConfirm` → save in claude-code). Best-effort: a write
 /// failure warns and is otherwise ignored (TS `updateSettingsForSource` never
 /// throws; the migration port follows the same warn-and-continue contract).
-fn persist_skip_dangerous_prompt() {
+pub(crate) fn persist_skip_dangerous_prompt() {
     use migrations::settings_update::{settings_path, update_settings, SettingsSource};
     let (lingxi_home, project_dir) = settings_dirs();
     let path = settings_path(SettingsSource::User, &lingxi_home, &project_dir);

@@ -13,6 +13,7 @@
 //! See `.omo/plans/2026-07-01-tui-iocraft-to-ratatui-migration.md`.
 #![forbid(unsafe_code)]
 
+pub mod agents_screen;
 pub mod app;
 pub mod composer;
 pub mod files;

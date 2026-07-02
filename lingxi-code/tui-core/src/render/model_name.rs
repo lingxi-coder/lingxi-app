@@ -22,6 +22,9 @@ const DISPLAY_NAMES: &[(&str, &str)] = &[
     ("claude-opus-4-5", "Opus 4.5"),
     ("claude-opus-4-1", "Opus 4.1"),
     ("claude-opus-4", "Opus 4"),
+    // 2.1.198 registry: claude-sonnet-5 → "Sonnet 5". Boundary matching keeps
+    // it distinct from claude-sonnet-4-x (and vice versa).
+    ("claude-sonnet-5", "Sonnet 5"),
     ("claude-sonnet-4-6", "Sonnet 4.6"),
     ("claude-sonnet-4-5", "Sonnet 4.5"),
     ("claude-sonnet-4", "Sonnet 4"),
@@ -75,6 +78,14 @@ mod tests {
         assert_eq!(render_model_name("claude-opus-4-8-20260115"), "Opus 4.8");
         assert_eq!(render_model_name("claude-opus-4-5-20251101-v1"), "Opus 4.5");
         assert_eq!(render_model_name("claude-sonnet-4-6"), "Sonnet 4.6");
+        // Sonnet 5 (2.1.198) — including the 1M-context label; boundary match
+        // keeps claude-sonnet-4-5 on "Sonnet 4.5".
+        assert_eq!(render_model_name("claude-sonnet-5"), "Sonnet 5");
+        assert_eq!(render_model_name("claude-sonnet-5-20260203"), "Sonnet 5");
+        assert_eq!(
+            render_model_name("claude-sonnet-5[1m]"),
+            "Sonnet 5 (1M context)"
+        );
         assert_eq!(
             render_model_name("claude-sonnet-4-5-20250929"),
             "Sonnet 4.5"

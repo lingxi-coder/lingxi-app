@@ -804,9 +804,11 @@ mod tests {
 
         // (model, expected model-max-output-tokens) — binary YCe (v2.1.183):
         // opus-4-8 / fable-5 → 64k default; sonnet-4-6 → 32k default.
+        // 2.1.198 pIe: sonnet-5 → 64k default (adaptive via registry capability).
         for (model, expected_max) in [
             ("claude-opus-4-8", 64_000u32),
             ("claude-sonnet-4-6", 32_000),
+            ("claude-sonnet-5", 64_000),
             ("claude-fable-5", 64_000),
         ] {
             let req = adapter

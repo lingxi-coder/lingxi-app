@@ -774,6 +774,7 @@ dependencies = [
  "tracing-subscriber",
  "traits",
  "tui",
+ "tui-rata",
  "uuid",
 ]
 

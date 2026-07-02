@@ -66,15 +66,18 @@ fn has_1m_context(model: &str) -> bool {
     model.to_lowercase().contains("[1m]")
 }
 
-/// `true` if the canonical model family supports 1M context (sonnet-4 family or
-/// opus-4-6), unless 1M context is disabled. Mirrors `modelSupports1M`
-/// (`context.ts:43-49`).
+/// `true` if the canonical model family supports 1M context (sonnet-4 family,
+/// sonnet-5, or opus-4-6), unless 1M context is disabled. Mirrors
+/// `modelSupports1M` (2.1.198 registry: `claude-sonnet-5` is natively 1M and
+/// carries `supports_1m_beta:!0` — `sonnet-5[1m]` is a valid suffixed id).
 fn model_supports_1m(model: &str) -> bool {
     if is_1m_context_disabled() {
         return false;
     }
     let canonical = canonical_name(model);
-    canonical.contains("claude-sonnet-4") || canonical.contains("opus-4-6")
+    canonical.contains("claude-sonnet-4")
+        || canonical.contains("claude-sonnet-5")
+        || canonical.contains("opus-4-6")
 }
 
 /// Family default concrete id for a bare alias. Mirrors `getDefault*Model()`
@@ -82,7 +85,8 @@ fn model_supports_1m(model: &str) -> bool {
 fn family_default_id(family_lower: &str) -> Option<&'static str> {
     match family_lower {
         "opus" => Some("claude-opus-4-8"),
-        "sonnet" => Some("claude-sonnet-4-6"),
+        // 2.1.198 alias table: sonnet.default = "claude-sonnet-5" (was 4-6).
+        "sonnet" => Some("claude-sonnet-5"),
         "haiku" => Some("claude-haiku-4-5"),
         _ => None,
     }
@@ -121,8 +125,8 @@ fn env_default(env_var: &str, family_lower: &str) -> String {
 
 /// `getDefaultSonnetModel()` (`model.ts:118-128`): env override (non-empty) wins;
 /// else provider-aware — `claude-sonnet-4-5-20250929` for non-firstParty
-/// (Bedrock/Vertex/Foundry), `claude-sonnet-4-6` for firstParty. Mirrors
-/// `agent::model_resolution::get_default_sonnet_model`.
+/// (Bedrock/Vertex/Foundry), `claude-sonnet-5` for firstParty (2.1.198 alias
+/// table). Mirrors `agent::model_resolution::get_default_sonnet_model`.
 fn default_sonnet_model() -> String {
     if let Some(v) = env::var("ANTHROPIC_DEFAULT_SONNET_MODEL")
         .ok()
@@ -230,6 +234,11 @@ fn canonical_name(model: &str) -> String {
     }
     if name.contains("claude-opus-4") {
         return "claude-opus-4".to_string();
+    }
+    // sonnet-5 before the sonnet-4-x arms (2.1.198; mutually exclusive —
+    // "claude-sonnet-4-5" does NOT contain "sonnet-5").
+    if name.contains("claude-sonnet-5") {
+        return "claude-sonnet-5".to_string();
     }
     if name.contains("claude-sonnet-4-6") {
         return "claude-sonnet-4-6".to_string();
@@ -379,15 +388,31 @@ mod tests {
     }
 
     #[test]
+    fn sonnet_5_supports_1m_carry() {
+        // 2.1.198: claude-sonnet-5 is a 1M family → the session's [1m] carries
+        // over (sonnet-5[1m] is a valid suffixed id in the binary).
+        assert_eq!(
+            resolve_skill_model_override("claude-sonnet-5", "claude-opus-4-6[1m]"),
+            "claude-sonnet-5[1m]"
+        );
+        assert!(model_supports_1m("claude-sonnet-5"));
+        // Hazard lock: neighbors resolve through their own arms.
+        assert!(model_supports_1m("claude-sonnet-4-5-20250929"));
+        assert!(!model_supports_1m("claude-haiku-4-5"));
+    }
+
+    #[test]
     fn parse_resolves_known_aliases() {
         // The `sonnet`/`opusplan` arms are provider-aware (#18) → pin firstParty
         // under the ENV_LOCK to assert the 1P ids deterministically.
         let _lock = ENV_LOCK.lock().unwrap();
         let _g = clear_provider_env();
         assert_eq!(parse_user_specified_model("opus"), "claude-opus-4-8");
-        assert_eq!(parse_user_specified_model("sonnet"), "claude-sonnet-4-6");
+        // 2.1.198: the bare `sonnet` alias (and `opusplan` outside plan mode)
+        // resolves to claude-sonnet-5 on firstParty.
+        assert_eq!(parse_user_specified_model("sonnet"), "claude-sonnet-5");
         assert_eq!(parse_user_specified_model("haiku"), "claude-haiku-4-5");
-        assert_eq!(parse_user_specified_model("opusplan"), "claude-sonnet-4-6");
+        assert_eq!(parse_user_specified_model("opusplan"), "claude-sonnet-5");
         // Unknown / full id passes through (case preserved).
         assert_eq!(
             parse_user_specified_model("claude-sonnet-4-6"),

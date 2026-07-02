@@ -611,7 +611,9 @@ pub struct DesktopEngineConfig {
 impl Default for DesktopEngineConfig {
     fn default() -> Self {
         Self {
-            default_model: "claude-sonnet-4-20250514".to_string(),
+            // 2.1.198: Sonnet 5 is the default first-party model (alias table
+            // sonnet.default = "claude-sonnet-5").
+            default_model: "claude-sonnet-5".to_string(),
         }
     }
 }
@@ -1118,7 +1120,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     api_key: "sk-test".to_string(),
 ///     cwd: PathBuf::from("/tmp/project"),
 ///     lingxi_home: PathBuf::from("/tmp/home/.lingxi"),
-///     default_model: "claude-sonnet-4-20250514".to_string(),
+///     default_model: "claude-sonnet-5".to_string(),
 ///     fallback_model: None,
 ///     provider_profiles: Some(BTreeMap::new()),
 ///     routing: None,
@@ -1841,6 +1843,8 @@ fn anthropic_models_for(
         "claude-opus-4-5-20251101".to_string(),
         "claude-opus-4-1-20250805".to_string(),
         "claude-opus-4-20250514".to_string(),
+        // Sonnet 5 — the 2.1.198 default first-party model.
+        "claude-sonnet-5".to_string(),
         "claude-sonnet-4-6".to_string(),
         "claude-sonnet-4-5-20250929".to_string(),
         "claude-haiku-4-5".to_string(),
@@ -5121,8 +5125,9 @@ mod tests {
         assert!(cfg.api_key.is_empty());
         assert_eq!(cfg.cwd, std::path::PathBuf::from("."));
         assert_eq!(cfg.lingxi_home, std::path::PathBuf::new());
-        // Mirrors `DesktopEngineConfig::default().default_model`.
-        assert_eq!(cfg.default_model, "claude-sonnet-4-20250514");
+        // Mirrors `DesktopEngineConfig::default().default_model` (2.1.198:
+        // Sonnet 5 is the default first-party model).
+        assert_eq!(cfg.default_model, "claude-sonnet-5");
         // Opus-fallback default: no fallback model unless argv supplies one.
         assert!(cfg.fallback_model.is_none());
         assert!(cfg.provider_profiles.is_none());

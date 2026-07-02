@@ -144,6 +144,10 @@ mod tests {
             "claude-3-5-sonnet-20241022",
             "claude-3-haiku-20240307",
             "claude-sonnet-4-5",
+            // Sonnet 5 (2.1.198 `LBd`): no "lean_prompt" capability in the
+            // registry, so it falls into the `includes("sonnet")` standard arm
+            // → LONG prompt (unlike opus-4-8 / fable-5 / mythos-5).
+            "claude-sonnet-5",
             "claude-opus-4-0",
             "claude-opus-4-1",
             "claude-opus-4-5",

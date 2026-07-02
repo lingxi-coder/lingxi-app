@@ -39,6 +39,9 @@ pub fn canonical(model: &str) -> String {
         "claude-opus-4-5",
         "claude-opus-4-1",
         "claude-opus-4-0",
+        // sonnet-5 before the sonnet-4-x arms (2.1.198 registry; mutually
+        // exclusive substrings — "claude-sonnet-4-5" does NOT contain it).
+        "claude-sonnet-5",
         "claude-sonnet-4-6",
         "claude-sonnet-4-5",
         "claude-sonnet-4-0",
@@ -92,13 +95,16 @@ pub fn model_supports_thinking(model: &str) -> bool {
 #[must_use]
 pub fn model_supports_adaptive_thinking(model: &str) -> bool {
     let c = canonical(model);
-    // Explicit TRUE set.
+    // Explicit TRUE set. 2.1.198 `Vit`: sonnet-5 resolves TRUE via the registry
+    // capability check `lB(n,"adaptive_thinking")` (its capabilities include
+    // "adaptive_thinking"); folded into the static TRUE set here.
     const ADAPTIVE: &[&str] = &[
         "claude-fable-5",
         "claude-mythos-5",
         "claude-opus-4-8",
         "claude-opus-4-7",
         "claude-opus-4-6",
+        "claude-sonnet-5",
         "claude-sonnet-4-6",
     ];
     if ADAPTIVE.contains(&c.as_str()) {
@@ -221,10 +227,28 @@ mod tests {
     }
 
     #[test]
+    fn sonnet_5_canonical_adaptive_and_no_temperature() {
+        // 2.1.198: canonical preserves claude-sonnet-5 (incl. dated ids), it is
+        // adaptive-thinking (registry capability), and it is NOT in the sIn
+        // temperature set (temperature omitted when thinking is off).
+        assert_eq!(canonical("claude-sonnet-5"), "claude-sonnet-5");
+        assert_eq!(canonical("claude-sonnet-5-20260203"), "claude-sonnet-5");
+        // Neighbor ids must NOT resolve to sonnet-5.
+        assert_eq!(canonical("claude-sonnet-4-5-20250929"), "claude-sonnet-4-5");
+        assert_eq!(canonical("claude-3-5-sonnet-20241022"), "claude-3-5-sonnet");
+        assert!(model_supports_adaptive_thinking("claude-sonnet-5"));
+        assert!(model_supports_thinking("claude-sonnet-5"));
+        assert!(!model_sends_temperature("claude-sonnet-5"));
+        // sonnet-4-6 keeps its (distinct) behavior: adaptive AND temperature.
+        assert!(model_sends_temperature("claude-sonnet-4-6"));
+    }
+
+    #[test]
     fn adaptive_thinking_exact_binary_list() {
         for m in [
             "claude-fable-5",
             "claude-mythos-5",
+            "claude-sonnet-5",
             "claude-opus-4-8-20260115",
             "claude-opus-4-7-20251201",
             "claude-opus-4-6-20260101",

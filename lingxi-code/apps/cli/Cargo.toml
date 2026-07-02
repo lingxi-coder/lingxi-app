@@ -54,6 +54,7 @@ msgqueue = { path = "../../msgqueue" }
 llm-client = { path = "../../llm-client" }
 dirs = "5"
 tui = { path = "../../tui" }
+tui-rata = { path = "../../tui-rata" }
 session = { path = "../../session" }
 # M9-05: desktop TaskRegistry type (the `Runtime` bundle re-surfaces the handle
 # built by `engine_desktop::build` for the TUI poller).

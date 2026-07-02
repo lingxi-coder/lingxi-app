@@ -29,7 +29,7 @@
 //!  - OS Version: {os.type() os.release()}
 //!  - You are powered by the model named {name}. The exact model ID is {id}.   (or id-only)
 //!  - Assistant knowledge cutoff is {cutoff}.   (omitted when unknown)
-//!  - The most recent Claude models are Fable 5 and the Claude 4.X family. …
+//!  - The most recent Claude models are the Claude 5 family, Opus 4.8, and Haiku 4.5. …
 //!  - LingXi is available as a CLI in the terminal, …
 //!  - Fast mode for LingXi uses Claude Opus with faster output …
 //! ```
@@ -46,11 +46,14 @@
 use crate::prompt::SystemPromptContext;
 use std::fmt::Write;
 
-/// Canonical model-id constants (`wPe`, binary offset 205834250) interpolated
-/// into the "most recent Claude models" static line. Byte-exact v2.1.183.
+/// Canonical model-id constants interpolated into the "most recent Claude
+/// models" static line. 2.1.198 (`hhc`): the line renders `latest_per_family`
+/// (`{fable: claude-fable-5, opus: claude-opus-4-8, sonnet: claude-sonnet-5,
+/// haiku: claude-haiku-4-5}`) as `${display_name}: '${id}'` pairs, with
+/// haiku-4-5 special-cased to its dated id.
 const MODEL_ID_FABLE: &str = "claude-fable-5";
 const MODEL_ID_OPUS: &str = "claude-opus-4-8";
-const MODEL_ID_SONNET: &str = "claude-sonnet-4-6";
+const MODEL_ID_SONNET: &str = "claude-sonnet-5";
 const MODEL_ID_HAIKU: &str = "claude-haiku-4-5-20251001";
 
 /// Format the `# Environment` block for a given context.
@@ -123,12 +126,15 @@ pub fn format(ctx: &SystemPromptContext) -> String {
         write!(&mut s, "\n - Assistant knowledge cutoff is {cutoff}.").unwrap();
     }
 
-    // Static guidance lines — byte-verbatim `Kym`. The em-dash is U+2014.
+    // Static guidance lines — byte-verbatim vs the 2.1.198 binary (`hhc`):
+    // lead sentence "the Claude 5 family, Opus 4.8, and Haiku 4.5"; the Model
+    // IDs render latest_per_family (fable, opus, sonnet→claude-sonnet-5,
+    // haiku→dated id). The em-dash is U+2014.
     write!(
         &mut s,
-        "\n - The most recent Claude models are Fable 5 and the Claude 4.X family. \
+        "\n - The most recent Claude models are the Claude 5 family, Opus 4.8, and Haiku 4.5. \
 Model IDs \u{2014} Fable 5: '{MODEL_ID_FABLE}', Opus 4.8: '{MODEL_ID_OPUS}', \
-Sonnet 4.6: '{MODEL_ID_SONNET}', Haiku 4.5: '{MODEL_ID_HAIKU}'. \
+Sonnet 5: '{MODEL_ID_SONNET}', Haiku 4.5: '{MODEL_ID_HAIKU}'. \
 When building AI applications, default to the latest and most capable Claude models."
     )
     .unwrap();

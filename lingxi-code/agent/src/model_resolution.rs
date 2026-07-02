@@ -61,7 +61,8 @@ use traits::env::is_env_truthy;
 fn family_default_id(family_lower: &str) -> Option<&'static str> {
     match family_lower {
         "opus" => Some("claude-opus-4-8"),
-        "sonnet" => Some("claude-sonnet-4-6"),
+        // 2.1.198 alias table: sonnet.default = "claude-sonnet-5" (was 4-6).
+        "sonnet" => Some("claude-sonnet-5"),
         "haiku" => Some("claude-haiku-4-5"),
         _ => None,
     }
@@ -72,8 +73,9 @@ fn family_default_id(family_lower: &str) -> Option<&'static str> {
 /// `getDefaultSonnetModel()` (`model.ts:119-128`) returns `getModelStrings().sonnet45`
 /// — canonical first-party id `claude-sonnet-4-5-20250929` (`configs.ts:45`) — when
 /// `getAPIProvider() !== 'firstParty'` (Bedrock/Vertex/Foundry), since those
-/// providers may not yet have Sonnet 4.6. firstParty stays on `sonnet46`
-/// (`family_default_id("sonnet")`).
+/// providers may not yet have Sonnet 5. firstParty is on `claude-sonnet-5`
+/// (`family_default_id("sonnet")`; 2.1.198 alias table
+/// `sonnet.per_provider = {bedrock/vertex/foundry: "claude-sonnet-4-5"}`).
 ///
 /// Haiku does NOT diverge by provider (`getDefaultHaikuModel` has no provider
 /// branch — Haiku 4.5 is on all platforms). Opus DOES in 2.1.193 — see
@@ -111,8 +113,8 @@ fn get_default_opus_model() -> String {
 /// `getDefaultSonnetModel()` (`model.ts:118-128`): the
 /// `ANTHROPIC_DEFAULT_SONNET_MODEL` env override (when non-empty) wins; else the
 /// default is provider-aware — `claude-sonnet-4-5-20250929` for non-firstParty
-/// (Bedrock/Vertex/Foundry, which may lag 4.6), `claude-sonnet-4-6` for
-/// firstParty.
+/// (Bedrock/Vertex/Foundry, which lag), `claude-sonnet-5` for firstParty
+/// (2.1.198 alias table).
 fn get_default_sonnet_model() -> String {
     if let Some(v) = std::env::var("ANTHROPIC_DEFAULT_SONNET_MODEL")
         .ok()
@@ -306,6 +308,11 @@ fn canonical_name(model: &str) -> String {
     }
     if name.contains("claude-opus-4") {
         return "claude-opus-4".to_string();
+    }
+    // sonnet-5 before the sonnet-4-x arms (2.1.198; mutually exclusive —
+    // "claude-sonnet-4-5" does NOT contain "sonnet-5").
+    if name.contains("claude-sonnet-5") {
+        return "claude-sonnet-5".to_string();
     }
     if name.contains("claude-sonnet-4-6") {
         return "claude-sonnet-4-6".to_string();
@@ -571,7 +578,7 @@ mod tests {
                 DEFAULT,
                 None,
             ),
-            "claude-sonnet-4-6"
+            "claude-sonnet-5"
         );
     }
 
@@ -649,7 +656,7 @@ mod tests {
                 DEFAULT,
                 None,
             ),
-            "claude-sonnet-4-6"
+            "claude-sonnet-5"
         );
     }
 
@@ -757,7 +764,7 @@ mod tests {
                 PermissionMode::Plan,
                 Some("haiku"),
             ),
-            "claude-sonnet-4-6"
+            "claude-sonnet-5"
         );
     }
 
@@ -905,11 +912,12 @@ mod tests {
     }
 
     #[test]
-    fn sonnet_default_is_4_6_on_first_party() {
+    fn sonnet_default_is_5_on_first_party() {
+        // 2.1.198 alias table: sonnet.default = claude-sonnet-5.
         let _lock = ENV_LOCK.lock().unwrap();
         let _g = clear_provider_env();
         assert!(api_provider_is_first_party());
-        assert_eq!(get_default_sonnet_model(), "claude-sonnet-4-6");
+        assert_eq!(get_default_sonnet_model(), "claude-sonnet-5");
         // The bare `sonnet` alias resolves through the same default on firstParty.
         assert_eq!(
             resolve_agent_model(
@@ -918,7 +926,7 @@ mod tests {
                 DEFAULT,
                 None,
             ),
-            "claude-sonnet-4-6"
+            "claude-sonnet-5"
         );
     }
 
@@ -990,7 +998,7 @@ mod tests {
         let _g = clear_provider_env();
         let _b = EnvGuard::set("CLAUDE_CODE_USE_BEDROCK", "0");
         assert!(api_provider_is_first_party());
-        assert_eq!(get_default_sonnet_model(), "claude-sonnet-4-6");
+        assert_eq!(get_default_sonnet_model(), "claude-sonnet-5");
     }
 
     #[test]

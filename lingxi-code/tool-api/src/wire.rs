@@ -240,6 +240,7 @@ mod tests {
         PromptOptions {
             include_examples: true,
             model: None,
+            model_profile: None,
         }
     }
 

@@ -576,6 +576,14 @@ fn bold_style() -> SpanStyle {
 
 /// Render the vertical (key:value) format for extra-narrow terminals.
 /// (`MarkdownTable.tsx:241-280`)
+///
+/// cc 2.1.198 overflow clamp ("Fixed markdown tables overflowing the right
+/// border in fullscreen", changelog 2.1.198): every emitted line is clamped to
+/// `term_width − SAFETY_MARGIN` — the same invariant the grid format's safety
+/// check enforces. The pre-fix layout let three things escape the frame: a
+/// label wider than the frame was never wrapped, the first-line value width
+/// was floored at 10 columns even when the label left no room, and unbroken
+/// over-long words (URLs) were kept intact past the right border.
 fn render_vertical_format(
     headers: &[Vec<StyledSpan>],
     rows: &[Vec<Vec<StyledSpan>>],
@@ -584,9 +592,15 @@ fn render_vertical_format(
     // Small indent for wrapped lines (just 2 spaces). (MarkdownTable.tsx:247)
     const WRAP_INDENT: &str = "  ";
 
+    // The frame every vertical line must fit in (cc 2.1.198 overflow clamp;
+    // SAFETY_MARGIN covers parent indentation like the message dot prefix).
+    let avail = term_width
+        .saturating_sub(SAFETY_MARGIN)
+        .max(MIN_COLUMN_WIDTH);
+
     let mut lines: Vec<StyledLine> = Vec::new();
     let header_texts: Vec<String> = headers.iter().map(|h| cell_plain_text(h)).collect();
-    let separator_width = (term_width.saturating_sub(1)).min(40);
+    let separator_width = avail.min(40);
     let separator: String = "─".repeat(separator_width);
 
     for (row_index, row) in rows.iter().enumerate() {
@@ -605,16 +619,33 @@ fn render_vertical_format(
             let value = collapse_whitespace(raw_value.trim_end());
 
             let label_w = UnicodeWidthStr::width(label.as_str());
-            // Wrap widths accounting for the label on the first line.
-            // (MarkdownTable.tsx:259-260)
-            let first_line_width = term_width.saturating_sub(label_w).saturating_sub(3);
-            let subsequent_line_width = term_width
-                .saturating_sub(WRAP_INDENT.len())
-                .saturating_sub(1);
+            let subsequent_line_width = avail.saturating_sub(WRAP_INDENT.len());
+
+            // A label that leaves no room for a value on its own line gets
+            // hard-broken to the frame; the value then starts on continuation
+            // lines instead of overflowing to the right (2.1.198 clamp).
+            // `label:` + ` ` must leave at least MIN_COLUMN_WIDTH for a value.
+            let first_line_width = avail.saturating_sub(label_w).saturating_sub(2);
+            if first_line_width < MIN_COLUMN_WIDTH {
+                let label_line = format!("{label}:");
+                for piece in hard_break_word(&label_line, avail) {
+                    lines.push(StyledLine {
+                        spans: vec![StyledSpan::styled(piece, bold_style())],
+                    });
+                }
+                for line in wrap_text(&value, subsequent_line_width.max(1), true) {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    lines.push(StyledLine::plain(format!("{WRAP_INDENT}{line}")));
+                }
+                continue;
+            }
 
             // Two-pass wrap: first line narrower, continuation lines wider.
-            // (MarkdownTable.tsx:264-274)
-            let first_pass = wrap_text(&value, first_line_width.max(10), false);
+            // Hard-break over-long words so no line escapes the frame.
+            // (MarkdownTable.tsx:264-274 + 2.1.198 clamp)
+            let first_pass = wrap_text(&value, first_line_width, true);
             let first_line = first_pass.first().cloned().unwrap_or_default();
             let wrapped_value: Vec<String> =
                 if first_pass.len() <= 1 || subsequent_line_width <= first_line_width {
@@ -625,7 +656,7 @@ fn render_vertical_format(
                         .map(|l| l.trim())
                         .collect::<Vec<_>>()
                         .join(" ");
-                    let rewrapped = wrap_text(&remaining, subsequent_line_width, false);
+                    let rewrapped = wrap_text(&remaining, subsequent_line_width, true);
                     let mut v = vec![first_line.clone()];
                     v.extend(rewrapped);
                     v
@@ -860,5 +891,76 @@ mod tests {
     fn empty_table_is_no_lines() {
         let lines = render_table(&[], &[], &[], 80, &theme());
         assert!(lines.is_empty());
+    }
+
+    /// Assert the cc 2.1.198 overflow clamp: no rendered line may exceed the
+    /// frame ("Fixed markdown tables overflowing the right border in
+    /// fullscreen", changelog 2.1.198).
+    fn assert_fits(lines: &[StyledLine], term_width: usize) {
+        for l in plain_lines(lines) {
+            assert!(
+                UnicodeWidthStr::width(l.as_str()) <= term_width,
+                "line overflows {term_width}-col frame: {l:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn vertical_fallback_long_label_does_not_overflow_frame() {
+        // A header label as wide as the frame used to render un-wrapped past
+        // the right border (first-line value width was floored at 10 columns).
+        let long_row = "one two three four five six seven eight nine ten";
+        for width in [12usize, 16, 20] {
+            let lines = render_table(
+                &header(&["ConfigurationKeyName"]),
+                &body(&[&[long_row]]),
+                &[ColumnAlign::Left],
+                width,
+                &theme(),
+            );
+            assert_fits(&lines, width);
+            // Sanity: this exercises the vertical fallback, not the grid.
+            assert!(!plain_lines(&lines).iter().any(|l| l.contains('┌')));
+        }
+    }
+
+    #[test]
+    fn vertical_fallback_long_word_value_hard_breaks_to_frame() {
+        // An unbroken over-long word (e.g. a URL) used to escape the frame
+        // because the vertical format wrapped without hard word breaks.
+        let url = "https://example.com/some/very/long/path/that/never/ends/at/all";
+        let tall = "a b c d e f g h i j k l m n o p q r s t u v w x y z";
+        for width in [16usize, 24, 32] {
+            let lines = render_table(
+                &header(&["Link", "Notes"]),
+                &body(&[&[url, tall]]),
+                &[ColumnAlign::Left, ColumnAlign::Left],
+                width,
+                &theme(),
+            );
+            assert_fits(&lines, width);
+        }
+    }
+
+    #[test]
+    fn grid_and_fallback_fit_frame_across_widths() {
+        // Sweep widths across both layout branches; the safety invariant must
+        // hold everywhere (lines ≤ term_width − SAFETY_MARGIN covers the
+        // message renderer's 2-column indent on top).
+        let headers = header(&["Name", "Description", "Status"]);
+        let rows = body(&[
+            &["alpha", "does a thing with words", "ok"],
+            &["beta", "supercalifragilisticexpialidocious", "pending"],
+        ]);
+        for width in 8usize..=100 {
+            let lines = render_table(
+                &headers,
+                &rows,
+                &[ColumnAlign::Left, ColumnAlign::Left, ColumnAlign::Right],
+                width,
+                &theme(),
+            );
+            assert_fits(&lines, width);
+        }
     }
 }

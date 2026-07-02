@@ -50,6 +50,23 @@ const PAGE: u16 = 10;
 /// Maximum composer content height before it stops growing and scrolls.
 const COMPOSER_MAX_LINES: usize = 6;
 
+/// Double-tap Esc tracking at the composer (cc 2.1.196/198 Esc semantics:
+/// Esc never quits — it interrupts a running turn, arms "Esc again to clear"
+/// when the composer has text, and double-taps into the rewind flow at an
+/// idle empty prompt). Any other key disarms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum EscState {
+    /// No pending Esc.
+    #[default]
+    None,
+    /// One Esc seen with composer text — the next Esc clears the composer
+    /// (binary feedback string: "Esc again to clear").
+    ClearArmed,
+    /// One Esc seen at an idle empty prompt — the next Esc triggers the
+    /// rewind entry point (binary: double-tap esc opens the rewind menu).
+    RewindArmed,
+}
+
 /// What a key press means to the event loop.
 enum KeyOutcome {
     /// Keep looping.
@@ -139,6 +156,11 @@ pub struct RataApp {
     /// Scrollback width from the previous frame; a change re-wraps everything,
     /// so the anchor adjustment is skipped for that frame.
     last_width: usize,
+    /// Double-tap Esc tracking (interrupt / clear / rewind semantics).
+    esc_state: EscState,
+    /// `true` → the client terminal is a Mac (locally or over SSH), so key
+    /// hints show `Opt`/`Cmd` instead of `Alt`/`Super` (cc 2.1.198).
+    mac_like: bool,
 }
 
 impl RataApp {
@@ -166,6 +188,8 @@ impl RataApp {
             line_cache: HashMap::new(),
             last_max_scroll: 0,
             last_width: 0,
+            esc_state: EscState::None,
+            mac_like: tui_core::key_hint::detect_mac_like(),
         }
     }
 
@@ -254,8 +278,42 @@ impl RataApp {
 
     fn on_composer_key(&mut self, key: KeyEvent) -> KeyOutcome {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Any key other than Esc disarms a pending Esc double-tap.
+        let esc_state = std::mem::take(&mut self.esc_state);
         match key.code {
-            KeyCode::Esc => KeyOutcome::Quit,
+            // Esc never quits (cc 2.1.196/198 semantics):
+            //   - a running turn is interrupted ("esc to interrupt"),
+            //   - with composer text: Esc-Esc clears it ("Esc again to clear"),
+            //   - at an idle empty prompt: Esc-Esc enters the rewind flow.
+            KeyCode::Esc => {
+                if let Some(token) = self.current_turn.take() {
+                    token.cancel();
+                    return KeyOutcome::Continue;
+                }
+                if !self.composer.is_blank() {
+                    if esc_state == EscState::ClearArmed {
+                        // Cleared text stays recallable via Up (history).
+                        let _ = self.composer.take();
+                    } else {
+                        self.esc_state = EscState::ClearArmed;
+                    }
+                    return KeyOutcome::Continue;
+                }
+                if esc_state == EscState::RewindArmed {
+                    // Rewind entry point. LingXi has no file-checkpoint /
+                    // conversation-rewind subsystem yet, so double-tap Esc
+                    // surfaces the binary's empty-state line instead of a
+                    // menu (cc 2.1.198 string: "Nothing to rewind to yet.").
+                    self.messages.push(RenderedMessage::SystemText {
+                        body: "Nothing to rewind to yet.".to_string(),
+                        timestamp: 0,
+                        is_error: false,
+                    });
+                } else {
+                    self.esc_state = EscState::RewindArmed;
+                }
+                KeyOutcome::Continue
+            }
             // Ctrl-C cancels an in-flight turn; with nothing running it exits.
             KeyCode::Char('c') if ctrl => {
                 if let Some(token) = self.current_turn.take() {
@@ -762,20 +820,29 @@ impl RataApp {
         let scroll = max_scroll.saturating_sub(self.scroll_up);
         frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), zones[0]);
 
+        // The Esc hint claims only what Esc actually does in each state
+        // (cc 2.1.196/198): "esc to interrupt" ONLY while a turn is running
+        // (binary hint: chord "esc" + action "interrupt", lowercase keyCase),
+        // "Esc again to clear" while a clear double-tap is armed (binary
+        // feedback string), and never "quit". Alt shows as Opt on Mac-like
+        // clients (cc 2.1.198 opt/cmd hint swap).
+        let alt = tui_core::key_hint::alt_label_title(self.mac_like);
         let base = if self.current_turn.is_some() {
-            "streaming…  ·  Ctrl-C: cancel  ·  PgUp/PgDn: scroll  ·  Esc: quit"
+            "esc to interrupt  ·  Ctrl-C: cancel  ·  PgUp/PgDn: scroll".to_string()
         } else if self.selected_msg.is_some() {
-            "↑/↓: select  ·  Enter/Space: expand  ·  Esc: back to composer"
+            "↑/↓: select  ·  Enter/Space: expand  ·  Esc: back to composer".to_string()
         } else if self.completion.is_some() {
-            "↑/↓: pick  ·  Tab: complete  ·  Esc: dismiss  ·  Enter: run"
+            "↑/↓: pick  ·  Tab: complete  ·  Esc: dismiss  ·  Enter: run".to_string()
+        } else if self.esc_state == EscState::ClearArmed {
+            "Esc again to clear".to_string()
         } else if self.verbose {
-            "Enter: send  ·  Ctrl-O: collapse  ·  ↑/↓: history  ·  Esc: quit"
+            "Enter: send  ·  Ctrl-O: collapse  ·  ↑/↓: history".to_string()
         } else {
-            "Enter: send  ·  Alt+Enter: newline  ·  Ctrl-O: expand  ·  Esc: quit"
+            format!("Enter: send  ·  {alt}+Enter: newline  ·  Ctrl-O: expand")
         };
         let status = match &self.vim {
             Some(vim) => format!("[{}]  {base}", vim.label()),
-            None => base.to_string(),
+            None => base,
         };
         frame.render_widget(Paragraph::new(status), zones[1]);
 
@@ -1385,10 +1452,111 @@ mod tests {
         );
     }
 
+    // ---- Esc semantics (cc 2.1.196/198: interrupt / clear / rewind) ----
+
     #[test]
-    fn esc_quits() {
+    fn esc_never_quits_at_idle() {
         let mut app = RataApp::new(Vec::new());
-        assert!(matches!(app.on_key(press(KeyCode::Esc)), KeyOutcome::Quit));
+        assert!(matches!(app.on_key(press(KeyCode::Esc)), KeyOutcome::Continue));
+        assert!(matches!(app.on_key(press(KeyCode::Esc)), KeyOutcome::Continue));
+    }
+
+    #[test]
+    fn esc_during_turn_interrupts_without_quitting() {
+        let mut app = RataApp::new(Vec::new());
+        typ(&mut app, "go");
+        app.on_key(press(KeyCode::Enter));
+        let token = app.current_turn.clone().unwrap();
+        assert!(!token.is_cancelled());
+        let outcome = app.on_key(press(KeyCode::Esc));
+        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert!(token.is_cancelled(), "Esc interrupts the running turn");
+        assert!(app.current_turn.is_none());
+    }
+
+    #[test]
+    fn esc_esc_with_text_clears_composer_and_keeps_history() {
+        let mut app = RataApp::new(Vec::new());
+        typ(&mut app, "draft text");
+        // First Esc arms the clear (composer untouched).
+        app.on_key(press(KeyCode::Esc));
+        assert_eq!(app.composer.text(), "draft text");
+        assert_eq!(app.esc_state, EscState::ClearArmed);
+        // Second Esc clears; the text is recallable via Up (history).
+        app.on_key(press(KeyCode::Esc));
+        assert_eq!(app.composer.text(), "");
+        app.on_key(press(KeyCode::Up));
+        assert_eq!(app.composer.text(), "draft text");
+    }
+
+    #[test]
+    fn any_other_key_disarms_the_esc_double_tap() {
+        let mut app = RataApp::new(Vec::new());
+        typ(&mut app, "abc");
+        app.on_key(press(KeyCode::Esc));
+        assert_eq!(app.esc_state, EscState::ClearArmed);
+        app.on_key(press(KeyCode::Char('d')));
+        assert_eq!(app.esc_state, EscState::None);
+        // The next Esc re-arms instead of clearing.
+        app.on_key(press(KeyCode::Esc));
+        assert_eq!(app.composer.text(), "abcd");
+    }
+
+    #[test]
+    fn esc_esc_at_idle_empty_prompt_hits_rewind_entry() {
+        // No rewind subsystem exists in LingXi yet: double-tap Esc surfaces
+        // the binary's empty-state line (cc 2.1.198 string) instead of a menu.
+        let mut app = RataApp::new(Vec::new());
+        app.on_key(press(KeyCode::Esc));
+        assert_eq!(app.esc_state, EscState::RewindArmed);
+        assert!(app.messages.is_empty());
+        app.on_key(press(KeyCode::Esc));
+        assert_eq!(app.messages.len(), 1);
+        match &app.messages[0] {
+            RenderedMessage::SystemText { body, .. } => {
+                assert_eq!(body, "Nothing to rewind to yet.");
+            }
+            other => panic!("expected SystemText, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn status_hint_claims_interrupt_only_while_running() {
+        let mut app = RataApp::new(Vec::new());
+        app.mac_like = false;
+        let mut term = test_terminal(70, 10);
+        // Idle: the footer must NOT claim Esc interrupts (nothing is running).
+        draw(&mut app, &mut term);
+        let idle = screen_text(&term);
+        assert!(!idle.contains("interrupt"), "idle footer: {idle}");
+        // Running: the footer shows the binary's "esc to interrupt" hint.
+        typ(&mut app, "go");
+        app.on_key(press(KeyCode::Enter));
+        draw(&mut app, &mut term);
+        assert!(
+            screen_text(&term).contains("esc to interrupt"),
+            "running footer must hint esc to interrupt"
+        );
+        // Esc-armed clear feedback uses the binary's exact string.
+        app.on_key(press(KeyCode::Esc)); // interrupt
+        typ(&mut app, "x");
+        app.on_key(press(KeyCode::Esc)); // arm clear
+        draw(&mut app, &mut term);
+        assert!(screen_text(&term).contains("Esc again to clear"));
+    }
+
+    #[test]
+    fn idle_hint_swaps_alt_for_opt_on_mac_like_clients() {
+        let mut app = RataApp::new(Vec::new());
+        let mut term = test_terminal(70, 10);
+        app.mac_like = false;
+        draw(&mut app, &mut term);
+        assert!(screen_text(&term).contains("Alt+Enter"));
+        app.mac_like = true;
+        draw(&mut app, &mut term);
+        let screen = screen_text(&term);
+        assert!(screen.contains("Opt+Enter"), "mac-like footer: {screen}");
+        assert!(!screen.contains("Alt+Enter"));
     }
 
     fn tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
@@ -1472,8 +1640,8 @@ mod tests {
         let outcome = app.on_key(press(KeyCode::Esc));
         assert!(matches!(outcome, KeyOutcome::Continue));
         assert!(app.active_screen.is_none());
-        // With the screen closed, Esc now quits as normal.
-        assert!(matches!(app.on_key(press(KeyCode::Esc)), KeyOutcome::Quit));
+        // With the screen closed, Esc still never quits (cc 2.1.196 semantics).
+        assert!(matches!(app.on_key(press(KeyCode::Esc)), KeyOutcome::Continue));
     }
 
     #[test]

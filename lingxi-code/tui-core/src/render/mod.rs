@@ -16,6 +16,7 @@ pub mod diff;
 pub mod markdown;
 pub mod markdown_table;
 pub mod model_name;
+pub mod osc8;
 pub mod syntax;
 
 /// The 16 named SGR colors (8 standard + 8 bright). Carried over from M6's

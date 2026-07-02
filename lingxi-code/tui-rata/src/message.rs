@@ -702,6 +702,34 @@ mod tests {
     }
 
     #[test]
+    fn wide_markdown_table_never_overflows_narrow_frame() {
+        // cc 2.1.198: "Fixed markdown tables overflowing the right border in
+        // fullscreen." The assistant renderer adds a 2-column marker/indent on
+        // top of the table layout; the full rendered line must still fit.
+        use unicode_width::UnicodeWidthStr;
+        let md = "\
+Intro line.
+
+| ConfigurationKeyName | Value | Notes |
+|---|---|---|
+| https://example.com/some/very/long/path/never/ends | supercalifragilisticexpialidocious | one two three four five six seven eight nine ten |
+";
+        for width in [24usize, 40, 60] {
+            let m = RenderedMessage::AssistantText {
+                body: md.to_string(),
+                timestamp: 0,
+            };
+            for line in render_message(&m, width, &Theme::dark(), false) {
+                let text = line.plain_text();
+                assert!(
+                    UnicodeWidthStr::width(text.as_str()) <= width,
+                    "line overflows {width}-col frame: {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn rate_limit_and_shutdown_render() {
         let rl = RenderedMessage::RateLimit {
             text: "Rate limited".to_string(),

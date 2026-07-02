@@ -32,6 +32,9 @@ serde_json = { workspace = true }
 [dev-dependencies]
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
+# Display-width assertions for the markdown-table overflow tests (same pin as
+# tui-core so a single version links).
+unicode-width = "=0.1.14"
 
 [lints]
 workspace = true

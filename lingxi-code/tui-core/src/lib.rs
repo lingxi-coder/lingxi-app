@@ -11,6 +11,7 @@
 pub mod active_turn;
 pub mod bash_runner;
 pub mod error;
+pub mod key_hint;
 pub mod message;
 pub mod message_render;
 pub mod multiagent;

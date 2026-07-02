@@ -58,7 +58,11 @@ const CHECKLIST: &[Entry] = &[
     Entry { version: "2.1.198", item: "Task panels: no stuck Running after finish/resume", disposition: Mission("M8") },
     Entry { version: "2.1.198", item: "Teammate API-error reports failed to lead; stuck teammate wake-retries on message", disposition: Mission("M9") },
     Entry { version: "2.1.198", item: "/diff panel refreshes on external branch switch/commit", disposition: Mission("M13") },
-    Entry { version: "2.1.198", item: "Markdown tables no longer overflow right border in fullscreen", disposition: Mission("M6") },
+    // M6 landed: tui_core::render::markdown_table vertical-format clamp
+    // (long labels hard-broken, over-long words hard-wrapped, all lines ≤
+    // frame − SAFETY_MARGIN); locked by overflow tests in markdown_table.rs +
+    // tui-rata message.rs `wide_markdown_table_never_overflows_narrow_frame`.
+    Entry { version: "2.1.198", item: "Markdown tables no longer overflow right border in fullscreen", disposition: Disposition::Implemented },
     // M2 landed: llm_client::aws_auth (ZBd/gIn/t2d port: trust gate + STS
     // probe + QBd=30s cooldown + 3-min timeout) + the V_c/G_c/s_f drive-loop
     // trigger (Ygf=2) in ApiService; settings keys awsAuthRefresh /
@@ -73,12 +77,21 @@ const CHECKLIST: &[Entry] = &[
     Entry { version: "2.1.198", item: "--bg + --print/-p rejected up front", disposition: Disposition::Implemented },
     Entry { version: "2.1.198", item: "Workflow progress view keeps earliest agents", disposition: Mission("M9") },
     Entry { version: "2.1.198", item: ".claude/rules conditional rules load via symlinked paths (realpath)", disposition: Mission("M11") },
+    // M6 partial: tui_core::render::osc8 ports the binary's OSC 8 emitters
+    // (`Bpl` hyperlink bytes, `jx()` support gate, URL wrapping incl. scheme)
+    // with byte-locked tests — but tui-rata draws through a ratatui cell
+    // Buffer that cannot carry escape sequences, so emission awaits a raw
+    // scrollback print path. Stays Mission until wired end-to-end.
     Entry { version: "2.1.198", item: "Cmd+click opens URLs in fullscreen in Warp; double-click selects whole URL", disposition: Mission("M6") },
     Entry { version: "2.1.198", item: "Plan mode auto-allows read-only tools when session starts in plan mode", disposition: Mission("M11") },
     Entry { version: "2.1.198", item: "/branch default fork name from first real prompt, not compaction summary", disposition: Mission("M12") },
     Entry { version: "2.1.198", item: "Focus mode: subagents in activity summary; completed notifications fold to one count", disposition: Mission("M10") },
-    Entry { version: "2.1.198", item: "Syntax highlighting upgraded to highlight.js 11", disposition: Mission("M6") },
-    Entry { version: "2.1.198", item: "opt/cmd hints instead of alt/super for Mac over SSH", disposition: Mission("M6") },
+    Entry { version: "2.1.198", item: "Syntax highlighting upgraded to highlight.js 11", disposition: Divergence("lingxi renders via syntect; visual-equivalence accepted, highlight.js is a JS-runtime dependency") },
+    // M6 landed: tui_core::key_hint ports the binary's `Pct()` probe (local
+    // macOS, or LC_TERMINAL=iTerm2 / TERM_PROGRAM=Apple_Terminal|iTerm.app
+    // forwarded over SSH) + the `nop` modifier table (Opt/Alt, Cmd/Super);
+    // wired into the tui-rata footer and locked by key_hint + app.rs tests.
+    Entry { version: "2.1.198", item: "opt/cmd hints instead of alt/super for Mac over SSH", disposition: Disposition::Implemented },
     Entry { version: "2.1.198", item: "Retry UX: error reason after 2nd attempt; status page link when overloaded", disposition: Mission("M12") },
     Entry { version: "2.1.198", item: "/login opens sign-in dialog from claude agents view", disposition: Mission("M7") },
     Entry { version: "2.1.198", item: "Launcher-agent messages are task direction, never user approval", disposition: Mission("M10") },
@@ -94,6 +107,9 @@ const CHECKLIST: &[Entry] = &[
     // ── 2.1.196 ────────────────────────────────────────────────────────────
     Entry { version: "2.1.196", item: "Org default models (Org default/Role default in /model)", disposition: Mission("M1") },
     Entry { version: "2.1.196", item: "Readable default session names at start", disposition: Mission("M13") },
+    // M6 partial: tui_core::render::osc8::file_link ports the binary's `t2()`
+    // (file:// OSC 8 target, plain-path display) with byte-locked tests;
+    // wiring blocked on the same raw print path as the URL entry above.
     Entry { version: "2.1.196", item: "Clickable file attachments (Cmd/Ctrl-click reveals in Finder)", disposition: Mission("M6") },
     Entry { version: "2.1.196", item: "mcp list/get do not spawn repo-self-approved servers; Pending approval shown", disposition: Mission("M11") },
     Entry { version: "2.1.196", item: "Waking a background job never deletes its transcript (set aside instead)", disposition: Mission("M8") },
@@ -105,6 +121,14 @@ const CHECKLIST: &[Entry] = &[
     Entry { version: "2.1.196", item: "Remote sessions auto-resume after server restart", disposition: Divergence("Anthropic cloud/remote infra; LingXi has no remote-session backend") },
     Entry { version: "2.1.196", item: "/cd moved sessions don't reappear in old dir's resume list (special chars)", disposition: Mission("M13") },
     Entry { version: "2.1.196", item: "plugin validate: local '.' plugins included; all error classes reported", disposition: Mission("M13") },
+    // M6 partial: tui-rata Esc semantics now match cc 2.1.196/198 (Esc never
+    // quits; interrupts a running turn with the "esc to interrupt" hint;
+    // Esc-Esc clears composer text with "Esc again to clear"; double-tap Esc
+    // at an idle empty prompt reaches the rewind entry point). LingXi has no
+    // file-checkpoint/rewind subsystem, so the entry point surfaces the
+    // binary's "Nothing to rewind to yet." line instead of the messageSelector
+    // menu ("Restore code and conversation" / "Restore conversation" /
+    // "Restore code"). Stays Mission until the rewind menu itself exists.
     Entry { version: "2.1.196", item: "Esc Esc at idle prompt opens rewind menu (regression fix)", disposition: Mission("M6") },
     Entry { version: "2.1.196", item: "MCP OAuth: no-scope request must not ask for full scopes_supported catalog", disposition: Mission("M11") },
     Entry { version: "2.1.196", item: "/context shows real token counts on Bedrock", disposition: Mission("M13") },

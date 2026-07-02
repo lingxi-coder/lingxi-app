@@ -1250,6 +1250,14 @@ impl ConversationOrchestrator {
         self
     }
 
+    /// Whether a [`JsonlWriter`] has been wired via [`Self::with_jsonl_writer`].
+    /// (M3 cc2.1.198) Probe for the `--no-session-persistence` boot gate: the
+    /// composition root leaves the slot `None` so nothing persists to disk.
+    #[must_use]
+    pub fn has_jsonl_writer(&self) -> bool {
+        self.jsonl_writer.is_some()
+    }
+
     /// Attach the resolved claude-home (`$LINGXI_CONFIG_DIR ?? ~/.claude`) so
     /// hook payloads carry a deterministically-computed `transcript_path` even
     /// when no [`JsonlWriter`] is wired (the production case). Builder-style —

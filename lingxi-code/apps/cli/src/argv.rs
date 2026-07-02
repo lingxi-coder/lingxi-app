@@ -209,12 +209,24 @@ pub struct Argv {
     pub verbose: bool,
 
     /// Minimal mode: skip hooks, LSP, plugin sync...Sets LINGXI_SIMPLE=1
-    // TODO(bare): wire into LINGXI_SIMPLE env + skip hooks/LSP/plugin behavior
+    ///
+    /// (M3 cc2.1.198) WIRED: `run_cli` exports `LINGXI_SIMPLE=1` (binary
+    /// `process.env.CLAUDE_CODE_SIMPLE="1"` on a pre-`--` `--bare` token) and
+    /// threads `CustomizationGates{bare}` through `resolve_desktop_config` into
+    /// `engine_desktop::build` (skips settings hooks, plugins incl. plugin LSP,
+    /// skill/custom-command dirs, custom agents; LINGXI.md unless `--add-dir`).
     #[arg(long = "bare")]
     pub bare: bool,
 
     /// Start with all customizations disabled — useful for troubleshooting
-    // TODO(safe-mode): wire into safe mode initialization (no plugins, hooks, etc.)
+    ///
+    /// (M3 cc2.1.198) WIRED: `run_cli` exports `LINGXI_SAFE_MODE=1` +
+    /// `LINGXI_DISABLE_LINGXI_MDS=1` (binary @223917313 `if(Ql())process.env.
+    /// CLAUDE_CODE_SAFE_MODE="1",process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS=
+    /// "1"`) and threads `CustomizationGates{safe_mode}` into `engine_desktop::
+    /// build` (disables settings hooks, plugins, skills/custom commands, custom
+    /// agents, discovered `.mcp.json` servers — `--mcp-config` servers survive,
+    /// binary `fQ`'s `L2()` — and the LINGXI.md hierarchy).
     #[arg(long = "safe-mode")]
     pub safe_mode: bool,
 
@@ -240,7 +252,12 @@ pub struct Argv {
     pub plugin_dir: Option<PathBuf>,
 
     /// Disable session persistence - sessions will not be saved to disk and cannot be resumed (only works with --print)
-    // TODO(no-session-persistence): wire into session-save path
+    ///
+    /// (M3 cc2.1.198) WIRED: non-print use hard-errors in `run_cli` (binary
+    /// @223929381 `if(a.sessionPersistence===!1&&!We)return Es("Error: --no-
+    /// session-persistence can only be used with --print mode.")`); the
+    /// accepted print case threads `DesktopConfig.session_persistence: false`
+    /// so `engine_desktop::build` wires NO session `JsonlWriter`.
     #[arg(long = "no-session-persistence")]
     pub no_session_persistence: bool,
 
@@ -625,6 +642,40 @@ impl Argv {
                         .to_string(),
                 );
             }
+        }
+        Ok(())
+    }
+
+    /// Upfront `--bg`/`--background` × `--print`/`-p` reject (cc 2.1.198
+    /// changelog "rejected up front"). Byte-locked to the binary's bg
+    /// fast-path validator `pof` @218854391: `if(o.some((i)=>{…return
+    /// i==="--print"||i.startsWith("--print=")||a.includes("-p")||l==="-p"}))
+    /// return"--bg and --print conflict: …"` — the caller (`handleBgFlag`
+    /// `oof` @218839305 via `mee`) writes the string + `\n` to STDERR (no
+    /// `Error:` prefix) and sets `process.exitCode=1`. The `—` renders as
+    /// a real em dash. clap has already folded `--print=`/combined `-p` forms
+    /// into `self.print`, matching the binary's peeled-token scan.
+    pub fn validate_background_args(&self) -> Result<(), String> {
+        if self.background && self.print {
+            return Err(
+                "--bg and --print conflict: --print never starts the interactive session that `claude agents` attaches to, so the job would be unattachable. The prompt is the positional \u{2014} drop --print: `claude --bg '<task>'`."
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    /// `--no-session-persistence` requires `--print` (cc 2.1.198 main action
+    /// @223929381: `if(a.sessionPersistence===!1&&!We)return Es("Error: --no-
+    /// session-persistence can only be used with --print mode.")`; `Es` =
+    /// `console.error` + exit 1). The returned string EXCLUDES the `Error: `
+    /// prefix — the caller prints `Error: {msg}` like the sibling stream-json
+    /// gates.
+    pub fn validate_session_persistence_args(&self) -> Result<(), String> {
+        if self.no_session_persistence && !self.print {
+            return Err(
+                "--no-session-persistence can only be used with --print mode.".to_string(),
+            );
         }
         Ok(())
     }

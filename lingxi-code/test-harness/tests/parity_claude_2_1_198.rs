@@ -67,7 +67,10 @@ const CHECKLIST: &[Entry] = &[
     Entry { version: "2.1.198", item: "macOS Local Network entitlements for background agent sessions", disposition: Divergence("macOS app packaging/entitlements, not core runtime") },
     Entry { version: "2.1.198", item: "/desktop cwd after entering+exiting a worktree", disposition: Mission("M13") },
     Entry { version: "2.1.198", item: "Agents view: no Reconnecting spam every ~52s", disposition: Mission("M7") },
-    Entry { version: "2.1.198", item: "--bg + --print/-p rejected up front", disposition: Mission("M3") },
+    // M3 landed: `Argv::validate_background_args` rejects --bg/--background ×
+    // --print/-p up front in `run_cli` (byte-locked `pof` message @218854391,
+    // stderr + exit 1); e2e-locked in apps/cli/tests/cli_argv_errors.rs.
+    Entry { version: "2.1.198", item: "--bg + --print/-p rejected up front", disposition: Disposition::Implemented },
     Entry { version: "2.1.198", item: "Workflow progress view keeps earliest agents", disposition: Mission("M9") },
     Entry { version: "2.1.198", item: ".claude/rules conditional rules load via symlinked paths (realpath)", disposition: Mission("M11") },
     Entry { version: "2.1.198", item: "Cmd+click opens URLs in fullscreen in Warp; double-click selects whole URL", disposition: Mission("M6") },

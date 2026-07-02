@@ -644,6 +644,70 @@ mod tests {
         assert!(a.no_session_persistence);
     }
 
+    /// (M3 cc2.1.198) `--no-session-persistence` requires `--print`. Byte-locked
+    /// to the binary's main action @223929381 (`Es("Error: --no-session-
+    /// persistence can only be used with --print mode.")`); the method returns
+    /// the string sans `Error: ` prefix (the caller prints `Error: {msg}`).
+    #[test]
+    fn no_session_persistence_requires_print_mode() {
+        // Interactive (no --print) ⟶ byte-exact rejection.
+        let a = Argv::from_iter(["lingxi-cli", "--no-session-persistence", "hi"]).unwrap();
+        assert_eq!(
+            a.validate_session_persistence_args().unwrap_err(),
+            "--no-session-persistence can only be used with --print mode."
+        );
+        // With --print ⟶ accepted.
+        let b =
+            Argv::from_iter(["lingxi-cli", "--print", "--no-session-persistence", "hi"]).unwrap();
+        assert!(b.validate_session_persistence_args().is_ok());
+        // Flag absent ⟶ always fine, print or not.
+        let c = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
+        assert!(c.validate_session_persistence_args().is_ok());
+    }
+
+    /// (M3 cc2.1.198) `--bg`/`--background` × `--print`/`-p` rejected up front.
+    /// Message byte-locked to the bg fast-path validator `pof` @218854391
+    /// (stderr line, no `Error:` prefix, exit 1) — note the real em dash.
+    #[test]
+    fn background_with_print_rejected_up_front() {
+        let locked = "--bg and --print conflict: --print never starts the interactive session that `claude agents` attaches to, so the job would be unattachable. The prompt is the positional \u{2014} drop --print: `claude --bg '<task>'`.";
+        // Every spelling pair conflicts: long/alias × long/short.
+        for args in [
+            ["lingxi-cli", "--bg", "--print", "task"],
+            ["lingxi-cli", "--background", "--print", "task"],
+            ["lingxi-cli", "--bg", "-p", "task"],
+            ["lingxi-cli", "-p", "--background", "task"],
+        ] {
+            let a = Argv::from_iter(args).unwrap();
+            assert_eq!(
+                a.validate_background_args().unwrap_err(),
+                locked,
+                "{args:?} must trip the upfront reject"
+            );
+        }
+        // Either flag alone passes.
+        assert!(Argv::from_iter(["lingxi-cli", "--bg", "task"])
+            .unwrap()
+            .validate_background_args()
+            .is_ok());
+        assert!(Argv::from_iter(["lingxi-cli", "-p", "task"])
+            .unwrap()
+            .validate_background_args()
+            .is_ok());
+    }
+
+    /// (M3 cc2.1.198) `--safe-mode` / `--bare` parse-and-carry (the wiring is
+    /// exercised in `init.rs` / engine-desktop tests).
+    #[test]
+    fn safe_mode_and_bare_flags_parse() {
+        let a = Argv::from_iter(["lingxi-cli", "--safe-mode", "hi"]).unwrap();
+        assert!(a.safe_mode);
+        assert!(!a.bare);
+        let b = Argv::from_iter(["lingxi-cli", "--bare", "hi"]).unwrap();
+        assert!(b.bare);
+        assert!(!b.safe_mode);
+    }
+
     #[test]
     fn from_pr_with_value_parses() {
         // SPACE form (matches commander `--from-pr [value]`): `--from-pr 123`

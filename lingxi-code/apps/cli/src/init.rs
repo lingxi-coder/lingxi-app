@@ -381,12 +381,28 @@ pub(crate) fn resolve_desktop_config(
     let mut global_mcp_path = migrations::global_config::global_config_path()
         .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
 
+    // (M3 cc2.1.198) `--safe-mode` / `--bare` customization gates. Mirrors the
+    // binary's `Ql()`/`xd()` predicates: flag OR truthy env (`run_cli` exports
+    // the env for children; a pre-set env also activates the mode, e.g. a
+    // subagent inheriting `CLAUDE_CODE_SAFE_MODE`).
+    let gates = engine_desktop::CustomizationGates {
+        safe_mode: argv.safe_mode
+            || traits::env::is_env_truthy(std::env::var("LINGXI_SAFE_MODE").ok().as_deref()),
+        bare: argv.bare
+            || traits::env::is_env_truthy(std::env::var("LINGXI_SIMPLE").ok().as_deref()),
+    };
+
     // `--strict-mcp-config` (claude-code main.tsx:1586): "Only use MCP servers
     // from --mcp-config, ignoring all other MCP configurations." Null the
     // discovered project/global `.mcp.json` paths so `build()` loads NO ambient
     // servers; the `--mcp-config` servers (parsed into `cli_mcp_servers` below
     // and merged in `build()`) become the only source.
-    if argv.strict_mcp_config {
+    //
+    // (M3 cc2.1.198) `--safe-mode` nulls the SAME discovered paths (binary `fQ`:
+    // `if(Hc("mcpAutoDiscovered"))return{servers:L2(),…}` — only flag-supplied
+    // servers survive, exactly the strict-mcp-config shape). `--bare` does NOT
+    // (`V5d.mcpAutoDiscovered:!1`; its help never lists MCP among the skips).
+    if argv.strict_mcp_config || gates.disables_mcp_discovery() {
         let nonexistent = std::path::PathBuf::from("/dev/null");
         project_mcp_path = nonexistent.clone();
         global_mcp_path = nonexistent;
@@ -483,9 +499,22 @@ pub(crate) fn resolve_desktop_config(
         // parity), which also makes the session-start
         // `fire_instructions_loaded()` fire over those files. Tests inject a
         // controlled provider (or `None`); only this real-host path reads the FS.
-        memory_provider: Some(orchestrator::prompt::real_provider_with_excludes(
-            load_lingxi_md_excludes(incl_user, incl_project),
-        )),
+        //
+        // (M3 cc2.1.198) `--safe-mode` disables the hierarchy outright; `--bare`
+        // disables it unless `--add-dir` supplies dirs (binary `eue()` passes
+        // `{explicitlyRequested:cI().length>0}` where `cI()` is the add-dir
+        // list). Safe mode ALSO exports `LINGXI_DISABLE_LINGXI_MDS=1` in
+        // `run_cli` (the orchestrator-level kill-switch); this `None` makes the
+        // gate hold without the env mutation too (env-free tests, bridge hosts).
+        memory_provider: if gates
+            .disables_claude_md(argv.add_dir.as_ref().is_some_and(|d| !d.is_empty()))
+        {
+            None
+        } else {
+            Some(orchestrator::prompt::real_provider_with_excludes(
+                load_lingxi_md_excludes(incl_user, incl_project),
+            ))
+        },
         // CLI-resolved session permission mode (`initialPermissionModeFromCLI`),
         // threaded in by `run_cli`.
         permission_mode,
@@ -530,6 +559,15 @@ pub(crate) fn resolve_desktop_config(
         // loaders above), so `--setting-sources project` does NOT load user-level
         // hooks or permission rules. `(true, true)` when the flag is absent.
         setting_source_scope: (incl_user, incl_project),
+        // (M3 cc2.1.198) `--safe-mode` / `--bare` gates, consumed at each
+        // registration site in `build()` (settings hooks, plugins + plugin LSP,
+        // skill/custom-command dirs, custom agents).
+        customization_gates: gates,
+        // (M3 cc2.1.198) `--no-session-persistence`: print-gated like the other
+        // print-only flags (the binary hard-errors on non-print use; `run_cli`
+        // already enforced that, this guard keeps direct/test callers faithful).
+        // `false` ⟶ `build()` wires no session `JsonlWriter`.
+        session_persistence: !(argv.print && argv.no_session_persistence),
     }
     // NOTE: claude-code's `--add-dir` is "Additional directories to allow TOOL
     // ACCESS to" (NOT LINGXI.md search — an earlier comment here misread it). It
@@ -785,6 +823,76 @@ mod tests {
         let cfg = resolve_desktop_config(&interactive, permission::PermissionMode::Default);
         assert!(cfg.max_turns.is_none());
         assert!(cfg.max_budget_usd.is_none());
+    }
+
+    /// (M3 cc2.1.198) `--safe-mode` / `--bare` gating in `resolve_desktop_config`:
+    /// gates thread into `DesktopConfig.customization_gates`; safe mode nulls the
+    /// discovered `.mcp.json` paths (binary `fQ`: only flag-supplied servers
+    /// survive) and drops the memory provider; bare keeps MCP discovery and only
+    /// drops the memory provider when no `--add-dir` is given (`eue()`'s
+    /// `explicitlyRequested:cI().length>0`).
+    #[test]
+    fn safe_mode_and_bare_gate_desktop_config() {
+        // Baseline: no reduced mode — provider present, real MCP paths.
+        let base = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
+        let cfg = resolve_desktop_config(&base, permission::PermissionMode::Default);
+        assert!(!cfg.customization_gates.safe_mode);
+        assert!(!cfg.customization_gates.bare);
+        assert!(cfg.memory_provider.is_some());
+        assert!(cfg.mcp_paths.iter().any(|p| p.ends_with(".mcp.json")));
+
+        // Safe mode: gates set, memory off, discovered MCP paths nulled.
+        let safe = Argv::from_iter(["lingxi-cli", "--safe-mode", "hi"]).unwrap();
+        let cfg = resolve_desktop_config(&safe, permission::PermissionMode::Default);
+        assert!(cfg.customization_gates.safe_mode);
+        assert!(cfg.memory_provider.is_none(), "safe mode disables LINGXI.md");
+        assert!(
+            cfg.mcp_paths.iter().all(|p| p == std::path::Path::new("/dev/null")),
+            "safe mode nulls discovered MCP paths: {:?}",
+            cfg.mcp_paths
+        );
+
+        // Safe mode + --add-dir: NO escape (unlike bare).
+        let safe_dir =
+            Argv::from_iter(["lingxi-cli", "--safe-mode", "--add-dir", "/tmp", "hi"]).unwrap();
+        let cfg = resolve_desktop_config(&safe_dir, permission::PermissionMode::Default);
+        assert!(cfg.memory_provider.is_none(), "--add-dir does not re-enable in safe mode");
+
+        // Bare: gates set, memory off, but MCP discovery KEPT (bare's help
+        // never lists MCP among the skips; `V5d.mcpAutoDiscovered:!1`).
+        let bare = Argv::from_iter(["lingxi-cli", "--bare", "hi"]).unwrap();
+        let cfg = resolve_desktop_config(&bare, permission::PermissionMode::Default);
+        assert!(cfg.customization_gates.bare);
+        assert!(cfg.memory_provider.is_none(), "bare skips CLAUDE.md auto-discovery");
+        assert!(cfg.mcp_paths.iter().any(|p| p.ends_with(".mcp.json")));
+
+        // Bare + --add-dir: explicit request re-enables the memory hierarchy.
+        let bare_dir =
+            Argv::from_iter(["lingxi-cli", "--bare", "--add-dir", "/tmp", "hi"]).unwrap();
+        let cfg = resolve_desktop_config(&bare_dir, permission::PermissionMode::Default);
+        assert!(cfg.memory_provider.is_some(), "--add-dir re-enables LINGXI.md in bare");
+    }
+
+    /// (M3 cc2.1.198) `--no-session-persistence` threads into
+    /// `DesktopConfig.session_persistence` print-gated (the binary hard-errors
+    /// on non-print use; this guard keeps direct callers faithful too).
+    #[test]
+    fn no_session_persistence_is_print_gated() {
+        let printed =
+            Argv::from_iter(["lingxi-cli", "--print", "--no-session-persistence", "hi"]).unwrap();
+        let cfg = resolve_desktop_config(&printed, permission::PermissionMode::Default);
+        assert!(!cfg.session_persistence);
+
+        // Flag absent (print) ⟶ persist.
+        let plain = Argv::from_iter(["lingxi-cli", "--print", "hi"]).unwrap();
+        let cfg = resolve_desktop_config(&plain, permission::PermissionMode::Default);
+        assert!(cfg.session_persistence);
+
+        // Interactive misuse never reaches here (run_cli hard-errors), but a
+        // direct caller stays faithful: non-print keeps persistence on.
+        let interactive = Argv::from_iter(["lingxi-cli", "--no-session-persistence", "hi"]).unwrap();
+        let cfg = resolve_desktop_config(&interactive, permission::PermissionMode::Default);
+        assert!(cfg.session_persistence);
     }
 
     #[test]

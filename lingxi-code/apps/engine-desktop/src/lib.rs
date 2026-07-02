@@ -1145,6 +1145,8 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     cli_mcp_servers: Vec::new(),
 ///     exclude_dynamic_system_prompt_sections: false,
 ///     setting_source_scope: (true, true),
+///     customization_gates: engine_desktop::CustomizationGates::default(),
+///     session_persistence: true,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -1314,6 +1316,113 @@ pub struct DesktopConfig {
     /// default, also the absent-flag case) ⟶ all tiers load, byte-identical to
     /// before this field.
     pub setting_source_scope: (bool, bool),
+    /// CLI `--safe-mode` / `--bare` customization gates (M3, cc 2.1.198).
+    /// Consumed at each registration site in `build()` (hooks / agents /
+    /// plugins / custom commands + skills); the CLI also gates the
+    /// memory-provider + discovered-MCP-path config fields it resolves itself.
+    /// `CustomizationGates::default()` (both false) ⟶ byte-identical to before
+    /// this field.
+    pub customization_gates: CustomizationGates,
+    /// CLI `--no-session-persistence` (print-mode only; the CLI validates the
+    /// cross-flag rule): `false` ⟶ `build()` wires NO session `JsonlWriter`, so
+    /// nothing is saved under `projects/` and the session cannot be resumed
+    /// (claude-code "Disable session persistence - sessions will not be saved
+    /// to disk and cannot be resumed"). `true` (the default) ⟶ unchanged.
+    pub session_persistence: bool,
+}
+
+/// `--safe-mode` / `--bare` reduced-mode customization gates (M3, cc 2.1.198).
+///
+/// Port of the binary's `Hc(feature, opts)` check (@209090235-ish minified:
+/// `function Hc(e,t){if(Ql()&&!K5d[e])return!0;if(xd()&&!t?.explicitlyRequested)
+/// return V5d[e];return!1}` with the two verdict maps
+/// `V5d`(bare)/`K5d`(safe-allowlist) @209090400), where `Ql()` = env
+/// `CLAUDE_CODE_SAFE_MODE` truthy OR argv `--safe-mode`, and `xd()` = env
+/// `CLAUDE_CODE_SIMPLE` truthy OR argv `--bare`. The per-feature helpers below
+/// bake in the map entries for exactly the features this composition root
+/// registers; each cites its map values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CustomizationGates {
+    /// `--safe-mode` (or env): "Start with all customizations (CLAUDE.md,
+    /// skills, plugins, hooks, MCP servers, custom commands and agents, …)
+    /// disabled — useful for troubleshooting a broken configuration."
+    pub safe_mode: bool,
+    /// `--bare` (or env): "Minimal mode: skip hooks, LSP, plugin sync, …,
+    /// and CLAUDE.md auto-discovery."
+    pub bare: bool,
+}
+
+impl CustomizationGates {
+    /// Settings-file hooks. Binary: bare disables outright (`V5d.hooks:!0`);
+    /// safe mode passes `Hc` (`K5d.hooks:!0`) but the hooks-config merge
+    /// collapses to the POLICY tier only (`UQr()` @209090550:
+    /// `if(e?.allowManagedHooksOnly===!0||Ql())return e?.hooks??{}`). lingxi
+    /// loads no policySettings hook tier (user + project only), so the safe-mode
+    /// "policy hooks still run" residue is the empty set here — both modes skip
+    /// the settings-hook loop.
+    #[must_use]
+    pub fn disables_settings_hooks(&self) -> bool {
+        self.safe_mode || self.bare
+    }
+
+    /// Plugin discovery + materialisation (`V5d.plugins:!0`,
+    /// `K5d.plugins:!1`; safe-mode log @211049652 "Skipping plugin hooks -
+    /// safe mode disables plugins"). Skipping the plugin bootstrap also skips
+    /// plugin LSP servers — lingxi's only LSP-server source — matching
+    /// `Hc("lspServers")` gating `initializeLspServerManager` (@213275452;
+    /// `V5d.lspServers:!0`, `K5d.lspServers:!1`).
+    #[must_use]
+    pub fn disables_plugins(&self) -> bool {
+        self.safe_mode || self.bare
+    }
+
+    /// Skill + custom-command dir discovery (`V5d.skills:!0`,
+    /// `K5d.skills:!1`; the user commands-dir loader `cWa` @213449557 bails on
+    /// `xd()||Hc("skills")`). RESIDUAL: in bare mode the binary still loads
+    /// skills from `--add-dir` roots (`aGe` @213453497 `if(xd())return …
+    /// o.map(S=>jht(join(S,".claude","skills")…))`) so `/skill-name` keeps
+    /// resolving; lingxi's registry loader has no add-dir root wiring yet, so
+    /// bare loads none (seam: `desktop_command_registry`'s skill-roots arg).
+    #[must_use]
+    pub fn disables_skills(&self) -> bool {
+        self.safe_mode || self.bare
+    }
+
+    /// Custom agent definitions from `agents/` dirs (`V5d.agents:!0`,
+    /// `K5d.agents:!1`). In the binary a `--agents` FLAG payload is an
+    /// explicit request that survives bare (`Hc("agents",{explicitlyRequested:
+    /// !0})` @223080769) but not safe mode ("--agents: ignored in safe mode");
+    /// lingxi's `--agents` flag is still parse-and-carry, so only the dir scan
+    /// is gated here.
+    #[must_use]
+    pub fn disables_custom_agents(&self) -> bool {
+        self.safe_mode || self.bare
+    }
+
+    /// Ambient (project/user `.mcp.json`) MCP discovery. SAFE MODE ONLY:
+    /// `fQ` @212967619 `if(Hc("mcpAutoDiscovered"))return{servers:L2(),…}` —
+    /// flag-supplied (`--mcp-config`) servers survive; `K5d.mcpAutoDiscovered:
+    /// !1` but `V5d.mcpAutoDiscovered:!1` too, i.e. bare does NOT disable
+    /// ambient MCP (its help text never lists MCP among the skips).
+    #[must_use]
+    pub fn disables_mcp_discovery(&self) -> bool {
+        self.safe_mode
+    }
+
+    /// CLAUDE/LINGXI.md memory hierarchy (`V5d.claudeMd:!0`, `K5d.claudeMd:
+    /// !1`). `explicitly_requested` mirrors `eue()` @209090235's
+    /// `{explicitlyRequested:cI().length>0}` — `cI()` is the `--add-dir` list
+    /// (`additionalDirectoriesForClaudeMd` @205673399) — so bare keeps the
+    /// hierarchy when `--add-dir` supplies CLAUDE.md dirs; safe mode never does
+    /// (and additionally exports `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`
+    /// @223917313).
+    #[must_use]
+    pub fn disables_claude_md(&self, explicitly_requested: bool) -> bool {
+        if self.safe_mode {
+            return true;
+        }
+        self.bare && !explicitly_requested
+    }
 }
 
 impl std::fmt::Debug for DesktopConfig {
@@ -1372,6 +1481,8 @@ impl std::fmt::Debug for DesktopConfig {
                 "exclude_dynamic_system_prompt_sections",
                 &self.exclude_dynamic_system_prompt_sections,
             )
+            .field("customization_gates", &self.customization_gates)
+            .field("session_persistence", &self.session_persistence)
             .finish()
     }
 }
@@ -1407,6 +1518,10 @@ impl Default for DesktopConfig {
             exclude_dynamic_system_prompt_sections: false,
             // Default: all setting tiers load (absent `--setting-sources`).
             setting_source_scope: (true, true),
+            // Default: no reduced mode (neither --safe-mode nor --bare).
+            customization_gates: CustomizationGates::default(),
+            // Default: persist the session JSONL (absent --no-session-persistence).
+            session_persistence: true,
         }
     }
 }
@@ -1426,6 +1541,7 @@ pub async fn desktop_command_registry(
     connect_writer: Arc<dyn command_core::ConnectCredentialWriter>,
     connect_copilot: Arc<dyn command_core::CopilotConnectDriver>,
     connect_chatgpt: Arc<dyn command_core::ChatGptConnectDriver>,
+    gates: CustomizationGates,
 ) -> CommandRegistry {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
@@ -1454,6 +1570,14 @@ pub async fn desktop_command_registry(
     // same-named custom command shadows a builtin (TS findCommand order).
     let home = dirs::home_dir().unwrap_or_else(|| lingxi_home.to_path_buf());
     let managed_dir = crate::settings_watch::managed_settings_dir();
+    // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom-command + skill
+    // dir discovery (`K5d.skills:!1` / `V5d.skills:!0`; the commands-dir
+    // loader `cWa` bails on `xd()||Hc("skills")`). Builtins above stay — only
+    // the on-disk customization layers are skipped, including the managed dir
+    // (the binary's `aGe` returns `[]` before reaching its managed root).
+    if gates.disables_skills() {
+        return reg;
+    }
     let registered = command_core::load_and_register_custom_commands(
         &mut reg,
         cwd,
@@ -2980,6 +3104,12 @@ pub async fn build(
     // user tier when `!include_user` and the project tier when `!include_project`
     // so e.g. `--setting-sources project` does NOT register user-level hooks.
     let (incl_user_settings, incl_project_settings) = cfg.setting_source_scope;
+    // (M3 cc2.1.198) `--safe-mode` / `--bare`: skip settings-file hooks. Bare
+    // disables hooks outright (binary `V5d.hooks:!0`); safe mode collapses the
+    // hooks-config merge to the POLICY tier only (`UQr()`: `if(e?.
+    // allowManagedHooksOnly===!0||Ql())return e?.hooks??{}`) — lingxi loads no
+    // policySettings hook tier, so both modes register zero settings hooks.
+    let skip_settings_hooks = cfg.customization_gates.disables_settings_hooks();
     for (path, source, included) in [
         (
             user_settings_path,
@@ -2992,7 +3122,7 @@ pub async fn build(
             incl_project_settings,
         ),
     ] {
-        if !included {
+        if !included || skip_settings_hooks {
             continue;
         }
         if let Ok(raw) = tokio::fs::read_to_string(&path).await {
@@ -3408,11 +3538,17 @@ pub async fn build(
     //       `cfg.lingxi_home/agents` (was `dirs::home_dir()/.lingxi/agents`).
     let project_agents_dir = cwd.join(branding::DOT_DIR).join("agents");
     let user_agents_dir = cfg.lingxi_home.join("agents");
-    let agents = agent::load_agents_from_dirs(&[
-        (user_agents_dir, agent::definition::AgentSource::UserDefined),
-        (project_agents_dir, agent::definition::AgentSource::Project),
-    ])
-    .await;
+    // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom agent definitions
+    // (`V5d.agents:!0`, `K5d.agents:!1`) — skip the dir scan, empty catalog.
+    let agents = if cfg.customization_gates.disables_custom_agents() {
+        Vec::new()
+    } else {
+        agent::load_agents_from_dirs(&[
+            (user_agents_dir, agent::definition::AgentSource::UserDefined),
+            (project_agents_dir, agent::definition::AgentSource::Project),
+        ])
+        .await
+    };
     let agent_catalog = Arc::new(tokio::sync::RwLock::new(agents));
 
     // (5.4) Real compaction. Threshold 150_000 tokens (M3 design lock for the
@@ -4357,10 +4493,19 @@ pub async fn build(
     ));
     let orch_builder = ConversationOrchestrator::new_with_streaming(
         orch_cfg, api_client, streaming_api, tools, hooks, perms, output, memory, cwd,
-    )
+    );
     // Gap #5: wire the production JSONL writer (constructed just above) so the
     // session is persisted + discoverable by the resume loader.
-    .with_jsonl_writer(main_jsonl_writer)
+    // (M3 cc2.1.198) `--no-session-persistence` ⟶ `cfg.session_persistence:
+    // false`: leave the orchestrator's `jsonl_writer` slot `None` (its persist
+    // paths are already `Option`-gated) so NO transcript is written under
+    // `projects/` and the session cannot be resumed.
+    let orch_builder = if cfg.session_persistence {
+        orch_builder.with_jsonl_writer(main_jsonl_writer)
+    } else {
+        orch_builder
+    };
+    let orch_builder = orch_builder
     // FIX A: hand the orchestrator the resolved claude-home so its hook payloads
     // carry a deterministically-computed `transcript_path`
     // (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
@@ -4550,6 +4695,7 @@ pub async fn build(
         connect_writer,
         connect_copilot.clone(),
         connect_chatgpt,
+        cfg.customization_gates,
     )
     .await;
     // SKILLEXEC.2: fill the shared command-registry slot the `Skill` tool's
@@ -4587,7 +4733,12 @@ pub async fn build(
     //       isolated LSP/skill/output-style/tool registry so `enable()` is
     //       non-panicking while only commands + hooks reach the engine's live
     //       registries.
-    {
+    //       (M3 cc2.1.198) `--safe-mode` / `--bare` skip the whole bootstrap
+    //       (`K5d.plugins:!1` / `V5d.plugins:!0`; safe-mode log "Skipping
+    //       plugin hooks - safe mode disables plugins"). This also skips
+    //       plugin LSP servers — lingxi's only LSP-server source — matching
+    //       `Hc("lspServers")` gating `initializeLspServerManager`.
+    if !cfg.customization_gates.disables_plugins() {
         let plugins_dir = std::env::var_os("LINGXI_PLUGIN_CACHE_DIR").map_or_else(
             || cfg.lingxi_home.join("plugins"),
             std::path::PathBuf::from,
@@ -4971,12 +5122,106 @@ mod tests {
             Arc::new(W),
             Arc::new(C),
             Arc::new(G),
+            super::CustomizationGates::default(),
         )
         .await;
         assert!(
             reg.get_handler("connect").is_some(),
             "/connect not wired into desktop registry"
         );
+    }
+
+    /// (M3 cc2.1.198) `--safe-mode` / `--bare` skip custom-command + skill dir
+    /// discovery in [`super::desktop_command_registry`] (`K5d.skills:!1` /
+    /// `V5d.skills:!0`) while builtins stay registered; default gates keep
+    /// loading the same fixture.
+    #[tokio::test]
+    async fn safe_mode_and_bare_skip_custom_command_discovery() {
+        use async_trait::async_trait;
+        use command_core::{
+            ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
+            CopilotConnectStep,
+        };
+        use traits::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
+
+        struct MockAuth;
+        #[async_trait]
+        impl AuthHandle for MockAuth {
+            async fn login(&self) -> Result<LoginInfo, AuthError> {
+                Err(AuthError::Cancelled)
+            }
+            async fn logout(&self) -> Result<(), AuthError> {
+                Ok(())
+            }
+            async fn current_user(&self) -> Option<LoginInfo> {
+                None
+            }
+        }
+        struct W;
+        #[async_trait]
+        impl ConnectCredentialWriter for W {
+            async fn prompt_and_store_key(&self, _id: &str) -> Result<(), ConnectError> {
+                Ok(())
+            }
+        }
+        struct C;
+        #[async_trait]
+        impl CopilotConnectDriver for C {
+            async fn begin(&self, _domain: Option<&str>) -> Result<CopilotConnectStep, ConnectError> {
+                Ok(CopilotConnectStep {
+                    user_code: "X".into(),
+                    verification_uri: "u".into(),
+                })
+            }
+            async fn poll_to_completion(&self, _s: &CopilotConnectStep) -> Result<(), ConnectError> {
+                Ok(())
+            }
+        }
+        struct G;
+        #[async_trait]
+        impl ChatGptConnectDriver for G {
+            async fn connect(&self) -> Result<String, ConnectError> {
+                Ok("Connected chatgpt.".into())
+            }
+        }
+
+        // Project fixture: `<cwd>/.lingxi/commands/m3custom.md` — resolvable as
+        // `/m3custom` when customization discovery runs.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+        let cmds = cwd.join(".lingxi").join("commands");
+        std::fs::create_dir_all(&cmds).expect("mk commands");
+        std::fs::write(cmds.join("m3custom.md"), "M3 custom command body").expect("write cmd");
+
+        for (gates, want_custom) in [
+            (super::CustomizationGates::default(), true),
+            (super::CustomizationGates { safe_mode: true, bare: false }, false),
+            (super::CustomizationGates { safe_mode: false, bare: true }, false),
+        ] {
+            let handle: Arc<dyn OrchestratorHandle> =
+                Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
+            let auth: Arc<dyn AuthHandle> = Arc::new(MockAuth);
+            let reg = super::desktop_command_registry(
+                handle,
+                auth,
+                &cwd,
+                &cwd, // lingxi_home rooted in the sandbox too (no user leakage)
+                Arc::new(W),
+                Arc::new(C),
+                Arc::new(G),
+                gates,
+            )
+            .await;
+            assert_eq!(
+                reg.resolve("m3custom").is_some(),
+                want_custom,
+                "{gates:?}: custom command discovery gate"
+            );
+            assert!(
+                reg.get_handler("connect").is_some(),
+                "{gates:?}: builtins must stay registered"
+            );
+        }
     }
 
     /// (Plan 3c C1) The [`super::connect::EngineCredentialWriter`] persists the
@@ -5322,6 +5567,8 @@ mod tests {
             cli_mcp_servers: Vec::new(),
             exclude_dynamic_system_prompt_sections: false,
             setting_source_scope: (true, true),
+            customization_gates: super::CustomizationGates::default(),
+            session_persistence: true,
         };
         (tmp, cfg)
     }
@@ -5947,6 +6194,108 @@ mod tests {
             hooks.iter().any(|h| h.event == "SessionStart"),
             "boot must load the SessionStart hook the lifecycle fire dispatches against: {hooks:?}"
         );
+    }
+
+    /// (M3 cc2.1.198) `CustomizationGates` — pure-logic lock of the binary's
+    /// `Hc(feature)` verdicts for the features this root registers (`V5d` =
+    /// bare map, `K5d` = safe-mode allowlist; see the struct docs).
+    #[test]
+    fn customization_gates_match_binary_maps() {
+        use super::CustomizationGates;
+        let off = CustomizationGates::default();
+        let safe = CustomizationGates { safe_mode: true, bare: false };
+        let bare = CustomizationGates { safe_mode: false, bare: true };
+
+        // Neither mode ⟶ nothing disabled (byte-identical to pre-M3 boot).
+        assert!(!off.disables_settings_hooks());
+        assert!(!off.disables_plugins());
+        assert!(!off.disables_skills());
+        assert!(!off.disables_custom_agents());
+        assert!(!off.disables_mcp_discovery());
+        assert!(!off.disables_claude_md(false));
+
+        // Safe mode disables all of them, claudeMd unconditionally (no
+        // explicit-request escape: "--agents: ignored in safe mode").
+        assert!(safe.disables_settings_hooks());
+        assert!(safe.disables_plugins());
+        assert!(safe.disables_skills());
+        assert!(safe.disables_custom_agents());
+        assert!(safe.disables_mcp_discovery());
+        assert!(safe.disables_claude_md(false));
+        assert!(safe.disables_claude_md(true), "safe mode ignores --add-dir");
+
+        // Bare: hooks/plugins/skills/agents disabled, but ambient MCP
+        // discovery is NOT (`V5d.mcpAutoDiscovered:!1`), and claudeMd is
+        // re-enabled by an explicit `--add-dir` request (`eue()`'s
+        // `explicitlyRequested:cI().length>0`).
+        assert!(bare.disables_settings_hooks());
+        assert!(bare.disables_plugins());
+        assert!(bare.disables_skills());
+        assert!(bare.disables_custom_agents());
+        assert!(!bare.disables_mcp_discovery());
+        assert!(bare.disables_claude_md(false));
+        assert!(!bare.disables_claude_md(true), "--add-dir re-enables in bare");
+    }
+
+    /// (M3 cc2.1.198) `--safe-mode` / `--bare` boot: the SAME project-settings
+    /// `SessionStart` hook fixture the positive test above proves LOADS must
+    /// NOT load when the gates are set (bare `V5d.hooks:!0`; safe mode's
+    /// `UQr()` keeps only the policySettings tier, which lingxi doesn't load).
+    #[tokio::test]
+    async fn safe_mode_and_bare_skip_settings_hooks_at_boot() {
+        use super::CustomizationGates;
+        use traits::OrchestratorHandle as _;
+
+        for gates in [
+            CustomizationGates { safe_mode: true, bare: false },
+            CustomizationGates { safe_mode: false, bare: true },
+        ] {
+            let (_tmp, mut cfg) = test_config(true);
+            cfg.customization_gates = gates;
+            let lingxi_dir = cfg.cwd.join(".lingxi");
+            std::fs::create_dir_all(&lingxi_dir).expect("mk .lingxi");
+            std::fs::write(
+                lingxi_dir.join("settings.json"),
+                r#"{ "hooks": { "SessionStart": [ { "hooks": [
+                    { "type": "command", "command": "true" }
+                ] } ] } }"#,
+            )
+            .expect("write settings.json");
+
+            let output: Arc<dyn traits::OutputStream> =
+                Arc::new(orchestrator::test_support::MockOutputStream::new());
+            let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+                Arc::new(RecordingPermissionSink::default());
+            let rt = build(cfg, output, perm_sink).await.expect("build");
+            let hooks = rt.orchestrator.list_hooks().await;
+            assert!(
+                !hooks.iter().any(|h| h.event == "SessionStart"),
+                "{gates:?} must skip settings-file hooks, got: {hooks:?}"
+            );
+        }
+    }
+
+    /// (M3 cc2.1.198) `--no-session-persistence` ⟶ `session_persistence:
+    /// false` leaves the orchestrator's `JsonlWriter` slot `None` (nothing is
+    /// saved under `projects/`, so the session can't be resumed); the default
+    /// (`true`) keeps the Gap-#5 production writer wired.
+    #[tokio::test]
+    async fn session_persistence_flag_gates_jsonl_writer() {
+        for (persist, want_writer) in [(true, true), (false, false)] {
+            let (_tmp, mut cfg) = test_config(true);
+            cfg.session_persistence = persist;
+            let output: Arc<dyn traits::OutputStream> =
+                Arc::new(orchestrator::test_support::MockOutputStream::new());
+            let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+                Arc::new(RecordingPermissionSink::default());
+            let rt = build(cfg, output, perm_sink).await.expect("build");
+            assert_eq!(
+                rt.orchestrator.has_jsonl_writer(),
+                want_writer,
+                "session_persistence={persist} must {}wire the JsonlWriter",
+                if want_writer { "" } else { "NOT " }
+            );
+        }
     }
 
     /// Instruction-load lifecycle: the boot path fires `InstructionsLoaded`

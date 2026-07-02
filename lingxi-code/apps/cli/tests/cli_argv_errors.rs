@@ -71,3 +71,40 @@ fn resume_without_value_no_tui_empty_dir_exits_0() {
             "No conversations found to resume.",
         ));
 }
+
+/// (M3 cc2.1.198) `--bg`/`--background` × `--print`/`-p` is rejected UP FRONT:
+/// one byte-locked line on stderr (no `Error:` prefix — the binary's
+/// `handleBgFlag` writes `${error}\n` directly), exit 1 (`process.exitCode=1`).
+/// Note the em dash. The reject fires before any runtime/session work, so no
+/// API key / config dir is needed.
+#[test]
+fn bg_with_print_rejected_up_front_exits_1() {
+    let locked = "--bg and --print conflict: --print never starts the interactive session that `claude agents` attaches to, so the job would be unattachable. The prompt is the positional \u{2014} drop --print: `claude --bg '<task>'`.";
+    for args in [
+        vec!["--bg", "--print", "task"],
+        vec!["--background", "-p", "task"],
+    ] {
+        Command::cargo_bin("lingxi-cli")
+            .unwrap()
+            .args(&args)
+            .assert()
+            .code(1)
+            .stderr(predicate::eq(format!("{locked}\n")));
+    }
+}
+
+/// (M3 cc2.1.198) `--no-session-persistence` outside `--print` hard-errors with
+/// the byte-locked line (`Es("Error: --no-session-persistence can only be used
+/// with --print mode.")`) and exit 1, before any turn runs.
+#[test]
+fn no_session_persistence_without_print_exits_1() {
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .env("ANTHROPIC_API_KEY", "sk-test-fake")
+        .args(["--no-session-persistence", "hi"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "Error: --no-session-persistence can only be used with --print mode.",
+        ));
+}

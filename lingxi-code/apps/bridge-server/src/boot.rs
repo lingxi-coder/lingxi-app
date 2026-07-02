@@ -254,6 +254,11 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         exclude_dynamic_system_prompt_sections: false,
         // The bridge has no `--setting-sources` flag; load all tiers.
         setting_source_scope: (true, true),
+        // The Electron bridge has no --safe-mode / --bare flags (CLI-only
+        // reduced modes); all customizations load.
+        customization_gates: engine_desktop::CustomizationGates::default(),
+        // The Electron bridge has no --no-session-persistence flag; persist.
+        session_persistence: true,
     }
 }
 
@@ -587,6 +592,8 @@ mod tests {
             cli_mcp_servers: Vec::new(),
             exclude_dynamic_system_prompt_sections: false,
             setting_source_scope: (true, true),
+            customization_gates: engine_desktop::CustomizationGates::default(),
+            session_persistence: true,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.

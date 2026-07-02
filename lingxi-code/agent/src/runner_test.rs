@@ -778,6 +778,53 @@ async fn schema_invalid_output_retried_then_captured() {
     assert_eq!(api.call_count(), 2, "the model retried once after the failure");
 }
 
+/// cc 2.1.196 (M9): a schema-rejected StructuredOutput attempt does NOT
+/// render beside its retry — no duplicate recap. The result surface a
+/// workflow/Agent consumer renders is the terminal `Completed.result`
+/// (`PoolSubagentSpawner::spawn` ignores Message events): after a rejected
+/// attempt + a valid retry there is EXACTLY ONE Completed, its payload is the
+/// retry's, and the rejected payload appears nowhere in it.
+#[tokio::test]
+async fn schema_rejected_attempt_is_not_surfaced_beside_its_retry() {
+    let so = |input: serde_json::Value| llm_client::LlmResponse {
+        content: vec![llm_client::ContentBlock::ToolCall {
+            id: ToolUseId::new().to_string(),
+            name: "StructuredOutput".into(),
+            input,
+        }],
+        ..tool_use_response("StructuredOutput", Some("tool_use"))
+    };
+    let rejected = serde_json::json!({ "answer": "REJECTED-SENTINEL" });
+    let valid = serde_json::json!({ "answer": 7 });
+    let api = MockSubagentApiClient::new(vec![
+        Ok(so(rejected.clone())), // schema-rejected attempt
+        Ok(so(valid.clone())),    // its retry
+    ]);
+    let mut ctx = loop_ctx(api, Some(CountingInvoker::new()), 6);
+    ctx.schema = Some(
+        r#"{"type":"object","required":["answer"],"properties":{"answer":{"type":"integer"}}}"#
+            .to_string(),
+    );
+    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let evs = drain(out_rx).await;
+
+    // Exactly one terminal Completed (one_completed asserts uniqueness) whose
+    // payload is the RETRY's — the rejected attempt is suppressed from the
+    // surfaced result, not rendered beside it.
+    let result = one_completed(&evs);
+    assert_eq!(result, valid, "the surfaced recap is the valid retry only");
+    assert!(
+        !result.to_string().contains("REJECTED-SENTINEL"),
+        "rejected payload must not leak into the surfaced result: {result}"
+    );
+    assert!(
+        !evs.iter().any(|e| matches!(e, SubagentEvent::Failed { .. })),
+        "a recovered retry is not a failure; got: {evs:?}"
+    );
+}
+
 /// Repeated schema-invalid StructuredOutput calls exhaust the retry cap (5)
 /// and abort with the byte-exact retry-cap-exceeded message.
 #[tokio::test]
@@ -1580,6 +1627,114 @@ async fn persist_mode_user_exit_while_idle_surfaces_killed() {
             .any(|e| matches!(e, SubagentEvent::Killed { agent_id: aid } if *aid == agent_id)),
         "UserExit while idle yields Killed; got: {evs:?}"
     );
+}
+
+// ---- Wake-on-message (cc 2.1.198, M9) ---------------------------------
+
+/// `SubagentApiClient` whose FIRST round-trip hangs forever (a teammate
+/// "stuck" mid-request / in the client's internal retry backoff) and whose
+/// subsequent round-trips capture their `messages` then answer end_turn.
+struct StuckThenCapturingApiClient {
+    calls: AtomicUsize,
+    first_call_started: tokio::sync::Notify,
+    later_messages: Mutex<Vec<Vec<ConversationMessage>>>,
+}
+impl StuckThenCapturingApiClient {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            calls: AtomicUsize::new(0),
+            first_call_started: tokio::sync::Notify::new(),
+            later_messages: Mutex::new(Vec::new()),
+        })
+    }
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+#[async_trait]
+impl crate::api::SubagentApiClient for StuckThenCapturingApiClient {
+    async fn messages_create(
+        &self,
+        _model: &str,
+        _system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n == 0 {
+            // Stuck: never resolves. The runner's select must drop this
+            // future on the inbound UserMessage and re-issue.
+            self.first_call_started.notify_one();
+            std::future::pending::<()>().await;
+            unreachable!("the stuck first call must be dropped, not resolved")
+        }
+        self.later_messages.lock().unwrap().push(messages);
+        Ok(text_response("woke and answered", Some("end_turn")))
+    }
+}
+
+/// cc 2.1.198 (M9): messaging a stuck teammate wakes it to retry immediately.
+/// Binary mechanism: SendMessage emits the recipient task's `retryWake` signal
+/// after the mailbox write (`TDo` @215134403: `r.retryWake?.emit()`), which
+/// `subscribeRetryWake` (@216289770) threads into the API retry loop so the
+/// backoff sleep is interrupted and the queued message rides into the turn.
+/// Rust analog: a `UserMessage` racing the in-flight round-trip drops the
+/// stuck `api_call` future, appends the message to history, and re-issues the
+/// round-trip immediately — previously the message text was silently DROPPED.
+#[tokio::test]
+async fn persist_mode_message_wakes_stuck_round_trip_and_carries_the_text() {
+    let api = StuckThenCapturingApiClient::new();
+    let mut ctx = loop_ctx(api.clone(), None, 4);
+    ctx.persistent = true;
+
+    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+
+    // Wait until the first round-trip is in flight (stuck).
+    api.first_call_started.notified().await;
+
+    // Message the stuck teammate.
+    event_tx
+        .send(engine::Event::UserMessage {
+            message_id: MessageId::new(),
+            request_id: RequestId::new(),
+            content: "are you alive? try again".into(),
+        })
+        .await
+        .unwrap();
+
+    // The wake re-issues the round-trip immediately; the retry completes.
+    let mut out_rx = out_rx;
+    let completed = loop {
+        let ev = out_rx.recv().await.expect("the woken turn-set completes");
+        if matches!(ev, SubagentEvent::Completed { .. }) {
+            break ev;
+        }
+    };
+    let SubagentEvent::Completed { result, .. } = &completed else {
+        unreachable!()
+    };
+    assert_eq!(result["text"], "woke and answered");
+    assert_eq!(api.call_count(), 2, "stuck call dropped + immediate retry");
+
+    // The retried round-trip CARRIES the message (cc queues it via
+    // pendingUserMessages; here it rides on the re-issued history).
+    let later = api.later_messages.lock().unwrap().clone();
+    let retry_history = later.first().expect("retry captured");
+    let carried = retry_history.iter().any(|m| {
+        matches!(m, ConversationMessage::User { content, .. }
+            if content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. }
+                if text.contains("are you alive? try again"))))
+    });
+    assert!(
+        carried,
+        "the wake message must ride on the retried round-trip, not be dropped: {retry_history:?}"
+    );
+
+    // Cooperative shutdown of the parked (persistent) runner.
+    event_tx.send(engine::Event::UserExit).await.unwrap();
+    handle.await.unwrap();
 }
 
 // ── G4 (SubagentStart additionalContext) + G5 (skills preload) ──────────

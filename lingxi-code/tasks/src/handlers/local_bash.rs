@@ -93,6 +93,23 @@ pub trait TaskStatusSink: Send + Sync {
     /// completion, failure, timeout, or kill.
     async fn set_status(&self, task_id: &str, status: TaskStatus);
 
+    /// Record a FAILED terminal status together with the failure reason.
+    ///
+    /// claude-code 2.1.198: a teammate dying on an API error reports "failed"
+    /// to the team lead WITH the reason — the in-process runner's catch block
+    /// sends a failed idle notification `{idleReason:"failed",
+    /// completedStatus:"failed", failureReason}` to the leader (binary
+    /// @216293689), and `zTt` caps `failureReason` at 200 chars (@215144889,
+    /// `kd(t.failureReason).slice(0,RXn)`, `RXn=200` @215149471).
+    /// [`TaskStatus::Failed`] is payload-less, so the reason travels through
+    /// this dedicated defaulted method instead (frozen-trait idiom). The
+    /// default forwards to [`Self::set_status`] (reason dropped) so existing
+    /// sinks keep their exact behavior; sinks with a lead-facing surface (the
+    /// coordinator's team registry) override it.
+    async fn set_failed(&self, task_id: &str, _error: &str) {
+        self.set_status(task_id, TaskStatus::Failed).await;
+    }
+
     /// Record the child's exit code (the value from
     /// [`ProcessOutput::exit_code`]). Called once on natural completion.
     async fn set_exit_code(&self, _task_id: &str, _exit_code: i32) {}

@@ -1584,6 +1584,104 @@ async fn workflow_agent_index_is_monotonic() {
     assert_eq!(start_events[2]["index"], 2);
 }
 
+/// cc 2.1.198 (M9): the workflow progress view keeps the EARLIEST agents
+/// while the phase counter stays correct. The binary's fix
+/// (`updateWorkflowProgressBatch`/`GCo` @213640399) keys `workflow_agent` /
+/// `workflow_phase` rows on `${type}:${index}` and updates them in place —
+/// when the row list overflows the window (`xVa=500` @213645694, trim at
+/// `len > xVa*2`) ONLY `workflow_log` rows are dropped from the front, never
+/// agent/phase rows. LingXi's progress stream is unbounded (spool + channel),
+/// so earliest agents are retained by construction; this test locks that a
+/// log flood past the binary's 1000-row trim threshold does not evict the
+/// earliest agent or phase rows, and the phase indices stay correct.
+#[tokio::test]
+async fn workflow_progress_keeps_earliest_agents_through_log_flood() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let spawner = Arc::new(EchoSpawner::default());
+    // Earliest agents FIRST, then a >1000-line log flood (the cc trim
+    // trigger), then a second phase with more agents.
+    run_workflow_script(
+        "phase('Early'); await agent('a0'); await agent('a1'); \
+         for (let i = 0; i < 1100; i++) { log('flood ' + i); } \
+         phase('Late'); await agent('a2');",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        spawner,
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        Some(tx),
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+    )
+    .await
+    .expect("runs");
+
+    let mut lines: Vec<String> = Vec::new();
+    while let Ok(line) = rx.try_recv() {
+        lines.push(line);
+    }
+
+    let agent_events: Vec<serde_json::Value> = lines
+        .iter()
+        .filter(|l| l.starts_with("[workflow_agent]"))
+        .filter_map(|l| {
+            serde_json::from_str::<serde_json::Value>(
+                l.trim_start_matches("[workflow_agent] "),
+            )
+            .ok()
+        })
+        .collect();
+
+    // The EARLIEST agents (indices 0 and 1, spawned before the flood) are
+    // still present — both their start and done rows survive.
+    for idx in [0, 1] {
+        assert!(
+            agent_events
+                .iter()
+                .any(|e| e["index"] == idx && e["state"] == "start"),
+            "earliest agent {idx} start row retained; got {} agent events",
+            agent_events.len()
+        );
+        assert!(
+            agent_events
+                .iter()
+                .any(|e| e["index"] == idx && e["state"] == "done"),
+            "earliest agent {idx} done row retained"
+        );
+    }
+    // The post-flood agent is present too.
+    assert!(
+        agent_events
+            .iter()
+            .any(|e| e["index"] == 2 && e["state"] == "done"),
+        "post-flood agent retained"
+    );
+
+    // The phase counter stays correct: both phase rows present with their
+    // 1-based indices intact (earliest phase NOT dropped by the flood).
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("[1]") && l.contains("=== Early ===")),
+        "earliest phase row retained with index 1"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("[2]") && l.contains("=== Late ===")),
+        "second phase row retained with index 2"
+    );
+    // And the flood itself really crossed the binary's trim threshold.
+    let flood_count = lines.iter().filter(|l| l.starts_with("flood ")).count();
+    assert_eq!(flood_count, 1100, "the log flood was emitted in full");
+}
+
 /// Agent events include phaseIndex/phaseTitle when agent() is dispatched during a phase.
 #[tokio::test]
 async fn workflow_agent_carries_phase_context() {

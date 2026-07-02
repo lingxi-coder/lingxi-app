@@ -163,6 +163,9 @@ fn text_response(text: &str) -> llm_client::LlmResponse {
 #[derive(Default)]
 struct RecordingSink {
     statuses: StdMutex<Vec<(String, TaskStatus)>>,
+    /// Failure reasons received through the `set_failed` seam (cc 2.1.198:
+    /// the failed idle notification's `failureReason` to the lead).
+    failures: StdMutex<Vec<(String, String)>>,
 }
 #[async_trait]
 impl TaskStatusSink for RecordingSink {
@@ -172,10 +175,20 @@ impl TaskStatusSink for RecordingSink {
             .unwrap()
             .push((task_id.to_string(), status));
     }
+    async fn set_failed(&self, task_id: &str, error: &str) {
+        self.failures
+            .lock()
+            .unwrap()
+            .push((task_id.to_string(), error.to_string()));
+        self.set_status(task_id, TaskStatus::Failed).await;
+    }
 }
 impl RecordingSink {
     fn last_status(&self) -> Option<TaskStatus> {
         self.statuses.lock().unwrap().last().map(|(_, s)| *s)
+    }
+    fn failures(&self) -> Vec<(String, String)> {
+        self.failures.lock().unwrap().clone()
     }
 }
 
@@ -614,6 +627,41 @@ async fn failed_turn_set_spools_failed_and_reports_terminal() {
         await_terminal(&sink).await,
         Some(TaskStatus::Failed),
         "Failed event reports terminal TaskStatus::Failed"
+    );
+}
+
+/// cc 2.1.198 (M9): a teammate dying on an API error reports "failed" WITH the
+/// failure reason through the `set_failed` seam — the reason the lead-facing
+/// `CoordinatorStatusSink` surfaces on the worker (binary @216293689: the
+/// in-process runner's catch sends `{idleReason:"failed",
+/// completedStatus:"failed", failureReason}` to the leader). Not a bare
+/// `set_status(Failed)` that would drop the error text.
+#[tokio::test]
+async fn failed_turn_set_reports_error_reason_through_set_failed() {
+    let api = ScriptedApiClient::new_error("rate limited: 529 overloaded");
+    let (_dir, fs, rt, handler, sink) = make_handler_with_sink(api);
+    let c = ctx(fs.clone(), rt.clone());
+
+    let h = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                agent_id: protocol::AgentId::new(),
+                name: "buddy".into(),
+                team_name: "alpha".into(),
+                description: String::new(),
+            },
+            c,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(await_terminal(&sink).await, Some(TaskStatus::Failed));
+    let failures = sink.failures();
+    assert_eq!(failures.len(), 1, "exactly one set_failed: {failures:?}");
+    assert_eq!(failures[0].0, h.task_id, "keyed on the teammate task id");
+    assert!(
+        failures[0].1.contains("rate limited: 529 overloaded"),
+        "the REAL error text reaches the sink (lead), not a sentinel: {failures:?}"
     );
 }
 

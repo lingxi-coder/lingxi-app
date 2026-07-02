@@ -93,7 +93,28 @@ const CHECKLIST: &[Entry] = &[
     // resumed session builds a FRESH registry, so a stale Running row cannot
     // survive resume by construction.
     Entry { version: "2.1.198", item: "Task panels: no stuck Running after finish/resume", disposition: Disposition::Implemented },
-    Entry { version: "2.1.198", item: "Teammate API-error reports failed to lead; stuck teammate wake-retries on message", disposition: Mission("M9") },
+    // M9 landed, both halves. FAILED-TO-LEAD: the binary's in-process runner
+    // catch sends a failed idle notification to the leader
+    // (`{idleReason:"failed", completedStatus:"failed", failureReason}`
+    // @216293689; `failureReason` capped at 200 by `zTt`/`RXn=200`
+    // @215144889/@215149471). lingxi already flipped the lead-visible status
+    // (teammate worker Failed → CoordinatorStatusSink → WorkerStatus::Failed);
+    // now the REAL error reason rides along via the new defaulted
+    // `TaskStatusSink::set_failed` seam (worker passes
+    // `SubagentEvent::Failed.error`; CoordinatorStatusSink overrides with the
+    // 200-char cap). Locked by tasks::…::failed_turn_set_reports_error_reason_
+    // through_set_failed + coordinator::status_sink::set_failed_reports_reason_
+    // to_lead_capped_at_200. WAKE-ON-MESSAGE: binary SendMessage emits the
+    // recipient task's `retryWake` after the mailbox write (`TDo` @215134403:
+    // `r.retryWake?.emit()`; called @216646768/@216647191), threaded as
+    // `subscribeRetryWake: V.subscribe` into the API-retry loop (@216289770)
+    // so a teammate stuck in retry backoff re-issues NOW with the queued
+    // message. lingxi analog: a `UserMessage` racing the in-flight round-trip
+    // (llm-client retries live inside that future) now drops it, appends the
+    // message to history, and re-issues immediately — previously the text was
+    // silently DISCARDED. Locked by agent::runner_test::persist_mode_message_
+    // wakes_stuck_round_trip_and_carries_the_text.
+    Entry { version: "2.1.198", item: "Teammate API-error reports failed to lead; stuck teammate wake-retries on message", disposition: Disposition::Implemented },
     Entry { version: "2.1.198", item: "/diff panel refreshes on external branch switch/commit", disposition: Mission("M13") },
     // M6 landed: tui_core::render::markdown_table vertical-format clamp
     // (long labels hard-broken, over-long words hard-wrapped, all lines ≤
@@ -120,7 +141,18 @@ const CHECKLIST: &[Entry] = &[
     // --print/-p up front in `run_cli` (byte-locked `pof` message @218854391,
     // stderr + exit 1); e2e-locked in apps/cli/tests/cli_argv_errors.rs.
     Entry { version: "2.1.198", item: "--bg + --print/-p rejected up front", disposition: Disposition::Implemented },
-    Entry { version: "2.1.198", item: "Workflow progress view keeps earliest agents", disposition: Mission("M9") },
+    // M9 verified: the cc bug's surface (a bounded workflowProgress row list
+    // whose overflow trim dropped the earliest workflow_agent rows) does not
+    // exist in lingxi — progress rows stream unbounded (RunOutcome.progress
+    // Vec + task-output spool), so earliest agents are kept by construction.
+    // The binary fix (`updateWorkflowProgressBatch`/`GCo` @213640399) keys
+    // agent/phase rows on `${type}:${index}` (updated in place, never
+    // dropped) and trims ONLY `workflow_log` rows from the front when the
+    // list exceeds `xVa*2` (xVa=500 @213645694) — agent rows and the phase
+    // counter survive. Locked by tasks::…::local_workflow_test::
+    // workflow_progress_keeps_earliest_agents_through_log_flood (>1000-line
+    // log flood; earliest agent + phase rows retained, indices correct).
+    Entry { version: "2.1.198", item: "Workflow progress view keeps earliest agents", disposition: Disposition::Implemented },
     Entry { version: "2.1.198", item: ".claude/rules conditional rules load via symlinked paths (realpath)", disposition: Mission("M11") },
     // M6 partial: tui_core::render::osc8 ports the binary's OSC 8 emitters
     // (`Bpl` hyperlink bytes, `jx()` support gate, URL wrapping incl. scheme)
@@ -172,7 +204,17 @@ const CHECKLIST: &[Entry] = &[
     // writer lands.
     Entry { version: "2.1.196", item: "Waking a background job never deletes its transcript (set aside instead)", disposition: Divergence("no bg-job wake/transcript-probe path exists in lingxi (jobs read-only) and no code path deletes transcripts; binary set-aside rename (s9e @206707678) ports with the future --bg wake") },
     Entry { version: "2.1.196", item: "Rate-limit warning flicker + over-counted telemetry with parallel requests", disposition: Mission("M12") },
-    Entry { version: "2.1.196", item: "No duplicate recap after schema-rejected StructuredOutput retry", disposition: Mission("M9") },
+    // M9 verified: cannot reproduce in lingxi's architecture. The workflow
+    // subagent's result surface is the runner's single terminal
+    // `Completed.result` (agent/src/runner.rs: `structured_result` is set
+    // ONLY by a schema-VALID StructuredOutput input; a rejected input feeds
+    // back an `is_error` ToolResult and the model retries), and
+    // `PoolSubagentSpawner::spawn` ignores Message events — so a
+    // schema-rejected attempt has no rendered recap to duplicate beside its
+    // retry. Locked by agent::runner_test::
+    // schema_rejected_attempt_is_not_surfaced_beside_its_retry (exactly one
+    // Completed; payload is the retry's; rejected sentinel absent).
+    Entry { version: "2.1.196", item: "No duplicate recap after schema-rejected StructuredOutput retry", disposition: Disposition::Implemented },
     Entry { version: "2.1.196", item: "PowerShell git diff/grep, egrep/fgrep, quoted | patterns: exit 1 is not failure", disposition: Mission("M13") },
     // M7 seam: this is the IN-APP side panel (task panel inside the running
     // TUI), not the standalone `claude agents` view M7 landed. lingxi's

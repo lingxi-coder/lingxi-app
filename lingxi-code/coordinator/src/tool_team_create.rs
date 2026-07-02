@@ -607,6 +607,7 @@ mod tests {
                 is_non_interactive_session: false,
                 custom_system_prompt: None,
                 append_system_prompt: None,
+                model_profile: None,
             },
             messages: vec![],
             tool_use_id: None,

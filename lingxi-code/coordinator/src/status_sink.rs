@@ -74,12 +74,15 @@ impl CoordinatorStatusSink {
     }
 }
 
-#[async_trait]
-impl TaskStatusSink for CoordinatorStatusSink {
-    async fn set_status(&self, task_id: &str, status: TaskStatus) {
-        let Some(worker_status) = Self::worker_status_for(status) else {
-            return;
-        };
+/// claude-code 2.1.198 caps the failed idle notification's `failureReason` at
+/// 200 chars before it reaches the leader (`zTt`:
+/// `kd(t.failureReason).slice(0,RXn)` @215144889, `RXn=200` @215149471).
+const FAILURE_REASON_CAP: usize = 200;
+
+impl CoordinatorStatusSink {
+    /// Apply `status` to the worker linked to `task_id` (unknown ids are a
+    /// no-op) and push the freshly-computed active-worker count downstream.
+    async fn apply(&self, task_id: &str, worker_status: WorkerStatus) {
         // Resolve the worker keyed on the handler-generated task id. Unknown
         // ids are a no-op (no panic) — the link may not be written back yet, or
         // the worker may already have been deleted.
@@ -96,6 +99,27 @@ impl TaskStatusSink for CoordinatorStatusSink {
         self.output
             .emit_coordinator_status(active, team_name.as_deref())
             .await;
+    }
+}
+
+#[async_trait]
+impl TaskStatusSink for CoordinatorStatusSink {
+    async fn set_status(&self, task_id: &str, status: TaskStatus) {
+        let Some(worker_status) = Self::worker_status_for(status) else {
+            return;
+        };
+        self.apply(task_id, worker_status).await;
+    }
+
+    /// A teammate dying on an API error reports "failed" to the lead WITH the
+    /// real failure reason (claude-code 2.1.198: the in-process runner's catch
+    /// sends `{idleReason:"failed", completedStatus:"failed", failureReason}`
+    /// to the leader, binary @216293689), instead of the payload-less
+    /// [`FAILED_ERROR`] sentinel `set_status` records. The reason is capped at
+    /// [`FAILURE_REASON_CAP`] chars, mirroring the binary's `.slice(0,200)`.
+    async fn set_failed(&self, task_id: &str, error: &str) {
+        let reason: String = error.chars().take(FAILURE_REASON_CAP).collect();
+        self.apply(task_id, WorkerStatus::Failed { error: reason }).await;
     }
 }
 
@@ -200,6 +224,45 @@ mod tests {
             },
             "Completed must leave the still-running worker in Working"
         );
+    }
+
+    /// cc 2.1.198 (M9): a teammate dying on an API error reports "failed" to
+    /// the lead WITH the real failure reason — `set_failed` (fed by the
+    /// teammate worker's `SubagentEvent::Failed { error }`) records
+    /// `WorkerStatus::Failed { error: <reason> }` on the lead's team registry,
+    /// not the payload-less sentinel, and pushes the status downstream. The
+    /// reason is capped at 200 chars (binary `RXn=200`,
+    /// `kd(t.failureReason).slice(0,RXn)`).
+    #[tokio::test]
+    async fn set_failed_reports_reason_to_lead_capped_at_200() {
+        let (team, out, sink) = fixture("task-api-err").await;
+        sink.set_status("task-api-err", TaskStatus::Running).await;
+
+        sink.set_failed("task-api-err", "subagent api error: 529 overloaded")
+            .await;
+
+        // The lead's view (team registry) shows Failed with the REAL reason —
+        // not silence, not Running, not the FAILED_ERROR sentinel.
+        assert_eq!(
+            status_of(&team.list().await),
+            &WorkerStatus::Failed {
+                error: "subagent api error: 529 overloaded".into()
+            }
+        );
+        // The terminal transition was pushed downstream (active count drops).
+        assert_eq!(out.last(), Some((0, None)));
+
+        // A reason longer than 200 chars is truncated to exactly 200.
+        let (team, _out, sink) = fixture("task-long").await;
+        let long = "e".repeat(300);
+        sink.set_failed("task-long", &long).await;
+        match status_of(&team.list().await) {
+            WorkerStatus::Failed { error } => {
+                assert_eq!(error.len(), 200, "reason capped at 200 chars");
+                assert_eq!(error, &"e".repeat(200));
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
     }
 
     #[tokio::test]

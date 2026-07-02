@@ -818,7 +818,16 @@ async fn run_subagent_loop(
             .effort
             .as_ref()
             .map(crate::definition::AgentEffort::to_wire);
+        // Message captured by the wake-on-message arm below; appended to
+        // `history` HERE (before the next `api_call` is built) because the
+        // in-flight future immutably borrows `history` inside the select.
+        let mut wake_message: Option<String> = None;
         let response = loop {
+            // (No Message emit — the persist-park path below appends injected
+            // user messages to history without emitting, so mirror it.)
+            if let Some(content) = wake_message.take() {
+                history.push(ConversationMessage::user(MessageId::new(), content));
+            }
             let api_call = async {
                 // Provider routing (dual-LLM dual-PROVIDER): thread the
                 // per-spawn `model_profile` as the api client's `profile` so the
@@ -863,6 +872,30 @@ async fn run_subagent_loop(
                         Some(engine::Event::UserExit | engine::Event::UserInterrupt) => {
                             let _ = out_tx.send(SubagentEvent::Killed { agent_id }).await;
                             return;
+                        }
+                        // claude-code 2.1.198 wake-on-message: messaging a stuck
+                        // teammate wakes it to retry immediately. In the binary,
+                        // the SendMessage tool emits the recipient task's
+                        // `retryWake` signal right after the mailbox write
+                        // (@216646768 → `TDo` @215134403:
+                        // `if(r?.status==="running")r.retryWake?.emit()`), and the
+                        // runner threads `subscribeRetryWake: V.subscribe` into
+                        // the query's API-retry loop (@216289770) so a teammate
+                        // parked in retry backoff re-issues NOW; the message
+                        // itself is queued and drained into the turn. The Rust
+                        // analog of that backoff sleep is the in-flight
+                        // `api_call` future (llm-client retries live inside it):
+                        // dropping it and re-issuing IS the wake — but the
+                        // message must ride along, so append it to history
+                        // before retrying (previously this arm fell into the
+                        // catch-all below and silently DISCARDED the text).
+                        // Persistent (teammate) runners only: one-shot subagents
+                        // keep the legacy drop-and-retry semantics.
+                        Some(engine::Event::UserMessage { content, .. })
+                            if ctx.persistent =>
+                        {
+                            wake_message = Some(content);
+                            continue;
                         }
                         // Non-termination event: drop the in-flight API future
                         // and retry the round-trip on the next iteration.

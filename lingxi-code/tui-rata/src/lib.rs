@@ -17,6 +17,7 @@
 pub mod app;
 pub mod composer;
 pub mod files;
+pub mod history_cell;
 pub mod image_view;
 pub mod message;
 pub mod overlay;
@@ -29,6 +30,7 @@ pub mod session;
 pub mod style_adapter;
 pub mod term_image;
 pub mod terminal;
+pub mod transcript;
 pub mod vim;
 
 use std::io::Stdout;

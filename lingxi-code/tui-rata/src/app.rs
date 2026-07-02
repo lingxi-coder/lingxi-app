@@ -31,6 +31,7 @@ use tui_core::permission_bridge::PermissionExchange;
 use tui_core::theme::Theme;
 
 use crate::composer::{Composer, ComposerView, MAX_VISIBLE_LINES};
+use crate::history_cell::MessageHistoryCell;
 use crate::overlay::{Dialog, DialogOutcome};
 use crate::palette::{command_items, CompletionPopup};
 use crate::picker::{ModelPicker, PickerOutcome};
@@ -38,8 +39,9 @@ use crate::renderable::Renderable;
 use crate::screens::FullScreen;
 use crate::session::SessionInfo;
 use crate::terminal::TerminalSession;
+use crate::transcript::Transcript;
 use crate::vim::{VimOutcome, VimState};
-use crate::{render, RataTerminal};
+use crate::RataTerminal;
 
 /// How long an idle Ctrl-C stays "armed" before a second press quits.
 const CTRL_C_EXIT_WINDOW: Duration = Duration::from_secs(2);
@@ -66,12 +68,11 @@ struct PendingPermission {
 
 /// Interactive chat state.
 pub struct RataApp {
-    messages: Vec<RenderedMessage>,
+    /// Conversation history: committed cells + the active streaming cell +
+    /// the native-scrollback commit cursor + verbose/render mode.
+    transcript: Transcript,
     composer: Composer,
     theme: Theme,
-    /// Count of `messages` already committed (inserted) into the terminal's
-    /// native scrollback; the tail beyond this is pending or actively streaming.
-    committed: usize,
     /// Cancellation token for the in-flight turn, if any.
     current_turn: Option<CancellationToken>,
     /// Active permission prompt, if any (owns the keyboard while open).
@@ -81,9 +82,6 @@ pub struct RataApp {
     /// Command/file completion popup shown while a `/command` or `@file` token
     /// is being typed.
     completion: Option<CompletionPopup>,
-    /// `true` → expand collapsible messages (thinking body, tool-use JSON,
-    /// grouped children) when committing them to scrollback. Toggled by Ctrl-O.
-    verbose: bool,
     /// Vim editing state when `/vim` is enabled (`None` → plain editor).
     vim: Option<VimState>,
     /// Wall-clock start, used to advance the streaming spinner animation.
@@ -105,15 +103,13 @@ impl RataApp {
     #[must_use]
     pub fn new(messages: Vec<RenderedMessage>) -> Self {
         Self {
-            messages,
+            transcript: Transcript::from_messages(messages),
             composer: Composer::default(),
             theme: Theme::dark(),
-            committed: 0,
             current_turn: None,
             pending_permission: None,
             active_model_picker: None,
             completion: None,
-            verbose: false,
             vim: None,
             start: std::time::Instant::now(),
             turn_started_at: None,
@@ -181,7 +177,7 @@ impl RataApp {
         if let Some(outcome) = self.handle_slash(&text) {
             return outcome;
         }
-        self.messages.push(RenderedMessage::UserText {
+        self.transcript.push_message(RenderedMessage::UserText {
             body: text.clone(),
             timestamp: 0,
         });
@@ -200,7 +196,7 @@ impl RataApp {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .map(String::from);
-            self.messages.push(RenderedMessage::UserImage {
+            self.transcript.push_message(RenderedMessage::UserImage {
                 image_id: None,
                 metadata: name,
                 source_path: Some(trimmed.to_string()),
@@ -257,7 +253,7 @@ impl RataApp {
             }
             // Ctrl-O toggles verbose (expand thinking/tool-use/grouped blocks).
             KeyCode::Char('o') if ctrl => {
-                self.verbose = !self.verbose;
+                self.transcript.toggle_verbose();
                 KeyOutcome::Continue
             }
             // Modified Enter (Alt/Shift) inserts a newline; plain Enter submits.
@@ -318,29 +314,50 @@ impl RataApp {
         }
     }
 
-    /// Fold one streaming event from the orchestrator bridge into the message
-    /// list: `TurnStarted` opens an empty assistant reply, `TextDelta` appends
-    /// to it, `TurnEnded` clears the in-flight cancel token, and other variants
-    /// are ignored for now.
+    /// Fold one streaming event from the orchestrator bridge into the
+    /// transcript: `TurnStarted` opens an empty active assistant cell,
+    /// `TextDelta` mutates it in place, `TurnEnded` finalizes it (moves it to
+    /// the committed history) and clears the in-flight cancel token; other
+    /// variants are ignored for now.
     pub fn apply_turn_event(&mut self, event: TurnEvent) {
         match event {
             TurnEvent::TurnStarted => {
                 self.turn_started_at = Some(std::time::Instant::now());
                 self.activity = None;
-                self.messages.push(RenderedMessage::AssistantText {
-                    body: String::new(),
-                    timestamp: 0,
-                });
+                // A straggler active cell (missed TurnEnded) is finalized, not
+                // dropped, before the new streaming reply opens.
+                self.transcript.flush_active();
+                self.transcript.set_active(Box::new(MessageHistoryCell::new(
+                    RenderedMessage::AssistantText {
+                        body: String::new(),
+                        timestamp: 0,
+                    },
+                )));
             }
             TurnEvent::TextDelta(delta) => {
-                if let Some(RenderedMessage::AssistantText { body, .. }) = self.messages.last_mut()
-                {
-                    body.push_str(&delta);
-                } else {
-                    self.messages.push(RenderedMessage::AssistantText {
-                        body: delta,
-                        timestamp: 0,
-                    });
+                let appended = self
+                    .transcript
+                    .mutate_active(|cell| {
+                        if let Some(RenderedMessage::AssistantText { body, .. }) = cell
+                            .as_any_mut()
+                            .downcast_mut::<MessageHistoryCell>()
+                            .map(MessageHistoryCell::message_mut)
+                        {
+                            body.push_str(&delta);
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if !appended {
+                    self.transcript.flush_active();
+                    self.transcript.set_active(Box::new(MessageHistoryCell::new(
+                        RenderedMessage::AssistantText {
+                            body: delta,
+                            timestamp: 0,
+                        },
+                    )));
                 }
             }
             TurnEvent::ToolUseStart { tool, .. } => {
@@ -350,6 +367,7 @@ impl RataApp {
                 self.activity = None;
             }
             TurnEvent::TurnEnded(_) => {
+                self.transcript.flush_active();
                 self.current_turn = None;
                 self.turn_started_at = None;
                 self.activity = None;
@@ -432,7 +450,7 @@ impl RataApp {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .map(String::from);
-            self.messages.push(RenderedMessage::UserImage {
+            self.transcript.push_message(RenderedMessage::UserImage {
                 image_id: None,
                 metadata: name,
                 source_path: Some(path),
@@ -476,13 +494,12 @@ impl RataApp {
                 Some(KeyOutcome::Continue)
             }
             "/clear" => {
-                self.messages.clear();
-                self.committed = 0;
+                self.transcript.clear();
                 Some(KeyOutcome::Continue)
             }
             "/model" => {
                 if self.session.models.is_empty() {
-                    self.messages.push(RenderedMessage::SystemText {
+                    self.transcript.push_message(RenderedMessage::SystemText {
                         body: "No models available.".to_string(),
                         timestamp: 0,
                         is_error: false,
@@ -496,7 +513,7 @@ impl RataApp {
             "/vim" => {
                 let now_on = self.vim.is_none();
                 self.vim = if now_on { Some(VimState::new()) } else { None };
-                self.messages.push(RenderedMessage::SystemText {
+                self.transcript.push_message(RenderedMessage::SystemText {
                     body: format!("Vim mode {}.", if now_on { "enabled" } else { "disabled" }),
                     timestamp: 0,
                     is_error: false,
@@ -510,7 +527,7 @@ impl RataApp {
     /// Push a read-only screen's content into the conversation scrollback as a
     /// plain-text system message (inline-viewport model: no full-page overlay).
     fn push_screen_text(&mut self, screen: &FullScreen) {
-        self.messages.push(RenderedMessage::SystemText {
+        self.transcript.push_message(RenderedMessage::SystemText {
             body: screen.plain_text(),
             timestamp: 0,
             is_error: false,
@@ -529,7 +546,7 @@ impl RataApp {
             }
             PickerOutcome::Selected(model, profile) => {
                 self.active_model_picker = None;
-                self.messages.push(RenderedMessage::SystemText {
+                self.transcript.push_message(RenderedMessage::SystemText {
                     body: format!("Switching model to {model}…"),
                     timestamp: 0,
                     is_error: false,
@@ -611,10 +628,12 @@ impl RataApp {
         base.max(overlay).clamp(4, 20)
     }
 
-    /// Commit finalized `messages` into the terminal's native scrollback via
-    /// [`crate::terminal::Terminal::insert_history_lines`] (written ABOVE the
-    /// bottom viewport). The actively-streaming last message is held back until
-    /// the turn ends (it still grows), so it commits once as a whole.
+    /// Commit finalized transcript cells into the terminal's native scrollback
+    /// via [`crate::terminal::Terminal::insert_history_lines`] (written ABOVE
+    /// the bottom viewport), delegating to
+    /// [`Transcript::flush_to_native_scrollback`]. The actively-streaming cell
+    /// is never committed here (it still grows in place); it commits once as a
+    /// whole when `TurnEnded` finalizes it.
     ///
     /// Generic over the backend so tests can drive it with a test backend; the
     /// runtime passes [`RataTerminal`].
@@ -622,28 +641,9 @@ impl RataApp {
         &mut self,
         terminal: &mut crate::terminal::Terminal<B>,
     ) -> io::Result<()> {
-        let width = usize::from(terminal.size()?.width.max(1));
-        while self.committed < self.messages.len() {
-            let is_last = self.committed + 1 == self.messages.len();
-            if is_last && self.current_turn.is_some() {
-                break;
-            }
-            let lines: Vec<Line<'static>> = crate::message::render_message(
-                &self.messages[self.committed],
-                width,
-                &self.theme,
-                self.verbose,
-            )
-            .iter()
-            .map(render::styled_line_to_ratatui)
-            .collect();
-            self.committed += 1;
-            if lines.is_empty() {
-                continue;
-            }
-            terminal.insert_history_lines(&lines)?;
-        }
-        Ok(())
+        let width = terminal.size()?.width.max(1);
+        self.transcript
+            .flush_to_native_scrollback(terminal, width, &self.theme)
     }
 
     /// The current streaming-spinner text: an animated Claude-accent glyph, the
@@ -696,7 +696,7 @@ impl RataApp {
         } else {
             let base = if self.completion.is_some() {
                 "↑/↓: pick  ·  Tab: complete  ·  Esc: dismiss  ·  Enter: run"
-            } else if self.verbose {
+            } else if self.transcript.verbose() {
                 "Enter: send  ·  Ctrl-O: collapse  ·  ↑/↓: history  ·  Esc: quit"
             } else {
                 "Enter: send  ·  Alt+Enter: newline  ·  Ctrl-O: verbose  ·  Esc: quit"
@@ -858,6 +858,27 @@ mod tests {
         }
     }
 
+    /// The transcript's messages in order — committed cells then the active
+    /// (streaming) cell — reconstructing the pre-Transcript `app.messages`
+    /// view so the behavior-lock assertions keep their exact indices.
+    fn messages(app: &RataApp) -> Vec<RenderedMessage> {
+        let cell_message = |cell: &dyn crate::history_cell::HistoryCell| {
+            cell.as_any()
+                .downcast_ref::<MessageHistoryCell>()
+                .expect("phase 3 transcript holds adapter cells only")
+                .message()
+                .clone()
+        };
+        let mut out: Vec<RenderedMessage> = app
+            .transcript
+            .committed_cells()
+            .iter()
+            .map(|cell| cell_message(cell.as_ref()))
+            .collect();
+        out.extend(app.transcript.active_cell().map(cell_message));
+        out
+    }
+
     #[test]
     fn alt_enter_inserts_newline_plain_enter_submits_whole_buffer() {
         let mut app = RataApp::new(Vec::new());
@@ -907,8 +928,9 @@ mod tests {
         assert!(matches!(outcome, KeyOutcome::Submit(ref p, _) if p == "hi"));
         assert_eq!(app.composer.text(), "");
         assert!(app.current_turn.is_some());
-        assert_eq!(app.messages.len(), 1);
-        assert!(matches!(app.messages[0], RenderedMessage::UserText { .. }));
+        let msgs = messages(&app);
+        assert_eq!(msgs.len(), 1);
+        assert!(matches!(msgs[0], RenderedMessage::UserText { .. }));
     }
 
     #[test]
@@ -918,7 +940,7 @@ mod tests {
             app.on_key(press(KeyCode::Enter)),
             KeyOutcome::Continue
         ));
-        assert!(app.messages.is_empty());
+        assert!(messages(&app).is_empty());
     }
 
     #[test]
@@ -930,7 +952,7 @@ mod tests {
         app.apply_turn_event(TurnEvent::TurnStarted);
         app.apply_turn_event(TurnEvent::TextDelta("Hel".to_string()));
         app.apply_turn_event(TurnEvent::TextDelta("lo".to_string()));
-        match &app.messages[1] {
+        match &messages(&app)[1] {
             RenderedMessage::AssistantText { body, .. } => assert_eq!(body, "Hello"),
             other => panic!("expected assistant text, got {other:?}"),
         }
@@ -1000,11 +1022,11 @@ mod tests {
     #[test]
     fn ctrl_o_toggles_verbose() {
         let mut app = RataApp::new(Vec::new());
-        assert!(!app.verbose);
+        assert!(!app.transcript.verbose());
         app.on_key(ctrl(KeyCode::Char('o')));
-        assert!(app.verbose);
+        assert!(app.transcript.verbose());
         app.on_key(ctrl(KeyCode::Char('o')));
-        assert!(!app.verbose);
+        assert!(!app.transcript.verbose());
     }
 
     #[test]
@@ -1025,7 +1047,7 @@ mod tests {
         assert_eq!(app.composer.text(), "pre hello world");
         // A non-existent image path is treated as text, not an image message.
         app.on_paste(" /no/such/file.png ");
-        assert!(app.messages.is_empty());
+        assert!(messages(&app).is_empty());
     }
 
     #[test]
@@ -1033,8 +1055,9 @@ mod tests {
         let mut app = RataApp::new(Vec::new());
         let outcome = submit_command(&mut app, "/image /tmp/pic.png");
         assert!(matches!(outcome, KeyOutcome::Continue));
-        assert_eq!(app.messages.len(), 1);
-        match &app.messages[0] {
+        let msgs = messages(&app);
+        assert_eq!(msgs.len(), 1);
+        match &msgs[0] {
             RenderedMessage::UserImage {
                 source_path: Some(p),
                 metadata,
@@ -1221,11 +1244,9 @@ mod tests {
         // Recognized command: no Submit; help text pushed into scrollback.
         assert!(matches!(outcome, KeyOutcome::Continue));
         assert_eq!(app.composer.text(), "");
-        assert_eq!(app.messages.len(), 1);
-        assert!(matches!(
-            app.messages[0],
-            RenderedMessage::SystemText { .. }
-        ));
+        let msgs = messages(&app);
+        assert_eq!(msgs.len(), 1);
+        assert!(matches!(msgs[0], RenderedMessage::SystemText { .. }));
         assert!(app.current_turn.is_none());
     }
 
@@ -1238,7 +1259,7 @@ mod tests {
         let outcome = app.on_key(press(KeyCode::Enter));
         // Unrecognized slash command falls through as a normal prompt.
         assert!(matches!(outcome, KeyOutcome::Submit(ref p, _) if p == "/frobnicate"));
-        assert_eq!(app.messages.len(), 1);
+        assert_eq!(messages(&app).len(), 1);
     }
 
     fn submit_command(app: &mut RataApp, cmd: &str) -> KeyOutcome {
@@ -1257,8 +1278,8 @@ mod tests {
         }]);
         let outcome = submit_command(&mut app, "/clear");
         assert!(matches!(outcome, KeyOutcome::Continue));
-        assert!(app.messages.is_empty());
-        assert_eq!(app.committed, 0);
+        assert!(messages(&app).is_empty());
+        assert_eq!(app.transcript.committed_to_terminal(), 0);
     }
 
     #[test]
@@ -1282,9 +1303,9 @@ mod tests {
             KeyOutcome::Continue
         ));
         // Both commands print their content into scrollback as system messages.
-        assert_eq!(app.messages.len(), 2);
-        assert!(app
-            .messages
+        let msgs = messages(&app);
+        assert_eq!(msgs.len(), 2);
+        assert!(msgs
             .iter()
             .all(|m| matches!(m, RenderedMessage::SystemText { .. })));
     }
@@ -1319,7 +1340,7 @@ mod tests {
             KeyOutcome::Continue
         ));
         assert!(app.active_model_picker.is_none());
-        assert_eq!(app.messages.len(), 1);
+        assert_eq!(messages(&app).len(), 1);
     }
 
     #[test]
@@ -1404,7 +1425,7 @@ mod tests {
         typ(&mut app, "  hi there  ");
         let outcome = app.on_key(press(KeyCode::Enter));
         assert!(matches!(outcome, KeyOutcome::Submit(ref p, _) if p == "hi there"));
-        match &app.messages[0] {
+        match &messages(&app)[0] {
             RenderedMessage::UserText { body, .. } => assert_eq!(body, "hi there"),
             other => panic!("expected user text, got {other:?}"),
         }
@@ -1418,7 +1439,7 @@ mod tests {
             app.on_key(press(KeyCode::Enter)),
             KeyOutcome::Continue
         ));
-        assert!(app.messages.is_empty());
+        assert!(messages(&app).is_empty());
         assert!(app.current_turn.is_none());
     }
 
@@ -1433,9 +1454,9 @@ mod tests {
             submit_command(&mut app, "/agents"),
             KeyOutcome::Continue
         ));
-        assert_eq!(app.messages.len(), 2);
-        assert!(app
-            .messages
+        let msgs = messages(&app);
+        assert_eq!(msgs.len(), 2);
+        assert!(msgs
             .iter()
             .all(|m| matches!(m, RenderedMessage::SystemText { .. })));
         assert!(app.current_turn.is_none(), "no prompt turn for commands");
@@ -1496,9 +1517,10 @@ mod tests {
             "",
             "image paste must not touch composer"
         );
-        assert_eq!(app.messages.len(), 1);
+        let msgs = messages(&app);
+        assert_eq!(msgs.len(), 1);
         let file_name = path.file_name().unwrap().to_str().unwrap();
-        match &app.messages[0] {
+        match &msgs[0] {
             RenderedMessage::UserImage {
                 source_path: Some(p),
                 metadata: Some(name),
@@ -1521,13 +1543,21 @@ mod tests {
         let mut terminal = inline_test_terminal(4);
         app.flush_scrollback(&mut terminal).unwrap();
         // The finalized user message commits; the streaming reply is held back.
-        assert_eq!(app.committed, 1);
+        assert_eq!(app.transcript.committed_to_terminal(), 1);
         app.apply_turn_event(TurnEvent::TextDelta("lo".to_string()));
         app.flush_scrollback(&mut terminal).unwrap();
-        assert_eq!(app.committed, 1, "still streaming: tail stays held back");
+        assert_eq!(
+            app.transcript.committed_to_terminal(),
+            1,
+            "still streaming: tail stays held back"
+        );
         app.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
         app.flush_scrollback(&mut terminal).unwrap();
-        assert_eq!(app.committed, 2, "turn ended: reply commits as a whole");
+        assert_eq!(
+            app.transcript.committed_to_terminal(),
+            2,
+            "turn ended: reply commits as a whole"
+        );
     }
 
     #[test]
@@ -1546,7 +1576,7 @@ mod tests {
         ]);
         let mut terminal = inline_test_terminal(4);
         app.flush_scrollback(&mut terminal).unwrap();
-        assert_eq!(app.committed, 2);
+        assert_eq!(app.transcript.committed_to_terminal(), 2);
     }
 
     #[test]

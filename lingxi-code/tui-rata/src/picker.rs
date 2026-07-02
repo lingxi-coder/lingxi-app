@@ -101,7 +101,7 @@ impl ModelPicker {
     }
 
     /// Draw the picker centered over `frame`, clearing the area beneath it.
-    pub fn render(&self, frame: &mut ratatui::Frame) {
+    pub fn render(&self, frame: &mut crate::terminal::Frame) {
         let area = frame.area();
         let width = u16::try_from(self.max_width() + 6)
             .unwrap_or(u16::MAX)

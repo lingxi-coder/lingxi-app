@@ -12,14 +12,16 @@
 //! real turn; the app cancels it on Ctrl-C).
 
 use std::io;
+use std::io::Write;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use permission::gate::{PermissionRequest, PermissionResponse};
+use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -34,6 +36,7 @@ use crate::palette::{command_items, CompletionPopup};
 use crate::picker::{ModelPicker, PickerOutcome};
 use crate::screens::FullScreen;
 use crate::session::SessionInfo;
+use crate::terminal::TerminalSession;
 use crate::vim::{VimOutcome, VimState};
 use crate::{render, RataTerminal};
 
@@ -611,14 +614,15 @@ impl RataApp {
     }
 
     /// Commit finalized `messages` into the terminal's native scrollback via
-    /// `insert_before`. The actively-streaming last message is held back until
+    /// [`crate::terminal::Terminal::insert_history_lines`] (written ABOVE the
+    /// bottom viewport). The actively-streaming last message is held back until
     /// the turn ends (it still grows), so it commits once as a whole.
     ///
-    /// Generic over the backend so tests can drive it with `TestBackend`; the
+    /// Generic over the backend so tests can drive it with a test backend; the
     /// runtime passes [`RataTerminal`].
-    fn flush_scrollback<B: ratatui::backend::Backend>(
+    fn flush_scrollback<B: Backend + Write>(
         &mut self,
-        terminal: &mut ratatui::Terminal<B>,
+        terminal: &mut crate::terminal::Terminal<B>,
     ) -> io::Result<()> {
         let width = usize::from(terminal.size()?.width.max(1));
         while self.committed < self.messages.len() {
@@ -636,13 +640,10 @@ impl RataApp {
             .map(render::styled_line_to_ratatui)
             .collect();
             self.committed += 1;
-            let h = u16::try_from(lines.len()).unwrap_or(0);
-            if h == 0 {
+            if lines.is_empty() {
                 continue;
             }
-            terminal.insert_before(h, move |buf| {
-                Paragraph::new(lines).render(buf.area, buf);
-            })?;
+            terminal.insert_history_lines(&lines)?;
         }
         Ok(())
     }
@@ -659,11 +660,12 @@ impl RataApp {
         format!("{} {verb}… ({secs}s · esc to interrupt)", FRAMES[idx])
     }
 
-    /// Draw the bottom inline viewport (history lives in the terminal's native
+    /// Draw the bottom viewport (history lives in the terminal's native
     /// scrollback via [`Self::flush_scrollback`]): a status line + the composer
     /// box, with any active overlay (completion / model picker / permission)
-    /// drawn on top.
-    fn render_viewport(&mut self, frame: &mut ratatui::Frame) {
+    /// drawn on top. Draws into the custom terminal's absolute-rect
+    /// [`crate::terminal::Frame`].
+    fn render_viewport(&mut self, frame: &mut crate::terminal::Frame) {
         let zones = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(3)])
@@ -778,11 +780,14 @@ fn is_image_path(s: &str) -> bool {
     has_img_ext && std::path::Path::new(s).is_file()
 }
 
-/// Run the interactive chat app on an INLINE viewport: history is committed to
-/// the terminal's native scrollback via [`RataApp::flush_scrollback`]; the
-/// bottom viewport (status + composer + overlays) is redrawn each tick. The
-/// viewport is recreated when its desired height changes (composer growth /
-/// overlay open). Restores the terminal on exit.
+/// Run the interactive chat app on the bottom-anchored custom terminal:
+/// history is committed to the terminal's native scrollback via
+/// [`RataApp::flush_scrollback`]; the bottom viewport (status + composer +
+/// overlays) is diff-redrawn each tick and resized in place via
+/// [`crate::terminal::Terminal::set_bottom_viewport_height`] when its desired
+/// height changes (composer growth / overlay open). Terminal modes are
+/// restored on exit — including panics — by the [`TerminalSession`] guard and
+/// the terminal's own drop (cursor style/visibility).
 ///
 /// # Errors
 /// Propagates the first terminal IO error (after restoring the terminal).
@@ -794,25 +799,25 @@ pub fn run_app(
     mut on_submit: impl FnMut(String, CancellationToken),
     mut on_switch_model: impl FnMut(String, Option<String>),
 ) -> io::Result<()> {
+    // Guard first, terminal second: locals drop in reverse order, so the
+    // terminal resets the cursor while raw mode is still active, then the
+    // guard restores cooked mode + bracketed paste.
+    let _session_guard = TerminalSession::new()?;
+    let mut terminal =
+        crate::terminal::Terminal::with_options(CrosstermBackend::new(io::stdout()))?;
     let mut app = RataApp::new(messages).with_session(session);
-    let mut height = app.viewport_height();
-    let mut terminal = crate::setup_terminal(height)?;
-    let result = app_loop(
+    app_loop(
         &mut terminal,
-        &mut height,
         &mut app,
         &mut events_rx,
         &mut permission_rx,
         &mut on_submit,
         &mut on_switch_model,
-    );
-    crate::restore_terminal(&mut terminal)?;
-    result
+    )
 }
 
 fn app_loop(
     terminal: &mut RataTerminal,
-    height: &mut u16,
     app: &mut RataApp,
     events_rx: &mut UnboundedReceiver<TurnEvent>,
     permission_rx: &mut Receiver<PermissionExchange>,
@@ -829,14 +834,10 @@ fn app_loop(
                 app.open_permission(exchange);
             }
         }
-        // Commit finalized history into the terminal's native scrollback.
+        // Size the absolute bottom viewport for this tick, THEN commit
+        // finalized history above it (insertion wraps at the viewport width).
+        terminal.set_bottom_viewport_height(app.viewport_height())?;
         app.flush_scrollback(terminal)?;
-        // Recreate the inline viewport if its desired height changed.
-        let desired = app.viewport_height();
-        if desired != *height {
-            *terminal = crate::resize_inline_viewport(desired)?;
-            *height = desired;
-        }
         terminal.draw(|frame| app.render_viewport(frame))?;
         if event::poll(Duration::from_millis(50))? {
             match event::read()? {
@@ -1373,27 +1374,28 @@ mod tests {
     // Transcript / BottomPane extraction. Adapt locations when structure moves,
     // but preserve every assertion.
 
-    use ratatui::backend::TestBackend;
     use ratatui::buffer::Cell;
     use ratatui::layout::Position;
-    use ratatui::{Terminal, TerminalOptions, Viewport};
 
-    /// An inline-viewport terminal over an 80x24 `TestBackend`, mirroring the
-    /// production `Viewport::Inline` runtime (viewport pinned at rows `0..h`
-    /// because the test cursor starts at the origin).
-    fn inline_test_terminal(viewport: u16) -> Terminal<TestBackend> {
-        Terminal::with_options(
-            TestBackend::new(80, 24),
-            TerminalOptions {
-                viewport: Viewport::Inline(viewport),
-            },
-        )
-        .expect("test terminal")
+    use crate::terminal::test_support::TestWriteBackend;
+    use crate::terminal::Terminal;
+
+    /// A bottom-anchored custom terminal over an 80x24 test backend with its
+    /// viewport sized to `viewport` rows, mirroring the production runtime
+    /// (viewport anchored at rows `0..h` because the test cursor starts at the
+    /// origin).
+    fn inline_test_terminal(viewport: u16) -> Terminal<TestWriteBackend> {
+        let mut terminal =
+            Terminal::with_options(TestWriteBackend::new(80, 24)).expect("test terminal");
+        terminal
+            .set_bottom_viewport_height(viewport)
+            .expect("viewport height");
+        terminal
     }
 
     /// Draw the bottom viewport at its self-reported height; returns the
     /// terminal for buffer/cursor inspection.
-    fn draw_viewport(app: &mut RataApp) -> Terminal<TestBackend> {
+    fn draw_viewport(app: &mut RataApp) -> Terminal<TestWriteBackend> {
         let mut terminal = inline_test_terminal(app.viewport_height());
         terminal
             .draw(|frame| app.render_viewport(frame))
@@ -1401,9 +1403,9 @@ mod tests {
         terminal
     }
 
-    /// The backend buffer as one string per row.
-    fn buffer_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
-        let buf = terminal.backend().buffer();
+    /// The last drawn frame (== the viewport rect) as one string per row.
+    fn buffer_rows(terminal: &Terminal<TestWriteBackend>) -> Vec<String> {
+        let buf = terminal.last_frame_buffer();
         let area = buf.area;
         (area.top()..area.bottom())
             .map(|y| {
@@ -1591,8 +1593,14 @@ mod tests {
             "composer bottom border: {}",
             rows[3]
         );
-        // Rows below the inline viewport stay untouched (native scrollback).
-        assert!(rows[4].trim().is_empty());
+        // The draw buffer covers EXACTLY the 4 viewport rows — rows below the
+        // viewport belong to the terminal's native scrollback and cannot be
+        // painted by the viewport draw (absolute-rect invariant).
+        assert_eq!(rows.len(), 4);
+        assert_eq!(
+            terminal.viewport_area,
+            ratatui::layout::Rect::new(0, 0, 80, 4)
+        );
     }
 
     #[test]

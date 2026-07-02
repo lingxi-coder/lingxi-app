@@ -76,7 +76,7 @@ impl Dialog {
     }
 
     /// Draw the dialog centered over `frame`, clearing the area beneath it.
-    pub fn render(&self, frame: &mut ratatui::Frame) {
+    pub fn render(&self, frame: &mut crate::terminal::Frame) {
         let area = frame.area();
         let content_w = self
             .body

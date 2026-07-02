@@ -157,7 +157,7 @@ impl FullScreen {
     }
 
     /// Draw the screen over the whole `frame`, clearing beneath it.
-    pub fn render(&self, frame: &mut ratatui::Frame) {
+    pub fn render(&self, frame: &mut crate::terminal::Frame) {
         let area = frame.area();
         frame.render_widget(Clear, area);
         let block = Block::new()

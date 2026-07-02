@@ -102,7 +102,7 @@ impl CompletionPopup {
 
     /// Draw the popup anchored just above `composer` (bordered list, cleared
     /// beneath). Grows upward from the composer's top edge.
-    pub fn render(&self, frame: &mut ratatui::Frame, composer: Rect) {
+    pub fn render(&self, frame: &mut crate::terminal::Frame, composer: Rect) {
         let rows = self.items.len().min(MAX_ROWS);
         let height = u16::try_from(rows + 2).unwrap_or(u16::MAX);
         let y = composer.y.saturating_sub(height);

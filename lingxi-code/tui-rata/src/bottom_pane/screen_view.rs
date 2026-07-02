@@ -109,6 +109,49 @@ impl ScreenView {
         )
     }
 
+    /// The `/stats` screen: statistics for the CURRENT session, computed
+    /// from live widget state (plan Phase 8). Lifetime usage aggregation
+    /// (claude-code `Stats.tsx`) needs the session-transcript store, which
+    /// this backend does not read yet — the screen scopes itself honestly.
+    #[must_use]
+    pub fn stats(
+        elapsed_secs: u64,
+        prompts_sent: usize,
+        replies_received: usize,
+        transcript_cells: usize,
+        model: Option<&ModelRow>,
+    ) -> Self {
+        let duration = if elapsed_secs >= 60 {
+            format!("{}m {:02}s", elapsed_secs / 60, elapsed_secs % 60)
+        } else {
+            format!("{elapsed_secs}s")
+        };
+        let model_label = model.map_or_else(
+            || "unknown".to_string(),
+            |m| {
+                if m.provider_label.is_empty() {
+                    m.display.clone()
+                } else {
+                    format!("{} ({})", m.display, m.provider_label)
+                }
+            },
+        );
+        let lines = vec![
+            header("This session"),
+            row("└ Duration", &duration),
+            row("└ Prompts sent", &prompts_sent.to_string()),
+            row("└ Replies received", &replies_received.to_string()),
+            row("└ Transcript cells", &transcript_cells.to_string()),
+            row("└ Model", &model_label),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Counts cover this session only.",
+                Style::default().add_modifier(Modifier::DIM),
+            )),
+        ];
+        Self::new("Stats", lines, "esc to close · ↑/↓ scroll")
+    }
+
     /// A read-only listing screen (`/mcp`, `/hooks`, `/agents`): a section
     /// header, then one entry per [`InfoRow`] (bold title + optional dim
     /// detail), or a dim "none" line when the list is empty.
@@ -146,6 +189,22 @@ impl ScreenView {
     #[must_use]
     pub fn scroll(&self) -> u16 {
         self.scroll
+    }
+
+    /// The body as plain text — spans joined per line, lines joined with
+    /// `\n`. Exposed for tests.
+    #[must_use]
+    pub fn body_text(&self) -> String {
+        self.lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 

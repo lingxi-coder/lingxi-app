@@ -20,6 +20,8 @@ pub mod chat_widget;
 pub mod color;
 pub mod command;
 pub mod composer;
+pub mod copy;
+pub mod export;
 pub mod files;
 pub mod history_cell;
 pub mod image_view;

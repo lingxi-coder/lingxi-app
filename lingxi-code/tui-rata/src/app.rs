@@ -124,6 +124,14 @@ impl<'cb> RataApp<'cb> {
                     ChatOutcome::SetTheme(setting) => {
                         tui_core::theme_persist::save_theme_setting(setting);
                     }
+                    // The confirmation is already in the transcript; write the
+                    // clipboard off-loop (fire-and-forget, like the iocraft
+                    // backend's `pump_copy_clipboard`).
+                    ChatOutcome::CopyToClipboard(text) => {
+                        std::thread::spawn(move || {
+                            crate::copy::copy_to_clipboard_native(&text);
+                        });
+                    }
                     ChatOutcome::Continue => {}
                 }
             }

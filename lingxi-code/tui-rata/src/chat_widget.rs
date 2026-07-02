@@ -57,6 +57,10 @@ pub enum ChatOutcome {
     /// already applied it live; the caller should persist the setting
     /// (best-effort, `tui_core::theme_persist`).
     SetTheme(ThemeSetting),
+    /// `/copy` resolved this text; the caller should write it to the system
+    /// clipboard (best-effort, [`crate::copy::copy_to_clipboard_native`]).
+    /// The confirmation message is already in the transcript.
+    CopyToClipboard(String),
 }
 
 /// The chat surface: owns the conversation state and the interactive footer,
@@ -89,8 +93,12 @@ pub struct ChatWidget {
     /// Permission requests waiting for the currently open prompt to resolve
     /// (prompts are serialized: one owns the keyboard at a time).
     pending_permissions: VecDeque<PermissionExchange>,
-    /// Widget-lifetime clock driving the spinner's animation frame.
+    /// Widget-lifetime clock driving the spinner's animation frame (and the
+    /// `/stats` session-duration row).
     start: std::time::Instant,
+    /// Where `/export` writes transcripts (default `~/.lingxi/exports`;
+    /// overridable so tests and embedders stay hermetic).
+    export_dir: std::path::PathBuf,
 }
 
 impl ChatWidget {
@@ -111,7 +119,14 @@ impl ChatWidget {
             activity: None,
             pending_permissions: VecDeque::new(),
             start: std::time::Instant::now(),
+            export_dir: crate::export::default_export_dir(),
         }
+    }
+
+    /// Override where `/export` writes transcripts (tests/embedders; the
+    /// default is [`crate::export::default_export_dir`]).
+    pub fn set_export_dir(&mut self, dir: std::path::PathBuf) {
+        self.export_dir = dir;
     }
 
     /// Replace the startup [`SessionInfo`] snapshot the screens and the
@@ -465,6 +480,96 @@ impl ChatWidget {
         );
         self.bottom_pane.show_view(Box::new(view));
         ChatOutcome::Continue
+    }
+
+    /// `/stats`: open the session statistics screen (live widget state:
+    /// duration, prompt/reply counts, transcript size, current model).
+    pub(crate) fn cmd_stats(&mut self, _args: &str) -> ChatOutcome {
+        use crate::history_cell::message::{AssistantTextCell, UserTextCell};
+        let cells = self.transcript.committed_cells();
+        let prompts = cells
+            .iter()
+            .filter(|c| c.as_any().downcast_ref::<UserTextCell>().is_some())
+            .count();
+        let replies = cells
+            .iter()
+            .filter(|c| c.as_any().downcast_ref::<AssistantTextCell>().is_some())
+            .count();
+        let view = ScreenView::stats(
+            self.start.elapsed().as_secs(),
+            prompts,
+            replies,
+            cells.len(),
+            self.session.models.iter().find(|m| m.is_current),
+        );
+        self.bottom_pane.show_view(Box::new(view));
+        ChatOutcome::Continue
+    }
+
+    /// `/export [filename]`: write the transcript (every committed cell's
+    /// copy-friendly raw lines — the raw-scrollback text) to a `.txt` file in
+    /// the export dir, echoing the outcome as a `system` message. No arg →
+    /// the timestamped default name; an existing target is never clobbered.
+    pub(crate) fn cmd_export(&mut self, args: &str) -> ChatOutcome {
+        use std::fmt::Write as _;
+        let mut body = String::new();
+        for cell in self.transcript.committed_cells() {
+            for line in cell.raw_lines() {
+                let _ = writeln!(body, "{line}");
+            }
+        }
+        let (display, is_error) = match crate::export::write_export(&self.export_dir, args, &body) {
+            Ok(path) => (
+                format!("Conversation exported to: {}", path.display()),
+                false,
+            ),
+            Err(crate::export::ExportError::Exists(path)) => (
+                format!(
+                    "Failed to export conversation: {} already exists (pass a different filename)",
+                    path.display()
+                ),
+                true,
+            ),
+            Err(crate::export::ExportError::Io(err)) => {
+                (format!("Failed to export conversation: {err}"), true)
+            }
+        };
+        self.transcript.push_message(RenderedMessage::SystemText {
+            body: display,
+            timestamp: 0,
+            is_error,
+        });
+        ChatOutcome::Continue
+    }
+
+    /// `/copy [N]`: resolve the Nth-latest assistant text (1 = latest,
+    /// default), echo the byte-locked confirmation/error, and hand the text
+    /// to the caller for the actual clipboard write.
+    pub(crate) fn cmd_copy(&mut self, args: &str) -> ChatOutcome {
+        use crate::history_cell::message::AssistantTextCell;
+        // Newest-first non-empty assistant bodies, capped at MAX_LOOKBACK
+        // (claude-code `collectRecentAssistantTexts`).
+        let texts: Vec<String> = self
+            .transcript
+            .committed_cells()
+            .iter()
+            .rev()
+            .filter_map(|c| c.as_any().downcast_ref::<AssistantTextCell>())
+            .map(|c| c.body().to_string())
+            .filter(|body| !body.is_empty())
+            .take(crate::copy::MAX_LOOKBACK)
+            .collect();
+        let (display, copy_text) = match crate::copy::parse_copy_command(&texts, args) {
+            crate::copy::CopyCommand::Copy { text, display } => (display, Some(text)),
+            crate::copy::CopyCommand::Error { display } => (display, None),
+        };
+        let is_error = copy_text.is_none();
+        self.transcript.push_message(RenderedMessage::SystemText {
+            body: display,
+            timestamp: 0,
+            is_error,
+        });
+        copy_text.map_or(ChatOutcome::Continue, ChatOutcome::CopyToClipboard)
     }
 
     /// `/theme`: open the theme picker on the active setting. The commit
@@ -1135,6 +1240,161 @@ mod tests {
     }
 
     #[test]
+    fn slash_stats_opens_session_stats_view_with_real_counts() {
+        let mut widget = ChatWidget::new(
+            vec![
+                RenderedMessage::UserText {
+                    body: "hi".to_string(),
+                    timestamp: 0,
+                },
+                RenderedMessage::AssistantText {
+                    body: "hello".to_string(),
+                    timestamp: 0,
+                },
+                RenderedMessage::SystemText {
+                    body: "note".to_string(),
+                    timestamp: 0,
+                    is_error: false,
+                },
+            ],
+            SessionInfo::default(),
+        );
+        assert!(matches!(
+            submit_command(&mut widget, "/stats"),
+            ChatOutcome::Continue
+        ));
+        let stats = widget
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .and_then(|v| v.as_any().downcast_ref::<ScreenView>())
+            .expect("stats screen open");
+        let text = stats.body_text();
+        assert!(text.contains("This session"), "{text}");
+        // 1 user prompt, 1 assistant reply, 3 committed cells.
+        let count_of = |label: &str| {
+            text.lines()
+                .find(|l| l.contains(label))
+                .unwrap_or_else(|| panic!("no {label} row:\n{text}"))
+                .rsplit(' ')
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(count_of("Prompts sent"), "1", "{text}");
+        assert_eq!(count_of("Replies received"), "1", "{text}");
+        assert_eq!(count_of("Transcript cells"), "3", "{text}");
+        assert!(text.contains("Counts cover this session only."), "{text}");
+        assert_eq!(widget.transcript().committed_cells().len(), 3, "no dump");
+        widget.handle_key(press(KeyCode::Esc));
+        assert!(widget.bottom_pane().view_stack().is_empty());
+    }
+
+    #[test]
+    fn slash_export_writes_raw_transcript_and_never_clobbers() {
+        let dir = std::env::temp_dir().join(format!("tui-rata-cmd-export-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let mut widget = ChatWidget::new(
+            vec![
+                RenderedMessage::UserText {
+                    body: "hi".to_string(),
+                    timestamp: 0,
+                },
+                RenderedMessage::AssistantText {
+                    body: "hello there".to_string(),
+                    timestamp: 0,
+                },
+            ],
+            SessionInfo::default(),
+        );
+        widget.set_export_dir(dir.clone());
+
+        // Named export writes the committed cells' raw (copy-friendly) text.
+        assert!(matches!(
+            submit_command(&mut widget, "/export conv"),
+            ChatOutcome::Continue
+        ));
+        let body = std::fs::read_to_string(dir.join("conv.txt")).expect("exported file");
+        assert!(body.contains("hi"), "{body}");
+        assert!(body.contains("hello there"), "{body}");
+        let echo = cell::<crate::history_cell::system::SystemTextCell>(&widget, 2);
+        assert!(
+            echo.body().starts_with("Conversation exported to: "),
+            "{}",
+            echo.body()
+        );
+        assert!(!echo.is_error());
+
+        // Re-exporting to the same name refuses to clobber, as an error echo.
+        submit_command(&mut widget, "/export conv");
+        let echo = cell::<crate::history_cell::system::SystemTextCell>(&widget, 3);
+        assert!(
+            echo.body().starts_with("Failed to export conversation:"),
+            "{}",
+            echo.body()
+        );
+        assert!(echo.is_error());
+
+        // Bare /export falls back to the timestamped default filename.
+        submit_command(&mut widget, "/export");
+        let echo = cell::<crate::history_cell::system::SystemTextCell>(&widget, 4);
+        assert!(
+            echo.body().contains("lingxi-transcript-"),
+            "{}",
+            echo.body()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn slash_copy_echoes_confirmation_and_hands_text_to_the_caller() {
+        use crate::history_cell::system::SystemTextCell;
+        let mut widget = widget();
+
+        // Empty transcript: byte-locked error, no clipboard handoff.
+        assert!(matches!(
+            submit_command(&mut widget, "/copy"),
+            ChatOutcome::Continue
+        ));
+        let echo = cell::<SystemTextCell>(&widget, 0);
+        assert_eq!(echo.body(), "No assistant message to copy");
+        assert!(echo.is_error());
+
+        // Two replies: /copy takes the latest, /copy 2 reaches back.
+        let mut widget = ChatWidget::new(
+            vec![
+                RenderedMessage::AssistantText {
+                    body: "older reply".to_string(),
+                    timestamp: 0,
+                },
+                RenderedMessage::AssistantText {
+                    body: "newest".to_string(),
+                    timestamp: 0,
+                },
+            ],
+            SessionInfo::default(),
+        );
+        let outcome = submit_command(&mut widget, "/copy");
+        assert!(matches!(outcome, ChatOutcome::CopyToClipboard(ref t) if t == "newest"));
+        assert_eq!(
+            cell::<SystemTextCell>(&widget, 2).body(),
+            "Copied to clipboard (6 characters, 1 lines)"
+        );
+        let outcome = submit_command(&mut widget, "/copy 2");
+        assert!(matches!(outcome, ChatOutcome::CopyToClipboard(ref t) if t == "older reply"));
+        // Out-of-range and junk args echo errors without a handoff.
+        assert!(matches!(
+            submit_command(&mut widget, "/copy 9"),
+            ChatOutcome::Continue
+        ));
+        assert_eq!(
+            cell::<SystemTextCell>(&widget, 4).body(),
+            "Only 2 assistant messages available to copy"
+        );
+        assert!(!widget.turn_running(), "/copy starts no turn");
+    }
+
+    #[test]
     fn slash_clear_resets_transcript_and_commit_cursor() {
         let mut widget = ChatWidget::new(
             vec![RenderedMessage::SystemText {
@@ -1153,6 +1413,23 @@ mod tests {
         ));
         assert!(widget.transcript().is_empty());
         assert_eq!(widget.transcript().committed_to_terminal(), 0);
+
+        // Criterion 17 (coherence): transcript state AND the native-scrollback
+        // commit counter reset TOGETHER — the next flush is a no-op on the
+        // emptied transcript, and new content commits cleanly from zero.
+        widget.flush_scrollback(&mut terminal).unwrap();
+        assert_eq!(widget.transcript().committed_to_terminal(), 0);
+        widget.transcript.push_message(RenderedMessage::SystemText {
+            body: "fresh".to_string(),
+            timestamp: 0,
+            is_error: false,
+        });
+        widget.flush_scrollback(&mut terminal).unwrap();
+        assert_eq!(
+            widget.transcript().committed_to_terminal(),
+            1,
+            "post-clear content commits from a zeroed cursor"
+        );
     }
 
     /// One string per buffer row.

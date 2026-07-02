@@ -16,23 +16,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 
-/// Rows shown in the popup before it stops growing.
+/// Rows shown in the popup before it stops growing (and starts scrolling to
+/// follow the highlight).
 const MAX_ROWS: usize = 6;
-
-/// The authoritative list of slash commands the ratatui backend handles
-/// (`app::RataApp::handle_slash`), with one-line descriptions. Keep in sync
-/// with the router.
-pub const COMMANDS: &[(&str, &str)] = &[
-    ("/help", "Show shortcuts and commands"),
-    ("/model", "Switch the active model"),
-    ("/doctor", "Show diagnostics"),
-    ("/mcp", "List MCP servers"),
-    ("/hooks", "List hooks"),
-    ("/agents", "List agents"),
-    ("/vim", "Toggle vim editing mode"),
-    ("/clear", "Clear the conversation"),
-    ("/exit", "Exit LingXi"),
-];
 
 /// One completion candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,20 +31,21 @@ pub struct CompletionItem {
     pub desc: String,
 }
 
-/// The commands whose name starts with `prefix` (a `/`-led token), as
-/// completion items. Empty when `prefix` is not a command fragment.
+/// The advertised registry commands whose name starts with `prefix` (a
+/// `/`-led token), as completion items — derived from the single
+/// [`crate::command::BUILTIN`] registry (plan Phase 8). Empty when `prefix`
+/// is not a command fragment.
 #[must_use]
 pub fn command_items(prefix: &str) -> Vec<CompletionItem> {
     if !prefix.starts_with('/') {
         return Vec::new();
     }
-    COMMANDS
-        .iter()
-        .filter(|(name, _)| name.starts_with(prefix))
-        .map(|(name, desc)| CompletionItem {
-            label: (*name).to_string(),
-            insert: (*name).to_string(),
-            desc: (*desc).to_string(),
+    crate::command::advertised()
+        .filter(|command| command.name.starts_with(prefix))
+        .map(|command| CompletionItem {
+            label: command.name.to_string(),
+            insert: command.name.to_string(),
+            desc: command.description.to_string(),
         })
         .collect()
 }
@@ -67,6 +54,9 @@ pub fn command_items(prefix: &str) -> Vec<CompletionItem> {
 pub struct CompletionView {
     items: Vec<CompletionItem>,
     selected: usize,
+    /// Top item index of the visible [`MAX_ROWS`] window (follows the
+    /// highlight so it can never scroll out of view).
+    offset: usize,
 }
 
 impl CompletionView {
@@ -77,7 +67,11 @@ impl CompletionView {
         if items.is_empty() {
             None
         } else {
-            Some(Self { items, selected: 0 })
+            Some(Self {
+                items,
+                selected: 0,
+                offset: 0,
+            })
         }
     }
 
@@ -96,12 +90,23 @@ impl CompletionView {
     /// Move the highlight up (clamped).
     pub fn prev(&mut self) {
         self.selected = self.selected.saturating_sub(1);
+        self.follow();
     }
 
     /// Move the highlight down (clamped).
     pub fn next(&mut self) {
         if self.selected + 1 < self.items.len() {
             self.selected += 1;
+        }
+        self.follow();
+    }
+
+    /// Keep the highlighted row inside the visible window.
+    fn follow(&mut self) {
+        if self.selected < self.offset {
+            self.offset = self.selected;
+        } else if self.selected >= self.offset + MAX_ROWS {
+            self.offset = self.selected + 1 - MAX_ROWS;
         }
     }
 
@@ -126,8 +131,9 @@ impl CompletionView {
         let lines: Vec<Line> = self
             .items
             .iter()
-            .take(MAX_ROWS)
             .enumerate()
+            .skip(self.offset)
+            .take(MAX_ROWS)
             .map(|(i, item)| {
                 let caret = if i == self.selected { "› " } else { "  " };
                 let style = if i == self.selected {
@@ -155,8 +161,9 @@ mod tests {
 
     #[test]
     fn command_items_filter_by_prefix() {
-        // A bare "/" matches every command.
-        assert_eq!(command_items("/").len(), COMMANDS.len());
+        // A bare "/" matches every ADVERTISED registry command, in order.
+        let all = command_items("/");
+        assert_eq!(all.len(), crate::command::advertised().count());
         // "/m" matches /model + /mcp.
         let m = command_items("/m");
         assert!(m.iter().any(|i| i.insert == "/model"));
@@ -165,6 +172,8 @@ mod tests {
         // Non-slash input yields nothing.
         assert!(command_items("model").is_empty());
         assert!(command_items("/zzz").is_empty());
+        // Unadvertised registry entries never surface.
+        assert!(!all.iter().any(|i| i.insert == "/image"));
     }
 
     #[test]
@@ -181,7 +190,61 @@ mod tests {
         assert_eq!(p.selected(), 0);
         p.next();
         assert_eq!(p.selected(), 1);
-        assert_eq!(p.selected_insert(), COMMANDS[1].0);
+        let second = crate::command::advertised().nth(1).unwrap().name;
+        assert_eq!(p.selected_insert(), second);
+    }
+
+    #[test]
+    fn window_follows_the_highlight_past_max_rows() {
+        // 10 items, 6 visible: walking to the end scrolls the window so the
+        // highlighted row is always rendered.
+        let items: Vec<CompletionItem> = (0..10)
+            .map(|i| CompletionItem {
+                label: format!("/cmd{i}"),
+                insert: format!("/cmd{i}"),
+                desc: String::new(),
+            })
+            .collect();
+        let mut p = CompletionView::new(items).unwrap();
+        for _ in 0..9 {
+            p.next();
+        }
+        assert_eq!(p.selected(), 9);
+        let screen = Rect::new(0, 0, 30, 12);
+        let composer = Rect::new(0, 10, 30, 2);
+        let mut buf = Buffer::empty(screen);
+        p.render(composer, &mut buf);
+        let text: String = (screen.top()..screen.bottom())
+            .map(|y| {
+                (screen.left()..screen.right())
+                    .map(|x| {
+                        buf.cell(ratatui::layout::Position::new(x, y))
+                            .map_or(" ", ratatui::buffer::Cell::symbol)
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("› /cmd9"), "highlight visible: {text}");
+        assert!(!text.contains("/cmd0"), "top rows scrolled out: {text}");
+        // Walking back up scrolls the window back to the top.
+        for _ in 0..9 {
+            p.prev();
+        }
+        let mut buf = Buffer::empty(screen);
+        p.render(composer, &mut buf);
+        let text: String = (screen.top()..screen.bottom())
+            .map(|y| {
+                (screen.left()..screen.right())
+                    .map(|x| {
+                        buf.cell(ratatui::layout::Position::new(x, y))
+                            .map_or(" ", ratatui::buffer::Cell::symbol)
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("› /cmd0"), "{text}");
     }
 
     #[test]

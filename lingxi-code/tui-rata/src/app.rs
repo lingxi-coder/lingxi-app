@@ -1378,7 +1378,7 @@ mod tests {
         assert_eq!(rows.len(), 20);
         let all = rows.join("\n");
         assert!(all.contains("Shortcuts"), "{all}");
-        assert!(all.contains("for bash mode"), "{all}");
+        assert!(all.contains("for commands"), "{all}");
         // Full-frame view: no status hints, no composer prompt beneath.
         assert!(!all.contains("Enter: send"), "status suppressed:\n{all}");
         assert!(!all.contains("│> "), "composer suppressed:\n{all}");

@@ -1,16 +1,32 @@
-//! The slash-command registry (plan Phase 6 step 9 — minimal for now; plan
-//! Phase 8 completes it into the single source for completion metadata, the
-//! help listing, and dispatch).
+//! The slash-command registry — the SINGLE source of truth for slash
+//! completion metadata, the `/help` command listing, and dispatch (plan
+//! Phase 8).
+//!
+//! [`crate::bottom_pane::completion_view::command_items`] and the `/help`
+//! screen's slash-command section
+//! ([`crate::bottom_pane::screen_view::help_lines`]) both derive from
+//! [`BUILTIN`], so the three surfaces can never drift (test-enforced by
+//! `registry_is_the_single_source_for_completion_help_and_dispatch`).
 //!
 //! [`resolve`] maps a submitted `/command [args]` buffer to its registered
 //! [`SlashCommand`]; [`crate::chat_widget::ChatWidget::handle_slash`] then
 //! runs the entry's dispatch fn — there is no hard-coded command `match` in
 //! the app. Unknown commands resolve to `None` and fall through as a normal
-//! prompt (locked behavior). Until Phase 8 unifies the sources, [`BUILTIN`]
-//! must stay in sync with
-//! [`crate::bottom_pane::completion_view::COMMANDS`] (test-enforced below).
+//! prompt (locked behavior).
 
 use crate::chat_widget::{ChatOutcome, ChatWidget};
+
+/// How a command treats trailing argument text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgSpec {
+    /// No arguments: trailing text falls through as a normal prompt.
+    None,
+    /// Arguments required: an empty tail falls through as a normal prompt.
+    Required,
+    /// Arguments optional: dispatch either way (the handler interprets the
+    /// tail, e.g. `/copy [N]`, `/color [name]`, `/export [filename]`).
+    Optional,
+}
 
 /// One registered slash command: completion/help metadata plus its dispatch.
 pub struct SlashCommand {
@@ -18,29 +34,30 @@ pub struct SlashCommand {
     pub name: &'static str,
     /// Alternate names that dispatch identically (`/quit` → `/exit`).
     pub aliases: &'static [&'static str],
-    /// One-line description (the completion popup's right column).
+    /// One-line description (the completion popup's right column and the
+    /// `/help` screen's command listing).
     pub description: &'static str,
-    /// Whether the command requires trailing arguments (`/image <path>`).
-    /// Arg-less commands reject trailing text; arg-taking commands reject an
-    /// empty tail — either mismatch falls through as a normal prompt.
-    pub accepts_args: bool,
-    /// Whether the command is advertised in the completion popup.
+    /// How the command treats trailing argument text.
+    pub args: ArgSpec,
+    /// Whether the command is advertised in the completion popup + `/help`.
     pub advertised: bool,
     /// The handler run on the widget when the command matches. Receives the
-    /// trimmed argument tail (`""` for arg-less commands).
+    /// trimmed argument tail (`""` when absent).
     pub run: fn(&mut ChatWidget, &str) -> ChatOutcome,
 }
 
-/// Every slash command the ratatui backend currently handles. Advertised
-/// entries mirror [`crate::bottom_pane::completion_view::COMMANDS`] in order,
-/// name, and description (test-enforced until plan Phase 8 makes this
-/// registry the single source).
+/// Every slash command the ratatui backend handles. Order is the completion
+/// popup order and the `/help` listing order.
+///
+/// Commands the iocraft backend advertised but that have NO data source or
+/// core API on this backend are deliberately NOT registered (never advertise
+/// "not implemented"): `/tasks` (no background-task feed reaches `run_app`).
 pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/help",
         aliases: &[],
         description: "Show shortcuts and commands",
-        accepts_args: false,
+        args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_help,
     },
@@ -48,7 +65,7 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/model",
         aliases: &[],
         description: "Switch the active model",
-        accepts_args: false,
+        args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_model,
     },
@@ -56,7 +73,7 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/doctor",
         aliases: &[],
         description: "Show diagnostics",
-        accepts_args: false,
+        args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_doctor,
     },
@@ -64,7 +81,7 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/mcp",
         aliases: &[],
         description: "List MCP servers",
-        accepts_args: false,
+        args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_mcp,
     },
@@ -72,7 +89,7 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/hooks",
         aliases: &[],
         description: "List hooks",
-        accepts_args: false,
+        args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_hooks,
     },
@@ -80,7 +97,7 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/agents",
         aliases: &[],
         description: "List agents",
-        accepts_args: false,
+        args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_agents,
     },
@@ -88,7 +105,7 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/vim",
         aliases: &[],
         description: "Toggle vim editing mode",
-        accepts_args: false,
+        args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_vim,
     },
@@ -96,7 +113,7 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/clear",
         aliases: &[],
         description: "Clear the conversation",
-        accepts_args: false,
+        args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_clear,
     },
@@ -104,7 +121,7 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/exit",
         aliases: &["/quit"],
         description: "Exit LingXi",
-        accepts_args: false,
+        args: ArgSpec::None,
         advertised: true,
         run: cmd_exit,
     },
@@ -112,11 +129,16 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/image",
         aliases: &[],
         description: "Attach an image file by path",
-        accepts_args: true,
+        args: ArgSpec::Required,
         advertised: false,
         run: ChatWidget::cmd_image,
     },
 ];
+
+/// The advertised registry entries in popup/help order.
+pub fn advertised() -> impl Iterator<Item = &'static SlashCommand> {
+    BUILTIN.iter().filter(|command| command.advertised)
+}
 
 /// `/exit` (alias `/quit`): exit the app. A free function (not a
 /// `ChatWidget` method) because it touches no widget state.
@@ -128,8 +150,8 @@ fn cmd_exit(_widget: &mut ChatWidget, _args: &str) -> ChatOutcome {
 ///
 /// `None` (the buffer falls through as a normal prompt) when the input is not
 /// `/`-led, names no registered command or alias, passes arguments to an
-/// arg-less command, or omits them for an arg-taking one — all locked
-/// pre-registry behavior.
+/// [`ArgSpec::None`] command, or omits them for an [`ArgSpec::Required`] one
+/// — all locked pre-registry behavior.
 #[must_use]
 pub fn resolve(input: &str) -> Option<(&'static SlashCommand, &str)> {
     let trimmed = input.trim();
@@ -142,33 +164,110 @@ pub fn resolve(input: &str) -> Option<(&'static SlashCommand, &str)> {
     let command = BUILTIN
         .iter()
         .find(|command| command.name == name || command.aliases.contains(&name))?;
-    if command.accepts_args && args.is_empty() {
-        return None;
-    }
-    if !command.accepts_args && !args.is_empty() {
-        return None;
+    match command.args {
+        ArgSpec::None if !args.is_empty() => return None,
+        ArgSpec::Required if args.is_empty() => return None,
+        _ => {}
     }
     Some((command, args))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::bottom_pane::completion_view::COMMANDS;
+    use std::collections::HashSet;
 
+    use super::*;
+    use crate::bottom_pane::completion_view::command_items;
+    use crate::bottom_pane::screen_view::help_lines;
+
+    /// Plan Phase 8 step 6: every registry command has completion metadata,
+    /// help metadata, and a dispatch path — all derived from ONE registry.
     #[test]
-    fn advertised_registry_matches_completion_popup_metadata() {
-        let advertised: Vec<(&str, &str)> = BUILTIN
+    fn registry_is_the_single_source_for_completion_help_and_dispatch() {
+        // Well-formed, unique entries.
+        let mut seen = HashSet::new();
+        for command in BUILTIN {
+            assert!(
+                command.name.starts_with('/') && command.name.len() > 1,
+                "malformed name {:?}",
+                command.name
+            );
+            assert!(
+                !command.description.trim().is_empty(),
+                "{} has no description",
+                command.name
+            );
+            assert!(seen.insert(command.name), "duplicate name {}", command.name);
+            for alias in command.aliases {
+                assert!(alias.starts_with('/'), "malformed alias {alias:?}");
+                assert!(seen.insert(alias), "alias collides: {alias}");
+            }
+        }
+
+        // Dispatch path: every name and alias resolves back to its entry with
+        // an argument shape the command accepts.
+        for command in BUILTIN {
+            let probe = |name: &str| match command.args {
+                ArgSpec::Required => format!("{name} x"),
+                ArgSpec::None | ArgSpec::Optional => name.to_string(),
+            };
+            let (resolved, _) = resolve(&probe(command.name))
+                .unwrap_or_else(|| panic!("{} has no dispatch path", command.name));
+            assert_eq!(resolved.name, command.name);
+            for alias in command.aliases {
+                let (resolved, _) = resolve(&probe(alias))
+                    .unwrap_or_else(|| panic!("alias {alias} has no dispatch path"));
+                assert_eq!(resolved.name, command.name, "alias {alias} mis-routes");
+            }
+        }
+
+        // Completion metadata derives from the registry: bare "/" lists every
+        // advertised command in registry order with its description.
+        let items = command_items("/");
+        assert_eq!(items.len(), advertised().count());
+        for (item, command) in items.iter().zip(advertised()) {
+            assert_eq!(item.insert, command.name);
+            assert_eq!(item.desc, command.description);
+        }
+
+        // Help metadata derives from the registry: every advertised command
+        // (name + description) appears in the /help body; unadvertised ones
+        // do not.
+        let help_text: String = help_lines()
             .iter()
-            .filter(|command| command.advertised)
-            .map(|command| (command.name, command.description))
-            .collect();
-        assert_eq!(
-            advertised,
-            COMMANDS.to_vec(),
-            "registry and completion metadata must stay in sync (same order, \
-             names, and descriptions) until plan Phase 8 unifies the source"
-        );
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for command in BUILTIN {
+            if command.advertised {
+                assert!(
+                    help_text.contains(command.name),
+                    "{} missing from /help",
+                    command.name
+                );
+                assert!(
+                    help_text.contains(command.description),
+                    "{} description missing from /help",
+                    command.name
+                );
+            } else {
+                assert!(
+                    !help_text.contains(command.name),
+                    "unadvertised {} leaked into /help",
+                    command.name
+                );
+            }
+        }
+    }
+
+    /// Deliberately dropped commands stay dropped: the iocraft backend's
+    /// `/tasks` has no data source on this backend, so it must not be
+    /// registered (plan Phase 8 step 4: never advertise "not implemented").
+    #[test]
+    fn dropped_commands_are_not_registered() {
+        assert!(resolve("/tasks").is_none());
+        assert!(!BUILTIN.iter().any(|c| c.name == "/tasks"));
     }
 
     #[test]

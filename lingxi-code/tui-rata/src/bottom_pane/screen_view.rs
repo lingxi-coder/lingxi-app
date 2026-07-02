@@ -8,10 +8,11 @@
 //! (scroll keys move the window; `Esc`/`q` close) and suppresses the status
 //! line ([`BottomPaneView::wants_status_line`] → `false`).
 //!
-//! `/help` content is ported from the iocraft `screens::help` (claude-code
-//! `HelpV2`): a `Shortcuts` section and a `Slash commands` section. Unlike the
-//! iocraft port it renders the DEFAULT chords statically (no live
-//! `keybindings.json` resolution) — a documented scaffold simplification.
+//! `/help` keeps the iocraft `screens::help` (claude-code `HelpV2`) shape — a
+//! `Shortcuts` section and a `Slash commands` section — but the shortcuts
+//! list the chords THIS backend implements and the slash-command listing
+//! derives from the single [`crate::command::BUILTIN`] registry (plan
+//! Phase 8), so `/help` can never advertise a dead chord or command.
 
 use std::any::Any;
 
@@ -204,46 +205,23 @@ fn row(key: &str, label: &str) -> Line<'static> {
     ])
 }
 
-/// Shortcut rows `(chord, label)`, ported from iocraft `help::SHORTCUTS`
-/// (default chords).
+/// Shortcut rows `(chord, label)`: the chords this ratatui backend actually
+/// implements (composer + pane routing). The former iocraft-ported list
+/// advertised chords with no handler here (`!` bash mode, `ctrl+t` tasks,
+/// `meta+p`, `/keybindings`, …) — plan Phase 8 replaces it with the honest
+/// set so `/help` never advertises a dead chord.
 const SHORTCUTS: &[(&str, &str)] = &[
-    ("!", "for bash mode"),
     ("/", "for commands"),
     ("@", "for file paths"),
-    ("&", "for background"),
-    ("/btw", "for side question"),
+    ("enter", "to send"),
+    ("alt + enter", "for a newline"),
+    ("tab", "to complete"),
+    ("↑/↓", "for history"),
     ("ctrl + o", "for verbose output"),
-    ("ctrl + t", "to toggle tasks"),
-    ("ctrl + s", "to stash prompt"),
-    ("ctrl + v", "to paste images"),
-    ("meta + p", "to switch model"),
-    ("meta + o", "to toggle fast mode"),
-    ("double tap esc", "to clear input"),
-    ("/keybindings", "to customize"),
-];
-
-/// Slash commands `(command, description)`, ported from iocraft
-/// `help::SLASH_COMMANDS`.
-const SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("/help", "Show keyboard shortcuts and commands"),
-    ("/clear", "Clear the conversation history"),
-    ("/exit", "Exit LingXi"),
-    ("/agents", "Manage agent configurations"),
-    ("/mcp", "Show configured MCP servers"),
-    ("/hooks", "Show configured hooks"),
-    ("/model", "Set the active model"),
-    ("/skills", "List available skills"),
-    ("/stats", "Show usage statistics"),
-    ("/doctor", "Diagnose the installation"),
-    ("/memory", "Edit LINGXI.md memory files"),
-    ("/theme", "Change the color theme"),
-    ("/config", "Open settings"),
-    ("/status", "Show the session status"),
-    ("/tasks", "View background tasks"),
-    ("/vim", "Toggle vim editing mode"),
-    ("/export", "Export the transcript"),
-    ("/copy", "Copy the last response"),
-    ("/color", "Set the prompt accent color"),
+    ("ctrl + a / e", "for line start/end"),
+    ("ctrl + w / u", "to delete word/line"),
+    ("esc", "to interrupt or quit"),
+    ("ctrl + c", "to cancel (twice quits)"),
 ];
 
 fn doctor_lines(d: &DoctorInfo) -> Vec<Line<'static>> {
@@ -274,9 +252,11 @@ fn doctor_lines(d: &DoctorInfo) -> Vec<Line<'static>> {
     ]
 }
 
-fn help_lines() -> Vec<Line<'static>> {
-    let mut out: Vec<Line<'static>> =
-        Vec::with_capacity(SHORTCUTS.len() + SLASH_COMMANDS.len() + 4);
+/// The `/help` body: a static shortcuts section plus the slash-command
+/// listing DERIVED from the single [`crate::command::BUILTIN`] registry (plan
+/// Phase 8) — advertised entries only, in registry order.
+pub(crate) fn help_lines() -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(SHORTCUTS.len() + 24);
     out.push(Line::from(
         "Claude understands your codebase, makes edits with your permission, \
          and executes commands — right from your terminal.",
@@ -288,8 +268,8 @@ fn help_lines() -> Vec<Line<'static>> {
     }
     out.push(Line::from(""));
     out.push(header("Slash commands"));
-    for (cmd, desc) in SLASH_COMMANDS {
-        out.push(row(cmd, desc));
+    for command in crate::command::advertised() {
+        out.push(row(command.name, command.description));
     }
     out.push(Line::from(""));
     out.push(Line::from(Span::styled(
@@ -426,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn help_body_has_both_sections_and_known_rows() {
+    fn help_body_has_both_sections_and_derives_commands_from_the_registry() {
         let lines = help_lines();
         let text: String = lines
             .iter()
@@ -436,8 +416,14 @@ mod tests {
             .join(" ");
         assert!(text.contains("Shortcuts"));
         assert!(text.contains("Slash commands"));
-        assert!(text.contains("for bash mode"));
-        assert!(text.contains("/skills"));
-        assert!(text.contains("/color"));
+        assert!(text.contains("for commands"));
+        // Every advertised registry command is listed (the registry is the
+        // single source — full sweep in command::tests).
+        for command in crate::command::advertised() {
+            assert!(text.contains(command.name), "{} missing", command.name);
+        }
+        // Dead chords from the iocraft help are gone.
+        assert!(!text.contains("for bash mode"));
+        assert!(!text.contains("/keybindings"));
     }
 }

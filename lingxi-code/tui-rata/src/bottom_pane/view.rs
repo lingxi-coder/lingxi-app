@@ -60,6 +60,8 @@ pub enum CommandAction {
     ClearTranscript,
     /// Exit the app (`/exit`, `/quit`).
     Quit,
+    /// Apply (and persist) this theme setting (`/theme` picker commit).
+    SetTheme(tui_core::theme::ThemeSetting),
 }
 
 /// A transient focused surface shown in the bottom pane: permission prompt,

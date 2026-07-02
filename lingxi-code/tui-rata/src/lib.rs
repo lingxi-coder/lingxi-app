@@ -17,6 +17,7 @@
 pub mod app;
 pub mod bottom_pane;
 pub mod chat_widget;
+pub mod color;
 pub mod command;
 pub mod composer;
 pub mod files;

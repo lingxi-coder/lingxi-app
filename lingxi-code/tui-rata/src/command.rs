@@ -134,6 +134,22 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_config,
     },
     SlashCommand {
+        name: "/theme",
+        aliases: &[],
+        description: "Change the color theme",
+        args: ArgSpec::None,
+        advertised: true,
+        run: ChatWidget::cmd_theme,
+    },
+    SlashCommand {
+        name: "/color",
+        aliases: &[],
+        description: "Set the session accent color",
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_color,
+    },
+    SlashCommand {
         name: "/vim",
         aliases: &[],
         description: "Toggle vim editing mode",

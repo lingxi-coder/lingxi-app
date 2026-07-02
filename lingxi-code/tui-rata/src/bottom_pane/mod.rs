@@ -20,6 +20,7 @@ pub mod model_picker_view;
 pub mod pending_input_preview;
 pub mod permission_view;
 pub mod screen_view;
+pub mod theme_picker_view;
 pub mod view;
 
 use std::time::{Duration, Instant};
@@ -126,6 +127,9 @@ pub struct BottomPane {
     pending_input_preview: PendingInputPreview,
     /// Theme for status-row styling.
     theme: Theme,
+    /// Session accent color (`/color`): tints the composer box border when
+    /// set. `None` → the theme default (no tint).
+    accent: Option<tui_core::render::StyleColor>,
 }
 
 impl BottomPane {
@@ -142,6 +146,7 @@ impl BottomPane {
             verbose: false,
             pending_input_preview: PendingInputPreview::new(),
             theme,
+            accent: None,
         }
     }
 
@@ -229,6 +234,23 @@ impl BottomPane {
     /// Mirror the transcript's verbose mode for the status hint text.
     pub fn set_verbose(&mut self, enabled: bool) {
         self.verbose = enabled;
+    }
+
+    /// Swap the render theme (`/theme` picker commit).
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
+    /// Set or clear the session accent color (`/color`), tinting the
+    /// composer box border.
+    pub fn set_accent(&mut self, accent: Option<tui_core::render::StyleColor>) {
+        self.accent = accent;
+    }
+
+    /// The session accent color, when one is set (`/color`).
+    #[must_use]
+    pub fn accent(&self) -> Option<tui_core::render::StyleColor> {
+        self.accent
     }
 
     /// Whether the composer is empty (ignoring surrounding whitespace).
@@ -553,7 +575,9 @@ impl Renderable for BottomPane {
         let zones = self.zones(area);
         Paragraph::new(self.status_line()).render(zones[0], buf);
         self.pending_input_preview.render(zones[1], buf);
-        ComposerView::new(&self.composer).render(zones[2], buf);
+        ComposerView::new(&self.composer)
+            .with_accent(self.accent.map(crate::style_adapter::to_ratatui))
+            .render(zones[2], buf);
         if let Some(popup) = &self.completion {
             popup.render(zones[2], buf);
         }

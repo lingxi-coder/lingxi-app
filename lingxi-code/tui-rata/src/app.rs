@@ -119,6 +119,11 @@ impl<'cb> RataApp<'cb> {
                     ChatOutcome::SwitchModel(model, profile) => {
                         (self.callbacks.on_switch_model)(model, profile);
                     }
+                    // The widget already applied the theme live; persist the
+                    // preference best-effort (no-op on any IO failure).
+                    ChatOutcome::SetTheme(setting) => {
+                        tui_core::theme_persist::save_theme_setting(setting);
+                    }
                     ChatOutcome::Continue => {}
                 }
             }
@@ -195,6 +200,13 @@ pub fn run_app(
     on_submit: impl FnMut(String, CancellationToken),
     on_switch_model: impl FnMut(String, Option<String>),
 ) -> io::Result<()> {
+    // Startup theme (production path only, keeping widget construction
+    // hermetic for tests): OSC-11 background detection first — it manages
+    // raw mode itself, so it runs BEFORE the session guard — then the
+    // persisted preference (default `Auto`, resolved against the detection).
+    tui_core::theme_detect::detect_terminal_theme();
+    let startup_theme = tui_core::theme_persist::load_theme_setting()
+        .unwrap_or(tui_core::theme::ThemeSetting::Auto);
     // Guard first, terminal second: locals drop in reverse order, so the
     // terminal resets the cursor while raw mode is still active, then the
     // guard restores cooked mode + bracketed paste.
@@ -211,6 +223,7 @@ pub fn run_app(
             on_switch_model: Box::new(on_switch_model),
         },
     );
+    app.chat_widget.set_theme(startup_theme);
     app.run(&mut terminal)
 }
 

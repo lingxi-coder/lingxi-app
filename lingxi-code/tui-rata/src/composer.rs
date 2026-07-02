@@ -452,13 +452,25 @@ impl Composer {
 /// [`crate::terminal::Frame`].
 pub struct ComposerView<'a> {
     composer: &'a Composer,
+    /// Session accent tint (`/color`): applied to the box border when set.
+    accent: Option<ratatui::style::Color>,
 }
 
 impl<'a> ComposerView<'a> {
     /// A view over `composer`.
     #[must_use]
     pub fn new(composer: &'a Composer) -> Self {
-        Self { composer }
+        Self {
+            composer,
+            accent: None,
+        }
+    }
+
+    /// Tint the composer box border with the session accent color (`/color`).
+    #[must_use]
+    pub fn with_accent(mut self, accent: Option<ratatui::style::Color>) -> Self {
+        self.accent = accent;
+        self
     }
 
     /// The first content row shown when only `visible_rows` rows fit: scrolls
@@ -471,7 +483,10 @@ impl<'a> ComposerView<'a> {
 
 impl Renderable for ComposerView<'_> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        let block = Block::new().borders(Borders::ALL);
+        let mut block = Block::new().borders(Borders::ALL);
+        if let Some(accent) = self.accent {
+            block = block.border_style(ratatui::style::Style::default().fg(accent));
+        }
         let inner = block.inner(area);
         block.render(area, buf);
         // The first line carries the "> " prompt; wrapped lines align under it.

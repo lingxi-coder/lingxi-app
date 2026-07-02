@@ -29,10 +29,11 @@ use tokio_util::sync::CancellationToken;
 use tui_core::message::RenderedMessage;
 use tui_core::orchestrator_bridge::TurnEvent;
 use tui_core::permission_bridge::PermissionExchange;
-use tui_core::theme::{Theme, ThemeName};
+use tui_core::theme::{theme_for, Theme, ThemeName, ThemeSetting};
 
 use crate::bottom_pane::permission_view::PermissionView;
 use crate::bottom_pane::screen_view::ScreenView;
+use crate::bottom_pane::theme_picker_view::ThemePickerView;
 use crate::bottom_pane::{BottomPane, BottomPaneOutcome, BottomPaneStatus, CommandAction};
 use crate::history_cell::message::AssistantTextCell;
 use crate::renderable::Renderable;
@@ -52,6 +53,10 @@ pub enum ChatOutcome {
     /// The user picked a model in `/model`; the caller should switch to
     /// `(request_model, profile)` via `OrchestratorHandle::switch_model`.
     SwitchModel(String, Option<String>),
+    /// The user committed a theme in the `/theme` picker. The widget has
+    /// already applied it live; the caller should persist the setting
+    /// (best-effort, `tui_core::theme_persist`).
+    SetTheme(ThemeSetting),
 }
 
 /// The chat surface: owns the conversation state and the interactive footer,
@@ -69,8 +74,10 @@ pub struct ChatWidget {
     session: SessionInfo,
     /// Theme for transcript rendering (native-scrollback flush).
     theme: Theme,
-    /// Name of the active theme (drives the `/theme` picker's current marker
-    /// and the `/status`/`/config` rows).
+    /// The active theme *preference* (drives the `/theme` picker's current
+    /// marker; `Auto` re-resolves on apply).
+    theme_setting: ThemeSetting,
+    /// Resolved name of the active theme (the `/status`/`/config` rows).
     theme_name: ThemeName,
     /// Cancellation token for the in-flight turn, if any.
     current_turn: Option<CancellationToken>,
@@ -97,6 +104,7 @@ impl ChatWidget {
             bottom_pane: BottomPane::new(theme),
             session,
             theme,
+            theme_setting: ThemeSetting::Named(ThemeName::Dark),
             theme_name: ThemeName::Dark,
             current_turn: None,
             turn_started_at: None,
@@ -110,6 +118,29 @@ impl ChatWidget {
     /// model picker render from.
     pub fn set_session(&mut self, session: SessionInfo) {
         self.session = session;
+    }
+
+    /// Apply a theme preference live: resolve it (`Auto` consults the OSC-11
+    /// cache / `$COLORFGBG` / color depth) and swap the render palette on the
+    /// transcript flush path and the bottom pane. Used by the startup theme
+    /// load in [`crate::app::run_app`] and the `/theme` picker commit.
+    pub fn set_theme(&mut self, setting: ThemeSetting) {
+        self.theme_setting = setting;
+        self.theme_name = setting.resolve();
+        self.theme = theme_for(self.theme_name);
+        self.bottom_pane.set_theme(self.theme);
+    }
+
+    /// The active theme preference (`/theme` picker current marker; tests).
+    #[must_use]
+    pub fn theme_setting(&self) -> ThemeSetting {
+        self.theme_setting
+    }
+
+    /// The resolved name of the active theme (`/status` row; tests).
+    #[must_use]
+    pub fn theme_name(&self) -> ThemeName {
+        self.theme_name
     }
 
     /// Route one key press: feed the pane the current turn status (Ctrl-C
@@ -436,6 +467,39 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
+    /// `/theme`: open the theme picker on the active setting. The commit
+    /// comes back as [`CommandAction::SetTheme`] via the view stack.
+    pub(crate) fn cmd_theme(&mut self, _args: &str) -> ChatOutcome {
+        self.bottom_pane
+            .show_view(Box::new(ThemePickerView::new(self.theme_setting)));
+        ChatOutcome::Continue
+    }
+
+    /// `/color [name]`: set/clear/list the session accent color (tints the
+    /// composer box). Pure parse ([`crate::color::parse_color_command`]) +
+    /// a byte-locked `system` echo; the accent itself is session-only.
+    pub(crate) fn cmd_color(&mut self, args: &str) -> ChatOutcome {
+        let (display, is_error) = match crate::color::parse_color_command(args) {
+            crate::color::ColorCommand::List { display } => (display, false),
+            crate::color::ColorCommand::Reset { display } => {
+                self.bottom_pane.set_accent(None);
+                (display, false)
+            }
+            crate::color::ColorCommand::Set { name, display } => {
+                self.bottom_pane
+                    .set_accent(Some(crate::color::accent_color(&name)));
+                (display, false)
+            }
+            crate::color::ColorCommand::Invalid { display } => (display, true),
+        };
+        self.transcript.push_message(RenderedMessage::SystemText {
+            body: display,
+            timestamp: 0,
+            is_error,
+        });
+        ChatOutcome::Continue
+    }
+
     /// `/vim`: toggle vim editing mode and echo the new state.
     pub(crate) fn cmd_vim(&mut self, _args: &str) -> ChatOutcome {
         let now_on = self.bottom_pane.toggle_vim();
@@ -564,6 +628,11 @@ impl ChatWidget {
                 ChatOutcome::Continue
             }
             CommandAction::Quit => ChatOutcome::Quit,
+            CommandAction::SetTheme(setting) => {
+                // Applied live here; the caller persists it (best-effort).
+                self.set_theme(setting);
+                ChatOutcome::SetTheme(setting)
+            }
         }
     }
 
@@ -978,6 +1047,91 @@ mod tests {
                 "{cmd} closes back to the composer"
             );
         }
+    }
+
+    #[test]
+    fn slash_theme_opens_picker_and_enter_applies_and_reports_for_persistence() {
+        let mut widget = widget();
+        assert_eq!(
+            widget.theme_setting(),
+            ThemeSetting::Named(ThemeName::Dark),
+            "hermetic default"
+        );
+        assert!(matches!(
+            submit_command(&mut widget, "/theme"),
+            ChatOutcome::Continue
+        ));
+        assert!(widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ThemePickerView>());
+        // Move from "Dark mode" (index 1) to "Light mode" (index 2), commit.
+        widget.handle_key(press(KeyCode::Down));
+        let outcome = widget.handle_key(press(KeyCode::Enter));
+        // The theme is applied live AND surfaced so the app can persist it.
+        assert!(matches!(
+            outcome,
+            ChatOutcome::SetTheme(ThemeSetting::Named(ThemeName::Light))
+        ));
+        assert_eq!(
+            widget.theme_setting(),
+            ThemeSetting::Named(ThemeName::Light)
+        );
+        assert_eq!(widget.theme_name(), ThemeName::Light);
+        assert_eq!(widget.theme, tui_core::theme::theme_for(ThemeName::Light));
+        assert!(
+            widget.bottom_pane().view_stack().is_empty(),
+            "picker closes on commit"
+        );
+        assert!(widget.transcript().is_empty(), "no scrollback dump");
+
+        // Esc cancels without touching the applied theme.
+        submit_command(&mut widget, "/theme");
+        widget.handle_key(press(KeyCode::Esc));
+        assert!(widget.bottom_pane().view_stack().is_empty());
+        assert_eq!(widget.theme_name(), ThemeName::Light);
+    }
+
+    #[test]
+    fn slash_color_sets_resets_lists_and_rejects_with_system_echoes() {
+        use crate::history_cell::system::SystemTextCell;
+        let mut widget = widget();
+
+        // Set: accent applied to the pane + byte-locked echo.
+        submit_command(&mut widget, "/color cyan");
+        assert_eq!(
+            widget.bottom_pane().accent(),
+            Some(crate::color::accent_color("cyan"))
+        );
+        assert_eq!(
+            cell::<SystemTextCell>(&widget, 0).body(),
+            "Session color set to: cyan"
+        );
+
+        // Invalid: error echo, accent untouched.
+        submit_command(&mut widget, "/color chartreuse");
+        assert!(widget.bottom_pane().accent().is_some());
+        let invalid = cell::<SystemTextCell>(&widget, 1);
+        assert!(invalid.body().starts_with("Invalid color \"chartreuse\"."));
+        assert!(invalid.is_error(), "invalid color echoes as an error");
+
+        // Reset alias: accent cleared.
+        submit_command(&mut widget, "/color default");
+        assert_eq!(widget.bottom_pane().accent(), None);
+        assert_eq!(
+            cell::<SystemTextCell>(&widget, 2).body(),
+            "Session color reset to default"
+        );
+
+        // Bare /color: lists the available colors (ArgSpec::Optional).
+        submit_command(&mut widget, "/color");
+        let list = cell::<SystemTextCell>(&widget, 3);
+        assert!(
+            list.body().starts_with("Please provide a color."),
+            "{}",
+            list.body()
+        );
+        assert!(!widget.turn_running(), "no prompt turn for /color");
     }
 
     #[test]

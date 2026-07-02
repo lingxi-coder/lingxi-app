@@ -9,8 +9,8 @@
 use iocraft::prelude::*;
 
 use crate::components::messages::user_tool_result::{INDENT, MARKER};
-use crate::theme::TuiTheme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::TuiTheme;
 
 /// Props for [`RateLimitMessage`].
 #[derive(Debug, Clone, Default, Props)]
@@ -58,7 +58,8 @@ pub fn RateLimitMessage(props: &RateLimitProps) -> impl Into<AnyElement<'static>
         .upsell
         .clone()
         .map(|u| {
-            element! { Text(content: format!("{INDENT}{u}"), color: TuiTheme::DIM.to_iocraft()) }.into_any()
+            element! { Text(content: format!("{INDENT}{u}"), color: TuiTheme::DIM.to_iocraft()) }
+                .into_any()
         })
         .into_iter()
         .collect();

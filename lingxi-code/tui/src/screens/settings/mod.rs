@@ -38,8 +38,8 @@ use engine::settings::EffectiveSettings;
 use iocraft::prelude::*;
 use traits::{CostSnapshot, OrchestratorHandle, StatusSnapshot};
 
-use crate::theme::TuiTheme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::TuiTheme;
 
 pub mod config;
 // (M7-13) The "Settings" tab module is intentionally named `settings` inside

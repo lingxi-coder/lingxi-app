@@ -8,9 +8,9 @@
 
 use iocraft::prelude::*;
 
+use crate::render_iocraft::StyleColorIocraftExt;
 use crate::screens::settings::SettingsData;
 use crate::theme::TuiTheme;
-use crate::render_iocraft::StyleColorIocraftExt;
 
 /// The documented M8 per-model gap line — kept verbatim as the divergence marker.
 pub const M8_GAP_LINE: &str = "Per-model cost breakdown is not available yet (M8).";

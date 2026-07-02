@@ -12,8 +12,8 @@ use iocraft::prelude::*;
 
 use crate::render::markdown::{render as render_markdown, MarkdownTheme};
 use crate::render::StyleColor;
-use crate::theme::TuiTheme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::TuiTheme;
 
 /// `∴ ` marker. U+2234 (0xE2 0x88 0xB4) + ASCII space. dim+italic.
 pub const THINKING_MARKER: &str = "\u{2234} ";

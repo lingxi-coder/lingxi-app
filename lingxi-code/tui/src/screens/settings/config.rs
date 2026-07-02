@@ -7,9 +7,9 @@
 
 use iocraft::prelude::*;
 
+use crate::render_iocraft::StyleColorIocraftExt;
 use crate::screens::settings::SettingsData;
 use crate::theme::TuiTheme;
-use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Render the Config tab body to a plain string (snapshot-testable). Reads the
 /// merged effective settings; `None` fields render `(default)`/`(none)`.

@@ -7,8 +7,8 @@
 use iocraft::prelude::*;
 
 use crate::multiagent::style::agent_color_from_name;
-use crate::theme::Theme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::Theme;
 
 /// `BLACK_CIRCLE` + ` ` (claude-code `figures.ts`): `⏺` (U+23FA) on macOS,
 /// `●` (U+25CF) elsewhere.

@@ -8,8 +8,8 @@
 use iocraft::prelude::*;
 
 use crate::multiagent::style::{agent_color, AgentColor};
-use crate::theme::Theme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::Theme;
 
 /// Props for [`TaskAssignmentMessage`].
 #[derive(Debug, Clone, Default, Props)]

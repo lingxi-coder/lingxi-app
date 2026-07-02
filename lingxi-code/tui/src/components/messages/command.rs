@@ -13,8 +13,8 @@
 
 use iocraft::prelude::*;
 
-use crate::theme::TuiTheme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::TuiTheme;
 
 /// `❯ ` pointer prefix + space (figures.pointer U+276F, color `subtle`).
 pub const PREFIX: &str = "\u{276F} ";

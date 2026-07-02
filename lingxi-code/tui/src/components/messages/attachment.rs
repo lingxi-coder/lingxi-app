@@ -14,8 +14,8 @@
 
 use iocraft::prelude::*;
 
-use crate::theme::TuiTheme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::TuiTheme;
 
 /// `⧉` selected-lines glyph (U+29C9).
 pub const SELECTED_GLYPH: &str = "\u{29C9}";

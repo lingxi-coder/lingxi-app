@@ -10,8 +10,8 @@
 
 use iocraft::prelude::*;
 
-use crate::theme::TuiTheme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::TuiTheme;
 
 /// Hard cap on displayed prompt text.
 pub const MAX_DISPLAY_CHARS: usize = 10_000;

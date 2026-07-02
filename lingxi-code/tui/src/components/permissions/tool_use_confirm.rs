@@ -19,9 +19,9 @@
 //! - `Up` / `BackTab` → step focus backward
 #![forbid(unsafe_code)]
 
+use crate::render_iocraft::StyleColorIocraftExt;
 use crossterm::event::{KeyCode, KeyEvent};
 use iocraft::prelude::*;
-use crate::render_iocraft::StyleColorIocraftExt;
 
 use super::{DialogFocus, DialogResolution};
 use crate::theme::TuiTheme;

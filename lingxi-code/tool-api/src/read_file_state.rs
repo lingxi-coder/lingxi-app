@@ -399,7 +399,11 @@ mod tests {
             set(&map, PathBuf::from(format!("/b/{i}")), entry("0123456789")); // 10 bytes
         }
         let guard = map.lock().unwrap();
-        assert!(guard.total_bytes() <= 25, "over budget: {}", guard.total_bytes());
+        assert!(
+            guard.total_bytes() <= 25,
+            "over budget: {}",
+            guard.total_bytes()
+        );
         assert!(guard.len() <= 2, "too many survived: {}", guard.len());
     }
 
@@ -412,8 +416,15 @@ mod tests {
         set(&map, PathBuf::from("/B"), entry("b"));
         assert!(get(&map, Path::new("/A")).is_some()); // promote A to MRU
         set(&map, PathBuf::from("/C"), entry("c")); // evicts LRU = B
-        assert!(get(&map, Path::new("/A")).is_some(), "A promoted, must survive");
-        assert_eq!(get(&map, Path::new("/B")), None, "B was LRU, must be evicted");
+        assert!(
+            get(&map, Path::new("/A")).is_some(),
+            "A promoted, must survive"
+        );
+        assert_eq!(
+            get(&map, Path::new("/B")),
+            None,
+            "B was LRU, must be evicted"
+        );
         assert!(get(&map, Path::new("/C")).is_some());
     }
 
@@ -446,7 +457,11 @@ mod tests {
         // A lone entry larger than the byte budget is kept (lru-cache never
         // evicts the key it just set when it's the only one).
         let map = new_read_file_state_map_with_limits(100, 4);
-        set(&map, PathBuf::from("/big"), entry("this content far exceeds four bytes"));
+        set(
+            &map,
+            PathBuf::from("/big"),
+            entry("this content far exceeds four bytes"),
+        );
         assert!(
             get(&map, Path::new("/big")).is_some(),
             "lone over-budget entry must be retained"

@@ -23,8 +23,8 @@ use iocraft::prelude::*;
 
 use super::fuzzy::filtered_ranked;
 use crate::render::truncate_to_width_ellipsis;
-use crate::theme::Theme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::Theme;
 
 /// Max dropdown rows shown at once (claude-code `OVERLAY_MAX_ITEMS`).
 pub const OVERLAY_MAX_ITEMS: usize = 5;

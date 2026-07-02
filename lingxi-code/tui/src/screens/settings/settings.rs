@@ -7,9 +7,9 @@
 use engine::settings::tracer::{FieldProvenance, Source};
 use iocraft::prelude::*;
 
+use crate::render_iocraft::StyleColorIocraftExt;
 use crate::screens::settings::SettingsData;
 use crate::theme::TuiTheme;
-use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Camel-case wire keys surfaced in the provenance table, in display order.
 /// These are the JSON keys (NOT the Rust `snake_case` names) that

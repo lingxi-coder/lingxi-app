@@ -38,10 +38,10 @@ pub mod user_teammate;
 pub mod user_text;
 pub mod user_tool_result;
 
+use crate::render::StyleColor;
 use crate::state::RenderedMessage;
 use crate::theme::Theme;
 use assistant_tool_use::{render_assistant_tool_use_to_string, AssistantToolUseProps};
-use crate::render::StyleColor;
 use user_tool_result::{render_user_tool_result_to_string, UserToolResultProps};
 
 pub use tui_core::message_render::{
@@ -281,9 +281,9 @@ pub fn render_entry_to_string_at_width(
                 .collect();
             resource_update::render_resource_update_to_string(&parsed)
         }
-        RenderedMessage::UserImage { image_id, metadata, .. } => {
-            image::render_image_label(*image_id, metadata.as_deref())
-        }
+        RenderedMessage::UserImage {
+            image_id, metadata, ..
+        } => image::render_image_label(*image_id, metadata.as_deref()),
         RenderedMessage::Attachment { attachment } => {
             attachment::render_attachment_to_string(attachment)
         }
@@ -484,9 +484,9 @@ pub fn render_entry_to_terminal_lines(
                 .collect();
             plain_terminal_lines(&resource_update::render_resource_update_to_string(&parsed))
         }
-        RenderedMessage::UserImage { image_id, metadata, .. } => {
-            plain_terminal_lines(&image::render_image_label(*image_id, metadata.as_deref()))
-        }
+        RenderedMessage::UserImage {
+            image_id, metadata, ..
+        } => plain_terminal_lines(&image::render_image_label(*image_id, metadata.as_deref())),
         RenderedMessage::Attachment { attachment } => {
             plain_terminal_lines(&attachment::render_attachment_to_string(attachment))
         }

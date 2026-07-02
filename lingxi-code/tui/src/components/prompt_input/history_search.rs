@@ -11,9 +11,9 @@
 //! and return a new state (or, for accept/cancel, the resulting prompt text).
 //! The live mount in `root.rs` calls the same functions the tests call.
 
+use crate::render_iocraft::StyleColorIocraftExt;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use iocraft::prelude::*;
-use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Search-overlay state. `Some(_)` in `AppState.history_search` means the
 /// overlay owns all keys.

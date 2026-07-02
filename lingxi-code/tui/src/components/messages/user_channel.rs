@@ -9,8 +9,8 @@
 
 use iocraft::prelude::*;
 
-use crate::theme::Theme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::Theme;
 
 /// `← ` inbound-channel arrow (U+2190 + space).
 pub const ARROW: &str = "\u{2190} ";

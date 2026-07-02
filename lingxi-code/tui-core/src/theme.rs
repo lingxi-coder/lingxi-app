@@ -615,8 +615,11 @@ mod tests {
         // ANSI theme uses named colors, not Rgb.
         let dark_ansi = theme_for(ThemeName::DarkAnsi);
         assert_eq!(dark_ansi.error, StyleColor::Named(NamedColor::BrightRed)); // ansi:redBright
-        assert_eq!(dark_ansi.success, StyleColor::Named(NamedColor::BrightGreen)); // ansi:greenBright
-                                                     // Every theme resolves (no panic) and is Copy.
+        assert_eq!(
+            dark_ansi.success,
+            StyleColor::Named(NamedColor::BrightGreen)
+        ); // ansi:greenBright
+           // Every theme resolves (no panic) and is Copy.
         for n in ThemeName::ALL {
             let _t: Theme = theme_for(n);
         }

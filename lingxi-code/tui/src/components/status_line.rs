@@ -10,8 +10,8 @@
 
 use std::path::PathBuf;
 
-use iocraft::prelude::*;
 use crate::render_iocraft::StyleColorIocraftExt;
+use iocraft::prelude::*;
 use permission::PermissionMode;
 use unicode_width::UnicodeWidthStr;
 

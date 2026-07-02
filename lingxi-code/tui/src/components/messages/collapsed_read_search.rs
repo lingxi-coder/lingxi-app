@@ -15,8 +15,8 @@
 
 use iocraft::prelude::*;
 
-use crate::theme::TuiTheme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::TuiTheme;
 
 /// Dim gutter for the summary + each expanded entry row (2 spaces + U+23BF +
 /// 2 spaces).

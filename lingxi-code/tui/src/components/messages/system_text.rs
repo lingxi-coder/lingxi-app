@@ -8,9 +8,9 @@
 
 use iocraft::prelude::*;
 
+use crate::render_iocraft::StyleColorIocraftExt;
 use crate::state::SystemLevel;
 use crate::theme::Theme;
-use crate::render_iocraft::StyleColorIocraftExt;
 
 /// `BLACK_CIRCLE` marker (ma-03): `⏺ ` (U+23FA) on macOS, `● ` (U+25CF)
 /// elsewhere — followed by an ASCII space.

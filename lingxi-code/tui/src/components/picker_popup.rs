@@ -10,8 +10,8 @@
 
 use iocraft::prelude::*;
 
-use crate::theme::Theme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::Theme;
 
 /// Leading marker glyph for a row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -6,8 +6,8 @@
 //! `CompactionCompleted` handler).
 use iocraft::prelude::*;
 
-use crate::theme::TuiTheme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::TuiTheme;
 
 /// Locked boundary line. `✻` = U+273B.
 pub const BOUNDARY_LINE: &str = "\u{273B} Conversation compacted (ctrl+o for history)";

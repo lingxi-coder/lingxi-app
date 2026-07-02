@@ -18,11 +18,11 @@
 //! neither frame exists — they are documented, not dead-coded.
 #![forbid(unsafe_code)]
 
+use crate::render_iocraft::StyleColorIocraftExt;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use iocraft::prelude::*;
 use session::jsonl::loader::{format_rfc3339_seconds, SessionMetadata};
 use uuid::Uuid;
-use crate::render_iocraft::StyleColorIocraftExt;
 
 /// One display row derived from a [`SessionMetadata`]. Terminal-free.
 #[derive(Debug, Clone, PartialEq, Eq)]

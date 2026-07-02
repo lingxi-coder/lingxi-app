@@ -20,8 +20,8 @@
 
 use std::time::Instant;
 
-use iocraft::prelude::*;
 use crate::render_iocraft::StyleColorIocraftExt;
+use iocraft::prelude::*;
 
 use crate::components::prompt_input::{
     apply_backspace, apply_insert, apply_move, apply_newline, CursorMove as PiCursor,

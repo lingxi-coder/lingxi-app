@@ -16,8 +16,8 @@
 //!   - focus prefix: `> ` (ASCII)
 #![allow(clippy::needless_pass_by_value)]
 
-use iocraft::prelude::*;
 use crate::render_iocraft::StyleColorIocraftExt;
+use iocraft::prelude::*;
 use protocol::ToolUseId;
 
 use crate::render::ansi::parse_ansi;

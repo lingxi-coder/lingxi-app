@@ -316,6 +316,10 @@ async fn run_ratatui(tui_build: crate::init::TuiBuild) -> i32 {
     let bridge_rx = tui_build.bridge_rx;
     let permission_rx = tui_build.permission_rx;
     let turn_tx = tui_build.turn_tx;
+    // (B4 Task 5 parity) Thread the composition root's shared subscription
+    // slot so the widget's rate-limit composer reads the live snapshot at
+    // compose time — same wiring as the iocraft `with_subscription` path.
+    let subscription = tui_build.runtime.subscription.clone();
     let session = build_session_info(orchestrator.as_ref()).await;
     let handle = tokio::runtime::Handle::current();
     let switch_orch = orchestrator.clone();
@@ -353,6 +357,7 @@ async fn run_ratatui(tui_build: crate::init::TuiBuild) -> i32 {
             session,
             bridge_rx,
             permission_rx,
+            Some(subscription),
             on_submit,
             on_switch_model,
         )

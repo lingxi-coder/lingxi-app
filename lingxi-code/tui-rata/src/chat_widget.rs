@@ -99,6 +99,33 @@ pub struct ChatWidget {
     /// Where `/export` writes transcripts (default `~/.lingxi/exports`;
     /// overridable so tests and embedders stay hermetic).
     export_dir: std::path::PathBuf,
+    /// Session-cumulative cost (`$0.0000`, 4-decimal claude-code parity) from
+    /// the latest [`TurnEvent::CostUpdated`]; shown in the status row.
+    cost: Option<String>,
+    /// The last rate-limit notice text pushed to the transcript, so identical
+    /// consecutive [`TurnEvent::RateLimit`] snapshots never stack (the old
+    /// backend's `state.last_rate_limit_text` dedupe slot; reset by `/clear`
+    /// with the scrollback).
+    last_rate_limit_text: Option<String>,
+    /// One-shot guard for the overage-transition notice
+    /// (`useRateLimitWarningNotification.tsx` `hasShownOverageNotification`):
+    /// set when the notice fires, reset when a `RateLimit` event shows the
+    /// session has LEFT overage. Deliberately survives `/clear` — TS
+    /// component state outlives transcript clears.
+    has_shown_overage_notification: bool,
+    /// Composition-root-shared subscription slot (`None` until the embedder
+    /// wires one via [`Self::set_subscription`]; the root's background fetch
+    /// fills it). Read at rate-limit compose time for subscription-granular
+    /// copy; absent/unfilled degrades to the unknown-subscription default
+    /// (TS-conservative), exactly like the old backend's
+    /// `AppState::subscription_snapshot`.
+    subscription: Option<traits::subscription::SharedSubscription>,
+    /// Validated terminal escape sequences from
+    /// [`TurnEvent::TerminalSequence`] (hook-returned, allowlisted +
+    /// BEL-normalized by the orchestrator), staged until the app loop drains
+    /// them via [`Self::take_terminal_sequences`] and writes the bytes to the
+    /// terminal that owns the controlling tty (claude-code `BEo`).
+    pending_terminal_sequences: Vec<String>,
 }
 
 impl ChatWidget {
@@ -120,6 +147,11 @@ impl ChatWidget {
             pending_permissions: VecDeque::new(),
             start: std::time::Instant::now(),
             export_dir: crate::export::default_export_dir(),
+            cost: None,
+            last_rate_limit_text: None,
+            has_shown_overage_notification: false,
+            subscription: None,
+            pending_terminal_sequences: Vec::new(),
         }
     }
 
@@ -185,7 +217,11 @@ impl ChatWidget {
     /// `TextDelta` mutates it in place, `ToolUseStart`/`ToolUseResult` set and
     /// clear the spinner activity, `TurnEnded` finalizes the active cell
     /// (moves it to the committed history) and clears the in-flight cancel
-    /// token; other variants are ignored for now.
+    /// token. `CostUpdated` refreshes the status-row cost, `ContextPressure`
+    /// sets/clears the pane banner, `CompactionCompleted` folds a
+    /// compact-boundary marker, `RateLimit` composes a transcript notice, and
+    /// `TerminalSequence` stages a write-through escape — every bridge-emitted
+    /// variant is handled (fix round 1: no wildcard drop).
     pub fn apply_turn_event(&mut self, event: TurnEvent) {
         match event {
             TurnEvent::TurnStarted => {
@@ -229,8 +265,160 @@ impl ChatWidget {
                 self.turn_started_at = None;
                 self.activity = None;
             }
-            _ => {}
+            TurnEvent::CostUpdated(cost_str) => {
+                // Update the status-row cost so the next render pass shows the
+                // post-turn dollar amount (old backend: `state.status.cost`).
+                self.cost = Some(cost_str);
+            }
+            TurnEvent::ContextPressure { banner } => {
+                // (TokenWarning) The orchestrator-computed context-pressure
+                // banner renders as its own pane row next pass; `None` clears a
+                // previously-shown banner once the context drops below the
+                // warning threshold (claude-code's `<TokenWarning>` returning
+                // null).
+                self.bottom_pane.set_context_pressure(banner);
+            }
+            TurnEvent::TerminalSequence { seq } => {
+                // #6: stage the validated terminal escape sequence; the app
+                // loop drains [`Self::take_terminal_sequences`] and writes the
+                // bytes to the terminal that owns the controlling tty
+                // (claude-code `BEo`; the old backend's async
+                // `pump_terminal_sequence`).
+                self.pending_terminal_sequences.push(seq);
+            }
+            TurnEvent::CompactionCompleted {
+                messages_before,
+                messages_after,
+                ..
+            } => {
+                // M7-04 parity: fold a `CompactBoundary` marker (renders
+                // `✻ Conversation compacted (ctrl+o for history)`; counts are
+                // retained on the variant for debug/telemetry parity but not
+                // rendered). Consecutive boundaries de-dupe to one marker —
+                // the old backend's `push_compact_boundary` contract.
+                self.push_compact_boundary(messages_before, messages_after);
+            }
+            TurnEvent::RateLimit {
+                status,
+                rate_limit_type,
+                utilization,
+                resets_at,
+                claim_resets_at,
+                overage_status,
+                overage_resets_at,
+                overage_disabled_reason,
+                fallback_available,
+            } => {
+                self.apply_rate_limit(&crate::rate_limit_messages::RateLimitInfo {
+                    status,
+                    rate_limit_type,
+                    utilization,
+                    resets_at,
+                    claim_resets_at,
+                    overage_status,
+                    overage_resets_at,
+                    overage_disabled_reason,
+                    fallback_available,
+                });
+            }
+            // Deliberately non-visible (named arms, not a wildcard):
+            // `RawUtilization`'s ONLY consumer is the configured statusline
+            // *command*'s `rate_limits` input (StatusLine.tsx:50-65) — an
+            // embedder-config surface this backend does not have ("statusline
+            // -only, unlike RateLimit", per the old backend); the reserved
+            // `PermissionRequest` variant is never emitted by the bridge —
+            // live prompts arrive through the `permission_bridge` channel
+            // into [`Self::open_permission`] instead.
+            TurnEvent::RawUtilization { .. } | TurnEvent::PermissionRequest { .. } => {}
         }
+    }
+
+    /// Fold a compaction boundary into the transcript, de-duping consecutive
+    /// boundaries (exactly one marker renders even if two sources report the
+    /// same compaction — the old backend's `push_compact_boundary`).
+    fn push_compact_boundary(&mut self, messages_before: u32, messages_after: u32) {
+        if self
+            .transcript
+            .committed_cells()
+            .last()
+            .is_some_and(|cell| {
+                cell.as_any()
+                    .downcast_ref::<crate::history_cell::system::CompactBoundaryCell>()
+                    .is_some()
+            })
+        {
+            return;
+        }
+        self.transcript
+            .push_message(RenderedMessage::CompactBoundary {
+                messages_before,
+                messages_after,
+            });
+    }
+
+    /// Fold one `TurnEvent::RateLimit` header snapshot: compose the
+    /// claude-code notice (`getRateLimitMessage`) and push it unless it
+    /// duplicates the last rendered text, then fire the one-shot
+    /// overage-transition notice (`useRateLimitWarningNotification.tsx`) on
+    /// entering overage — reset the flag on leaving it. Ported from the old
+    /// backend's `streaming::apply_event` `RateLimit` arm.
+    fn apply_rate_limit(&mut self, info: &crate::rate_limit_messages::RateLimitInfo) {
+        // Subscription-granular copy: the snapshot the composition root
+        // resolved (`None`/unfilled until the background fetch lands →
+        // default = unknown subscription, TS-conservative).
+        let sub = self.subscription_snapshot().unwrap_or_default();
+        if let Some(composed) = crate::rate_limit_messages::compose_rate_limit(info, &sub) {
+            if self.last_rate_limit_text.as_deref() != Some(composed.text.as_str()) {
+                self.last_rate_limit_text = Some(composed.text.clone());
+                self.transcript.push_message(RenderedMessage::RateLimit {
+                    text: composed.text,
+                    upsell: composed.upsell,
+                });
+            }
+        }
+        // Overage-transition notice: fire ONCE on entering overage when
+        // `!isTeamOrEnterprise || hasBillingAccess` (tsx :62); reset the
+        // one-shot flag on leaving overage (tsx :70-72). Guarded by its own
+        // flag (not the text dedupe slot) and survives `/clear`, like the TS
+        // component state.
+        if crate::rate_limit_messages::is_using_overage(info) {
+            if !self.has_shown_overage_notification
+                && (!sub.is_team_or_enterprise() || sub.has_claude_ai_billing_access())
+            {
+                self.has_shown_overage_notification = true;
+                self.transcript.push_message(RenderedMessage::RateLimit {
+                    text: crate::rate_limit_messages::using_overage_text(info, &sub),
+                    upsell: None,
+                });
+            }
+        } else {
+            self.has_shown_overage_notification = false;
+        }
+    }
+
+    /// Current resolved subscription snapshot, if the embedder wired a slot
+    /// and the seed/background fetch has filled it. A poisoned lock degrades
+    /// to `None` (conservative copy, never a panic in the event-fold path) —
+    /// the documented `SharedSubscription` reader stance.
+    fn subscription_snapshot(&self) -> Option<traits::subscription::SubscriptionSnapshot> {
+        self.subscription
+            .as_ref()
+            .and_then(|s| s.read().ok())
+            .and_then(|guard| guard.clone())
+    }
+
+    /// Wire the composition root's shared subscription slot so the rate-limit
+    /// composer reads the live snapshot at compose time (the old backend's
+    /// `Runtime::with_subscription`).
+    pub fn set_subscription(&mut self, slot: traits::subscription::SharedSubscription) {
+        self.subscription = Some(slot);
+    }
+
+    /// Drain the staged `TurnEvent::TerminalSequence` escapes (FIFO order).
+    /// The app loop writes them through to the terminal's writer.
+    #[must_use]
+    pub fn take_terminal_sequences(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_terminal_sequences)
     }
 
     /// Open a permission prompt for `exchange` by pushing a
@@ -612,9 +800,20 @@ impl ChatWidget {
     }
 
     /// `/clear`: drop the transcript (committed + active + commit cursor).
+    /// The rate-limit dedupe slot resets with the scrollback: a suppressed
+    /// identical notice would otherwise never reappear in the now-empty
+    /// transcript. (`has_shown_overage_notification` deliberately NOT reset:
+    /// the TS flag is component state, surviving transcript clears.)
     pub(crate) fn cmd_clear(&mut self, _args: &str) -> ChatOutcome {
-        self.transcript.clear();
+        self.clear_transcript();
         ChatOutcome::Continue
+    }
+
+    /// Shared `/clear` effect (slash path and [`CommandAction::ClearTranscript`]
+    /// view path): drop the transcript and the rate-limit dedupe slot together.
+    fn clear_transcript(&mut self) {
+        self.transcript.clear();
+        self.last_rate_limit_text = None;
     }
 
     /// `/image <path>`: record an image message for `path` so a graphics
@@ -658,6 +857,7 @@ impl ChatWidget {
         BottomPaneStatus {
             running: self.current_turn.is_some(),
             text: self.spinner_text(),
+            cost: self.cost.clone(),
         }
     }
 
@@ -724,7 +924,7 @@ impl ChatWidget {
     fn run_command(&mut self, action: CommandAction) -> ChatOutcome {
         match action {
             CommandAction::ClearTranscript => {
-                self.transcript.clear();
+                self.clear_transcript();
                 ChatOutcome::Continue
             }
             CommandAction::Quit => ChatOutcome::Quit,
@@ -1654,5 +1854,276 @@ mod tests {
             widget.handle_key(press(KeyCode::Enter)),
             ChatOutcome::Quit
         ));
+    }
+
+    // ===== Fix round 1: the remaining bridge-emitted TurnEvent variants =====
+
+    /// The rendered widget rows at `width`, sized to the desired height.
+    fn rendered_rows(widget: &mut ChatWidget, width: u16) -> Vec<String> {
+        let area = Rect::new(0, 0, width, widget.desired_height(width).max(4));
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+        buffer_rows(&buf)
+    }
+
+    #[test]
+    fn cost_updated_shows_in_the_status_row_idle_and_running() {
+        let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::CostUpdated("$0.0123".to_string()));
+        // Idle hints row carries the dim cost suffix.
+        let rows = rendered_rows(&mut widget, 80);
+        assert!(
+            rows[0].contains("Enter: send") && rows[0].contains("$0.0123"),
+            "idle status row: {}",
+            rows[0]
+        );
+        // Running spinner row carries it too, and a later event replaces it.
+        submit_command(&mut widget, "go");
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::CostUpdated("$0.0456".to_string()));
+        let rows = rendered_rows(&mut widget, 80);
+        let status = rows
+            .iter()
+            .find(|r| r.contains("esc to interrupt"))
+            .expect("running status row");
+        assert!(status.contains("$0.0456"), "running status row: {status}");
+        assert!(!status.contains("$0.0123"), "stale cost replaced: {status}");
+    }
+
+    #[test]
+    fn context_pressure_banner_renders_its_own_row_and_clears() {
+        let mut widget = widget();
+        let width = 80;
+        let idle_height = widget.desired_height(width);
+        widget.apply_turn_event(TurnEvent::ContextPressure {
+            banner: Some(traits::ContextPressureBanner {
+                text: "Context low (12% remaining)".to_string(),
+                level: traits::ContextPressureLevel::Warning,
+            }),
+        });
+        assert_eq!(
+            widget.bottom_pane().context_pressure().map(|b| b.level),
+            Some(traits::ContextPressureLevel::Warning)
+        );
+        // The banner adds exactly one pane row, rendered between the status
+        // row and the composer.
+        assert_eq!(widget.desired_height(width), idle_height + 1);
+        let rows = rendered_rows(&mut widget, width);
+        assert!(
+            rows[1].contains("Context low (12% remaining)"),
+            "banner row: {}",
+            rows[1]
+        );
+        assert!(
+            rows.iter().any(|r| r.starts_with("│> ")),
+            "composer still visible:\n{}",
+            rows.join("\n")
+        );
+        // `None` clears the banner and its row.
+        widget.apply_turn_event(TurnEvent::ContextPressure { banner: None });
+        assert!(widget.bottom_pane().context_pressure().is_none());
+        assert_eq!(widget.desired_height(width), idle_height);
+    }
+
+    #[test]
+    fn compaction_completed_folds_one_deduped_compact_boundary() {
+        use crate::history_cell::system::CompactBoundaryCell;
+        let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::CompactionCompleted {
+            messages_before: 40,
+            messages_after: 8,
+            bytes_saved: 1024,
+        });
+        assert_eq!(cells(&widget).len(), 1);
+        let _ = cell::<CompactBoundaryCell>(&widget, 0);
+        // A duplicate report of the same compaction de-dupes to ONE marker
+        // (the old backend's `push_compact_boundary` contract).
+        widget.apply_turn_event(TurnEvent::CompactionCompleted {
+            messages_before: 40,
+            messages_after: 8,
+            bytes_saved: 1024,
+        });
+        assert_eq!(cells(&widget).len(), 1, "consecutive boundaries de-dupe");
+        // A NON-boundary message in between makes the next boundary render.
+        widget.transcript.push_message(RenderedMessage::SystemText {
+            body: "between".to_string(),
+            timestamp: 0,
+            is_error: false,
+        });
+        widget.apply_turn_event(TurnEvent::CompactionCompleted {
+            messages_before: 12,
+            messages_after: 4,
+            bytes_saved: 2048,
+        });
+        assert_eq!(cells(&widget).len(), 3);
+        let _ = cell::<CompactBoundaryCell>(&widget, 2);
+    }
+
+    /// A rejected five-hour rate-limit header snapshot.
+    fn rate_limit_rejected() -> TurnEvent {
+        TurnEvent::RateLimit {
+            status: Some("rejected".to_string()),
+            rate_limit_type: Some("five_hour".to_string()),
+            utilization: None,
+            resets_at: None,
+            claim_resets_at: None,
+            overage_status: None,
+            overage_resets_at: None,
+            overage_disabled_reason: None,
+            fallback_available: None,
+        }
+    }
+
+    #[test]
+    fn rate_limit_composes_a_notice_and_dedupes_identical_text() {
+        use crate::history_cell::system::RateLimitCell;
+        let mut widget = widget();
+        widget.apply_turn_event(rate_limit_rejected());
+        assert_eq!(cells(&widget).len(), 1);
+        let notice = cell::<RateLimitCell>(&widget, 0);
+        assert_eq!(notice.text(), "You've hit your session limit");
+        assert_eq!(notice.upsell(), None, "unknown subscription → no upsell");
+        // An identical snapshot composes the same text → suppressed.
+        widget.apply_turn_event(rate_limit_rejected());
+        assert_eq!(cells(&widget).len(), 1, "identical notices never stack");
+        // `/clear` resets the dedupe slot with the scrollback: the SAME
+        // notice can reappear in the now-empty transcript.
+        submit_command(&mut widget, "/clear");
+        widget.apply_turn_event(rate_limit_rejected());
+        assert_eq!(cells(&widget).len(), 1);
+        assert_eq!(
+            cell::<RateLimitCell>(&widget, 0).text(),
+            "You've hit your session limit"
+        );
+    }
+
+    #[test]
+    fn rate_limit_overage_transition_notice_fires_once_and_rearms_on_leaving() {
+        use crate::history_cell::system::RateLimitCell;
+        let overage = || TurnEvent::RateLimit {
+            status: Some("rejected".to_string()),
+            rate_limit_type: Some("five_hour".to_string()),
+            utilization: None,
+            resets_at: None,
+            claim_resets_at: None,
+            overage_status: Some("allowed".to_string()),
+            overage_resets_at: None,
+            overage_disabled_reason: None,
+            fallback_available: None,
+        };
+        let mut widget = widget();
+        // Entering overage: no composed notice (isUsingOverage + allowed →
+        // null), but the ONE-SHOT transition notice fires.
+        widget.apply_turn_event(overage());
+        assert_eq!(cells(&widget).len(), 1);
+        assert_eq!(
+            cell::<RateLimitCell>(&widget, 0).text(),
+            "You're now using extra usage"
+        );
+        assert!(widget.has_shown_overage_notification);
+        // Staying in overage: the flag suppresses a repeat.
+        widget.apply_turn_event(overage());
+        assert_eq!(cells(&widget).len(), 1, "one-shot while in overage");
+        // The flag SURVIVES /clear (TS component state) — no repeat after it.
+        submit_command(&mut widget, "/clear");
+        widget.apply_turn_event(overage());
+        assert!(
+            widget.has_shown_overage_notification,
+            "flag survives /clear"
+        );
+        assert!(cells(&widget).is_empty(), "no repeat notice after /clear");
+        // Leaving overage resets the flag; re-entering fires again.
+        widget.apply_turn_event(TurnEvent::RateLimit {
+            status: Some("allowed".to_string()),
+            rate_limit_type: None,
+            utilization: None,
+            resets_at: None,
+            claim_resets_at: None,
+            overage_status: None,
+            overage_resets_at: None,
+            overage_disabled_reason: None,
+            fallback_available: None,
+        });
+        assert!(!widget.has_shown_overage_notification);
+        widget.apply_turn_event(overage());
+        assert_eq!(cells(&widget).len(), 1);
+        assert_eq!(
+            cell::<RateLimitCell>(&widget, 0).text(),
+            "You're now using extra usage"
+        );
+    }
+
+    #[test]
+    fn rate_limit_reads_the_wired_subscription_slot_at_compose_time() {
+        use crate::history_cell::system::RateLimitCell;
+        let mut widget = widget();
+        // A live composition-root slot, filled AFTER wiring (the background
+        // fetch landing) — the composer reads it at compose time.
+        let slot: traits::subscription::SharedSubscription =
+            std::sync::Arc::new(std::sync::RwLock::new(None));
+        widget.set_subscription(std::sync::Arc::clone(&slot));
+        *slot.write().unwrap() = Some(traits::subscription::SubscriptionSnapshot {
+            is_subscriber: true,
+            subscription_type: Some("pro".to_string()),
+            billing_type: Some("stripe_subscription".to_string()),
+            ..Default::default()
+        });
+        widget.apply_turn_event(rate_limit_rejected());
+        let notice = cell::<RateLimitCell>(&widget, 0);
+        assert_eq!(notice.text(), "You've hit your session limit");
+        assert!(
+            notice.upsell().is_some(),
+            "subscriber snapshot → subscription-granular error upsell"
+        );
+    }
+
+    #[test]
+    fn terminal_sequences_stage_in_order_and_drain_once() {
+        let mut widget = widget();
+        assert!(widget.take_terminal_sequences().is_empty());
+        widget.apply_turn_event(TurnEvent::TerminalSequence {
+            seq: "\u{1b}]0;title\u{7}".to_string(),
+        });
+        widget.apply_turn_event(TurnEvent::TerminalSequence {
+            seq: "\u{1b}]9;notify\u{7}".to_string(),
+        });
+        assert_eq!(
+            widget.take_terminal_sequences(),
+            vec![
+                "\u{1b}]0;title\u{7}".to_string(),
+                "\u{1b}]9;notify\u{7}".to_string()
+            ],
+            "FIFO order"
+        );
+        assert!(
+            widget.take_terminal_sequences().is_empty(),
+            "drain consumes the stage"
+        );
+        // Staging never touches the transcript.
+        assert!(widget.transcript().is_empty());
+    }
+
+    #[test]
+    fn raw_utilization_and_reserved_permission_variant_are_documented_noops() {
+        // RawUtilization's only consumer is the configured statusline
+        // *command* input — a surface this backend does not have; the
+        // reserved PermissionRequest variant is never emitted by the bridge
+        // (live prompts arrive via the permission channel). Both fold without
+        // any visible or turn-state change.
+        let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::RawUtilization {
+            five_hour_utilization: Some(0.5),
+            five_hour_resets_at: Some(1),
+            seven_day_utilization: Some(0.2),
+            seven_day_resets_at: Some(2),
+        });
+        widget.apply_turn_event(TurnEvent::PermissionRequest {
+            tool: "Bash".to_string(),
+            input: serde_json::json!({}),
+        });
+        assert!(widget.transcript().is_empty());
+        assert!(!widget.turn_running());
+        assert!(!widget.has_open_permission());
+        assert!(widget.take_terminal_sequences().is_empty());
     }
 }

@@ -26,6 +26,7 @@ pub mod files;
 pub mod history_cell;
 pub mod image_view;
 pub mod message;
+pub mod rate_limit_messages;
 pub mod render;
 pub mod renderable;
 pub mod session;

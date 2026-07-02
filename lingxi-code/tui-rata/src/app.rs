@@ -101,6 +101,10 @@ impl<'cb> RataApp<'cb> {
             while let Ok(exchange) = self.permission_rx.try_recv() {
                 self.open_permission(exchange);
             }
+            // Hook-returned terminal escapes (`TurnEvent::TerminalSequence`,
+            // already validated + BEL-normalized) write through to the tty
+            // BEFORE the draw so the diff pass never interleaves with them.
+            self.write_terminal_sequences(terminal)?;
             let width = terminal.size()?.width;
             terminal.set_bottom_viewport_height(self.viewport_height(width))?;
             self.flush_scrollback(terminal)?;
@@ -169,6 +173,29 @@ impl<'cb> RataApp<'cb> {
         self.chat_widget.desired_height(width).clamp(4, 20)
     }
 
+    /// Write the staged hook-returned terminal escape sequences
+    /// (`TurnEvent::TerminalSequence`) straight to the terminal's writer —
+    /// the host that owns the controlling tty (claude-code `BEo`; the old
+    /// backend's async `pump_terminal_sequence` writing to stdout). The
+    /// sequences are allowlisted OSC/BEL escapes that never move the cursor,
+    /// so writing them between frames cannot corrupt the viewport diff.
+    fn write_terminal_sequences<B: Backend + Write>(
+        &mut self,
+        terminal: &mut crate::terminal::Terminal<B>,
+    ) -> io::Result<()> {
+        let sequences = self.chat_widget.take_terminal_sequences();
+        if sequences.is_empty() {
+            return Ok(());
+        }
+        let backend = terminal.backend_mut();
+        for seq in sequences {
+            backend.write_all(seq.as_bytes())?;
+        }
+        // Disambiguated: the raw writer flush (`io::Write`), not
+        // `ratatui::backend::Backend::flush`.
+        Write::flush(backend)
+    }
+
     /// Commit finalized transcript cells into the terminal's native
     /// scrollback (see [`ChatWidget::flush_scrollback`]).
     fn flush_scrollback<B: Backend + Write>(
@@ -198,6 +225,11 @@ impl<'cb> RataApp<'cb> {
 /// restored on exit — including panics — by the [`TerminalSession`] guard and
 /// the terminal's own drop (cursor style/visibility).
 ///
+/// `subscription` is the composition root's shared subscription slot (seeded/
+/// filled by its background fetch); the rate-limit composer reads the live
+/// snapshot at compose time. Pass `None` when the embedder has no slot — the
+/// copy degrades to the unknown-subscription default (TS-conservative).
+///
 /// # Errors
 /// Propagates the first terminal IO error (after restoring the terminal).
 pub fn run_app(
@@ -205,6 +237,7 @@ pub fn run_app(
     session: SessionInfo,
     events_rx: UnboundedReceiver<TurnEvent>,
     permission_rx: Receiver<PermissionExchange>,
+    subscription: Option<traits::subscription::SharedSubscription>,
     on_submit: impl FnMut(String, CancellationToken),
     on_switch_model: impl FnMut(String, Option<String>),
 ) -> io::Result<()> {
@@ -232,6 +265,9 @@ pub fn run_app(
         },
     );
     app.chat_widget.set_theme(startup_theme);
+    if let Some(slot) = subscription {
+        app.chat_widget.set_subscription(slot);
+    }
     app.run(&mut terminal)
 }
 
@@ -1454,6 +1490,39 @@ mod tests {
             escapes.contains("\x1b[0 q"),
             "terminal drop must reset the cursor style during unwind; got: {escapes:?}"
         );
+    }
+
+    #[test]
+    fn staged_terminal_sequences_write_through_to_the_terminal_raw_stream() {
+        // Fix round 1: `TurnEvent::TerminalSequence` (hook-returned, already
+        // validated) must reach the tty byte stream — the tick drains the
+        // widget's stage and writes it to the terminal's writer verbatim.
+        let mut app = test_app(Vec::new());
+        let backend = TestWriteBackend::new(80, 24);
+        let raw = backend.raw_handle();
+        let mut terminal = Terminal::with_options(backend).expect("terminal");
+        app.apply_turn_event(TurnEvent::TerminalSequence {
+            seq: "\u{1b}]0;lingxi title\u{7}".to_string(),
+        });
+        app.apply_turn_event(TurnEvent::TerminalSequence {
+            seq: "\u{1b}]9;done\u{7}".to_string(),
+        });
+        raw.borrow_mut().clear();
+        app.write_terminal_sequences(&mut terminal).expect("write");
+        let bytes = raw.borrow().clone();
+        let out = String::from_utf8_lossy(&bytes);
+        let title = out
+            .find("\u{1b}]0;lingxi title\u{7}")
+            .expect("title escape");
+        let notify = out.find("\u{1b}]9;done\u{7}").expect("notify escape");
+        assert!(
+            title < notify,
+            "write-through preserves FIFO order: {out:?}"
+        );
+        // The stage drained: a second tick writes nothing.
+        raw.borrow_mut().clear();
+        app.write_terminal_sequences(&mut terminal).expect("write");
+        assert!(raw.borrow().is_empty(), "stage consumed on first drain");
     }
 
     // ===== Plan Phase 13: layout and resize behavior =====

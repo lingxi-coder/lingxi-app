@@ -60,6 +60,9 @@ pub struct BottomPaneStatus {
     /// The spinner/status text shown while running (owner-computed from its
     /// turn state: activity label, elapsed seconds, animation frame).
     pub text: String,
+    /// Session-cumulative cost (`$0.0000` — `TurnEvent::CostUpdated`),
+    /// appended dim at the end of the status row when known.
+    pub cost: Option<String>,
 }
 
 /// What the owner must do after the pane routed one key or paste. Local
@@ -125,6 +128,10 @@ pub struct BottomPane {
     verbose: bool,
     /// Preview of queued inputs (empty seam until a queue source exists).
     pending_input_preview: PendingInputPreview,
+    /// Owner-fed context-pressure banner (`TurnEvent::ContextPressure` — the
+    /// claude-code `<TokenWarning>` line). Rendered as its own row between the
+    /// status row and the composer; `None` renders nothing.
+    context_pressure: Option<traits::ContextPressureBanner>,
     /// Theme for status-row styling.
     theme: Theme,
     /// Session accent color (`/color`): tints the composer box border when
@@ -145,6 +152,7 @@ impl BottomPane {
             status: BottomPaneStatus::default(),
             verbose: false,
             pending_input_preview: PendingInputPreview::new(),
+            context_pressure: None,
             theme,
             accent: None,
         }
@@ -235,6 +243,18 @@ impl BottomPane {
     /// Mirror the transcript's verbose mode for the status hint text.
     pub fn set_verbose(&mut self, enabled: bool) {
         self.verbose = enabled;
+    }
+
+    /// Set or clear the owner-fed context-pressure banner
+    /// (`TurnEvent::ContextPressure`); `None` removes the banner row.
+    pub fn set_context_pressure(&mut self, banner: Option<traits::ContextPressureBanner>) {
+        self.context_pressure = banner;
+    }
+
+    /// The context-pressure banner currently shown, if any (tests/owner).
+    #[must_use]
+    pub fn context_pressure(&self) -> Option<&traits::ContextPressureBanner> {
+        self.context_pressure.as_ref()
     }
 
     /// Swap the render theme (`/theme` picker commit).
@@ -508,16 +528,27 @@ impl BottomPane {
 
     /// The status row: the running spinner (owner-fed text), the armed-Ctrl-C
     /// hint, or the idle key hints (with the vim mode label when enabled).
+    /// The session-cumulative cost (`TurnEvent::CostUpdated`) is appended dim
+    /// at the end of the spinner/hint variants once known (the old backend's
+    /// `state.status.cost` slot; the transient armed-Ctrl-C hint stays clean).
     fn status_line(&self) -> Line<'static> {
         let dim = crate::style_adapter::to_ratatui(self.theme.dim);
+        let cost_span = || {
+            self.status
+                .cost
+                .as_ref()
+                .map(|cost| Span::styled(format!("  ·  {cost}"), Style::default().fg(dim)))
+        };
         if self.status.running {
             let claude = crate::style_adapter::to_ratatui(self.theme.claude);
             // The spinner text already carries "esc to interrupt"; Esc while
             // running interrupts (it does NOT quit), so no "Esc: quit" here.
-            return Line::from(vec![
+            let mut spans = vec![
                 Span::styled(self.status.text.clone(), Style::default().fg(claude)),
                 Span::styled("   ·  Ctrl-C: cancel", Style::default().fg(dim)),
-            ]);
+            ];
+            spans.extend(cost_span());
+            return Line::from(spans);
         }
         if self.ctrl_c_armed() {
             let claude = crate::style_adapter::to_ratatui(self.theme.claude);
@@ -537,16 +568,35 @@ impl BottomPane {
             Some(vim) => format!("[{}]  {base}", vim.label()),
             None => base.to_string(),
         };
-        Line::from(Span::styled(text, Style::default().fg(dim)))
+        let mut spans = vec![Span::styled(text, Style::default().fg(dim))];
+        spans.extend(cost_span());
+        Line::from(spans)
     }
 
-    /// The pane's vertical zones within `area`: status row, queued-input
-    /// preview, the completion popup's reserved rows (zero when closed), and
-    /// the composer (which keeps the full remainder so overlay-grown frames
-    /// look identical to the pre-pane renderer). Reserving the popup rows —
-    /// instead of letting the composer keep them — is what makes the popup
-    /// actually visible above the composer inside the grown pane (plan Phase
-    /// 13 layout fix: it used to be squeezed against the pane top).
+    /// The context-pressure banner row (claude-code `<TokenWarning>`): the
+    /// byte-exact orchestrator-computed text, colored by severity (`Dim` →
+    /// theme dim, `Warning`/`Error` → the matching theme colors). Only called
+    /// when a banner is set (its zone is zero-height otherwise).
+    fn context_pressure_line(&self, banner: &traits::ContextPressureBanner) -> Line<'static> {
+        let color = match banner.level {
+            traits::ContextPressureLevel::Dim => self.theme.dim,
+            traits::ContextPressureLevel::Warning => self.theme.warning,
+            traits::ContextPressureLevel::Error => self.theme.error,
+        };
+        Line::from(Span::styled(
+            banner.text.clone(),
+            Style::default().fg(crate::style_adapter::to_ratatui(color)),
+        ))
+    }
+
+    /// The pane's vertical zones within `area`: status row, context-pressure
+    /// banner (zero-height when clear), queued-input preview, the completion
+    /// popup's reserved rows (zero when closed), and the composer (which keeps
+    /// the full remainder so overlay-grown frames look identical to the
+    /// pre-pane renderer). Reserving the popup rows — instead of letting the
+    /// composer keep them — is what makes the popup actually visible above the
+    /// composer inside the grown pane (plan Phase 13 layout fix: it used to be
+    /// squeezed against the pane top).
     fn zones(&self, area: Rect) -> std::rc::Rc<[Rect]> {
         let completion = self
             .completion
@@ -556,6 +606,7 @@ impl BottomPane {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
+                Constraint::Length(u16::from(self.context_pressure.is_some())),
                 Constraint::Length(self.pending_input_preview.desired_height(area.width)),
                 Constraint::Length(completion),
                 Constraint::Min(3),
@@ -584,14 +635,17 @@ impl Renderable for BottomPane {
         }
         let zones = self.zones(area);
         Paragraph::new(self.status_line()).render(zones[0], buf);
-        self.pending_input_preview.render(zones[1], buf);
+        if let Some(banner) = &self.context_pressure {
+            Paragraph::new(self.context_pressure_line(banner)).render(zones[1], buf);
+        }
+        self.pending_input_preview.render(zones[2], buf);
         ComposerView::new(&self.composer)
             .with_accent(self.accent.map(crate::style_adapter::to_ratatui))
-            .render(zones[3], buf);
+            .render(zones[4], buf);
         if let Some(popup) = &self.completion {
             // Anchors upward from the composer's top edge, which fills
-            // exactly the rows `zones` reserved for it (zone 2).
-            popup.render(zones[3], buf);
+            // exactly the rows `zones` reserved for it (zone 3).
+            popup.render(zones[4], buf);
         }
         for view in self.view_stack.views() {
             view.render(area, buf);
@@ -606,7 +660,9 @@ impl Renderable for BottomPane {
         let composer =
             u16::try_from(self.composer.lines().len().clamp(1, MAX_VISIBLE_LINES)).unwrap_or(1);
         let preview = self.pending_input_preview.desired_height(width);
-        let base = 1 + preview + composer + 2; // status + preview + composer content + border
+        let banner = u16::from(self.context_pressure.is_some());
+        // status + banner + preview + composer content + border
+        let base = 1 + banner + preview + composer + 2;
         let overlay = if let Some(view) = self.view_stack.active() {
             view.desired_height(width)
         } else if let Some(popup) = &self.completion {
@@ -624,14 +680,14 @@ impl Renderable for BottomPane {
         if let Some(view) = self.full_frame_view() {
             return view.cursor_pos(area);
         }
-        ComposerView::new(&self.composer).cursor_pos(self.zones(area)[3])
+        ComposerView::new(&self.composer).cursor_pos(self.zones(area)[4])
     }
 
     fn cursor_style(&self, area: Rect) -> SetCursorStyle {
         if let Some(view) = self.full_frame_view() {
             return view.cursor_style(area);
         }
-        ComposerView::new(&self.composer).cursor_style(self.zones(area)[3])
+        ComposerView::new(&self.composer).cursor_style(self.zones(area)[4])
     }
 }
 
@@ -1176,6 +1232,7 @@ mod tests {
         pane.set_task_running(BottomPaneStatus {
             running: true,
             text: "Working…".to_string(),
+            cost: None,
         });
         assert!(matches!(
             pane.handle_key(ctrl_c),
@@ -1200,6 +1257,7 @@ mod tests {
         pane.set_task_running(BottomPaneStatus {
             running: true,
             text: "✻ Working… (1s · esc to interrupt)".to_string(),
+            cost: None,
         });
         // Running + no local surface: Esc surfaces the interrupt intent (the
         // spinner's "esc to interrupt" hint), never Quit.
@@ -1327,6 +1385,7 @@ mod tests {
         pane.set_task_running(BottomPaneStatus {
             running: true,
             text: "✻ Working… (3s · esc to interrupt)".to_string(),
+            cost: None,
         });
         let area = Rect::new(0, 0, 80, 4);
         let mut buf = Buffer::empty(area);
@@ -1356,6 +1415,70 @@ mod tests {
         let mut buf = Buffer::empty(area);
         pane.render(area, &mut buf);
         assert!(buffer_row(&buf, 0).contains("Ctrl-O: collapse"));
+    }
+
+    // ===== Fix round 1: cost suffix + context-pressure banner row =====
+
+    #[test]
+    fn status_row_appends_the_owner_fed_cost_dim_suffix() {
+        let mut pane = pane();
+        let area = Rect::new(0, 0, 80, 4);
+        // Idle hints row carries the cost once known.
+        pane.set_task_running(BottomPaneStatus {
+            running: false,
+            text: String::new(),
+            cost: Some("$0.0123".to_string()),
+        });
+        let mut buf = Buffer::empty(area);
+        pane.render(area, &mut buf);
+        let row = buffer_row(&buf, 0);
+        assert!(
+            row.contains("Enter: send") && row.contains("·  $0.0123"),
+            "{row}"
+        );
+        // Running spinner row keeps it too, after the cancel hint.
+        pane.set_task_running(BottomPaneStatus {
+            running: true,
+            text: "✻ Working… (3s · esc to interrupt)".to_string(),
+            cost: Some("$0.0123".to_string()),
+        });
+        let mut buf = Buffer::empty(area);
+        pane.render(area, &mut buf);
+        let row = buffer_row(&buf, 0);
+        assert!(
+            row.contains("Ctrl-C: cancel") && row.contains("·  $0.0123"),
+            "{row}"
+        );
+    }
+
+    #[test]
+    fn context_pressure_banner_takes_one_row_between_status_and_composer() {
+        let mut pane = pane();
+        let without = pane.desired_height(80);
+        pane.set_context_pressure(Some(traits::ContextPressureBanner {
+            text: "Context left until auto-compact: 8%".to_string(),
+            level: traits::ContextPressureLevel::Dim,
+        }));
+        assert_eq!(pane.desired_height(80), without + 1, "banner adds one row");
+        let area = Rect::new(0, 0, 80, pane.desired_height(80));
+        let mut buf = Buffer::empty(area);
+        pane.render(area, &mut buf);
+        assert!(buffer_row(&buf, 0).contains("Enter: send"), "status first");
+        assert!(
+            buffer_row(&buf, 1).contains("Context left until auto-compact: 8%"),
+            "banner row second: {}",
+            buffer_row(&buf, 1)
+        );
+        assert!(
+            buffer_row(&buf, 2).starts_with('┌'),
+            "composer box below the banner: {}",
+            buffer_row(&buf, 2)
+        );
+        // The composer cursor tracks the shifted composer zone.
+        assert_eq!(pane.cursor_pos(area).map(|(_, y)| y), Some(3));
+        // Clearing removes the row and restores the height.
+        pane.set_context_pressure(None);
+        assert_eq!(pane.desired_height(80), without);
     }
 
     // ===== Plan Phase 13: completion popup layout (steps 1 + 3) =====

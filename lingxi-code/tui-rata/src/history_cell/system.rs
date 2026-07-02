@@ -164,6 +164,18 @@ impl RateLimitCell {
     pub fn new(text: String, upsell: Option<String>) -> Self {
         Self { text, upsell }
     }
+
+    /// The notice text (tests/inspection).
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The optional dim upsell line (tests/inspection).
+    #[must_use]
+    pub fn upsell(&self) -> Option<&str> {
+        self.upsell.as_deref()
+    }
 }
 
 impl StyledCell for RateLimitCell {

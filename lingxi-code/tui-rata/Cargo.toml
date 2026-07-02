@@ -14,6 +14,14 @@ path = "src/lib.rs"
 # migration. `tui-rata` renders it with ratatui; it must never depend on iocraft.
 tui-core = { path = "../tui-core" }
 permission = { path = "../permission" }
+# (fix round 1) `TurnEvent::ContextPressure`/`RateLimit` handling needs the
+# banner + subscription types the bridge events carry. Already in the graph via
+# tui-core (promoted from dev-dependencies; no new external dependency).
+traits = { path = "../traits" }
+# (fix round 1) `rate_limit_messages` reuses the existing 1:1
+# `formatResetTime` port instead of duplicating it (the old iocraft `tui`
+# reaches the SAME function through its `orchestrator` dependency).
+llm-client = { path = "../llm-client" }
 # Ratatui 0.29 uses crossterm 0.28 — the SAME major the workspace pins — so only
 # one crossterm version links (verified via `cargo tree -p tui-rata -i crossterm`).
 # All three features are dependency-free cfg gates, also enabled by codex-rs/tui:
@@ -42,7 +50,6 @@ unicode-width = "=0.1.14"
 
 [dev-dependencies]
 protocol = { path = "../protocol" }
-traits = { path = "../traits" }
 
 [lints]
 workspace = true

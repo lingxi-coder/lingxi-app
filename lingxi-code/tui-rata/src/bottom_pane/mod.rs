@@ -541,14 +541,23 @@ impl BottomPane {
     }
 
     /// The pane's vertical zones within `area`: status row, queued-input
-    /// preview, and the composer (which keeps the full remainder so
-    /// overlay-grown frames look identical to the pre-pane renderer).
+    /// preview, the completion popup's reserved rows (zero when closed), and
+    /// the composer (which keeps the full remainder so overlay-grown frames
+    /// look identical to the pre-pane renderer). Reserving the popup rows —
+    /// instead of letting the composer keep them — is what makes the popup
+    /// actually visible above the composer inside the grown pane (plan Phase
+    /// 13 layout fix: it used to be squeezed against the pane top).
     fn zones(&self, area: Rect) -> std::rc::Rc<[Rect]> {
+        let completion = self
+            .completion
+            .as_ref()
+            .map_or(0, CompletionView::desired_height);
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
                 Constraint::Length(self.pending_input_preview.desired_height(area.width)),
+                Constraint::Length(completion),
                 Constraint::Min(3),
             ])
             .split(area)
@@ -578,9 +587,11 @@ impl Renderable for BottomPane {
         self.pending_input_preview.render(zones[1], buf);
         ComposerView::new(&self.composer)
             .with_accent(self.accent.map(crate::style_adapter::to_ratatui))
-            .render(zones[2], buf);
+            .render(zones[3], buf);
         if let Some(popup) = &self.completion {
-            popup.render(zones[2], buf);
+            // Anchors upward from the composer's top edge, which fills
+            // exactly the rows `zones` reserved for it (zone 2).
+            popup.render(zones[3], buf);
         }
         for view in self.view_stack.views() {
             view.render(area, buf);
@@ -589,7 +600,8 @@ impl Renderable for BottomPane {
 
     /// Desired pane height at `width` columns: status + preview + composer,
     /// grown to fit the active stacked view (which reports its own height) or
-    /// the completion popup. The owner applies the viewport min/max clamp.
+    /// the completion popup's own rows. The owner applies the viewport
+    /// min/max clamp.
     fn desired_height(&self, width: u16) -> u16 {
         let composer =
             u16::try_from(self.composer.lines().len().clamp(1, MAX_VISIBLE_LINES)).unwrap_or(1);
@@ -597,8 +609,8 @@ impl Renderable for BottomPane {
         let base = 1 + preview + composer + 2; // status + preview + composer content + border
         let overlay = if let Some(view) = self.view_stack.active() {
             view.desired_height(width)
-        } else if self.completion.is_some() {
-            base + 8
+        } else if let Some(popup) = &self.completion {
+            base + popup.desired_height()
         } else {
             0
         };
@@ -612,14 +624,14 @@ impl Renderable for BottomPane {
         if let Some(view) = self.full_frame_view() {
             return view.cursor_pos(area);
         }
-        ComposerView::new(&self.composer).cursor_pos(self.zones(area)[2])
+        ComposerView::new(&self.composer).cursor_pos(self.zones(area)[3])
     }
 
     fn cursor_style(&self, area: Rect) -> SetCursorStyle {
         if let Some(view) = self.full_frame_view() {
             return view.cursor_style(area);
         }
-        ComposerView::new(&self.composer).cursor_style(self.zones(area)[2])
+        ComposerView::new(&self.composer).cursor_style(self.zones(area)[3])
     }
 }
 
@@ -1344,5 +1356,101 @@ mod tests {
         let mut buf = Buffer::empty(area);
         pane.render(area, &mut buf);
         assert!(buffer_row(&buf, 0).contains("Ctrl-O: collapse"));
+    }
+
+    // ===== Plan Phase 13: completion popup layout (steps 1 + 3) =====
+
+    #[test]
+    fn completion_desired_height_tracks_the_popup_row_count() {
+        let mut pane = pane();
+        // Bare "/" lists the whole registry: 6 visible rows + 2 borders = 8
+        // popup rows over the 4-row base.
+        typ(&mut pane, "/");
+        assert!(pane.completion().is_some());
+        assert_eq!(pane.desired_height(80), 12, "base 4 + full popup 8");
+        // "/m" narrows to 3 items (/model, /mcp, /memory): the pane shrinks
+        // with the popup (3 + 2 borders = 5 popup rows) instead of keeping a
+        // fixed +8.
+        typ(&mut pane, "m");
+        assert_eq!(pane.completion().unwrap().desired_height(), 5);
+        assert_eq!(pane.desired_height(80), 9, "base 4 + filtered popup 5");
+    }
+
+    #[test]
+    fn completion_popup_items_and_composer_occupy_disjoint_rows() {
+        // Regression (plan Phase 13 layout fix): the composer used to keep
+        // the whole grown pane, squeezing the popup into a single border row
+        // at the pane top; the items were never visible. The pane now
+        // reserves the popup rows between the status row and the composer.
+        let mut pane = pane();
+        typ(&mut pane, "/");
+        let height = pane.desired_height(80);
+        assert_eq!(height, 12);
+        let area = Rect::new(0, 0, 80, height);
+        let mut buf = Buffer::empty(area);
+        pane.render(area, &mut buf);
+        // Row 0: completion status hints.
+        assert!(buffer_row(&buf, 0).contains("Tab: complete"));
+        // Rows 1..=8: the popup box with its 6-item window fully visible.
+        assert!(buffer_row(&buf, 1).contains("Complete"), "popup title row");
+        assert!(
+            buffer_row(&buf, 2).contains("› /help"),
+            "first item highlighted: {}",
+            buffer_row(&buf, 2)
+        );
+        assert!(
+            buffer_row(&buf, 7).contains("/agents"),
+            "sixth item visible: {}",
+            buffer_row(&buf, 7)
+        );
+        assert!(
+            buffer_row(&buf, 8).starts_with('└'),
+            "popup bottom border: {}",
+            buffer_row(&buf, 8)
+        );
+        // Rows 9..12: the composer box directly beneath — disjoint rows, no
+        // overlap between popup and composer content.
+        assert!(
+            buffer_row(&buf, 9).starts_with('┌'),
+            "composer top border: {}",
+            buffer_row(&buf, 9)
+        );
+        assert!(
+            buffer_row(&buf, 10).starts_with("│> /"),
+            "prompt row: {}",
+            buffer_row(&buf, 10)
+        );
+        assert!(
+            buffer_row(&buf, 11).starts_with('└'),
+            "composer bottom border: {}",
+            buffer_row(&buf, 11)
+        );
+        // The cursor sits on the composer's prompt row, after the "/".
+        assert_eq!(pane.cursor_pos(area), Some((4, 10)));
+    }
+
+    // ===== Plan Phase 13 step 4: cursor containment =====
+
+    #[test]
+    fn cursor_claim_is_contained_or_hidden_at_tiny_pane_heights() {
+        let mut pane = pane();
+        typ(&mut pane, "hello");
+        for height in 1..=4u16 {
+            let area = Rect::new(0, 0, 80, height);
+            match pane.cursor_pos(area) {
+                None => {} // hidden is always safe
+                Some((x, y)) => {
+                    assert!(
+                        x < area.right() && y < area.bottom(),
+                        "cursor ({x},{y}) escapes the {height}-row pane"
+                    );
+                }
+            }
+        }
+        // At the degenerate 2-row height the composer has no content row at
+        // all: the cursor must be hidden, never parked outside the box.
+        assert_eq!(pane.cursor_pos(Rect::new(0, 0, 80, 2)), None);
+        // At the full idle height it is claimed inside the composer.
+        assert_eq!(pane.cursor_pos(Rect::new(0, 0, 80, 4)), Some((8, 2)));
     }
 }

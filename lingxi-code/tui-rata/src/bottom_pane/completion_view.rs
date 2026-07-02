@@ -81,6 +81,17 @@ impl CompletionView {
         &self.items[self.selected].insert
     }
 
+    /// Rows the popup wants on screen: the visible item window (at most
+    /// [`MAX_ROWS`]) plus the 2 border rows. [`BottomPane`] reserves exactly
+    /// this many rows above the composer so the popup is never squeezed
+    /// against the pane top (plan Phase 13 layout fix).
+    ///
+    /// [`BottomPane`]: crate::bottom_pane::BottomPane
+    #[must_use]
+    pub fn desired_height(&self) -> u16 {
+        u16::try_from(self.items.len().min(MAX_ROWS) + 2).unwrap_or(u16::MAX)
+    }
+
     /// Highlighted row index (exposed for tests).
     #[must_use]
     pub fn selected(&self) -> usize {
@@ -114,8 +125,7 @@ impl CompletionView {
     /// beneath), rendering into `buf` (`(Rect, &mut Buffer)` contract). Grows
     /// upward from the composer's top edge.
     pub fn render(&self, composer: Rect, buf: &mut Buffer) {
-        let rows = self.items.len().min(MAX_ROWS);
-        let height = u16::try_from(rows + 2).unwrap_or(u16::MAX);
+        let height = self.desired_height();
         let y = composer.y.saturating_sub(height);
         let rect = Rect {
             x: composer.x,

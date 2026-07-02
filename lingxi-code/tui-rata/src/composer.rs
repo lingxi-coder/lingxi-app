@@ -515,6 +515,13 @@ impl Renderable for ComposerView<'_> {
 
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
         let inner = Block::new().borders(Borders::ALL).inner(area);
+        // A degenerate inner rect (terminal too small for even one content
+        // row) has nowhere the cursor could sit INSIDE the composer: claim
+        // none so the terminal hides it instead of parking it outside the
+        // box (plan Phase 13 graceful-clipping fix).
+        if inner.width == 0 || inner.height == 0 {
+            return None;
+        }
         let (crow, ccol) = self.composer.cursor_row_col();
         let first_row = self.first_visible_row(usize::from(inner.height));
         let cursor_y = inner.y + u16::try_from(crow - first_row).unwrap_or(0);

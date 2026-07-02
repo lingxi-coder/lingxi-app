@@ -1455,4 +1455,368 @@ mod tests {
             "terminal drop must reset the cursor style during unwind; got: {escapes:?}"
         );
     }
+
+    // ===== Plan Phase 13: layout and resize behavior =====
+    // Buffer tests over the app's own draw path at multiple terminal sizes
+    // (80x24 locks live above; these add 120x40, 40x12 narrow, and
+    // minimum-height clipping), plus native-scrollback/viewport interaction.
+
+    /// A test terminal of an arbitrary size with its bottom viewport sized to
+    /// the app's self-reported height at that width (one run-loop tick's
+    /// sizing; `set_bottom_viewport_height` clamps to the screen height).
+    fn sized_terminal(app: &RataApp, width: u16, height: u16) -> Terminal<TestWriteBackend> {
+        let mut terminal =
+            Terminal::with_options(TestWriteBackend::new(width, height)).expect("test terminal");
+        terminal
+            .set_bottom_viewport_height(app.viewport_height(width))
+            .expect("viewport height");
+        terminal
+    }
+
+    /// Draw the viewport at an arbitrary terminal size through the app's own
+    /// draw path; returns the terminal for buffer/cursor inspection.
+    fn draw_viewport_at(app: &mut RataApp, width: u16, height: u16) -> Terminal<TestWriteBackend> {
+        let mut terminal = sized_terminal(app, width, height);
+        app.draw(&mut terminal).expect("draw");
+        terminal
+    }
+
+    /// The 1-based bottom rows of every history-write scroll region
+    /// (`ESC[1;{n}r`) in a raw escape stream: `insert_history_lines` confines
+    /// history writes to rows `1..=n`, so `n` must never exceed the viewport
+    /// top (0-based) or history would overwrite the bottom pane.
+    fn history_scroll_region_bottoms(out: &str) -> Vec<u16> {
+        let mut bottoms = Vec::new();
+        let mut rest = out;
+        while let Some(idx) = rest.find("\x1b[1;") {
+            rest = &rest[idx + 4..];
+            let digits = rest.chars().take_while(char::is_ascii_digit).count();
+            if digits > 0 && rest[digits..].starts_with('r') {
+                bottoms.push(rest[..digits].parse::<u16>().expect("region bottom"));
+            }
+        }
+        bottoms
+    }
+
+    #[test]
+    fn layout_120x40_idle_wide_composer_spans_full_width() {
+        let mut app = test_app(Vec::new());
+        assert_eq!(app.viewport_height(120), 4, "idle viewport is 4 rows");
+        let terminal = draw_viewport_at(&mut app, 120, 40);
+        let rows = buffer_rows(&terminal);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].chars().count(), 120, "rows span the full width");
+        assert!(rows[0].contains("Enter: send"), "status row: {}", rows[0]);
+        assert!(rows[1].starts_with('┌') && rows[1].ends_with('┐'));
+        assert!(rows[2].starts_with("│> ") && rows[2].ends_with('│'));
+        assert!(rows[3].starts_with('└') && rows[3].ends_with('┘'));
+    }
+
+    #[test]
+    fn layout_120x40_long_markdown_streaming_tail_above_running_pane() {
+        let mut app = test_app(Vec::new());
+        typ(&mut app, "go");
+        app.on_key(press(KeyCode::Enter));
+        app.apply_turn_event(TurnEvent::TurnStarted);
+        // The just-opened EMPTY assistant cell renders its 1-row marker: the
+        // viewport already grows by one tail row before any delta arrives.
+        assert_eq!(app.viewport_height(120), 5, "empty active cell marker row");
+        // A long markdown paragraph wraps at 120 columns into several rows.
+        let paragraph = "lorem ipsum dolor sit amet consectetur adipiscing elit ".repeat(10);
+        app.apply_turn_event(TurnEvent::TextDelta(paragraph));
+        let viewport = app.viewport_height(120);
+        assert!(viewport > 5, "wrapped tail grows the viewport: {viewport}");
+        let terminal = draw_viewport_at(&mut app, 120, 40);
+        let rows = buffer_rows(&terminal);
+        assert_eq!(rows.len(), usize::from(viewport));
+        let text_row = rows
+            .iter()
+            .position(|row| row.contains("lorem ipsum"))
+            .unwrap_or_else(|| panic!("streamed markdown not visible:\n{}", rows.join("\n")));
+        let status_row = rows
+            .iter()
+            .position(|row| row.contains("esc to interrupt"))
+            .expect("running status row");
+        assert!(text_row < status_row, "tail above the running status");
+        // The pane stays pinned beneath the tail: its last three rows are the
+        // composer box, with no tail text bleeding into them.
+        assert!(rows[rows.len() - 3].starts_with('┌'));
+        assert!(rows[rows.len() - 2].starts_with("│> "));
+        assert!(rows[rows.len() - 1].starts_with('└'));
+        assert!(!rows[rows.len() - 2].contains("lorem"), "no overlap");
+    }
+
+    #[test]
+    fn layout_40x12_narrow_completion_popup_and_composer_share_the_screen() {
+        let mut app = test_app(Vec::new());
+        typ(&mut app, "/");
+        assert_eq!(
+            app.viewport_height(40),
+            12,
+            "completion viewport fills the 12-row terminal"
+        );
+        let terminal = draw_viewport_at(&mut app, 40, 12);
+        let rows = buffer_rows(&terminal);
+        assert_eq!(rows.len(), 12);
+        // Status hints clip at 40 columns without panicking.
+        assert!(rows[0].contains("Tab: complete"), "status: {}", rows[0]);
+        // The popup box (6-item window) sits between status and composer.
+        assert!(rows[1].contains("Complete"), "popup title: {}", rows[1]);
+        assert!(rows[2].contains("› /help"), "first item: {}", rows[2]);
+        assert!(rows[8].starts_with('└'), "popup bottom: {}", rows[8]);
+        // The composer box keeps the bottom rows — disjoint from the popup.
+        assert!(rows[9].starts_with('┌'), "composer top: {}", rows[9]);
+        assert!(rows[10].starts_with("│> /"), "prompt row: {}", rows[10]);
+        assert!(rows[11].starts_with('└'), "composer bottom: {}", rows[11]);
+    }
+
+    #[test]
+    fn layout_40x12_narrow_permission_modal_clips_gracefully() {
+        let mut app = test_app(Vec::new());
+        let (exchange, _resp_rx) = tool_exchange();
+        app.open_permission(exchange);
+        assert_eq!(app.viewport_height(40), 9, "permission viewport height");
+        let terminal = draw_viewport_at(&mut app, 40, 12);
+        let all = buffer_rows(&terminal).join("\n");
+        assert!(all.contains("Permission required"), "{all}");
+        assert!(all.contains("Yes, allow once"), "{all}");
+        assert!(all.contains("No, deny"), "{all}");
+    }
+
+    /// One full tick (flush + draw) on a `height`-row terminal: must clip
+    /// gracefully — never panic, never escape the screen, never park a
+    /// visible cursor outside the viewport.
+    fn assert_clips_gracefully(name: &str, mut app: RataApp<'static>, height: u16) {
+        let mut terminal = sized_terminal(&app, 80, height);
+        app.flush_scrollback(&mut terminal)
+            .unwrap_or_else(|e| panic!("{name}@{height}: flush: {e}"));
+        app.draw(&mut terminal)
+            .unwrap_or_else(|e| panic!("{name}@{height}: draw: {e}"));
+        let area = terminal.viewport_area;
+        assert!(
+            area.bottom() <= height,
+            "{name}@{height}: viewport {area:?} escapes the screen"
+        );
+        assert_eq!(
+            terminal.last_frame_buffer().area,
+            area,
+            "{name}@{height}: frame covers exactly the viewport"
+        );
+        // Any claimed cursor stays inside the viewport rect.
+        if !terminal.cursor_hidden() {
+            let pos = terminal.get_cursor_position().unwrap();
+            assert!(
+                area.contains(pos),
+                "{name}@{height}: cursor {pos:?} outside viewport {area:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn layout_minimum_height_terminals_clip_gracefully_without_panic() {
+        for height in 1..=3u16 {
+            assert_clips_gracefully("idle", test_app(Vec::new()), height);
+
+            let mut app = test_app(Vec::new());
+            typ(&mut app, "go");
+            app.on_key(press(KeyCode::Enter));
+            app.apply_turn_event(TurnEvent::TurnStarted);
+            app.apply_turn_event(TurnEvent::TextDelta("tiny stream".to_string()));
+            assert_clips_gracefully("streaming", app, height);
+
+            let mut app = test_app(Vec::new());
+            typ(&mut app, "/");
+            assert_clips_gracefully("completion", app, height);
+
+            let mut app = test_app(Vec::new());
+            let (exchange, _resp_rx) = tool_exchange();
+            app.open_permission(exchange);
+            assert_clips_gracefully("permission", app, height);
+
+            let mut app = test_app(Vec::new());
+            submit_command(&mut app, "/help");
+            assert_clips_gracefully("help", app, height);
+        }
+    }
+
+    #[test]
+    fn layout_completion_popup_items_visible_between_status_and_composer() {
+        // End-to-end lock for the Phase 13 popup-zone fix through the app's
+        // own draw path (the pre-fix render squeezed the popup into a single
+        // border row: items were never visible).
+        let mut app = test_app(Vec::new());
+        typ(&mut app, "/");
+        assert_eq!(app.viewport_height(80), 12);
+        let terminal = draw_viewport(&mut app);
+        let rows = buffer_rows(&terminal);
+        assert!(rows[2].contains("› /help"), "items visible: {}", rows[2]);
+        assert!(
+            rows[10].starts_with("│> /"),
+            "composer beneath: {}",
+            rows[10]
+        );
+        // No row mixes popup content with composer content.
+        assert!(
+            !rows.iter().any(|r| r.contains("› /") && r.contains("│> ")),
+            "popup and composer overlap:\n{}",
+            rows.join("\n")
+        );
+    }
+
+    #[test]
+    fn layout_cursor_stays_inside_composer_rect_with_wide_chars_at_narrow_width() {
+        let mut app = test_app(Vec::new());
+        // 25 CJK chars = 50 display columns, wider than the 38-column inner
+        // rect of a 40-column composer: the cursor clamps to the inner right
+        // edge instead of escaping through the border.
+        typ(&mut app, &"你".repeat(25));
+        assert_eq!(app.viewport_height(40), 4);
+        let mut terminal = draw_viewport_at(&mut app, 40, 12);
+        let pos = terminal.get_cursor_position().unwrap();
+        assert_eq!(
+            (pos.x, pos.y),
+            (38, 2),
+            "cursor clamps to the last inner column"
+        );
+        // The right border cell is intact — the cursor sits inside the box.
+        let buf = terminal.last_frame_buffer();
+        assert_eq!(
+            buf.cell(Position::new(39, 2)).map(Cell::symbol),
+            Some("│"),
+            "composer border intact at the clamp edge"
+        );
+    }
+
+    #[test]
+    fn viewport_height_shrinks_when_composer_shrinks_and_overlays_close() {
+        let mut app = test_app(Vec::new());
+        // Composer growth (locked above) … and the reverse: deleting lines
+        // shrinks the viewport back down step by step.
+        typ(&mut app, "one");
+        for _ in 0..9 {
+            app.on_key(alt(KeyCode::Enter));
+        }
+        assert_eq!(app.viewport_height(80), 9, "grown to the composer cap");
+        for _ in 0..5 {
+            app.on_key(press(KeyCode::Backspace));
+        }
+        assert_eq!(app.viewport_height(80), 8, "5 lines left: 1 + 5 + 2");
+        for _ in 0..4 {
+            app.on_key(press(KeyCode::Backspace));
+        }
+        assert_eq!(app.viewport_height(80), 4, "back to the idle height");
+        // Overlay open/close moves it the same way: completion popup…
+        app.on_key(ctrl(KeyCode::Char('u'))); // clear the leftover "one"
+        typ(&mut app, "/");
+        assert_eq!(app.viewport_height(80), 12);
+        app.on_key(press(KeyCode::Esc));
+        assert_eq!(app.viewport_height(80), 4, "popup dismissed: idle again");
+    }
+
+    #[test]
+    fn long_finalized_transcript_flush_pins_viewport_to_bottom_of_screen() {
+        // 30 finalized one-line messages: more than the 20 rows available
+        // above the initial top-anchored viewport, so the flush must push
+        // the viewport all the way to the bottom edge and keep every
+        // insertion above it.
+        let messages: Vec<RenderedMessage> = (0..30)
+            .map(|i| RenderedMessage::SystemText {
+                body: format!("scrollback line {i:02}"),
+                timestamp: 0,
+                is_error: false,
+            })
+            .collect();
+        let mut app = test_app(messages);
+        let mut terminal = sized_terminal(&app, 80, 24);
+        assert_eq!(
+            terminal.viewport_area,
+            ratatui::layout::Rect::new(0, 0, 80, 4)
+        );
+        app.flush_scrollback(&mut terminal).unwrap();
+        assert_eq!(app.chat_widget.transcript().committed_to_terminal(), 30);
+        // Bottom-pinned: 24-row screen minus the 4-row pane.
+        assert_eq!(
+            terminal.viewport_area,
+            ratatui::layout::Rect::new(0, 20, 80, 4),
+            "viewport pinned to the bottom edge"
+        );
+        // All 30 lines went out, oldest first.
+        let out = String::from_utf8_lossy(&terminal.backend().raw_handle().borrow()).into_owned();
+        let first = out.find("scrollback line 00").expect("first line written");
+        let last = out.find("scrollback line 29").expect("last line written");
+        assert!(first < last, "commit order preserved");
+        // The pane still draws cleanly into the moved viewport.
+        app.draw(&mut terminal).unwrap();
+        let rows = buffer_rows(&terminal);
+        assert!(rows[0].contains("Enter: send"), "status row: {}", rows[0]);
+        assert!(rows[2].starts_with("│> "), "prompt row: {}", rows[2]);
+    }
+
+    #[test]
+    fn native_scrollback_insertions_stay_above_the_pane_across_viewport_height_changes() {
+        // Criterion 22: grow the viewport (completion), shrink it back
+        // (dismiss), then flush new history — every insertion's scroll region
+        // must stay strictly above the (possibly re-anchored) viewport.
+        let messages: Vec<RenderedMessage> = (0..30)
+            .map(|i| RenderedMessage::SystemText {
+                body: format!("warmup line {i:02}"),
+                timestamp: 0,
+                is_error: false,
+            })
+            .collect();
+        let mut app = test_app(messages);
+        let mut terminal = sized_terminal(&app, 80, 24);
+        app.flush_scrollback(&mut terminal).unwrap();
+        app.draw(&mut terminal).unwrap();
+        assert_eq!(terminal.viewport_area.top(), 20, "warmup pinned to bottom");
+
+        // Grow: the completion popup expands the viewport upward.
+        typ(&mut app, "/");
+        terminal
+            .set_bottom_viewport_height(app.viewport_height(80))
+            .unwrap();
+        app.draw(&mut terminal).unwrap();
+        assert_eq!(
+            terminal.viewport_area,
+            ratatui::layout::Rect::new(0, 12, 80, 12)
+        );
+
+        // Shrink: dismissing the popup keeps the viewport top anchored (codex
+        // parity) — the pane is no longer at the bottom edge.
+        app.on_key(press(KeyCode::Esc));
+        terminal
+            .set_bottom_viewport_height(app.viewport_height(80))
+            .unwrap();
+        app.draw(&mut terminal).unwrap();
+        assert_eq!(
+            terminal.viewport_area,
+            ratatui::layout::Rect::new(0, 12, 80, 4)
+        );
+
+        // New finalized content after the height changes: the insertion may
+        // scroll the viewport back down, but must never write into it.
+        let raw = terminal.backend().raw_handle();
+        raw.borrow_mut().clear();
+        app.apply_turn_event(TurnEvent::TurnStarted);
+        app.apply_turn_event(TurnEvent::TextDelta("post-shrink reply".to_string()));
+        app.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        app.flush_scrollback(&mut terminal).unwrap();
+        let out = String::from_utf8_lossy(&raw.borrow()).into_owned();
+        assert!(out.contains("post-shrink reply"), "reply flushed");
+        let area = terminal.viewport_area;
+        assert!(area.top() >= 12, "insertions only push the viewport down");
+        assert!(area.bottom() <= 24, "viewport stays on screen");
+        let bottoms = history_scroll_region_bottoms(&out);
+        assert!(!bottoms.is_empty(), "history writes use a scroll region");
+        assert!(
+            bottoms.iter().all(|&n| n <= area.top()),
+            "history region rows {bottoms:?} must stay above viewport top {}",
+            area.top()
+        );
+        // And the pane still draws cleanly afterwards.
+        app.draw(&mut terminal).unwrap();
+        let rows = buffer_rows(&terminal);
+        assert!(rows[0].contains("Enter: send"), "status row: {}", rows[0]);
+        assert!(rows[2].starts_with("│> "), "prompt row: {}", rows[2]);
+    }
 }

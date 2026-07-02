@@ -124,11 +124,18 @@ impl Transcript {
 
     /// The live tail: what the active cell currently renders (empty when
     /// idle). This — not the committed flush — is how in-flight content
-    /// becomes visible, so active text is never double-rendered.
+    /// becomes visible, so active text is never double-rendered. Lines are
+    /// hard-wrapped to `width` so long streamed text is fully visible (and
+    /// counted row-exactly for viewport sizing) instead of clipping at the
+    /// right edge; on finalization the terminal wraps the committed content
+    /// the same way (`insert_history_lines` row accounting).
     #[must_use]
     pub fn visible_live_tail(&self, width: u16, theme: &Theme) -> Vec<Line<'static>> {
         self.active.as_ref().map_or_else(Vec::new, |cell| {
-            cell.display_lines(width.max(1), theme, self.render_mode)
+            wrap_to_width(
+                cell.display_lines(width.max(1), theme, self.render_mode),
+                width,
+            )
         })
     }
 
@@ -193,6 +200,51 @@ impl Transcript {
         self.render_mode.verbose = !self.render_mode.verbose;
         self.render_mode.verbose
     }
+}
+
+/// Hard-wrap `lines` at `width` display columns, preserving span styles and
+/// never splitting a wide (2-column) glyph across rows. This mirrors how the
+/// terminal itself wraps committed history on flush (character wrap, and the
+/// same `div_ceil` row count [`crate::terminal::Terminal::insert_history_lines`]
+/// budgets), so the live tail shows — and is sized for — every streamed
+/// column instead of clipping at the right edge (plan Phase 13 layout fix).
+fn wrap_to_width(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
+    use ratatui::text::Span;
+    use unicode_width::UnicodeWidthChar;
+    let max = usize::from(width.max(1));
+    let mut out = Vec::new();
+    for line in lines {
+        let (style, alignment) = (line.style, line.alignment);
+        let mut row: Vec<Span<'static>> = Vec::new();
+        let mut row_width = 0usize;
+        for span in line.spans {
+            let span_style = span.style;
+            let mut chunk = String::new();
+            for ch in span.content.chars() {
+                let ch_width = ch.width().unwrap_or(0);
+                if row_width + ch_width > max && row_width > 0 {
+                    if !chunk.is_empty() {
+                        row.push(Span::styled(std::mem::take(&mut chunk), span_style));
+                    }
+                    let mut wrapped = Line::from(std::mem::take(&mut row));
+                    wrapped.style = style;
+                    wrapped.alignment = alignment;
+                    out.push(wrapped);
+                    row_width = 0;
+                }
+                chunk.push(ch);
+                row_width += ch_width;
+            }
+            if !chunk.is_empty() {
+                row.push(Span::styled(chunk, span_style));
+            }
+        }
+        let mut wrapped = Line::from(row);
+        wrapped.style = style;
+        wrapped.alignment = alignment;
+        out.push(wrapped);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -514,5 +566,59 @@ mod tests {
         assert!(!out.contains("\x1b_G"));
 
         std::fs::remove_file(&png).ok();
+    }
+
+    // ===== Plan Phase 13: live-tail hard wrap =====
+
+    #[test]
+    fn live_tail_hard_wraps_long_streamed_lines_to_the_viewport_width() {
+        let mut transcript = Transcript::new();
+        let mut cell = AssistantTextCell::new(String::new());
+        // One long markdown paragraph: 10 x 8 = 80 chars + the 2-column
+        // marker = 82 columns.
+        cell.append(&"abcdefgh".repeat(10));
+        transcript.set_active(Box::new(cell));
+        let tail = transcript.visible_live_tail(40, &Theme::dark());
+        // 82 columns at width 40 = 3 rows — the same row count the terminal
+        // budgets when this line is later flushed (div_ceil accounting).
+        assert_eq!(tail.len(), 3, "82 columns / 40 = 3 rows");
+        assert!(
+            tail.iter().all(|line| line.width() <= 40),
+            "every wrapped row fits the width: {:?}",
+            tail.iter()
+                .map(ratatui::text::Line::width)
+                .collect::<Vec<_>>()
+        );
+        // Nothing is lost to clipping: the rows concatenate back to the text.
+        let joined: String = tail
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(
+            joined,
+            format!(
+                "{}{}",
+                crate::history_cell::message::ASSISTANT_MARKER,
+                "abcdefgh".repeat(10)
+            )
+        );
+    }
+
+    #[test]
+    fn live_tail_wrap_never_splits_wide_glyphs() {
+        let mut transcript = Transcript::new();
+        let mut cell = AssistantTextCell::new(String::new());
+        // 2-column marker + 3 wide chars (2 cols each) = 8 columns. At width
+        // 5 the wide glyph straddling the boundary moves to the next row.
+        cell.append("你好吗");
+        transcript.set_active(Box::new(cell));
+        let tail = transcript.visible_live_tail(5, &Theme::dark());
+        assert_eq!(tail.len(), 2, "8 columns at width 5 = 2 rows");
+        assert_eq!(tail[0].width(), 4, "● 你 (a split would make 5)");
+        assert_eq!(tail[1].width(), 4, "好吗");
+        // Short tails are untouched.
+        let tail = transcript.visible_live_tail(80, &Theme::dark());
+        assert_eq!(tail.len(), 1);
     }
 }

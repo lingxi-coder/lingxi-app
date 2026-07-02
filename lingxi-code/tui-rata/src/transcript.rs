@@ -90,7 +90,9 @@ impl Transcript {
     /// Insert every not-yet-committed finalized cell into the terminal's
     /// native scrollback (above the bottom viewport), advancing the commit
     /// cursor. Cells that render to no lines are consumed by the cursor
-    /// without inserting. The active cell is never flushed here — it stays
+    /// without inserting. A cell contributing a raw escape block (an inline
+    /// image) gets it emitted below its lines — rich mode only; raw mode is
+    /// copy-friendly text. The active cell is never flushed here — it stays
     /// the live tail until [`Self::flush_active`].
     ///
     /// # Errors
@@ -102,16 +104,20 @@ impl Transcript {
         theme: &Theme,
     ) -> io::Result<()> {
         while self.committed_to_terminal < self.committed.len() {
-            let lines = self.committed[self.committed_to_terminal].display_lines(
-                width.max(1),
-                theme,
-                self.render_mode,
-            );
+            let cell = &self.committed[self.committed_to_terminal];
+            let lines = cell.display_lines(width.max(1), theme, self.render_mode);
+            let escape = if self.render_mode.raw {
+                None
+            } else {
+                cell.scrollback_escape()
+            };
             self.committed_to_terminal += 1;
-            if lines.is_empty() {
-                continue;
+            if !lines.is_empty() {
+                terminal.insert_history_lines(&lines)?;
             }
-            terminal.insert_history_lines(&lines)?;
+            if let Some(escape) = escape {
+                terminal.insert_history_image(escape.rows, &escape.escape)?;
+            }
         }
         Ok(())
     }
@@ -443,5 +449,70 @@ mod tests {
         assert!(transcript.active_cell().is_none());
         assert_eq!(transcript.committed_to_terminal(), 0, "nothing flushed yet");
         assert!(!transcript.is_empty());
+    }
+
+    /// An image cell on a graphics-capable terminal: the text fallback line
+    /// commits first, the inline-image escape follows below it. Raw render
+    /// mode (copy-friendly) suppresses the escape but keeps the fallback.
+    #[test]
+    fn image_cell_flush_emits_text_fallback_then_inline_escape() {
+        use crate::history_cell::attachments::UserImageCell;
+        use crate::term_image::ImageProtocol;
+
+        let png = std::env::temp_dir().join(format!(
+            "tui-rata-transcript-img-{}.png",
+            std::process::id()
+        ));
+        image::RgbaImage::new(4, 20).save(&png).expect("test png");
+
+        let cell = |protocol| {
+            Box::new(UserImageCell::with_protocol(
+                Some(7),
+                None,
+                Some(png.display().to_string()),
+                protocol,
+            ))
+        };
+
+        // Rich mode + kitty: fallback line then the escape.
+        let mut transcript = Transcript::new();
+        transcript.push_committed(cell(ImageProtocol::Kitty));
+        let (mut terminal, raw) = test_terminal();
+        transcript
+            .flush_to_native_scrollback(&mut terminal, 80, &Theme::dark())
+            .unwrap();
+        let out = raw_string(&raw);
+        let fallback = out.find("[Image #7]").expect("text fallback committed");
+        let escape = out.find("\x1b_Ga=T,f=100,r=2,").expect("kitty escape");
+        assert!(fallback < escape, "fallback precedes the image:\n{out:?}");
+        assert_eq!(transcript.committed_to_terminal(), 1);
+
+        // Raw mode: fallback only, no escape.
+        let mut transcript = Transcript::new();
+        transcript.set_render_mode(RenderMode {
+            raw: true,
+            verbose: false,
+        });
+        transcript.push_committed(cell(ImageProtocol::Kitty));
+        let (mut terminal, raw) = test_terminal();
+        transcript
+            .flush_to_native_scrollback(&mut terminal, 80, &Theme::dark())
+            .unwrap();
+        let out = raw_string(&raw);
+        assert!(out.contains("[Image #7]"), "fallback stays in raw mode");
+        assert!(!out.contains("\x1b_G"), "no escape in raw mode:\n{out:?}");
+
+        // No graphics support: fallback only.
+        let mut transcript = Transcript::new();
+        transcript.push_committed(cell(ImageProtocol::None));
+        let (mut terminal, raw) = test_terminal();
+        transcript
+            .flush_to_native_scrollback(&mut terminal, 80, &Theme::dark())
+            .unwrap();
+        let out = raw_string(&raw);
+        assert!(out.contains("[Image #7]"));
+        assert!(!out.contains("\x1b_G"));
+
+        std::fs::remove_file(&png).ok();
     }
 }

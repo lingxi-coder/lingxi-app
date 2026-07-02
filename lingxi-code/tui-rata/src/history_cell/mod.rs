@@ -89,6 +89,16 @@ pub trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
         None
     }
 
+    /// A raw terminal escape block this cell contributes to native scrollback
+    /// BELOW its display lines when committed in rich mode (real inline
+    /// images). `None` (the default) for text-only cells. The flusher
+    /// reserves [`ScrollbackEscape::rows`] rows above the viewport and
+    /// anchors the escape there (see
+    /// [`crate::terminal::Terminal::insert_history_image`]).
+    fn scrollback_escape(&self) -> Option<ScrollbackEscape> {
+        None
+    }
+
     /// Upcast for downcasting to the concrete cell type.
     ///
     /// Explicit instead of relying on `dyn HistoryCell` → `dyn Any` trait
@@ -97,6 +107,18 @@ pub trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
 
     /// Mutable upcast for downcasting (in-place mutation of the active cell).
     fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+/// A raw escape block a committed cell emits into native scrollback (real
+/// inline images): `rows` terminal rows tall, printed after the cell's
+/// display lines in rich mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScrollbackEscape {
+    /// How many scrollback rows the escape's output occupies (the flusher
+    /// reserves exactly this much room above the viewport).
+    pub rows: u16,
+    /// The raw escape bytes to print at the reserved block's top-left.
+    pub escape: String,
 }
 
 /// Renderer default width when a caller passes 0 columns (pre-split
@@ -111,6 +133,12 @@ pub(crate) trait StyledCell: std::fmt::Debug + Send + Sync + Any {
     /// The styled lines at `width` columns (never 0), colored by `theme`,
     /// with collapsible content expanded per `verbose`.
     fn styled_lines(&self, width: usize, theme: &Theme, verbose: bool) -> Vec<StyledLine>;
+
+    /// See [`HistoryCell::scrollback_escape`] (forwarded by the blanket
+    /// impl); `None` (the default) for text-only cells.
+    fn scrollback_escape(&self) -> Option<ScrollbackEscape> {
+        None
+    }
 }
 
 impl<T: StyledCell> HistoryCell for T {
@@ -143,6 +171,10 @@ impl<T: StyledCell> HistoryCell for T {
                 )
             })
             .collect()
+    }
+
+    fn scrollback_escape(&self) -> Option<ScrollbackEscape> {
+        StyledCell::scrollback_escape(self)
     }
 
     fn as_any(&self) -> &dyn Any {

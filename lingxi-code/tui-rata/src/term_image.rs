@@ -1,16 +1,13 @@
-//! Terminal inline-image capability detection.
+//! Terminal inline-image support: capability detection + escape encoders.
 //!
-//! Reports which inline-image protocol the host terminal supports (kitty
-//! graphics, iTerm2 inline images, or sixel), detected from environment
-//! variables. This is the FOUNDATION for real inline image display.
-//!
-//! DATA-MODEL BLOCKER (documented, intentional): the neutral
-//! `tui_core::message::RenderedMessage::UserImage` variant carries only an
-//! `image_id` + optional `metadata` — NOT the pixel bytes. Real inline
-//! rendering therefore needs an engine-side change to thread the image data
-//! through to the render model; until then `tui-rata` renders the aligned
-//! `[Image #N]` placeholder and this module only reports the terminal's
-//! capability (so a future data feed can pick the right protocol).
+//! Detection reports which inline-image protocol the host terminal supports
+//! (kitty graphics, iTerm2 inline images, or sixel), read from environment
+//! variables. The encoders turn image file bytes into a transmit-and-display
+//! escape for that protocol, scaled to a fixed number of terminal ROWS so the
+//! native-scrollback flusher can reserve exactly that much room. The image
+//! history cell ([`crate::history_cell::attachments::UserImageCell`]) emits
+//! these escapes below its always-present text fallback when the message
+//! carries a `source_path` and the terminal is graphics-capable.
 
 /// An inline-image protocol a terminal may support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,21 +111,26 @@ pub fn base64_encode(data: &[u8]) -> String {
 }
 
 /// Encode `bytes` (a PNG/JPEG/… file) as an iTerm2 inline-image escape
-/// (`ESC ] 1337 ; File=inline=1;size=N : <base64> BEL`). iTerm2 / WezTerm
-/// render it at the cursor.
+/// (`ESC ] 1337 ; File=inline=1;size=N;height=R;preserveAspectRatio=1 :
+/// <base64> BEL`), scaled to `rows` terminal rows (aspect preserved). iTerm2
+/// / WezTerm render it at the cursor.
 #[must_use]
-pub fn encode_iterm2(bytes: &[u8]) -> String {
+pub fn encode_iterm2(bytes: &[u8], rows: u16) -> String {
     let b64 = base64_encode(bytes);
-    format!("\x1b]1337;File=inline=1;size={}:{b64}\x07", bytes.len())
+    format!(
+        "\x1b]1337;File=inline=1;size={};height={rows};preserveAspectRatio=1:{b64}\x07",
+        bytes.len()
+    )
 }
 
 /// Max base64 chars per kitty transmission chunk (protocol limit is 4096).
 const KITTY_CHUNK: usize = 4096;
 
 /// Encode `bytes` as a kitty graphics-protocol transmit-and-display sequence
-/// (`f=100` PNG), chunked at [`KITTY_CHUNK`] with the `m=` continuation flag.
+/// (`f=100` PNG), scaled to `rows` terminal rows (`r=`; columns follow the
+/// aspect ratio), chunked at [`KITTY_CHUNK`] with the `m=` continuation flag.
 #[must_use]
-pub fn encode_kitty(bytes: &[u8]) -> String {
+pub fn encode_kitty(bytes: &[u8], rows: u16) -> String {
     let b64 = base64_encode(bytes);
     let raw = b64.as_bytes();
     if raw.is_empty() {
@@ -140,7 +142,9 @@ pub fn encode_kitty(bytes: &[u8]) -> String {
         let more = u8::from(i + 1 < chunks.len());
         let payload = std::str::from_utf8(chunk).unwrap_or("");
         if i == 0 {
-            out.push_str(&format!("\x1b_Ga=T,f=100,m={more};{payload}\x1b\\"));
+            out.push_str(&format!(
+                "\x1b_Ga=T,f=100,r={rows},m={more};{payload}\x1b\\"
+            ));
         } else {
             out.push_str(&format!("\x1b_Gm={more};{payload}\x1b\\"));
         }
@@ -148,15 +152,20 @@ pub fn encode_kitty(bytes: &[u8]) -> String {
     out
 }
 
-/// Read the image file at `path` and encode it for `protocol`. Returns `None`
-/// when the file can't be read or the protocol has no byte-stream encoder here
-/// (sixel needs pixel rasterization, which is out of scope).
+/// Read the image file at `path` and encode it for `protocol`, scaled to
+/// `rows` terminal rows. Returns `None` when the file can't be read or the
+/// protocol has no byte-stream encoder here (sixel needs pixel rasterization,
+/// which is out of scope).
 #[must_use]
-pub fn render_inline_image(path: &std::path::Path, protocol: ImageProtocol) -> Option<String> {
+pub fn render_inline_image(
+    path: &std::path::Path,
+    protocol: ImageProtocol,
+    rows: u16,
+) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     match protocol {
-        ImageProtocol::ITerm2 => Some(encode_iterm2(&bytes)),
-        ImageProtocol::Kitty => Some(encode_kitty(&bytes)),
+        ImageProtocol::ITerm2 => Some(encode_iterm2(&bytes, rows)),
+        ImageProtocol::Kitty => Some(encode_kitty(&bytes, rows)),
         ImageProtocol::Sixel | ImageProtocol::None => None,
     }
 }
@@ -229,39 +238,46 @@ mod tests {
     }
 
     #[test]
-    fn iterm2_escape_wraps_base64_with_size() {
-        let esc = encode_iterm2(b"foo");
-        assert!(esc.starts_with("\x1b]1337;File=inline=1;size=3:"));
+    fn iterm2_escape_wraps_base64_with_size_and_row_height() {
+        let esc = encode_iterm2(b"foo", 4);
+        assert!(
+            esc.starts_with("\x1b]1337;File=inline=1;size=3;height=4;preserveAspectRatio=1:"),
+            "got: {esc:?}"
+        );
         assert!(esc.ends_with('\x07'));
         assert!(esc.contains("Zm9v"));
     }
 
     #[test]
-    fn kitty_escape_is_chunked_with_continuation_flag() {
+    fn kitty_escape_is_row_scaled_and_chunked_with_continuation_flag() {
         // A payload larger than one chunk splits into m=1 … m=0 segments.
         let big = vec![b'A'; KITTY_CHUNK * 2]; // base64 grows this past 2 chunks
-        let esc = encode_kitty(&big);
-        assert!(esc.starts_with("\x1b_Ga=T,f=100,m=1;"));
+        let esc = encode_kitty(&big, 8);
+        assert!(
+            esc.starts_with("\x1b_Ga=T,f=100,r=8,m=1;"),
+            "got head: {esc:.40}"
+        );
         assert!(esc.contains("\x1b_Gm=1;")); // a middle continuation chunk
         assert!(esc.ends_with("\x1b\\"));
         assert!(esc.contains("m=0;")); // the final chunk clears the flag
                                        // A small payload is a single m=0 chunk.
-        let small = encode_kitty(b"hi");
-        assert!(small.starts_with("\x1b_Ga=T,f=100,m=0;"));
+        let small = encode_kitty(b"hi", 8);
+        assert!(small.starts_with("\x1b_Ga=T,f=100,r=8,m=0;"));
     }
 
     #[test]
     fn render_inline_image_reads_file_and_dispatches_by_protocol() {
         let path = std::env::temp_dir().join(format!("lingxi-img-test-{}.bin", std::process::id()));
         std::fs::write(&path, b"foo").unwrap();
-        let iterm = render_inline_image(&path, ImageProtocol::ITerm2).unwrap();
+        let iterm = render_inline_image(&path, ImageProtocol::ITerm2, 4).unwrap();
         assert!(iterm.contains("Zm9v"));
-        assert!(render_inline_image(&path, ImageProtocol::None).is_none());
+        assert!(render_inline_image(&path, ImageProtocol::None, 4).is_none());
         let _ = std::fs::remove_file(&path);
         // A missing file yields None.
         assert!(render_inline_image(
             std::path::Path::new("/no/such/img.png"),
-            ImageProtocol::Kitty
+            ImageProtocol::Kitty,
+            4
         )
         .is_none());
     }

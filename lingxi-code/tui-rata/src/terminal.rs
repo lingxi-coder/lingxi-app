@@ -363,6 +363,38 @@ where
         Ok(())
     }
 
+    /// Insert a raw escape block (an inline image) into the native scrollback
+    /// ABOVE the viewport: reserve `rows` blank rows via
+    /// [`Self::insert_history_lines`] (which owns all the room-making/scroll
+    /// arithmetic), then anchor the escape at the reserved block's top-left —
+    /// kitty/iTerm2 draw down-and-right from the cursor — and restore the
+    /// cursor. Callers size the escape to exactly `rows` terminal rows (see
+    /// `history_cell::ScrollbackEscape`). Zero rows or an empty escape is a
+    /// no-op.
+    ///
+    /// # Errors
+    /// Returns any backend IO error from writing the escape sequences.
+    pub fn insert_history_image(&mut self, rows: u16, escape: &str) -> io::Result<()> {
+        if rows == 0 || escape.is_empty() {
+            return Ok(());
+        }
+        let blank = vec![Line::default(); usize::from(rows)];
+        self.insert_history_lines(&blank)?;
+        // The reserved rows sit directly above the (possibly just-moved)
+        // viewport. On a terminal too short to fit them all, saturate to the
+        // top row — the escape clips instead of erroring.
+        let top = self.viewport_area.top().saturating_sub(rows);
+        let last_cursor_pos = self.last_known_cursor_pos;
+        queue!(
+            self.backend,
+            MoveTo(0, top),
+            Print(escape),
+            // Cursor-position-neutral, matching insert_history_lines.
+            MoveTo(last_cursor_pos.x, last_cursor_pos.y)
+        )?;
+        Ok(())
+    }
+
     /// The last fully drawn frame buffer (test introspection: the custom
     /// terminal flushes escape diffs to the backend writer, so a cell-grid
     /// snapshot only exists in the double buffer).
@@ -1102,5 +1134,46 @@ mod tests {
         terminal.insert_history_lines(&[]).unwrap();
         assert!(raw.borrow().is_empty());
         assert_eq!(terminal.viewport_area, Rect::new(0, 20, 80, 4));
+    }
+
+    #[test]
+    fn insert_history_image_reserves_rows_and_anchors_escape_above_viewport() {
+        let mut terminal = test_terminal(80, 24);
+        // Viewport pinned to the bottom 4 rows (20..24).
+        terminal.set_viewport_area(Rect::new(0, 20, 80, 4));
+        let raw = terminal.backend().raw_handle();
+        raw.borrow_mut().clear();
+
+        terminal
+            .insert_history_image(3, "\x1b_Gfake-image\x1b\\")
+            .unwrap();
+
+        let out = raw_string(&raw);
+        // Room is made through the normal history path (scroll region above
+        // the viewport)…
+        assert!(
+            out.contains("\x1b[1;20r"),
+            "room-making scroll region: {out:?}"
+        );
+        // …then the escape is anchored at the reserved block's top-left:
+        // 3 rows above the viewport top (0-based row 17 → 1-based 18, col 1).
+        let anchor = out.find("\x1b[18;1H").expect("anchor above viewport");
+        let escape = out.find("\x1b_Gfake-image").expect("escape emitted");
+        assert!(anchor < escape, "anchor precedes the escape:\n{out:?}");
+        // Cursor-position-neutral, like text history inserts.
+        assert!(out.ends_with("\x1b[1;1H"), "restores cursor: {out:?}");
+        // The viewport itself never moved.
+        assert_eq!(terminal.viewport_area, Rect::new(0, 20, 80, 4));
+    }
+
+    #[test]
+    fn insert_history_image_with_no_rows_or_empty_escape_is_a_no_op() {
+        let mut terminal = test_terminal(80, 24);
+        terminal.set_viewport_area(Rect::new(0, 20, 80, 4));
+        let raw = terminal.backend().raw_handle();
+        raw.borrow_mut().clear();
+        terminal.insert_history_image(0, "\x1b_Gx\x1b\\").unwrap();
+        terminal.insert_history_image(3, "").unwrap();
+        assert!(raw.borrow().is_empty());
     }
 }

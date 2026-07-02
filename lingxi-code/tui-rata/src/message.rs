@@ -52,7 +52,20 @@ pub fn render_message(
         RenderedMessage::AssistantToolUse { tool, input, .. } => {
             tool_use_lines(tool, input, theme, verbose)
         }
-        RenderedMessage::UserToolResult { result, .. } => tool_result_lines(result, theme),
+        RenderedMessage::UserToolResult {
+            result,
+            old_string,
+            new_string,
+            file_path,
+            ..
+        } => tool_result_lines(
+            result,
+            old_string.as_deref(),
+            new_string.as_deref(),
+            file_path.as_deref(),
+            width,
+            theme,
+        ),
         RenderedMessage::UserBashInput { command } => user_bash_input_lines(command, theme),
         RenderedMessage::UserBashOutput { stdout, stderr }
         | RenderedMessage::UserLocalCommandOutput { stdout, stderr } => {
@@ -147,7 +160,7 @@ pub fn render_message(
             group_tool_use_lines(tool, entries, theme, verbose)
         }
         RenderedMessage::CollapsedReadSearch { entries, .. } => {
-            collapsed_read_search_lines(entries, theme)
+            collapsed_read_search_lines(entries, theme, verbose)
         }
         RenderedMessage::Attachment { attachment } => attachment_lines(attachment),
         RenderedMessage::Advisor { kind, verbose } => advisor_lines(kind, *verbose, theme),

@@ -1,26 +1,34 @@
-//! Reusable modal overlay: a centered, bordered dialog with a title, body
-//! lines, and a selectable option list.
+//! Generic modal dialog view: a centered, bordered box with a title, body
+//! lines, and a selectable option list (ported from the former
+//! `overlay::Dialog`, plan Phase 4).
 //!
-//! The foundation for permission prompts and full-page pickers. Modeled on
-//! codex's `bottom_pane` popups: a centered box drawn over the content with a
-//! `Clear`, arrow-navigated options, `Enter`/`Esc`, and `1`–`9` shortcuts.
+//! The foundation for [`crate::bottom_pane::permission_view::PermissionView`]
+//! and future confirm-style views. Modeled on codex's `bottom_pane` popups: a
+//! centered box drawn over the content with a `Clear`, arrow-navigated
+//! options, `Enter`/`Esc`, and `1`–`9` shortcuts.
 
-use crossterm::event::KeyCode;
+use std::any::Any;
+
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 
+use crate::bottom_pane::view::{BottomPaneView, ViewAction, ViewOutcome};
+use crate::renderable::Renderable;
+
 /// A modal dialog: title + body lines + a selectable option list.
-pub struct Dialog {
+pub struct DialogView {
     title: String,
     body: Vec<String>,
     options: Vec<String>,
     selected: usize,
 }
 
-/// Result of routing a key into a [`Dialog`].
+/// Result of routing a key into a [`DialogView`] (the dialog-local outcome;
+/// wrapping views map it onto their own [`ViewOutcome`]).
 pub enum DialogOutcome {
     /// Still open (navigation only).
     Pending,
@@ -30,7 +38,7 @@ pub enum DialogOutcome {
     Cancelled,
 }
 
-impl Dialog {
+impl DialogView {
     /// Build a dialog. `selected` starts at the first option.
     #[must_use]
     pub fn new(title: impl Into<String>, body: Vec<String>, options: Vec<String>) -> Self {
@@ -76,9 +84,17 @@ impl Dialog {
         }
     }
 
-    /// Draw the dialog centered over `area`, clearing the buffer beneath it
-    /// (`(Rect, &mut Buffer)` contract — no frame ownership).
-    pub fn render(&self, area: Rect, buf: &mut Buffer) {
+    /// The modal box height the dialog wants: body + separator + options +
+    /// borders/footer chrome.
+    fn modal_height(&self) -> u16 {
+        let body_extra = usize::from(!self.body.is_empty());
+        u16::try_from(self.body.len() + self.options.len() + body_extra + 4).unwrap_or(u16::MAX)
+    }
+}
+
+impl Renderable for DialogView {
+    /// Draw the dialog centered over `area`, clearing the buffer beneath it.
+    fn render(&self, area: Rect, buf: &mut Buffer) {
         let content_w = self
             .body
             .iter()
@@ -91,10 +107,7 @@ impl Dialog {
             .unwrap_or(u16::MAX)
             .min(area.width.saturating_sub(4))
             .max(20);
-        let body_extra = usize::from(!self.body.is_empty());
-        let height = u16::try_from(self.body.len() + self.options.len() + body_extra + 4)
-            .unwrap_or(u16::MAX)
-            .min(area.height);
+        let height = self.modal_height().min(area.height);
         let rect = centered_rect(width, height, area);
 
         Clear.render(rect, buf);
@@ -123,6 +136,24 @@ impl Dialog {
 
         Paragraph::new(lines).render(inner, buf);
     }
+
+    fn desired_height(&self, _width: u16) -> u16 {
+        self.modal_height()
+    }
+}
+
+impl BottomPaneView for DialogView {
+    fn handle_key(&mut self, key: KeyEvent) -> ViewOutcome {
+        match self.on_key(key.code) {
+            DialogOutcome::Pending => ViewOutcome::Pending,
+            DialogOutcome::Selected(idx) => ViewOutcome::Accepted(ViewAction::Selected(idx)),
+            DialogOutcome::Cancelled => ViewOutcome::Cancelled,
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 /// A `width`×`height` rectangle centered within `area` (clamped to fit).
@@ -140,10 +171,12 @@ pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::KeyModifiers;
+
     use super::*;
 
-    fn dialog() -> Dialog {
-        Dialog::new(
+    fn dialog() -> DialogView {
+        DialogView::new(
             "Approve?",
             vec!["Run `ls`?".to_string()],
             vec!["Yes".to_string(), "Always".to_string(), "No".to_string()],
@@ -190,6 +223,30 @@ mod tests {
     fn esc_cancels() {
         let mut d = dialog();
         assert!(matches!(d.on_key(KeyCode::Esc), DialogOutcome::Cancelled));
+    }
+
+    #[test]
+    fn view_contract_maps_dialog_outcomes() {
+        let mut d = dialog();
+        let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        assert!(matches!(
+            d.handle_key(press(KeyCode::Down)),
+            ViewOutcome::Pending
+        ));
+        assert!(matches!(
+            d.handle_key(press(KeyCode::Enter)),
+            ViewOutcome::Accepted(ViewAction::Selected(1))
+        ));
+        assert!(matches!(
+            d.handle_key(press(KeyCode::Esc)),
+            ViewOutcome::Cancelled
+        ));
+    }
+
+    #[test]
+    fn desired_height_matches_modal_chrome() {
+        // 1 body + 3 options + 1 separator + 4 chrome = 9.
+        assert_eq!(dialog().desired_height(80), 9);
     }
 
     #[test]

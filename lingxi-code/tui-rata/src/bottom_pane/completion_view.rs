@@ -1,10 +1,14 @@
 //! The composer completion popup: a small list of candidates shown just above
-//! the composer while a `/command` or `@file` token is being typed.
+//! the composer while a `/command` or `@file` token is being typed (ported
+//! from the former `palette::CompletionPopup`, plan Phase 4).
 //!
 //! Presentational + selection only — the app decides how to APPLY the chosen
 //! item (a `/command` replaces the whole buffer; an `@file` replaces just the
 //! token). Modeled on codex's `bottom_pane` completion popup, anchored above
-//! the composer rather than a full-screen modal.
+//! the composer rather than a full-screen modal. Unlike the modal
+//! [`crate::bottom_pane::view::BottomPaneView`]s it is NOT stacked: it
+//! coexists with the composer (typing keeps filtering), so its state stays
+//! with the composer owner (`RataApp` today, `BottomPane` in plan Phase 5).
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -60,12 +64,12 @@ pub fn command_items(prefix: &str) -> Vec<CompletionItem> {
 }
 
 /// A completion popup over a candidate list.
-pub struct CompletionPopup {
+pub struct CompletionView {
     items: Vec<CompletionItem>,
     selected: usize,
 }
 
-impl CompletionPopup {
+impl CompletionView {
     /// Build a popup over `items` (highlight at the top). Returns `None` when
     /// there is nothing to show.
     #[must_use]
@@ -165,13 +169,13 @@ mod tests {
 
     #[test]
     fn new_is_none_when_empty() {
-        assert!(CompletionPopup::new(Vec::new()).is_none());
-        assert!(CompletionPopup::new(command_items("/h")).is_some());
+        assert!(CompletionView::new(Vec::new()).is_none());
+        assert!(CompletionView::new(command_items("/h")).is_some());
     }
 
     #[test]
     fn nav_clamps_and_reports_selected_insert() {
-        let mut p = CompletionPopup::new(command_items("/")).unwrap();
+        let mut p = CompletionView::new(command_items("/")).unwrap();
         assert_eq!(p.selected(), 0);
         p.prev(); // clamps at 0
         assert_eq!(p.selected(), 0);
@@ -182,7 +186,7 @@ mod tests {
 
     #[test]
     fn render_anchors_above_composer_rect_in_buffer() {
-        let p = CompletionPopup::new(command_items("/m")).unwrap();
+        let p = CompletionView::new(command_items("/m")).unwrap();
         let screen = Rect::new(0, 0, 40, 12);
         // Composer occupies the bottom rows; the popup grows upward from its top.
         let composer = Rect::new(0, 8, 40, 4);

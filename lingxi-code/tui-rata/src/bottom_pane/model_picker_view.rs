@@ -1,46 +1,40 @@
-//! Scrollable model picker for `/model`: a centered, bordered selection list
-//! over the session's [`ModelRow`]s.
+//! Scrollable model picker view for `/model`: a centered, bordered selection
+//! list over the session's [`ModelRow`]s (ported from the former
+//! `picker::ModelPicker`, plan Phase 4).
 //!
-//! Unlike the read-only [`crate::screens::FullScreen`] it is INTERACTIVE — arrow
-//! keys move a highlight (the viewport follows), `Enter` confirms the model,
-//! `Esc` cancels. The currently active model is marked with a `●`. Modeled on
-//! codex's `list_selection_view` + the modal contract of
-//! [`crate::overlay::Dialog`].
+//! Unlike the read-only [`crate::bottom_pane::screen_view::ScreenView`] it is
+//! INTERACTIVE — arrow keys move a highlight (the viewport follows), `Enter`
+//! confirms the model ([`ViewOutcome::SwitchModel`]), `Esc` cancels. The
+//! currently active model is marked with a `●`. Modeled on codex's
+//! `list_selection_view` + the modal contract of
+//! [`crate::bottom_pane::dialog_view::DialogView`].
 
-use crossterm::event::KeyCode;
+use std::any::Any;
+
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 
-use crate::overlay::centered_rect;
+use crate::bottom_pane::dialog_view::centered_rect;
+use crate::bottom_pane::view::{BottomPaneView, ViewOutcome};
+use crate::renderable::Renderable;
 use crate::session::ModelRow;
 
 /// Rows shown in the picker viewport before it scrolls.
 const VIEWPORT: usize = 12;
 
-/// Result of routing a key into a [`ModelPicker`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PickerOutcome {
-    /// Still open (navigation only).
-    Pending,
-    /// The user confirmed a model: `(request_model, profile)` — the exact args
-    /// `OrchestratorHandle::switch_model` accepts.
-    Selected(String, Option<String>),
-    /// The user cancelled (`Esc`).
-    Cancelled,
-}
-
 /// An interactive, scrollable model selection list.
-pub struct ModelPicker {
+pub struct ModelPickerView {
     rows: Vec<ModelRow>,
     selected: usize,
     /// Top row index of the scroll window.
     offset: usize,
 }
 
-impl ModelPicker {
+impl ModelPickerView {
     /// Build a picker over `rows`, starting the highlight on the current model
     /// (the row with `is_current`), or the first row when none is marked.
     #[must_use]
@@ -66,33 +60,6 @@ impl ModelPicker {
         self.selected
     }
 
-    /// Route a key: arrows move the highlight (viewport follows), `Enter`
-    /// confirms, `Esc` cancels.
-    pub fn on_key(&mut self, code: KeyCode) -> PickerOutcome {
-        match code {
-            KeyCode::Up => {
-                self.selected = self.selected.saturating_sub(1);
-                self.follow();
-                PickerOutcome::Pending
-            }
-            KeyCode::Down => {
-                if self.selected + 1 < self.rows.len() {
-                    self.selected += 1;
-                }
-                self.follow();
-                PickerOutcome::Pending
-            }
-            KeyCode::Enter => self
-                .rows
-                .get(self.selected)
-                .map_or(PickerOutcome::Cancelled, |r| {
-                    PickerOutcome::Selected(r.request_model.clone(), r.profile.clone())
-                }),
-            KeyCode::Esc => PickerOutcome::Cancelled,
-            _ => PickerOutcome::Pending,
-        }
-    }
-
     /// Keep the highlighted row inside the scroll window.
     fn follow(&mut self) {
         if self.selected < self.offset {
@@ -102,9 +69,18 @@ impl ModelPicker {
         }
     }
 
-    /// Draw the picker centered over `area`, clearing the buffer beneath it
-    /// (`(Rect, &mut Buffer)` contract — no frame ownership).
-    pub fn render(&self, area: Rect, buf: &mut Buffer) {
+    fn max_width(&self) -> usize {
+        self.rows
+            .iter()
+            .map(|r| r.display.chars().count() + r.provider_label.chars().count() + 3)
+            .max()
+            .unwrap_or(20)
+    }
+}
+
+impl Renderable for ModelPickerView {
+    /// Draw the picker centered over `area`, clearing the buffer beneath it.
+    fn render(&self, area: Rect, buf: &mut Buffer) {
         let width = u16::try_from(self.max_width() + 6)
             .unwrap_or(u16::MAX)
             .min(area.width.saturating_sub(4))
@@ -148,17 +124,51 @@ impl ModelPicker {
         Paragraph::new(lines).render(inner, buf);
     }
 
-    fn max_width(&self) -> usize {
-        self.rows
-            .iter()
-            .map(|r| r.display.chars().count() + r.provider_label.chars().count() + 3)
-            .max()
-            .unwrap_or(20)
+    /// The bottom-viewport rows the picker claims: its visible rows + modal
+    /// chrome (locked layout value: 2 models → 6 rows at 80x24).
+    fn desired_height(&self, _width: u16) -> u16 {
+        u16::try_from(self.rows.len()).unwrap_or(0).min(12) + 4
+    }
+}
+
+impl BottomPaneView for ModelPickerView {
+    /// Route a key: arrows move the highlight (viewport follows, clamped at
+    /// the list edges — locked behavior), `Enter` confirms, `Esc` cancels.
+    fn handle_key(&mut self, key: KeyEvent) -> ViewOutcome {
+        match key.code {
+            KeyCode::Up => {
+                self.selected = self.selected.saturating_sub(1);
+                self.follow();
+                ViewOutcome::Pending
+            }
+            KeyCode::Down => {
+                if self.selected + 1 < self.rows.len() {
+                    self.selected += 1;
+                }
+                self.follow();
+                ViewOutcome::Pending
+            }
+            KeyCode::Enter => self
+                .rows
+                .get(self.selected)
+                .map_or(ViewOutcome::Cancelled, |r| ViewOutcome::SwitchModel {
+                    request_model: r.request_model.clone(),
+                    profile: r.profile.clone(),
+                }),
+            KeyCode::Esc => ViewOutcome::Cancelled,
+            _ => ViewOutcome::Pending,
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::KeyModifiers;
+
     use super::*;
 
     fn rows() -> Vec<ModelRow> {
@@ -180,49 +190,76 @@ mod tests {
         ]
     }
 
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
     #[test]
     fn starts_on_current_model() {
-        let p = ModelPicker::new(rows());
+        let p = ModelPickerView::new(rows());
         assert_eq!(p.selected(), 1);
     }
 
     #[test]
     fn enter_confirms_selected_request_model_and_profile() {
-        let mut p = ModelPicker::new(rows());
-        p.on_key(KeyCode::Up); // move to Opus
+        let mut p = ModelPickerView::new(rows());
+        p.handle_key(press(KeyCode::Up)); // move to Opus
         assert_eq!(p.selected(), 0);
-        assert_eq!(
-            p.on_key(KeyCode::Enter),
-            PickerOutcome::Selected("claude-opus".into(), Some("anthropic".into()))
-        );
+        assert!(matches!(
+            p.handle_key(press(KeyCode::Enter)),
+            ViewOutcome::SwitchModel { ref request_model, ref profile }
+                if request_model == "claude-opus" && profile.as_deref() == Some("anthropic")
+        ));
     }
 
     #[test]
     fn esc_cancels() {
-        let mut p = ModelPicker::new(rows());
-        assert_eq!(p.on_key(KeyCode::Esc), PickerOutcome::Cancelled);
+        let mut p = ModelPickerView::new(rows());
+        assert!(matches!(
+            p.handle_key(press(KeyCode::Esc)),
+            ViewOutcome::Cancelled
+        ));
     }
 
     #[test]
     fn arrows_clamp_at_both_ends() {
-        let mut p = ModelPicker::new(rows());
-        p.on_key(KeyCode::Down); // already last (index 1), clamps
+        let mut p = ModelPickerView::new(rows());
+        p.handle_key(press(KeyCode::Down)); // already last (index 1), clamps
         assert_eq!(p.selected(), 1);
-        p.on_key(KeyCode::Up);
-        p.on_key(KeyCode::Up); // clamps at 0
+        p.handle_key(press(KeyCode::Up));
+        p.handle_key(press(KeyCode::Up)); // clamps at 0
         assert_eq!(p.selected(), 0);
     }
 
     #[test]
     fn empty_picker_enter_cancels() {
-        let mut p = ModelPicker::new(Vec::new());
+        let mut p = ModelPickerView::new(Vec::new());
         assert!(p.is_empty());
-        assert_eq!(p.on_key(KeyCode::Enter), PickerOutcome::Cancelled);
+        assert!(matches!(
+            p.handle_key(press(KeyCode::Enter)),
+            ViewOutcome::Cancelled
+        ));
+    }
+
+    #[test]
+    fn desired_height_is_rows_plus_chrome() {
+        assert_eq!(ModelPickerView::new(rows()).desired_height(80), 6);
+        let many: Vec<ModelRow> = (0..30)
+            .map(|i| ModelRow {
+                display: format!("m{i}"),
+                request_model: format!("m{i}"),
+                profile: None,
+                provider_label: String::new(),
+                is_current: false,
+            })
+            .collect();
+        // Caps at the 12-row scroll viewport + 4 chrome.
+        assert_eq!(ModelPickerView::new(many).desired_height(80), 16);
     }
 
     #[test]
     fn render_centers_list_with_current_marker_into_buffer() {
-        let p = ModelPicker::new(rows());
+        let p = ModelPickerView::new(rows());
         let area = Rect::new(0, 0, 60, 10);
         let mut buf = Buffer::empty(area);
         p.render(area, &mut buf);

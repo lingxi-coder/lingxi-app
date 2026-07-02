@@ -419,6 +419,13 @@ where
         Ok(())
     }
 
+    /// Whether the cursor is currently hidden (a draw that claims no cursor
+    /// position hides it). Test-only introspection.
+    #[cfg(test)]
+    pub(crate) fn cursor_hidden(&self) -> bool {
+        self.hidden_cursor
+    }
+
     /// Apply a visible cursor style.
     pub fn set_cursor_style(&mut self, style: SetCursorStyle) -> io::Result<()> {
         queue!(self.backend, style)

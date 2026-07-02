@@ -15,17 +15,14 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+pub mod bottom_pane;
 pub mod composer;
 pub mod files;
 pub mod history_cell;
 pub mod image_view;
 pub mod message;
-pub mod overlay;
-pub mod palette;
-pub mod picker;
 pub mod render;
 pub mod renderable;
-pub mod screens;
 pub mod session;
 pub mod style_adapter;
 pub mod term_image;

@@ -16,27 +16,26 @@ use std::io::Write;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use permission::gate::{PermissionRequest, PermissionResponse};
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tui_core::message::RenderedMessage;
 use tui_core::orchestrator_bridge::TurnEvent;
 use tui_core::permission_bridge::PermissionExchange;
 use tui_core::theme::Theme;
 
+use crate::bottom_pane::completion_view::{command_items, CompletionView};
+use crate::bottom_pane::model_picker_view::ModelPickerView;
+use crate::bottom_pane::permission_view::PermissionView;
+use crate::bottom_pane::screen_view::ScreenView;
+use crate::bottom_pane::{CommandAction, ViewOutcome, ViewStack};
 use crate::composer::{Composer, ComposerView, MAX_VISIBLE_LINES};
 use crate::history_cell::MessageHistoryCell;
-use crate::overlay::{Dialog, DialogOutcome};
-use crate::palette::{command_items, CompletionPopup};
-use crate::picker::{ModelPicker, PickerOutcome};
 use crate::renderable::Renderable;
-use crate::screens::FullScreen;
 use crate::session::SessionInfo;
 use crate::terminal::TerminalSession;
 use crate::transcript::Transcript;
@@ -60,12 +59,6 @@ enum KeyOutcome {
     SwitchModel(String, Option<String>),
 }
 
-/// A permission request awaiting the user's decision.
-struct PendingPermission {
-    dialog: Dialog,
-    resp_tx: oneshot::Sender<PermissionResponse>,
-}
-
 /// Interactive chat state.
 pub struct RataApp {
     /// Conversation history: committed cells + the active streaming cell +
@@ -75,13 +68,14 @@ pub struct RataApp {
     theme: Theme,
     /// Cancellation token for the in-flight turn, if any.
     current_turn: Option<CancellationToken>,
-    /// Active permission prompt, if any (owns the keyboard while open).
-    pending_permission: Option<PendingPermission>,
-    /// Active `/model` picker, if any (owns the keyboard).
-    active_model_picker: Option<ModelPicker>,
+    /// Transient keyboard-owning views stacked over the composer: permission
+    /// prompt, `/model` picker, read-only screens (plan Phase 4). The top
+    /// view sees every key/paste until it pops itself via its outcome.
+    view_stack: ViewStack,
     /// Command/file completion popup shown while a `/command` or `@file` token
-    /// is being typed.
-    completion: Option<CompletionPopup>,
+    /// is being typed. NOT a stacked view — it coexists with the composer
+    /// (typing keeps filtering); plan Phase 5 moves it into `BottomPane`.
+    completion: Option<CompletionView>,
     /// Vim editing state when `/vim` is enabled (`None` → plain editor).
     vim: Option<VimState>,
     /// Wall-clock start, used to advance the streaming spinner animation.
@@ -107,8 +101,7 @@ impl RataApp {
             composer: Composer::default(),
             theme: Theme::dark(),
             current_turn: None,
-            pending_permission: None,
-            active_model_picker: None,
+            view_stack: ViewStack::new(),
             completion: None,
             vim: None,
             start: std::time::Instant::now(),
@@ -128,11 +121,10 @@ impl RataApp {
     }
 
     fn on_key(&mut self, key: KeyEvent) -> KeyOutcome {
-        if self.pending_permission.is_some() {
-            return self.on_permission_key(key.code);
-        }
-        if self.active_model_picker.is_some() {
-            return self.on_picker_key(key.code);
+        // An active view owns the keyboard until it resolves (layered
+        // routing: view stack first, then completion/vim/composer).
+        if let Some(outcome) = self.view_stack.route_key(key) {
+            return self.on_view_outcome(outcome);
         }
         if self.completion.is_some() {
             if let Some(outcome) = self.on_completion_key(key.code) {
@@ -177,6 +169,13 @@ impl RataApp {
         if let Some(outcome) = self.handle_slash(&text) {
             return outcome;
         }
+        self.submit_prompt(text)
+    }
+
+    /// Record `text` as the user's prompt and hand it to the caller with a
+    /// fresh per-turn cancellation token. Shared by the composer submit path
+    /// and [`ViewOutcome::SubmitPrompt`].
+    fn submit_prompt(&mut self, text: String) -> KeyOutcome {
         self.transcript.push_message(RenderedMessage::UserText {
             body: text.clone(),
             timestamp: 0,
@@ -186,10 +185,54 @@ impl RataApp {
         KeyOutcome::Submit(text, token)
     }
 
-    /// Handle a bracketed paste. An image file path (existing `.png`/`.jpg`/…)
-    /// becomes an image message (auto-selected for preview); anything else is
-    /// inserted into the composer at the cursor.
-    fn on_paste(&mut self, text: &str) {
+    /// Act on the outcome the view stack returned after routing a key/paste
+    /// (the stack has already done its own pop/push bookkeeping; only
+    /// app-level effects are left).
+    fn on_view_outcome(&mut self, outcome: ViewOutcome) -> KeyOutcome {
+        match outcome {
+            // `OpenView` is consumed inside the stack and never surfaces here;
+            // the remaining variants carry no app-level effect.
+            ViewOutcome::Pending
+            | ViewOutcome::Cancelled
+            | ViewOutcome::Accepted(_)
+            | ViewOutcome::PermissionResponse(_)
+            | ViewOutcome::OpenView(_) => KeyOutcome::Continue,
+            ViewOutcome::SubmitPrompt(prompt) => self.submit_prompt(prompt),
+            ViewOutcome::SwitchModel {
+                request_model,
+                profile,
+            } => {
+                self.transcript.push_message(RenderedMessage::SystemText {
+                    body: format!("Switching model to {request_model}…"),
+                    timestamp: 0,
+                    is_error: false,
+                });
+                KeyOutcome::SwitchModel(request_model, profile)
+            }
+            ViewOutcome::RunCommand(action) => self.run_command(action),
+        }
+    }
+
+    /// Execute a command effect a view requested via
+    /// [`ViewOutcome::RunCommand`].
+    fn run_command(&mut self, action: CommandAction) -> KeyOutcome {
+        match action {
+            CommandAction::ClearTranscript => {
+                self.transcript.clear();
+                KeyOutcome::Continue
+            }
+            CommandAction::Quit => KeyOutcome::Quit,
+        }
+    }
+
+    /// Handle a bracketed paste. An active view owns the paste stream (modal
+    /// views swallow it by default). Otherwise an image file path (existing
+    /// `.png`/`.jpg`/…) becomes an image message (auto-selected for preview);
+    /// anything else is inserted into the composer at the cursor.
+    fn on_paste(&mut self, text: &str) -> KeyOutcome {
+        if let Some(outcome) = self.view_stack.route_paste(text) {
+            return self.on_view_outcome(outcome);
+        }
         let trimmed = text.trim();
         if is_image_path(trimmed) {
             let name = std::path::Path::new(trimmed)
@@ -205,6 +248,7 @@ impl RataApp {
             self.composer.insert_str(text);
             self.sync_completion();
         }
+        KeyOutcome::Continue
     }
 
     fn on_composer_key(&mut self, key: KeyEvent) -> KeyOutcome {
@@ -376,65 +420,19 @@ impl RataApp {
         }
     }
 
-    /// Open a permission prompt for `exchange`; it owns the keyboard until the
-    /// user resolves it (Enter/1-3 approve or deny, Esc denies).
+    /// Open a permission prompt for `exchange` by pushing a
+    /// [`PermissionView`]: it owns the keyboard until the user resolves it
+    /// (Enter/1-3 approve or deny, Esc denies) and delivers the response
+    /// through the exchange's one-shot channel exactly once.
     pub fn open_permission(&mut self, exchange: PermissionExchange) {
-        let who = exchange
-            .worker
-            .as_ref()
-            .map_or_else(|| "The assistant".to_string(), |w| format!("@{}", w.name));
-        let (tool, mut input) = match &exchange.request {
-            PermissionRequest::ToolUseConfirm {
-                tool_name,
-                tool_input,
-                ..
-            } => (tool_name.clone(), tool_input.to_string()),
-            PermissionRequest::ExitPlanMode { plan } => ("ExitPlanMode".to_string(), plan.clone()),
-            PermissionRequest::BypassPermissionsMode => {
-                ("BypassPermissionsMode".to_string(), String::new())
-            }
-        };
-        if input.chars().count() > 68 {
-            input = format!("{}…", input.chars().take(67).collect::<String>());
-        }
-        let dialog = Dialog::new(
-            "Permission required",
-            vec![format!("{who} wants to use {tool}:"), input],
-            vec![
-                "Yes, allow once".to_string(),
-                "Yes, allow always".to_string(),
-                "No, deny".to_string(),
-            ],
-        );
-        self.pending_permission = Some(PendingPermission {
-            dialog,
-            resp_tx: exchange.resp_tx,
-        });
+        self.view_stack
+            .push(Box::new(PermissionView::new(exchange)));
     }
 
-    fn on_permission_key(&mut self, code: KeyCode) -> KeyOutcome {
-        let Some(pending) = self.pending_permission.as_mut() else {
-            return KeyOutcome::Continue;
-        };
-        match pending.dialog.on_key(code) {
-            DialogOutcome::Pending => {}
-            DialogOutcome::Selected(idx) => {
-                let response = match idx {
-                    0 => PermissionResponse::AllowOnce,
-                    1 => PermissionResponse::AllowAlways,
-                    _ => PermissionResponse::Deny,
-                };
-                self.resolve_permission(response);
-            }
-            DialogOutcome::Cancelled => self.resolve_permission(PermissionResponse::Deny),
-        }
-        KeyOutcome::Continue
-    }
-
-    fn resolve_permission(&mut self, response: PermissionResponse) {
-        if let Some(pending) = self.pending_permission.take() {
-            let _ = pending.resp_tx.send(response);
-        }
+    /// Whether a permission prompt is anywhere on the view stack (the event
+    /// loop defers further permission requests until it resolves).
+    fn has_open_permission(&self) -> bool {
+        self.view_stack.contains::<PermissionView>()
     }
 
     /// Route a recognized slash command. Returns `Some(outcome)` when the input
@@ -459,38 +457,39 @@ impl RataApp {
         }
         match trimmed {
             "/help" => {
-                self.push_screen_text(&FullScreen::help());
+                self.view_stack.push(Box::new(ScreenView::help()));
                 Some(KeyOutcome::Continue)
             }
             "/doctor" => {
-                self.push_screen_text(&FullScreen::doctor(&self.session.doctor));
+                self.view_stack
+                    .push(Box::new(ScreenView::doctor(&self.session.doctor)));
                 Some(KeyOutcome::Continue)
             }
             "/mcp" => {
-                self.push_screen_text(&FullScreen::from_rows(
+                self.view_stack.push(Box::new(ScreenView::from_rows(
                     "MCP servers",
                     "MCP servers",
                     &self.session.mcp,
                     "No MCP servers configured.",
-                ));
+                )));
                 Some(KeyOutcome::Continue)
             }
             "/hooks" => {
-                self.push_screen_text(&FullScreen::from_rows(
+                self.view_stack.push(Box::new(ScreenView::from_rows(
                     "Hooks",
                     "Hooks",
                     &self.session.hooks,
                     "No hooks configured.",
-                ));
+                )));
                 Some(KeyOutcome::Continue)
             }
             "/agents" => {
-                self.push_screen_text(&FullScreen::from_rows(
+                self.view_stack.push(Box::new(ScreenView::from_rows(
                     "Agents",
                     "Agents",
                     &self.session.agents,
                     "No agents configured.",
-                ));
+                )));
                 Some(KeyOutcome::Continue)
             }
             "/clear" => {
@@ -505,7 +504,8 @@ impl RataApp {
                         is_error: false,
                     });
                 } else {
-                    self.active_model_picker = Some(ModelPicker::new(self.session.models.clone()));
+                    self.view_stack
+                        .push(Box::new(ModelPickerView::new(self.session.models.clone())));
                 }
                 Some(KeyOutcome::Continue)
             }
@@ -521,38 +521,6 @@ impl RataApp {
                 Some(KeyOutcome::Continue)
             }
             _ => None,
-        }
-    }
-
-    /// Push a read-only screen's content into the conversation scrollback as a
-    /// plain-text system message (inline-viewport model: no full-page overlay).
-    fn push_screen_text(&mut self, screen: &FullScreen) {
-        self.transcript.push_message(RenderedMessage::SystemText {
-            body: screen.plain_text(),
-            timestamp: 0,
-            is_error: false,
-        });
-    }
-
-    fn on_picker_key(&mut self, code: KeyCode) -> KeyOutcome {
-        let Some(picker) = self.active_model_picker.as_mut() else {
-            return KeyOutcome::Continue;
-        };
-        match picker.on_key(code) {
-            PickerOutcome::Pending => KeyOutcome::Continue,
-            PickerOutcome::Cancelled => {
-                self.active_model_picker = None;
-                KeyOutcome::Continue
-            }
-            PickerOutcome::Selected(model, profile) => {
-                self.active_model_picker = None;
-                self.transcript.push_message(RenderedMessage::SystemText {
-                    body: format!("Switching model to {model}…"),
-                    timestamp: 0,
-                    is_error: false,
-                });
-                KeyOutcome::SwitchModel(model, profile)
-            }
         }
     }
 
@@ -597,29 +565,25 @@ impl RataApp {
         let is_command =
             text.starts_with('/') && !text.contains('\n') && !text.contains(char::is_whitespace);
         if is_command {
-            self.completion = CompletionPopup::new(command_items(&text));
+            self.completion = CompletionView::new(command_items(&text));
             return;
         }
         if let Some((_, fragment)) = self.composer.at_fragment() {
-            self.completion = CompletionPopup::new(crate::files::file_completions(&fragment));
+            self.completion = CompletionView::new(crate::files::file_completions(&fragment));
             return;
         }
         self.completion = None;
     }
 
-    /// Desired inline-viewport height: status + composer, grown to fit an
-    /// active overlay (permission dialog / model picker / completion popup).
-    fn viewport_height(&self) -> u16 {
+    /// Desired inline-viewport height at `width` columns: status + composer,
+    /// grown to fit the active stacked view (which reports its own height
+    /// through [`Renderable::desired_height`]) or the completion popup.
+    fn viewport_height(&self, width: u16) -> u16 {
         let composer =
             u16::try_from(self.composer.lines().len().clamp(1, MAX_VISIBLE_LINES)).unwrap_or(1);
         let base = 1 + composer + 2; // status + composer content + border
-        let overlay = if self.pending_permission.is_some() {
-            9
-        } else if self.active_model_picker.is_some() {
-            u16::try_from(self.session.models.len())
-                .unwrap_or(0)
-                .min(12)
-                + 4
+        let overlay = if let Some(view) = self.view_stack.active() {
+            view.desired_height(width)
         } else if self.completion.is_some() {
             base + 8
         } else {
@@ -669,6 +633,21 @@ impl RataApp {
     /// position/style are copied back onto the frame at the end.
     fn render_viewport(&mut self, frame: &mut crate::terminal::Frame) {
         let area = frame.area();
+
+        // A full-frame view (e.g. `/help`) owns the whole viewport: no status
+        // row, no composer, and the cursor is the view's to claim (hidden by
+        // default).
+        if let Some(view) = self.view_stack.active() {
+            if !view.wants_status_line() {
+                view.render(area, frame.buffer_mut());
+                if let Some(pos) = view.cursor_pos(area) {
+                    frame.set_cursor_position(pos);
+                    frame.set_cursor_style(view.cursor_style(area));
+                }
+                return;
+            }
+        }
+
         let zones = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(3)])
@@ -715,15 +694,14 @@ impl RataApp {
         Paragraph::new(status).render(zones[0], buf);
         composer_view.render(zones[1], buf);
 
-        // Overlays draw over the viewport.
+        // Overlays draw over the viewport: the completion popup anchored
+        // above the composer, then the stacked views bottom-to-top (each a
+        // centered modal over the full area).
         if let Some(popup) = &self.completion {
             popup.render(zones[1], buf);
         }
-        if let Some(picker) = &self.active_model_picker {
-            picker.render(area, buf);
-        }
-        if let Some(pending) = &self.pending_permission {
-            pending.dialog.render(area, buf);
+        for view in self.view_stack.views() {
+            view.render(area, buf);
         }
 
         // Frame adapter: copy the composer's cursor claim onto the frame.
@@ -811,26 +789,28 @@ fn app_loop(
             app.apply_turn_event(event);
         }
         // Take a new permission request only when none is currently shown.
-        if app.pending_permission.is_none() {
+        if !app.has_open_permission() {
             if let Ok(exchange) = permission_rx.try_recv() {
                 app.open_permission(exchange);
             }
         }
         // Size the absolute bottom viewport for this tick, THEN commit
         // finalized history above it (insertion wraps at the viewport width).
-        terminal.set_bottom_viewport_height(app.viewport_height())?;
+        let width = terminal.size()?.width;
+        terminal.set_bottom_viewport_height(app.viewport_height(width))?;
         app.flush_scrollback(terminal)?;
         terminal.draw(|frame| app.render_viewport(frame))?;
         if event::poll(Duration::from_millis(50))? {
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => match app.on_key(key) {
-                    KeyOutcome::Quit => return Ok(()),
-                    KeyOutcome::Submit(prompt, token) => on_submit(prompt, token),
-                    KeyOutcome::SwitchModel(model, profile) => on_switch_model(model, profile),
-                    KeyOutcome::Continue => {}
-                },
+            let outcome = match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
                 Event::Paste(text) => app.on_paste(&text),
-                _ => {}
+                _ => KeyOutcome::Continue,
+            };
+            match outcome {
+                KeyOutcome::Quit => return Ok(()),
+                KeyOutcome::Submit(prompt, token) => on_submit(prompt, token),
+                KeyOutcome::SwitchModel(model, profile) => on_switch_model(model, profile),
+                KeyOutcome::Continue => {}
             }
         }
     }
@@ -838,6 +818,9 @@ fn app_loop(
 
 #[cfg(test)]
 mod tests {
+    use permission::gate::{PermissionRequest, PermissionResponse};
+    use tokio::sync::oneshot;
+
     use super::*;
 
     fn press(code: KeyCode) -> KeyEvent {
@@ -1032,11 +1015,11 @@ mod tests {
     #[test]
     fn viewport_height_grows_for_overlays() {
         let mut app = RataApp::new(Vec::new());
-        let base = app.viewport_height();
+        let base = app.viewport_height(80);
         // Opening the completion popup grows the viewport.
         typ(&mut app, "/");
         assert!(app.completion.is_some());
-        assert!(app.viewport_height() > base);
+        assert!(app.viewport_height(80) > base);
     }
 
     #[test]
@@ -1195,7 +1178,7 @@ mod tests {
         let mut app = RataApp::new(Vec::new());
         let (exchange, resp_rx) = tool_exchange();
         app.open_permission(exchange);
-        assert!(app.pending_permission.is_some());
+        assert!(app.has_open_permission());
 
         // While a prompt is open, normal keys are swallowed by the dialog and
         // never reach the composer.
@@ -1205,7 +1188,7 @@ mod tests {
         // Enter selects the highlighted option (index 0 = AllowOnce).
         let outcome = app.on_key(press(KeyCode::Enter));
         assert!(matches!(outcome, KeyOutcome::Continue));
-        assert!(app.pending_permission.is_none());
+        assert!(!app.has_open_permission());
         assert_eq!(
             resp_rx.blocking_recv().unwrap(),
             PermissionResponse::AllowOnce
@@ -1219,7 +1202,7 @@ mod tests {
         app.open_permission(exchange);
         let outcome = app.on_key(press(KeyCode::Esc));
         assert!(matches!(outcome, KeyOutcome::Continue));
-        assert!(app.pending_permission.is_none());
+        assert!(!app.has_open_permission());
         assert_eq!(resp_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
     }
 
@@ -1230,24 +1213,58 @@ mod tests {
         app.open_permission(exchange);
         // '3' shortcut = third option = Deny.
         app.on_key(press(KeyCode::Char('3')));
-        assert!(app.pending_permission.is_none());
+        assert!(!app.has_open_permission());
         assert_eq!(resp_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
     }
 
     #[test]
-    fn slash_help_prints_into_scrollback_without_sending_a_prompt() {
+    fn slash_help_opens_screen_view_without_sending_a_prompt() {
         let mut app = RataApp::new(Vec::new());
         for c in "/help".chars() {
             app.on_key(press(KeyCode::Char(c)));
         }
         let outcome = app.on_key(press(KeyCode::Enter));
-        // Recognized command: no Submit; help text pushed into scrollback.
+        // Recognized command: no Submit; a focused ScreenView opens instead
+        // of dumping text into scrollback (plan Phase 4 view-stack routing).
         assert!(matches!(outcome, KeyOutcome::Continue));
         assert_eq!(app.composer.text(), "");
-        let msgs = messages(&app);
-        assert_eq!(msgs.len(), 1);
-        assert!(matches!(msgs[0], RenderedMessage::SystemText { .. }));
+        assert!(app.view_stack.contains::<ScreenView>());
+        assert!(messages(&app).is_empty(), "no scrollback dump");
         assert!(app.current_turn.is_none());
+    }
+
+    #[test]
+    fn screen_view_owns_keys_scrolls_and_esc_closes_without_quitting() {
+        let mut app = RataApp::new(Vec::new());
+        submit_command(&mut app, "/help");
+        assert!(app.view_stack.contains::<ScreenView>());
+        // Keys go to the view, not the composer.
+        app.on_key(press(KeyCode::Char('x')));
+        assert_eq!(app.composer.text(), "");
+        // Down scrolls the screen body.
+        app.on_key(press(KeyCode::Down));
+        let scroll = app
+            .view_stack
+            .active()
+            .and_then(|v| v.as_any().downcast_ref::<ScreenView>())
+            .expect("help screen active")
+            .scroll();
+        assert_eq!(scroll, 1);
+        // Esc closes the view (does NOT quit the app) and returns the keys.
+        let outcome = app.on_key(press(KeyCode::Esc));
+        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert!(app.view_stack.is_empty());
+        app.on_key(press(KeyCode::Char('h')));
+        assert_eq!(app.composer.text(), "h");
+    }
+
+    #[test]
+    fn screen_view_q_closes() {
+        let mut app = RataApp::new(Vec::new());
+        submit_command(&mut app, "/help");
+        let outcome = app.on_key(press(KeyCode::Char('q')));
+        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert!(app.view_stack.is_empty());
     }
 
     #[test]
@@ -1292,22 +1309,23 @@ mod tests {
     }
 
     #[test]
-    fn slash_doctor_and_mcp_print_into_scrollback() {
+    fn slash_doctor_and_mcp_open_screen_views() {
         let mut app = RataApp::new(Vec::new());
         assert!(matches!(
             submit_command(&mut app, "/doctor"),
             KeyOutcome::Continue
         ));
+        assert!(app.view_stack.contains::<ScreenView>());
+        app.on_key(press(KeyCode::Esc)); // close /doctor
+        assert!(app.view_stack.is_empty());
         assert!(matches!(
             submit_command(&mut app, "/mcp"),
             KeyOutcome::Continue
         ));
-        // Both commands print their content into scrollback as system messages.
-        let msgs = messages(&app);
-        assert_eq!(msgs.len(), 2);
-        assert!(msgs
-            .iter()
-            .all(|m| matches!(m, RenderedMessage::SystemText { .. })));
+        assert!(app.view_stack.contains::<ScreenView>());
+        // Focused views, not scrollback dumps; and no prompt turn started.
+        assert!(messages(&app).is_empty());
+        assert!(app.current_turn.is_none());
     }
 
     fn app_with_models() -> RataApp {
@@ -1339,7 +1357,7 @@ mod tests {
             submit_command(&mut app, "/model"),
             KeyOutcome::Continue
         ));
-        assert!(app.active_model_picker.is_none());
+        assert!(!app.view_stack.contains::<ModelPickerView>());
         assert_eq!(messages(&app).len(), 1);
     }
 
@@ -1350,7 +1368,7 @@ mod tests {
             submit_command(&mut app, "/model"),
             KeyOutcome::Continue
         ));
-        assert!(app.active_model_picker.is_some());
+        assert!(app.view_stack.contains::<ModelPickerView>());
         // Picker owns the keyboard: move up to the first (Opus) row and confirm.
         app.on_key(press(KeyCode::Up));
         let outcome = app.on_key(press(KeyCode::Enter));
@@ -1359,17 +1377,94 @@ mod tests {
             KeyOutcome::SwitchModel(ref m, ref p)
                 if m == "claude-opus" && p.as_deref() == Some("anthropic")
         ));
-        assert!(app.active_model_picker.is_none());
+        assert!(!app.view_stack.contains::<ModelPickerView>());
     }
 
     #[test]
     fn model_picker_esc_cancels_without_switching() {
         let mut app = app_with_models();
         submit_command(&mut app, "/model");
-        assert!(app.active_model_picker.is_some());
+        assert!(app.view_stack.contains::<ModelPickerView>());
         let outcome = app.on_key(press(KeyCode::Esc));
         assert!(matches!(outcome, KeyOutcome::Continue));
-        assert!(app.active_model_picker.is_none());
+        assert!(!app.view_stack.contains::<ModelPickerView>());
+    }
+
+    #[test]
+    fn permission_stacks_over_picker_and_returns_keys_to_it() {
+        let mut app = app_with_models();
+        submit_command(&mut app, "/model");
+        assert!(app.view_stack.contains::<ModelPickerView>());
+        // A permission request arriving while the picker is open stacks on
+        // top and owns the keyboard.
+        let (exchange, resp_rx) = tool_exchange();
+        app.open_permission(exchange);
+        assert_eq!(app.view_stack.len(), 2);
+        let outcome = app.on_key(press(KeyCode::Enter)); // resolves permission
+        assert!(matches!(outcome, KeyOutcome::Continue));
+        assert_eq!(
+            resp_rx.blocking_recv().unwrap(),
+            PermissionResponse::AllowOnce
+        );
+        // The picker beneath survives and gets the keyboard back.
+        assert!(app.view_stack.contains::<ModelPickerView>());
+        app.on_key(press(KeyCode::Up));
+        let outcome = app.on_key(press(KeyCode::Enter));
+        assert!(matches!(outcome, KeyOutcome::SwitchModel(ref m, _) if m == "claude-opus"));
+    }
+
+    #[test]
+    fn view_run_command_outcomes_dispatch_to_the_app() {
+        use std::any::Any;
+
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        /// A stub view that returns a scripted command on Enter.
+        struct CommandStub(Option<CommandAction>);
+
+        impl Renderable for CommandStub {
+            fn render(&self, _area: Rect, _buf: &mut Buffer) {}
+            fn desired_height(&self, _width: u16) -> u16 {
+                1
+            }
+        }
+
+        impl crate::bottom_pane::BottomPaneView for CommandStub {
+            fn handle_key(&mut self, _key: KeyEvent) -> ViewOutcome {
+                self.0
+                    .take()
+                    .map_or(ViewOutcome::Pending, ViewOutcome::RunCommand)
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+
+        // ClearTranscript empties the transcript.
+        let mut app = RataApp::new(vec![RenderedMessage::SystemText {
+            body: "old".to_string(),
+            timestamp: 0,
+            is_error: false,
+        }]);
+        app.view_stack
+            .push(Box::new(CommandStub(Some(CommandAction::ClearTranscript))));
+        assert!(matches!(
+            app.on_key(press(KeyCode::Enter)),
+            KeyOutcome::Continue
+        ));
+        assert!(messages(&app).is_empty());
+        assert!(app.view_stack.is_empty(), "completed view popped");
+
+        // Quit surfaces as KeyOutcome::Quit.
+        let mut app = RataApp::new(Vec::new());
+        app.view_stack
+            .push(Box::new(CommandStub(Some(CommandAction::Quit))));
+        assert!(matches!(
+            app.on_key(press(KeyCode::Enter)),
+            KeyOutcome::Quit
+        ));
     }
 
     // ===== Phase 0 behavior locks (codex-ui-structure plan) =====
@@ -1396,10 +1491,10 @@ mod tests {
         terminal
     }
 
-    /// Draw the bottom viewport at its self-reported height; returns the
-    /// terminal for buffer/cursor inspection.
+    /// Draw the bottom viewport at its self-reported height (80 columns);
+    /// returns the terminal for buffer/cursor inspection.
     fn draw_viewport(app: &mut RataApp) -> Terminal<TestWriteBackend> {
-        let mut terminal = inline_test_terminal(app.viewport_height());
+        let mut terminal = inline_test_terminal(app.viewport_height(80));
         terminal
             .draw(|frame| app.render_viewport(frame))
             .expect("draw");
@@ -1450,15 +1545,15 @@ mod tests {
             submit_command(&mut app, "/hooks"),
             KeyOutcome::Continue
         ));
+        assert!(app.view_stack.contains::<ScreenView>());
+        app.on_key(press(KeyCode::Esc)); // close /hooks
         assert!(matches!(
             submit_command(&mut app, "/agents"),
             KeyOutcome::Continue
         ));
-        let msgs = messages(&app);
-        assert_eq!(msgs.len(), 2);
-        assert!(msgs
-            .iter()
-            .all(|m| matches!(m, RenderedMessage::SystemText { .. })));
+        assert!(app.view_stack.contains::<ScreenView>());
+        app.on_key(press(KeyCode::Esc)); // close /agents
+        assert!(messages(&app).is_empty(), "views, not scrollback dumps");
         assert!(app.current_turn.is_none(), "no prompt turn for commands");
         assert!(matches!(
             submit_command(&mut app, "/quit"),
@@ -1474,7 +1569,7 @@ mod tests {
         app.on_key(press(KeyCode::Down)); // highlight "Yes, allow always"
         let outcome = app.on_key(press(KeyCode::Enter));
         assert!(matches!(outcome, KeyOutcome::Continue));
-        assert!(app.pending_permission.is_none());
+        assert!(!app.has_open_permission());
         assert_eq!(
             resp_rx.blocking_recv().unwrap(),
             PermissionResponse::AllowAlways
@@ -1488,7 +1583,7 @@ mod tests {
         app.open_permission(exchange);
         // '1' shortcut resolves with the first option (AllowOnce)…
         app.on_key(press(KeyCode::Char('1')));
-        assert!(app.pending_permission.is_none());
+        assert!(!app.has_open_permission());
         assert_eq!(
             resp_rx.blocking_recv().unwrap(),
             PermissionResponse::AllowOnce
@@ -1587,13 +1682,13 @@ mod tests {
             app.on_key(alt(KeyCode::Enter));
         }
         // 10 content lines clamp at composer::MAX_VISIBLE_LINES (6): 1 + 6 + 2 = 9.
-        assert_eq!(app.viewport_height(), 9);
+        assert_eq!(app.viewport_height(80), 9);
     }
 
     #[test]
     fn layout_80x24_idle_status_line_plus_bordered_composer() {
         let mut app = RataApp::new(Vec::new());
-        assert_eq!(app.viewport_height(), 4, "idle bottom viewport is 4 rows");
+        assert_eq!(app.viewport_height(80), 4, "idle bottom viewport is 4 rows");
         let terminal = draw_viewport(&mut app);
         let rows = buffer_rows(&terminal);
         assert!(rows[0].contains("Enter: send"), "status row: {}", rows[0]);
@@ -1655,7 +1750,7 @@ mod tests {
         let mut app = RataApp::new(Vec::new());
         typ(&mut app, "/");
         assert!(app.completion.is_some());
-        assert_eq!(app.viewport_height(), 12, "completion viewport height");
+        assert_eq!(app.viewport_height(80), 12, "completion viewport height");
         let terminal = draw_viewport(&mut app);
         let all = buffer_rows(&terminal).join("\n");
         assert!(all.contains("Complete"), "popup title visible:\n{all}");
@@ -1666,7 +1761,7 @@ mod tests {
         let mut app = RataApp::new(Vec::new());
         let (exchange, _resp_rx) = tool_exchange();
         app.open_permission(exchange);
-        assert_eq!(app.viewport_height(), 9, "permission viewport height");
+        assert_eq!(app.viewport_height(80), 9, "permission viewport height");
         let terminal = draw_viewport(&mut app);
         let all = buffer_rows(&terminal).join("\n");
         assert!(all.contains("Permission required"), "{all}");
@@ -1678,11 +1773,31 @@ mod tests {
     fn layout_model_picker_overlays_viewport() {
         let mut app = app_with_models();
         submit_command(&mut app, "/model");
-        assert_eq!(app.viewport_height(), 6, "picker viewport height");
+        assert_eq!(app.viewport_height(80), 6, "picker viewport height");
         let terminal = draw_viewport(&mut app);
         let all = buffer_rows(&terminal).join("\n");
         assert!(all.contains("Select model"), "{all}");
         assert!(all.contains("Opus"), "{all}");
         assert!(all.contains("Sonnet"), "{all}");
+    }
+
+    #[test]
+    fn layout_help_screen_fills_viewport_without_status_or_composer() {
+        let mut app = RataApp::new(Vec::new());
+        submit_command(&mut app, "/help");
+        // The help body wants more rows than the viewport allows: clamps at
+        // the 20-row viewport cap (new Phase 4 lock).
+        assert_eq!(app.viewport_height(80), 20, "help screen viewport height");
+        let terminal = draw_viewport(&mut app);
+        let rows = buffer_rows(&terminal);
+        assert_eq!(rows.len(), 20);
+        let all = rows.join("\n");
+        assert!(all.contains("Shortcuts"), "{all}");
+        assert!(all.contains("for bash mode"), "{all}");
+        // Full-frame view: no status hints, no composer prompt beneath.
+        assert!(!all.contains("Enter: send"), "status suppressed:\n{all}");
+        assert!(!all.contains("│> "), "composer suppressed:\n{all}");
+        // The view claims no cursor, so the draw hides it.
+        assert!(terminal.cursor_hidden(), "screen view hides the cursor");
     }
 }

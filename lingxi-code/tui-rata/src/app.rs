@@ -223,6 +223,7 @@ mod tests {
     use super::*;
     use crate::bottom_pane::model_picker_view::ModelPickerView;
     use crate::bottom_pane::screen_view::ScreenView;
+    use crate::history_cell::message::{AssistantTextCell, UserTextCell};
     use crate::history_cell::MessageHistoryCell;
 
     fn press(code: KeyCode) -> KeyEvent {
@@ -261,26 +262,29 @@ mod tests {
         }
     }
 
-    /// The transcript's messages in order — committed cells then the active
-    /// (streaming) cell — reconstructing the pre-Transcript `app.messages`
-    /// view so the behavior-lock assertions keep their exact indices.
-    fn messages(app: &RataApp) -> Vec<RenderedMessage> {
-        let cell_message = |cell: &dyn crate::history_cell::HistoryCell| {
-            cell.as_any()
-                .downcast_ref::<MessageHistoryCell>()
-                .expect("phase 3 transcript holds adapter cells only")
-                .message()
-                .clone()
-        };
-        let mut out: Vec<RenderedMessage> = app
+    /// The transcript's cells in order — committed then the active
+    /// (streaming) cell — keeping the pre-Transcript `app.messages` indices
+    /// for the behavior-lock assertions, now at cell level (the message-cells
+    /// split replaced the old `messages()` reconstruction).
+    fn cells<'a>(app: &'a RataApp<'_>) -> Vec<&'a dyn crate::history_cell::HistoryCell> {
+        let mut out: Vec<&dyn crate::history_cell::HistoryCell> = app
             .chat_widget
             .transcript()
             .committed_cells()
             .iter()
-            .map(|cell| cell_message(cell.as_ref()))
+            .map(AsRef::as_ref)
             .collect();
-        out.extend(app.chat_widget.transcript().active_cell().map(cell_message));
+        out.extend(app.chat_widget.transcript().active_cell());
         out
+    }
+
+    /// Downcast transcript cell `idx` (committed order, active last) to its
+    /// concrete cell type.
+    fn cell<'a, T: 'static>(app: &'a RataApp<'_>, idx: usize) -> &'a T {
+        cells(app)[idx]
+            .as_any()
+            .downcast_ref::<T>()
+            .expect("concrete cell type")
     }
 
     #[test]
@@ -341,9 +345,8 @@ mod tests {
         assert!(matches!(outcome, ChatOutcome::Submit(ref p, _) if p == "hi"));
         assert_eq!(app.chat_widget.bottom_pane().composer().text(), "");
         assert!(app.chat_widget.turn_running());
-        let msgs = messages(&app);
-        assert_eq!(msgs.len(), 1);
-        assert!(matches!(msgs[0], RenderedMessage::UserText { .. }));
+        assert_eq!(cells(&app).len(), 1);
+        assert_eq!(cell::<UserTextCell>(&app, 0).body(), "hi");
     }
 
     #[test]
@@ -353,7 +356,7 @@ mod tests {
             app.on_key(press(KeyCode::Enter)),
             ChatOutcome::Continue
         ));
-        assert!(messages(&app).is_empty());
+        assert!(cells(&app).is_empty());
     }
 
     #[test]
@@ -365,10 +368,7 @@ mod tests {
         app.apply_turn_event(TurnEvent::TurnStarted);
         app.apply_turn_event(TurnEvent::TextDelta("Hel".to_string()));
         app.apply_turn_event(TurnEvent::TextDelta("lo".to_string()));
-        match &messages(&app)[1] {
-            RenderedMessage::AssistantText { body, .. } => assert_eq!(body, "Hello"),
-            other => panic!("expected assistant text, got {other:?}"),
-        }
+        assert_eq!(cell::<AssistantTextCell>(&app, 1).body(), "Hello");
         app.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
         assert!(!app.chat_widget.turn_running());
     }
@@ -470,7 +470,7 @@ mod tests {
         );
         // A non-existent image path is treated as text, not an image message.
         app.on_paste(" /no/such/file.png ");
-        assert!(messages(&app).is_empty());
+        assert!(cells(&app).is_empty());
     }
 
     #[test]
@@ -478,9 +478,9 @@ mod tests {
         let mut app = test_app(Vec::new());
         let outcome = submit_command(&mut app, "/image /tmp/pic.png");
         assert!(matches!(outcome, ChatOutcome::Continue));
-        let msgs = messages(&app);
-        assert_eq!(msgs.len(), 1);
-        match &msgs[0] {
+        assert_eq!(cells(&app).len(), 1);
+        // UserImage is not yet a per-variant cell: it still rides the adapter.
+        match cell::<MessageHistoryCell>(&app, 0).message() {
             RenderedMessage::UserImage {
                 source_path: Some(p),
                 metadata,
@@ -793,7 +793,7 @@ mod tests {
             .bottom_pane()
             .view_stack()
             .contains::<ScreenView>());
-        assert!(messages(&app).is_empty(), "no scrollback dump");
+        assert!(cells(&app).is_empty(), "no scrollback dump");
         assert!(!app.chat_widget.turn_running());
     }
 
@@ -846,7 +846,7 @@ mod tests {
         let outcome = app.on_key(press(KeyCode::Enter));
         // Unrecognized slash command falls through as a normal prompt.
         assert!(matches!(outcome, ChatOutcome::Submit(ref p, _) if p == "/frobnicate"));
-        assert_eq!(messages(&app).len(), 1);
+        assert_eq!(cells(&app).len(), 1);
     }
 
     fn submit_command(app: &mut RataApp, cmd: &str) -> ChatOutcome {
@@ -865,7 +865,7 @@ mod tests {
         }]);
         let outcome = submit_command(&mut app, "/clear");
         assert!(matches!(outcome, ChatOutcome::Continue));
-        assert!(messages(&app).is_empty());
+        assert!(cells(&app).is_empty());
         assert_eq!(app.chat_widget.transcript().committed_to_terminal(), 0);
     }
 
@@ -902,7 +902,7 @@ mod tests {
             .view_stack()
             .contains::<ScreenView>());
         // Focused views, not scrollback dumps; and no prompt turn started.
-        assert!(messages(&app).is_empty());
+        assert!(cells(&app).is_empty());
         assert!(!app.chat_widget.turn_running());
     }
 
@@ -942,7 +942,7 @@ mod tests {
             .bottom_pane()
             .view_stack()
             .contains::<ModelPickerView>());
-        assert_eq!(messages(&app).len(), 1);
+        assert_eq!(cells(&app).len(), 1);
     }
 
     #[test]
@@ -1079,10 +1079,7 @@ mod tests {
         typ(&mut app, "  hi there  ");
         let outcome = app.on_key(press(KeyCode::Enter));
         assert!(matches!(outcome, ChatOutcome::Submit(ref p, _) if p == "hi there"));
-        match &messages(&app)[0] {
-            RenderedMessage::UserText { body, .. } => assert_eq!(body, "hi there"),
-            other => panic!("expected user text, got {other:?}"),
-        }
+        assert_eq!(cell::<UserTextCell>(&app, 0).body(), "hi there");
     }
 
     #[test]
@@ -1093,7 +1090,7 @@ mod tests {
             app.on_key(press(KeyCode::Enter)),
             ChatOutcome::Continue
         ));
-        assert!(messages(&app).is_empty());
+        assert!(cells(&app).is_empty());
         assert!(!app.chat_widget.turn_running());
     }
 
@@ -1120,7 +1117,7 @@ mod tests {
             .view_stack()
             .contains::<ScreenView>());
         app.on_key(press(KeyCode::Esc)); // close /agents
-        assert!(messages(&app).is_empty(), "views, not scrollback dumps");
+        assert!(cells(&app).is_empty(), "views, not scrollback dumps");
         assert!(
             !app.chat_widget.turn_running(),
             "no prompt turn for commands"
@@ -1182,10 +1179,10 @@ mod tests {
             "",
             "image paste must not touch composer"
         );
-        let msgs = messages(&app);
-        assert_eq!(msgs.len(), 1);
+        assert_eq!(cells(&app).len(), 1);
         let file_name = path.file_name().unwrap().to_str().unwrap();
-        match &msgs[0] {
+        // UserImage is not yet a per-variant cell: it still rides the adapter.
+        match cell::<MessageHistoryCell>(&app, 0).message() {
             RenderedMessage::UserImage {
                 source_path: Some(p),
                 metadata: Some(name),

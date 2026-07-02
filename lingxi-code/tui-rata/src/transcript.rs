@@ -18,7 +18,7 @@ use ratatui::text::Line;
 use tui_core::message::RenderedMessage;
 use tui_core::theme::Theme;
 
-use crate::history_cell::{HistoryCell, MessageHistoryCell, RenderMode};
+use crate::history_cell::{cell_for_message, HistoryCell, RenderMode};
 
 /// Committed history + active in-flight cell + native-scrollback commit
 /// cursor + render mode (rich/raw and verbose/expanded state).
@@ -49,10 +49,7 @@ impl Transcript {
     #[must_use]
     pub fn from_messages(messages: Vec<RenderedMessage>) -> Self {
         Self {
-            committed: messages
-                .into_iter()
-                .map(|message| Box::new(MessageHistoryCell::new(message)) as Box<dyn HistoryCell>)
-                .collect(),
+            committed: messages.into_iter().map(cell_for_message).collect(),
             ..Self::default()
         }
     }
@@ -62,10 +59,11 @@ impl Transcript {
         self.committed.push(cell);
     }
 
-    /// Commit a [`RenderedMessage`] via the adapter cell — the transcript owns
-    /// the `RenderedMessage` → [`HistoryCell`] conversion.
+    /// Commit a [`RenderedMessage`] via [`cell_for_message`] — the transcript
+    /// owns the `RenderedMessage` → [`HistoryCell`] conversion (per-variant
+    /// cells for the ported core variants, the adapter cell otherwise).
     pub fn push_message(&mut self, message: RenderedMessage) {
-        self.push_committed(Box::new(MessageHistoryCell::new(message)));
+        self.push_committed(cell_for_message(message));
     }
 
     /// Replace the active in-flight cell. Callers that must not lose a
@@ -197,6 +195,7 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
+    use crate::history_cell::message::AssistantTextCell;
     use crate::terminal::test_support::TestWriteBackend;
     use crate::terminal::Terminal;
 
@@ -225,10 +224,7 @@ mod tests {
     }
 
     fn assistant_cell(body: &str) -> Box<dyn HistoryCell> {
-        Box::new(MessageHistoryCell::new(RenderedMessage::AssistantText {
-            body: body.to_string(),
-            timestamp: 0,
-        }))
+        Box::new(AssistantTextCell::new(body.to_string()))
     }
 
     /// Append `delta` to the active assistant cell; `false` when the active
@@ -236,12 +232,8 @@ mod tests {
     fn append_delta(transcript: &mut Transcript, delta: &str) -> bool {
         transcript
             .mutate_active(|cell| {
-                if let Some(RenderedMessage::AssistantText { body, .. }) = cell
-                    .as_any_mut()
-                    .downcast_mut::<MessageHistoryCell>()
-                    .map(MessageHistoryCell::message_mut)
-                {
-                    body.push_str(delta);
+                if let Some(assistant) = cell.as_any_mut().downcast_mut::<AssistantTextCell>() {
+                    assistant.append(delta);
                     true
                 } else {
                     false
@@ -337,12 +329,9 @@ mod tests {
         assert_eq!(transcript.committed_cells().len(), 2);
         let last = transcript.committed_cells()[1]
             .as_any()
-            .downcast_ref::<MessageHistoryCell>()
-            .expect("adapter cell");
-        assert!(matches!(
-            last.message(),
-            RenderedMessage::AssistantText { body, .. } if body == "streamed"
-        ));
+            .downcast_ref::<AssistantTextCell>()
+            .expect("assistant cell");
+        assert_eq!(last.body(), "streamed");
         // Flushing again is a no-op.
         transcript.flush_active();
         assert_eq!(transcript.committed_cells().len(), 2);

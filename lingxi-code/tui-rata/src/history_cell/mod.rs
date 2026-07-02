@@ -7,12 +7,20 @@
 //! mutate in place while streaming and is rendered as the live tail until it
 //! is finalized (see [`crate::transcript::Transcript`]).
 //!
-//! This phase introduces the trait plus one adapter cell,
+//! The core `RenderedMessage` variants render through concrete per-variant
+//! cells (plan Phase 9, "message cells"): [`message`] (user/assistant text,
+//! prompt/command/bash input), [`system`] (system text/rich/api-error/rate
+//! -limit), and [`tool`] (tool use/result, bash/local command output,
+//! grouped/collapsed folds). [`cell_for_message`] picks the concrete cell;
+//! variants not yet split keep flowing through the adapter cell
 //! [`MessageHistoryCell`], which wraps a whole
-//! [`tui_core::message::RenderedMessage`] and delegates to the existing
-//! [`crate::message::render_message`] renderer so output is byte-identical to
-//! the pre-transcript flush path. Later plan phases split it into
-//! per-variant cells.
+//! [`tui_core::message::RenderedMessage`] and delegates to
+//! [`crate::message::render_message`] so their output is byte-identical to
+//! the pre-transcript flush path (the second message-cells phase ports them).
+
+pub mod message;
+pub mod system;
+pub mod tool;
 
 use std::any::Any;
 use std::time::Instant;
@@ -20,6 +28,7 @@ use std::time::Instant;
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 use tui_core::message::RenderedMessage;
+use tui_core::render::{SpanStyle, StyleColor, StyledLine, StyledSpan};
 use tui_core::theme::Theme;
 
 /// How a [`HistoryCell`] renders its lines.
@@ -88,10 +97,183 @@ pub trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
-/// The first [`HistoryCell`]: an adapter over a whole [`RenderedMessage`]
-/// delegating to [`crate::message::render_message`], so transcript rendering
-/// is byte-identical to the pre-transcript renderer while the per-variant
-/// cell split proceeds (plan Phase 3 step 5).
+/// Renderer default width when a caller passes 0 columns (pre-split
+/// `render_message` behavior, kept by every cell).
+pub(crate) const DEFAULT_WIDTH: usize = 80;
+
+/// Internal single-source render contract for the concrete cells: produce the
+/// neutral [`StyledLine`]s for one message. The blanket [`HistoryCell`] impl
+/// below derives rich/raw display lines, width defaulting, and downcasting
+/// uniformly from it, so each cell only owns its variant's rendering.
+pub(crate) trait StyledCell: std::fmt::Debug + Send + Sync + Any {
+    /// The styled lines at `width` columns (never 0), colored by `theme`,
+    /// with collapsible content expanded per `verbose`.
+    fn styled_lines(&self, width: usize, theme: &Theme, verbose: bool) -> Vec<StyledLine>;
+}
+
+impl<T: StyledCell> HistoryCell for T {
+    fn display_lines(&self, width: u16, theme: &Theme, mode: RenderMode) -> Vec<Line<'static>> {
+        if mode.raw {
+            return self.raw_lines();
+        }
+        let width = if width == 0 {
+            DEFAULT_WIDTH
+        } else {
+            usize::from(width)
+        };
+        self.styled_lines(width, theme, mode.verbose)
+            .iter()
+            .map(crate::render::styled_line_to_ratatui)
+            .collect()
+    }
+
+    fn raw_lines(&self) -> Vec<Line<'static>> {
+        // Plain text of the rich render at the renderer's default width; the
+        // theme is irrelevant once styles are stripped.
+        self.styled_lines(DEFAULT_WIDTH, &Theme::dark(), false)
+            .iter()
+            .map(|line| {
+                Line::from(
+                    line.spans
+                        .iter()
+                        .map(|span| span.text.as_str())
+                        .collect::<String>(),
+                )
+            })
+            .collect()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+/// Convert one [`RenderedMessage`] into its concrete [`HistoryCell`]: the
+/// core variants map to the per-variant cells in [`message`]/[`system`]/
+/// [`tool`]; every not-yet-ported variant falls back to the
+/// [`MessageHistoryCell`] adapter (removed once the second message-cells
+/// phase covers them all).
+#[must_use]
+pub fn cell_for_message(message: RenderedMessage) -> Box<dyn HistoryCell> {
+    match message {
+        RenderedMessage::UserText { body, .. } => Box::new(message::UserTextCell::new(body)),
+        RenderedMessage::AssistantText { body, .. } => {
+            Box::new(message::AssistantTextCell::new(body))
+        }
+        RenderedMessage::UserPrompt { text } => Box::new(message::UserPromptCell::new(text)),
+        RenderedMessage::UserCommand {
+            command,
+            args,
+            is_skill,
+        } => Box::new(message::UserCommandCell::new(command, args, is_skill)),
+        RenderedMessage::UserBashInput { command } => {
+            Box::new(message::UserBashInputCell::new(command))
+        }
+        RenderedMessage::SystemText { body, is_error, .. } => {
+            Box::new(system::SystemTextCell::new(body, is_error))
+        }
+        RenderedMessage::SystemTextRich { body, level } => {
+            Box::new(system::SystemTextRichCell::new(body, level))
+        }
+        RenderedMessage::SystemApiError {
+            error,
+            retry_attempt,
+            max_retries,
+            ..
+        } => Box::new(system::SystemApiErrorCell::new(
+            error,
+            retry_attempt,
+            max_retries,
+        )),
+        RenderedMessage::RateLimit { text, upsell } => {
+            Box::new(system::RateLimitCell::new(text, upsell))
+        }
+        RenderedMessage::AssistantToolUse { tool, input, .. } => {
+            Box::new(tool::ToolUseCell::new(tool, input))
+        }
+        RenderedMessage::UserToolResult {
+            result,
+            old_string,
+            new_string,
+            file_path,
+            ..
+        } => Box::new(tool::ToolResultCell::new(
+            result, old_string, new_string, file_path,
+        )),
+        RenderedMessage::UserBashOutput { stdout, stderr }
+        | RenderedMessage::UserLocalCommandOutput { stdout, stderr } => {
+            Box::new(tool::CommandOutputCell::new(stdout, stderr))
+        }
+        RenderedMessage::GroupedToolUse { tool, entries, .. } => {
+            Box::new(tool::GroupedToolUseCell::new(tool, entries))
+        }
+        RenderedMessage::CollapsedReadSearch { entries, .. } => {
+            Box::new(tool::CollapsedReadSearchCell::new(entries))
+        }
+        other => Box::new(MessageHistoryCell::new(other)),
+    }
+}
+
+// ===== Shared styled-line primitives (moved from `message.rs` in the
+// message-cells split; used by the cell modules AND the legacy renderer). =====
+
+/// One [`StyledLine`] per `\n`-separated line, single-span colored `color`
+/// (empty text → no lines).
+pub(crate) fn colored_lines(text: &str, color: StyleColor) -> Vec<StyledLine> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    text.split('\n')
+        .map(|line| StyledLine {
+            spans: vec![StyledSpan::styled(
+                line.to_string(),
+                SpanStyle {
+                    fg: color,
+                    ..SpanStyle::default()
+                },
+            )],
+        })
+        .collect()
+}
+
+/// One unstyled [`StyledLine`] per `\n`-separated line (empty text → none).
+pub(crate) fn plain_lines(text: &str) -> Vec<StyledLine> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    text.split('\n').map(StyledLine::plain).collect()
+}
+
+/// One-line truncation to `max` chars (newlines flattened to spaces).
+pub(crate) fn truncate(s: &str, max: usize) -> String {
+    let flat = s.replace('\n', " ");
+    if flat.chars().count() <= max {
+        flat
+    } else {
+        let cut: String = flat.chars().take(max.saturating_sub(1)).collect();
+        format!("{cut}…")
+    }
+}
+
+/// A dim-colored span in the active theme.
+pub(crate) fn dim_span(text: String, theme: &Theme) -> StyledSpan {
+    StyledSpan::styled(
+        text,
+        SpanStyle {
+            fg: theme.dim,
+            ..SpanStyle::default()
+        },
+    )
+}
+
+/// The adapter [`HistoryCell`] over a whole [`RenderedMessage`], delegating
+/// to [`crate::message::render_message`], so rendering of the variants not
+/// yet split into per-variant cells is byte-identical to the pre-transcript
+/// renderer (plan Phase 3 step 5; the second message-cells phase retires it).
 #[derive(Debug)]
 pub struct MessageHistoryCell {
     message: RenderedMessage,
@@ -117,39 +299,9 @@ impl MessageHistoryCell {
     }
 }
 
-impl HistoryCell for MessageHistoryCell {
-    fn display_lines(&self, width: u16, theme: &Theme, mode: RenderMode) -> Vec<Line<'static>> {
-        if mode.raw {
-            return self.raw_lines();
-        }
-        crate::message::render_message(&self.message, usize::from(width), theme, mode.verbose)
-            .iter()
-            .map(crate::render::styled_line_to_ratatui)
-            .collect()
-    }
-
-    fn raw_lines(&self) -> Vec<Line<'static>> {
-        // Plain text of the rich render at the renderer's default width; the
-        // theme is irrelevant once styles are stripped.
-        crate::message::render_message(&self.message, 0, &Theme::dark(), false)
-            .iter()
-            .map(|line| {
-                Line::from(
-                    line.spans
-                        .iter()
-                        .map(|span| span.text.as_str())
-                        .collect::<String>(),
-                )
-            })
-            .collect()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
+impl StyledCell for MessageHistoryCell {
+    fn styled_lines(&self, width: usize, theme: &Theme, verbose: bool) -> Vec<StyledLine> {
+        crate::message::render_message(&self.message, width, theme, verbose)
     }
 }
 
@@ -293,6 +445,133 @@ mod tests {
         });
         assert!(!empty.is_visible(80), "empty user text renders nothing");
         assert!(assistant("hello").is_visible(80));
+    }
+
+    /// `true` when the factory maps `message` to the concrete cell type `T`.
+    fn maps_to<T: 'static>(message: RenderedMessage) -> bool {
+        cell_for_message(message)
+            .as_any()
+            .downcast_ref::<T>()
+            .is_some()
+    }
+
+    #[test]
+    fn factory_maps_text_and_system_variants_to_concrete_cells() {
+        assert!(maps_to::<message::UserTextCell>(
+            RenderedMessage::UserText {
+                body: "hi".into(),
+                timestamp: 0,
+            }
+        ));
+        assert!(maps_to::<message::AssistantTextCell>(
+            RenderedMessage::AssistantText {
+                body: "hi".into(),
+                timestamp: 0,
+            }
+        ));
+        assert!(maps_to::<message::UserPromptCell>(
+            RenderedMessage::UserPrompt { text: "p".into() }
+        ));
+        assert!(maps_to::<message::UserCommandCell>(
+            RenderedMessage::UserCommand {
+                command: "help".into(),
+                args: String::new(),
+                is_skill: false,
+            }
+        ));
+        assert!(maps_to::<message::UserBashInputCell>(
+            RenderedMessage::UserBashInput {
+                command: "ls".into(),
+            }
+        ));
+        assert!(maps_to::<system::SystemTextCell>(
+            RenderedMessage::SystemText {
+                body: "s".into(),
+                timestamp: 0,
+                is_error: false,
+            }
+        ));
+        assert!(maps_to::<system::SystemTextRichCell>(
+            RenderedMessage::SystemTextRich {
+                body: "s".into(),
+                level: tui_core::message::SystemLevel::Info,
+            }
+        ));
+        assert!(maps_to::<system::SystemApiErrorCell>(
+            RenderedMessage::SystemApiError {
+                error: "e".into(),
+                retry_attempt: 1,
+                retry_in_seconds: 1,
+                max_retries: 3,
+                truncated: false,
+            }
+        ));
+        assert!(maps_to::<system::RateLimitCell>(
+            RenderedMessage::RateLimit {
+                text: "r".into(),
+                upsell: None,
+            }
+        ));
+        // Not yet ported: falls back to the adapter cell.
+        assert!(maps_to::<MessageHistoryCell>(
+            RenderedMessage::AssistantThinking {
+                thinking: "t".into(),
+                expanded: false,
+            }
+        ));
+    }
+
+    #[test]
+    fn factory_maps_tool_variants_to_concrete_cells() {
+        assert!(maps_to::<tool::ToolUseCell>(
+            RenderedMessage::AssistantToolUse {
+                id: protocol::ToolUseId::new(),
+                tool: "Read".into(),
+                input: serde_json::json!({}),
+            }
+        ));
+        assert!(maps_to::<tool::ToolResultCell>(
+            RenderedMessage::UserToolResult {
+                id: protocol::ToolUseId::new(),
+                tool: "Read".into(),
+                result: serde_json::json!("ok"),
+                old_string: None,
+                new_string: None,
+                file_path: None,
+            }
+        ));
+        assert!(maps_to::<tool::CommandOutputCell>(
+            RenderedMessage::UserBashOutput {
+                stdout: "o".into(),
+                stderr: String::new(),
+            }
+        ));
+        assert!(maps_to::<tool::CommandOutputCell>(
+            RenderedMessage::UserLocalCommandOutput {
+                stdout: "o".into(),
+                stderr: String::new(),
+            }
+        ));
+        assert!(maps_to::<tool::GroupedToolUseCell>(
+            RenderedMessage::GroupedToolUse {
+                tool: "Read".into(),
+                group_id: protocol::ToolUseId::new(),
+                entries: Vec::new(),
+            }
+        ));
+        assert!(maps_to::<tool::CollapsedReadSearchCell>(
+            RenderedMessage::CollapsedReadSearch {
+                search_count: 0,
+                read_count: 0,
+                list_count: 0,
+                is_active: false,
+                group_id: protocol::ToolUseId::new(),
+                entries: Vec::new(),
+                mem_read: 0,
+                mem_search: 0,
+                mem_write: 0,
+            }
+        ));
     }
 
     #[test]

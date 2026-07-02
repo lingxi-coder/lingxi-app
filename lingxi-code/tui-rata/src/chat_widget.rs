@@ -34,7 +34,7 @@ use tui_core::theme::Theme;
 use crate::bottom_pane::permission_view::PermissionView;
 use crate::bottom_pane::screen_view::ScreenView;
 use crate::bottom_pane::{BottomPane, BottomPaneOutcome, BottomPaneStatus, CommandAction};
-use crate::history_cell::MessageHistoryCell;
+use crate::history_cell::message::AssistantTextCell;
 use crate::renderable::Renderable;
 use crate::session::SessionInfo;
 use crate::transcript::Transcript;
@@ -144,23 +144,17 @@ impl ChatWidget {
                 // A straggler active cell (missed TurnEnded) is finalized, not
                 // dropped, before the new streaming reply opens.
                 self.transcript.flush_active();
-                self.transcript.set_active(Box::new(MessageHistoryCell::new(
-                    RenderedMessage::AssistantText {
-                        body: String::new(),
-                        timestamp: 0,
-                    },
-                )));
+                self.transcript
+                    .set_active(Box::new(AssistantTextCell::new(String::new())));
             }
             TurnEvent::TextDelta(delta) => {
                 let appended = self
                     .transcript
                     .mutate_active(|cell| {
-                        if let Some(RenderedMessage::AssistantText { body, .. }) = cell
-                            .as_any_mut()
-                            .downcast_mut::<MessageHistoryCell>()
-                            .map(MessageHistoryCell::message_mut)
+                        if let Some(assistant) =
+                            cell.as_any_mut().downcast_mut::<AssistantTextCell>()
                         {
-                            body.push_str(&delta);
+                            assistant.append(&delta);
                             true
                         } else {
                             false
@@ -169,12 +163,8 @@ impl ChatWidget {
                     .unwrap_or(false);
                 if !appended {
                     self.transcript.flush_active();
-                    self.transcript.set_active(Box::new(MessageHistoryCell::new(
-                        RenderedMessage::AssistantText {
-                            body: delta,
-                            timestamp: 0,
-                        },
-                    )));
+                    self.transcript
+                        .set_active(Box::new(AssistantTextCell::new(delta)));
                 }
             }
             TurnEvent::ToolUseStart { tool, .. } => {
@@ -592,6 +582,7 @@ mod tests {
     use super::*;
     use crate::bottom_pane::model_picker_view::ModelPickerView;
     use crate::bottom_pane::{BottomPaneView, ViewOutcome};
+    use crate::history_cell::MessageHistoryCell;
     use crate::session::ModelRow;
     use crate::terminal::test_support::TestWriteBackend;
     use crate::terminal::Terminal;
@@ -619,24 +610,27 @@ mod tests {
         widget.handle_key(press(KeyCode::Enter))
     }
 
-    /// The transcript's messages in order — committed cells then the active
-    /// (streaming) cell — for assertions over the adapter cells.
-    fn messages(widget: &ChatWidget) -> Vec<RenderedMessage> {
-        let cell_message = |cell: &dyn crate::history_cell::HistoryCell| {
-            cell.as_any()
-                .downcast_ref::<MessageHistoryCell>()
-                .expect("phase 3 transcript holds adapter cells only")
-                .message()
-                .clone()
-        };
-        let mut out: Vec<RenderedMessage> = widget
+    /// The transcript's cells in order — committed then the active
+    /// (streaming) cell — for per-variant cell-level assertions (the
+    /// message-cells split replaced the old `messages()` reconstruction).
+    fn cells(widget: &ChatWidget) -> Vec<&dyn crate::history_cell::HistoryCell> {
+        let mut out: Vec<&dyn crate::history_cell::HistoryCell> = widget
             .transcript
             .committed_cells()
             .iter()
-            .map(|cell| cell_message(cell.as_ref()))
+            .map(AsRef::as_ref)
             .collect();
-        out.extend(widget.transcript.active_cell().map(cell_message));
+        out.extend(widget.transcript.active_cell());
         out
+    }
+
+    /// Downcast transcript cell `idx` (committed order, active last) to its
+    /// concrete cell type.
+    fn cell<T: 'static>(widget: &ChatWidget, idx: usize) -> &T {
+        cells(widget)[idx]
+            .as_any()
+            .downcast_ref::<T>()
+            .expect("concrete cell type")
     }
 
     fn tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
@@ -719,10 +713,7 @@ mod tests {
         // Deltas grow the active cell in place.
         widget.apply_turn_event(TurnEvent::TextDelta("Hel".to_string()));
         widget.apply_turn_event(TurnEvent::TextDelta("lo".to_string()));
-        match &messages(&widget)[1] {
-            RenderedMessage::AssistantText { body, .. } => assert_eq!(body, "Hello"),
-            other => panic!("expected assistant text, got {other:?}"),
-        }
+        assert_eq!(cell::<AssistantTextCell>(&widget, 1).body(), "Hello");
 
         // ToolUseStart sets the spinner activity; ToolUseResult clears it.
         widget.apply_turn_event(TurnEvent::ToolUseStart {
@@ -803,7 +794,7 @@ mod tests {
         let outcome = submit_command(&mut widget, "/help");
         assert!(matches!(outcome, ChatOutcome::Continue));
         assert!(widget.bottom_pane().view_stack().contains::<ScreenView>());
-        assert!(messages(&widget).is_empty(), "no scrollback dump");
+        assert!(widget.transcript().is_empty(), "no scrollback dump");
         assert!(!widget.turn_running());
         widget.handle_key(press(KeyCode::Esc)); // close /help
 
@@ -828,9 +819,9 @@ mod tests {
         let mut widget = widget();
         let outcome = submit_command(&mut widget, "/image /tmp/pic.png");
         assert!(matches!(outcome, ChatOutcome::Continue));
-        let msgs = messages(&widget);
-        assert_eq!(msgs.len(), 1);
-        match &msgs[0] {
+        assert_eq!(cells(&widget).len(), 1);
+        // UserImage is not yet a per-variant cell: it still rides the adapter.
+        match cell::<MessageHistoryCell>(&widget, 0).message() {
             RenderedMessage::UserImage {
                 source_path: Some(p),
                 metadata,
@@ -901,12 +892,8 @@ mod tests {
             .view_stack()
             .contains::<ModelPickerView>());
         // The switch is echoed as a system message.
-        match &messages(&widget)[0] {
-            RenderedMessage::SystemText { body, .. } => {
-                assert!(body.contains("Switching model to claude-opus"), "{body}");
-            }
-            other => panic!("expected system text, got {other:?}"),
-        }
+        let body = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0).body();
+        assert!(body.contains("Switching model to claude-opus"), "{body}");
     }
 
     #[test]
@@ -1103,7 +1090,7 @@ mod tests {
             widget.handle_key(press(KeyCode::Enter)),
             ChatOutcome::Continue
         ));
-        assert!(messages(&widget).is_empty());
+        assert!(widget.transcript().is_empty());
         assert!(
             widget.bottom_pane().view_stack().is_empty(),
             "completed view popped"

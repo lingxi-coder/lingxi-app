@@ -2,39 +2,36 @@
 //!
 //! This is the `tui-rata` side of message rendering: it consumes the neutral
 //! `tui_core` message model + render primitives and produces `StyledLine`s that
-//! [`crate::render::styled_line_to_ratatui`] turns into ratatui text. The
-//! common variants are rendered directly here in ratatui-land; the iocraft
-//! component renderers (for the interactive/expandable variants) stay in `tui`.
+//! [`crate::render::styled_line_to_ratatui`] turns into ratatui text. The core
+//! variants (user/assistant text, prompt/command/bash echoes, system text and
+//! errors, tool use/result/output/folds) live in the per-variant history cells
+//! under [`crate::history_cell`] — [`render_message`] delegates to those same
+//! renderers, so this dispatcher stays the line-identity oracle across every
+//! variant. The remaining variants (thinking/team/advisor/plan/attachment/
+//! image) are still rendered inline here and move into cells in the second
+//! message-cells phase.
 
-use tui_core::message::{
-    AdvisorKind, PlanApprovalKind, RenderedMessage, SystemLevel, UserTeammateKind,
+use tui_core::message::{AdvisorKind, PlanApprovalKind, RenderedMessage, UserTeammateKind};
+use tui_core::render::{agent_color_from_name, SpanStyle, StyledLine, StyledSpan};
+use tui_core::theme::Theme;
+
+use crate::history_cell::message::{
+    assistant_lines, user_bash_input_lines, user_command_lines, user_prompt_lines, user_text_lines,
 };
-use tui_core::render::markdown::{render_with_width, MarkdownTheme};
-use tui_core::render::{agent_color_from_name, SpanStyle, StyleColor, StyledLine, StyledSpan};
-use tui_core::theme::{Theme, ThemeName};
-
-/// Assistant dot marker (iocraft `assistant_text::MARKER` parity): `⏺ `
-/// (U+23FA) on macOS — renders as the reddish record glyph — `● ` (U+25CF)
-/// elsewhere, each + a trailing space.
-const ASSISTANT_MARKER: &str = if cfg!(target_os = "macos") {
-    "\u{23FA} "
-} else {
-    "\u{25CF} "
+use crate::history_cell::system::{
+    rate_limit_lines, system_api_error_lines, system_text_lines, system_text_rich_lines,
 };
-const CONT_INDENT: &str = "  ";
-const DEFAULT_WIDTH: usize = 80;
+use crate::history_cell::tool::{
+    collapsed_read_search_lines, command_output_lines, group_tool_use_lines, tool_result_lines,
+    tool_use_lines,
+};
+use crate::history_cell::{colored_lines, plain_lines, truncate, DEFAULT_WIDTH};
 
-fn markdown_theme() -> MarkdownTheme {
-    MarkdownTheme {
-        inline_code: StyleColor::Rgb(177, 185, 249),
-        code_theme: ThemeName::Dark,
-    }
-}
-
-/// Render one message into styled lines for the scrollback. Returns an empty
-/// vec for variants that have no native-scrollback text form yet (they remain
-/// the iocraft renderers' responsibility until ported). `verbose` expands the
-/// collapsible variants (thinking body, tool-use JSON, grouped children).
+/// Render one message into styled lines for the scrollback. Every variant has
+/// an explicit arm (no wildcard): visible variants produce lines; the only
+/// empty renders are documented empty-input cases (empty user text / empty
+/// notification summaries). `verbose` expands the collapsible variants
+/// (thinking body, tool-use JSON, grouped children).
 #[must_use]
 pub fn render_message(
     entry: &RenderedMessage,
@@ -44,50 +41,33 @@ pub fn render_message(
 ) -> Vec<StyledLine> {
     let width = if width == 0 { DEFAULT_WIDTH } else { width };
     match entry {
-        RenderedMessage::UserText { body, .. } => {
-            if body.is_empty() {
-                Vec::new()
-            } else {
-                vec![StyledLine::plain(format!("> {body}"))]
-            }
-        }
+        RenderedMessage::UserText { body, .. } => user_text_lines(body),
         RenderedMessage::AssistantText { body, .. } => assistant_lines(body, width),
         RenderedMessage::SystemText { body, is_error, .. } => {
-            let color = if *is_error { theme.error } else { theme.dim };
-            colored_lines(body, color)
+            system_text_lines(body, *is_error, theme)
         }
         RenderedMessage::SystemTextRich { body, level } => {
-            let color = match level {
-                SystemLevel::Info => theme.dim,
-                SystemLevel::Warning => theme.warning,
-                SystemLevel::Error => theme.error,
-            };
-            colored_lines(body, color)
+            system_text_rich_lines(body, *level, theme)
         }
         RenderedMessage::AssistantToolUse { tool, input, .. } => {
             tool_use_lines(tool, input, theme, verbose)
         }
         RenderedMessage::UserToolResult { result, .. } => tool_result_lines(result, theme),
-        RenderedMessage::UserBashInput { command } => {
-            colored_lines(&format!("! {command}"), theme.dim)
-        }
+        RenderedMessage::UserBashInput { command } => user_bash_input_lines(command, theme),
         RenderedMessage::UserBashOutput { stdout, stderr }
         | RenderedMessage::UserLocalCommandOutput { stdout, stderr } => {
-            bash_output_lines(stdout, stderr, theme)
+            command_output_lines(stdout, stderr, theme)
         }
-        RenderedMessage::UserCommand { command, args, .. } => {
-            let text = if args.is_empty() {
-                format!("/{command}")
-            } else {
-                format!("/{command} {args}")
-            };
-            vec![StyledLine::plain(text)]
-        }
+        RenderedMessage::UserCommand {
+            command,
+            args,
+            is_skill,
+        } => user_command_lines(command, args, *is_skill),
         RenderedMessage::UserMemoryInput { input } => {
             colored_lines(&format!("# {input}"), theme.dim)
         }
         RenderedMessage::UserPlan { plan_content } => plain_lines(plan_content),
-        RenderedMessage::UserPrompt { text } => plain_lines(text),
+        RenderedMessage::UserPrompt { text } => user_prompt_lines(text),
         RenderedMessage::AgentNotification { summary, .. } => colored_lines(summary, theme.dim),
         RenderedMessage::CompactBoundary { .. } => {
             colored_lines("✻ Conversation compacted (ctrl+o for history)", theme.dim)
@@ -106,16 +86,9 @@ pub fn render_message(
             retry_attempt,
             max_retries,
             ..
-        } => colored_lines(
-            &format!("API error: {error} (retry {retry_attempt}/{max_retries})"),
-            theme.error,
-        ),
+        } => system_api_error_lines(error, *retry_attempt, *max_retries, theme),
         RenderedMessage::RateLimit { text, upsell } => {
-            let mut out = colored_lines(text, theme.error);
-            if let Some(upsell) = upsell {
-                out.extend(colored_lines(upsell, theme.dim));
-            }
-            out
+            rate_limit_lines(text, upsell.as_deref(), theme)
         }
         RenderedMessage::Shutdown { from, reason, .. } => {
             let msg = match reason {
@@ -173,181 +146,14 @@ pub fn render_message(
         RenderedMessage::GroupedToolUse { tool, entries, .. } => {
             group_tool_use_lines(tool, entries, theme, verbose)
         }
-        RenderedMessage::CollapsedReadSearch { entries, .. } => colored_lines(
-            &format!("Read/Search ({} results)", entries.len()),
-            theme.dim,
-        ),
+        RenderedMessage::CollapsedReadSearch { entries, .. } => {
+            collapsed_read_search_lines(entries, theme)
+        }
         RenderedMessage::Attachment { attachment } => attachment_lines(attachment),
         RenderedMessage::Advisor { kind, verbose } => advisor_lines(kind, *verbose, theme),
         RenderedMessage::PlanApproval { kind } => plan_approval_lines(kind, theme),
         RenderedMessage::AssistantRedactedThinking => colored_lines("✻ Thinking…", theme.dim),
-        _ => Vec::new(),
     }
-}
-
-/// Markdown-render the assistant body, prefixing the first line with the
-/// `● ` marker and indenting continuation lines (mirrors the iocraft renderer).
-fn assistant_lines(body: &str, width: usize) -> Vec<StyledLine> {
-    let mut out = Vec::new();
-    let mut rendered = render_with_width(body, &markdown_theme(), width)
-        .into_iter()
-        .filter(|line| !line.spans.is_empty());
-
-    if let Some(mut first) = rendered.next() {
-        first.spans.insert(0, StyledSpan::plain(ASSISTANT_MARKER));
-        out.push(first);
-    }
-    for mut line in rendered {
-        line.spans.insert(0, StyledSpan::plain(CONT_INDENT));
-        out.push(line);
-    }
-    if out.is_empty() {
-        out.push(StyledLine::plain(ASSISTANT_MARKER));
-    }
-    out
-}
-
-fn colored_lines(text: &str, color: StyleColor) -> Vec<StyledLine> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    text.split('\n')
-        .map(|line| StyledLine {
-            spans: vec![StyledSpan::styled(
-                line.to_string(),
-                SpanStyle {
-                    fg: color,
-                    ..SpanStyle::default()
-                },
-            )],
-        })
-        .collect()
-}
-
-fn plain_lines(text: &str) -> Vec<StyledLine> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    text.split('\n').map(StyledLine::plain).collect()
-}
-
-/// One-line truncation to `max` chars (newlines flattened to spaces).
-fn truncate(s: &str, max: usize) -> String {
-    let flat = s.replace('\n', " ");
-    if flat.chars().count() <= max {
-        flat
-    } else {
-        let cut: String = flat.chars().take(max.saturating_sub(1)).collect();
-        format!("{cut}…")
-    }
-}
-
-fn dim_span(text: String, theme: &Theme) -> StyledSpan {
-    StyledSpan::styled(
-        text,
-        SpanStyle {
-            fg: theme.dim,
-            ..SpanStyle::default()
-        },
-    )
-}
-
-/// A tool call: `● {tool}` header + arguments. Collapsed → a dim, truncated
-/// one-line summary; verbose → the pretty-printed JSON input, dim-indented.
-fn tool_use_lines(
-    tool: &str,
-    input: &serde_json::Value,
-    theme: &Theme,
-    verbose: bool,
-) -> Vec<StyledLine> {
-    let header = StyledLine {
-        spans: vec![
-            StyledSpan::styled(
-                "● ".to_string(),
-                SpanStyle {
-                    fg: theme.success,
-                    ..SpanStyle::default()
-                },
-            ),
-            StyledSpan::plain(tool.to_string()),
-        ],
-    };
-    let mut out = vec![header];
-    if verbose {
-        let pretty = serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
-        for line in pretty.split('\n') {
-            out.push(StyledLine {
-                spans: vec![dim_span(format!("  {line}"), theme)],
-            });
-        }
-    } else {
-        out.push(StyledLine {
-            spans: vec![dim_span(
-                format!("  {}", truncate(&input.to_string(), 100)),
-                theme,
-            )],
-        });
-    }
-    out
-}
-
-/// A tool result: `⎿ {summary}` — the string content when present, else compact JSON.
-fn tool_result_lines(result: &serde_json::Value, theme: &Theme) -> Vec<StyledLine> {
-    let summary = if let Some(s) = result.as_str() {
-        s.to_string()
-    } else if let Some(s) = result.get("content").and_then(serde_json::Value::as_str) {
-        s.to_string()
-    } else {
-        result.to_string()
-    };
-    vec![StyledLine {
-        spans: vec![dim_span(format!("  ⎿ {}", truncate(&summary, 100)), theme)],
-    }]
-}
-
-fn bash_output_lines(stdout: &str, stderr: &str, theme: &Theme) -> Vec<StyledLine> {
-    let mut out = plain_lines(stdout);
-    if !stderr.is_empty() {
-        out.extend(colored_lines(stderr, theme.error));
-    }
-    out
-}
-
-/// A grouped tool-use block: `● {tool} (×{count})` header. Collapsed → header
-/// only; verbose → header + each child's truncated input → result line.
-fn group_tool_use_lines(
-    tool: &str,
-    entries: &[(serde_json::Value, serde_json::Value)],
-    theme: &Theme,
-    verbose: bool,
-) -> Vec<StyledLine> {
-    let mut out = vec![StyledLine {
-        spans: vec![
-            StyledSpan::styled(
-                "● ".to_string(),
-                SpanStyle {
-                    fg: theme.success,
-                    ..SpanStyle::default()
-                },
-            ),
-            StyledSpan::plain(format!("{tool} (×{})", entries.len())),
-        ],
-    }];
-    if verbose {
-        for (input, result) in entries {
-            out.push(StyledLine {
-                spans: vec![dim_span(
-                    format!(
-                        "  ⎿ {} → {}",
-                        truncate(&input.to_string(), 60),
-                        truncate(&result.to_string(), 60)
-                    ),
-                    theme,
-                )],
-            });
-        }
-    }
-    out
 }
 
 /// A one-line summary of a user attachment (directory listing / file read /
@@ -484,7 +290,10 @@ fn plan_approval_lines(kind: &PlanApprovalKind, theme: &Theme) -> Vec<StyledLine
 
 #[cfg(test)]
 mod tests {
+    use tui_core::message::SystemLevel;
+
     use super::*;
+    use crate::history_cell::message::ASSISTANT_MARKER;
 
     #[test]
     fn user_text_gets_prompt_prefix() {
@@ -1352,13 +1161,14 @@ mod tests {
         );
     }
 
-    // Confirmed failing on 2026-07-02 (pre-refactor baseline): the
-    // `attachment_lines` wildcard flattens PdfReference/SelectedLines/
-    // McpResource/PlanFileReference/InvokedSkills to "[attachment]" and
-    // `UserCommand { is_skill: true }` loses its `Skill(name)` form. The
-    // message-cells phase replaces those fallbacks and removes this ignore.
+    // Confirmed failing on 2026-07-02 (pre-refactor baseline). The message
+    // -cells split fixed `UserCommand { is_skill: true }` (now `Skill(name)`);
+    // the one remaining blocker is the `attachment_lines` sub-wildcard, which
+    // still flattens PdfReference/SelectedLines/McpResource/PlanFileReference/
+    // InvokedSkills to "[attachment]". The second message-cells phase replaces
+    // that fallback and removes this ignore.
     #[test]
-    #[ignore = "wildcard fallback hides variants; un-ignored in message-cells phase"]
+    #[ignore = "attachment sub-wildcard hides variants; un-ignored in message-cells II"]
     fn every_rendered_message_variant_renders_visibly_or_is_documented_hidden() {
         let theme = Theme::dark();
         let mut failures = Vec::new();
@@ -1392,5 +1202,35 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    // ===== Message-cells phase: the split renderers stay line-identical =====
+
+    /// Every ported (per-variant-cell) fixture must render EXACTLY the same
+    /// ratatui lines through its concrete cell as through the legacy
+    /// `render_message` dispatcher — the line-identity lock for the split.
+    #[test]
+    fn ported_cells_render_line_identical_to_render_message() {
+        use crate::history_cell::{cell_for_message, RenderMode};
+        let theme = Theme::dark();
+        for (name, msg, _, _) in coverage_fixtures() {
+            for verbose in [false, true] {
+                let expected: Vec<ratatui::text::Line<'static>> =
+                    render_message(&msg, 80, &theme, verbose)
+                        .iter()
+                        .map(crate::render::styled_line_to_ratatui)
+                        .collect();
+                let cell = cell_for_message(msg.clone());
+                let got = cell.display_lines(
+                    80,
+                    &theme,
+                    RenderMode {
+                        raw: false,
+                        verbose,
+                    },
+                );
+                assert_eq!(got, expected, "{name} diverged (verbose={verbose})");
+            }
+        }
     }
 }

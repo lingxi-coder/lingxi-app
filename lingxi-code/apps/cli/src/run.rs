@@ -1379,9 +1379,8 @@ async fn resume_resolved_session(
 /// with the prior conversation.
 ///
 /// Reuses the FRESH TUI mount end-to-end ([`crate::init::build_runtime_for_tui`]
-/// → [`crate::mode::build_tui_runtime`] → [`crate::mode::mount_tui_runtime`]),
-/// adding exactly the two resume seeds the W38 seam + the engine resume path
-/// expose:
+/// → [`crate::mode::run_ratatui`]), adding exactly the two resume seeds the W38
+/// seam + the engine resume path expose:
 ///   1. ENGINE side — overwrite the freshly-built orchestrator's in-memory
 ///      `SessionState` (`history` + `session_id`) with the replayed transcript
 ///      via [`seed_orchestrator_session`], so a follow-up turn continues the
@@ -1419,10 +1418,12 @@ async fn mount_resumed_tui(
     // ENGINE seed: replay the transcript into the orchestrator's session so a
     // live turn continues the prior conversation.
     seed_orchestrator_session(&tui_build.runtime.orchestrator, session_id, &messages).await;
-    // RENDER seed: map the raw JSONL into TUI scrollback rows (W38 seam).
+    // RENDER seed: map the raw JSONL into TUI scrollback rows (W38 seam), then
+    // launch the ratatui backend (`tui-rata`) with that replayed scrollback.
+    // Resume has no SessionRegistration (fresh launches register; resume does
+    // not), so no status forwarder is threaded.
     let resumed_messages = tui::replay::rebuild_from_jsonl(&messages);
-    let tui_runtime = crate::mode::build_tui_runtime(tui_build, argv, resumed_messages).await;
-    crate::mode::mount_tui_runtime(tui_runtime).await
+    crate::mode::run_ratatui(tui_build, None, resumed_messages).await
 }
 
 /// Seed an already-built orchestrator's in-memory [`engine::SessionState`] from
@@ -1901,69 +1902,6 @@ mod tests {
             &s.history[1],
             protocol::ConversationMessage::Assistant { .. }
         ));
-    }
-
-    #[tokio::test]
-    async fn resumed_tui_runtime_carries_replay_and_live_orchestrator() {
-        // The render-side seam: `build_tui_runtime` with replayed scrollback
-        // produces a `tui::session::Runtime` whose `resumed_messages` match
-        // `rebuild_from_jsonl(transcript)` and which carries a live orchestrator
-        // + bridge (not NOT_IMPLEMENTED).
-        let argv = tui_argv();
-        let build = crate::init::build_runtime_for_tui(&argv)
-            .await
-            .expect("build_runtime_for_tui");
-
-        let messages = vec![
-            jsonl_line("user", &serde_json::json!("resume me")),
-            jsonl_line("assistant", &serde_json::json!("resumed")),
-        ];
-        let expected = tui::replay::rebuild_from_jsonl(&messages);
-        assert_eq!(expected.len(), 2, "two rows rebuilt from the transcript");
-
-        let tui_runtime = crate::mode::build_tui_runtime(build, &argv, expected.clone()).await;
-
-        // Replayed scrollback is carried verbatim into the TUI runtime.
-        assert_eq!(
-            tui_runtime.resumed_messages.len(),
-            expected.len(),
-            "resumed_messages match rebuild_from_jsonl output"
-        );
-        assert!(matches!(
-            &tui_runtime.resumed_messages[0],
-            tui::state::RenderedMessage::UserText { body, .. } if body == "resume me"
-        ));
-        // A live orchestrator + bridge are wired (the mount is real, not stubbed).
-        assert!(
-            tui_runtime.orchestrator.is_some(),
-            "resumed runtime carries a live orchestrator handle"
-        );
-        assert!(
-            tui_runtime.bridge.is_some(),
-            "resumed runtime carries a live streaming bridge"
-        );
-        assert!(
-            tui_runtime.turn_tx.is_some(),
-            "resumed runtime carries the turn-spawn sender"
-        );
-    }
-
-    #[tokio::test]
-    async fn fresh_tui_runtime_carries_no_replay() {
-        // SAFETY: a FRESH launch passes an empty replay vec, so the resulting
-        // runtime's `resumed_messages` is empty — byte-identical to the
-        // pre-M5-13 fresh mount (no scrollback seed).
-        let argv = tui_argv();
-        let build = crate::init::build_runtime_for_tui(&argv)
-            .await
-            .expect("build_runtime_for_tui");
-        let tui_runtime = crate::mode::build_tui_runtime(build, &argv, Vec::new()).await;
-        assert!(
-            tui_runtime.resumed_messages.is_empty(),
-            "a fresh mount seeds no replayed scrollback"
-        );
-        assert!(tui_runtime.orchestrator.is_some());
-        assert!(tui_runtime.bridge.is_some());
     }
 
     // ── P5 Phase 3: pure control-arm classification ──────────────────────────

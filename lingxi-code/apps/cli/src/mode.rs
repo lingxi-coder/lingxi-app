@@ -1,6 +1,6 @@
 //! Three-way mode dispatch added in M6-01. Routes argv to one of:
 //! - `Mode::Print(prompt)`: existing `run::run_oneshot` (v0.6.0, unchanged)
-//! - `Mode::Tui`: new `tui::run_tui_session` (v0.7.0 default)
+//! - `Mode::Tui`: the ratatui TUI (`tui-rata`) via `run_ratatui` (default)
 //! - `Mode::StdioRepl`: existing `repl::run_repl` (v0.6.0, kept as `--no-tui`
 //!   and non-TTY fallback)
 //!
@@ -185,155 +185,15 @@ pub async fn dispatch(
                     name.as_deref(),
                 ))
             };
-            // FRESH launch: no replayed scrollback. `build_tui_runtime` with an
-            // empty `resumed_messages` vec is byte-identical to the pre-refactor
-            // inline assembly — `Runtime::with_resumed_messages([])` is a no-op
-            // and `run_tui_session` skips the seed when the vec is empty.
-            // (iocraft → ratatui migration) The ratatui backend is now the
-            // DEFAULT (iocraft is opt-out via `LINGXI_TUI_BACKEND=iocraft`). It
+            // FRESH launch: ratatui (`tui-rata`) is the only TUI backend. It
             // drives the live orchestrator directly via `tui_build`'s bridge
-            // channel, so it MUST branch before `build_tui_runtime` moves
-            // `tui_build` into the iocraft runtime.
-            if use_ratatui_backend() {
-                let code = run_ratatui(tui_build, Some(session_registration.clone())).await;
-                // Unlink NOW (idempotent with Drop): the status forwarders may
-                // still hold `Arc` clones inside detached tasks, and the
-                // record must not outlive the interactive session.
-                session_registration.deregister();
-                return code;
-            }
-            let tui_runtime = build_tui_runtime(tui_build, argv, Vec::new()).await;
-            let code = mount_tui_runtime(tui_runtime).await;
+            // channel; no replayed scrollback (empty seed).
+            let code = run_ratatui(tui_build, Some(session_registration.clone()), Vec::new()).await;
+            // Unlink NOW (idempotent with Drop): the status forwarders may still
+            // hold `Arc` clones inside detached tasks, and the record must not
+            // outlive the interactive session.
             session_registration.deregister();
             code
-        }
-    }
-}
-
-/// Assemble the [`tui::session::Runtime`] from a [`crate::init::TuiBuild`].
-///
-/// (M5-13) Extracted from the `Mode::Tui` arm so the `--resume <uuid>` mount
-/// (`run::run_resume_by_id`) reuses the EXACT same wiring — orchestrator handle,
-/// bridge, status snapshot, multi-agent `PollerFeed`, turn-spawn sender, and the
-/// command registry — instead of duplicating it. The ONLY resume-specific input
-/// is `resumed_messages`: the prior conversation, already mapped to TUI
-/// scrollback rows via `tui::replay::rebuild_from_jsonl`. A FRESH launch passes
-/// an empty vec, so `with_resumed_messages([])` is a no-op and the fresh mount
-/// stays byte-identical to the pre-extraction inline code.
-pub(crate) async fn build_tui_runtime(
-    tui_build: crate::init::TuiBuild,
-    argv: &Argv,
-    resumed_messages: Vec<tui::state::RenderedMessage>,
-) -> tui::session::Runtime {
-    // (M7-13 review) Coerce the concrete orchestrator to the
-    // `OrchestratorHandle` trait object so it can drive both the session
-    // id read and the Settings open pump inside the TUI mount.
-    let orchestrator: Arc<dyn OrchestratorHandle> = tui_build.runtime.orchestrator.clone();
-    let session_id = orchestrator.current_session_id().await;
-    let bridge = tui::session::TuiBridge {
-        rx: tui_build.bridge_rx,
-    };
-    // Status snapshot — model from argv (if set), cwd from current
-    // dir, cost placeholder. Full status wiring lands in M6-06.
-    let mut status = tui::state::StatusSnapshot::default();
-    if let Some(m) = &argv.model {
-        status.model.clone_from(m);
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        status.cwd = cwd;
-    }
-    // (M9-05) Wrap the desktop TaskRegistry in a `PollerFeed` so the TUI
-    // background-task footer + dialog read live state. The registry is
-    // the SAME one wired into the tool context (tools that spawn tasks
-    // update it; the feed polls it). Coerced to the narrow `traits`
-    // handle at the seam.
-    let task_feed: Arc<dyn tui::multiagent::MultiAgentFeed> = Arc::new(
-        tui::multiagent::PollerFeed::new(tui_build.runtime.task_registry.clone()
-            as Arc<dyn traits::task_registry::TaskRegistryHandle>),
-    );
-    // (MULTIMODAL.1) Thread the bridge sender clone so the TUI live-key
-    // loop can spawn streaming turns (`tui::root::pump_turn`). Moved out
-    // of `tui_build` (a disjoint field from the already-taken `bridge_rx`).
-    // (ARGS.3) Thread the dispatcher's shared command registry so the TUI
-    // populates its progressive argument-hint map at init. `.registry()`
-    // only clones the inner `Arc<RwLock<CommandRegistry>>`, leaving the
-    // dispatcher in place on `tui_build.runtime` (read before `turn_tx`,
-    // a disjoint field, is moved out below — no borrow/move conflict).
-    let command_registry = tui_build.runtime.dispatcher.registry();
-    // Thread the SAME fully-wired slash dispatcher (incl. its UserPromptExpansion
-    // hooks) into the TUI so the live submit path can expand a typed `/loop` (and
-    // Markdown/Plugin prompt commands) and run it as a turn — matching the CLI
-    // repl. `.registry()` above already cloned the shared registry Arc; the
-    // dispatcher field is otherwise unused in TUI mode, so move it out here.
-    let slash_dispatcher: Arc<dyn traits::SlashCommandDispatcher> =
-        Arc::new(tui_build.runtime.dispatcher);
-    // (`!` bash mode) The engine-built sandboxed Bash runner (over the same
-    // `BuiltinToolContext`/`BashTool` the model uses). Threaded into the TUI so a
-    // typed `!command` runs sandboxed and renders inline — no LLM turn, no raw
-    // process. `.clone()` only bumps the `Arc` (disjoint field on the runtime).
-    let bash_runner = tui_build.runtime.bash_runner.clone();
-    // (Plan 3c §8 / I1/I2) Project the engine-computed provider maps off the
-    // runtime (disjoint fields, read before `turn_tx` is moved out below) so the
-    // `/model` picker can badge unconfigured providers + resolve a bare
-    // USER-provider model id to its own group + availability gate. Empty (the
-    // default) keeps every row available — byte-identical to the historical path.
-    let provider_availability = tui_build.runtime.provider_availability.clone();
-    let model_providers = tui_build.runtime.model_providers.clone();
-    // (T2a) Project the engine-computed per-provider login-method map off the
-    // runtime so the data-driven `/connect` picker renders the real catalog
-    // provider set + method. Without this the map reaches `AppState` empty and
-    // `connect_rows_from` yields zero rows ("No providers available.").
-    let provider_auth_methods = tui_build.runtime.provider_auth_methods.clone();
-    // (Plan 3c C1) Project the shared engine credential store off the runtime so
-    // the `/connect` screen's `pump_store_provider_key` persists a collected key
-    // via `CredentialManager::set_provider_key`.
-    let provider_key_store = tui_build.runtime.provider_key_store.clone();
-    let web_search_http = tui_build.runtime.http.clone();
-    // (`/connect` Copilot device-flow) Project the engine GitHub-Copilot OAuth
-    // device-flow driver off the runtime so picking GitHub Copilot in `/connect`
-    // runs the real web sign-in (browser open + device-code poll + token store)
-    // via `root`'s copilot-login task. `.clone()` only bumps the `Arc`.
-    let copilot_connect_driver = tui_build.runtime.connect_copilot.clone();
-    // (T2b) OAuth sign-in driver — picking Anthropic Pro/Max or OpenAI ChatGPT in
-    // `/connect` runs the real browser flow via `root`'s oauth-login task.
-    let oauth_connect_driver = tui_build.runtime.oauth_connect_driver.clone();
-    // (M5-13) Seed the prior conversation last so a resumed session paints its
-    // existing history on the first frame. For a fresh launch this is `[]`.
-    tui::session::Runtime::with_bridge(session_id, bridge, status)
-        .with_orchestrator(orchestrator)
-        .with_multiagent_feed(task_feed)
-        .with_turn_tx(tui_build.turn_tx)
-        .with_permission_rx(tui_build.permission_rx)
-        .with_command_registry(command_registry)
-        .with_dispatcher(slash_dispatcher)
-        .with_bash_runner(bash_runner)
-        .with_provider_availability(provider_availability)
-        .with_provider_auth_methods(provider_auth_methods)
-        .with_model_providers(model_providers)
-        .with_provider_key_store(provider_key_store)
-        .with_web_search_http(web_search_http)
-        .with_copilot_connect_driver(copilot_connect_driver)
-        .with_oauth_connect_driver(oauth_connect_driver)
-        // (B4 Task 5) Thread the composition root's shared subscription slot so
-        // the TUI rate-limit composer reads the live snapshot at compose time.
-        .with_subscription(tui_build.runtime.subscription.clone())
-        // (A6 batch-6 Task 2) Read + merge the `statusLine` setting (User+Local,
-        // Local-over-User) and thread it through so the TUI's debounced
-        // statusline pump runs the configured command. `None` (no setting)
-        // leaves the built-in status row in place.
-        .with_status_line_config(read_status_line_config())
-        .with_resumed_messages(resumed_messages)
-}
-
-/// Drive the TUI to a clean shutdown and map its result to a process exit code.
-/// Shared by the fresh `Mode::Tui` arm and the `--resume <uuid>` mount.
-pub(crate) async fn mount_tui_runtime(tui_runtime: tui::session::Runtime) -> i32 {
-    let cancel = CancellationToken::new();
-    match tui::run_tui_session(tui_runtime, cancel).await {
-        Ok(()) => exit_codes::SUCCESS,
-        Err(e) => {
-            eprintln!("lingxi-cli: tui session failed: {e}");
-            exit_codes::RUNTIME_ERROR
         }
     }
 }
@@ -350,9 +210,10 @@ pub(crate) async fn mount_tui_runtime(tui_runtime: tui::session::Runtime) -> i32
 /// status effect @222989611): `TurnStarted` → `busy`, `TurnEnded` → `idle`,
 /// a pending permission exchange → `waiting` with `waitingFor: "permission
 /// prompt"` (the binary's dialog-open reason), resolved exchange → `busy`.
-async fn run_ratatui(
+pub(crate) async fn run_ratatui(
     tui_build: crate::init::TuiBuild,
     registration: Option<Arc<crate::agents_registry::SessionRegistration>>,
+    resumed_messages: Vec<tui_rata::RenderedMessage>,
 ) -> i32 {
     let orchestrator: Arc<dyn OrchestratorHandle> = tui_build.runtime.orchestrator.clone();
     let (bridge_rx, permission_rx) = match &registration {
@@ -377,7 +238,10 @@ async fn run_ratatui(
         .iter()
         .find(|m| m.is_current)
         .map_or_else(|| "(default)".to_string(), |m| m.display.clone());
-    let welcome = vec![tui_rata::RenderedMessage::SystemText {
+    // Seed the transcript with the welcome banner, then any replayed scrollback
+    // (`--resume`: `rebuild_from_jsonl` rows). A fresh launch passes an empty
+    // `resumed_messages`, so the seed is byte-identical to the welcome-only path.
+    let mut welcome = vec![tui_rata::RenderedMessage::SystemText {
         body: format!(
             "✻ Welcome to LingXi Code ({})\n  /help for commands · Esc interrupts a running turn · Esc (idle) or Ctrl-C twice to quit\n  cwd: {}\n  model: {}",
             session.doctor.cli_version, session.doctor.cwd, current_model
@@ -385,6 +249,7 @@ async fn run_ratatui(
         timestamp: 0,
         is_error: false,
     }];
+    welcome.extend(resumed_messages);
     let on_submit = move |prompt: String, cancel: CancellationToken| {
         let _ = turn_tx.send(tui_rata::TurnEvent::TurnStarted);
         let orch = orchestrator.clone();
@@ -657,19 +522,6 @@ fn memory_rows(
     rows
 }
 
-/// Whether the ratatui backend is used. It is now the DEFAULT; set
-/// `LINGXI_TUI_BACKEND=iocraft` (case-insensitive) to opt back into the legacy
-/// iocraft TUI during the migration. Any other value (or unset) uses ratatui.
-fn use_ratatui_backend() -> bool {
-    ratatui_selected(std::env::var("LINGXI_TUI_BACKEND").ok().as_deref())
-}
-
-/// Pure backend selection over the raw `LINGXI_TUI_BACKEND` value (testable
-/// without touching process env): only an explicit `iocraft` opts out.
-fn ratatui_selected(value: Option<&str>) -> bool {
-    !matches!(value, Some(v) if v.eq_ignore_ascii_case("iocraft"))
-}
-
 /// Resolve `(lingxi_home, project_dir)` the settings reader/writer address.
 ///
 /// `lingxi_home = ~/.claude` (the user settings root; `/dev/null` when no home
@@ -897,17 +749,6 @@ mod tests {
             "{memory:?}"
         );
         assert_eq!(memory[1].title, "User memory");
-    }
-
-    #[test]
-    fn ratatui_is_default_and_iocraft_opts_out() {
-        // Unset or any non-iocraft value → ratatui (the new default).
-        assert!(ratatui_selected(None));
-        assert!(ratatui_selected(Some("ratatui")));
-        assert!(ratatui_selected(Some("anything")));
-        // Only an explicit iocraft (case-insensitive) opts back out.
-        assert!(!ratatui_selected(Some("iocraft")));
-        assert!(!ratatui_selected(Some("IOCRAFT")));
     }
 
     #[test]

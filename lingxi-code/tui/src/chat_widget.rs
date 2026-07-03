@@ -469,20 +469,31 @@ impl ChatWidget {
     /// inputs fresh (see [`Self::apply_turn_event`]).
     pub fn set_status_line(&mut self, slot: crate::status_line::SharedStatusLine) {
         if let Ok(mut s) = slot.lock() {
-            s.data.model = self.current_model_display();
+            let (id, display) = self.current_model_id_display();
+            s.data.model_id = id;
+            s.data.model = display;
             s.data.cwd = std::path::PathBuf::from(&self.session.doctor.cwd);
+            // Run once on startup (claude-code executes the statusline on mount,
+            // not only on turn boundaries).
+            s.dirty = true;
         }
         self.status_line = Some(slot);
     }
 
+    /// The current model's `(wire_id, display)` pair (falls back to
+    /// `("(default)", "(default)")`), for the statusline payload's
+    /// `model.id`/`model.display_name`.
+    fn current_model_id_display(&self) -> (String, String) {
+        self.session.models.iter().find(|m| m.is_current).map_or_else(
+            || ("(default)".to_string(), "(default)".to_string()),
+            |m| (m.request_model.clone(), m.display.clone()),
+        )
+    }
+
     /// The current model's display string (falls back to `(default)`), reused
-    /// for the statusline payload's `model.id`/`display_name`.
+    /// for the welcome banner + statusline seeding.
     fn current_model_display(&self) -> String {
-        self.session
-            .models
-            .iter()
-            .find(|m| m.is_current)
-            .map_or_else(|| "(default)".to_string(), |m| m.display.clone())
+        self.current_model_id_display().1
     }
 
     /// Update one field of the shared statusline slot (no-op when unwired).
@@ -961,6 +972,10 @@ impl ChatWidget {
     /// pump slot (empty when no statusline is configured or the command has not
     /// produced output yet). Rendered just above the bottom pane.
     fn status_line_lines(&self) -> Vec<ratatui::text::Line<'static>> {
+        /// Cap on statusline rows so a pathological multi-line command cannot
+        /// steal the whole pane and hide the composer (claude-code statuslines
+        /// are single-line by convention; this is a defensive bound).
+        const MAX_STATUS_LINE_ROWS: usize = 3;
         let Some(slot) = &self.status_line else {
             return Vec::new();
         };
@@ -970,11 +985,14 @@ impl ChatWidget {
         let Some(text) = shared.text.as_deref() else {
             return Vec::new();
         };
+        // `statusLine.padding` → left pad (claude-code `<Box paddingX>`); 0 default.
+        let pad = " ".repeat(shared.config.as_ref().map_or(0, |c| c.padding));
         let dim = crate::style_adapter::to_ratatui(self.theme.dim);
         text.lines()
+            .take(MAX_STATUS_LINE_ROWS)
             .map(|l| {
                 ratatui::text::Line::from(ratatui::text::Span::styled(
-                    l.to_string(),
+                    format!("{pad}{l}"),
                     ratatui::style::Style::default().fg(dim),
                 ))
             })
@@ -1042,6 +1060,19 @@ impl ChatWidget {
                     body: format!("Switching model to {request_model}…"),
                     timestamp: 0,
                     is_error: false,
+                });
+                // Refresh the statusline model + re-arm the pump so the command
+                // reports the new model (claude-code re-runs on model change).
+                let display = self
+                    .session
+                    .models
+                    .iter()
+                    .find(|m| m.request_model == request_model)
+                    .map_or_else(|| request_model.clone(), |m| m.display.clone());
+                self.with_status_line(|s| {
+                    s.data.model_id = request_model.clone();
+                    s.data.model = display;
+                    s.dirty = true;
                 });
                 ChatOutcome::SwitchModel(request_model, profile)
             }

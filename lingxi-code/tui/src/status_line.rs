@@ -27,7 +27,11 @@ use tui_core::status_line_command::{
 /// widget as `TurnEvent`s arrive; read by the pump when it re-runs the command.
 #[derive(Debug, Clone, Default)]
 pub struct StatusLineData {
-    /// Current model display string (`workspace`-adjacent; reused for id+display).
+    /// Current model WIRE id (`model.id`, e.g. the provider-local request model),
+    /// distinct from the human display name (claude-code `model.id` vs
+    /// `display_name`).
+    pub model_id: String,
+    /// Current model display string (`model.display_name`).
     pub model: String,
     /// Working directory (`workspace.current_dir` + `project_dir`).
     pub cwd: PathBuf,
@@ -80,7 +84,7 @@ pub fn build_payload(shared: &StatusLineShared) -> Option<(String, String)> {
     }
     let d = &shared.data;
     let json = build_status_line_input(
-        &d.model,
+        &d.model_id,
         &d.model,
         &d.cwd,
         &d.cwd,
@@ -115,7 +119,8 @@ mod tests {
         let slot = armed("my-statusline.sh");
         {
             let mut s = slot.lock().unwrap();
-            s.data.model = "claude-sonnet-4.5".into();
+            s.data.model_id = "claude-sonnet-4-5-20250929".into();
+            s.data.model = "Claude Sonnet 4.5".into();
             s.data.cwd = PathBuf::from("/a/b");
             s.data.cost = "$0.1234".into();
         }
@@ -123,7 +128,9 @@ mod tests {
         assert_eq!(cmd, "my-statusline.sh");
         let v: serde_json::Value = serde_json::from_str(&jsonstr).unwrap();
         assert_eq!(v["workspace"]["current_dir"], "/a/b");
-        assert_eq!(v["model"]["id"], "claude-sonnet-4.5");
+        // model.id is the WIRE id; display_name is the human label.
+        assert_eq!(v["model"]["id"], "claude-sonnet-4-5-20250929");
+        assert_eq!(v["model"]["display_name"], "Claude Sonnet 4.5");
         // $0.1234 → 0.1234 total_cost_usd.
         assert!((v["cost"]["total_cost_usd"].as_f64().unwrap() - 0.1234).abs() < 1e-9);
     }

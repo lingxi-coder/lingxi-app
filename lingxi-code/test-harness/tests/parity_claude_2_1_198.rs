@@ -121,7 +121,21 @@ const CHECKLIST: &[Entry] = &[
     // orchestrator streaming_transient_retry_test (thinking-only reset retries
     // & succeeds; a started tool forbids the retry; non-transient never retries).
     Entry { version: "2.1.198", item: "Mid-response transient network errors retry with backoff (ECONNRESET etc.)", disposition: Disposition::Implemented },
-    Entry { version: "2.1.198", item: "Sandbox classifier: dedupe repeated same-host requests", disposition: Mission("M11") },
+    // M11 → Divergence (no lingxi surface). The binary dedupe is `createSandbox
+    // AskCallback`: a `Map<host, Promise<bool>>` that COALESCES concurrent
+    // same-host network requests into ONE interactive prompt (`sendRequest`
+    // subtype `can_use_tool`, `input:{host}`, `description:"Allow network
+    // connection to ${host}?"` via `requestUserDialog`), then persists the grant
+    // with `addSessionAllowedHost` so later requests match the allow-list and
+    // never re-ask. lingxi NEVER wires this interactive network-ask: the
+    // sandbox-runtime `AskFn` seam exists (matcher::filter_network_request_with_ask)
+    // but every production `SandboxManager::initialize` passes `ask_callback:
+    // None` (sandbox-runtime/bin/srt.rs, sandbox-runtime-runner/src/lib.rs), no
+    // code constructs an AskFn, and the live proxy runner is not even mounted
+    // (tool-api sandbox_runner defaults to LegacyWrapRunner = sync seatbelt/
+    // seccomp wrap, no network proxy). With no interactive host prompt, there are
+    // no repeated same-host asks to dedupe.
+    Entry { version: "2.1.198", item: "Sandbox classifier: dedupe repeated same-host requests", disposition: Divergence("no lingxi surface: the interactive sandbox network-ask callback (createSandboxAskCallback) is never wired — ask_callback is None at every production SandboxManager::initialize and the live proxy runner is unmounted (LegacyWrapRunner) — so there is no repeated host prompt to dedupe") },
     // M8 landed: REAL lingxi bug found + fixed — `register_self_contained_
     // handlers` registered `LocalBashHandler` with its default
     // `NoopStatusSink`, so a finished background bash task's registry status
@@ -205,14 +219,41 @@ const CHECKLIST: &[Entry] = &[
     // workflow_progress_keeps_earliest_agents_through_log_flood (>1000-line
     // log flood; earliest agent + phase rows retained, indices correct).
     Entry { version: "2.1.198", item: "Workflow progress view keeps earliest agents", disposition: Disposition::Implemented },
-    Entry { version: "2.1.198", item: ".claude/rules conditional rules load via symlinked paths (realpath)", disposition: Mission("M11") },
+    // M11: conditional-rule glob matching gains a realpath symlink fallback,
+    // 1:1 with the binary filter `pqt` (claudemd.ts): after the lexical
+    // `relative(base, touched)`, if `touched` is absolute AND the lexical
+    // relative failed (empty / `..`-escape / absolute), it resolves
+    // `realpathSync(dirname(touched))` (`jd`) and, only when a symlink was
+    // resolved (`c!==l`), recomputes the relative path from the canonical dir —
+    // so a file reached through a symlinked path that resolves back under the
+    // rule base still matches. Ported in orchestrator conditional_rules::
+    // relative_path_for_match (only the touched dir is realpath'd; base is
+    // assumed canonical, as production's realpath'd getOriginalCwd is). Locked by
+    // `symlinked_touched_file_matches_via_realpath_fallback` (matches) +
+    // `symlink_resolving_outside_base_still_does_not_match` (does not over-match).
+    Entry { version: "2.1.198", item: ".claude/rules conditional rules load via symlinked paths (realpath)", disposition: Disposition::Implemented },
     // M6 partial: tui_core::render::osc8 ports the binary's OSC 8 emitters
     // (`Bpl` hyperlink bytes, `jx()` support gate, URL wrapping incl. scheme)
     // with byte-locked tests — but tui-rata draws through a ratatui cell
     // Buffer that cannot carry escape sequences, so emission awaits a raw
     // scrollback print path. Stays Mission until wired end-to-end.
     Entry { version: "2.1.198", item: "Cmd+click opens URLs in fullscreen in Warp; double-click selects whole URL", disposition: Mission("M6") },
-    Entry { version: "2.1.198", item: "Plan mode auto-allows read-only tools when session starts in plan mode", disposition: Mission("M11") },
+    // M11: session-start (boot) plan mode auto-allows read-only tools. The
+    // CLI `--permission-mode plan` (resolve_permission_mode) threads through
+    // DesktopConfig into `PermissionPolicy::from_rules(Plan, rules)`
+    // (engine-desktop lib.rs:3435). At the first tool call `session.plan_mode`
+    // is still false (only the runtime EnterPlanMode tool sets it), so the
+    // orchestrator uses the normal `check` → `authorize` under the boot mode
+    // Plan → the mutation backstop: `hmr`-plan-safe read-only tools fall
+    // through to the read-only auto-allow (no prompt), mutating tools trip the
+    // backstop → Ask → prompt. The binary session-start branch
+    // `if(permissionMode==="plan"){i=_nn(n);...}` is a no-op here (`_nn`/`Smr`
+    // is the auto/transcript-classifier gate, OFF in external builds).
+    // Locked by permission policy_gate_test `plan_mode_read_only_tool_auto_allows`
+    // (boot Plan + Read → Allow, 0 prompts) and `plan_mode_mutating_tool_
+    // delegates_to_inner` (boot Plan + Edit → prompt), plus policy_test
+    // `plan_mode_does_not_backstop_plan_safe_read` / `plan_mode_asks_on_mutating_tool`.
+    Entry { version: "2.1.198", item: "Plan mode auto-allows read-only tools when session starts in plan mode", disposition: Disposition::Implemented },
     // M12 landed: `session::jsonl::title::derive_fork_name` is a 1:1 port of the
     // binary `I2l`/`deriveFirstPrompt` (@217273303) — it reuses the existing
     // `first_meaningful_user_text` (`n9e`) extractor, which SKIPS `isMeta` and
@@ -340,7 +381,19 @@ const CHECKLIST: &[Entry] = &[
     // (file:// OSC 8 target, plain-path display) with byte-locked tests;
     // wiring blocked on the same raw print path as the URL entry above.
     Entry { version: "2.1.196", item: "Clickable file attachments (Cmd/Ctrl-click reveals in Finder)", disposition: Mission("M6") },
-    Entry { version: "2.1.196", item: "mcp list/get do not spawn repo-self-approved servers; Pending approval shown", disposition: Mission("M11") },
+    // M11: `mcp list`/`mcp get` surface unapproved (repo-self-approved) project
+    // `.mcp.json` servers as the byte-exact binary status `SSc` = "\u23F8 Pending
+    // approval (run `claude` to approve)" and NEVER spawn/health-check them —
+    // 1:1 with the binary list `$Tf` (`status: n.has(i) ? SSc : (await
+    // ySc(i,a)).status`) and get `qTf` (`i==="pending" ? {status:SSc} : … : await
+    // ySc(t,s)`), where the pending branch SKIPS `ySc` (the connect/spawn probe).
+    // lingxi's list/get were already probe-free (client-side), so the spawn-guard
+    // held trivially; the gap was DISPLAY. apps/cli commands/mcp.rs now flags
+    // pending project servers (is_pending_project_server + project_server_is_approved,
+    // the scope guard keeps a same-named user/local server fully shown). Locked by
+    // pending_approval_tests (byte-exact string, pending vs approved, user/local
+    // neighbor never mislabelled, trust-reset reverts approved→pending).
+    Entry { version: "2.1.196", item: "mcp list/get do not spawn repo-self-approved servers; Pending approval shown", disposition: Disposition::Implemented },
     // M8 N/A-with-evidence: the cc fix is in the daemon's job-WAKE transcript
     // probe — `s9e` (@206707678) renames an unreadable transcript to
     // `<sid>.orphaned-<ts>-<uuid8>.jsonl` instead of deleting. lingxi has NO
@@ -439,7 +492,7 @@ const CHECKLIST: &[Entry] = &[
     // menu ("Restore code and conversation" / "Restore conversation" /
     // "Restore code"). Stays Mission until the rewind menu itself exists.
     Entry { version: "2.1.196", item: "Esc Esc at idle prompt opens rewind menu (regression fix)", disposition: Mission("M6") },
-    Entry { version: "2.1.196", item: "MCP OAuth: no-scope request must not ask for full scopes_supported catalog", disposition: Mission("M11") },
+    Entry { version: "2.1.196", item: "MCP OAuth: no-scope request must not ask for full scopes_supported catalog", disposition: Disposition::Implemented },
     // M13 landed as a regression LOCK: lingxi's `/context`
     // (commands/core/src/context.rs) renders
     // `OrchestratorHandle::context_window_usage`, which sums the session's

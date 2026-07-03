@@ -204,6 +204,16 @@ pub struct AuthServerMetadata {
     /// Scopes the server advertises (`scopes_supported`), if any.
     #[serde(default)]
     pub scopes_supported: Option<Vec<String>>,
+    /// Non-standard curated `scope` string some servers publish (claude-code
+    /// `getCuratedMetadataScope` first branch: `if ("scope" in e && typeof
+    /// e.scope === "string") return e.scope`). Preferred over the
+    /// `scopes_supported` catalog when present.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Non-standard curated `default_scope` string (the fallback after
+    /// `scope` in claude-code's curated-scope reader).
+    #[serde(default)]
+    pub default_scope: Option<String>,
     /// Token revocation endpoint (RFC 7009), if advertised (auth.ts:495-498).
     #[serde(default)]
     pub revocation_endpoint: Option<String>,
@@ -576,6 +586,104 @@ pub async fn refresh_tokens(
 /// print a link, etc.). Invoked once, after the loopback listener has bound.
 pub type OnAuthorizationUrl = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// The curated scope for a no-explicit-scope request — 1:1 with claude-code's
+/// `getCuratedMetadataScope` (cc 2.1.196 fix: "MCP OAuth: no-scope request must
+/// not ask for full `scopes_supported` catalog"):
+///
+/// 1. the non-standard `scope` metadata string when published, else
+/// 2. the non-standard `default_scope` metadata string, else
+/// 3. the full `scopes_supported` catalog ONLY when the user explicitly
+///    configured `authServerMetadataUrl` for this server
+///    (`has_explicit_metadata_url`), else
+/// 4. EMPTY — the request carries no `scope` parameter at all.
+///
+/// Before the fix the catalog was requested unconditionally, over-asking the
+/// authorization server for every advertised scope.
+fn curated_metadata_scope(meta: &AuthServerMetadata, has_explicit_metadata_url: bool) -> String {
+    if let Some(s) = meta.scope.as_deref().or(meta.default_scope.as_deref()) {
+        return s.to_string();
+    }
+    if has_explicit_metadata_url {
+        return meta
+            .scopes_supported
+            .as_ref()
+            .map(|s| s.join(" "))
+            .unwrap_or_default();
+    }
+    String::new()
+}
+
+/// Append `offline_access` to the authorize-URL scope when the server
+/// advertises it — 1:1 with the binary's `D$p(e,t)`. `scope` mirrors JS `e`:
+/// `None` is JS `null` (no scope resolved at all), `Some(s)` a resolved scope
+/// string (possibly empty). The binary:
+///
+/// ```js
+/// function D$p(e,t){
+///   if(e!==null && e.split(" ").includes("offline_access")) return e;
+///   if(!t?.scopes_supported?.includes("offline_access")) return e;
+///   return e===null ? "offline_access" : `${e} offline_access`;
+/// }
+/// ```
+///
+/// Applied ONLY to the authorize URL (the binary's `redirectToAuthorization`),
+/// never to the DCR client metadata.
+fn with_offline_access(scope: Option<&str>, meta: &AuthServerMetadata) -> Option<String> {
+    // if(e!==null && e.split(" ").includes("offline_access")) return e;
+    if let Some(s) = scope {
+        if s.split(' ').any(|x| x == "offline_access") {
+            return Some(s.to_string());
+        }
+    }
+    // if(!t?.scopes_supported?.includes("offline_access")) return e;
+    let advertised = meta
+        .scopes_supported
+        .as_ref()
+        .is_some_and(|s| s.iter().any(|x| x == "offline_access"));
+    if !advertised {
+        return scope.map(str::to_string);
+    }
+    // return e===null ? "offline_access" : `${e} offline_access`
+    Some(match scope {
+        None => "offline_access".to_string(),
+        Some(s) => format!("{s} offline_access"),
+    })
+}
+
+/// The final `scope` parameter for the authorize URL — 1:1 with the binary's
+/// `redirectToAuthorization` scope resolution. `scope` is the already-resolved
+/// request scope (step-up override or `curated_metadata_scope`), possibly
+/// empty; `has_explicit_metadata_url` is whether the user configured
+/// `authServerMetadataUrl`. Returns the string to place in the URL — empty ⇒
+/// omit the `scope` parameter entirely.
+///
+/// ```js
+/// t = authServerMetadataUrl ? getCuratedMetadataScope() : undefined
+/// n = <scope already in the URL>              // absent when empty
+/// r = t ?? n                                  // JS nullish
+/// o = r === null ? null : D$p(r, metadata)    // offline_access appender
+/// // URL keeps `o` when non-null, else `n`
+/// ```
+///
+/// The `r === null` guard is why a genuine no-scope request (no explicit
+/// metadata URL, no curated scope) stays scope-less even when the server
+/// advertises `offline_access` — the cc 2.1.196 "don't over-ask" fix.
+fn authorize_url_scope(
+    scope: &str,
+    has_explicit_metadata_url: bool,
+    meta: &AuthServerMetadata,
+) -> String {
+    // n = the scope actually placed in the URL (absent when empty).
+    let n: Option<&str> = (!scope.is_empty()).then_some(scope);
+    // t = authServerMetadataUrl ? getCuratedMetadataScope() : undefined.
+    let t: Option<&str> = has_explicit_metadata_url.then_some(scope);
+    // r = t ?? n.
+    let r: Option<&str> = t.or(n);
+    // o = r === null ? null : D$p(r); URL carries `o` when non-null.
+    r.and_then(|rs| with_offline_access(Some(rs), meta))
+        .unwrap_or_default()
+}
+
 /// Drive the full interactive OAuth flow for a remote MCP server:
 /// discovery → (DCR) → PKCE → bind loopback listener → build authorize URL →
 /// surface it via `on_auth_url` → accept the redirect → exchange the code.
@@ -612,18 +720,21 @@ pub async fn perform_oauth_flow(
     let redirect_uri = format!("http://localhost:{port}/callback");
 
     // 3. Advertised scope (used both for DCR client metadata and the authorize
-    //    URL). claude-code's `getScopeFromMetadata` is `scopes_supported`-only
-    //    in our subset (auth.ts:2460-2463); empty when none advertised.
-    //    A `scope_override` (a cached step-up scope from a prior 403
-    //    `insufficient_scope`) takes precedence over the advertised scope so the
-    //    authorize URL requests the elevated scope (auth.ts:909-935 / 1625-1637).
+    //    URL). A `scope_override` (a cached step-up scope from a prior 403
+    //    `insufficient_scope`) takes precedence so the authorize URL requests
+    //    the elevated scope (auth.ts:909-935 / 1625-1637). Otherwise the scope
+    //    is the CURATED metadata scope — cc 2.1.196 fix, binary
+    //    `getCuratedMetadataScope`: the non-standard `scope` / `default_scope`
+    //    metadata strings when published, and the full `scopes_supported`
+    //    catalog ONLY when the user explicitly configured
+    //    `authServerMetadataUrl` (`if(this.serverConfig.oauth?.
+    //    authServerMetadataUrl && Array.isArray(this._metadata?.
+    //    scopes_supported)) return this._metadata.scopes_supported.join(" ")`).
+    //    With no scope specified anywhere the request carries NO scope — it
+    //    must NOT ask for the whole advertised catalog.
     let scope = match scope_override {
         Some(s) if !s.is_empty() => s.to_string(),
-        _ => meta
-            .scopes_supported
-            .as_ref()
-            .map(|s| s.join(" "))
-            .unwrap_or_default(),
+        _ => curated_metadata_scope(&meta, oauth.auth_server_metadata_url.is_some()),
     };
 
     // 4. Client id — configured, else dynamic client registration.
@@ -639,9 +750,22 @@ pub async fn perform_oauth_flow(
         register_client(http, reg, &redirect_uri, server_name, dcr_scope).await?
     };
 
-    // 5. Authorize URL (PKCE inside) + surface it to the host.
+    // 5. Authorize URL (PKCE inside) + surface it to the host. The authorize
+    //    scope (unlike the DCR scope) gains `offline_access` when the server
+    //    advertises it (binary `redirectToAuthorization` → `D$p`), so refresh
+    //    tokens keep being issued now that the catalog is no longer requested.
+    //    Mirror the binary's scope resolution 1:1 (`redirectToAuthorization`):
+    //      t = authServerMetadataUrl ? getCuratedMetadataScope() : undefined
+    //      n = the scope actually placed in the URL (absent when empty)
+    //      r = t ?? n            (JS nullish: t="" is kept; undefined → n)
+    //      o = r === null ? null : D$p(r, metadata)
+    //    Only when `o` is non-null does the URL carry a scope, so a genuine
+    //    no-scope request (no explicit metadata URL + no curated scope) stays
+    //    scope-less even when the server advertises `offline_access`.
+    let authorize_scope =
+        authorize_url_scope(&scope, oauth.auth_server_metadata_url.is_some(), &meta);
     let (auth_url, verifier, state) =
-        build_authorize_url(&meta, &client_id, &redirect_uri, &scope);
+        build_authorize_url(&meta, &client_id, &redirect_uri, &authorize_scope);
     on_auth_url(&auth_url);
 
     // 6. Wait for the redirect, validate state, capture the code. `redirect_uri`
@@ -1173,6 +1297,8 @@ mod tests {
             token_endpoint: "https://as.example.com/token".into(),
             registration_endpoint: None,
             scopes_supported: None,
+            scope: None,
+            default_scope: None,
             revocation_endpoint: None,
             revocation_endpoint_auth_methods_supported: None,
             token_endpoint_auth_methods_supported: None,
@@ -1188,6 +1314,140 @@ mod tests {
         // No scope param when empty.
         assert!(!url.contains("scope="));
         assert!(!verifier.is_empty());
+    }
+
+    /// Metadata builder for the curated-scope tests (all optional fields off).
+    fn meta_with(
+        scopes_supported: Option<Vec<&str>>,
+        scope: Option<&str>,
+        default_scope: Option<&str>,
+    ) -> AuthServerMetadata {
+        AuthServerMetadata {
+            authorization_endpoint: "https://as.example.com/authorize".into(),
+            token_endpoint: "https://as.example.com/token".into(),
+            registration_endpoint: None,
+            scopes_supported: scopes_supported
+                .map(|v| v.into_iter().map(String::from).collect()),
+            scope: scope.map(String::from),
+            default_scope: default_scope.map(String::from),
+            revocation_endpoint: None,
+            revocation_endpoint_auth_methods_supported: None,
+            token_endpoint_auth_methods_supported: None,
+        }
+    }
+
+    /// cc 2.1.196 fix (`getCuratedMetadataScope`): with no scope specified and
+    /// no explicit `authServerMetadataUrl`, the full `scopes_supported`
+    /// catalog must NOT be requested — the resolved scope is empty.
+    #[test]
+    fn no_scope_request_does_not_ask_for_scopes_supported_catalog() {
+        let meta = meta_with(Some(vec!["read", "write", "admin"]), None, None);
+        assert_eq!(curated_metadata_scope(&meta, false), "");
+    }
+
+    /// The catalog IS used when the user explicitly configured
+    /// `authServerMetadataUrl` (the binary's `serverConfig.oauth?.
+    /// authServerMetadataUrl` gate).
+    #[test]
+    fn explicit_metadata_url_still_uses_the_advertised_catalog() {
+        let meta = meta_with(Some(vec!["read", "write"]), None, None);
+        assert_eq!(curated_metadata_scope(&meta, true), "read write");
+        // No catalog advertised → still empty.
+        let bare = meta_with(None, None, None);
+        assert_eq!(curated_metadata_scope(&bare, true), "");
+    }
+
+    /// The non-standard curated `scope` / `default_scope` metadata strings win
+    /// over the catalog regardless of the metadata-url gate (`Q$a` order:
+    /// `scope`, then `default_scope`).
+    #[test]
+    fn curated_scope_and_default_scope_strings_take_precedence() {
+        let meta = meta_with(Some(vec!["a", "b"]), Some("curated"), Some("dflt"));
+        assert_eq!(curated_metadata_scope(&meta, false), "curated");
+        assert_eq!(curated_metadata_scope(&meta, true), "curated");
+        let meta = meta_with(Some(vec!["a", "b"]), None, Some("dflt"));
+        assert_eq!(curated_metadata_scope(&meta, false), "dflt");
+    }
+
+    /// `D$p`: `offline_access` is appended to the authorize scope only when the
+    /// server advertises it, never duplicated, and used bare (JS `e===null`
+    /// branch) when no scope was resolved at all. `None` mirrors JS `null`.
+    #[test]
+    fn offline_access_appended_only_when_advertised() {
+        let advertises = meta_with(Some(vec!["read", "offline_access"]), None, None);
+        let not_advertised = meta_with(Some(vec!["read"]), None, None);
+        // Appended when advertised.
+        assert_eq!(
+            with_offline_access(Some("read"), &advertises),
+            Some("read offline_access".to_string())
+        );
+        // Bare `offline_access` when the resolved scope is null (`e===null`).
+        assert_eq!(
+            with_offline_access(None, &advertises),
+            Some("offline_access".to_string())
+        );
+        // An explicit EMPTY-STRING scope is NOT null: `${e} offline_access`
+        // keeps the leading space, matching `D$p("")`.
+        assert_eq!(
+            with_offline_access(Some(""), &advertises),
+            Some(" offline_access".to_string())
+        );
+        // Never duplicated.
+        assert_eq!(
+            with_offline_access(Some("read offline_access"), &advertises),
+            Some("read offline_access".to_string())
+        );
+        // Untouched when not advertised (null stays null).
+        assert_eq!(
+            with_offline_access(Some("read"), &not_advertised),
+            Some("read".to_string())
+        );
+        assert_eq!(with_offline_access(None, &not_advertised), None);
+        let none = meta_with(None, None, None);
+        assert_eq!(
+            with_offline_access(Some("read"), &none),
+            Some("read".to_string())
+        );
+    }
+
+    /// Caller-level (`redirectToAuthorization`): a genuine no-scope request (no
+    /// explicit metadata URL, no curated scope) carries NO `scope` param even
+    /// when the server advertises `offline_access`. This is the `r === null`
+    /// guard — without it the port would over-ask `scope=offline_access`.
+    #[test]
+    fn authorize_scope_no_scope_no_url_stays_scopeless_even_with_offline_access() {
+        // Server advertises offline_access, user set no scope & no metadata URL.
+        let meta = meta_with(Some(vec!["read", "offline_access"]), None, None);
+        assert_eq!(authorize_url_scope("", false, &meta), "");
+        // Even with an empty catalog it stays scope-less.
+        let bare = meta_with(None, None, None);
+        assert_eq!(authorize_url_scope("", false, &bare), "");
+    }
+
+    /// A resolved non-empty scope (curated string / step-up override) DOES gain
+    /// `offline_access` when advertised, regardless of the metadata-URL gate.
+    #[test]
+    fn authorize_scope_nonempty_gets_offline_access_when_advertised() {
+        let meta = meta_with(Some(vec!["read", "offline_access"]), None, None);
+        assert_eq!(authorize_url_scope("read", false, &meta), "read offline_access");
+        assert_eq!(authorize_url_scope("read", true, &meta), "read offline_access");
+        // Not advertised → left untouched.
+        let no_off = meta_with(Some(vec!["read"]), None, None);
+        assert_eq!(authorize_url_scope("read", false, &no_off), "read");
+    }
+
+    /// With an explicit metadata URL the catalog is requested (t = curated) and
+    /// still gains offline_access when advertised.
+    #[test]
+    fn authorize_scope_explicit_url_requests_catalog() {
+        let meta = meta_with(Some(vec!["read", "write", "offline_access"]), None, None);
+        // curated_metadata_scope(explicit=true) joins the catalog; feed that in.
+        let curated = curated_metadata_scope(&meta, true);
+        assert_eq!(curated, "read write offline_access");
+        assert_eq!(
+            authorize_url_scope(&curated, true, &meta),
+            "read write offline_access"
+        );
     }
 
     // -- FIX 2: server_key uses config (insertion) header order, not sorted. ---

@@ -462,16 +462,18 @@ async fn full_flow_attaches_bearer_and_persists_tokens() {
     let register = reqs.iter().find(|r| r.url.contains("/register")).unwrap();
     assert_eq!(register.method, HttpMethod::Post);
     // FIX 3: the DCR client metadata carries the per-server client_name
-    // `LingXi (${serverName})` (auth.ts:1419) and the advertised scope
-    // (auth.ts:1428 / getScopeFromMetadata).
+    // `LingXi (${serverName})` (auth.ts:1419).
     let reg_body = register.body.as_deref().unwrap();
     assert!(
         reg_body.contains("\"client_name\":\"LingXi (remote)\""),
         "DCR client_name should be per-server; body={reg_body}"
     );
+    // cc 2.1.196 fix (getCuratedMetadataScope): with NO scope configured and NO
+    // explicit authServerMetadataUrl, the request must NOT ask for the full
+    // `scopes_supported` catalog — the DCR metadata carries no scope at all.
     assert!(
-        reg_body.contains("\"scope\":\"mcp:read\""),
-        "DCR metadata should include advertised scope; body={reg_body}"
+        !reg_body.contains("\"scope\""),
+        "no-scope DCR must not request the scopes_supported catalog; body={reg_body}"
     );
     // FIX 1: the persisted tokens carry the DCR-issued client_id so refresh
     // re-sends it (asserted on storage below).

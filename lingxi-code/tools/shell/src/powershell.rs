@@ -75,6 +75,40 @@ pub fn resolve_powershell_path() -> Option<PathBuf> {
     }
 }
 
+/// Build the PowerShell tool-result `data` payload for a finished command.
+///
+/// `is_error` runs through the 2.1.196 exit-code reinterpretation
+/// (claude-code `Wja`, `powershell_semantics.rs`): grep-family / `git diff` /
+/// `git grep` exit 1 = "no matches" / "differences found", NOT an error;
+/// robocopy grades 0-7 succeed. When the exit code carries a semantic
+/// meaning, `returnCodeInterpretation` is added (the binary's result data
+/// `returnCodeInterpretation: E.message`); it is omitted otherwise. A timeout
+/// is always an error.
+#[must_use]
+fn powershell_result_data(
+    cmd_str: &str,
+    exit_code: i32,
+    timed_out: bool,
+    stdout: &str,
+    stderr: &str,
+    truncated: bool,
+) -> Value {
+    let interp =
+        crate::powershell_semantics::interpret_powershell_command_result(cmd_str, exit_code);
+    let mut data = json!({
+        "exit_code": exit_code,
+        "stdout":    stdout,
+        "stderr":    stderr,
+        "is_error":  interp.is_error || timed_out,
+        "timed_out": timed_out,
+        "truncated": truncated,
+    });
+    if let Some(msg) = interp.message {
+        data["returnCodeInterpretation"] = json!(msg);
+    }
+    data
+}
+
 /// `PowerShellTool` — same shape as BashTool but routes through pwsh on Unix
 /// and powershell.exe on Windows.
 #[derive(Clone)]
@@ -317,7 +351,14 @@ impl Tool for PowerShellTool {
                 let (stdout_clean, _ansi_out) = strip_ansi_count(&out.stdout);
                 let (stderr_clean, _ansi_err) = strip_ansi_count(&out.stderr);
                 let (stdout_final, truncated) = truncate_default(stdout_clean);
-                let is_error = out.exit_code != 0 || out.timed_out;
+                let data = powershell_result_data(
+                    &cmd_str,
+                    out.exit_code,
+                    out.timed_out,
+                    &stdout_final,
+                    &stderr_clean,
+                    truncated,
+                );
                 let elapsed = SystemTime::now()
                     .duration_since(started_at)
                     .unwrap_or_default()
@@ -334,14 +375,7 @@ impl Tool for PowerShellTool {
                 self.ctx.bus.log_event(POWERSHELL_COMPLETED, meta).await;
 
                 Ok(ToolCallResult {
-                    data: json!({
-                        "exit_code": out.exit_code,
-                        "stdout":    stdout_final,
-                        "stderr":    stderr_clean,
-                        "is_error":  is_error,
-                        "timed_out": out.timed_out,
-                        "truncated": truncated,
-                    }),
+                    data,
                     model_content: None,
                     new_messages: vec![],
                     context_modifier: None,
@@ -367,6 +401,40 @@ mod tests {
     use super::*;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use traits::process::ProcessOutput;
+
+    /// 2.1.196 regression lock: grep-family / git diff / git grep exit 1 is
+    /// NOT reported as an error (and carries `returnCodeInterpretation`),
+    /// while default commands keep any-nonzero-is-error.
+    #[test]
+    fn exit_one_search_commands_are_not_failures() {
+        let d = powershell_result_data("grep \"foo|bar\" file.txt", 1, false, "", "", false);
+        assert_eq!(d["is_error"], false);
+        assert_eq!(d["returnCodeInterpretation"], "No matches found");
+
+        let g = powershell_result_data("git diff", 1, false, "", "", false);
+        assert_eq!(g["is_error"], false);
+        assert_eq!(g["returnCodeInterpretation"], "Files differ");
+
+        let e = powershell_result_data("egrep pat f.txt", 1, false, "", "", false);
+        assert_eq!(e["is_error"], false);
+
+        // Default semantics: exit 1 stays an error with the failure note.
+        let x = powershell_result_data("Get-ChildItem", 1, false, "", "", false);
+        assert_eq!(x["is_error"], true);
+        assert_eq!(
+            x["returnCodeInterpretation"],
+            "Command failed with exit code 1"
+        );
+
+        // Exit 0 carries NO returnCodeInterpretation key at all.
+        let ok = powershell_result_data("git diff", 0, false, "out", "", false);
+        assert_eq!(ok["is_error"], false);
+        assert!(ok.get("returnCodeInterpretation").is_none());
+
+        // A timeout is an error even when the exit code is benign.
+        let t = powershell_result_data("grep pat f", 1, true, "", "", false);
+        assert_eq!(t["is_error"], true);
+    }
 
     #[test]
     fn locked_constants_unchanged() {

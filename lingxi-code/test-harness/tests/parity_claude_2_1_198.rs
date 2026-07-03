@@ -156,7 +156,13 @@ const CHECKLIST: &[Entry] = &[
     // silently DISCARDED. Locked by agent::runner_test::persist_mode_message_
     // wakes_stuck_round_trip_and_carries_the_text.
     Entry { version: "2.1.198", item: "Teammate API-error reports failed to lead; stuck teammate wake-retries on message", disposition: Disposition::Implemented },
-    Entry { version: "2.1.198", item: "/diff panel refreshes on external branch switch/commit", disposition: Mission("M13") },
+    // M13 N/A-with-evidence: the cc fix refreshes the interactive /diff
+    // PANEL when git state changes underneath it. lingxi has no diff panel —
+    // `/diff` is a headless InteractiveOnlyHandler stub (commands/core/src/
+    // register.rs `register_interactive_only_commands`) and no diff surface
+    // exists in tui-rata/tui (the only "diff" hit is a doc-comment word in
+    // tui-rata/src/render.rs). The refresh fix ports together with the panel.
+    Entry { version: "2.1.198", item: "/diff panel refreshes on external branch switch/commit", disposition: Divergence("no /diff panel in lingxi: /diff is a headless interactive-only stub; the refresh fix targets UI that does not exist yet") },
     // M6 landed: tui_core::render::markdown_table vertical-format clamp
     // (long labels hard-broken, over-long words hard-wrapped, all lines ≤
     // frame − SAFETY_MARGIN); locked by overflow tests in markdown_table.rs +
@@ -168,7 +174,12 @@ const CHECKLIST: &[Entry] = &[
     // awsCredentialExport / gcpAuthRefresh in engine SettingsJson.
     Entry { version: "2.1.198", item: "awsAuthRefresh runs automatically on STS expiry (anthropicAws/Mantle)", disposition: Disposition::Implemented },
     Entry { version: "2.1.198", item: "macOS Local Network entitlements for background agent sessions", disposition: Divergence("macOS app packaging/entitlements, not core runtime") },
-    Entry { version: "2.1.198", item: "/desktop cwd after entering+exiting a worktree", disposition: Mission("M13") },
+    // M13 N/A-with-evidence: `/desktop` ("Continue the current session in
+    // Claude Desktop") is a pass-1 UnimplementedCommandHandler stub in lingxi
+    // (command-api builtin_support names.rs; only the `app` alias is wired) —
+    // there is no Claude Desktop handoff whose cwd could go stale after a
+    // worktree exit.
+    Entry { version: "2.1.198", item: "/desktop cwd after entering+exiting a worktree", disposition: Divergence("no Claude Desktop handoff in lingxi: /desktop is an unimplemented stub, so there is no cwd to fix") },
     // M7 N/A-with-evidence: the cc fix was in the remote-session WS transport
     // (`useRemoteSession`/`updateReconnectingStatus`, binary strings
     // @206609/221616 regions). lingxi's agents view
@@ -274,7 +285,20 @@ const CHECKLIST: &[Entry] = &[
     Entry { version: "2.1.197", item: "Sonnet 5 default model, native 1M context, promo $2/$10 per Mtok through 2026-08-31", disposition: Mission("M1") },
     // ── 2.1.196 ────────────────────────────────────────────────────────────
     Entry { version: "2.1.196", item: "Org default models (Org default/Role default in /model)", disposition: Mission("M1") },
-    Entry { version: "2.1.196", item: "Readable default session names at start", disposition: Mission("M13") },
+    // M13 N/A-with-evidence: in the 2.1.198 binary the ONLY
+    // default-name-at-creation generator is `ast()` = `${adjective}-${noun}`
+    // (crypto-random picks from the `_pi`/`ypi` word lists, @207957524), and
+    // its call sites are (a) Remote Control bridge session titles
+    // `${lJt()}-${ast()}` — `claude remote-control` @219124566 and the
+    // in-session bridge repl auto-start @220332899, where `lJt()` =
+    // CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX || sanitized hostname ||
+    // "remote-control" — and (b) plan-file slugs (`fCe` @219392307). Local
+    // sessions still title via customTitle / AI rename
+    // (`rename_generate_name`) / first-prompt extraction. So this changelog
+    // entry is the Remote Control bridge default title, and lingxi has no
+    // Remote Control bridge (features::Feature::RemoteControl =
+    // Stage::Removed, default-off, config ignored).
+    Entry { version: "2.1.196", item: "Readable default session names at start", disposition: Divergence("binary-verified: the readable default name (adjective-noun ast()) is minted only for Remote Control bridge sessions + plan slugs; lingxi has no Remote Control bridge (Feature::RemoteControl removed)") },
     // M6 partial: tui_core::render::osc8::file_link ports the binary's `t2()`
     // (file:// OSC 8 target, plain-path display) with byte-locked tests;
     // wiring blocked on the same raw print path as the URL entry above.
@@ -315,7 +339,24 @@ const CHECKLIST: &[Entry] = &[
     // schema_rejected_attempt_is_not_surfaced_beside_its_retry (exactly one
     // Completed; payload is the retry's; rejected sentinel absent).
     Entry { version: "2.1.196", item: "No duplicate recap after schema-rejected StructuredOutput retry", disposition: Disposition::Implemented },
-    Entry { version: "2.1.196", item: "PowerShell git diff/grep, egrep/fgrep, quoted | patterns: exit 1 is not failure", disposition: Mission("M13") },
+    // M13 landed: 1:1 port of the binary's PowerShell command semantics
+    // (`Wja`/`W6p`/`JEo`/`G6p` @213326500-213329000) as
+    // tool-shell `powershell_semantics` — PowerShell-aware last-segment split
+    // (quoted `|` is NOT a separator; `'...'` literal, `"..."` with backtick
+    // escapes, `#` comments, `&&`/lone-`&` statement breaks), call-operator +
+    // quoted-.exe-path base extraction, and the `j6p` map
+    // (grep/rg/egrep/fgrep/findstr exit 1 = "No matches found",
+    // robocopy 0-7 succeed) plus `git grep`/`git diff` (`isError:
+    // code!==0&&code!==1`, byte-locked `Nht`/`q6p`). `PowerShellTool` result
+    // data routes `is_error` through the interpreter and carries
+    // `returnCodeInterpretation` (the binary result field). The Bash-side
+    // `interpretCommandResult` gained the same 2.1.196 additions from the
+    // 2.1.198 oracle (`cLp`/`uLp`/`lLp` @212637913): egrep/fgrep + git
+    // diff/grep with `-C`/`-c` value-skip (exit>=2 semantics). Locked by
+    // tool-shell powershell_semantics::tests, powershell::tests::
+    // exit_one_search_commands_are_not_failures, and command_semantics tests
+    // (egrep_fgrep/git_diff_and_grep/quoted_pipe).
+    Entry { version: "2.1.196", item: "PowerShell git diff/grep, egrep/fgrep, quoted | patterns: exit 1 is not failure", disposition: Disposition::Implemented },
     // M7 seam: this is the IN-APP side panel (task panel inside the running
     // TUI), not the standalone `claude agents` view M7 landed. lingxi's
     // in-app background-task footer/dialog reads `tui::multiagent::
@@ -334,8 +375,24 @@ const CHECKLIST: &[Entry] = &[
     // attach_forwards_bypass_to_dispatched_session`).
     Entry { version: "2.1.196", item: "claude agents --dangerously-skip-permissions shows disclaimer, applies bypass", disposition: Disposition::Implemented },
     Entry { version: "2.1.196", item: "Remote sessions auto-resume after server restart", disposition: Divergence("Anthropic cloud/remote infra; LingXi has no remote-session backend") },
-    Entry { version: "2.1.196", item: "/cd moved sessions don't reappear in old dir's resume list (special chars)", disposition: Mission("M13") },
-    Entry { version: "2.1.196", item: "plugin validate: local '.' plugins included; all error classes reported", disposition: Mission("M13") },
+    // M13 N/A-with-evidence: lingxi has no `/cd` command (not in the locked
+    // 94-name builtin surface; the binary's `name:"cd"` object @217314772
+    // postdates the lock) and no session-move bookkeeping — a session's JSONL
+    // lives under `projects/<project_dir_name(cwd)>/` fixed at creation
+    // (session/src/jsonl/path.rs), so a session can never "move" out of a
+    // directory's resume list and the stale-old-path escaping bug has no
+    // surface. Ports together with `/cd` itself.
+    Entry { version: "2.1.196", item: "/cd moved sessions don't reappear in old dir's resume list (special chars)", disposition: Divergence("no /cd command or session-move bookkeeping in lingxi; sessions are keyed to their creation cwd and cannot reappear in an old dir's resume list") },
+    // M13 N/A-with-evidence: the cc fix is inside the binary's DEEP validate
+    // walker (`ESf`/`xZt`/`Eqo`/`nlr` @218090074-218111595: marketplace
+    // plugins[] source/path checks incl. local "." entries, per-component
+    // skill/agent/command frontmatter + hooks.json error classes). lingxi's
+    // `plugin validate` (apps/cli/src/commands/plugin.rs `run_validate`) is a
+    // shallow single-manifest validator (JSON parse + identity fields) with
+    // no marketplace-entry walk to skip anything from and no component
+    // validators whose error classes could be dropped. The fix ports together
+    // with the deep walker.
+    Entry { version: "2.1.196", item: "plugin validate: local '.' plugins included; all error classes reported", disposition: Divergence("lingxi plugin validate is a shallow single-manifest validator; the cc fix targets the deep marketplace/component walker that is not ported") },
     // M6 partial: tui-rata Esc semantics now match cc 2.1.196/198 (Esc never
     // quits; interrupts a running turn with the "esc to interrupt" hint;
     // Esc-Esc clears composer text with "Esc again to clear"; double-tap Esc
@@ -346,9 +403,25 @@ const CHECKLIST: &[Entry] = &[
     // "Restore code"). Stays Mission until the rewind menu itself exists.
     Entry { version: "2.1.196", item: "Esc Esc at idle prompt opens rewind menu (regression fix)", disposition: Mission("M6") },
     Entry { version: "2.1.196", item: "MCP OAuth: no-scope request must not ask for full scopes_supported catalog", disposition: Mission("M11") },
-    Entry { version: "2.1.196", item: "/context shows real token counts on Bedrock", disposition: Mission("M13") },
+    // M13 landed as a regression LOCK: lingxi's `/context`
+    // (commands/core/src/context.rs) renders
+    // `OrchestratorHandle::context_window_usage`, which sums the session's
+    // CUMULATIVE usage (`SessionState::usage`, orchestrator/src/
+    // handle_impl.rs) with no model-id/provider lookup — the failure mode the
+    // binary fixed (a per-model usage lookup coming up empty under
+    // Bedrock-style model ids) cannot occur by construction. Locked by
+    // orchestrator handle_impl::tests::
+    // context_window_usage_is_model_id_agnostic_bedrock_regression (Bedrock
+    // inference-profile id + non-zero session usage → real token counts).
+    Entry { version: "2.1.196", item: "/context shows real token counts on Bedrock", disposition: Disposition::Implemented },
     Entry { version: "2.1.196", item: "/deep-research verifier failures reported as unverified, not all-refuted", disposition: Divergence("bundled skill content, not core behavior") },
-    Entry { version: "2.1.196", item: "Plugin dependency pins honored for local-folder git-backed marketplaces", disposition: Mission("M13") },
+    // M13 N/A-with-evidence: lingxi's marketplace layer supports only
+    // git-URL catalogs with path-based entries (plugin/src/marketplace.rs —
+    // "HTTP-URL catalogs, installed_plugins.json persistence, and non-path
+    // plugin sources (git/url sub-sources) are follow-up work");
+    // `MarketplacePluginEntry` has no pin/commit field and there is no
+    // local-folder marketplace add path whose pins could be dishonored.
+    Entry { version: "2.1.196", item: "Plugin dependency pins honored for local-folder git-backed marketplaces", disposition: Divergence("no local-folder marketplace add path and no dependency-pin field in lingxi's marketplace layer; ports together with that machinery") },
     // M7 landed: `cli::agents_registry::merged_state` ports the binary's
     // `mGf` (@223855350) — a terminal outcome beats a stale `blocked` tempo,
     // so a row can never flip Done ↔ Needs-input (locked by
@@ -385,7 +458,16 @@ const CHECKLIST: &[Entry] = &[
     // 5-min floor). Locked by stream_watchdog unit tests +
     // service_test::streaming_idle_watchdog_aborts_hung_stream.
     Entry { version: "2.1.196", item: "Streaming idle watchdog on by default (5 min, env kill-switch)", disposition: Disposition::Implemented },
-    Entry { version: "2.1.196", item: "Remote Control disabled when ANTHROPIC_BASE_URL is non-Anthropic", disposition: Mission("M13") },
+    // M13 N/A-with-evidence: lingxi has no Remote Control runtime to gate —
+    // `features::Feature::RemoteControl` is `Stage::Removed`, default-off,
+    // and its config key is ignored (features/src/lib.rs:1313 +
+    // features/src/tests.rs remote_control_* tests); only compatibility
+    // surfaces remain (the `remoteControlAtStartup` settings-key migration,
+    // PushNotification's "Remote Control inactive" strings, the `bridge`
+    // command-name stub, and SendMessage's documented-unported `bridge:`
+    // peer). With no bridge to start, the non-Anthropic-base-URL disable gate
+    // has nothing to disable.
+    Entry { version: "2.1.196", item: "Remote Control disabled when ANTHROPIC_BASE_URL is non-Anthropic", disposition: Divergence("no Remote Control runtime in lingxi (Feature::RemoteControl removed/default-off); the base-URL gate has no surface") },
     // M7 seam: lingxi's foreground TUI composer has no ←-on-empty entry
     // point yet (the binary's `[PERF:bg-leftarrow-start]` path respawns
     // `claude agents`). What DID land is the attach side: leaving an

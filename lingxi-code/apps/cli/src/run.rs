@@ -1386,7 +1386,7 @@ async fn resume_resolved_session(
 ///      via [`seed_orchestrator_session`], so a follow-up turn continues the
 ///      prior conversation rather than starting empty.
 ///   2. RENDER side — seed the TUI scrollback via
-///      `tui::replay::rebuild_from_jsonl(&messages)`, so the existing history is
+///      `tui_rata::replay::rebuild_from_jsonl(&messages)`, so the existing history is
 ///      painted on the very first frame (the claude-code REPL `initialMessages`
 ///      analog).
 ///
@@ -1422,7 +1422,7 @@ async fn mount_resumed_tui(
     // launch the ratatui backend (`tui-rata`) with that replayed scrollback.
     // Resume has no SessionRegistration (fresh launches register; resume does
     // not), so no status forwarder is threaded.
-    let resumed_messages = tui::replay::rebuild_from_jsonl(&messages);
+    let resumed_messages = tui_rata::replay::rebuild_from_jsonl(&messages);
     crate::mode::run_ratatui(tui_build, None, resumed_messages).await
 }
 

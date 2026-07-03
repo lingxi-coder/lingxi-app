@@ -30,6 +30,8 @@ pub mod message;
 pub mod rate_limit_messages;
 pub mod render;
 pub mod resume;
+pub mod replay;
+pub mod permission_gate;
 pub mod startup_trust;
 pub mod startup_bypass;
 pub mod raw_screen;

@@ -31,7 +31,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 /// Moved to `tui-core` (`tui_core::permission_bridge::PermissionExchange`)
 /// during the iocraft → ratatui migration; re-exported so `crate::permission_bridge::PermissionExchange`
 /// keeps resolving. `TuiPermissionGate` (below) still constructs it.
-pub use tui_core::permission_bridge::PermissionExchange;
+use tui_core::permission_bridge::PermissionExchange;
 
 /// Orchestrator-side permission gate that forwards each `check` call to
 /// the TUI over an mpsc channel and awaits a oneshot reply.
@@ -112,7 +112,7 @@ impl PermissionGate for TuiPermissionGate {
         // wired ToolUseConfirm badge renders only the name.
         let worker_info =
             worker.map(
-                |w| crate::components::permissions::worker::WorkerPermissionInfo {
+                |w| tui_core::permission_bridge::WorkerPermissionInfo {
                     color: w.name.clone(),
                     name: w.name,
                     team: w.team,

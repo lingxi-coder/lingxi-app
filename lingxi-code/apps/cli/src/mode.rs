@@ -306,10 +306,10 @@ pub(crate) async fn run_ratatui(
 /// forwarder (which observes the dialog's actual resolution). Detached task;
 /// ends when the source channel closes.
 fn spawn_status_bridge_forwarder(
-    mut src: tokio::sync::mpsc::UnboundedReceiver<tui::events::orchestrator_bridge::TurnEvent>,
+    mut src: tokio::sync::mpsc::UnboundedReceiver<tui_core::orchestrator_bridge::TurnEvent>,
     reg: Arc<crate::agents_registry::SessionRegistration>,
-) -> tokio::sync::mpsc::UnboundedReceiver<tui::events::orchestrator_bridge::TurnEvent> {
-    use tui::events::orchestrator_bridge::TurnEvent;
+) -> tokio::sync::mpsc::UnboundedReceiver<tui_core::orchestrator_bridge::TurnEvent> {
+    use tui_core::orchestrator_bridge::TurnEvent;
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
         while let Some(ev) = src.recv().await {
@@ -333,7 +333,7 @@ fn spawn_status_bridge_forwarder(
 }
 
 /// (M8 cc2.1.198) Interpose the permission channel: each
-/// [`tui::permission_bridge::PermissionExchange`] marks the session
+/// [`tui_core::permission_bridge::PermissionExchange`] marks the session
 /// `waiting` / `"permission prompt"` (the binary's `Pb` reason for an open
 /// permission dialog @222989611) and has its one-shot responder wrapped so
 /// the RESOLUTION (user answered, or dialog dropped = cancel) flips the
@@ -341,9 +341,9 @@ fn spawn_status_bridge_forwarder(
 /// settles it to `idle`. The wrapped responder forwards the response (or the
 /// drop) to the original gate unchanged.
 fn spawn_status_permission_forwarder(
-    mut src: tokio::sync::mpsc::Receiver<tui::permission_bridge::PermissionExchange>,
+    mut src: tokio::sync::mpsc::Receiver<tui_core::permission_bridge::PermissionExchange>,
     reg: Arc<crate::agents_registry::SessionRegistration>,
-) -> tokio::sync::mpsc::Receiver<tui::permission_bridge::PermissionExchange> {
+) -> tokio::sync::mpsc::Receiver<tui_core::permission_bridge::PermissionExchange> {
     // Same capacity as the gate's channel (init.rs `channel(16)`).
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     tokio::spawn(async move {
@@ -532,58 +532,6 @@ fn settings_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
     let lingxi_home = crate::run::lingxi_home_dir();
     let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     (lingxi_home, project_dir)
-}
-
-/// (A6 batch-6 Task 2) Read + merge the `statusLine` setting from the USER
-/// (`~/.lingxi/settings.json`) and LOCAL (`<proj>/.lingxi/settings.local.json`)
-/// tiers, Local-over-User, and parse it into a [`StatusLineConfig`]. `None` when
-/// neither tier carries a `command`-shaped `statusLine` (then the built-in row
-/// renders). Pure over the two settings roots so it is unit-testable; the live
-/// caller [`read_status_line_config`] resolves them via [`settings_dirs`].
-///
-/// `statusLine` is NOT a typed `SettingsJson` field (`Settings::load` cannot
-/// carry it), so this reads the raw per-tier maps directly via
-/// `read_settings_map`. A broken/unreadable tier degrades to "no value" for that
-/// tier (read error → treated as absent), matching the TS warn-and-continue
-/// settings stance.
-///
-/// DIVERGENCES from claude-code (documented, intentional): (1) TS resolves
-/// `statusLine` from the fully-merged settings across User → Project
-/// (`.lingxi/settings.json`) → Local → flag → policy (`constants.ts`
-/// `SETTING_SOURCES`); the Rust `migrations::settings_update::SettingsSource`
-/// has only `User`/`Local` substrate (same limit as [`read_skip_dangerous_prompt`]),
-/// so a `statusLine` committed in project `.lingxi/settings.json` is silently
-/// dropped — recorded in spec rev2.11's remaining list. (2) TS deep-merges the
-/// `statusLine` OBJECT across tiers (lodash default merge); this does a whole-
-/// object replace (Local's `statusLine` wholly replaces User's), so a config
-/// SPLIT across tiers (e.g. `{type,command}` in User + `{padding}` in Local)
-/// diverges — real configs carry the whole object in one tier, so this is
-/// acceptable.
-fn read_status_line_config_from(
-    lingxi_home: &std::path::Path,
-    project_dir: &std::path::Path,
-) -> Option<tui::components::status_line_command::StatusLineConfig> {
-    use migrations::settings_update::{read_settings_map, settings_path, SettingsSource};
-    // Local-over-User: read User first, then let Local's `statusLine` override.
-    let mut status_line: Option<serde_json::Value> = None;
-    for source in [SettingsSource::User, SettingsSource::Local] {
-        let p = settings_path(source, lingxi_home, project_dir);
-        if let Ok(map) = read_settings_map(&p) {
-            if let Some(v) = map.get("statusLine") {
-                status_line = Some(v.clone());
-            }
-        }
-    }
-    status_line
-        .as_ref()
-        .and_then(tui::components::status_line_command::StatusLineConfig::from_settings_value)
-}
-
-/// (A6 batch-6 Task 2) Live wrapper over [`read_status_line_config_from`],
-/// resolving the User+Local settings roots via [`settings_dirs`].
-fn read_status_line_config() -> Option<tui::components::status_line_command::StatusLineConfig> {
-    let (lingxi_home, project_dir) = settings_dirs();
-    read_status_line_config_from(&lingxi_home, &project_dir)
 }
 
 /// True iff `skipDangerousModePermissionPrompt` is truthy in EITHER the user
@@ -791,56 +739,6 @@ mod tests {
         std::fs::write(path, body).unwrap();
     }
 
-    /// A real `{"statusLine":{"type":"command","command":"echo hi"}}` in USER
-    /// settings reaches a `Some(StatusLineConfig)` via the merge helper. This is
-    /// the B2 RED — nothing parsed `statusLine` into the runtime before.
-    #[test]
-    fn status_line_config_read_from_user_settings() {
-        let tmp = std::env::temp_dir().join(format!("slc-user-{}", std::process::id()));
-        let lingxi_home = tmp.join("home");
-        let project_dir = tmp.join("proj");
-        write_settings(
-            &lingxi_home.join("settings.json"),
-            r#"{"statusLine":{"type":"command","command":"echo hi"}}"#,
-        );
-        let cfg = read_status_line_config_from(&lingxi_home, &project_dir);
-        let cfg = cfg.expect("user statusLine parses");
-        assert_eq!(cfg.command, "echo hi");
-        assert_eq!(cfg.kind, "command");
-        std::fs::remove_dir_all(&tmp).ok();
-    }
-
-    /// Local settings (`<proj>/.lingxi/settings.local.json`) WIN over User for
-    /// the `statusLine` key (Local-over-User precedence).
-    #[test]
-    fn status_line_config_local_overrides_user() {
-        let tmp = std::env::temp_dir().join(format!("slc-prec-{}", std::process::id()));
-        let lingxi_home = tmp.join("home");
-        let project_dir = tmp.join("proj");
-        write_settings(
-            &lingxi_home.join("settings.json"),
-            r#"{"statusLine":{"type":"command","command":"user-cmd"}}"#,
-        );
-        write_settings(
-            &project_dir.join(".lingxi").join("settings.local.json"),
-            r#"{"statusLine":{"type":"command","command":"local-cmd"}}"#,
-        );
-        let cfg = read_status_line_config_from(&lingxi_home, &project_dir)
-            .expect("merged statusLine parses");
-        assert_eq!(cfg.command, "local-cmd", "Local wins over User");
-        std::fs::remove_dir_all(&tmp).ok();
-    }
-
-    /// No `statusLine` key anywhere → `None` (built-in row renders).
-    #[test]
-    fn status_line_config_absent_is_none() {
-        let tmp = std::env::temp_dir().join(format!("slc-none-{}", std::process::id()));
-        let lingxi_home = tmp.join("home");
-        let project_dir = tmp.join("proj");
-        write_settings(&lingxi_home.join("settings.json"), r#"{"theme":"dark"}"#);
-        assert!(read_status_line_config_from(&lingxi_home, &project_dir).is_none());
-        std::fs::remove_dir_all(&tmp).ok();
-    }
 
     // ── (Task 3) startup trust gate ───────────────────────────────────────
     //

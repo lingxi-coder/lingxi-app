@@ -1,7 +1,0 @@
----
-source: crates/tui/tests/render_user_misc.rs
-assertion_line: 22
-expression: e.to_string()
----
-# use rg
-Got it.

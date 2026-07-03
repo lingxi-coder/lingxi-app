@@ -1,6 +1,0 @@
----
-source: crates/tui/tests/render_user_bash.rs
-expression: element.to_string()
----
-hello
-world

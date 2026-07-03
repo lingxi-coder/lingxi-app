@@ -1,7 +1,0 @@
----
-source: tui/tests/coordinator_chrome.rs
-assertion_line: 28
-expression: "render_teammate_view_header(\"alice\", \"Explore the repo\")"
----
-Viewing @alice · esc to return
-Explore the repo

@@ -1,6 +1,0 @@
----
-source: crates/tui/tests/render_syntax.rs
-expression: s
----
-[P]alpha
-[P]beta

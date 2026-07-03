@@ -101,7 +101,7 @@ pub struct Runtime {
     /// `BuiltinToolContext`/`BashTool` the model uses. The TUI mount threads a
     /// clone into `tui::session::Runtime::with_bash_runner` so a typed `!command`
     /// runs sandboxed and renders inline with no LLM turn.
-    pub bash_runner: std::sync::Arc<dyn tui::bash_runner::BashRunner>,
+    pub bash_runner: std::sync::Arc<dyn tui_core::bash_runner::BashRunner>,
     /// (`/connect` Copilot device-flow) GitHub-Copilot OAuth device-flow driver,
     /// projected straight from [`engine_desktop::DesktopRuntime::connect_copilot`].
     /// The TUI mount threads a clone into
@@ -121,16 +121,16 @@ pub struct Runtime {
 ///
 /// Returns the standard [`Runtime`] plus the bridge receiver the TUI
 /// drains for streaming events. The orchestrator inside `runtime` is
-/// constructed with a [`tui::BridgeOutputStream`] as its `output`,
+/// constructed with a [`tui_core::orchestrator_bridge::BridgeOutputStream`] as its `output`,
 /// so every `emit_text` / `emit_tool_call` / `emit_end_turn` lands on
-/// `bridge_rx` as a [`tui::TurnEvent`].
+/// `bridge_rx` as a [`tui_core::orchestrator_bridge::TurnEvent`].
 pub struct TuiBuild {
     /// Standard runtime bundle.
     pub runtime: Runtime,
     /// Bridge receiver — the TUI render loop drains this into
     /// `tui::streaming::apply_event`.
     pub bridge_rx:
-        tokio::sync::mpsc::UnboundedReceiver<tui::events::orchestrator_bridge::TurnEvent>,
+        tokio::sync::mpsc::UnboundedReceiver<tui_core::orchestrator_bridge::TurnEvent>,
     /// (MULTIMODAL.1) A clone of the bridge SENDER, handed to the TUI so its
     /// live-key turn-spawn pump (`tui::root::pump_turn`) can emit `TurnStarted`
     /// / `TurnEnded` on the SAME channel the orchestrator's `BridgeOutputStream`
@@ -138,11 +138,11 @@ pub struct TuiBuild {
     /// spawned streaming turn's spinner + completion render through the one
     /// bridge pump. `UnboundedSender` is `Clone`, so cloning it here does not
     /// disturb the `BridgeOutputStream` that owns the original.
-    pub turn_tx: tokio::sync::mpsc::UnboundedSender<tui::events::orchestrator_bridge::TurnEvent>,
+    pub turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
     /// (TUI-PERM) Receiver for the injected `TuiPermissionGate`'s exchanges.
     /// Threaded into `session::Runtime::with_permission_rx` so the TUI's
     /// permission pump drives the interactive dialog.
-    pub permission_rx: tokio::sync::mpsc::Receiver<tui::permission_bridge::PermissionExchange>,
+    pub permission_rx: tokio::sync::mpsc::Receiver<tui_core::permission_bridge::PermissionExchange>,
 }
 
 /// Errors surfaced while building a [`Runtime`].
@@ -653,7 +653,7 @@ pub async fn build_runtime_from_config(
 
 /// TUI variant of [`build_runtime`]. (M6-03)
 ///
-/// Constructs the orchestrator with [`tui::BridgeOutputStream`] as
+/// Constructs the orchestrator with [`tui_core::orchestrator_bridge::BridgeOutputStream`] as
 /// its `output` so streaming `emit_text` calls route into the bridge
 /// channel returned alongside the runtime. The TUI render loop drains
 /// this channel through `tui::streaming::apply_event`.
@@ -670,7 +670,7 @@ pub async fn build_runtime_for_tui(argv: &Argv) -> Result<TuiBuild, InitError> {
     // `BridgeOutputStream` so the TUI's turn-spawn pump can emit
     // `TurnStarted`/`TurnEnded` on the same channel the orchestrator streams on.
     let turn_tx = bridge_tx.clone();
-    let bridge: Arc<dyn OutputStream> = Arc::new(tui::BridgeOutputStream::new(bridge_tx));
+    let bridge: Arc<dyn OutputStream> = Arc::new(tui_core::orchestrator_bridge::BridgeOutputStream::new(bridge_tx));
     // (Task 8) Thread the CLI-resolved mode through the interactive TUI path.
     // The guard already ran in `run_cli` (notice already printed there too), so
     // this drops the notice and takes only the mode.
@@ -684,10 +684,10 @@ pub async fn build_runtime_for_tui(argv: &Argv) -> Result<TuiBuild, InitError> {
     // TUI dialog over this channel instead of auto-allowing. AllowAlways
     // persists to <cwd>/.lingxi/settings.local.json (via `.with_persist`).
     let (perm_tx, perm_rx) =
-        tokio::sync::mpsc::channel::<tui::permission_bridge::PermissionExchange>(16);
+        tokio::sync::mpsc::channel::<tui_core::permission_bridge::PermissionExchange>(16);
     let session_allow_rules = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let gate = std::sync::Arc::new(
-        tui::permission_bridge::TuiPermissionGate::new(perm_tx, session_allow_rules).with_persist(
+        tui_rata::permission_gate::TuiPermissionGate::new(perm_tx, session_allow_rules).with_persist(
             permission::PermissionPaths {
                 lingxi_home: cfg.lingxi_home.clone(),
                 cwd: cfg.cwd.clone(),

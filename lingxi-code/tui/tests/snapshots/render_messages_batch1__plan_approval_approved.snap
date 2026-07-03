@@ -1,6 +1,0 @@
----
-source: crates/tui/tests/render_messages_batch1.rs
-expression: s
----
-✓ Plan Approved by you
-You can now proceed with implementation. Your plan mode restrictions have been lifted.

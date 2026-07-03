@@ -519,9 +519,25 @@ where
         Ok(())
     }
 
-    /// Force a full repaint on the next draw (after raw escape operations).
+    /// Force a full repaint on the next draw (after raw escape operations, e.g.
+    /// a viewport grow that exposed rows still holding pre-TUI terminal
+    /// content).
+    ///
+    /// `diff_buffers` only emits a cell when it differs from the previous
+    /// buffer and only clears *trailing* blanks per row, so a blank (space)
+    /// cell in a freshly exposed viewport row equals the reset previous buffer
+    /// and is NOT emitted — leaving stale scrollback showing through the
+    /// viewport's blank columns (the footer's 2-column indent, the composer
+    /// gutter). Marking every previous cell `skip` makes it unequal to any real
+    /// (`skip == false`) current cell, so blanks are repainted as spaces. This
+    /// is row-bounded (no clear-to-end-of-display), so it does NOT reintroduce
+    /// the scrollback-orphan leak that motivated the no-clear growth path.
     pub fn invalidate_viewport(&mut self) {
-        self.previous_buffer_mut().reset();
+        let buf = self.previous_buffer_mut();
+        buf.reset();
+        for cell in &mut buf.content {
+            cell.set_skip(true);
+        }
     }
 
     /// Reset the inactive buffer and swap it in as current.
@@ -1159,6 +1175,49 @@ mod tests {
                 (2, 0, "c".to_string()),
             ],
             "OSC escapes must not skip or shift subsequent cells"
+        );
+    }
+
+    #[test]
+    fn invalidate_viewport_repaints_leading_blank_columns() {
+        // Regression (footer / composer left-edge artifact): an inline viewport
+        // drawn over pre-existing terminal content must repaint its blank
+        // columns (the footer's 2-col indent, the composer gutter).
+        // `diff_buffers` skips a cell equal to the previous buffer and only
+        // clears TRAILING blanks per row, so leading/interior blanks that match
+        // a reset previous buffer were never emitted — leaving stale scrollback
+        // showing through. `invalidate_viewport` marks every previous cell
+        // `skip`, so every real (skip=false) cell — blanks included — differs
+        // and is repainted.
+        let mut term = test_terminal(10, 2);
+        term.set_bottom_viewport_height(2).unwrap();
+        term.invalidate_viewport();
+        assert!(
+            term.previous_buffer().content.iter().all(|c| c.skip),
+            "invalidate must mark every previous cell skip"
+        );
+
+        // A frame with two leading blank columns then text (like "  Enter").
+        let area = term.viewport_area;
+        let mut next = Buffer::empty(area);
+        for (i, ch) in "  Enter".chars().enumerate() {
+            next.cell_mut(Position::new(u16::try_from(i).unwrap(), area.y))
+                .unwrap()
+                .set_symbol(&ch.to_string());
+        }
+        let leading: Vec<(u16, String)> = diff_buffers(term.previous_buffer(), &next)
+            .into_iter()
+            .filter_map(|c| match c {
+                DrawCommand::Put { x, y, cell } if x < 2 && y == area.y => {
+                    Some((x, cell.symbol().to_string()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            leading,
+            vec![(0, " ".to_string()), (1, " ".to_string())],
+            "leading blank columns must be repainted as spaces after invalidate"
         );
     }
 

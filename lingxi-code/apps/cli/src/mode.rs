@@ -1,6 +1,6 @@
 //! Three-way mode dispatch added in M6-01. Routes argv to one of:
 //! - `Mode::Print(prompt)`: existing `run::run_oneshot` (v0.6.0, unchanged)
-//! - `Mode::Tui`: the ratatui TUI (`tui-rata`) via `run_ratatui` (default)
+//! - `Mode::Tui`: the ratatui TUI via `run_ratatui` (default)
 //! - `Mode::StdioRepl`: existing `repl::run_repl` (v0.6.0, kept as `--no-tui`
 //!   and non-TTY fallback)
 //!
@@ -238,18 +238,22 @@ pub(crate) async fn run_ratatui(
         .iter()
         .find(|m| m.is_current)
         .map_or_else(|| "(default)".to_string(), |m| m.display.clone());
-    // Seed the transcript with the welcome banner, then any replayed scrollback
-    // (`--resume`: `rebuild_from_jsonl` rows). A fresh launch passes an empty
-    // `resumed_messages`, so the seed is byte-identical to the welcome-only path.
-    let mut welcome = vec![tui::RenderedMessage::SystemText {
-        body: format!(
-            "✻ Welcome to LingXi Code ({})\n  /help for commands · Esc interrupts a running turn · Esc (idle) or Ctrl-C twice to quit\n  cwd: {}\n  model: {}",
-            session.doctor.cli_version, session.doctor.cwd, current_model
-        ),
-        timestamp: 0,
-        is_error: false,
-    }];
-    welcome.extend(resumed_messages);
+    // A fresh launch opens on the welcome banner; a `--resume` mount opens on
+    // the replayed prior conversation instead (matching the iocraft resume UX,
+    // which shows the history with no fresh welcome). Both paths render through
+    // the SAME ratatui backend so the composer/footer chrome is identical.
+    let initial = if resumed_messages.is_empty() {
+        vec![tui::RenderedMessage::SystemText {
+            body: format!(
+                "✻ Welcome to LingXi Code ({})\n  /help for commands · Esc interrupts a running turn · Esc (idle) or Ctrl-C twice to quit\n  cwd: {}\n  model: {}",
+                session.doctor.cli_version, session.doctor.cwd, current_model
+            ),
+            timestamp: 0,
+            is_error: false,
+        }]
+    } else {
+        resumed_messages
+    };
     let on_submit = move |prompt: String, cancel: CancellationToken| {
         let _ = turn_tx.send(tui::TurnEvent::TurnStarted);
         let orch = orchestrator.clone();
@@ -312,7 +316,7 @@ pub(crate) async fn run_ratatui(
     });
     let run_result = tokio::task::spawn_blocking(move || {
         tui::app::run_app(
-            welcome,
+            initial,
             session,
             bridge_rx,
             permission_rx,

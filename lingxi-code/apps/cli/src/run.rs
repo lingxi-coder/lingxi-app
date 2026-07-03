@@ -1419,9 +1419,9 @@ async fn mount_resumed_tui(
     // live turn continues the prior conversation.
     seed_orchestrator_session(&tui_build.runtime.orchestrator, session_id, &messages).await;
     // RENDER seed: map the raw JSONL into TUI scrollback rows (W38 seam), then
-    // launch the ratatui backend (`tui-rata`) with that replayed scrollback.
-    // Resume has no SessionRegistration (fresh launches register; resume does
-    // not), so no status forwarder is threaded.
+    // launch the ratatui backend with that replayed scrollback. Resume has no
+    // SessionRegistration (fresh launches register; resume does not), so no
+    // status forwarder is threaded.
     let resumed_messages = tui::replay::rebuild_from_jsonl(&messages);
     crate::mode::run_ratatui(tui_build, None, resumed_messages).await
 }

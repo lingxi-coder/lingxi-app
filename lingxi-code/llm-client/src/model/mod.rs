@@ -8,6 +8,7 @@ pub mod overflow;
 pub mod prompt_too_long;
 pub mod rate_limit;
 pub mod retry;
+pub mod stream_watchdog;
 pub mod telemetry;
 pub mod thinking;
 pub mod user_agent;

@@ -4630,7 +4630,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // `StreamingToolExecutor` user_interrupted path.
         user_cancel: Option<CancellationToken>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
-        use crate::streaming_loop::{pump_stream_with_executor, ExecutorPump};
+        use crate::streaming_loop::ExecutorPump;
         use protocol::ContentBlock;
 
         // Startup Responses WebSocket prewarm is strictly opportunistic. A real
@@ -5269,17 +5269,84 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // open stream is pumped as before.
             let pumped = match opened {
                 OpenOutcome::Recovered(pumped_from_recovery) => pumped_from_recovery,
-                OpenOutcome::Stream(stream) => match pump_stream_with_executor(
-                stream,
-                &self.output,
-                ExecutorPump {
-                    executor: &mut exec,
-                    assistant_id,
-                    user_cancel: user_cancel.as_ref(),
-                },
-            )
-            .await
-            {
+                OpenOutcome::Stream(first_stream) => {
+                // cc 2.1.198 mid-response transient retry (`query.ts` stream
+                // loop @219649648): on a transient network drop (ECONNRESET /
+                // connection closed / reset) OR a watchdog idle-timeout, re-open
+                // and re-pump the SAME streaming request with backoff — but ONLY
+                // while `!real_content_started` (binary `!Hr`). Because a
+                // `tool_use` block STARTING flips `real_content_started`, this
+                // guard also guarantees NO tool has been dispatched, so a
+                // non-idempotent tool is never re-run. The failed pump left
+                // `session.history` untouched and (by the guard) the executor
+                // clean, so the retry reuses `exec` and re-snapshots history.
+                let mut cur_stream = first_stream;
+                let mut mid_stream_retries: u32 = 0;
+                let pump_outcome: Result<crate::streaming_loop::PumpedTurn, OrchestratorError> =
+                    loop {
+                        match crate::streaming_loop::pump_stream_with_executor_tracked(
+                            cur_stream,
+                            &self.output,
+                            ExecutorPump {
+                                executor: &mut exec,
+                                assistant_id,
+                                user_cancel: user_cancel.as_ref(),
+                            },
+                        )
+                        .await
+                        {
+                            Ok(p) => break Ok(p),
+                            Err(f)
+                                if crate::streaming_loop::is_transient_mid_stream(&f.error)
+                                    && !f.real_content_started
+                                    && mid_stream_retries
+                                        < crate::streaming_loop::mid_stream_retry_cap(&f.error) =>
+                            {
+                                mid_stream_retries += 1;
+                                // Exponential backoff + jitter (binary `sle`).
+                                let base = llm_client::model::retry::scaled_base_delay_ms(
+                                    u8::try_from(mid_stream_retries - 1).unwrap_or(u8::MAX),
+                                    None,
+                                );
+                                tokio::time::sleep(llm_client::model::retry::jittered_delay(base))
+                                    .await;
+                                tracing::warn!(
+                                    attempt = mid_stream_retries,
+                                    "mid-response transient stream error — retrying streaming request"
+                                );
+                                // Re-snapshot history (+ additional context) for
+                                // the retry — same pattern as the 529 fallback.
+                                let (mut re_snapshot, re_model, re_profile) = {
+                                    let s = self.session.lock().await;
+                                    (s.history.clone(), s.model.clone(), s.model_profile.clone())
+                                };
+                                if let Some(ctx_msg) = self.additional_context_message().await {
+                                    re_snapshot.insert(0, ctx_msg);
+                                }
+                                match self
+                                    .streaming_api
+                                    .stream(
+                                        &re_model,
+                                        re_profile.as_deref(),
+                                        system_prompt.as_deref(),
+                                        re_snapshot,
+                                        wire_tools.clone(),
+                                    )
+                                    .await
+                                {
+                                    Ok(s) => {
+                                        cur_stream = s;
+                                        continue;
+                                    }
+                                    // Re-open failed: surface as the terminal
+                                    // pump error for the arms below.
+                                    Err(e) => break Err(OrchestratorError::Streaming(e)),
+                                }
+                            }
+                            Err(f) => break Err(f.error),
+                        }
+                    };
+                match pump_outcome {
                 Ok(p) => p,
                 Err(OrchestratorError::Streaming(
                     ref e @ (LlmError::Overloaded { .. } | LlmError::ProviderInternal),
@@ -5390,7 +5457,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     final_message_id = id;
                     break;
                 }
-                },
+                }
+                }
             };
             // A3: accumulate this turn's output tokens (TS `getTurnOutputTokens()`).
             global_turn_tokens = global_turn_tokens.saturating_add(pumped.output_tokens);

@@ -125,14 +125,76 @@ fn merge_usage(seed: &LlmUsage, delta: &LlmUsage) -> LlmUsage {
 ///   double stop, type mismatch, malformed `tool_use` input JSON).
 /// - [`OrchestratorError::StreamEndedWithoutStop`] if the stream
 ///   produced no `MessageStop` event before terminating.
+/// Outcome of a FAILED [`pump_stream_with_executor_tracked`] pump: the
+/// [`OrchestratorError`] plus whether any *real* (non-thinking) content block
+/// had STARTED before the failure.
+///
+/// `real_content_started` mirrors the 2.1.198 binary's `Hr` flag (set at a
+/// non-thinking `content_block_start`, @219640711). The mid-stream transient
+/// retry in `conversation.rs` fires ONLY when `!real_content_started` — which
+/// subsumes the "never resubmit after a non-idempotent tool executed" guard:
+/// a `tool_use` block starting is non-thinking, so it flips this true and
+/// disqualifies the retry (a dispatched tool can never be re-run).
+#[derive(Debug)]
+pub(crate) struct PumpFailure {
+    /// The terminal orchestrator error the pump surfaced.
+    pub(crate) error: OrchestratorError,
+    /// `true` once a non-thinking content block had started streaming.
+    pub(crate) real_content_started: bool,
+}
+
+/// Whether a mid-stream [`LlmError`] is a TRANSIENT network failure eligible
+/// for the streaming-request retry (cc 2.1.198 mid-response transient retry):
+/// a transport-layer drop (ECONNRESET / "connection closed" / reset / EPIPE /
+/// timeout — surfaced as [`LlmError::Transport`]) or a watchdog idle-timeout
+/// abort ([`llm_client::model::stream_watchdog::is_stream_idle_timeout`]).
+///
+/// `ProviderInternal` / `Overloaded` are deliberately EXCLUDED here — those
+/// keep their dedicated non-streaming fallback arm.
+pub(crate) fn is_transient_mid_stream(error: &OrchestratorError) -> bool {
+    match error {
+        OrchestratorError::Streaming(e) | OrchestratorError::ApiCall(e) => {
+            matches!(e, LlmError::Transport { .. })
+                || llm_client::model::stream_watchdog::is_stream_idle_timeout(e)
+        }
+        _ => false,
+    }
+}
+
+/// Max streaming-request retries for a stale-connection drop. Binary `An=2`
+/// (`Kn<An`, @219649648) — the stale-connection retry budget.
+pub(crate) const MID_STREAM_STALE_CONNECTION_MAX_RETRIES: u32 = 2;
+
+/// Max streaming-request retries for a watchdog idle-timeout. Binary `ao=1`
+/// (`Mn<ao`, @219649648) — the idle-timeout retry budget.
+pub(crate) const MID_STREAM_IDLE_TIMEOUT_MAX_RETRIES: u32 = 1;
+
+/// Cause-aware retry cap for a mid-stream transient error, matching the
+/// binary's split `ac?Mn<ao:Kn<An` (idle-timeout `ao=1` vs stale-connection
+/// `An=2`). Only meaningful when [`is_transient_mid_stream`] is `true`.
+pub(crate) fn mid_stream_retry_cap(error: &OrchestratorError) -> u32 {
+    let is_idle = matches!(
+        error,
+        OrchestratorError::Streaming(e) | OrchestratorError::ApiCall(e)
+            if llm_client::model::stream_watchdog::is_stream_idle_timeout(e)
+    );
+    if is_idle {
+        MID_STREAM_IDLE_TIMEOUT_MAX_RETRIES
+    } else {
+        MID_STREAM_STALE_CONNECTION_MAX_RETRIES
+    }
+}
+
 pub async fn pump_stream(
     stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
     output: &Arc<dyn OutputStream>,
 ) -> Result<PumpedTurn, OrchestratorError> {
-    pump_stream_inner(stream, output, None).await
+    pump_stream_inner(stream, output, None)
+        .await
+        .map_err(|f| f.error)
 }
 
-/// Context handed to [`pump_stream_with_executor`] so that, as each
+/// Context handed to [`pump_stream_with_executor_tracked`] so that, as each
 /// `tool_use` block's `content_block_stop` arrives mid-stream, its tool is
 /// registered with (and dispatched into) the [`StreamingToolExecutor`] —
 /// faithful to claude-code `query.ts:837-844`, where `addTool` runs INSIDE
@@ -174,11 +236,16 @@ pub(crate) struct ExecutorPump<'a, 'e> {
 /// The drain of completed results into history is intentionally NOT performed
 /// here — see [`ExecutorPump`]'s byte-equivalence contract. The caller drains
 /// the (possibly already-`Completed`) tools post-stream in received order.
-pub(crate) async fn pump_stream_with_executor(
+/// Like [`pump_stream_with_executor_tracked`], but surfaces the richer
+/// [`PumpFailure`] (error + `real_content_started`) so the caller can decide
+/// whether to retry the streaming request (cc 2.1.198 mid-response transient
+/// retry). On success the outcome is byte-identical to
+/// [`pump_stream_with_executor_tracked`].
+pub(crate) async fn pump_stream_with_executor_tracked(
     stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
     output: &Arc<dyn OutputStream>,
     pump: ExecutorPump<'_, '_>,
-) -> Result<PumpedTurn, OrchestratorError> {
+) -> Result<PumpedTurn, PumpFailure> {
     pump_stream_inner(stream, output, Some(pump)).await
 }
 
@@ -186,9 +253,13 @@ async fn pump_stream_inner(
     mut stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
     output: &Arc<dyn OutputStream>,
     mut pump: Option<ExecutorPump<'_, '_>>,
-) -> Result<PumpedTurn, OrchestratorError> {
+) -> Result<PumpedTurn, PumpFailure> {
     let mut acc = BlockAccumulator::new();
     let mut turn = PumpedTurn::default();
+    // Mirrors the binary's `Hr`: set true the moment a non-thinking content
+    // block STARTS (text / tool_use / etc.). Gates the caller's mid-stream
+    // transient retry — see [`PumpFailure`].
+    let mut real_content_started = false;
     // Capture the MessageStart usage as the fallback billing source for
     // input tokens, in case MessageDelta carries no usage (rare). The
     // MessageDelta usage supersedes this when present.
@@ -216,14 +287,39 @@ async fn pump_stream_inner(
             stream.next().await
         };
         let Some(item) = item else { break };
-        let event = item.map_err(OrchestratorError::Streaming)?;
+        let event = match item {
+            Ok(ev) => ev,
+            Err(e) => {
+                return Err(PumpFailure {
+                    error: OrchestratorError::Streaming(e),
+                    real_content_started,
+                });
+            }
+        };
         // Capture MessageStart usage before dispatching (dispatch consumes the event).
         if let LlmEvent::MessageStart { ref response } = event {
             message_start_usage = Some(response.usage.clone());
         }
-        let action = dispatch_event(event, &mut acc, output)
-            .await
-            .map_err(|e| OrchestratorError::StreamingProtocol(e.to_string()))?;
+        // `Hr` (binary @219640711): a non-thinking `content_block_start` flips
+        // `real_content_started`, disqualifying the mid-stream transient retry.
+        if let LlmEvent::ContentBlockStart { ref content_block, .. } = event {
+            if !matches!(
+                content_block,
+                llm_client::ContentBlock::Reasoning { .. }
+                    | llm_client::ContentBlock::RedactedThinking { .. }
+            ) {
+                real_content_started = true;
+            }
+        }
+        let action = match dispatch_event(event, &mut acc, output).await {
+            Ok(a) => a,
+            Err(e) => {
+                return Err(PumpFailure {
+                    error: OrchestratorError::StreamingProtocol(e.to_string()),
+                    real_content_started,
+                });
+            }
+        };
         match action {
             RouterAction::Continue => {}
             RouterAction::AppendAssistantBlock(block) => {
@@ -302,7 +398,10 @@ async fn pump_stream_inner(
         }
     }
     // Stream ended without a MessageStop.
-    Err(OrchestratorError::StreamEndedWithoutStop)
+    Err(PumpFailure {
+        error: OrchestratorError::StreamEndedWithoutStop,
+        real_content_started,
+    })
 }
 
 #[cfg(test)]

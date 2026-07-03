@@ -1898,6 +1898,70 @@ mod tests {
         assert_eq!(info.rate_limit_type.as_deref(), Some("seven_day"));
     }
 
+    // ── M12: rate-limit warning flicker (2.1.196 monotonic guard) ────────────
+
+    fn unified_headers(status: &str) -> BTreeMap<String, String> {
+        let mut h = BTreeMap::new();
+        h.insert(
+            "anthropic-ratelimit-unified-representative-claim".to_string(),
+            "seven_day".to_string(),
+        );
+        h.insert(
+            "anthropic-ratelimit-unified-status".to_string(),
+            status.to_string(),
+        );
+        h
+    }
+
+    /// The `Bha`/`Nha` monotonic guard: an out-of-order (older-timestamp)
+    /// response must NOT overwrite a newer at-limit snapshot, so the warning
+    /// cannot flicker off while still at the limit. A genuinely NEWER response
+    /// still updates.
+    #[test]
+    fn stale_parallel_response_does_not_flip_rate_limit_warning_off() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+
+        // t=1000: the account is at its weekly limit (rejected).
+        adapter.record_rate_limit_from_headers_at(&unified_headers("rejected"), "", 1000);
+        assert_eq!(
+            adapter.last_rate_limit_info().and_then(|i| i.status),
+            Some("rejected".to_string()),
+        );
+
+        // t=500: a STALE parallel response reporting 'allowed' arrives late —
+        // it must be DROPPED (no flicker): the warning stays 'rejected'.
+        adapter.record_rate_limit_from_headers_at(&unified_headers("allowed"), "", 500);
+        assert_eq!(
+            adapter.last_rate_limit_info().and_then(|i| i.status),
+            Some("rejected".to_string()),
+            "a stale (older-timestamp) response must not flip the warning off"
+        );
+
+        // t=2000: a genuinely NEWER 'allowed' response clears the limit.
+        adapter.record_rate_limit_from_headers_at(&unified_headers("allowed"), "", 2000);
+        assert_eq!(
+            adapter.last_rate_limit_info().and_then(|i| i.status),
+            Some("allowed".to_string()),
+            "a fresher response must update the snapshot"
+        );
+    }
+
+    /// The guard is inert under normal monotonic operation: equal-or-increasing
+    /// timestamps always record (the production path uses wall-clock `now_ms`).
+    #[test]
+    fn equal_or_increasing_timestamps_always_record() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        adapter.record_rate_limit_from_headers_at(&unified_headers("allowed"), "", 5000);
+        adapter.record_rate_limit_from_headers_at(&unified_headers("rejected"), "", 5000);
+        assert_eq!(
+            adapter.last_rate_limit_info().and_then(|i| i.status),
+            Some("rejected".to_string()),
+            "an equal-timestamp record is not stale and updates"
+        );
+    }
+
     // ── B6-T1: terminal-only 429 state promotion (pending slot) ──────────────
     //
     // claude-code updates the limits/raw module state ONLY in the terminal
@@ -2576,6 +2640,73 @@ mod tests {
             stream_transport.stream_call_count(),
             2,
             "must retry exactly once (429 → 200)"
+        );
+    }
+
+    // ── M12: streaming idle watchdog (cc 2.1.196 default-on) ─────────────────
+
+    /// A frame stream that NEVER produces a frame nor completes — models a
+    /// hung connection so the idle watchdog must fire.
+    struct HangingFrames;
+    impl crate::FrameStream for HangingFrames {
+        fn next_frame(
+            &mut self,
+        ) -> BoxFuture<'_, Result<Option<crate::RawStreamFrame>, LlmError>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// Transport that opens a 200 stream whose frames hang forever.
+    struct HangingStreamTransport;
+    impl Transport for HangingStreamTransport {
+        fn execute<'a>(
+            &'a self,
+            _request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
+            Box::pin(async move {
+                Err(LlmError::Transport {
+                    message: "execute not scripted".to_string(),
+                })
+            })
+        }
+        fn open_stream<'a>(
+            &'a self,
+            _request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+            Box::pin(async move {
+                Ok(StreamingResponse {
+                    status: 200,
+                    headers: BTreeMap::new(),
+                    frames: Box::new(HangingFrames),
+                })
+            })
+        }
+    }
+
+    /// The watchdog is ON by default and aborts a stream that produces no
+    /// event within the idle timeout, surfacing a detectable idle-timeout
+    /// error. `start_paused` auto-advances the mock clock to the deadline.
+    #[tokio::test(start_paused = true)]
+    async fn streaming_idle_watchdog_aborts_hung_stream() {
+        use futures::StreamExt;
+        let adapter = make_adapter(Arc::new(HangingStreamTransport) as Arc<dyn Transport>)
+            .with_stream_idle_timeout_override(Some(std::time::Duration::from_millis(50)));
+        let mut stream = adapter
+            .stream(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+            )
+            .await
+            .expect("connect-phase 200 opens the stream");
+        let first = stream.next().await.expect("the watchdog yields an error item");
+        let err = first.expect_err("a hung stream must abort with an idle-timeout error");
+        assert!(
+            crate::model::stream_watchdog::is_stream_idle_timeout(&err),
+            "expected a watchdog idle-timeout abort, got {err:?}"
         );
     }
 

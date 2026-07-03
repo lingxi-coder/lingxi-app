@@ -97,10 +97,30 @@ pub fn render_message(
             retry_attempt,
             max_retries,
             ..
-        } => colored_lines(
-            &format!("API error: {error} (retry {retry_attempt}/{max_retries})"),
-            theme.error,
-        ),
+        } => {
+            // cc 2.1.198 retry UX: the concrete reason is hidden behind a
+            // generic "API error" until `attempt >= min(3, max_retries)`
+            // (after the 2nd attempt); on an overloaded error the status-page
+            // link is appended once the reason is revealed.
+            let reason = tui_core::retry_ux::retry_error_reason(
+                *retry_attempt,
+                *max_retries,
+                error,
+            );
+            let mut out = colored_lines(
+                &format!("API error: {reason} (retry {retry_attempt}/{max_retries})"),
+                theme.error,
+            );
+            if let Some(tip) = tui_core::retry_ux::overloaded_status_tip(
+                None,
+                error,
+                *retry_attempt,
+                *max_retries,
+            ) {
+                out.extend(colored_lines(&tip, theme.dim));
+            }
+            out
+        }
         RenderedMessage::RateLimit { text, upsell } => {
             let mut out = colored_lines(text, theme.error);
             if let Some(upsell) = upsell {
@@ -477,6 +497,49 @@ fn plan_approval_lines(kind: &PlanApprovalKind, theme: &Theme) -> Vec<StyledLine
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_error_hides_reason_before_third_attempt() {
+        // Attempt 1: generic "API error", concrete reason hidden.
+        let m = RenderedMessage::SystemApiError {
+            error: "529 Overloaded".to_string(),
+            retry_attempt: 1,
+            retry_in_seconds: 3,
+            max_retries: 10,
+            truncated: false,
+        };
+        let text = render_message(&m, 80, &Theme::dark(), false)
+            .iter()
+            .map(super::StyledLine::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("API error: API error (retry 1/10)"), "{text}");
+        assert!(!text.contains("529 Overloaded"), "reason hidden pre-3rd: {text}");
+        // No status-page tip before the reason is revealed.
+        assert!(!text.contains("status.claude.com"), "{text}");
+    }
+
+    #[test]
+    fn api_error_reveals_reason_and_status_link_on_overload_after_2nd() {
+        // Attempt 3 (>= min(3,10)): concrete reason + overloaded status-page link.
+        let m = RenderedMessage::SystemApiError {
+            error: "529 Overloaded".to_string(),
+            retry_attempt: 3,
+            retry_in_seconds: 3,
+            max_retries: 10,
+            truncated: false,
+        };
+        let text = render_message(&m, 80, &Theme::dark(), false)
+            .iter()
+            .map(super::StyledLine::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("529 Overloaded"), "reason revealed at 3rd: {text}");
+        assert!(
+            text.contains("https://status.claude.com"),
+            "overloaded retry must show the status-page link: {text}"
+        );
+    }
 
     #[test]
     fn user_text_gets_prompt_prefix() {

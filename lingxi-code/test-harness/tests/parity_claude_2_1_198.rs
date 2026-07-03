@@ -109,7 +109,18 @@ const CHECKLIST: &[Entry] = &[
     // provider_side_query::{session_thinking_config_rides_on_the_wire,
     // no_thinking_config_keeps_legacy_wire}.
     Entry { version: "2.1.198", item: "Subagents + compaction inherit extended thinking config", disposition: Disposition::Implemented },
-    Entry { version: "2.1.198", item: "Mid-response transient network errors retry with backoff (ECONNRESET etc.)", disposition: Mission("M12") },
+    // M12 landed: the orchestrator streaming turn loop re-opens + re-pumps the
+    // streaming request on a transient network drop (ECONNRESET / connection
+    // closed / reset → `LlmError::Transport`, or a watchdog idle-timeout) with
+    // exponential+jitter backoff (binary `sle`), gated on `!real_content_started`
+    // (binary `!Hr`): because a `tool_use` block STARTING flips that flag, the
+    // guard also guarantees a non-idempotent tool is never re-run. Cause-aware
+    // caps (stale-connection `An=2`, idle-timeout `ao=1`,
+    // orchestrator/src/streaming_loop.rs). `pump_stream_with_executor_tracked`
+    // returns the `PumpFailure { error, real_content_started }`; locked by
+    // orchestrator streaming_transient_retry_test (thinking-only reset retries
+    // & succeeds; a started tool forbids the retry; non-transient never retries).
+    Entry { version: "2.1.198", item: "Mid-response transient network errors retry with backoff (ECONNRESET etc.)", disposition: Disposition::Implemented },
     Entry { version: "2.1.198", item: "Sandbox classifier: dedupe repeated same-host requests", disposition: Mission("M11") },
     // M8 landed: REAL lingxi bug found + fixed — `register_self_contained_
     // handlers` registered `LocalBashHandler` with its default
@@ -191,7 +202,18 @@ const CHECKLIST: &[Entry] = &[
     // scrollback print path. Stays Mission until wired end-to-end.
     Entry { version: "2.1.198", item: "Cmd+click opens URLs in fullscreen in Warp; double-click selects whole URL", disposition: Mission("M6") },
     Entry { version: "2.1.198", item: "Plan mode auto-allows read-only tools when session starts in plan mode", disposition: Mission("M11") },
-    Entry { version: "2.1.198", item: "/branch default fork name from first real prompt, not compaction summary", disposition: Mission("M12") },
+    // M12 landed: `session::jsonl::title::derive_fork_name` is a 1:1 port of the
+    // binary `I2l`/`deriveFirstPrompt` (@217273303) — it reuses the existing
+    // `first_meaningful_user_text` (`n9e`) extractor, which SKIPS `isMeta` and
+    // `isCompactSummary` user messages, so a session whose history begins with a
+    // compaction summary is named from the first REAL prompt; then the
+    // `/branch`-specific `.replace(/\s+/g," ").trim().slice(0,100).trimEnd() ||
+    // "Branched conversation"` tail (100-cap + fork fallback, vs the title
+    // path's 200-cap + "(session)"). Locked by session fork_name_test. NOTE:
+    // the interactive `/branch` fork+resume flow itself is still an
+    // interactive-only stub in lingxi; `derive_fork_name` is the faithful
+    // building block it will call.
+    Entry { version: "2.1.198", item: "/branch default fork name from first real prompt, not compaction summary", disposition: Disposition::Implemented },
     // M10 verified-absent: cc's focus mode is a session display state
     // (`focusMode`, voice-flow coupled) that folds mid-turn output — the
     // binary carries `# Focus mode` system-prompt sections (Sff/bff) and a
@@ -209,7 +231,21 @@ const CHECKLIST: &[Entry] = &[
     // forwarded over SSH) + the `nop` modifier table (Opt/Alt, Cmd/Super);
     // wired into the tui-rata footer and locked by key_hint + app.rs tests.
     Entry { version: "2.1.198", item: "opt/cmd hints instead of alt/super for Mac over SSH", disposition: Disposition::Implemented },
-    Entry { version: "2.1.198", item: "Retry UX: error reason after 2nd attempt; status page link when overloaded", disposition: Mission("M12") },
+    // M12 landed (logic + render): `tui_core::retry_ux` ports the binary's
+    // retry-status gating (`pHo`/spinner `Te` @214952343/@214957169): the
+    // concrete error reason is hidden behind a generic "API error" until
+    // `attempt >= min(3, max_retries)` (after the 2nd attempt), and an
+    // overloaded error (`status==529` or text contains "overload") at that point
+    // shows the status-page link `https://status.claude.com` (binary `zha`).
+    // Wired into the tui-rata `SystemApiError` scrollback renderer; locked by
+    // tui_core::retry_ux tests + tui-rata message render tests. DIVERGENCE (grep
+    // evidence): the LIVE per-attempt retry-status EVENT surface from llm-client
+    // (binary `onRetryStatus`) is not wired — retries are internal to
+    // `llm_client::ApiService`'s drive loop and the only `SystemApiError`
+    // producer is a demo fixture (tui/src/state.rs:1770); the tui-rata spinner
+    // has no "tip" surface to replace, so the status-page link renders in the
+    // scrollback api-error line rather than the spinner tip.
+    Entry { version: "2.1.198", item: "Retry UX: error reason after 2nd attempt; status page link when overloaded", disposition: Disposition::Implemented },
     // M7 seam: the standalone agents view (tui-rata `agents_screen`) has no
     // mountable sign-in dialog yet — the OAuth `/connect`/login flow lives in
     // the full TUI runtime. Seam = a `/login` key route in
@@ -253,7 +289,21 @@ const CHECKLIST: &[Entry] = &[
     // set-aside rename ports together with the `--bg` wake path when the job
     // writer lands.
     Entry { version: "2.1.196", item: "Waking a background job never deletes its transcript (set aside instead)", disposition: Divergence("no bg-job wake/transcript-probe path exists in lingxi (jobs read-only) and no code path deletes transcripts; binary set-aside rename (s9e @206707678) ports with the future --bg wake") },
-    Entry { version: "2.1.196", item: "Rate-limit warning flicker + over-counted telemetry with parallel requests", disposition: Mission("M12") },
+    // M12 landed (flicker) + divergence (telemetry): the FLICKER fix ports the
+    // binary `Bha`/`Nha` monotonic guard (@210953352) into
+    // `ApiService::record_rate_limit_from_headers_at` / `_from_429_at` — a
+    // response whose record timestamp is OLDER than the last recorded one is
+    // dropped, so an out-of-order (parallel) response can never flip the warning
+    // off. Combined with the orchestrator's existing full-value
+    // `emit_rate_limit_if_changed` change-gate (stricter than the binary's
+    // status+overage `kqt` gate), the warning neither flickers nor re-emits an
+    // unchanged state. Locked by llm-client
+    // stale_parallel_response_does_not_flip_rate_limit_warning_off +
+    // equal_or_increasing_timestamps_always_record. The over-counted-telemetry
+    // half is N/A: lingxi never ported `tengu_claudeai_limits_status_changed`
+    // (grep: 0 hits in telemetry/llm-client/orchestrator), so there is no
+    // shared limits-status counter to over-count.
+    Entry { version: "2.1.196", item: "Rate-limit warning flicker + over-counted telemetry with parallel requests", disposition: Disposition::Implemented },
     // M9 verified: cannot reproduce in lingxi's architecture. The workflow
     // subagent's result surface is the runner's single terminal
     // `Completed.result` (agent/src/runner.rs: `structured_result` is set
@@ -325,7 +375,16 @@ const CHECKLIST: &[Entry] = &[
     Entry { version: "2.1.196", item: "Workers killed by daemon restart auto-resume when agents view opens", disposition: Mission("M8") },
     Entry { version: "2.1.196", item: "/code-review workflow: five cleanup finders merged into one (-25% tokens)", disposition: Divergence("bundled workflow content, not core behavior") },
     Entry { version: "2.1.196", item: "Per-frame rendering skips no-op subtree walks during streaming", disposition: Disposition::Implemented },
-    Entry { version: "2.1.196", item: "Streaming idle watchdog on by default (5 min, env kill-switch)", disposition: Mission("M12") },
+    // M12 landed: `llm_client::model::stream_watchdog` ports the binary's
+    // default-ON idle watchdog (`jo = CLAUDE_ENABLE_STREAM_WATCHDOG ?? !0`,
+    // `fzr()` = `max(env, 300000)` @208691984). `drive_stream` wraps each
+    // blocking frame read in a `tokio::time::timeout` (deadline reset per event)
+    // and aborts with a detectable `StreamInterrupted` idle-timeout error.
+    // Disabled via `LINGXI_ENABLE_STREAM_WATCHDOG=0` (+ `CLAUDE_` alias);
+    // timeout raised via `LINGXI_STREAM_IDLE_TIMEOUT_MS` (+ `CLAUDE_` alias,
+    // 5-min floor). Locked by stream_watchdog unit tests +
+    // service_test::streaming_idle_watchdog_aborts_hung_stream.
+    Entry { version: "2.1.196", item: "Streaming idle watchdog on by default (5 min, env kill-switch)", disposition: Disposition::Implemented },
     Entry { version: "2.1.196", item: "Remote Control disabled when ANTHROPIC_BASE_URL is non-Anthropic", disposition: Mission("M13") },
     // M7 seam: lingxi's foreground TUI composer has no ←-on-empty entry
     // point yet (the binary's `[PERF:bg-leftarrow-start]` path respawns

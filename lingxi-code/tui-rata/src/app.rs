@@ -105,10 +105,7 @@ impl<'cb> RataApp<'cb> {
             // already validated + BEL-normalized) write through to the tty
             // BEFORE the draw so the diff pass never interleaves with them.
             self.write_terminal_sequences(terminal)?;
-            let width = terminal.size()?.width;
-            terminal.set_bottom_viewport_height(self.viewport_height(width))?;
-            self.flush_scrollback(terminal)?;
-            self.draw(terminal)?;
+            self.render_tick(terminal)?;
             if event::poll(self.redraw_interval)? {
                 let outcome = match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key(key),
@@ -213,6 +210,25 @@ impl<'cb> RataApp<'cb> {
     ) -> io::Result<()> {
         let chat_widget = &mut self.chat_widget;
         terminal.draw(|frame| chat_widget.render_frame(frame))
+    }
+
+    /// One frame: viewport sizing, history flush, and the widget draw, all
+    /// inside a synchronized-update bracket so the terminal applies the frame
+    /// atomically (codex `Tui::draw`). The bracket must close even when a
+    /// step fails — a dangling `?2026h` freezes the terminal.
+    fn render_tick<B: Backend + Write>(
+        &mut self,
+        terminal: &mut crate::terminal::Terminal<B>,
+    ) -> io::Result<()> {
+        terminal.begin_sync_update()?;
+        let result = (|| {
+            let width = terminal.size()?.width;
+            terminal.set_bottom_viewport_height(self.viewport_height(width))?;
+            self.flush_scrollback(terminal)?;
+            self.draw(terminal)
+        })();
+        let end = terminal.end_sync_update();
+        result.and(end)
     }
 }
 
@@ -1301,6 +1317,24 @@ mod tests {
         let mut terminal = inline_test_terminal(4);
         app.flush_scrollback(&mut terminal).unwrap();
         assert_eq!(app.chat_widget.transcript().committed_to_terminal(), 2);
+    }
+
+    #[test]
+    fn tick_frame_is_bracketed_in_a_synchronized_update() {
+        let backend = crate::terminal::test_support::TestWriteBackend::new(80, 24);
+        let raw = backend.raw_handle();
+        let mut terminal = crate::terminal::Terminal::with_options(backend).unwrap();
+        let mut app = test_app(Vec::new());
+        app.render_tick(&mut terminal).unwrap();
+        let out = String::from_utf8_lossy(&raw.borrow()).into_owned();
+        let begin = out.find("\x1b[?2026h").expect("begin synchronized update");
+        let end = out.rfind("\x1b[?2026l").expect("end synchronized update");
+        assert!(begin < end, "bracket must open before it closes");
+        // The viewport sizing + draw escapes all land INSIDE the bracket.
+        assert!(
+            out[..begin].find("\x1b[").is_none(),
+            "no escapes before the bracket: {out:?}"
+        );
     }
 
     #[test]

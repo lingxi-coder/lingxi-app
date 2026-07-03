@@ -512,6 +512,21 @@ where
     pub fn size(&self) -> io::Result<Size> {
         self.backend.size()
     }
+
+    /// Open a synchronized-update bracket (`CSI ?2026h`): the terminal
+    /// buffers everything until the matching [`Self::end_sync_update`], so a
+    /// frame's viewport move + history insert + diff repaint apply atomically
+    /// (codex `Tui::draw`'s `stdout().sync_update`; the bytes go through the
+    /// backend so tests can observe them).
+    pub fn begin_sync_update(&mut self) -> io::Result<()> {
+        queue!(self.backend, crossterm::terminal::BeginSynchronizedUpdate)
+    }
+
+    /// Close the synchronized-update bracket (`CSI ?2026l`) and flush.
+    pub fn end_sync_update(&mut self) -> io::Result<()> {
+        queue!(self.backend, crossterm::terminal::EndSynchronizedUpdate)?;
+        Write::flush(&mut self.backend)
+    }
 }
 
 /// CSI DECSTBM: set the terminal scroll region to the 1-based row range

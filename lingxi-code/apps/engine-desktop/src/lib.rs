@@ -2670,6 +2670,36 @@ pub async fn build(
     let (default_model_id, default_model_profile) =
         traits::parse_model_ref(&cfg.default_model, &default_listings);
 
+    // (M10 cc2.1.198) LingXi multi-provider half of the Explore `GAe`/`obm`
+    // firstParty gate: `false` when the session's default model routes to a
+    // NON-Anthropic provider profile (OpenAI/Gemini/…) so the built-in Explore
+    // agent resolves to `inherit` (the opus cap never fires for a foreign
+    // provider — same behavior as the TS `fr() !== "firstParty"` branch). The
+    // env half (Bedrock/Vertex/Foundry) is checked inside
+    // `agent::model_resolution::resolve_builtin_explore_model`. Must be
+    // computed while `assembled.client_config.providers` is still owned.
+    let session_provider_first_party = {
+        let profile_name = default_model_profile.clone().or_else(|| {
+            model_providers
+                .get(&default_model_id)
+                .map(|(profile, _)| profile.clone())
+        });
+        match profile_name {
+            Some(name) => assembled
+                .client_config
+                .providers
+                .iter()
+                .find(|p| p.profile_name == name)
+                // Unknown profile name → the built-in Anthropic route.
+                .map_or(true, |p| {
+                    matches!(p.provider_id, llm_client::ProviderId::AnthropicFirstParty)
+                }),
+            // No configured profile serves the default model → the built-in
+            // Anthropic route (plain api-key / OAuth install).
+            None => true,
+        }
+    };
+
     let mut client = DefaultLlmClient::from_config(assembled.client_config)
         .map_err(|e| BuildError::ApiBase(format!("llm-client config: {e}")))?;
     // §6.1: ONE composite credential slot for ALL providers (anthropic api-key /
@@ -3011,6 +3041,10 @@ pub async fn build(
         // model unchanged (default mode → byte-identical to before this seam).
         .with_permission_mode(cfg.permission_mode)
         .with_model_setting(cfg.default_model.clone())
+        // (M10 cc2.1.198) Explore `GAe` firstParty gate, multi-provider half:
+        // a non-Anthropic default profile behaves like the TS non-firstParty
+        // branch (Explore → inherit, never the opus cap).
+        .with_session_provider_first_party(session_provider_first_party)
         // G4/G5: stamp the session id + cwd on the `HookContext` the child runner
         // builds for the SubagentStart fire (the orchestrator's hook context is
         // session-scoped at runtime; the spawner uses a boot-stable session id —
@@ -3661,7 +3695,15 @@ pub async fn build(
         ));
     let forked_runner = Arc::new(
         sidequery::ForkedAgentRunner::new()
-            .with_side_query_client(side_query_client.clone(), orch_cfg.model.clone()),
+            .with_side_query_client(side_query_client.clone(), orch_cfg.model.clone())
+            // (M10 cc2.1.198) the compaction summary call INHERITS the session
+            // extended-thinking config (binary: `thinkingConfig: mXt(r)` on the
+            // summarizer `sEt` call @216945141). The session config is the same
+            // `ThinkingConfig::default()` (Adaptive intent) the main-loop
+            // `ApiService` holds — nothing overrides it at boot — and the
+            // model predicates + `LINGXI_DISABLE_THINKING` kill switches apply
+            // per request inside `reasoning_for_request`.
+            .with_session_thinking(llm_client::model::thinking::ThinkingConfig::default()),
     );
     let autocompactor =
         compaction::Autocompactor::with_forked_runner(forked_runner, cache_safe_slot.clone());

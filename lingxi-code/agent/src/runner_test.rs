@@ -1737,6 +1737,176 @@ async fn persist_mode_message_wakes_stuck_round_trip_and_carries_the_text() {
     handle.await.unwrap();
 }
 
+// ---- Launcher message ≠ permission approval (cc 2.1.198, M10) ----------
+
+/// `ToolInvoker` that PARKS inside `invoke` — a pending permission prompt
+/// living in the permission gate below the invoker seam — until the test
+/// releases it, then resolves as the gate's DENY. Tracks whether the pending
+/// prompt was resolved and how many times the tool ran.
+struct PendingPermissionInvoker {
+    invoke_started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    calls: AtomicUsize,
+    resolved: std::sync::atomic::AtomicBool,
+}
+impl PendingPermissionInvoker {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            invoke_started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            calls: AtomicUsize::new(0),
+            resolved: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+}
+#[async_trait]
+impl traits::ToolInvoker for PendingPermissionInvoker {
+    async fn invoke(
+        &self,
+        _name: &str,
+        _input: serde_json::Value,
+        _ctx: traits::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, traits::tool_invoker::ToolInvokerError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.invoke_started.notify_one();
+        self.release.notified().await;
+        self.resolved.store(true, Ordering::SeqCst);
+        Err(traits::tool_invoker::ToolInvokerError::Internal(
+            "Permission to use SlowTool has been denied.".into(),
+        ))
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// `SubagentApiClient` whose FIRST round-trip returns one `SlowTool` tool_use
+/// and whose subsequent round-trips capture their `messages` then end the turn.
+struct ToolUseThenCapturingApiClient {
+    calls: AtomicUsize,
+    later_messages: Mutex<Vec<Vec<ConversationMessage>>>,
+}
+impl ToolUseThenCapturingApiClient {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            calls: AtomicUsize::new(0),
+            later_messages: Mutex::new(Vec::new()),
+        })
+    }
+}
+#[async_trait]
+impl crate::api::SubagentApiClient for ToolUseThenCapturingApiClient {
+    async fn messages_create(
+        &self,
+        _model: &str,
+        _system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n == 0 {
+            return Ok(tool_use_response("SlowTool", Some("tool_use")));
+        }
+        self.later_messages.lock().unwrap().push(messages);
+        Ok(text_response("done after direction", Some("end_turn")))
+    }
+}
+
+/// cc 2.1.198 (M10): "Fixed an issue where messages sent by the agent that
+/// launched a subagent could be treated as user approval" — a launcher/lead
+/// message to a running subagent is NEW TASK DIRECTION and must NEVER satisfy
+/// a pending permission request. Structurally, LingXi keeps the two channels
+/// separate: permission approval reaches a pending prompt only through the
+/// permission gate below the `ToolInvoker` seam, while a launcher message
+/// arrives as `engine::Event::UserMessage` on the runner's event channel and
+/// is appended to history as a user message. This test locks that separation:
+/// with a permission prompt PENDING inside `invoke`, an inbound launcher
+/// message (1) does not resolve/approve the prompt, (2) does not re-run the
+/// tool, and (3) rides into the next round-trip as a plain user message AFTER
+/// the gate's own deny result.
+#[tokio::test]
+async fn launcher_message_is_direction_not_approval_of_pending_permission() {
+    let api = ToolUseThenCapturingApiClient::new();
+    let invoker = PendingPermissionInvoker::new();
+    let mut ctx = loop_ctx(
+        api.clone(),
+        Some(invoker.clone() as Arc<dyn traits::ToolInvoker>),
+        4,
+    );
+    ctx.persistent = true;
+
+    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+
+    // Wait until the tool call is in flight with its permission prompt pending.
+    invoker.invoke_started.notified().await;
+
+    // The launcher messages the running subagent (SendMessage → UserMessage).
+    event_tx
+        .send(engine::Event::UserMessage {
+            message_id: MessageId::new(),
+            request_id: RequestId::new(),
+            content: "switch to auditing the docs instead".into(),
+        })
+        .await
+        .unwrap();
+
+    // The message must NOT satisfy the pending permission: the prompt is still
+    // parked after the message has been delivered.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !invoker.resolved.load(Ordering::SeqCst),
+        "a launcher message must never resolve a pending permission request"
+    );
+
+    // Only the permission gate's own channel resolves the prompt — as a DENY.
+    invoker.release.notify_one();
+
+    // The turn-set completes: deny tool_result fed back, launcher message
+    // drained as task direction, final end_turn.
+    let mut out_rx = out_rx;
+    loop {
+        let ev = out_rx.recv().await.expect("the turn-set completes");
+        if matches!(ev, SubagentEvent::Completed { .. }) {
+            break;
+        }
+    }
+
+    // The tool ran exactly once — the message triggered no approval-driven
+    // (re-)execution.
+    assert_eq!(invoker.calls.load(Ordering::SeqCst), 1);
+
+    // The next round-trip's history carries the gate's DENY as the tool_result
+    // and the launcher message as a plain user TEXT message after it.
+    let later = api.later_messages.lock().unwrap().clone();
+    let hist = later.first().expect("second round-trip captured");
+    let deny_idx = hist
+        .iter()
+        .position(|m| {
+            matches!(m, ConversationMessage::User { content, .. }
+                if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { content, is_error, .. }
+                    if *is_error && content == "Error: Permission to use SlowTool has been denied.")))
+        })
+        .expect("the deny tool_result is in history");
+    let direction_idx = hist
+        .iter()
+        .position(|m| {
+            matches!(m, ConversationMessage::User { content, .. }
+                if content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. }
+                    if text.contains("switch to auditing the docs instead"))))
+        })
+        .expect("the launcher message rides as task direction");
+    assert!(
+        direction_idx > deny_idx,
+        "direction is appended after the deny result, never in its place"
+    );
+
+    // Cooperative shutdown of the parked (persistent) runner.
+    event_tx.send(engine::Event::UserExit).await.unwrap();
+    handle.await.unwrap();
+}
+
 // ── G4 (SubagentStart additionalContext) + G5 (skills preload) ──────────
 
 /// `SubagentApiClient` that captures the `messages` of its FIRST round-trip

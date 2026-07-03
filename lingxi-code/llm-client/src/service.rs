@@ -81,13 +81,6 @@ fn reasoning_budget(reasoning: Option<crate::ReasoningConfig>) -> u32 {
     }
 }
 
-/// `true` when the named env var is truthy under the strict claude-code
-/// allowlist (`1`/`true`/`yes`/`on`). Used for the `LINGXI_DISABLE_THINKING`
-/// / `LINGXI_DISABLE_ADAPTIVE_THINKING` gates.
-fn is_thinking_env_disabled(name: &str) -> bool {
-    traits::env::is_env_truthy(std::env::var(name).ok().as_deref())
-}
-
 // ── Subscriber state ─────────────────────────────────────────────────────────
 
 /// Subscription flags — gates the 429 retry policy.
@@ -802,62 +795,17 @@ impl ApiService {
         // and claude.ts:1693. Computed AFTER max_tokens is known (the fixed-
         // budget cap clamps to max_tokens-1).
         {
-            use crate::model::thinking::{
-                model_sends_temperature, model_supports_adaptive_thinking,
-                model_supports_thinking, ThinkingConfig,
-            };
-            use crate::ReasoningConfig;
+            use crate::model::thinking::{model_sends_temperature, session_thinking_active};
 
-            let has_thinking = self.thinking != ThinkingConfig::Disabled
-                && !is_thinking_env_disabled("LINGXI_DISABLE_THINKING");
+            let has_thinking = session_thinking_active(self.thinking);
 
-            // The byte-faithful claude-code thinking shape (Adaptive default,
-            // canonical max-output budget cap) is Anthropic-specific. The
-            // OpenAI/Gemini codecs mistranslate `Adaptive` to a forced
-            // `effort="high"` / `thinkingBudget=0`, so it must NOT be applied to
-            // non-Claude models. We therefore branch on the model family.
-            let is_claude = crate::model::context_window::is_claude_family(model);
-
-            req.reasoning = if !has_thinking {
-                None
-            } else if is_claude {
-                // Claude path — unchanged from claude-code.
-                if model_supports_thinking(model) {
-                    if !is_thinking_env_disabled("LINGXI_DISABLE_ADAPTIVE_THINKING")
-                        && model_supports_adaptive_thinking(model)
-                    {
-                        Some(ReasoningConfig::Adaptive)
-                    } else {
-                        let mut budget =
-                            crate::model::context_window::max_thinking_tokens_for_model(model);
-                        if let ThinkingConfig::Enabled { budget_tokens } = self.thinking {
-                            budget = budget_tokens;
-                        }
-                        // budget_tokens must stay strictly below max_tokens.
-                        budget = budget.min(req.max_tokens.unwrap_or(u32::MAX).saturating_sub(1));
-                        Some(ReasoningConfig::Enabled {
-                            budget_tokens: budget,
-                        })
-                    }
-                } else {
-                    None
-                }
-            } else {
-                // Non-Claude: only honor an EXPLICIT fixed budget. The default
-                // (`Adaptive`, "let the model decide" — an Anthropic intent)
-                // sends no reasoning field, so the provider applies its own
-                // reasoning default instead of a forced high-effort / zero-budget.
-                match self.thinking {
-                    ThinkingConfig::Enabled { budget_tokens } => {
-                        let budget =
-                            budget_tokens.min(req.max_tokens.unwrap_or(u32::MAX).saturating_sub(1));
-                        Some(ReasoningConfig::Enabled {
-                            budget_tokens: budget,
-                        })
-                    }
-                    _ => None,
-                }
-            };
+            // The claude/non-claude branch, the env kill switches and the
+            // budget clamp live in `model::thinking::reasoning_for_request` —
+            // the SAME session-config resolution the compaction side-query
+            // path inherits (cc 2.1.198). Behavior is byte-identical to the
+            // previous inline block.
+            req.reasoning =
+                crate::model::thinking::reasoning_for_request(self.thinking, model, req.max_tokens);
 
             // temperature:1 ONLY when thinking is disabled AND the model is in the
             // `rhn` temperature-gate set (binary @205866168:

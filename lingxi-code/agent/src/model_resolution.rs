@@ -48,7 +48,7 @@
 //!   threads the per-call model straight in as a separate arg must NOT run the
 //!   alias logic twice.
 
-use crate::definition::AgentModel;
+use crate::definition::{AgentDefinition, AgentModel, AgentSource};
 use permission::PermissionMode;
 use traits::env::is_env_truthy;
 
@@ -418,6 +418,82 @@ fn strip_1m_suffix(s: &str) -> String {
         s[..s.len() - 4].trim().to_string()
     } else {
         s.trim().to_string()
+    }
+}
+
+/// The Explore model-cap ladder — claude-code 2.1.198 `Kyl`
+/// (`["haiku","sonnet","opus"]`). `obm` slices it up to and including
+/// [`EXPLORE_MODEL_CAP`] (`Kyl.slice(0, Kyl.indexOf(Yyl)+1)` — the whole array,
+/// since opus is last) and asks whether the session model names ANY of these
+/// families.
+const EXPLORE_MODEL_CAP_LADDER: [&str; 3] = ["haiku", "sonnet", "opus"];
+
+/// The alias the built-in Explore agent is capped at — claude-code 2.1.198
+/// `Yyl` (`"opus"`).
+const EXPLORE_MODEL_CAP: &str = "opus";
+
+/// 1:1 port of `dPn(e,t)` (2.1.198): `true` iff the lowercased model string
+/// contains ANY of the (non-empty) needles, case-insensitively.
+fn model_contains_any(model: &str, needles: &[&str]) -> bool {
+    let lower = model.to_lowercase();
+    needles
+        .iter()
+        .any(|n| !n.is_empty() && lower.contains(&n.to_lowercase()))
+}
+
+/// 1:1 port of `obm(e)` (2.1.198): `true` iff the provider is firstParty AND
+/// the session model names NONE of the haiku/sonnet/opus families (i.e. a
+/// fable/mythos-class session model, "above" the opus cap).
+///
+/// `session_provider_first_party` is LingXi's multi-provider extension of the
+/// `fr() !== "firstParty"` gate: the composition root passes `false` when the
+/// session's default model routes to a non-Anthropic provider profile
+/// (OpenAI/Gemini/…), which behaves exactly like the TS non-firstParty branch
+/// (→ `false` → Explore inherits). The env half (`CLAUDE_CODE_USE_BEDROCK` /
+/// `_VERTEX` / `_FOUNDRY`) is checked here, same as `fr()`.
+fn session_model_exceeds_explore_cap(
+    session_model: &str,
+    session_provider_first_party: bool,
+) -> bool {
+    if !session_provider_first_party || !api_provider_is_first_party() {
+        return false;
+    }
+    let cap_idx = EXPLORE_MODEL_CAP_LADDER
+        .iter()
+        .position(|m| *m == EXPLORE_MODEL_CAP)
+        .expect("the cap is in the ladder");
+    let ladder = &EXPLORE_MODEL_CAP_LADDER[..=cap_idx];
+    !model_contains_any(session_model, ladder)
+}
+
+/// 1:1 port of `GAe(e,t)` (2.1.198): the built-in `Explore` agent's model is
+/// derived from the SESSION model instead of its (now `"inherit"`) frontmatter.
+///
+/// ```js
+/// function GAe(e,t){if(e.agentType!==qme.agentType||e.source!=="built-in")return e.model;
+///   return obm(t)?Yyl:"inherit"}
+/// ```
+///
+/// - Any non-Explore or non-built-in definition: `def.model` unchanged (a
+///   user/project agent literally named "Explore" keeps its own model).
+/// - Built-in Explore on a firstParty session whose model names none of
+///   haiku/sonnet/opus (fable/mythos-class): the `"opus"` alias — Explore
+///   inherits the session model CAPPED at opus.
+/// - Otherwise (haiku/sonnet/opus session, or any non-firstParty provider):
+///   `"inherit"` — Explore runs on the session model.
+#[must_use]
+pub fn resolve_builtin_explore_model(
+    def: &AgentDefinition,
+    session_model: &str,
+    session_provider_first_party: bool,
+) -> AgentModel {
+    if def.agent_type != "Explore" || !matches!(def.source, AgentSource::BuiltIn) {
+        return def.model.clone();
+    }
+    if session_model_exceeds_explore_cap(session_model, session_provider_first_party) {
+        AgentModel::Alias(EXPLORE_MODEL_CAP.to_string())
+    } else {
+        AgentModel::Inherit
     }
 }
 
@@ -1157,5 +1233,121 @@ mod tests {
             ),
             "custom-opus-id"
         );
+    }
+
+    // ── GAe/obm/dPn (2.1.198): built-in Explore model from the session model ──
+
+    /// A built-in Explore stand-in matching the fields `GAe` consults.
+    fn builtin_explore_def() -> AgentDefinition {
+        let mut def = crate::builtins::builtin_agent_definitions()
+            .into_iter()
+            .find(|d| d.agent_type == "Explore")
+            .expect("Explore is a built-in");
+        // The 2.1.198 frontmatter is `model:"inherit"` (qme); assert it here so
+        // the GAe tests below exercise the real definition.
+        assert!(matches!(def.model, AgentModel::Inherit));
+        def.model = AgentModel::Inherit;
+        def
+    }
+
+    #[test]
+    fn explore_on_fable_class_session_caps_at_opus() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        let def = builtin_explore_def();
+        // fable/mythos-class session models name none of haiku/sonnet/opus →
+        // obm true → the "opus" alias (Yyl).
+        for session in ["claude-fable-5", "claude-mythos-5-20260101", "CLAUDE-FABLE-5[1m]"] {
+            assert!(
+                matches!(
+                    resolve_builtin_explore_model(&def, session, true),
+                    AgentModel::Alias(ref a) if a == "opus"
+                ),
+                "{session} → opus cap"
+            );
+        }
+    }
+
+    #[test]
+    fn explore_on_claude_family_session_inherits() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        let def = builtin_explore_def();
+        // dPn is a case-insensitive substring test over ["haiku","sonnet","opus"].
+        for session in [
+            "claude-sonnet-5",
+            "claude-opus-4-8-20260115",
+            "claude-haiku-4-5",
+            "CLAUDE-OPUS-4-6",
+        ] {
+            assert!(
+                matches!(resolve_builtin_explore_model(&def, session, true), AgentModel::Inherit),
+                "{session} → inherit"
+            );
+        }
+    }
+
+    #[test]
+    fn explore_on_non_first_party_env_provider_inherits() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        let def = builtin_explore_def();
+        // fr() !== "firstParty" (Bedrock/Vertex/Foundry) → obm false → inherit,
+        // even for a fable-class session model.
+        for var in ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"] {
+            let _p = EnvGuard::set(var, "1");
+            assert!(
+                matches!(
+                    resolve_builtin_explore_model(&def, "claude-fable-5", true),
+                    AgentModel::Inherit
+                ),
+                "{var} → inherit"
+            );
+        }
+    }
+
+    #[test]
+    fn explore_on_non_anthropic_profile_inherits() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        let def = builtin_explore_def();
+        // LingXi multi-provider: a session routed to a non-Anthropic provider
+        // profile (OpenAI/Gemini/…) behaves like the non-firstParty branch.
+        assert!(matches!(
+            resolve_builtin_explore_model(&def, "gpt-4o", false),
+            AgentModel::Inherit
+        ));
+    }
+
+    #[test]
+    fn non_explore_and_non_builtin_defs_keep_their_model() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        // Non-Explore built-in: model untouched (GAe early-return on agentType).
+        let plan = crate::builtins::builtin_agent_definitions()
+            .into_iter()
+            .find(|d| d.agent_type == "Plan")
+            .unwrap();
+        assert!(matches!(
+            resolve_builtin_explore_model(&plan, "claude-fable-5", true),
+            AgentModel::Inherit
+        ));
+        let guide = crate::builtins::builtin_agent_definitions()
+            .into_iter()
+            .find(|d| d.agent_type == "claude-code-guide")
+            .unwrap();
+        assert!(matches!(
+            resolve_builtin_explore_model(&guide, "claude-fable-5", true),
+            AgentModel::Alias(ref a) if a == "haiku"
+        ));
+        // A USER-DEFINED agent literally named "Explore": source != built-in →
+        // untouched (GAe early-return on source).
+        let mut user_explore = builtin_explore_def();
+        user_explore.source = AgentSource::UserDefined;
+        user_explore.model = AgentModel::Alias("sonnet".to_string());
+        assert!(matches!(
+            resolve_builtin_explore_model(&user_explore, "claude-fable-5", true),
+            AgentModel::Alias(ref a) if a == "sonnet"
+        ));
     }
 }

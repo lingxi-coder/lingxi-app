@@ -857,6 +857,64 @@ mod tests {
         clear_thinking_env();
     }
 
+    /// cc 2.1.198 "Subagents + compaction inherit extended thinking config" —
+    /// the SUBAGENT seam half. `ProviderApiAdapter`'s `agent::SubagentApiClient`
+    /// impl delegates 1:1 to `ApiService::messages_create` / `stream`, which
+    /// route every request through the SAME `build_request` and thus the SAME
+    /// session `self.thinking` (binary: the child session's options carry
+    /// `thinkingConfig: sDi(n.options.thinkingConfig, …)` @215628753). Lock
+    /// that the subagent entry point issues a wire body whose `thinking`
+    /// field matches the session config exactly like the main loop's.
+    #[tokio::test]
+    async fn subagent_entry_point_inherits_session_thinking_config() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_thinking_env();
+        let model = "claude-sonnet-4-20250514";
+
+        // Default session config (Adaptive intent): the issued body carries the
+        // SAME thinking the shared main-loop builder computes for this model.
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport.clone());
+        let expected = match adapter
+            .build_request(model, None, None, vec![], vec![], false, None)
+            .expect("build_request")
+            .reasoning
+        {
+            Some(crate::ReasoningConfig::Adaptive) => serde_json::json!({"type": "adaptive"}),
+            Some(crate::ReasoningConfig::Enabled { budget_tokens }) => {
+                serde_json::json!({"type": "enabled", "budget_tokens": budget_tokens})
+            }
+            None => serde_json::Value::Null,
+        };
+        assert_ne!(expected, serde_json::Value::Null, "session thinking is ON by default");
+        adapter
+            .messages_create(model, None, None, vec![], vec![])
+            .await
+            .expect("messages_create");
+        let body = transport.seen.lock().unwrap()[0].body_json.clone();
+        assert_eq!(
+            body.get("thinking").cloned().unwrap_or(serde_json::Value::Null),
+            expected,
+            "subagent seam body inherits the session thinking config"
+        );
+
+        // Explicit session config (fixed budget): the subagent seam carries it too.
+        let transport2 = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter2 = make_adapter(transport2.clone())
+            .with_thinking(crate::model::thinking::ThinkingConfig::Enabled { budget_tokens: 2_048 });
+        adapter2
+            .messages_create(model, None, None, vec![], vec![])
+            .await
+            .expect("messages_create");
+        let body2 = transport2.seen.lock().unwrap()[0].body_json.clone();
+        assert_eq!(
+            body2["thinking"],
+            serde_json::json!({"type": "enabled", "budget_tokens": 2_048}),
+            "an explicit session budget rides on the subagent seam"
+        );
+        clear_thinking_env();
+    }
+
     #[test]
     fn build_request_disable_thinking_env_drops_reasoning_sets_temperature() {
         let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

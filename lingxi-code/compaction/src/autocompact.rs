@@ -372,6 +372,7 @@ mod tests {
             debug: false,
             verbose: false,
             main_loop_model: "test".into(),
+            model_profile: None,
             max_budget_nano_usd: None,
             mcp_clients: vec![],
             is_non_interactive_session: false,

@@ -486,7 +486,12 @@ pub fn builtin_agent_definitions() -> Vec<AgentDefinition> {
             "Explore",
             "Read-only search agent for broad fan-out searches — when answering means sweeping many files, directories, or naming conventions and you only need the conclusion, not the file dumps. It reads excerpts rather than whole files, so it locates code; it doesn't review or audit it. Specify search breadth: \"medium\" for moderate exploration, \"very thorough\" for multiple locations and naming conventions.",
             AgentToolPolicy::Except(read_only_disallowed()),
-            AgentModel::Alias("haiku".to_string()),
+            // claude-code 2.1.198 `qme` frontmatter is `model:"inherit"` (was
+            // `"haiku"`): the effective model is computed per-session by `GAe`
+            // (`crate::model_resolution::resolve_builtin_explore_model`) —
+            // inherit the session model, capped at "opus" for fable/mythos-class
+            // firstParty sessions.
+            AgentModel::Inherit,
             EXPLORE_PROMPT,
         ),
         def(
@@ -642,10 +647,9 @@ mod tests {
         assert!(matches!(find(&defs, "general-purpose").model, AgentModel::Inherit));
         assert!(matches!(find(&defs, "Plan").model, AgentModel::Inherit));
         assert!(matches!(find(&defs, "verification").model, AgentModel::Inherit));
-        assert!(matches!(
-            &find(&defs, "Explore").model,
-            AgentModel::Alias(m) if m == "haiku"
-        ));
+        // 2.1.198 `qme`: Explore's frontmatter is `inherit` — the session-model
+        // cap is applied by `resolve_builtin_explore_model` (GAe), not here.
+        assert!(matches!(find(&defs, "Explore").model, AgentModel::Inherit));
         assert!(matches!(
             &find(&defs, "claude-code-guide").model,
             AgentModel::Alias(m) if m == "haiku"

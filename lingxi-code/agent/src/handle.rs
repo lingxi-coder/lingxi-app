@@ -106,6 +106,14 @@ pub struct PoolSubagentSpawner {
     /// (the default) the Inherit branch returns the parent model unchanged
     /// (faithful: a non-opusplan setting never triggers the plan-mode swap).
     model_setting: Option<String>,
+    /// LingXi multi-provider half of the 2.1.198 `GAe`/`obm` firstParty gate
+    /// (`fr() !== "firstParty"`): `false` when the session's default model
+    /// routes to a non-Anthropic provider profile (OpenAI/Gemini/…), which
+    /// makes the built-in Explore agent resolve to `"inherit"` exactly like
+    /// the TS non-firstParty branch. Default `true` (the Anthropic default
+    /// install); the env half (Bedrock/Vertex/Foundry) is checked inside
+    /// [`crate::model_resolution::resolve_builtin_explore_model`].
+    session_provider_first_party: bool,
     /// Hook executor handed to every child runner via
     /// [`SubagentContext::hook_executor`] so the runner can fire `SubagentStart`
     /// (collecting + injecting the hooks' `additionalContexts`, claude
@@ -204,6 +212,7 @@ impl PoolSubagentSpawner {
             default_model: None,
             permission_mode: PermissionMode::Default,
             model_setting: None,
+            session_provider_first_party: true,
             hook_executor: Arc::new(std::sync::OnceLock::new()),
             skill_loader: Arc::new(std::sync::OnceLock::new()),
             hook_session_id: protocol::SessionId::nil(),
@@ -283,6 +292,16 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn with_model_setting(mut self, setting: impl Into<String>) -> Self {
         self.model_setting = Some(setting.into());
+        self
+    }
+
+    /// Builder: LingXi multi-provider half of the 2.1.198 Explore firstParty
+    /// gate — pass `false` when the session's default model routes to a
+    /// non-Anthropic provider profile so the built-in Explore agent resolves
+    /// to `inherit` (never the opus cap). See the field docs.
+    #[must_use]
+    pub fn with_session_provider_first_party(mut self, first_party: bool) -> Self {
+        self.session_provider_first_party = first_party;
         self
     }
 
@@ -409,6 +428,16 @@ impl PoolSubagentSpawner {
     async fn resolve_definition(&self, subagent_type: &str) -> AgentDefinition {
         let mut def = self.lookup_definition(subagent_type).await;
         if let Some(parent_model) = &self.default_model {
+            // 2.1.198 `GAe`: the built-in Explore definition's model is derived
+            // from the SESSION model (inherit, capped at "opus" for
+            // fable/mythos-class firstParty sessions) BEFORE the normal
+            // alias/Inherit resolution. Non-Explore / non-built-in definitions
+            // pass through unchanged.
+            def.model = crate::model_resolution::resolve_builtin_explore_model(
+                &def,
+                parent_model,
+                self.session_provider_first_party,
+            );
             def.model = AgentModel::Explicit(crate::model_resolution::resolve_agent_model(
                 &def.model,
                 parent_model,
@@ -1161,7 +1190,15 @@ impl SubagentSpawner for PoolSubagentSpawner {
             Some(parent) => {
                 let pref = match model {
                     Some(m) => AgentModel::Alias(m.to_string()),
-                    None => def.model.clone(),
+                    // 2.1.198 `GAe`: same session-model derivation for the
+                    // built-in Explore definition as the spawn path, so the
+                    // `tengu_agent_tool_selected` metadata reports the model
+                    // the spawn will actually use.
+                    None => crate::model_resolution::resolve_builtin_explore_model(
+                        &def,
+                        parent,
+                        self.session_provider_first_party,
+                    ),
                 };
                 crate::model_resolution::resolve_agent_model(
                     &pref,
@@ -1701,12 +1738,14 @@ mod tests {
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
         let spawner = PoolSubagentSpawner::new(pool);
-        // Explore is a read-only built-in: Except the write tools, model haiku,
-        // a real system prompt, and the high built-in turn cap (not the old 1).
+        // Explore is a read-only built-in: Except the write tools, model
+        // `inherit` (2.1.198 `qme` frontmatter; the session cap is applied by
+        // GAe on the resolved path), a real system prompt, and the high
+        // built-in turn cap (not the old 1).
         let def = spawner.resolve_definition("Explore").await;
         assert_eq!(def.agent_type, "Explore");
         assert!(matches!(def.tools, AgentToolPolicy::Except(_)));
-        assert!(matches!(&def.model, AgentModel::Alias(m) if m == "haiku"));
+        assert!(matches!(&def.model, AgentModel::Inherit));
         assert!(def.system_prompt.is_some());
         assert_eq!(def.max_turns, crate::builtins::BUILTIN_AGENT_MAX_TURNS);
     }
@@ -1758,10 +1797,72 @@ mod tests {
     async fn resolve_definition_resolves_family_alias_to_concrete_id() {
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
-        // Explore is Alias("haiku"); parent is opus (different tier) → resolves
-        // to haiku's concrete default id, NOT the parent.
+        // claude-code-guide is Alias("haiku"); parent is opus (different tier)
+        // → resolves to haiku's concrete default id, NOT the parent.
+        let spawner = PoolSubagentSpawner::new(pool).with_default_model("claude-opus-4-7");
+        let def = spawner.resolve_definition("claude-code-guide").await;
+        assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "claude-haiku-4-5"));
+    }
+
+    // ── 2.1.198 GAe: built-in Explore inherits the session model capped at opus ──
+
+    #[tokio::test]
+    async fn resolve_definition_explore_inherits_claude_family_session_model() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        // A haiku/sonnet/opus-named session model → GAe "inherit" → the parent
+        // model verbatim (NOT the old haiku alias resolution).
         let spawner = PoolSubagentSpawner::new(pool).with_default_model("claude-opus-4-7");
         let def = spawner.resolve_definition("Explore").await;
+        assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "claude-opus-4-7"));
+    }
+
+    #[tokio::test]
+    async fn resolve_definition_explore_caps_fable_class_session_at_opus() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        // A fable/mythos-class session model (names none of haiku/sonnet/opus)
+        // on firstParty → GAe "opus" → the opus family default id.
+        let spawner = PoolSubagentSpawner::new(pool).with_default_model("claude-fable-5");
+        let def = spawner.resolve_definition("Explore").await;
+        assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "claude-opus-4-8"));
+    }
+
+    #[tokio::test]
+    async fn resolve_definition_explore_on_non_anthropic_profile_inherits() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        // LingXi multi-provider: the composition root passes first_party=false
+        // when the session routes to a non-Anthropic profile → GAe behaves
+        // like the TS non-firstParty branch → inherit the session model (the
+        // opus cap NEVER fires for a foreign provider).
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_default_model("gpt-4o")
+            .with_session_provider_first_party(false);
+        let def = spawner.resolve_definition("Explore").await;
+        assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "gpt-4o"));
+    }
+
+    #[tokio::test]
+    async fn resolve_definition_user_defined_explore_keeps_its_own_model() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        // A user/project agent literally named "Explore" (source != built-in)
+        // is untouched by GAe: its own model frontmatter resolves normally.
+        let base = agent_def(AgentToolPolicy::Explicit(vec!["Read".to_string()]));
+        let custom = AgentDefinition {
+            agent_type: "Explore".to_string(),
+            model: AgentModel::Alias("haiku".to_string()),
+            source: AgentSource::UserDefined,
+            ..base
+        };
+        let catalog = Arc::new(RwLock::new(vec![custom]));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_agent_catalog(catalog)
+            .with_default_model("claude-fable-5");
+        let def = spawner.resolve_definition("Explore").await;
+        // haiku alias, parent fable (no tier match) → the haiku default id —
+        // NOT the opus cap.
         assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "claude-haiku-4-5"));
     }
 
@@ -1772,7 +1873,7 @@ mod tests {
         // No default model wired (legacy/tests): the alias is NOT resolved — the
         // runner's resolve_model then emits it raw (back-compat).
         let spawner = PoolSubagentSpawner::new(pool);
-        let def = spawner.resolve_definition("Explore").await;
+        let def = spawner.resolve_definition("claude-code-guide").await;
         assert!(matches!(&def.model, AgentModel::Alias(m) if m == "haiku"));
     }
 

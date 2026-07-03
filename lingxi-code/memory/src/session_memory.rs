@@ -404,6 +404,7 @@ mod tests {
                 debug: false,
                 verbose: false,
                 main_loop_model: "claude-haiku-4-5".into(),
+                model_profile: None,
                 max_budget_nano_usd: None,
                 mcp_clients: vec![],
                 is_non_interactive_session: false,

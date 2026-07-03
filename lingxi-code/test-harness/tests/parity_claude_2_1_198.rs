@@ -77,8 +77,38 @@ const CHECKLIST: &[Entry] = &[
     // `--bg` dispatcher that SETS those envs is still open (the isolation
     // config fallback of `HAo()` lands with it).
     Entry { version: "2.1.198", item: "Background agents auto commit/push/draft PR on worktree completion", disposition: Disposition::Implemented },
-    Entry { version: "2.1.198", item: "Explore agent inherits session model capped at opus", disposition: Mission("M10") },
-    Entry { version: "2.1.198", item: "Subagents + compaction inherit extended thinking config", disposition: Mission("M10") },
+    // M10 landed: 1:1 port of `GAe`/`obm`/`dPn` (binary: `qme` Explore def is
+    // `model:"inherit"`; `GAe` returns `obm(sessionModel) ? "opus" : "inherit"`
+    // for built-in Explore only; `obm` = firstParty && session model names none
+    // of Kyl=["haiku","sonnet","opus"]). Ported as
+    // `agent::model_resolution::resolve_builtin_explore_model`, applied in
+    // `PoolSubagentSpawner::{resolve_definition,resolve_selection}`; the
+    // built-in Explore def's model flipped Alias("haiku")→Inherit to match
+    // qme. LingXi multi-provider (accepted divergence): a session default
+    // model routed to a NON-Anthropic provider profile behaves like the TS
+    // non-firstParty branch (inherit, never the opus cap) via
+    // `with_session_provider_first_party(false)` wired at engine-desktop boot.
+    // Locked by agent::model_resolution (explore_on_* table) +
+    // agent::handle (resolve_definition_explore_*) tests.
+    Entry { version: "2.1.198", item: "Explore agent inherits session model capped at opus", disposition: Disposition::Implemented },
+    // M10 landed, both halves. SUBAGENTS: inherit BY CONSTRUCTION — the
+    // subagent seam (`ProviderApiAdapter: agent::SubagentApiClient`) delegates
+    // to the SAME `ApiService` whose `build_request` applies the session
+    // `self.thinking` to every request (binary: child options carry
+    // `thinkingConfig: sDi(n.options.thinkingConfig,…)` @215628753); locked by
+    // llm_client service_test::subagent_entry_point_inherits_session_thinking_
+    // config. COMPACTION: was a real gap — the fork-summarizer path
+    // (`ForkedAgentRunner`→`ProviderSideQueryClient`) DROPPED thinking. Now the
+    // session `ThinkingConfig` threads `with_session_thinking` (engine-desktop
+    // compaction runner) → `SideQueryRequest.thinking` → the SAME
+    // `model::thinking::reasoning_for_request` rules as the main loop (binary:
+    // summarizer passes `thinkingConfig: mXt(r)` = session options.thinkingConfig
+    // @216945141/@216926189; other sEt callers stay explicitly disabled →
+    // utility side queries keep `thinking: None`). Locked by
+    // sidequery forked_agent::forked_call_carries_the_session_thinking_config +
+    // provider_side_query::{session_thinking_config_rides_on_the_wire,
+    // no_thinking_config_keeps_legacy_wire}.
+    Entry { version: "2.1.198", item: "Subagents + compaction inherit extended thinking config", disposition: Disposition::Implemented },
     Entry { version: "2.1.198", item: "Mid-response transient network errors retry with backoff (ECONNRESET etc.)", disposition: Mission("M12") },
     Entry { version: "2.1.198", item: "Sandbox classifier: dedupe repeated same-host requests", disposition: Mission("M11") },
     // M8 landed: REAL lingxi bug found + fixed — `register_self_contained_
@@ -162,7 +192,17 @@ const CHECKLIST: &[Entry] = &[
     Entry { version: "2.1.198", item: "Cmd+click opens URLs in fullscreen in Warp; double-click selects whole URL", disposition: Mission("M6") },
     Entry { version: "2.1.198", item: "Plan mode auto-allows read-only tools when session starts in plan mode", disposition: Mission("M11") },
     Entry { version: "2.1.198", item: "/branch default fork name from first real prompt, not compaction summary", disposition: Mission("M12") },
-    Entry { version: "2.1.198", item: "Focus mode: subagents in activity summary; completed notifications fold to one count", disposition: Mission("M10") },
+    // M10 verified-absent: cc's focus mode is a session display state
+    // (`focusMode`, voice-flow coupled) that folds mid-turn output — the
+    // binary carries `# Focus mode` system-prompt sections (Sff/bff) and a
+    // `focusMode` option consumed by the voice/notification pipeline. LingXi
+    // has NO focus-mode surface: zero `focusMode`/focus-mode state anywhere;
+    // the flag-gated `focus_mode` prompt section is explicitly un-ported
+    // (orchestrator/src/prompt/body_sections.rs docs), and the TUI's "focus
+    // mode" (tui/src/root.rs) is an unrelated tool-block navigation feature.
+    // With no surface, neither the activity-summary nor the notification-fold
+    // fix has anything to attach to.
+    Entry { version: "2.1.198", item: "Focus mode: subagents in activity summary; completed notifications fold to one count", disposition: Divergence("no focus-mode surface in lingxi (focus_mode prompt section un-ported by design; TUI 'focus mode' is unrelated tool-block navigation)") },
     Entry { version: "2.1.198", item: "Syntax highlighting upgraded to highlight.js 11", disposition: Divergence("lingxi renders via syntect; visual-equivalence accepted, highlight.js is a JS-runtime dependency") },
     // M6 landed: tui_core::key_hint ports the binary's `Pct()` probe (local
     // macOS, or LC_TERMINAL=iTerm2 / TERM_PROGRAM=Apple_Terminal|iTerm.app
@@ -176,7 +216,17 @@ const CHECKLIST: &[Entry] = &[
     // `AgentsScreenState::on_key` once an auth dialog is mountable from the
     // thin view loop.
     Entry { version: "2.1.198", item: "/login opens sign-in dialog from claude agents view", disposition: Mission("M7") },
-    Entry { version: "2.1.198", item: "Launcher-agent messages are task direction, never user approval", disposition: Mission("M10") },
+    // M10 verify+lock (no code change needed): LingXi structurally separates
+    // the two channels — permission approval reaches a pending prompt only
+    // through the permission gate below the `ToolInvoker` seam (keyed
+    // `can_use_tool`/dialog), while a launcher/lead message arrives as
+    // `engine::Event::UserMessage` on the runner's event channel, where the
+    // M9 wake arm appends it to history as a plain user message (task
+    // direction). A message delivered while a permission prompt is pending
+    // cannot resolve the prompt or re-run the tool. Locked by
+    // agent::runner_test::launcher_message_is_direction_not_approval_of_
+    // pending_permission.
+    Entry { version: "2.1.198", item: "Launcher-agent messages are task direction, never user approval", disposition: Disposition::Implemented },
     // M4 landed: `/agents` now returns the binary's removed-wizard guidance
     // (`Otf` text, `.lingxi`-branded paths) with the verbatim `(removed) …`
     // description (`commands/core/src/agents.rs`, `core_description`, /help

@@ -1594,6 +1594,11 @@ pub async fn desktop_command_registry(
     connect_copilot: Arc<dyn command_core::CopilotConnectDriver>,
     connect_chatgpt: Arc<dyn command_core::ChatGptConnectDriver>,
     gates: CustomizationGates,
+    // SKILLEXEC: the SAME shared command-registry slot the slash dispatcher and
+    // `Skill` tool loader observe (filled by `build()` right after this returns).
+    // `/reload-skills` (batch 8) mutates it live so a reload refreshes the set
+    // the rest of the session sees.
+    shared_registry: Arc<RwLock<CommandRegistry>>,
 ) -> CommandRegistry {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
@@ -1607,7 +1612,7 @@ pub async fn desktop_command_registry(
     register_core_batch_1(&mut reg, handle.clone());
     register_core_batch_2(&mut reg, handle.clone(), auth);
     register_core_batch_4(&mut reg, handle.clone());
-    register_core_batch_5(&mut reg, handle);
+    register_core_batch_5(&mut reg, handle.clone());
     // Plan 3c: wire `/connect` over the engine-supplied credential-writer +
     // Copilot device-flow + ChatGPT OAuth seams.
     command_core::register::register_core_connect(
@@ -1626,6 +1631,21 @@ pub async fn desktop_command_registry(
     // same-named custom command shadows a builtin (TS findCommand order).
     let home = dirs::home_dir().unwrap_or_else(|| lingxi_home.to_path_buf());
     let managed_dir = crate::settings_watch::managed_settings_dir();
+    // Batch 8: the newly-ported implemented commands (`/fork`, `/goal`,
+    // `/recap`, `/reload-skills`, `/skill-doctor`, `/stop`). Wired here (after
+    // the skill-discovery roots are known, before the `disables_skills` early
+    // return) so the builtins register regardless of the customization gate.
+    command_core::register_core_batch_8(
+        &mut reg,
+        handle.clone(),
+        shared_registry,
+        cwd.to_path_buf(),
+        lingxi_home.to_path_buf(),
+        Some(managed_dir.clone()),
+        home.clone(),
+        Vec::new(),
+        gates.safe_mode,
+    );
     // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom-command + skill
     // dir discovery (`K5d.skills:!1` / `V5d.skills:!0`; the commands-dir
     // loader `cWa` bails on `xd()||Hc("skills")`). Builtins above stay — only
@@ -4865,6 +4885,7 @@ pub async fn build(
         connect_copilot.clone(),
         connect_chatgpt,
         cfg.customization_gates,
+        shared_command_registry.clone(),
     )
     .await;
     // SKILLEXEC.2: fill the shared command-registry slot the `Skill` tool's
@@ -5356,6 +5377,7 @@ mod tests {
             Arc::new(C),
             Arc::new(G),
             super::CustomizationGates::default(),
+            Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
         )
         .await;
         assert!(
@@ -5443,6 +5465,7 @@ mod tests {
                 Arc::new(C),
                 Arc::new(G),
                 gates,
+                Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
             )
             .await;
             assert_eq!(

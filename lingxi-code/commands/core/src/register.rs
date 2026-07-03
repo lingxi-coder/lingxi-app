@@ -5,7 +5,7 @@
 use command_api::CommandRegistry;
 use std::sync::Arc;
 
-/// Register all 94 built-in slash commands into `reg`.
+/// Register all 100 built-in slash commands into `reg`.
 ///
 /// The non-core names point at per-name instances of
 /// [`command_api::builtin_support::UnimplementedCommandHandler`] that return the locked
@@ -25,7 +25,7 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
         core_description, UnimplementedCommandHandler, BUILTIN_COMMAND_NAMES,
     };
 
-    // Pass 1: register all 94 with per-name unimplemented handler instances.
+    // Pass 1: register all 100 with per-name unimplemented handler instances.
     //
     // Each name needs its own handler **instance** because the handler
     // carries its own `name` field used to substitute the locked literal.
@@ -296,6 +296,69 @@ pub fn register_core_batch_7(reg: &mut CommandRegistry) {
     reg.register_builtin_handler(Arc::new(SkillsHandler::new()));
 }
 
+/// Overwrite the batch-8 entries (`fork`, `goal`, `recap`, `reload-skills`,
+/// `skill-doctor`, `stop`) with their real handlers.
+///
+/// Call **after** [`register_all_builtin_commands`]. The function is
+/// idempotent — every name is overwritten in-place via `HashMap::insert`
+/// semantics.
+///
+/// Handle/root threading:
+///
+/// * `handle` — the live orchestrator handle. `/fork`, `/goal`, `/recap`, and
+///   `/stop` each consume it (`/fork` reads the transcript + coordinator gate
+///   and drives `fork_conversation`; `/goal` keeps its own session state but
+///   holds the handle for a future app-state seam; `/recap` reads the
+///   transcript; `/stop` requests exit).
+/// * `shared_registry` — the SAME `Arc<RwLock<CommandRegistry>>` the slash
+///   dispatcher and skill-tool loader observe, so `/reload-skills` re-walks
+///   disk and refreshes the *live* command set the rest of the session sees.
+/// * `cwd` / `lingxi_home` / `managed_dir` / `home` / `additional_skill_dirs`
+///   — the skill-discovery roots shared with [`crate::SkillsHandler`]
+///   (`/reload-skills` and `/skill-doctor` both re-scan them).
+/// * `safe_mode` — the CLI `--safe-mode` flag (`CustomizationGates.safe_mode`),
+///   feeding `/reload-skills`'s trailing "(custom skills are disabled in safe
+///   mode)" note.
+///
+/// The composition roots (`apps/engine-desktop`, `apps/engine-mobile`) call
+/// this alongside the other core batch registrars.
+pub fn register_core_batch_8(
+    reg: &mut CommandRegistry,
+    handle: Arc<dyn traits::OrchestratorHandle>,
+    shared_registry: Arc<tokio::sync::RwLock<CommandRegistry>>,
+    cwd: std::path::PathBuf,
+    lingxi_home: std::path::PathBuf,
+    managed_dir: Option<std::path::PathBuf>,
+    home: std::path::PathBuf,
+    additional_skill_dirs: Vec<std::path::PathBuf>,
+    safe_mode: bool,
+) {
+    use crate::{
+        ForkHandler, GoalHandler, RecapHandler, ReloadSkillsHandler, SkillDoctorHandler,
+        StopHandler,
+    };
+
+    reg.register_builtin_handler(Arc::new(ForkHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(GoalHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(RecapHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(ReloadSkillsHandler::with_all_roots(
+        shared_registry,
+        cwd.clone(),
+        lingxi_home.clone(),
+        managed_dir.clone(),
+        home,
+        additional_skill_dirs.clone(),
+        safe_mode,
+    )));
+    reg.register_builtin_handler(Arc::new(SkillDoctorHandler::new(
+        cwd,
+        lingxi_home,
+        managed_dir,
+        additional_skill_dirs,
+    )));
+    reg.register_builtin_handler(Arc::new(StopHandler::new(handle)));
+}
+
 /// Register headless fallback handlers for commands whose local implementation
 /// requires the interactive TUI surface.
 pub fn register_interactive_only_commands(reg: &mut CommandRegistry) {
@@ -360,10 +423,10 @@ mod registry_tests {
     use command_api::model::CommandResult;
 
     #[test]
-    fn register_all_registers_exactly_94_names() {
+    fn register_all_registers_exactly_100_names() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 94);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 100);
         for name in BUILTIN_COMMAND_NAMES {
             assert!(
                 reg.resolve(name).is_some(),

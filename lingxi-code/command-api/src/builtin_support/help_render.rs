@@ -6,7 +6,7 @@
 //! ```text
 //! Commands:\n
 //!   /<name padded to longest+2>  <description>\n
-//!   ... (68 lines, sorted ASCII-ascending) ...
+//!   ... (74 lines, sorted ASCII-ascending) ...
 //! ```
 //!
 //! Where `<description>` is `core_description(name)` — the real per-command
@@ -15,8 +15,8 @@
 //! LingXi-specific / internal commands without one. The 26 hidden/disabled
 //! commands ([`is_palette_hidden`]) are filtered out to match claude-code's
 //! `commands.filter(c => !c.isHidden && !$te(c))` help/palette filter, so the
-//! default total (no `DISABLE_*_COMMAND` env gates set) is 1 header + 68
-//! visible commands = 69 lines.
+//! default total (no `DISABLE_*_COMMAND` env gates set) is 1 header + 74
+//! visible commands = 75 lines.
 
 use crate::builtin_support::names::{
     core_description, is_command_env_disabled, is_palette_hidden, BUILTIN_COMMAND_NAMES,
@@ -84,19 +84,19 @@ mod tests {
     }
 
     #[test]
-    fn output_has_exactly_69_lines() {
-        // 1 header + 68 visible commands = 69 lines (each terminated by '\n').
+    fn output_has_exactly_75_lines() {
+        // 1 header + 74 visible commands = 75 lines (each terminated by '\n').
         // The 26 hidden/disabled commands (is_palette_hidden) are filtered out,
         // matching claude-code's `!isHidden && !$te` help/palette filter.
-        // (94 builtins − 26 hidden = 68 visible, with no DISABLE_* env set.)
+        // (100 builtins − 26 hidden = 74 visible, with no DISABLE_* env set.)
         // Serialize with the env-gate mutators (names::ENV_LOCK) so a concurrent
         // `DISABLE_*_COMMAND` mutation can't transiently drop a counted command.
         let _g = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
         let s = render_help_screen();
         let n = s.matches('\n').count();
         assert_eq!(
-            n, 69,
-            "expected 69 newlines (1 header + 68 visible commands), got {n}"
+            n, 75,
+            "expected 75 newlines (1 header + 74 visible commands), got {n}"
         );
     }
 

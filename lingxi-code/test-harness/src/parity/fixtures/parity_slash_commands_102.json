@@ -3,8 +3,8 @@
     "plan": "M5-09",
     "spec_section": "\u00a73 M5-09 row + \u00a74.6 (Slash commands)",
     "_claude_code_version": "see CHANGELOG v0.6.0 baseline",
-    "_count_history": "94-name surface (2026-06-20 slash parity #66/#67 removed cost/stats as /usage aliases + deleted vim/pr-comments/output-style). implemented is target runtime status.",
-    "total_count_lock": 94,
+    "_count_history": "100-name surface (2026-07-04 batch-8 added fork/goal/recap/reload-skills/skill-doctor/stop as implemented commands; prior 94-name surface from the 2026-06-20 slash parity #66/#67). implemented is target runtime status.",
+    "total_count_lock": 100,
     "core_count_lock": 18,
     "unimplemented_count_lock": 47,
     "stub_literal_template": "{name}: not implemented in v0.6.0 (M5)",
@@ -336,6 +336,24 @@
       "requires_tui": false
     },
     {
+      "name": "fork",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "goal",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
       "name": "good-claude",
       "is_core": false,
       "implemented": false,
@@ -617,6 +635,15 @@
       "defer_reason": "host/remote service dependency deferred"
     },
     {
+      "name": "recap",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
       "name": "release-notes",
       "is_core": false,
       "implemented": true,
@@ -634,6 +661,15 @@
       "target_status": "deferred",
       "requires_tui": false,
       "defer_reason": "host-bound deferred gap"
+    },
+    {
+      "name": "reload-skills",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
     },
     {
       "name": "remote-env",
@@ -741,6 +777,15 @@
       "requires_tui": false
     },
     {
+      "name": "skill-doctor",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
       "name": "skills",
       "is_core": false,
       "implemented": true,
@@ -770,6 +815,15 @@
     },
     {
       "name": "stickers",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "stop",
       "is_core": false,
       "implemented": true,
       "claude_type": "local",

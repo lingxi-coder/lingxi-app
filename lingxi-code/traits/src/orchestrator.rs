@@ -86,6 +86,18 @@ pub struct CompactionSummary {
     pub bytes_saved: u64,
 }
 
+/// Outcome of a successful [`OrchestratorHandle::fork_conversation`] — the
+/// spawned background agent's display name and its full agent id. `/fork`
+/// renders `"⑂ forked {name} ({id-tail})"` from these two fields (the tail is
+/// the last four chars of `agent_id`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkOutcome {
+    /// Human-readable name of the spawned background agent.
+    pub name: String,
+    /// Full agent id; `/fork` shows only its last four characters.
+    pub agent_id: String,
+}
+
 /// Errors surfaced through the orchestrator's public handle.
 ///
 /// Distinct from `orchestrator::OrchestratorError` because the
@@ -717,6 +729,30 @@ pub trait OrchestratorHandle: Send + Sync {
     /// session (e.g. the test mock) need no override.
     async fn conversation_transcript(&self) -> Vec<protocol::ConversationMessage> {
         Vec::new()
+    }
+
+    /// Whether this session is a coordinator (team lead) session.
+    ///
+    /// Backs `/fork`'s `isEnabled:()=>!tv()` gate: forking is unavailable in a
+    /// coordinator session (the user is pointed at `/branch` instead). Same
+    /// additive-default shape as [`Self::emit_coordinator_status`].
+    ///
+    /// Default returns `false` (an ordinary, non-coordinator session), so
+    /// handle impls that never enter coordinator mode need no override.
+    async fn is_coordinator_session(&self) -> bool {
+        false
+    }
+
+    /// Spawn a background agent that inherits the full conversation, per
+    /// `/fork`. Returns the spawned agent's [`ForkOutcome`] (name + id) on
+    /// success.
+    ///
+    /// Default returns `Err(HandleError::Unimplemented(..))` so existing
+    /// handle impls (and the test mock) keep compiling; the composition roots
+    /// override it against the real background-agent spawner.
+    async fn fork_conversation(&self, directive: &str) -> Result<ForkOutcome, HandleError> {
+        let _ = directive;
+        Err(HandleError::Unimplemented("fork_conversation".into()))
     }
 
     /// File paths currently tracked in the session's read-file-state cache.

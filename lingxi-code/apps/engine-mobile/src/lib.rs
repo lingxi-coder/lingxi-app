@@ -204,6 +204,13 @@ pub fn mobile_command_registry(
     register_core_batch_2(&mut reg, handle.clone(), auth);
     register_core_batch_4(&mut reg, handle.clone());
     register_core_batch_5(&mut reg, handle);
+    // Batch 8 (`/fork`, `/goal`, `/recap`, `/reload-skills`, `/skill-doctor`,
+    // `/stop`) is wired by the uniffi composition root (`host::build_mobile`)
+    // right after this returns, because it needs the shared
+    // `Arc<tokio::sync::RwLock<CommandRegistry>>` slot (tokio is a
+    // `uniffi`-gated optional dependency here, unavailable in this default-lean
+    // lib build).
+    //
     // Mobile-only command handlers: currently none — the mobile command names
     // (/mobile, /voice, /share, /camera) are served as command-core
     // unimplemented stubs. Register real mobile handlers on `reg` directly here

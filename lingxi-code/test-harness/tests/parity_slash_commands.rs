@@ -1,11 +1,11 @@
-//! Parity: lock the 94 builtin slash-command names plus the per-command
+//! Parity: lock the 100 builtin slash-command names plus the per-command
 //! command/target status matrix across the full surface.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
 //! Task 6. Locks (2026-06-20 slash-parity pass #66/#67 re-locked from 99→94 —
 //! removed cost/stats as /usage aliases + deleted vim/pr-comments/output-style):
 //!
-//! - Total name count = 94
+//! - Total name count = 100
 //! - Core name count = 18
 //! - Target implemented status is explicit per command
 //! - Stub literal template = "{name}: not implemented in v0.6.0 (M5)"
@@ -18,7 +18,7 @@ use command_api::CommandRegistry;
 use command_api::RegistrySlashDispatcher;
 use command_core::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
-    register_core_batch_4, register_core_batch_5,
+    register_core_batch_4, register_core_batch_5, register_core_batch_8,
 };
 use orchestrator::test_support::MockOrchestratorHandle;
 use serde::Deserialize;
@@ -60,7 +60,18 @@ fn fully_wired_registry() -> CommandRegistry {
     });
     register_core_batch_2(&mut reg, handle.clone(), auth);
     register_core_batch_4(&mut reg, handle.clone());
-    register_core_batch_5(&mut reg, handle);
+    register_core_batch_5(&mut reg, handle.clone());
+    register_core_batch_8(
+        &mut reg,
+        handle,
+        Arc::new(RwLock::new(CommandRegistry::new())),
+        std::path::PathBuf::from("."),
+        std::path::PathBuf::from("."),
+        None,
+        std::path::PathBuf::from("."),
+        Vec::new(),
+        false,
+    );
     reg
 }
 
@@ -138,6 +149,8 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "exit",
     "export",
     "files",
+    "fork",
+    "goal",
     "help",
     "hooks",
     "init",
@@ -153,16 +166,20 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "plan",
     "plugin",
     "privacy-settings",
+    "recap",
     "release-notes",
+    "reload-skills",
     "rename",
     "resume",
     "review",
     "rewind",
     "security-review",
+    "skill-doctor",
     "skills",
     "status",
     "statusline",
     "stickers",
+    "stop",
     "tasks",
     "terminal-setup",
     "theme",
@@ -184,9 +201,9 @@ fn fixture_v2() -> ParityFileV2 {
 #[test]
 fn fixture_total_matches_constant() {
     let f = fixture();
-    assert_eq!(f.meta.total_count_lock, 94);
-    assert_eq!(f.commands.len(), 94);
-    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 94);
+    assert_eq!(f.meta.total_count_lock, 100);
+    assert_eq!(f.commands.len(), 100);
+    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 100);
     assert_eq!(f.commands.len(), BUILTIN_COMMAND_NAMES.len());
 }
 

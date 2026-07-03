@@ -68,8 +68,8 @@ mod tests {
                 // Hidden/disabled commands are filtered out of /help.
                 assert!(!s.contains("  /heapdump "));
                 assert!(!s.contains("  /ant-trace "));
-                // 69 newlines total (1 header + 68 visible commands).
-                assert_eq!(s.matches('\n').count(), 69);
+                // 75 newlines total (1 header + 74 visible commands).
+                assert_eq!(s.matches('\n').count(), 75);
             }
             other => panic!("expected Done, got {other:?}"),
         }

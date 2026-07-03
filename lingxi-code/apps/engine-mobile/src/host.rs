@@ -1080,8 +1080,30 @@ pub async fn build_mobile_inner(
         }
     }
     orch.spawn_startup_responses_websocket_prewarm();
-    let reg = mobile_command_registry(handle, auth.clone());
-    let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
+    // Pre-create the shared registry slot so batch-8's `/reload-skills` handler
+    // and the dispatcher observe ONE command set; fill it once the builtins are
+    // assembled, then hand the SAME `Arc` to the dispatcher.
+    let shared_command_registry: Arc<RwLock<command_api::CommandRegistry>> =
+        Arc::new(RwLock::new(command_api::CommandRegistry::new()));
+    let mut reg = mobile_command_registry(handle.clone(), auth.clone());
+    // Batch 8 (`/fork`, `/goal`, `/recap`, `/reload-skills`, `/skill-doctor`,
+    // `/stop`): wired here in the uniffi composition root because it needs the
+    // shared `Arc<tokio::sync::RwLock<CommandRegistry>>` (tokio is uniffi-only in
+    // this crate's default lib build). Mobile has no on-disk custom-skill
+    // discovery layer, so no managed dir / no additional dirs / safe-mode off.
+    command_core::register_core_batch_8(
+        &mut reg,
+        handle,
+        shared_command_registry.clone(),
+        cwd.clone(),
+        cfg.lingxi_home.clone(),
+        None,
+        cwd.clone(),
+        Vec::new(),
+        false,
+    );
+    *shared_command_registry.write().await = reg;
+    let dispatcher = RegistrySlashDispatcher::new(shared_command_registry);
 
     // (9) Session lifecycle fires (P0.2 — mobile sibling of `engine_desktop::build`
     //     §7 / §7.1). Fire `SessionStart` then `InstructionsLoaded` now that the

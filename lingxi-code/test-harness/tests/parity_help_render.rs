@@ -19,12 +19,12 @@ fn golden_starts_with_locked_header() {
 }
 
 #[test]
-fn golden_has_69_lines() {
-    // 1 header + 68 VISIBLE commands = 69 lines (each `\n`-terminated).
+fn golden_has_75_lines() {
+    // 1 header + 74 VISIBLE commands = 75 lines (each `\n`-terminated).
     // The 26 hidden/disabled commands (is_palette_hidden) are filtered out,
     // matching claude-code's `commands.filter(c => !c.isHidden && !$te(c))`.
-    // (94 builtins − 26 hidden = 68, no DISABLE_*_COMMAND env set.)
-    assert_eq!(GOLDEN.matches('\n').count(), 69);
+    // (100 builtins − 26 hidden = 74, no DISABLE_*_COMMAND env set.)
+    assert_eq!(GOLDEN.matches('\n').count(), 75);
 }
 
 #[test]

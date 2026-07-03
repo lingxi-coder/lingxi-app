@@ -85,7 +85,7 @@ pub use notification::{NotificationError, NotificationRequest, NotificationServi
 pub use orchestrator::{
     curated_model_names, is_curated_model, parse_model_ref, AgentInfo, CheckStatus,
     CompactionSummary, ContextPressureBanner, ContextPressureLevel, CostSnapshot, DoctorCheck,
-    DoctorReport, DoctorSummary, HandleError, HookInfo, McpServerInfo, McpStatus,
+    DoctorReport, DoctorSummary, ForkOutcome, HandleError, HookInfo, McpServerInfo, McpStatus,
     MemoryEditorOutcome, ModelListing, OrchestratorHandle, OutputEvent, OutputStream,
     RateLimitSnapshot, StatusSnapshot, TurnOutcome,
 };

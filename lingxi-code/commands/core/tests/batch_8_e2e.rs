@@ -1,0 +1,150 @@
+//! End-to-end: build a registry with `register_all_builtin_commands` +
+//! `register_core_batch_8`, dispatch each of the 6 batch-8 commands through the
+//! `RegistrySlashDispatcher`, and verify behaviour against the default mock
+//! orchestrator.
+//!
+//! Batch-8 commands: `/fork`, `/goal`, `/recap`, `/reload-skills`,
+//! `/skill-doctor`, `/stop`.
+
+use command_api::CommandRegistry;
+use command_api::RegistrySlashDispatcher;
+use command_core::{register_all_builtin_commands, register_core_batch_8};
+use orchestrator::test_support::MockOrchestratorHandle;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use traits::{SlashCommandDispatcher, SlashDispatchResult};
+
+/// A fresh, uniquely-named temp directory (no `tempfile` dependency here — same
+/// idiom as the handler unit tests). Callers are responsible for removing it.
+fn tmp_root(tag: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock before epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "lingxi-batch8-e2e-{tag}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp root");
+    dir
+}
+
+/// Build a dispatcher with the full builtin surface plus batch-8, rooted in an
+/// empty temp skill tree so `/reload-skills` and `/skill-doctor` render their
+/// deterministic "nothing here" states. Returns the dispatcher, the mock
+/// handle, and the temp root (kept alive so the caller can clean it up).
+fn fresh(tag: &str) -> (RegistrySlashDispatcher, Arc<MockOrchestratorHandle>, PathBuf) {
+    let root = tmp_root(tag);
+    let cwd = root.join("repo");
+    let home = root.join("home");
+    let lingxi_home = home.join(".lingxi");
+    std::fs::create_dir_all(cwd.join(".git")).expect("git marker");
+    std::fs::create_dir_all(&lingxi_home).expect("lingxi home");
+
+    let mut reg = CommandRegistry::new();
+    register_all_builtin_commands(&mut reg);
+    let handle: Arc<MockOrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
+    let shared: Arc<RwLock<CommandRegistry>> = Arc::new(RwLock::new(CommandRegistry::new()));
+    register_core_batch_8(
+        &mut reg,
+        handle.clone(),
+        shared,
+        cwd,
+        lingxi_home,
+        None,
+        home,
+        Vec::new(),
+        false,
+    );
+    let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
+    (d, handle, root)
+}
+
+async fn handled(d: &RegistrySlashDispatcher, raw: &str) -> String {
+    match d.dispatch(raw).await {
+        SlashDispatchResult::Handled { display } => display,
+        other => panic!("{raw} expected Handled, got {other:?}"),
+    }
+}
+
+#[test]
+fn all_6_batch_8_names_resolve() {
+    let (d, _h, root) = fresh("resolve");
+    // Access the underlying registry through a fresh build to assert resolution.
+    let mut reg = CommandRegistry::new();
+    register_all_builtin_commands(&mut reg);
+    let handle: Arc<MockOrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
+    let shared: Arc<RwLock<CommandRegistry>> = Arc::new(RwLock::new(CommandRegistry::new()));
+    register_core_batch_8(
+        &mut reg,
+        handle,
+        shared,
+        PathBuf::from("."),
+        PathBuf::from("."),
+        None,
+        PathBuf::from("."),
+        Vec::new(),
+        false,
+    );
+    for name in ["fork", "goal", "recap", "reload-skills", "skill-doctor", "stop"] {
+        assert!(reg.resolve(name).is_some(), "/{name} missing");
+        assert!(reg.get_handler(name).is_some(), "/{name} handler missing");
+    }
+    drop(d);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn fork_without_directive_renders_usage() {
+    let (d, _h, root) = fresh("fork");
+    assert_eq!(handled(&d, "/fork").await, "Usage: /fork <directive>");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn goal_with_no_active_goal_reports_no_goal_set() {
+    let (d, _h, root) = fresh("goal");
+    assert_eq!(handled(&d, "/goal").await, "No goal set");
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn recap_with_empty_transcript_reports_nothing_to_recap() {
+    let (d, _h, root) = fresh("recap");
+    assert_eq!(
+        handled(&d, "/recap").await,
+        "Nothing to recap yet — send a message first."
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn reload_skills_on_empty_tree_reports_no_changes() {
+    let (d, _h, root) = fresh("reload");
+    assert_eq!(
+        handled(&d, "/reload-skills").await,
+        "Reloaded skills: 0 skills available (no changes)"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn skill_doctor_on_empty_tree_reports_no_skills() {
+    let (d, _h, root) = fresh("doctor");
+    assert_eq!(
+        handled(&d, "/skill-doctor").await,
+        "Skills loaded this session\n\n  (no skills loaded)\n\nAll loaded skills have been used at least once."
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn stop_requests_exit_and_returns_locked_literal() {
+    // Ensure no stray job-dir rewrite path is exercised.
+    std::env::remove_var("LINGXI_JOB_DIR");
+    let (d, mock, root) = fresh("stop");
+    assert_eq!(handled(&d, "/stop").await, "Session stopped.");
+    assert!(mock.was_exit_requested());
+    std::fs::remove_dir_all(root).ok();
+}

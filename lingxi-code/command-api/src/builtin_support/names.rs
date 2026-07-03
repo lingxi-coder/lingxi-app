@@ -1,4 +1,4 @@
-//! Locked constant tables of the 94 builtin command names + the 18 core names.
+//! Locked constant tables of the 100 builtin command names + the 18 core names.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
 //! Task 0 step 2 (name list) + Task 0 step 3 (18 core list).
@@ -12,15 +12,21 @@
 //! (`cost`, `stats` — 0 `name:"cost"`/`name:"stats"` command objects). The 18
 //! core count is unchanged: `cost`'s core slot was reassigned to `usage` (now
 //! the implemented command that absorbs cost/stats).
+//!
+//! The 2026-07-04 batch-8 slash-command pass added six newly-ported,
+//! implemented commands (`fork`, `goal`, `recap`, `reload-skills`,
+//! `skill-doctor`, `stop`), re-locking the total from 94 to **100**. The 18
+//! core count is unchanged (the new commands are wired via
+//! `command_core::register_core_batch_8`, not the core placeholder path).
 
 /// Every built-in slash command's runtime name (without leading `/`),
-/// ASCII-sorted. Locked at length **94** for v0.6.0.
+/// ASCII-sorted. Locked at length **100** for v0.6.0.
 ///
 /// Changing the count or membership requires bumping the parity fixture
 /// `crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json`
 /// (fixture filename retained for git-history continuity; the counts inside
 /// reflect the 94/47/18 lock per the 2026-06-20 slash-parity pass).
-pub const BUILTIN_COMMAND_NAMES: &[&str; 94] = &[
+pub const BUILTIN_COMMAND_NAMES: &[&str; 100] = &[
     "add-dir",
     "advisor",
     "agents",
@@ -55,6 +61,8 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 94] = &[
     "fast",
     "feedback",
     "files",
+    "fork",
+    "goal",
     "good-claude",
     "heapdump",
     "help",
@@ -84,8 +92,10 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 94] = &[
     "plugin",
     "privacy-settings",
     "rate-limit-options",
+    "recap",
     "release-notes",
     "reload-plugins",
+    "reload-skills",
     "remote-env",
     "remote-setup",
     "rename",
@@ -97,10 +107,12 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 94] = &[
     "security-review",
     "session",
     "share",
+    "skill-doctor",
     "skills",
     "status",
     "statusline",
     "stickers",
+    "stop",
     "summary",
     "tag",
     "tasks",
@@ -593,6 +605,15 @@ pub fn core_description(name: &str) -> &'static str {
         "upgrade" => "Upgrade to Max for higher rate limits and more Opus",
         "voice" => "Toggle voice mode",
         "x402" => "Configure x402 crypto payments (USDC on Base)",
+        // Batch-8 implemented commands (real handlers in `command-core`); their
+        // `description()` bodies carry the verbatim oracle strings, mirrored here
+        // so the palette / `/help` rows never show the placeholder fallback.
+        "fork" => "Spawn a background agent that inherits the full conversation",
+        "goal" => "Set a goal — keep working until the condition is met",
+        "recap" => "Generate a one-line session recap now",
+        "reload-skills" => "Pick up skills added or changed on disk during this session",
+        "skill-doctor" => "Show which loaded skills are unused and costing context",
+        "stop" => "Stop this background session; transcript and worktree are kept",
         _ => "(unimplemented in v0.6.0)",
     }
 }
@@ -612,8 +633,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn total_count_locked_at_94() {
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 94);
+    fn total_count_locked_at_100() {
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 100);
     }
 
     // ── #63 DISABLE_*_COMMAND env gates ──────────────────────────────────────
@@ -888,7 +909,7 @@ mod tests {
         // subset of the locked name list and therefore cannot change the
         // total count, membership, or ordering that the parity fixture locks.
         assert!(INTENTIONALLY_DISABLED_COMMANDS.len() < BUILTIN_COMMAND_NAMES.len());
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 94);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 100);
     }
 
     // ========================================================================
@@ -993,7 +1014,7 @@ mod tests {
             INTENTIONALLY_DISABLED_COMMANDS.len(),
             "23 + 3 == 26"
         );
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 94);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 100);
     }
 
     #[test]

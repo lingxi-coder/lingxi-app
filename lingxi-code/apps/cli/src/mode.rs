@@ -195,7 +195,8 @@ pub async fn dispatch(
             // channel, so it MUST branch before `build_tui_runtime` moves
             // `tui_build` into the iocraft runtime.
             if use_ratatui_backend() {
-                let code = run_ratatui(tui_build, Some(session_registration.clone())).await;
+                let code =
+                    run_ratatui(tui_build, Some(session_registration.clone()), Vec::new()).await;
                 // Unlink NOW (idempotent with Drop): the status forwarders may
                 // still hold `Arc` clones inside detached tasks, and the
                 // record must not outlive the interactive session.
@@ -350,9 +351,10 @@ pub(crate) async fn mount_tui_runtime(tui_runtime: tui::session::Runtime) -> i32
 /// status effect @222989611): `TurnStarted` → `busy`, `TurnEnded` → `idle`,
 /// a pending permission exchange → `waiting` with `waitingFor: "permission
 /// prompt"` (the binary's dialog-open reason), resolved exchange → `busy`.
-async fn run_ratatui(
+pub(crate) async fn run_ratatui(
     tui_build: crate::init::TuiBuild,
     registration: Option<Arc<crate::agents_registry::SessionRegistration>>,
+    resumed_messages: Vec<tui_rata::RenderedMessage>,
 ) -> i32 {
     let orchestrator: Arc<dyn OrchestratorHandle> = tui_build.runtime.orchestrator.clone();
     let (bridge_rx, permission_rx) = match &registration {
@@ -377,14 +379,22 @@ async fn run_ratatui(
         .iter()
         .find(|m| m.is_current)
         .map_or_else(|| "(default)".to_string(), |m| m.display.clone());
-    let welcome = vec![tui_rata::RenderedMessage::SystemText {
-        body: format!(
-            "✻ Welcome to LingXi Code ({})\n  /help for commands · Esc interrupts a running turn · Esc (idle) or Ctrl-C twice to quit\n  cwd: {}\n  model: {}",
-            session.doctor.cli_version, session.doctor.cwd, current_model
-        ),
-        timestamp: 0,
-        is_error: false,
-    }];
+    // A fresh launch opens on the welcome banner; a `--resume` mount opens on
+    // the replayed prior conversation instead (matching the iocraft resume UX,
+    // which shows the history with no fresh welcome). Both paths render through
+    // the SAME ratatui backend so the composer/footer chrome is identical.
+    let initial = if resumed_messages.is_empty() {
+        vec![tui_rata::RenderedMessage::SystemText {
+            body: format!(
+                "✻ Welcome to LingXi Code ({})\n  /help for commands · Esc interrupts a running turn · Esc (idle) or Ctrl-C twice to quit\n  cwd: {}\n  model: {}",
+                session.doctor.cli_version, session.doctor.cwd, current_model
+            ),
+            timestamp: 0,
+            is_error: false,
+        }]
+    } else {
+        resumed_messages
+    };
     let on_submit = move |prompt: String, cancel: CancellationToken| {
         let _ = turn_tx.send(tui_rata::TurnEvent::TurnStarted);
         let orch = orchestrator.clone();
@@ -400,7 +410,7 @@ async fn run_ratatui(
     };
     match tokio::task::spawn_blocking(move || {
         tui_rata::app::run_app(
-            welcome,
+            initial,
             session,
             bridge_rx,
             permission_rx,
@@ -660,7 +670,7 @@ fn memory_rows(
 /// Whether the ratatui backend is used. It is now the DEFAULT; set
 /// `LINGXI_TUI_BACKEND=iocraft` (case-insensitive) to opt back into the legacy
 /// iocraft TUI during the migration. Any other value (or unset) uses ratatui.
-fn use_ratatui_backend() -> bool {
+pub(crate) fn use_ratatui_backend() -> bool {
     ratatui_selected(std::env::var("LINGXI_TUI_BACKEND").ok().as_deref())
 }
 

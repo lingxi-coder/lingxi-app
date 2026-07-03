@@ -1420,7 +1420,16 @@ async fn mount_resumed_tui(
     // live turn continues the prior conversation.
     seed_orchestrator_session(&tui_build.runtime.orchestrator, session_id, &messages).await;
     // RENDER seed: map the raw JSONL into TUI scrollback rows (W38 seam).
+    // `tui::state::RenderedMessage`, `tui_rata::RenderedMessage` and the replay
+    // output are all the same `tui_core::message::RenderedMessage`, so the
+    // replayed history feeds either backend unchanged.
     let resumed_messages = tui::replay::rebuild_from_jsonl(&messages);
+    // Route resume through the SAME backend a fresh launch uses (ratatui is the
+    // default; iocraft only via LINGXI_TUI_BACKEND=iocraft) so the composer /
+    // footer chrome is identical instead of always dropping into iocraft.
+    if crate::mode::use_ratatui_backend() {
+        return crate::mode::run_ratatui(tui_build, None, resumed_messages).await;
+    }
     let tui_runtime = crate::mode::build_tui_runtime(tui_build, argv, resumed_messages).await;
     crate::mode::mount_tui_runtime(tui_runtime).await
 }

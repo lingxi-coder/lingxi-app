@@ -4,19 +4,27 @@
 //! `getUpsellMessage` (byte-locked strings landed in batch 3; the full
 //! subscription-aware arm port landed in batch 4 — see the CLOSED list below).
 //!
-//! Pure function: the nine `OutputEvent::RateLimit` header-derived fields in,
+//! (fix round 1) Carried over 1:1 from the iocraft backend's
+//! `tui/src/rate_limit_messages.rs` so [`crate::chat_widget::ChatWidget`] can
+//! fold `TurnEvent::RateLimit` header snapshots into
+//! `RenderedMessage::RateLimit` notices exactly like the old renderer. The
+//! locked upsell literals (previously
+//! `tui/src/components/messages/rate_limit.rs`) live in the local [`upsell`]
+//! module.
+//!
+//! Pure function: the nine `TurnEvent::RateLimit` header-derived fields in,
 //! `Option<ComposedRateLimit { text, upsell }>` out. Copy strings are
 //! byte-identical to the TS source — note that `rateLimitMessages.ts` uses
 //! STRAIGHT ASCII apostrophes throughout (`You've hit your…` literals at
 //! lines 169/233/238/340/343 are `'`/U+0027, NOT U+2019); the curly
 //! apostrophe/ellipsis literals live only in the `getUpsellMessage` strings,
-//! already byte-locked in
-//! [`crate::components::messages::rate_limit::upsell`].
+//! already byte-locked in [`upsell`].
 //!
 //! Reset-time formatting REUSES
-//! [`orchestrator::model::rate_limit::format_reset_time`] — the existing 1:1
+//! [`llm_client::model::rate_limit::format_reset_time`] — the existing 1:1
 //! port of TS `utils/format.ts` `formatResetTime` (en-US, 12-hour, minute
-//! omitted at `:00`, lowercased am/pm, `(<tz>)` suffix when requested).
+//! omitted at `:00`, lowercased am/pm, `(<tz>)` suffix when requested). The
+//! old backend reached the same function through its `orchestrator` re-export.
 //!
 //! ## Subscription granularity (batch-4: documented gaps CLOSED)
 //!
@@ -38,12 +46,31 @@
 //! `None` for non-subscribers (TSX :26 `if (!shouldShowUpsell) return null`,
 //! with `shouldShowUpsell = isClaudeAISubscriber()` at :78).
 
-use crate::components::messages::rate_limit::upsell;
-use orchestrator::model::rate_limit::format_reset_time;
+use llm_client::model::rate_limit::format_reset_time;
 use traits::env::is_env_truthy;
 use traits::subscription::SubscriptionSnapshot;
 
-/// The nine header-derived fields of `traits::OutputEvent::RateLimit`
+/// Locked upsell strings. Mirrors claude-code `getUpsellMessage`
+/// (`RateLimitMessage.tsx`). Note the curly apostrophe U+2019 in "you’re" and
+/// the ellipsis U+2026 in "Opening your options…". Carried byte-identical from
+/// the iocraft backend's `components/messages/rate_limit.rs`.
+pub mod upsell {
+    /// Max-20x + extra-usage enabled.
+    pub const EXTRA_USAGE_FINISH: &str = "/extra-usage to finish what you\u{2019}re working on.";
+    /// Max-20x, extra-usage disabled.
+    pub const LOGIN_SWITCH: &str = "/login to switch to an API usage-billed account.";
+    /// Auto-open menu.
+    pub const OPENING_OPTIONS: &str = "Opening your options\u{2026}";
+    /// Default (non-team, no extra-usage).
+    pub const UPGRADE: &str = "/upgrade to increase your usage limit.";
+    /// Team/enterprise, no billing access.
+    pub const EXTRA_USAGE_ADMIN: &str = "/extra-usage to request more usage from your admin.";
+    /// Fallback (team/enterprise generic).
+    pub const UPGRADE_OR_EXTRA: &str =
+        "/upgrade or /extra-usage to finish what you\u{2019}re working on.";
+}
+
+/// The nine header-derived fields of `TurnEvent::RateLimit`
 /// (each `None` when the provider did not send the corresponding
 /// `anthropic-ratelimit-unified-*` header). Mirrors the TS `ClaudeAILimits`
 /// shape minus the derived `isUsingOverage`, which [`compose_rate_limit`]
@@ -74,7 +101,7 @@ pub struct RateLimitInfo {
 
 /// A composed rate-limit notice: error/warning text plus the optional dim
 /// upsell line rendered under it by
-/// [`crate::components::messages::rate_limit::RateLimitMessage`].
+/// [`crate::history_cell::system::RateLimitCell`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposedRateLimit {
     /// The notice text (rendered error-colored).
@@ -178,7 +205,7 @@ fn compose_with(
 ///   (overageStatus === 'allowed' || overageStatus === 'allowed_warning')
 /// ```
 ///
-/// `pub` so the streaming layer's overage-transition notice
+/// `pub` so the chat widget's overage-transition notice
 /// (`useRateLimitWarningNotification.tsx`) shares the one derivation instead
 /// of re-deriving it.
 #[must_use]
@@ -303,16 +330,15 @@ fn early_warning_text(info: &RateLimitInfo, sub: &SubscriptionSnapshot) -> Optio
 
     // TS :222-224: `used = limits.utilization ? Math.floor(u * 100) :
     // undefined`, then truthiness-gated (`if (used && ...)`) — so both a
-    // falsy utilization (0) and a floored 0% behave as absent.
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "TS Math.floor of a 0-1 utilization fraction times 100; the floored value fits trivially"
-    )]
+    // falsy utilization (0) and a floored 0% behave as absent. Kept as an
+    // already-floored `f64` rendered with `{:.0}` (no int cast): identical
+    // digits for every in-range fraction, and non-finite values (JS-falsy
+    // `NaN`) are filtered like the TS truthiness gate.
     let used = info
         .utilization
         .filter(|u| *u != 0.0)
-        .map(|u| (u * 100.0).floor() as i64)
-        .filter(|n| *n != 0);
+        .map(|u| (u * 100.0).floor())
+        .filter(|n| *n != 0.0 && n.is_finite());
     let reset_time = fmt_reset(info.resets_at);
 
     // "Get upsell command based on subscription type and limit type" —
@@ -325,9 +351,9 @@ fn early_warning_text(info: &RateLimitInfo, sub: &SubscriptionSnapshot) -> Optio
 
     if let Some(used) = used {
         let base = if let Some(reset_time) = &reset_time {
-            format!("You've used {used}% of your {limit_name} \u{b7} resets {reset_time}")
+            format!("You've used {used:.0}% of your {limit_name} \u{b7} resets {reset_time}")
         } else {
-            format!("You've used {used}% of your {limit_name}")
+            format!("You've used {used:.0}% of your {limit_name}")
         };
         return Some(with_upsell(base));
     }
@@ -496,14 +522,22 @@ mod tests {
     }
 
     /// Unix-epoch seconds `delta` seconds from now (kept well within 24h so
-    /// `format_reset_time` stays on the time-only branch).
+    /// `format_reset_time` stays on the time-only branch). std-only (no
+    /// chrono dev-dependency in this crate).
     fn ts_in(delta: i64) -> u64 {
-        u64::try_from(chrono::Utc::now().timestamp() + delta).unwrap()
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("epoch")
+                .as_secs(),
+        )
+        .unwrap();
+        u64::try_from(now + delta).unwrap()
     }
 
     /// Expected `formatResetTime(ts, true)` output (showTimezone = true,
     /// showTime defaulted true) — computed through the SAME reused
-    /// orchestrator port so the assertions are deterministic.
+    /// llm-client port so the assertions are deterministic.
     fn reset(ts: u64) -> String {
         format_reset_time(Some(i64::try_from(ts).unwrap()), true, true).unwrap()
     }
@@ -1115,5 +1149,18 @@ mod tests {
             assert!(s.is_ascii(), "warning upsell copy must be straight ASCII");
             assert!(!s.contains('\u{2019}'));
         }
+    }
+
+    // ── locked upsell literals (RateLimitMessage.tsx getUpsellMessage) ────
+
+    #[test]
+    fn extra_usage_uses_curly_apostrophe() {
+        assert!(upsell::EXTRA_USAGE_FINISH.contains('\u{2019}'));
+        assert!(upsell::UPGRADE_OR_EXTRA.contains('\u{2019}'));
+    }
+
+    #[test]
+    fn opening_options_uses_ellipsis() {
+        assert!(upsell::OPENING_OPTIONS.ends_with('\u{2026}'));
     }
 }

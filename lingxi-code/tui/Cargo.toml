@@ -1,6 +1,6 @@
 [package]
 name = "tui"
-version = "0.12.0"   # 0.8.0 in M7-16; 0.10.0 in M9-09
+version = "0.12.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -10,88 +10,48 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-branding = { workspace = true }
+# The backend-neutral core extracted from `tui` during the iocraft → ratatui
+# migration. `tui` renders it with ratatui; it must never depend on iocraft.
 tui-core = { path = "../tui-core" }
-protocol = { path = "../protocol" }
-traits = { path = "../traits" }
-orchestrator = { path = "../orchestrator" }
-telemetry = { path = "../telemetry" }
-engine = { path = "../engine" }
 permission = { path = "../permission" }
-command-api = { path = "../command-api" }
-command-core = { path = "../commands/core" }
-session = { path = "../session" }
-# (M9-09 real data) Disk-skill loader for the `/skills` viewer: re-exports
-# `parse_skill_markdown`, `Skill`, `SkillSource`, `LoadedFrom`. The frozen
-# `OrchestratorHandle` exposes no `list_skills`, so the TUI walks the on-disk
-# `.claude/skills/` dirs itself (off the UI executor) via this in-workspace
-# abstraction. Depending on `skill-api` is not editing `traits/`.
-skill-api = { path = "../skill-api" }
-# (M7-14) CLAUDE.md hierarchy walker + loader — the M3 store the Memory editor
-# reads through and writes back to (§4 R7: no new persistence layer).
-memory = { path = "../memory" }
-# (Plan 3c C1) Credential store for the `/connect` screen's provider-key write
-# (`pump_store_provider_key` → `CredentialManager::set_provider_key`). `secret`
-# is a leaf crate (depends only on protocol/traits), so this is acyclic — the
-# host threads its shared `Arc<CredentialManager>` onto the App, mirroring the
-# `provider_availability` seam.
-secret = { path = "../secret" }
-tool-web = { path = "../tools/web" }
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-# (theme-detect) rustix::event::poll + rustix::io::read for the non-blocking TTY
-# pre-flight in `TimedStdin` — safe wrappers around poll(2)/read(2) that require
-# no `unsafe`. Not in [workspace.dependencies]; pinned to the 0.38 series already
-# in the workspace lockfile (pulled transitively by crossterm).
-rustix = { version = "0.38", features = ["event"] }
-
-iocraft = "=0.8.3"
-pulldown-cmark = { version = "=0.13.4", default-features = false }
-crossterm = { workspace = true, features = ["event-stream"] }
-# Syntax highlighting — pure-Rust fancy-regex backend (NO onig C dep). MSRV 1.82
-# verified in M7-02 Task 1 with the transitive pins below.
-syntect = { version = "=5.3.0", default-features = false, features = ["default-fancy"] }
-# Line- + word-level diff for StructuredDiff. Reuses the version already in
-# the workspace lockfile (2.7.0); 3.x requires Rust 1.85 > our MSRV 1.82.
-similar = "=2.7.0"
-# `fs` + `io-util`: the `/stats` walk + `/color` transcript append in `root.rs`
-# read/append session JSONL via `tokio::fs` + `AsyncWriteExt`. (`fs` was already
-# pulled transitively by the stats walk; declared explicitly here.)
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs", "io-util"] }
-tokio-util = { workspace = true, features = ["rt"] }
-tokio-stream = { workspace = true }
-futures = { workspace = true }
-async-trait = { workspace = true }
-thiserror = { workspace = true }
-tracing = "0.1"
-serde = { workspace = true, features = ["derive"] }
+# (fix round 1) `TurnEvent::ContextPressure`/`RateLimit` handling needs the
+# banner + subscription types the bridge events carry. Already in the graph via
+# tui-core (promoted from dev-dependencies; no new external dependency).
+traits = { path = "../traits" }
+# (fix round 1) `rate_limit_messages` reuses the existing 1:1
+# `formatResetTime` port instead of duplicating it (the old iocraft `tui`
+# reaches the SAME function through its `orchestrator` dependency).
+llm-client = { path = "../llm-client" }
+# Ratatui 0.29 uses crossterm 0.28 — the SAME major the workspace pins — so only
+# one crossterm version links (verified via `cargo tree -p tui -i crossterm`).
+# All three features are dependency-free cfg gates, also enabled by codex-rs/tui:
+# `scrolling-regions` unlocks `Backend::scroll_region_up/down` (bottom-anchored
+# custom terminal room-making); `unstable-widget-ref` unlocks `WidgetRef` and
+# `unstable-rendered-line-info` unlocks `Paragraph::line_count`, both needed by
+# the `renderable` height/render contract ported from codex.
+ratatui = { version = "0.29", features = [
+    "scrolling-regions",
+    "unstable-rendered-line-info",
+    "unstable-widget-ref",
+] }
+crossterm = { workspace = true }
+# Inline-image widget (kitty/iTerm2/sixel). v5 targets ratatui 0.29. Its default
+# `image-defaults` feature enables `image/default`, which pulls the AVIF codec
+# chain (avif-serialize/moxcms) that needs edition2024 / rustc 1.85 (> workspace
+# 1.82) — so default features are OFF and `image` is brought in directly with
+# only png+jpeg (pinned to 0.25.5 in Cargo.lock, below the 0.25.6 moxcms bump).
+ratatui-image = { version = "=5.0.0", default-features = false, features = ["crossterm"] }
+image = { version = "0.25.5", default-features = false, features = ["png", "jpeg"] }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
 serde_json = { workspace = true }
-uuid = { version = "1.10", features = ["v4"] }
-# (M7-03) Column-accurate wrap measurement for the line-based scroll model.
-# Exact-pinned to the version already locked in the workspace (0.1.14).
+# Display-column width for CJK/wide-char-aware cursor positioning in the composer.
 unicode-width = "=0.1.14"
-# (M7-06) Grapheme-correct cursor/column geometry for the multi-line editor.
-# Exact-pinned to the version already resolved in the workspace lockfile.
-unicode-segmentation = "=1.12.0"
-# (M7-11) Config-home resolution for the Doctor screen (`~/.claude`). Already
-# a direct dep of bridge/cli/orchestrator at the same major (5.0.1 in the
-# workspace lockfile) — no new major introduced.
-dirs = "5"
-url = "2"
-# (cp-05) Gitignore-aware recursive walk fallback for `@`-completion when
-# `dir` isn't a git repo (the in-process equivalent of claude-code's `rg
-# --hidden` fallback). Already a workspace dep (permission/orchestrator).
-ignore = "0.4"
-
-[dev-dependencies]
-insta = { version = "1.40", features = ["yaml"] }
-assert_cmd = "=2.0.16"
-predicates = "3"
-tempfile = "3"
-tokio = { workspace = true, features = ["test-util"] }
-# (M7-13) Internal path-dep for `MockOrchestratorHandle` in the Settings
-# read-real-values + edit-through-handle behavior tests. Not a new workspace
-# dep; no cycle (orchestrator does not depend on tui).
-orchestrator = { path = "../orchestrator" }
+uuid = { version = "1.10", features = ["v4"] }
+async-trait = { workspace = true }
+session = { path = "../session" }
+protocol = { path = "../protocol" }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

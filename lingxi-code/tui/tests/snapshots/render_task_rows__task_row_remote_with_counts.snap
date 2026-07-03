@@ -1,6 +1,0 @@
----
-source: tui/tests/render_task_rows.rs
-assertion_line: 54
-expression: "render_remote_agent_row(\"deploy\", \"running\", Some((3, 7)))"
----
-◇ deploy · 3/7

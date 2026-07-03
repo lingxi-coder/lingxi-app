@@ -22,7 +22,7 @@
 //! - `User` tool-result     → [`RenderedMessage::UserToolResult`], grouped under
 //!   its originating tool-use via that side-table (the claude-code
 //!   `sourceToolUseID` correlation) and decorated with the diff inputs derived
-//!   by [`crate::streaming::diff_inputs_for`] — exactly as the live
+//!   by [`tui_core::active_turn::diff_inputs_for`] — exactly as the live
 //!   `ToolUseResult` event does.
 //! - `Assistant`/`User` thinking → [`RenderedMessage::AssistantThinking`]
 //!   (collapsed) / [`RenderedMessage::AssistantRedactedThinking`] (no body).
@@ -38,7 +38,7 @@
 //! the common turn kinds (user/assistant text, tool-use, tool-result) replay in
 //! order.
 
-use crate::state::RenderedMessage;
+use tui_core::message::RenderedMessage;
 use protocol::{ContentBlock, ConversationMessage, ToolUseId};
 use std::collections::HashMap;
 
@@ -173,7 +173,7 @@ fn push_user_block(
             let (old_string, new_string, file_path) = tool_inputs
                 .get(tool_use_id)
                 .map_or((None, None, None), |input| {
-                    crate::streaming::diff_inputs_for(&tool, input)
+                    tui_core::active_turn::diff_inputs_for(&tool, input)
                 });
             // The live path stores the raw JSON result payload; the persisted
             // transcript stores the stringified `content`. Re-wrap it as a JSON

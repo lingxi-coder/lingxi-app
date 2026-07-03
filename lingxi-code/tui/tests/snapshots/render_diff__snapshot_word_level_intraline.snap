@@ -1,7 +1,0 @@
----
-source: tui/tests/render_diff.rs
-assertion_line: 69
-expression: "structure(&render(\"function oldName(p)\\n\", \"function newName(p)\\n\",\nSome(\"x.js\"), ThemeName::Dark))"
----
-[C]1 - [P]function[P] [E]oldName(p)
-[C]1 + [P]function[P] [E]newName(p)

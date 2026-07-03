@@ -1,6 +1,0 @@
----
-source: tui/tests/render_task_rows.rs
-assertion_line: 55
-expression: "render_local_workflow_row(\"pipeline\", \"running\", Some(4), false)"
----
-pipeline (4 agents)

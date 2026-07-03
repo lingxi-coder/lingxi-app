@@ -1,6 +1,0 @@
----
-source: crates/tui/tests/render_user_bash.rs
-assertion_line: 14
-expression: element.to_string()
----
-! ls -la

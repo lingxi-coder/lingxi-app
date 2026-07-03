@@ -1,9 +1,0 @@
----
-source: crates/tui/src/screens/settings/settings.rs
-expression: out
----
-Settings
-model: source=user
-trustedDirectories: source=defaults
-telemetryEnabled: source=(default)
-Read-only · edit via Config tab ($EDITOR) · Esc to close

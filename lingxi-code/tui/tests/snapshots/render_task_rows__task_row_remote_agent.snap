@@ -1,6 +1,0 @@
----
-source: tui/tests/render_task_rows.rs
-assertion_line: 29
-expression: "render_task_row(&row(\"remote_agent\", \"running\", \"deploy\"))"
----
-◇ deploy · running…

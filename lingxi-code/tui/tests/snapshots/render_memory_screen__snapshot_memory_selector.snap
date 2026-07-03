@@ -1,8 +1,0 @@
----
-source: crates/tui/tests/render_memory_screen.rs
-expression: out
----
-Memory files
-❯ Project memory  Checked in at ./LINGXI.md
-  User memory (new)  Saved in ~/.lingxi/LINGXI.md
-↑/↓ select · Enter edit · Esc close

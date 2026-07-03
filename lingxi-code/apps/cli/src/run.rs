@@ -1379,9 +1379,8 @@ async fn resume_resolved_session(
 /// with the prior conversation.
 ///
 /// Reuses the FRESH TUI mount end-to-end ([`crate::init::build_runtime_for_tui`]
-/// → [`crate::mode::build_tui_runtime`] → [`crate::mode::mount_tui_runtime`]),
-/// adding exactly the two resume seeds the W38 seam + the engine resume path
-/// expose:
+/// → [`crate::mode::run_ratatui`]), adding exactly the two resume seeds the W38
+/// seam + the engine resume path expose:
 ///   1. ENGINE side — overwrite the freshly-built orchestrator's in-memory
 ///      `SessionState` (`history` + `session_id`) with the replayed transcript
 ///      via [`seed_orchestrator_session`], so a follow-up turn continues the
@@ -1419,19 +1418,12 @@ async fn mount_resumed_tui(
     // ENGINE seed: replay the transcript into the orchestrator's session so a
     // live turn continues the prior conversation.
     seed_orchestrator_session(&tui_build.runtime.orchestrator, session_id, &messages).await;
-    // RENDER seed: map the raw JSONL into TUI scrollback rows (W38 seam).
-    // `tui::state::RenderedMessage`, `tui_rata::RenderedMessage` and the replay
-    // output are all the same `tui_core::message::RenderedMessage`, so the
-    // replayed history feeds either backend unchanged.
+    // RENDER seed: map the raw JSONL into TUI scrollback rows (W38 seam), then
+    // launch the ratatui backend with that replayed scrollback. Resume has no
+    // SessionRegistration (fresh launches register; resume does not), so no
+    // status forwarder is threaded.
     let resumed_messages = tui::replay::rebuild_from_jsonl(&messages);
-    // Route resume through the SAME backend a fresh launch uses (ratatui is the
-    // default; iocraft only via LINGXI_TUI_BACKEND=iocraft) so the composer /
-    // footer chrome is identical instead of always dropping into iocraft.
-    if crate::mode::use_ratatui_backend() {
-        return crate::mode::run_ratatui(tui_build, None, resumed_messages).await;
-    }
-    let tui_runtime = crate::mode::build_tui_runtime(tui_build, argv, resumed_messages).await;
-    crate::mode::mount_tui_runtime(tui_runtime).await
+    crate::mode::run_ratatui(tui_build, None, resumed_messages).await
 }
 
 /// Seed an already-built orchestrator's in-memory [`engine::SessionState`] from
@@ -1511,8 +1503,8 @@ async fn run_resume_stdio_picker(argv: &Argv, sink: &dyn OutputSink) -> i32 {
     }
 }
 
-/// `--resume` (no id) under a full TTY — open the iocraft Resume screen over
-/// the same M5-08 loader rows. After the TUI returns, read the chosen UUID:
+/// `--resume` (no id) under a full TTY — open the ratatui Resume picker over
+/// the same M5-08 loader rows. After the picker returns, read the chosen UUID:
 /// `Some(uuid)` → "Resumed session {uuid}"; `None` → "Cancelled."
 async fn run_resume_iocraft(argv: &Argv, sink: &dyn OutputSink) -> i32 {
     let rows = match load_resume_rows().await {
@@ -1531,14 +1523,47 @@ async fn run_resume_iocraft(argv: &Argv, sink: &dyn OutputSink) -> i32 {
         }
     };
 
-    match tui::session::run_resume_picker(rows).await {
-        Ok(Some(uuid)) => {
+    // Map the loader metadata into the picker's lean rows (the picker crate does
+    // not depend on the `session` loader). The dim metadata line is built with
+    // the picker's `relative_time_ago` so it stays byte-identical to the old
+    // iocraft screen: `<relative time ago> · <N> messages`.
+    let now = std::time::SystemTime::now();
+    let picker_rows: Vec<tui::resume::ResumeRow> = rows
+        .iter()
+        .map(|m| {
+            let msgs = if m.message_count == 1 {
+                "1 message".to_string()
+            } else {
+                format!("{} messages", m.message_count)
+            };
+            tui::resume::ResumeRow {
+                uuid: m.uuid,
+                title: m.title.clone(),
+                metadata_label: format!(
+                    "{} \u{00b7} {}",
+                    tui::resume::relative_time_ago(m.modified, now),
+                    msgs
+                ),
+            }
+        })
+        .collect();
+
+    // Blocking terminal IO → off the async runtime, like the chat `run_app`.
+    let picked =
+        tokio::task::spawn_blocking(move || tui::resume::run_resume_picker(picker_rows)).await;
+
+    match picked {
+        Ok(Ok(Some(uuid))) => {
             sink.text(&format!("Resumed session {uuid}\n")).await;
             exit_codes::SUCCESS
         }
-        Ok(None) => {
+        Ok(Ok(None)) => {
             sink.text("Cancelled.\n").await;
             exit_codes::SUCCESS
+        }
+        Ok(Err(e)) => {
+            sink.error("runtime", &e.to_string()).await;
+            exit_codes::RUNTIME_ERROR
         }
         Err(e) => {
             sink.error("runtime", &e.to_string()).await;
@@ -1910,69 +1935,6 @@ mod tests {
             &s.history[1],
             protocol::ConversationMessage::Assistant { .. }
         ));
-    }
-
-    #[tokio::test]
-    async fn resumed_tui_runtime_carries_replay_and_live_orchestrator() {
-        // The render-side seam: `build_tui_runtime` with replayed scrollback
-        // produces a `tui::session::Runtime` whose `resumed_messages` match
-        // `rebuild_from_jsonl(transcript)` and which carries a live orchestrator
-        // + bridge (not NOT_IMPLEMENTED).
-        let argv = tui_argv();
-        let build = crate::init::build_runtime_for_tui(&argv)
-            .await
-            .expect("build_runtime_for_tui");
-
-        let messages = vec![
-            jsonl_line("user", &serde_json::json!("resume me")),
-            jsonl_line("assistant", &serde_json::json!("resumed")),
-        ];
-        let expected = tui::replay::rebuild_from_jsonl(&messages);
-        assert_eq!(expected.len(), 2, "two rows rebuilt from the transcript");
-
-        let tui_runtime = crate::mode::build_tui_runtime(build, &argv, expected.clone()).await;
-
-        // Replayed scrollback is carried verbatim into the TUI runtime.
-        assert_eq!(
-            tui_runtime.resumed_messages.len(),
-            expected.len(),
-            "resumed_messages match rebuild_from_jsonl output"
-        );
-        assert!(matches!(
-            &tui_runtime.resumed_messages[0],
-            tui::state::RenderedMessage::UserText { body, .. } if body == "resume me"
-        ));
-        // A live orchestrator + bridge are wired (the mount is real, not stubbed).
-        assert!(
-            tui_runtime.orchestrator.is_some(),
-            "resumed runtime carries a live orchestrator handle"
-        );
-        assert!(
-            tui_runtime.bridge.is_some(),
-            "resumed runtime carries a live streaming bridge"
-        );
-        assert!(
-            tui_runtime.turn_tx.is_some(),
-            "resumed runtime carries the turn-spawn sender"
-        );
-    }
-
-    #[tokio::test]
-    async fn fresh_tui_runtime_carries_no_replay() {
-        // SAFETY: a FRESH launch passes an empty replay vec, so the resulting
-        // runtime's `resumed_messages` is empty — byte-identical to the
-        // pre-M5-13 fresh mount (no scrollback seed).
-        let argv = tui_argv();
-        let build = crate::init::build_runtime_for_tui(&argv)
-            .await
-            .expect("build_runtime_for_tui");
-        let tui_runtime = crate::mode::build_tui_runtime(build, &argv, Vec::new()).await;
-        assert!(
-            tui_runtime.resumed_messages.is_empty(),
-            "a fresh mount seeds no replayed scrollback"
-        );
-        assert!(tui_runtime.orchestrator.is_some());
-        assert!(tui_runtime.bridge.is_some());
     }
 
     // ── P5 Phase 3: pure control-arm classification ──────────────────────────

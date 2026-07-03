@@ -1,8 +1,0 @@
----
-source: crates/tui/tests/snapshot_palette_completion.rs
-assertion_line: 34
-expression: out
----
-+ src/lib.rs
-+ src/main.rs
-+ README.md

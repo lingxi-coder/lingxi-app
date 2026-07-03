@@ -633,7 +633,7 @@ impl Renderable for BottomPane {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         if let Some(view) = self.full_frame_view() {
             view.render(area, buf);
-            // TEMP-VERIFY: fall through so the composer also renders.
+            return;
         }
         let zones = self.zones(area);
         Paragraph::new(self.status_line()).render(zones[0], buf);

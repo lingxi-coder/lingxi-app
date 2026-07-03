@@ -18,6 +18,7 @@ pub mod multiagent;
 pub mod orchestrator_bridge;
 pub mod permission_bridge;
 pub mod recent_models;
+pub mod status_line_command;
 pub mod render;
 pub mod retry_ux;
 pub mod telemetry;

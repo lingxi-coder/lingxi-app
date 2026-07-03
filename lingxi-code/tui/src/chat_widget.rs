@@ -121,6 +121,12 @@ pub struct ChatWidget {
     /// (TS-conservative), exactly like the old backend's
     /// `AppState::subscription_snapshot`.
     subscription: Option<traits::subscription::SharedSubscription>,
+    /// Composition-root-shared custom-statusline slot (`None` unless the
+    /// embedder wires one via [`Self::set_status_line`]). The widget writes the
+    /// live pump inputs (cost / rate-limit utilization) + marks it dirty on
+    /// `TurnEnded`; the async pump (CLI `run_ratatui`) runs the configured
+    /// command and writes back `text`, which the bottom pane renders.
+    status_line: Option<crate::status_line::SharedStatusLine>,
     /// Validated terminal escape sequences from
     /// [`TurnEvent::TerminalSequence`] (hook-returned, allowlisted +
     /// BEL-normalized by the orchestrator), staged until the app loop drains
@@ -152,6 +158,7 @@ impl ChatWidget {
             last_rate_limit_text: None,
             has_shown_overage_notification: false,
             subscription: None,
+            status_line: None,
             pending_terminal_sequences: Vec::new(),
         }
     }
@@ -288,10 +295,14 @@ impl ChatWidget {
                 self.current_turn = None;
                 self.turn_started_at = None;
                 self.activity = None;
+                // Re-arm the statusline pump (claude-code executes the command
+                // on turn boundaries; the pump is debounced single-flight).
+                self.with_status_line(|s| s.dirty = true);
             }
             TurnEvent::CostUpdated(cost_str) => {
                 // Update the status-row cost so the next render pass shows the
                 // post-turn dollar amount (old backend: `state.status.cost`).
+                self.with_status_line(|s| s.data.cost = cost_str.clone());
                 self.cost = Some(cost_str);
             }
             TurnEvent::ContextPressure { banner } => {
@@ -345,15 +356,29 @@ impl ChatWidget {
                     fallback_available,
                 });
             }
-            // Deliberately non-visible (named arms, not a wildcard):
             // `RawUtilization`'s ONLY consumer is the configured statusline
-            // *command*'s `rate_limits` input (StatusLine.tsx:50-65) — an
-            // embedder-config surface this backend does not have ("statusline
-            // -only, unlike RateLimit", per the old backend); the reserved
-            // `PermissionRequest` variant is never emitted by the bridge —
-            // live prompts arrive through the `permission_bridge` channel
-            // into [`Self::open_permission`] instead.
-            TurnEvent::RawUtilization { .. } | TurnEvent::PermissionRequest { .. } => {}
+            // command's `rate_limits` input: fold it into the shared pump slot
+            // (no visible row of its own).
+            TurnEvent::RawUtilization {
+                five_hour_utilization,
+                five_hour_resets_at,
+                seven_day_utilization,
+                seven_day_resets_at,
+            } => {
+                self.with_status_line(|s| {
+                    s.data.raw_utilization =
+                        Some(tui_core::status_line_command::RawUtilizationSnapshot {
+                            five_hour_utilization,
+                            five_hour_resets_at,
+                            seven_day_utilization,
+                            seven_day_resets_at,
+                        });
+                });
+            }
+            // The reserved `PermissionRequest` variant is never emitted by the
+            // bridge — live prompts arrive through the `permission_bridge`
+            // channel into [`Self::open_permission`] instead.
+            TurnEvent::PermissionRequest { .. } => {}
         }
     }
 
@@ -438,6 +463,37 @@ impl ChatWidget {
         self.subscription = Some(slot);
     }
 
+    /// Wire the composition root's shared custom-statusline slot and seed its
+    /// static pump inputs (model + cwd) from the current session. The async
+    /// pump reads this slot; `TurnEvent`s keep the live cost / rate-limit
+    /// inputs fresh (see [`Self::apply_turn_event`]).
+    pub fn set_status_line(&mut self, slot: crate::status_line::SharedStatusLine) {
+        if let Ok(mut s) = slot.lock() {
+            s.data.model = self.current_model_display();
+            s.data.cwd = std::path::PathBuf::from(&self.session.doctor.cwd);
+        }
+        self.status_line = Some(slot);
+    }
+
+    /// The current model's display string (falls back to `(default)`), reused
+    /// for the statusline payload's `model.id`/`display_name`.
+    fn current_model_display(&self) -> String {
+        self.session
+            .models
+            .iter()
+            .find(|m| m.is_current)
+            .map_or_else(|| "(default)".to_string(), |m| m.display.clone())
+    }
+
+    /// Update one field of the shared statusline slot (no-op when unwired).
+    fn with_status_line<F: FnOnce(&mut crate::status_line::StatusLineShared)>(&self, f: F) {
+        if let Some(slot) = &self.status_line {
+            if let Ok(mut s) = slot.lock() {
+                f(&mut s);
+            }
+        }
+    }
+
     /// Drain the staged `TurnEvent::TerminalSequence` escapes (FIFO order).
     /// The app loop writes them through to the terminal's writer.
     #[must_use]
@@ -493,6 +549,7 @@ impl ChatWidget {
     pub fn desired_height(&self, width: u16) -> u16 {
         let running = self.pane_status().running;
         self.live_tail_height(width)
+            .saturating_add(self.status_line_height())
             .saturating_add(self.bottom_pane.desired_height_for(width, running))
     }
 
@@ -518,6 +575,29 @@ impl ChatWidget {
             );
             Renderable::render(line, row_area, buf);
         }
+        // The custom statusline row(s) sit directly above the pane (below the
+        // live tail). Carve them off the top of the pane area, drawn dim.
+        let sl = self.status_line_lines();
+        let sl_h = u16::try_from(sl.len()).unwrap_or(0).min(pane_area.height);
+        for (row, line) in sl.iter().enumerate() {
+            let row_area = Rect::new(
+                pane_area.x,
+                pane_area.y + u16::try_from(row).unwrap_or(u16::MAX),
+                pane_area.width,
+                1,
+            );
+            ratatui::widgets::Widget::render(
+                ratatui::widgets::Paragraph::new(line.clone()),
+                row_area,
+                buf,
+            );
+        }
+        let pane_area = Rect::new(
+            pane_area.x,
+            pane_area.y + sl_h,
+            pane_area.width,
+            pane_area.height.saturating_sub(sl_h),
+        );
         self.bottom_pane.render(pane_area, buf);
     }
 
@@ -527,6 +607,15 @@ impl ChatWidget {
     #[must_use]
     pub fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
         let (_, pane_area) = self.split_area(area, self.live_tail_height(area.width));
+        // The statusline row(s) sit above the pane (see `render`); shift the
+        // pane down by their height so the composer cursor lands correctly.
+        let sl_h = self.status_line_height().min(pane_area.height);
+        let pane_area = Rect::new(
+            pane_area.x,
+            pane_area.y + sl_h,
+            pane_area.width,
+            pane_area.height.saturating_sub(sl_h),
+        );
         self.bottom_pane.cursor_pos(pane_area)
     }
 
@@ -866,6 +955,35 @@ impl ChatWidget {
     /// How many rows the live tail wants at `width` (zero when idle).
     fn live_tail_height(&self, width: u16) -> u16 {
         line_count(&self.live_tail(width))
+    }
+
+    /// The custom-statusline command output as dim rows, read from the shared
+    /// pump slot (empty when no statusline is configured or the command has not
+    /// produced output yet). Rendered just above the bottom pane.
+    fn status_line_lines(&self) -> Vec<ratatui::text::Line<'static>> {
+        let Some(slot) = &self.status_line else {
+            return Vec::new();
+        };
+        let Ok(shared) = slot.lock() else {
+            return Vec::new();
+        };
+        let Some(text) = shared.text.as_deref() else {
+            return Vec::new();
+        };
+        let dim = crate::style_adapter::to_ratatui(self.theme.dim);
+        text.lines()
+            .map(|l| {
+                ratatui::text::Line::from(ratatui::text::Span::styled(
+                    l.to_string(),
+                    ratatui::style::Style::default().fg(dim),
+                ))
+            })
+            .collect()
+    }
+
+    /// Row count the custom statusline wants (0 when none).
+    fn status_line_height(&self) -> u16 {
+        u16::try_from(self.status_line_lines().len()).unwrap_or(u16::MAX)
     }
 
     /// Split `area` into `(tail_area, pane_area)`: the pane keeps (at least)

@@ -254,6 +254,7 @@ pub fn run_app(
     events_rx: UnboundedReceiver<TurnEvent>,
     permission_rx: Receiver<PermissionExchange>,
     subscription: Option<traits::subscription::SharedSubscription>,
+    status_line: Option<crate::status_line::SharedStatusLine>,
     on_submit: impl FnMut(String, CancellationToken),
     on_switch_model: impl FnMut(String, Option<String>),
 ) -> io::Result<()> {
@@ -283,6 +284,9 @@ pub fn run_app(
     app.chat_widget.set_theme(startup_theme);
     if let Some(slot) = subscription {
         app.chat_widget.set_subscription(slot);
+    }
+    if let Some(slot) = status_line {
+        app.chat_widget.set_status_line(slot);
     }
     app.run(&mut terminal)
 }

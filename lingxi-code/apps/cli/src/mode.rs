@@ -263,19 +263,68 @@ pub(crate) async fn run_ratatui(
             let _ = orch.switch_model(&model, profile.as_deref()).await;
         });
     };
-    match tokio::task::spawn_blocking(move || {
+    // (statusline) Shared slot for the custom `statusLine` command, built from
+    // the User+Local setting, plus the debounced single-flight pump (the
+    // claude-code `StatusLine.tsx` execute-on-change analog: 300ms tick, run
+    // only when the widget re-armed `dirty` on a turn boundary, set-only-on-
+    // change). The slot is shared with the render thread via `run_app`.
+    let status_line = tui::status_line::new_slot(read_status_line_config());
+    let pump_slot = status_line.clone();
+    let status_pump = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(300));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            // Build the (command, stdin-json) payload under the lock, then DROP
+            // it before the off-thread command run. Skip unless re-armed.
+            let payload = {
+                let Ok(mut s) = pump_slot.lock() else {
+                    continue;
+                };
+                if !s.dirty {
+                    continue;
+                }
+                s.dirty = false;
+                tui::status_line::build_payload(&s)
+            };
+            let Some((command, stdin_json)) = payload else {
+                continue;
+            };
+            let out = tokio::task::spawn_blocking(move || {
+                tui_core::status_line_command::run_status_line_command(
+                    &command,
+                    &stdin_json,
+                    tui_core::status_line_command::STATUS_LINE_TIMEOUT,
+                )
+            })
+            .await
+            .unwrap_or_default();
+            // `run_status_line_command` already returns formatted text — set
+            // only on change (claude-code `prev.statusLineText === text`).
+            if let Some(text) = out {
+                if let Ok(mut s) = pump_slot.lock() {
+                    if s.text.as_deref() != Some(text.as_str()) {
+                        s.text = Some(text);
+                    }
+                }
+            }
+        }
+    });
+    let run_result = tokio::task::spawn_blocking(move || {
         tui::app::run_app(
             welcome,
             session,
             bridge_rx,
             permission_rx,
             Some(subscription),
+            Some(status_line),
             on_submit,
             on_switch_model,
         )
     })
-    .await
-    {
+    .await;
+    status_pump.abort();
+    match run_result {
         Ok(Ok(())) => {
             // Print the BARE uuid (not the `sess:`-prefixed SessionId Display):
             // it matches the on-disk `<uuid>.jsonl` and what `--resume` resolves
@@ -532,6 +581,37 @@ fn settings_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
     let lingxi_home = crate::run::lingxi_home_dir();
     let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     (lingxi_home, project_dir)
+}
+
+/// Read + merge the `statusLine` setting from the USER
+/// (`~/.lingxi/settings.json`) and LOCAL (`<proj>/.lingxi/settings.local.json`)
+/// tiers, Local-over-User, and parse it into a [`StatusLineConfig`]. `None`
+/// when neither tier carries a `statusLine` object.
+fn read_status_line_config_from(
+    lingxi_home: &std::path::Path,
+    project_dir: &std::path::Path,
+) -> Option<tui_core::status_line_command::StatusLineConfig> {
+    use migrations::settings_update::{read_settings_map, settings_path, SettingsSource};
+    // Local-over-User: read User first, then let Local's `statusLine` override.
+    let mut status_line: Option<serde_json::Value> = None;
+    for source in [SettingsSource::User, SettingsSource::Local] {
+        let p = settings_path(source, lingxi_home, project_dir);
+        if let Ok(map) = read_settings_map(&p) {
+            if let Some(v) = map.get("statusLine") {
+                status_line = Some(v.clone());
+            }
+        }
+    }
+    status_line
+        .as_ref()
+        .and_then(tui_core::status_line_command::StatusLineConfig::from_settings_value)
+}
+
+/// Live wrapper over [`read_status_line_config_from`], resolving the User+Local
+/// settings roots via [`settings_dirs`].
+fn read_status_line_config() -> Option<tui_core::status_line_command::StatusLineConfig> {
+    let (lingxi_home, project_dir) = settings_dirs();
+    read_status_line_config_from(&lingxi_home, &project_dir)
 }
 
 /// True iff `skipDangerousModePermissionPrompt` is truthy in EITHER the user

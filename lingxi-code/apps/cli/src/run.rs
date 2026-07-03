@@ -968,27 +968,55 @@ pub async fn run_stream_json_input_loop(
 /// Returns `(supportsEffort, supportedEffortLevels, supportsAdaptiveThinking,
 ///           supportsFastMode, supportsAutoMode)`.
 ///
-/// Known Anthropic models are hard-coded based on the golden capture
-/// (GROUND-TRUTH-init.md). Unknown models get all-false / empty defaults.
+/// Refreshed to the 2.1.198 registry truth. The binary's initialize models
+/// builder (print.ts @223434963) computes per-row: effort = `iw` (registry
+/// "effort" capability), levels = `UR = [low,medium,high,xhigh,max]` filtered
+/// by `BIe` ("max_effort") and `Zne` ("xhigh_effort", which additionally
+/// EXCLUDES opus-4-6/sonnet-4-6 by name), adaptive = `Vit`
+/// ("adaptive_thinking"), fast = `_h` (registry "fast_mode" or the
+/// opus-4-7/opus-4-8 pair, gated on firstParty via `lc()`), auto = `mTe`
+/// (true on firstParty for every non-legacy model). Capability sets come from
+/// the baked-in catalog (binary blob @207769000..207775500). Legacy Claude
+/// ids (claude-3-*, opus-4-0/4-1/4-5, sonnet-4-0/4-5, haiku-4-5) are the
+/// shared exclusion list in all four predicates → all-false. Unknown /
+/// non-Anthropic models keep all-false / empty defaults (multi-provider
+/// divergence: the binary's `RN(Fh(e))` non-1P fallback has no lingxi seam).
 fn model_capabilities(
     request_model: &str,
 ) -> (bool, Vec<&'static str>, bool, bool, bool) {
+    /// `UR` — the full effort ladder (binary: `UR=["low","medium","high",
+    /// "xhigh","max"]`).
+    const LEVELS_WITH_XHIGH: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+    /// `UR` minus `xhigh` (`Zne` excludes opus-4-6 / sonnet-4-6 by name).
+    const LEVELS_NO_XHIGH: &[&str] = &["low", "medium", "high", "max"];
+
     let rm = request_model.to_lowercase();
-    if rm.contains("opus") {
-        // claude-opus-4 / opus[1m]: supportsEffort + adaptiveThinking
-        (true, vec!["low", "medium", "high"], true, false, false)
-    } else if rm.contains("sonnet") {
-        // claude-sonnet-4: supportsEffort + fastMode + autoMode
-        (true, vec!["low", "medium", "high"], false, true, true)
-    } else if rm.contains("haiku") {
-        // claude-haiku-3-5: no special capabilities in the golden capture
-        (false, vec![], false, false, false)
-    } else if rm == "default" {
-        // The "default" pseudo-model routes to the system default.
-        (false, vec![], false, false, false)
-    } else {
-        (false, vec![], false, false, false)
+
+    // The "default" pseudo-model: the binary computes capabilities on the
+    // RESOLVED model (`r = R_()` for the Default row); lingxi's default
+    // resolves to claude-sonnet-5 (2.1.197/198, M1).
+    if rm == "default" {
+        return model_capabilities("claude-sonnet-5");
     }
+
+    // opus-4-7 / opus-4-8: full ladder incl. xhigh, adaptive thinking, and
+    // the ONLY two fast-mode models (`_h`: registry "fast_mode" / name pair).
+    if rm.contains("opus-4-7") || rm.contains("opus-4-8") {
+        return (true, LEVELS_WITH_XHIGH.to_vec(), true, true, true);
+    }
+    // sonnet-5 / fable-5 / mythos-5: full ladder + adaptive + auto, NO fast
+    // mode (their registry entries carry no "fast_mode"). NB the substring
+    // hazard is safe: "claude-sonnet-4-5" does NOT contain "sonnet-5".
+    if rm.contains("sonnet-5") || rm.contains("fable-5") || rm.contains("mythos-5") {
+        return (true, LEVELS_WITH_XHIGH.to_vec(), true, false, true);
+    }
+    // sonnet-4-6 / opus-4-6: effort WITHOUT xhigh (`Zne` name-excludes them;
+    // registry has "max_effort" but no "xhigh_effort"), adaptive, auto.
+    if rm.contains("sonnet-4-6") || rm.contains("opus-4-6") {
+        return (true, LEVELS_NO_XHIGH.to_vec(), true, false, true);
+    }
+    // Legacy Claude exclusions + unknown / non-Anthropic ids: all-false.
+    (false, vec![], false, false, false)
 }
 
 /// Drive a one-shot `--output-format json` / `--json` conversation.
@@ -1962,6 +1990,67 @@ mod tests {
         };
         assert_eq!(payload["version"], traits::CLAUDE_CODE_VERSION);
         assert!(payload.get("buildTime").is_some());
+    }
+
+    /// The initialize-response capability golden, refreshed to the 2.1.198
+    /// registry (M1b). Each row mirrors the binary's per-model truth:
+    /// `iw`/`UR.filter(BIe,Zne)`/`Vit`/`_h`/`mTe` over the baked-in catalog
+    /// capabilities (binary blob @207769000; builder @223434963).
+    #[test]
+    fn model_capabilities_match_2_1_198_registry() {
+        let all = vec!["low", "medium", "high", "xhigh", "max"];
+        let no_xhigh = vec!["low", "medium", "high", "max"];
+
+        // opus-4-7 / opus-4-8: full ladder + adaptive + FAST + auto (the only
+        // two fast-mode models in the 2.1.198 registry).
+        for m in ["claude-opus-4-7", "claude-opus-4-8-20260115"] {
+            assert_eq!(
+                model_capabilities(m),
+                (true, all.clone(), true, true, true),
+                "{m}"
+            );
+        }
+        // sonnet-5 / fable-5 / mythos-5: full ladder + adaptive + auto, no fast.
+        for m in ["claude-sonnet-5", "claude-fable-5", "claude-mythos-5"] {
+            assert_eq!(
+                model_capabilities(m),
+                (true, all.clone(), true, false, true),
+                "{m}"
+            );
+        }
+        // sonnet-4-6 / opus-4-6: no xhigh (binary `Zne` excludes them by name).
+        for m in ["claude-sonnet-4-6", "claude-opus-4-6-20260101"] {
+            assert_eq!(
+                model_capabilities(m),
+                (true, no_xhigh.clone(), true, false, true),
+                "{m}"
+            );
+        }
+        // Legacy exclusion list shared by all four binary predicates.
+        for m in [
+            "claude-sonnet-4-5-20250929",
+            "claude-sonnet-4-20250514",
+            "claude-haiku-4-5",
+            "claude-opus-4-1",
+            "claude-opus-4-5",
+            "claude-3-5-sonnet-20241022",
+        ] {
+            assert_eq!(
+                model_capabilities(m),
+                (false, vec![], false, false, false),
+                "{m}"
+            );
+        }
+        // Unknown / non-Anthropic ids stay all-false (multi-provider divergence).
+        assert_eq!(
+            model_capabilities("gpt-4o"),
+            (false, vec![], false, false, false)
+        );
+        // "default" resolves to the session default model (claude-sonnet-5).
+        assert_eq!(
+            model_capabilities("default"),
+            model_capabilities("claude-sonnet-5")
+        );
     }
 
     #[test]

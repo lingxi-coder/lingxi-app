@@ -7951,14 +7951,15 @@ mod turn_recovery_tests {
     }
 
     /// Seed a history far past the hard blocking limit. The default model
-    /// (`claude-opus-4-7`, 200k window) blocks around ~177k tokens; 2M chars ≈
-    /// 500k tokens (estimator is chars/4), comfortably over.
+    /// (`claude-opus-4-8`) is natively 1M as of 2.1.198 (M1b), so the
+    /// blocking limit sits just under 1M tokens; 8M chars ≈ 2M tokens
+    /// (estimator is chars/4), comfortably over.
     async fn seed_over_blocking_limit(orch: &ConversationOrchestrator) {
         let session = orch.session();
         let mut s = session.lock().await;
         s.history.push(ConversationMessage::user(
             MessageId::new(),
-            "x".repeat(2_000_000),
+            "x".repeat(8_000_000),
         ));
     }
 

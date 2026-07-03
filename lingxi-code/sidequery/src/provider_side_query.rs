@@ -148,9 +148,11 @@ impl ProviderSideQueryClient {
 /// Build the minimal model table for side-query callers.
 ///
 /// Side queries use "claude-haiku-4-5" (memory selector) and
-/// "claude-opus-4-6" (compaction). All entries get the same capability set:
-/// streaming=false (side queries are always non-streaming), tools, vision,
-/// documents, no reasoning.
+/// "claude-opus-4-6" (compaction), plus the current session defaults
+/// (claude-sonnet-5 / claude-opus-4-8 / claude-fable-5) that compaction forks
+/// inherit. All entries get the same capability set: streaming=false (side
+/// queries are always non-streaming), tools, vision, documents, reasoning
+/// (the cc 2.1.198 thinking-inheritance seam).
 fn sidequery_model_table() -> Vec<ModelProfile> {
     fn model(display: &str, billing: &str, aliases: &[&str]) -> ModelProfile {
         ModelProfile {
@@ -185,6 +187,13 @@ fn sidequery_model_table() -> Vec<ModelProfile> {
         // Compaction model (AutocompactConfig::default)
         model("claude-opus-4-6", "claude-opus-4-6", &[]),
         model("claude-opus-4-7", "claude-opus-4-7", &[]),
+        // Current-generation defaults (2.1.197/198, M1b): a compaction fork on
+        // the session default (claude-sonnet-5) — or an opus-4-8/fable-5
+        // session — must resolve here instead of dying with ModelUnavailable.
+        // All three support (adaptive) thinking; `reasoning: true` above.
+        model("claude-sonnet-5", "claude-sonnet-5", &[]),
+        model("claude-opus-4-8", "claude-opus-4-8", &[]),
+        model("claude-fable-5", "claude-fable-5", &[]),
         // Broad Sonnet/Opus/Haiku coverage for callers using any model string
         model("claude-sonnet-4-6", "claude-sonnet-4-6", &[]),
         model(
@@ -876,6 +885,50 @@ mod tests {
             body.get("thinking").is_none(),
             "legacy callers must not grow a thinking field: {body}"
         );
+    }
+
+    /// M1b regression (found in M10): the model table MUST cover the current
+    /// session defaults — a production compaction fork on `claude-sonnet-5`
+    /// (the 2.1.197/198 default), `claude-opus-4-8` or `claude-fable-5` used
+    /// to die with `LlmError::ModelUnavailable` before any request was sent.
+    #[tokio::test]
+    async fn current_default_models_resolve_for_compaction_forks() {
+        for m in ["claude-sonnet-5", "claude-opus-4-8", "claude-fable-5"] {
+            let body = serde_json::json!({
+                "id": "msg_cur", "model": m,
+                "content": [{ "type": "text", "text": "SUMMARY" }],
+                "stop_reason": "end_turn",
+                "usage": { "input_tokens": 1, "output_tokens": 1 }
+            })
+            .to_string();
+            let transport = Arc::new(StubTransport::new(body));
+            let client = ProviderSideQueryClient::new("sk-test", None, transport.clone());
+            let mut r = req(None);
+            r.model = m.into();
+            r.query_source = QuerySource::Compaction;
+            // Compaction forks inherit the session thinking config (cc
+            // 2.1.198); all three models support (adaptive) thinking.
+            r.thinking = Some(llm_client::model::thinking::ThinkingConfig::default());
+
+            let resp = client
+                .query(r)
+                .await
+                .unwrap_or_else(|e| panic!("{m} must resolve, got {e:?}"));
+            assert_eq!(resp.text.as_deref(), Some("SUMMARY"), "{m}");
+
+            // The request reached the wire with the right model AND the
+            // adaptive thinking shape (all three are adaptive-thinking models).
+            let received = transport.received.lock().unwrap();
+            assert_eq!(received.len(), 1, "{m}");
+            let body: serde_json::Value =
+                serde_json::from_str(received[0].body.as_deref().unwrap()).unwrap();
+            assert_eq!(body["model"].as_str(), Some(m), "{m}");
+            assert_eq!(
+                body["thinking"],
+                serde_json::json!({ "type": "adaptive" }),
+                "{m}: session thinking must ride like a main-loop request"
+            );
+        }
     }
 
     #[tokio::test]

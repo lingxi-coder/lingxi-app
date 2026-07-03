@@ -282,9 +282,46 @@ const CHECKLIST: &[Entry] = &[
     // surface and locked `ultrareview`'s unsupported exit.
     Entry { version: "2.1.198", item: "Removed /agents wizard", disposition: Disposition::Implemented },
     // ── 2.1.197 ────────────────────────────────────────────────────────────
-    Entry { version: "2.1.197", item: "Sonnet 5 default model, native 1M context, promo $2/$10 per Mtok through 2026-08-31", disposition: Mission("M1") },
+    // M1+M1b landed. DEFAULT: sonnet alias → claude-sonnet-5 (registry
+    // `aliases.sonnet.default` @207774{6xx}; lingxi: agent/skill sonnet-family
+    // default flip + engine-desktop boot default, M1 3a730b442). NATIVE 1M:
+    // registry `context:{window:1e6,native_1m:!0,native_1m_3p:{bedrock,vertex,
+    // foundry}}`; ported as llm-client `model_native_1m` (binary `Hx`
+    // @208698511), locked by context_window sonnet_5_is_natively_1m_and_64k_
+    // output + opus_4_7_opus_4_8_fable_5_are_natively_1m (M1b extends native
+    // 1M to opus-4-7/opus-4-8/fable-5/mythos-5 per the same registry blob).
+    // PRICING — binary-probed: the client cost table (`S3e` @207923~,
+    // keyed via `wa.sonnet5`) maps claude-sonnet-5 to the STANDARD sonnet
+    // rate object `mne = {inputTokens:3, outputTokens:15,
+    // promptCacheWriteTokens:3.75, promptCacheWrite1hTokens:6,
+    // promptCacheReadTokens:0.3}`; the binary contains NO `inputTokens:2` /
+    // `outputTokens:10` rate and NO date logic — the $2/$10-through-2026-08-31
+    // promo appears ONLY in embedded doc prose as billing-side intro pricing
+    // ("Per-token pricing is unchanged at the $3/$15 sticker (introductory
+    // $2/$10 per MTok applies through 2026-08-31)" @222439766; pricing table
+    // "$3.00 ($2.00 intro through 2026-08-31)" @222047026). lingxi matches
+    // the binary exactly: cost builtin_reference claude-sonnet-5 =
+    // 3_000/15_000/3_750/300 nano-USD, locked by cost
+    // builtin_has_sonnet_5_standard_3_15.
+    Entry { version: "2.1.197", item: "Sonnet 5 default model, native 1M context, promo $2/$10 per Mtok through 2026-08-31", disposition: Disposition::Implemented },
     // ── 2.1.196 ────────────────────────────────────────────────────────────
-    Entry { version: "2.1.196", item: "Org default models (Org default/Role default in /model)", disposition: Mission("M1") },
+    // M1b binary-probed: "Org default" is sourced from the claude.ai OAuth
+    // bootstrap — `fetchBootstrapData` persists `orgModelDefaultCache`
+    // {name, updated_at, data_source, override_user_selection, orgUuid} into
+    // local config (@214604765), validated against
+    // `oauthAccount.organizationUuid` in `getOrgModelDefaultCache`/`b6r`
+    // (@208724792, firstParty-only via `Zle`), cleared on oauth_logout
+    // (@214599714); the /model picker suffixes " · Org default" (`rha`
+    // @210923280) or " · Set by your organization" (managed model setting,
+    // `zRn`) on the Default row (`YRn` @207950852). "Role default" does NOT
+    // exist in the 2.1.198 binary (0 string hits). lingxi has neither source:
+    // no claude.ai bootstrap/client-data cache (grep orgModelDefault|
+    // modelAccessCache|clientDataCache → only a doc comment in
+    // tool-api/src/model_prompt_gate.rs) and no managed-settings `model` key
+    // (PolicySettings is permission-rule provenance only,
+    // permission/src/rule.rs; engine-desktop settings_watch fires ConfigChange
+    // hooks, parses no model). No org-policy seam exists to source the label.
+    Entry { version: "2.1.196", item: "Org default models (Org default/Role default in /model)", disposition: Divergence("binary sources Org default from the claude.ai OAuth bootstrap orgModelDefaultCache (b6r @208724792) + managed model setting; lingxi has no claude.ai bootstrap/client-data cache and no policy-settings model source (grep: 0 hits outside a doc comment)") },
     // M13 N/A-with-evidence: in the 2.1.198 binary the ONLY
     // default-name-at-creation generator is `ast()` = `${adjective}-${noun}`
     // (crypto-random picks from the `_pi`/`ypi` word lists, @207957524), and

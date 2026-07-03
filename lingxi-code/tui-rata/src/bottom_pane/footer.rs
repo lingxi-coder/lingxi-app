@@ -2,8 +2,6 @@
 //! (render layer): pure formatting of `FooterProps` into a dim, 2-column-indented
 //! line. Mode selection stays in `BottomPane` (codex keeps it in ChatComposer).
 
-#![allow(dead_code)] // consumed by Task 5
-
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;

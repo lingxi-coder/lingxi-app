@@ -1354,20 +1354,21 @@ mod tests {
         assert_eq!(app.viewport_height(80), 4, "idle bottom viewport is 4 rows");
         let terminal = draw_viewport(&mut app);
         let rows = buffer_rows(&terminal);
-        assert!(rows[0].contains("Enter: send"), "status row: {}", rows[0]);
-        assert!(rows[0].contains("Esc: quit"), "status row: {}", rows[0]);
-        // Row 1 is the composer's top padding (no border glyph).
+        // Row 0 is the composer's top padding (idle has no leading status
+        // row — the key hints moved to the LAST row as the footer).
         assert!(
-            !rows[1].contains('┌'),
+            !rows[0].contains('┌'),
             "composer top padding has no border: {}",
-            rows[1]
+            rows[0]
         );
-        assert!(rows[2].starts_with('›'), "prompt row: {}", rows[2]);
+        assert!(rows[1].starts_with('›'), "prompt row: {}", rows[1]);
         assert!(
-            !rows[3].contains('└'),
+            !rows[2].contains('└'),
             "composer bottom padding has no border: {}",
-            rows[3]
+            rows[2]
         );
+        assert!(rows[3].contains("Enter: send"), "footer row: {}", rows[3]);
+        assert!(rows[3].contains("Esc: quit"), "footer row: {}", rows[3]);
         // The draw buffer covers EXACTLY the 4 viewport rows — rows below the
         // viewport belong to the terminal's native scrollback and cannot be
         // painted by the viewport draw (absolute-rect invariant).
@@ -1384,8 +1385,10 @@ mod tests {
         typ(&mut app, "你好");
         let mut terminal = draw_viewport(&mut app);
         let pos = terminal.get_cursor_position().unwrap();
-        // x = gutter inner.x(2) + two wide chars × 2 columns = 6; y = row 2.
-        assert_eq!((pos.x, pos.y), (6, 2));
+        // x = gutter inner.x(2) + two wide chars × 2 columns = 6; y = row 1
+        // (idle has no leading status row — the composer's top padding is
+        // row 0, the prompt row is row 1).
+        assert_eq!((pos.x, pos.y), (6, 1));
     }
 
     #[test]
@@ -1409,8 +1412,9 @@ mod tests {
         app.on_key(press(KeyCode::Enter));
         app.apply_turn_event(TurnEvent::TurnStarted);
         app.apply_turn_event(TurnEvent::TextDelta("streamed reply words".to_string()));
-        // The viewport grows for the tail: idle pane (4) + one tail row.
-        assert_eq!(app.viewport_height(80), 5, "tail grows the viewport");
+        // The viewport grows for the tail: running pane (5: status + composer
+        // 3 + footer) + one tail row.
+        assert_eq!(app.viewport_height(80), 6, "tail grows the viewport");
         let terminal = draw_viewport(&mut app);
         let rows = buffer_rows(&terminal);
         // The mid-turn delta is visible in the drawn frame BEFORE TurnEnded,
@@ -1435,10 +1439,10 @@ mod tests {
         app.on_key(ctrl(KeyCode::Char('c')));
         let terminal = draw_viewport(&mut app);
         let rows = buffer_rows(&terminal);
+        // Idle: the reminder lives in the footer, the LAST row.
         assert!(
-            rows[0].contains("Press Ctrl-C again to exit"),
-            "status: {}",
-            rows[0]
+            rows.last().unwrap().contains("Press Ctrl-C again to exit"),
+            "footer: {rows:?}"
         );
     }
 
@@ -1447,7 +1451,9 @@ mod tests {
         let mut app = test_app(Vec::new());
         typ(&mut app, "/");
         assert!(app.chat_widget.bottom_pane().completion().is_some());
-        assert_eq!(app.viewport_height(80), 12, "completion viewport height");
+        // composer 3 + full-registry popup 8 (the popup REPLACES the footer
+        // below the composer; no leading status row while idle).
+        assert_eq!(app.viewport_height(80), 11, "completion viewport height");
         let terminal = draw_viewport(&mut app);
         let all = buffer_rows(&terminal).join("\n");
         assert!(all.contains("Complete"), "popup title visible:\n{all}");
@@ -1619,12 +1625,12 @@ mod tests {
         let rows = buffer_rows(&terminal);
         assert_eq!(rows.len(), 4);
         assert_eq!(rows[0].chars().count(), 120, "rows span the full width");
-        assert!(rows[0].contains("Enter: send"), "status row: {}", rows[0]);
-        // No border glyphs anywhere: rows 1 and 3 are padding, background-
-        // styled across the full width.
-        assert!(!rows[1].contains('┌') && !rows[1].contains('┐'));
-        assert!(rows[2].starts_with('›'));
-        assert!(!rows[3].contains('└') && !rows[3].contains('┘'));
+        // Idle has no leading status row: rows 0 and 2 are composer padding,
+        // background-styled across the full width, with no border glyphs.
+        assert!(!rows[0].contains('┌') && !rows[0].contains('┐'));
+        assert!(rows[1].starts_with('›'));
+        assert!(!rows[2].contains('└') && !rows[2].contains('┘'));
+        assert!(rows[3].contains("Enter: send"), "footer row: {}", rows[3]);
     }
 
     #[test]
@@ -1635,12 +1641,13 @@ mod tests {
         app.apply_turn_event(TurnEvent::TurnStarted);
         // The just-opened EMPTY assistant cell renders its 1-row marker: the
         // viewport already grows by one tail row before any delta arrives.
-        assert_eq!(app.viewport_height(120), 5, "empty active cell marker row");
+        // Running pane (5: status + composer 3 + footer) + one tail row.
+        assert_eq!(app.viewport_height(120), 6, "empty active cell marker row");
         // A long markdown paragraph wraps at 120 columns into several rows.
         let paragraph = "lorem ipsum dolor sit amet consectetur adipiscing elit ".repeat(10);
         app.apply_turn_event(TurnEvent::TextDelta(paragraph));
         let viewport = app.viewport_height(120);
-        assert!(viewport > 5, "wrapped tail grows the viewport: {viewport}");
+        assert!(viewport > 6, "wrapped tail grows the viewport: {viewport}");
         let terminal = draw_viewport_at(&mut app, 120, 40);
         let rows = buffer_rows(&terminal);
         assert_eq!(rows.len(), usize::from(viewport));
@@ -1653,38 +1660,39 @@ mod tests {
             .position(|row| row.contains("esc to interrupt"))
             .expect("running status row");
         assert!(text_row < status_row, "tail above the running status");
-        // The pane stays pinned beneath the tail: its last three rows are the
-        // composer (top padding, `›` prompt row, bottom padding), with no
-        // tail text bleeding into them.
-        assert!(!rows[rows.len() - 3].contains('┌'));
-        assert!(rows[rows.len() - 2].starts_with('›'));
-        assert!(!rows[rows.len() - 1].contains('└'));
-        assert!(!rows[rows.len() - 2].contains("lorem"), "no overlap");
+        // The pane stays pinned beneath the tail: its last FOUR rows are the
+        // composer (top padding, `›` prompt row, bottom padding) then the
+        // footer — with no tail text bleeding into any of them.
+        assert!(!rows[rows.len() - 4].contains('┌'));
+        assert!(rows[rows.len() - 3].starts_with('›'));
+        assert!(!rows[rows.len() - 2].contains('└'));
+        assert!(rows[rows.len() - 1].contains("Enter: send"), "footer last");
+        assert!(!rows[rows.len() - 3].contains("lorem"), "no overlap");
     }
 
     #[test]
     fn layout_40x12_narrow_completion_popup_and_composer_share_the_screen() {
         let mut app = test_app(Vec::new());
         typ(&mut app, "/");
+        // composer 3 + full-registry popup 8: the popup REPLACES the footer
+        // hints below the composer (no leftover hint row at 40 columns).
         assert_eq!(
             app.viewport_height(40),
-            12,
-            "completion viewport fills the 12-row terminal"
+            11,
+            "completion viewport fills the composer + popup rows"
         );
         let terminal = draw_viewport_at(&mut app, 40, 12);
         let rows = buffer_rows(&terminal);
-        assert_eq!(rows.len(), 12);
-        // Status hints clip at 40 columns without panicking.
-        assert!(rows[0].contains("Tab: complete"), "status: {}", rows[0]);
-        // The popup box (6-item window) sits between status and composer.
-        assert!(rows[1].contains("Complete"), "popup title: {}", rows[1]);
-        assert!(rows[2].contains("› /help"), "first item: {}", rows[2]);
-        assert!(rows[8].starts_with('└'), "popup bottom: {}", rows[8]);
-        // The composer keeps the bottom rows — disjoint from the popup. Row 9
-        // is top padding (no border glyph).
-        assert!(!rows[9].contains('┌'), "composer top padding: {}", rows[9]);
-        assert!(rows[10].starts_with("› /"), "prompt row: {}", rows[10]);
-        assert!(!rows[11].contains('└'), "composer bottom padding: {}", rows[11]);
+        assert_eq!(rows.len(), 11);
+        // The composer comes FIRST now (no leading status row while idle).
+        // Row 0 is top padding (no border glyph).
+        assert!(!rows[0].contains('┌'), "composer top padding: {}", rows[0]);
+        assert!(rows[1].starts_with("› /"), "prompt row: {}", rows[1]);
+        assert!(!rows[2].contains('└'), "composer bottom padding: {}", rows[2]);
+        // The popup box (6-item window) sits directly beneath the composer.
+        assert!(rows[3].contains("Complete"), "popup title: {}", rows[3]);
+        assert!(rows[4].contains("› /help"), "first item: {}", rows[4]);
+        assert!(rows[10].starts_with('└'), "popup bottom: {}", rows[10]);
     }
 
     #[test]
@@ -1760,21 +1768,18 @@ mod tests {
     fn layout_completion_popup_items_visible_between_status_and_composer() {
         // End-to-end lock for the Phase 13 popup-zone fix through the app's
         // own draw path (the pre-fix render squeezed the popup into a single
-        // border row: items were never visible).
+        // border row: items were never visible). Plan Task 5 reorder: the
+        // composer now comes FIRST, with the popup directly beneath it.
         let mut app = test_app(Vec::new());
         typ(&mut app, "/");
-        assert_eq!(app.viewport_height(80), 12);
+        assert_eq!(app.viewport_height(80), 11);
         let terminal = draw_viewport(&mut app);
         let rows = buffer_rows(&terminal);
-        assert!(rows[2].contains("› /help"), "items visible: {}", rows[2]);
-        assert!(
-            rows[10].starts_with("› /"),
-            "composer beneath: {}",
-            rows[10]
-        );
+        assert!(rows[1].starts_with("› /"), "composer above: {}", rows[1]);
+        assert!(rows[4].contains("› /help"), "items visible: {}", rows[4]);
         // No row mixes popup chrome with the composer row.
         assert!(
-            !rows[10].contains("Complete"),
+            !rows[1].contains("Complete"),
             "popup and composer overlap:\n{}",
             rows.join("\n")
         );
@@ -1790,9 +1795,11 @@ mod tests {
         assert_eq!(app.viewport_height(40), 4);
         let mut terminal = draw_viewport_at(&mut app, 40, 12);
         let pos = terminal.get_cursor_position().unwrap();
+        // y = 1: idle has no leading status row (the composer's top padding
+        // is row 0, the prompt row is row 1).
         assert_eq!(
             (pos.x, pos.y),
-            (38, 2),
+            (38, 1),
             "cursor clamps to the last inner column"
         );
         // The 1-column right margin is untouched by text — the cursor sits
@@ -1826,7 +1833,7 @@ mod tests {
         // Overlay open/close moves it the same way: completion popup…
         app.on_key(ctrl(KeyCode::Char('u'))); // clear the leftover "one"
         typ(&mut app, "/");
-        assert_eq!(app.viewport_height(80), 12);
+        assert_eq!(app.viewport_height(80), 11);
         app.on_key(press(KeyCode::Esc));
         assert_eq!(app.viewport_height(80), 4, "popup dismissed: idle again");
     }
@@ -1866,8 +1873,8 @@ mod tests {
         // The pane still draws cleanly into the moved viewport.
         app.draw(&mut terminal).unwrap();
         let rows = buffer_rows(&terminal);
-        assert!(rows[0].contains("Enter: send"), "status row: {}", rows[0]);
-        assert!(rows[2].starts_with('›'), "prompt row: {}", rows[2]);
+        assert!(rows[1].starts_with('›'), "prompt row: {}", rows[1]);
+        assert!(rows[3].contains("Enter: send"), "footer row: {}", rows[3]);
     }
 
     #[test]
@@ -1888,7 +1895,8 @@ mod tests {
         app.draw(&mut terminal).unwrap();
         assert_eq!(terminal.viewport_area.top(), 20, "warmup pinned to bottom");
 
-        // Grow: the completion popup expands the viewport upward.
+        // Grow: the completion popup expands the viewport upward (composer 3
+        // + full-registry popup 8 = 11 rows; 24 - 11 = 13 top).
         typ(&mut app, "/");
         terminal
             .set_bottom_viewport_height(app.viewport_height(80))
@@ -1896,7 +1904,7 @@ mod tests {
         app.draw(&mut terminal).unwrap();
         assert_eq!(
             terminal.viewport_area,
-            ratatui::layout::Rect::new(0, 12, 80, 12)
+            ratatui::layout::Rect::new(0, 13, 80, 11)
         );
 
         // Shrink: dismissing the popup keeps the viewport top anchored (codex
@@ -1908,7 +1916,7 @@ mod tests {
         app.draw(&mut terminal).unwrap();
         assert_eq!(
             terminal.viewport_area,
-            ratatui::layout::Rect::new(0, 12, 80, 4)
+            ratatui::layout::Rect::new(0, 13, 80, 4)
         );
 
         // New finalized content after the height changes: the insertion may
@@ -1922,7 +1930,7 @@ mod tests {
         let out = String::from_utf8_lossy(&raw.borrow()).into_owned();
         assert!(out.contains("post-shrink reply"), "reply flushed");
         let area = terminal.viewport_area;
-        assert!(area.top() >= 12, "insertions only push the viewport down");
+        assert!(area.top() >= 13, "insertions only push the viewport down");
         assert!(area.bottom() <= 24, "viewport stays on screen");
         let bottoms = history_scroll_region_bottoms(&out);
         assert!(!bottoms.is_empty(), "history writes use a scroll region");
@@ -1934,7 +1942,7 @@ mod tests {
         // And the pane still draws cleanly afterwards.
         app.draw(&mut terminal).unwrap();
         let rows = buffer_rows(&terminal);
-        assert!(rows[0].contains("Enter: send"), "status row: {}", rows[0]);
-        assert!(rows[2].starts_with('›'), "prompt row: {}", rows[2]);
+        assert!(rows[1].starts_with('›'), "prompt row: {}", rows[1]);
+        assert!(rows[3].contains("Enter: send"), "footer row: {}", rows[3]);
     }
 }

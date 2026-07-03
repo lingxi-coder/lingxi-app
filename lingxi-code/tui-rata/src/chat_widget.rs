@@ -455,10 +455,21 @@ impl ChatWidget {
     /// active cell's rendered lines — zero when idle) stacked above the pane's
     /// own height (status + composer, grown to fit the active stacked view or
     /// the completion popup). The owner applies its viewport clamp policy.
+    ///
+    /// Uses [`BottomPane::desired_height_for`] with the freshly computed
+    /// [`Self::pane_status`] running flag rather than
+    /// `self.bottom_pane.desired_height` directly: the pane's own running
+    /// flag only updates inside `handle_key`/`render`, so right after
+    /// `apply_turn_event` starts or ends a turn — before either of those runs
+    /// again — the pane's stored flag is stale. Height is now
+    /// running-dependent (the status indicator adds a row), so measuring
+    /// against the stale flag would undersize the viewport for one tick and
+    /// clip the live tail.
     #[must_use]
     pub fn desired_height(&self, width: u16) -> u16 {
+        let running = self.pane_status().running;
         self.live_tail_height(width)
-            .saturating_add(self.bottom_pane.desired_height(width))
+            .saturating_add(self.bottom_pane.desired_height_for(width, running))
     }
 
     /// Draw the widget into `area` of `buf`: refreshes the pane's task status
@@ -1693,9 +1704,13 @@ mod tests {
         // renders its 1-row marker) stacked above the pane's height.
         let tail_height = widget.live_tail_height(width);
         assert_eq!(tail_height, 1, "empty active assistant cell = marker row");
+        // `desired_height` uses the FRESHLY computed running flag (Task 5:
+        // height is now running-dependent), not `bottom_pane().desired_height`
+        // directly — the pane's own flag only updates inside
+        // `handle_key`/`render`, and neither has run yet at this point.
         assert_eq!(
             widget.desired_height(width),
-            widget.bottom_pane().desired_height(width) + tail_height
+            widget.bottom_pane().desired_height_for(width, true) + tail_height
         );
         let area = Rect::new(0, 0, width, widget.desired_height(width).max(4));
         let mut buf = Buffer::empty(area);
@@ -1870,18 +1885,22 @@ mod tests {
     fn cost_updated_shows_in_the_status_row_idle_and_running() {
         let mut widget = widget();
         widget.apply_turn_event(TurnEvent::CostUpdated("$0.0123".to_string()));
-        // Idle hints row carries the dim cost suffix.
-        let rows = rendered_rows(&mut widget, 80);
+        // Idle hints now live in the footer (the LAST row) and carry the dim
+        // cost suffix. Width 90 (not 80): the footer's 2-column indent
+        // pushes this exact hint+cost combination past 80 columns, clipping
+        // the cost suffix — an unrelated width edge case, not what this test
+        // checks.
+        let rows = rendered_rows(&mut widget, 90);
+        let footer = rows.last().expect("footer row");
         assert!(
-            rows[0].contains("Enter: send") && rows[0].contains("$0.0123"),
-            "idle status row: {}",
-            rows[0]
+            footer.contains("Enter: send") && footer.contains("$0.0123"),
+            "idle footer row: {footer}"
         );
         // Running spinner row carries it too, and a later event replaces it.
         submit_command(&mut widget, "go");
         widget.apply_turn_event(TurnEvent::TurnStarted);
         widget.apply_turn_event(TurnEvent::CostUpdated("$0.0456".to_string()));
-        let rows = rendered_rows(&mut widget, 80);
+        let rows = rendered_rows(&mut widget, 90);
         let status = rows
             .iter()
             .find(|r| r.contains("esc to interrupt"))
@@ -1905,14 +1924,14 @@ mod tests {
             widget.bottom_pane().context_pressure().map(|b| b.level),
             Some(traits::ContextPressureLevel::Warning)
         );
-        // The banner adds exactly one pane row, rendered between the status
-        // row and the composer.
+        // The banner adds exactly one pane row. Idle has no leading status
+        // row now, so the banner renders FIRST, above the composer.
         assert_eq!(widget.desired_height(width), idle_height + 1);
         let rows = rendered_rows(&mut widget, width);
         assert!(
-            rows[1].contains("Context low (12% remaining)"),
+            rows[0].contains("Context low (12% remaining)"),
             "banner row: {}",
-            rows[1]
+            rows[0]
         );
         assert!(
             rows.iter().any(|r| r.starts_with('›')),

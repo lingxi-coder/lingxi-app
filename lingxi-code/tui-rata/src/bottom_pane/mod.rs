@@ -527,51 +527,44 @@ impl BottomPane {
         }
     }
 
-    /// The status row: the running spinner (owner-fed text), the armed-Ctrl-C
-    /// hint, or the idle key hints (with the vim mode label when enabled).
-    /// The session-cumulative cost (`TurnEvent::CostUpdated`) is appended dim
-    /// at the end of the spinner/hint variants once known (the old backend's
-    /// `state.status.cost` slot; the transient armed-Ctrl-C hint stays clean).
-    fn status_line(&self) -> Line<'static> {
+    /// The running status indicator shown ABOVE the composer (codex
+    /// `StatusIndicatorWidget` position): owner-fed spinner text + Ctrl-C
+    /// hint + session cost, 2-space indented (codex `LIVE_PREFIX_COLS`). Idle
+    /// key hints live in the footer BELOW the composer now
+    /// (`footer::footer_line`) — only called while `self.status.running`.
+    fn status_indicator_line(&self) -> Line<'static> {
         let dim = crate::style_adapter::to_ratatui(self.theme.dim);
-        let cost_span = || {
-            self.status
-                .cost
-                .as_ref()
-                .map(|cost| Span::styled(format!("  ·  {cost}"), Style::default().fg(dim)))
-        };
-        if self.status.running {
-            let claude = crate::style_adapter::to_ratatui(self.theme.claude);
-            // The spinner text already carries "esc to interrupt"; Esc while
-            // running interrupts (it does NOT quit), so no "Esc: quit" here.
-            let mut spans = vec![
-                Span::styled(self.status.text.clone(), Style::default().fg(claude)),
-                Span::styled("   ·  Ctrl-C: cancel", Style::default().fg(dim)),
-            ];
-            spans.extend(cost_span());
-            return Line::from(spans);
+        let claude = crate::style_adapter::to_ratatui(self.theme.claude);
+        // The spinner text already carries "esc to interrupt"; Esc while
+        // running interrupts (it does NOT quit), so no "Esc: quit" here.
+        let mut spans = vec![
+            Span::raw("  "),
+            Span::styled(self.status.text.clone(), Style::default().fg(claude)),
+            Span::styled("   ·  Ctrl-C: cancel", Style::default().fg(dim)),
+        ];
+        if let Some(cost) = &self.status.cost {
+            spans.push(Span::styled(format!("  ·  {cost}"), Style::default().fg(dim)));
         }
-        if self.ctrl_c_armed() {
-            let claude = crate::style_adapter::to_ratatui(self.theme.claude);
-            return Line::from(Span::styled(
-                "Press Ctrl-C again to exit",
-                Style::default().fg(claude),
-            ));
-        }
-        let base = if self.completion.is_some() {
-            "↑/↓: pick  ·  Tab: complete  ·  Esc: dismiss  ·  Enter: run"
-        } else if self.verbose {
-            "Enter: send  ·  Ctrl-O: collapse  ·  ↑/↓: history  ·  Esc: quit"
-        } else {
-            "Enter: send  ·  Alt+Enter: newline  ·  Ctrl-O: verbose  ·  Esc: quit"
-        };
-        let text = match &self.vim {
-            Some(vim) => format!("[{}]  {base}", vim.label()),
-            None => base.to_string(),
-        };
-        let mut spans = vec![Span::styled(text, Style::default().fg(dim))];
-        spans.extend(cost_span());
         Line::from(spans)
+    }
+
+    /// Footer props for the current pane state (mode selection that codex
+    /// keeps in `ChatComposer::footer_props`).
+    fn footer_props(&self) -> footer::FooterProps {
+        let mode = if self.ctrl_c_armed() {
+            footer::FooterMode::CtrlCReminder
+        } else if self.completion.is_some() {
+            footer::FooterMode::CompletionActive
+        } else if self.verbose {
+            footer::FooterMode::IdleVerbose
+        } else {
+            footer::FooterMode::Idle
+        };
+        footer::FooterProps {
+            mode,
+            vim_label: self.vim.as_ref().map(|v| v.label().to_string()),
+            cost: self.status.cost.clone(),
+        }
     }
 
     /// The context-pressure banner row (claude-code `<TokenWarning>`): the
@@ -590,27 +583,26 @@ impl BottomPane {
         ))
     }
 
-    /// The pane's vertical zones within `area`: status row, context-pressure
-    /// banner (zero-height when clear), queued-input preview, the completion
-    /// popup's reserved rows (zero when closed), and the composer (which keeps
-    /// the full remainder so overlay-grown frames look identical to the
-    /// pre-pane renderer). Reserving the popup rows — instead of letting the
-    /// composer keep them — is what makes the popup actually visible above the
-    /// composer inside the grown pane (plan Phase 13 layout fix: it used to be
-    /// squeezed against the pane top).
+    /// The pane's vertical zones within `area`, in codex's order (codex
+    /// `BottomPane::as_renderable`): the running status indicator ABOVE,
+    /// then the context-pressure banner, the queued-input preview, the
+    /// composer, and finally the below-composer slot — the completion popup
+    /// when open (codex `ActivePopup` replacing the footer), the key-hint
+    /// footer otherwise.
     fn zones(&self, area: Rect) -> std::rc::Rc<[Rect]> {
-        let completion = self
-            .completion
-            .as_ref()
-            .map_or(0, CompletionView::desired_height);
+        let below = if let Some(c) = self.completion.as_ref() {
+            CompletionView::desired_height(c)
+        } else {
+            footer::footer_height(&self.footer_props())
+        };
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
+                Constraint::Length(u16::from(self.status.running)),
                 Constraint::Length(u16::from(self.context_pressure.is_some())),
                 Constraint::Length(self.pending_input_preview.desired_height(area.width)),
-                Constraint::Length(completion),
                 Constraint::Min(3),
+                Constraint::Length(below),
             ])
             .split(area)
     }
@@ -622,57 +614,90 @@ impl BottomPane {
             .active()
             .filter(|view| !view.wants_status_line())
     }
+
+    /// [`Renderable::desired_height`], but with `running` supplied by the
+    /// caller instead of read from `self.status.running`. The pane's own
+    /// running flag is refreshed lazily (only [`Self::set_task_running`]
+    /// updates it, called from `handle_key`/`render`), so an owner sizing its
+    /// viewport right after a turn starts/ends — before either of those runs
+    /// again — would otherwise measure against a stale flag. Height is now
+    /// running-dependent (the status indicator adds a row), so
+    /// [`crate::chat_widget::ChatWidget::desired_height`] calls this with the
+    /// freshly computed value instead.
+    #[must_use]
+    pub fn desired_height_for(&self, width: u16, running: bool) -> u16 {
+        let composer =
+            u16::try_from(self.composer.lines().len().clamp(1, MAX_VISIBLE_LINES)).unwrap_or(1) + 2;
+        let preview = self.pending_input_preview.desired_height(width);
+        let banner = u16::from(self.context_pressure.is_some());
+        let running = u16::from(running);
+        let below = if let Some(popup) = &self.completion {
+            popup.desired_height()
+        } else {
+            footer::footer_height(&self.footer_props())
+        };
+        let base = running + banner + preview + composer + below;
+        let overlay = if let Some(view) = self.view_stack.active() {
+            view.desired_height(width)
+        } else {
+            0
+        };
+        base.max(overlay)
+    }
 }
 
 impl Renderable for BottomPane {
-    /// Draw the pane: status row + queued-input preview + the borderless
-    /// composer (background block with a `›` gutter prompt), with the
-    /// completion popup anchored above the composer and stacked views
-    /// painted bottom-to-top over the full area — unless the active view owns
-    /// the whole frame.
+    /// Draw the pane: the running status indicator (only while a turn is in
+    /// flight) + context-pressure banner + queued-input preview + the
+    /// borderless composer (background block with a `›` gutter prompt), then
+    /// the below-composer slot — the completion popup when open, the
+    /// key-hint footer otherwise — with stacked views painted bottom-to-top
+    /// over the full area, unless the active view owns the whole frame.
     fn render(&self, area: Rect, buf: &mut Buffer) {
         if let Some(view) = self.full_frame_view() {
             view.render(area, buf);
             return;
         }
         let zones = self.zones(area);
-        Paragraph::new(self.status_line()).render(zones[0], buf);
+        if self.status.running {
+            Paragraph::new(self.status_indicator_line()).render(zones[0], buf);
+        }
         if let Some(banner) = &self.context_pressure {
             Paragraph::new(self.context_pressure_line(banner)).render(zones[1], buf);
         }
         self.pending_input_preview.render(zones[2], buf);
         ComposerView::new(&self.composer)
             .with_accent(self.accent.map(crate::style_adapter::to_ratatui))
-            .render(zones[4], buf);
+            .render(zones[3], buf);
+        let below = zones[4];
         if let Some(popup) = &self.completion {
-            // Anchors upward from the composer's top edge, which fills
-            // exactly the rows `zones` reserved for it (zone 3).
-            popup.render(zones[4], buf);
+            // `CompletionView::render` anchors UPWARD from the rect it is
+            // given (it grew up from the composer's top edge in the old
+            // above-composer layout). Feeding it a zero-height rect pinned
+            // to the below-zone's bottom edge makes the same upward-anchor
+            // math land exactly on `below` — i.e. the popup now fills the
+            // below-composer slot instead of sitting above the composer.
+            let anchor = Rect {
+                x: below.x,
+                y: below.y.saturating_add(below.height),
+                width: below.width,
+                height: 0,
+            };
+            popup.render(anchor, buf);
+        } else {
+            footer::render_footer(below, buf, &self.footer_props(), &self.theme);
         }
         for view in self.view_stack.views() {
             view.render(area, buf);
         }
     }
 
-    /// Desired pane height at `width` columns: status + preview + composer,
-    /// grown to fit the active stacked view (which reports its own height) or
-    /// the completion popup's own rows. The owner applies the viewport
-    /// min/max clamp.
+    /// Desired pane height at `width` columns: running indicator + banner +
+    /// preview + composer + the below-composer slot (completion popup or
+    /// footer), grown to fit the active stacked view (which reports its own
+    /// height). The owner applies the viewport min/max clamp.
     fn desired_height(&self, width: u16) -> u16 {
-        let composer =
-            u16::try_from(self.composer.lines().len().clamp(1, MAX_VISIBLE_LINES)).unwrap_or(1);
-        let preview = self.pending_input_preview.desired_height(width);
-        let banner = u16::from(self.context_pressure.is_some());
-        // status + banner + preview + composer content + border
-        let base = 1 + banner + preview + composer + 2;
-        let overlay = if let Some(view) = self.view_stack.active() {
-            view.desired_height(width)
-        } else if let Some(popup) = &self.completion {
-            base + popup.desired_height()
-        } else {
-            0
-        };
-        base.max(overlay)
+        self.desired_height_for(width, self.status.running)
     }
 
     /// The composer's cursor (claimed even while centered modals are open —
@@ -682,14 +707,14 @@ impl Renderable for BottomPane {
         if let Some(view) = self.full_frame_view() {
             return view.cursor_pos(area);
         }
-        ComposerView::new(&self.composer).cursor_pos(self.zones(area)[4])
+        ComposerView::new(&self.composer).cursor_pos(self.zones(area)[3])
     }
 
     fn cursor_style(&self, area: Rect) -> SetCursorStyle {
         if let Some(view) = self.full_frame_view() {
             return view.cursor_style(area);
         }
-        ComposerView::new(&self.composer).cursor_style(self.zones(area)[4])
+        ComposerView::new(&self.composer).cursor_style(self.zones(area)[3])
     }
 }
 
@@ -1061,6 +1086,56 @@ mod tests {
             .collect()
     }
 
+    /// Every row of `buf`, top to bottom (plan Task 5 layout tests).
+    fn buffer_rows(buf: &Buffer) -> Vec<String> {
+        (buf.area.top()..buf.area.bottom())
+            .map(|y| buffer_row(buf, y))
+            .collect()
+    }
+
+    // ===== Plan Task 5: codex bottom-pane order (status above, composer,
+    // footer below) =====
+
+    #[test]
+    fn idle_pane_order_is_composer_then_footer() {
+        let pane = pane();
+        let area = Rect::new(0, 0, 80, pane.desired_height(80));
+        let mut buf = Buffer::empty(area);
+        pane.render(area, &mut buf);
+        let rows: Vec<String> = buffer_rows(&buf);
+        // LAST row carries the key hints…
+        assert!(
+            rows.last().unwrap().trim_start().starts_with("Enter: send"),
+            "footer at bottom: {rows:?}"
+        );
+        // …and the first row is the composer's top padding, NOT a hint row.
+        assert!(!rows[0].contains("Enter: send"), "no hints above the composer: {rows:?}");
+        // Composer prompt sits directly above the footer block.
+        assert!(
+            rows.iter().any(|r| r.starts_with("› ") || r.starts_with('›')),
+            "gutter prompt present: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn running_pane_shows_spinner_above_and_no_hints_below() {
+        let mut pane = pane();
+        pane.set_task_running(BottomPaneStatus {
+            running: true,
+            text: "Simmering… (esc to interrupt)".to_string(),
+            cost: None,
+        });
+        let area = Rect::new(0, 0, 80, pane.desired_height(80));
+        let mut buf = Buffer::empty(area);
+        pane.render(area, &mut buf);
+        let rows: Vec<String> = buffer_rows(&buf);
+        assert!(rows[0].contains("Simmering"), "spinner row above the composer: {rows:?}");
+        assert!(
+            rows[0].starts_with("  "),
+            "codex status rows are LIVE_PREFIX_COLS-indented"
+        );
+    }
+
     #[test]
     fn key_routing_order_active_view_before_completion_before_composer() {
         let mut pane = pane();
@@ -1326,9 +1401,10 @@ mod tests {
         let mut pane = pane();
         typ(&mut pane, "你好");
         let area = Rect::new(0, 0, 80, pane.desired_height(80).max(4));
-        // x = gutter inner.x(2) + two wide chars × 2 columns = 6; y = status
-        // row (1) + composer top padding (1) = 2.
-        assert_eq!(pane.cursor_pos(area), Some((6, 2)));
+        // x = gutter inner.x(2) + two wide chars × 2 columns = 6; y = the
+        // composer's top padding (1) — idle has no leading status row now
+        // (it moved below the composer as the footer).
+        assert_eq!(pane.cursor_pos(area), Some((6, 1)));
     }
 
     #[test]
@@ -1339,27 +1415,28 @@ mod tests {
             let _ = pane.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
             typ(&mut pane, &format!("l{i}"));
         }
-        // 8 content lines clamp at MAX_VISIBLE_LINES: 1 + 6 + 2 = 9 rows.
+        // 8 content lines clamp at MAX_VISIBLE_LINES: 6 + 2 + 1(footer) = 9 rows.
         assert_eq!(pane.desired_height(80), 9);
         let area = Rect::new(0, 0, 80, 9);
         let mut buf = Buffer::empty(area);
         pane.render(area, &mut buf);
-        // Status row, then the composer scrolled so l7 (cursor row) is the
-        // bottom visible content row: l2..l7 fill the 6 content rows. The `›`
-        // gutter prompt is pinned to the top visible row (l2 here).
-        assert!(buffer_row(&buf, 0).contains("Enter: send"));
+        // The composer scrolled so l7 (cursor row) is the bottom visible
+        // content row: l2..l7 fill the 6 content rows. The `›` gutter prompt
+        // is pinned to the top visible row (l2 here); the footer hints are
+        // pinned to the LAST row, below the composer.
+        assert!(buffer_row(&buf, 8).contains("Enter: send"));
         assert!(
-            buffer_row(&buf, 2).starts_with("› l2"),
+            buffer_row(&buf, 1).starts_with("› l2"),
             "{}",
-            buffer_row(&buf, 2)
+            buffer_row(&buf, 1)
         );
         assert!(
-            buffer_row(&buf, 7).starts_with("  l7"),
+            buffer_row(&buf, 6).starts_with("  l7"),
             "{}",
-            buffer_row(&buf, 7)
+            buffer_row(&buf, 6)
         );
         let (x, y) = pane.cursor_pos(area).expect("composer cursor");
-        assert_eq!((x, y), (4, 7), "cursor on the bottom visible content row");
+        assert_eq!((x, y), (4, 6), "cursor on the bottom visible content row");
     }
 
     #[test]
@@ -1371,56 +1448,64 @@ mod tests {
         let area = Rect::new(0, 0, 80, 6);
         let mut buf = Buffer::empty(area);
         pane.render(area, &mut buf);
-        assert!(buffer_row(&buf, 0).contains("Enter: send"), "status first");
-        assert!(buffer_row(&buf, 1).starts_with("Queued messages:"));
-        assert!(buffer_row(&buf, 2).starts_with("  ↳ queued draft"));
-        // Row 3 is the composer's top padding (no border glyph); the `›`
-        // gutter prompt renders on row 4, the first content row.
+        // Idle has no leading status row: the preview is first now.
+        assert!(buffer_row(&buf, 0).starts_with("Queued messages:"), "preview first");
+        assert!(buffer_row(&buf, 1).starts_with("  ↳ queued draft"));
+        // Row 2 is the composer's top padding (no border glyph); the `›`
+        // gutter prompt renders on row 3, the first content row.
         assert!(
-            buffer_row(&buf, 4).starts_with('›'),
+            buffer_row(&buf, 3).starts_with('›'),
             "composer prompt below preview: {}",
-            buffer_row(&buf, 4)
+            buffer_row(&buf, 3)
         );
-        // Cursor moves down with the composer: top padding row is now y=3.
-        assert_eq!(pane.cursor_pos(area), Some((2, 4)));
+        // The footer hints are pinned to the last row, below the composer.
+        assert!(buffer_row(&buf, 5).contains("Enter: send"), "footer last");
+        // Cursor moves down with the composer: top padding row is now y=2.
+        assert_eq!(pane.cursor_pos(area), Some((2, 3)));
     }
 
     #[test]
     fn status_line_variants_running_armed_and_vim_label() {
         let mut pane = pane();
+        // Running: the spinner + Ctrl-C hint sits on the FIRST row (the
+        // status indicator above the composer) — unaffected by the reorder.
         pane.set_task_running(BottomPaneStatus {
             running: true,
             text: "✻ Working… (3s · esc to interrupt)".to_string(),
             cost: None,
         });
-        let area = Rect::new(0, 0, 80, 4);
+        let area = Rect::new(0, 0, 80, pane.desired_height(80));
         let mut buf = Buffer::empty(area);
         pane.render(area, &mut buf);
         assert!(buffer_row(&buf, 0).contains("esc to interrupt"));
         assert!(buffer_row(&buf, 0).contains("Ctrl-C: cancel"));
 
+        // Idle variants all live in the footer now — the LAST row.
         pane.set_task_running(BottomPaneStatus::default());
         let _ = pane.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let area = Rect::new(0, 0, 80, pane.desired_height(80));
         let mut buf = Buffer::empty(area);
         pane.render(area, &mut buf);
-        assert!(buffer_row(&buf, 0).contains("Press Ctrl-C again to exit"));
+        assert!(buffer_row(&buf, area.height - 1).contains("Press Ctrl-C again to exit"));
 
         // Vim label prefixes the idle hints once enabled ('c' above disarmed…
         // actually ctrl-c armed; type to disarm, then enable vim).
         let _ = pane.handle_key(key(KeyCode::Backspace));
         assert!(pane.toggle_vim());
+        let area = Rect::new(0, 0, 80, pane.desired_height(80));
         let mut buf = Buffer::empty(area);
         pane.render(area, &mut buf);
         assert!(
-            buffer_row(&buf, 0).contains("[INSERT]"),
+            buffer_row(&buf, area.height - 1).contains("[INSERT]"),
             "{}",
-            buffer_row(&buf, 0)
+            buffer_row(&buf, area.height - 1)
         );
 
         pane.set_verbose(true);
+        let area = Rect::new(0, 0, 80, pane.desired_height(80));
         let mut buf = Buffer::empty(area);
         pane.render(area, &mut buf);
-        assert!(buffer_row(&buf, 0).contains("Ctrl-O: collapse"));
+        assert!(buffer_row(&buf, area.height - 1).contains("Ctrl-O: collapse"));
     }
 
     // ===== Fix round 1: cost suffix + context-pressure banner row =====
@@ -1428,26 +1513,32 @@ mod tests {
     #[test]
     fn status_row_appends_the_owner_fed_cost_dim_suffix() {
         let mut pane = pane();
-        let area = Rect::new(0, 0, 80, 4);
-        // Idle hints row carries the cost once known.
+        // Idle hints now live in the footer (the LAST row); it carries the
+        // cost once known. Width 90 (not 80): the footer's 2-column indent
+        // (`FOOTER_INDENT_COLS`) pushes this exact hint+cost combination past
+        // 80 columns, clipping the cost suffix — an unrelated width edge
+        // case, not what this test checks.
         pane.set_task_running(BottomPaneStatus {
             running: false,
             text: String::new(),
             cost: Some("$0.0123".to_string()),
         });
+        let area = Rect::new(0, 0, 90, pane.desired_height(90));
         let mut buf = Buffer::empty(area);
         pane.render(area, &mut buf);
-        let row = buffer_row(&buf, 0);
+        let row = buffer_row(&buf, area.height - 1);
         assert!(
             row.contains("Enter: send") && row.contains("·  $0.0123"),
             "{row}"
         );
-        // Running spinner row keeps it too, after the cancel hint.
+        // Running spinner row (still the FIRST row) keeps it too, after the
+        // cancel hint.
         pane.set_task_running(BottomPaneStatus {
             running: true,
             text: "✻ Working… (3s · esc to interrupt)".to_string(),
             cost: Some("$0.0123".to_string()),
         });
+        let area = Rect::new(0, 0, 90, pane.desired_height(90));
         let mut buf = Buffer::empty(area);
         pane.render(area, &mut buf);
         let row = buffer_row(&buf, 0);
@@ -1469,21 +1560,23 @@ mod tests {
         let area = Rect::new(0, 0, 80, pane.desired_height(80));
         let mut buf = Buffer::empty(area);
         pane.render(area, &mut buf);
-        assert!(buffer_row(&buf, 0).contains("Enter: send"), "status first");
+        // Idle has no leading status row: the banner is first now.
         assert!(
-            buffer_row(&buf, 1).contains("Context left until auto-compact: 8%"),
-            "banner row second: {}",
-            buffer_row(&buf, 1)
+            buffer_row(&buf, 0).contains("Context left until auto-compact: 8%"),
+            "banner row first: {}",
+            buffer_row(&buf, 0)
         );
-        // Row 2 is the composer's top padding (no border glyph); the `›`
-        // gutter prompt renders on row 3, the first content row below it.
+        // Row 1 is the composer's top padding (no border glyph); the `›`
+        // gutter prompt renders on row 2, the first content row below it.
         assert!(
-            buffer_row(&buf, 3).starts_with('›'),
+            buffer_row(&buf, 2).starts_with('›'),
             "composer prompt below the banner: {}",
-            buffer_row(&buf, 3)
+            buffer_row(&buf, 2)
         );
+        // The footer hints are pinned to the last row, below the composer.
+        assert!(buffer_row(&buf, 4).contains("Enter: send"), "footer last");
         // The composer cursor tracks the shifted composer zone.
-        assert_eq!(pane.cursor_pos(area).map(|(_, y)| y), Some(3));
+        assert_eq!(pane.cursor_pos(area).map(|(_, y)| y), Some(2));
         // Clearing removes the row and restores the height.
         pane.set_context_pressure(None);
         assert_eq!(pane.desired_height(80), without);
@@ -1495,70 +1588,68 @@ mod tests {
     fn completion_desired_height_tracks_the_popup_row_count() {
         let mut pane = pane();
         // Bare "/" lists the whole registry: 6 visible rows + 2 borders = 8
-        // popup rows over the 4-row base.
+        // popup rows, REPLACING the footer below the composer (3 rows).
         typ(&mut pane, "/");
         assert!(pane.completion().is_some());
-        assert_eq!(pane.desired_height(80), 12, "base 4 + full popup 8");
+        assert_eq!(pane.desired_height(80), 11, "composer 3 + full popup 8");
         // "/m" narrows to 3 items (/model, /mcp, /memory): the pane shrinks
         // with the popup (3 + 2 borders = 5 popup rows) instead of keeping a
         // fixed +8.
         typ(&mut pane, "m");
         assert_eq!(pane.completion().unwrap().desired_height(), 5);
-        assert_eq!(pane.desired_height(80), 9, "base 4 + filtered popup 5");
+        assert_eq!(pane.desired_height(80), 8, "composer 3 + filtered popup 5");
     }
 
     #[test]
     fn completion_popup_items_and_composer_occupy_disjoint_rows() {
-        // Regression (plan Phase 13 layout fix): the composer used to keep
-        // the whole grown pane, squeezing the popup into a single border row
-        // at the pane top; the items were never visible. The pane now
-        // reserves the popup rows between the status row and the composer.
+        // Codex order (plan Task 5): the composer comes FIRST, then the
+        // completion popup occupies the below-composer slot exactly like
+        // codex's `ActivePopup` replaces the footer — no hint row survives
+        // while the popup is open.
         let mut pane = pane();
         typ(&mut pane, "/");
         let height = pane.desired_height(80);
-        assert_eq!(height, 12);
+        assert_eq!(height, 11);
         let area = Rect::new(0, 0, 80, height);
         let mut buf = Buffer::empty(area);
         pane.render(area, &mut buf);
-        // Row 0: completion status hints.
-        assert!(buffer_row(&buf, 0).contains("Tab: complete"));
-        // Rows 1..=8: the popup box with its 6-item window fully visible.
-        assert!(buffer_row(&buf, 1).contains("Complete"), "popup title row");
+        // Rows 0..=2: the composer (top padding, prompt, bottom padding) —
+        // disjoint from the popup below it, no overlap.
         assert!(
-            buffer_row(&buf, 2).contains("› /help"),
-            "first item highlighted: {}",
+            !buffer_row(&buf, 0).contains('┌'),
+            "composer top padding has no border: {}",
+            buffer_row(&buf, 0)
+        );
+        assert!(
+            buffer_row(&buf, 1).starts_with("› /"),
+            "prompt row: {}",
+            buffer_row(&buf, 1)
+        );
+        assert!(
+            !buffer_row(&buf, 2).contains('└'),
+            "composer bottom padding has no border: {}",
             buffer_row(&buf, 2)
         );
+        // Rows 3..=10: the popup box with its 6-item window fully visible,
+        // directly beneath the composer.
+        assert!(buffer_row(&buf, 3).contains("Complete"), "popup title row");
         assert!(
-            buffer_row(&buf, 7).contains("/agents"),
+            buffer_row(&buf, 4).contains("› /help"),
+            "first item highlighted: {}",
+            buffer_row(&buf, 4)
+        );
+        assert!(
+            buffer_row(&buf, 9).contains("/agents"),
             "sixth item visible: {}",
-            buffer_row(&buf, 7)
-        );
-        assert!(
-            buffer_row(&buf, 8).starts_with('└'),
-            "popup bottom border: {}",
-            buffer_row(&buf, 8)
-        );
-        // Rows 9..12: the composer directly beneath — disjoint rows, no
-        // overlap between popup and composer content. Row 9 is top padding
-        // (no border glyph); the `›` gutter prompt renders on row 10.
-        assert!(
-            !buffer_row(&buf, 9).contains('┌'),
-            "composer top padding has no border: {}",
             buffer_row(&buf, 9)
         );
         assert!(
-            buffer_row(&buf, 10).starts_with("› /"),
-            "prompt row: {}",
+            buffer_row(&buf, 10).starts_with('└'),
+            "popup bottom border: {}",
             buffer_row(&buf, 10)
         );
-        assert!(
-            !buffer_row(&buf, 11).contains('└'),
-            "composer bottom padding has no border: {}",
-            buffer_row(&buf, 11)
-        );
         // The cursor sits on the composer's prompt row, after the "/".
-        assert_eq!(pane.cursor_pos(area), Some((3, 10)));
+        assert_eq!(pane.cursor_pos(area), Some((3, 1)));
     }
 
     // ===== Plan Phase 13 step 4: cursor containment =====
@@ -1582,7 +1673,8 @@ mod tests {
         // At the degenerate 2-row height the composer has no content row at
         // all: the cursor must be hidden, never parked outside the box.
         assert_eq!(pane.cursor_pos(Rect::new(0, 0, 80, 2)), None);
-        // At the full idle height it is claimed inside the composer.
-        assert_eq!(pane.cursor_pos(Rect::new(0, 0, 80, 4)), Some((7, 2)));
+        // At the full idle height it is claimed inside the composer (idle has
+        // no leading status row now, so the composer's top padding is row 0).
+        assert_eq!(pane.cursor_pos(Rect::new(0, 0, 80, 4)), Some((7, 1)));
     }
 }

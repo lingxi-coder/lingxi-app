@@ -84,7 +84,7 @@ pub fn detect_from(
 /// Standard base64 alphabet (RFC 4648).
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-/// Encode bytes as standard base64 (`=`-padded). Self-contained so `tui-rata`
+/// Encode bytes as standard base64 (`=`-padded). Self-contained so `tui`
 /// needs no base64 dependency.
 #[must_use]
 pub fn base64_encode(data: &[u8]) -> String {

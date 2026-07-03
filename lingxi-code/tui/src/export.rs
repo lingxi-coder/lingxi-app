@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 /// Default export directory, `~/.lingxi/exports` (iocraft
 /// `default_export_dir` parity), falling back to the cwd without a home dir.
-/// Home comes from `$HOME`/`%USERPROFILE%` (dependency-free; `tui-rata` does
+/// Home comes from `$HOME`/`%USERPROFILE%` (dependency-free; `tui` does
 /// not pull the `dirs` crate).
 #[must_use]
 pub fn default_export_dir() -> PathBuf {
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn write_export_creates_refuses_overwrite_and_stays_inside_dir() {
-        let dir = std::env::temp_dir().join(format!("tui-rata-export-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tui-export-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
 
         let path = write_export(&dir, "conv", "> hi\nreply\n").expect("first write");

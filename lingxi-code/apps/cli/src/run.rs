@@ -1386,7 +1386,7 @@ async fn resume_resolved_session(
 ///      via [`seed_orchestrator_session`], so a follow-up turn continues the
 ///      prior conversation rather than starting empty.
 ///   2. RENDER side — seed the TUI scrollback via
-///      `tui_rata::replay::rebuild_from_jsonl(&messages)`, so the existing history is
+///      `tui::replay::rebuild_from_jsonl(&messages)`, so the existing history is
 ///      painted on the very first frame (the claude-code REPL `initialMessages`
 ///      analog).
 ///
@@ -1422,7 +1422,7 @@ async fn mount_resumed_tui(
     // launch the ratatui backend (`tui-rata`) with that replayed scrollback.
     // Resume has no SessionRegistration (fresh launches register; resume does
     // not), so no status forwarder is threaded.
-    let resumed_messages = tui_rata::replay::rebuild_from_jsonl(&messages);
+    let resumed_messages = tui::replay::rebuild_from_jsonl(&messages);
     crate::mode::run_ratatui(tui_build, None, resumed_messages).await
 }
 
@@ -1528,7 +1528,7 @@ async fn run_resume_iocraft(argv: &Argv, sink: &dyn OutputSink) -> i32 {
     // the picker's `relative_time_ago` so it stays byte-identical to the old
     // iocraft screen: `<relative time ago> · <N> messages`.
     let now = std::time::SystemTime::now();
-    let picker_rows: Vec<tui_rata::resume::ResumeRow> = rows
+    let picker_rows: Vec<tui::resume::ResumeRow> = rows
         .iter()
         .map(|m| {
             let msgs = if m.message_count == 1 {
@@ -1536,12 +1536,12 @@ async fn run_resume_iocraft(argv: &Argv, sink: &dyn OutputSink) -> i32 {
             } else {
                 format!("{} messages", m.message_count)
             };
-            tui_rata::resume::ResumeRow {
+            tui::resume::ResumeRow {
                 uuid: m.uuid,
                 title: m.title.clone(),
                 metadata_label: format!(
                     "{} \u{00b7} {}",
-                    tui_rata::resume::relative_time_ago(m.modified, now),
+                    tui::resume::relative_time_ago(m.modified, now),
                     msgs
                 ),
             }
@@ -1550,7 +1550,7 @@ async fn run_resume_iocraft(argv: &Argv, sink: &dyn OutputSink) -> i32 {
 
     // Blocking terminal IO → off the async runtime, like the chat `run_app`.
     let picked =
-        tokio::task::spawn_blocking(move || tui_rata::resume::run_resume_picker(picker_rows)).await;
+        tokio::task::spawn_blocking(move || tui::resume::run_resume_picker(picker_rows)).await;
 
     match picked {
         Ok(Ok(Some(uuid))) => {

@@ -1,6 +1,6 @@
 //! Render `RenderedMessage`s into styled lines for the ratatui scrollback.
 //!
-//! This is the `tui-rata` side of message rendering: it consumes the neutral
+//! This is the `tui` side of message rendering: it consumes the neutral
 //! `tui_core` message model + render primitives and produces `StyledLine`s that
 //! [`crate::render::styled_line_to_ratatui`] turns into ratatui text. Every
 //! variant renders through the per-variant history cells under

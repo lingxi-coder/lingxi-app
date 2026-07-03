@@ -687,7 +687,7 @@ pub async fn build_runtime_for_tui(argv: &Argv) -> Result<TuiBuild, InitError> {
         tokio::sync::mpsc::channel::<tui_core::permission_bridge::PermissionExchange>(16);
     let session_allow_rules = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let gate = std::sync::Arc::new(
-        tui_rata::permission_gate::TuiPermissionGate::new(perm_tx, session_allow_rules).with_persist(
+        tui::permission_gate::TuiPermissionGate::new(perm_tx, session_allow_rules).with_persist(
             permission::PermissionPaths {
                 lingxi_home: cfg.lingxi_home.clone(),
                 cwd: cfg.cwd.clone(),

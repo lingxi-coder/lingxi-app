@@ -135,9 +135,9 @@ pub async fn dispatch(
             let (bypass_mode, _) = crate::resolve_permission_mode(argv);
             let is_bypass = bypass_mode == permission::PermissionMode::BypassPermissions;
             let skip_set = read_skip_dangerous_prompt();
-            if tui_rata::startup_bypass::should_show_bypass_dialog(is_bypass, skip_set) {
-                match tui_rata::startup_bypass::mount_bypass_dialog().await {
-                    Ok(tui_rata::startup_bypass::BypassDialogOutcome::Accept) => {
+            if tui::startup_bypass::should_show_bypass_dialog(is_bypass, skip_set) {
+                match tui::startup_bypass::mount_bypass_dialog().await {
+                    Ok(tui::startup_bypass::BypassDialogOutcome::Accept) => {
                         // Persist so subsequent launches skip the prompt
                         // (`onConfirm` → `saveCurrentProjectConfig`). Best-effort.
                         persist_skip_dangerous_prompt();
@@ -150,7 +150,7 @@ pub async fn dispatch(
                         // but silently drops. The event name is registered and the
                         // emit lands once a pre-session sink exists.
                     }
-                    Ok(tui_rata::startup_bypass::BypassDialogOutcome::Decline) => {
+                    Ok(tui::startup_bypass::BypassDialogOutcome::Decline) => {
                         // User declined (or pressed Esc): exit 1 (TS `process.exit(1)`).
                         return exit_codes::RUNTIME_ERROR;
                     }
@@ -213,7 +213,7 @@ pub async fn dispatch(
 pub(crate) async fn run_ratatui(
     tui_build: crate::init::TuiBuild,
     registration: Option<Arc<crate::agents_registry::SessionRegistration>>,
-    resumed_messages: Vec<tui_rata::RenderedMessage>,
+    resumed_messages: Vec<tui::RenderedMessage>,
 ) -> i32 {
     let orchestrator: Arc<dyn OrchestratorHandle> = tui_build.runtime.orchestrator.clone();
     let (bridge_rx, permission_rx) = match &registration {
@@ -241,7 +241,7 @@ pub(crate) async fn run_ratatui(
     // Seed the transcript with the welcome banner, then any replayed scrollback
     // (`--resume`: `rebuild_from_jsonl` rows). A fresh launch passes an empty
     // `resumed_messages`, so the seed is byte-identical to the welcome-only path.
-    let mut welcome = vec![tui_rata::RenderedMessage::SystemText {
+    let mut welcome = vec![tui::RenderedMessage::SystemText {
         body: format!(
             "✻ Welcome to LingXi Code ({})\n  /help for commands · Esc interrupts a running turn · Esc (idle) or Ctrl-C twice to quit\n  cwd: {}\n  model: {}",
             session.doctor.cli_version, session.doctor.cwd, current_model
@@ -251,7 +251,7 @@ pub(crate) async fn run_ratatui(
     }];
     welcome.extend(resumed_messages);
     let on_submit = move |prompt: String, cancel: CancellationToken| {
-        let _ = turn_tx.send(tui_rata::TurnEvent::TurnStarted);
+        let _ = turn_tx.send(tui::TurnEvent::TurnStarted);
         let orch = orchestrator.clone();
         handle.spawn(async move {
             let _ = orch.run_turn_streaming_with_cancel(&prompt, cancel).await;
@@ -264,7 +264,7 @@ pub(crate) async fn run_ratatui(
         });
     };
     match tokio::task::spawn_blocking(move || {
-        tui_rata::app::run_app(
+        tui::app::run_app(
             welcome,
             session,
             bridge_rx,
@@ -370,11 +370,11 @@ fn spawn_status_permission_forwarder(
 }
 
 /// Snapshot the orchestrator's MCP/hooks/agents/model listings into a
-/// `tui_rata::session::SessionInfo` for the full-page screens (`/mcp`,
+/// `tui::session::SessionInfo` for the full-page screens (`/mcp`,
 /// `/hooks`, `/agents`, `/doctor`, `/model`). Awaited once before the blocking
 /// TUI loop starts, mirroring the iocraft screens' capture-at-open contract.
-async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui_rata::session::SessionInfo {
-    use tui_rata::session::{DoctorInfo, InfoRow, ModelRow, SessionInfo};
+async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::SessionInfo {
+    use tui::session::{DoctorInfo, InfoRow, ModelRow, SessionInfo};
 
     let servers = orch.list_mcp_servers().await;
     let mcp_connected = u32::try_from(
@@ -460,7 +460,7 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui_rata::session:
 fn skills_rows(
     cwd: &std::path::Path,
     lingxi_home: &std::path::Path,
-) -> Vec<tui_rata::session::InfoRow> {
+) -> Vec<tui::session::InfoRow> {
     skill_api::load_file_skill_sections(cwd, lingxi_home)
         .into_iter()
         .flat_map(|section| {
@@ -471,7 +471,7 @@ fn skills_rows(
                 } else {
                     format!("{source} · {}", row.description)
                 };
-                tui_rata::session::InfoRow::new(row.name, Some(detail))
+                tui::session::InfoRow::new(row.name, Some(detail))
             })
         })
         .collect()
@@ -484,9 +484,9 @@ fn skills_rows(
 fn memory_rows(
     cwd: &std::path::Path,
     os_home: &std::path::Path,
-) -> Vec<tui_rata::session::InfoRow> {
+) -> Vec<tui::session::InfoRow> {
     use memory::lingxi_md::hierarchy::{user_config_dir, walk, FILE_NAME};
-    use tui_rata::session::InfoRow;
+    use tui::session::InfoRow;
 
     let project_path = cwd.join(FILE_NAME);
     let user_path = user_config_dir(os_home).join(FILE_NAME);
@@ -623,15 +623,15 @@ async fn trust_gate() -> TrustGateOutcome {
     }
     // `trust_gate_should_prompt` only returns true with `Some(config_path)`.
     let config_path = config_path.expect("prompt implies a config path");
-    match tui_rata::startup_trust::mount_trust_dialog(&cwd).await {
-        Ok(tui_rata::startup_trust::TrustDialogOutcome::Accept) => {
+    match tui::startup_trust::mount_trust_dialog(&cwd).await {
+        Ok(tui::startup_trust::TrustDialogOutcome::Accept) => {
             // "Yes, I trust this folder" → record acceptance via the shared
             // accept branch (`TrustDialog.tsx:162,174-177`): SESSION-ONLY
             // in-memory when `cwd == $HOME`, else persisted to disk best-effort.
             migrations::global_config::record_trust_accept(&config_path, &cwd);
             TrustGateOutcome::Proceed
         }
-        Ok(tui_rata::startup_trust::TrustDialogOutcome::Decline) => TrustGateOutcome::Decline,
+        Ok(tui::startup_trust::TrustDialogOutcome::Decline) => TrustGateOutcome::Decline,
         Err(e) => {
             eprintln!("lingxi-cli: trust dialog failed: {e}");
             TrustGateOutcome::Decline
@@ -747,7 +747,7 @@ mod tests {
     // so the gate DECISION is tested here via the store seam
     // (`trust_gate_should_prompt`, against a real `migrations::global_config`
     // temp config). The dialog's pure key→outcome map (Accept/Decline/Esc) is
-    // covered by `tui_rata::startup_trust`'s own unit tests; `apps/cli` does not
+    // covered by `tui::startup_trust`'s own unit tests; `apps/cli` does not
     // depend on `crossterm`, so the gate's branch logic is exercised here at
     // the predicate seam — mirroring how the bypass gate is covered (pure
     // predicate, thin I/O wrapper excluded).

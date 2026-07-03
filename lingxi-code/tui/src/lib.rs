@@ -1,4 +1,4 @@
-//! `tui-rata` — Ratatui-based terminal UI runtime for LingXi.
+//! `tui` — Ratatui-based terminal UI runtime for LingXi.
 //!
 //! The target backend of the iocraft → ratatui migration. It renders the
 //! backend-neutral model in `tui-core` (state, render model, theme, message

@@ -166,12 +166,12 @@ pub async fn run(cli: &Cli) -> i32 {
             return crate::exit_codes::RUNTIME_ERROR;
         }
         let skip_set = crate::mode::read_skip_dangerous_prompt();
-        if tui_rata::startup_bypass::should_show_bypass_dialog(true, skip_set) {
-            match tui_rata::startup_bypass::mount_bypass_dialog().await {
-                Ok(tui_rata::startup_bypass::BypassDialogOutcome::Accept) => {
+        if tui::startup_bypass::should_show_bypass_dialog(true, skip_set) {
+            match tui::startup_bypass::mount_bypass_dialog().await {
+                Ok(tui::startup_bypass::BypassDialogOutcome::Accept) => {
                     crate::mode::persist_skip_dangerous_prompt();
                 }
-                Ok(tui_rata::startup_bypass::BypassDialogOutcome::Decline) => {
+                Ok(tui::startup_bypass::BypassDialogOutcome::Decline) => {
                     return crate::exit_codes::RUNTIME_ERROR;
                 }
                 Err(e) => {
@@ -348,9 +348,9 @@ fn print_sessions_json(cli: &Cli) -> i32 {
 /// `--json` path reads (the view is the `--all` listing, minus this process's
 /// own registration). PR references come from the job's detail/name text
 /// (binary `Hon` token scan).
-fn load_view_rows(cli: &Cli) -> Vec<tui_rata::agents_screen::AgentRow> {
+fn load_view_rows(cli: &Cli) -> Vec<tui::agents_screen::AgentRow> {
     use crate::agents_registry as reg;
-    use tui_rata::agents_screen::{extract_pr_number, AgentRow};
+    use tui::agents_screen::{extract_pr_number, AgentRow};
 
     let home = crate::run::lingxi_home_dir();
     let live = reg::read_live_sessions(&reg::sessions_dir(&home));
@@ -448,11 +448,11 @@ fn attach_args(cli: &Cli, session_id: &str) -> Vec<String> {
 /// pure blocking read (zero idle wakeups — the M7 behavior, byte-identical).
 ///
 /// Terminal IO only — every decision lives in the unit-tested
-/// [`tui_rata::agents_screen::AgentsScreenState`] +
+/// [`tui::agents_screen::AgentsScreenState`] +
 /// [`crate::agents_notify::detect_transitions`]. Errors restore the terminal
 /// and report on stderr.
 fn run_agents_view(cli: &Cli, mut watcher: NotificationWatcher) -> i32 {
-    use tui_rata::agents_screen::{AgentsOutcome, AgentsScreenState};
+    use tui::agents_screen::{AgentsOutcome, AgentsScreenState};
 
     // Seed the band map BEFORE the first render so a view opened onto an
     // already-blocked job stays quiet ($1f: first observation records, never
@@ -463,14 +463,14 @@ fn run_agents_view(cli: &Cli, mut watcher: NotificationWatcher) -> i32 {
         .then(|| std::time::Duration::from_millis(1000));
     let mut state = AgentsScreenState::new(load_view_rows(cli));
     loop {
-        let mut terminal = match tui_rata::setup_terminal() {
+        let mut terminal = match tui::setup_terminal() {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("lingxi-cli agents: terminal setup failed: {e}");
                 return crate::exit_codes::RUNTIME_ERROR;
             }
         };
-        let outcome = tui_rata::agents_screen::run_view_loop_with_tick(
+        let outcome = tui::agents_screen::run_view_loop_with_tick(
             &mut state,
             &mut terminal,
             tick,
@@ -479,7 +479,7 @@ fn run_agents_view(cli: &Cli, mut watcher: NotificationWatcher) -> i32 {
                 view.reload(load_view_rows(cli));
             },
         );
-        let _ = tui_rata::restore_terminal(&mut terminal);
+        let _ = tui::restore_terminal(&mut terminal);
         drop(terminal);
         match outcome {
             Ok(AgentsOutcome::Exit) => return crate::exit_codes::SUCCESS,

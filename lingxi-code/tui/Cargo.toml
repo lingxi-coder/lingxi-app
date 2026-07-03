@@ -1,5 +1,5 @@
 [package]
-name = "tui-rata"
+name = "tui"
 version = "0.12.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # The backend-neutral core extracted from `tui` during the iocraft → ratatui
-# migration. `tui-rata` renders it with ratatui; it must never depend on iocraft.
+# migration. `tui` renders it with ratatui; it must never depend on iocraft.
 tui-core = { path = "../tui-core" }
 permission = { path = "../permission" }
 # (fix round 1) `TurnEvent::ContextPressure`/`RateLimit` handling needs the
@@ -23,7 +23,7 @@ traits = { path = "../traits" }
 # reaches the SAME function through its `orchestrator` dependency).
 llm-client = { path = "../llm-client" }
 # Ratatui 0.29 uses crossterm 0.28 — the SAME major the workspace pins — so only
-# one crossterm version links (verified via `cargo tree -p tui-rata -i crossterm`).
+# one crossterm version links (verified via `cargo tree -p tui -i crossterm`).
 # All three features are dependency-free cfg gates, also enabled by codex-rs/tui:
 # `scrolling-regions` unlocks `Backend::scroll_region_up/down` (bottom-anchored
 # custom terminal room-making); `unstable-widget-ref` unlocks `WidgetRef` and

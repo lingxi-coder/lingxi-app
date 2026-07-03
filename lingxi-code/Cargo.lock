@@ -770,8 +770,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "traits",
+ "tui",
  "tui-core",
- "tui-rata",
  "unicode-width 0.1.14",
  "uuid",
 ]
@@ -1331,8 +1331,8 @@ dependencies = [
  "tool-worktree",
  "tracing",
  "traits",
+ "tui",
  "tui-core",
- "tui-rata",
  "workflow",
 ]
 
@@ -5678,6 +5678,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "tui"
+version = "0.12.0"
+dependencies = [
+ "async-trait",
+ "crossterm",
+ "image 0.25.5",
+ "llm-client",
+ "permission",
+ "protocol",
+ "ratatui",
+ "ratatui-image",
+ "serde_json",
+ "session",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "traits",
+ "tui-core",
+ "unicode-width 0.1.14",
+ "uuid",
+]
+
+[[package]]
 name = "tui-core"
 version = "0.12.0"
 dependencies = [
@@ -5701,29 +5724,6 @@ dependencies = [
  "traits",
  "unicode-segmentation",
  "unicode-width 0.1.14",
-]
-
-[[package]]
-name = "tui-rata"
-version = "0.12.0"
-dependencies = [
- "async-trait",
- "crossterm",
- "image 0.25.5",
- "llm-client",
- "permission",
- "protocol",
- "ratatui",
- "ratatui-image",
- "serde_json",
- "session",
- "tokio",
- "tokio-util",
- "tracing",
- "traits",
- "tui-core",
- "unicode-width 0.1.14",
- "uuid",
 ]
 
 [[package]]

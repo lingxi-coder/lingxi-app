@@ -1,4 +1,4 @@
-//! Interactive `tui-rata` chat app: the runtime event loop around
+//! Interactive `tui` chat app: the runtime event loop around
 //! [`ChatWidget`].
 //!
 //! `RataApp` is runtime orchestration ONLY (plan Phase 7): it owns the chat

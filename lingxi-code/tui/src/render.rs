@@ -1,9 +1,9 @@
 //! Render `tui_core`'s neutral styled-line model into ratatui text.
 //!
 //! `tui_core::render::StyledLine`/`StyledSpan` are backend-neutral; this module
-//! is the `tui-rata` side that maps them onto `ratatui::text::Line`/`Span`,
+//! is the `tui` side that maps them onto `ratatui::text::Line`/`Span`,
 //! using [`crate::style_adapter`] for the color boundary. This is the seam that
-//! lets `tui-rata` display everything `tui-core` renders (markdown, ANSI,
+//! lets `tui` display everything `tui-core` renders (markdown, ANSI,
 //! diffs, message bodies) without the neutral core knowing about ratatui.
 
 use ratatui::style::{Modifier, Style};

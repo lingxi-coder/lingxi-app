@@ -1230,7 +1230,7 @@ pub struct DesktopConfig {
     /// enforcement is on (the CLI default), so rules + the active mode +
     /// read-only auto-allow resolve first and only an unresolved `Ask` reaches
     /// the injected prompt. The interactive TUI injects a
-    /// `tui_rata::permission_gate::TuiPermissionGate` here so an `Ask` surfaces as a dialog; `None`
+    /// `tui::permission_gate::TuiPermissionGate` here so an `Ask` surfaces as a dialog; `None`
     /// (the default + every headless/transport caller) keeps the prior
     /// selection, byte-identical.
     pub injected_permission_gate: Option<Arc<dyn PermissionGate>>,
@@ -3321,7 +3321,7 @@ pub async fn build(
     // still forwards to the remote client). An explicit env value still overrides.
     //
     // Inner-gate selection (the `(perms, adapter_gate)` match at :1836):
-    // - INTERACTIVE TUI sessions inject `tui_rata::permission_gate::TuiPermissionGate`
+    // - INTERACTIVE TUI sessions inject `tui::permission_gate::TuiPermissionGate`
     //   via `cfg.injected_permission_gate` (the `if let Some(injected)` arm), so an
     //   unresolved mutating `Ask` (a `DenyByDefault` tool with no matching rule)
     //   surfaces the permission dialog instead of silently resolving — wired by

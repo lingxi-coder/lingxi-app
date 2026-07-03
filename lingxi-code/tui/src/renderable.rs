@@ -1,4 +1,4 @@
-//! The shared renderable contract for `tui-rata` widgets (plan Phase 2).
+//! The shared renderable contract for `tui` widgets (plan Phase 2).
 //!
 //! Ported from codex-rs `tui/src/render/renderable.rs` (UI architecture
 //! pattern only — no codex product types). A [`Renderable`] draws itself into

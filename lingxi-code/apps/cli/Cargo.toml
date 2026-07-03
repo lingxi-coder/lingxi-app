@@ -53,7 +53,7 @@ msgqueue = { path = "../../msgqueue" }
 # stream-json P2b: contextWindow/maxOutputTokens per model from the llm-client catalog.
 llm-client = { path = "../../llm-client" }
 dirs = "5"
-tui-rata = { path = "../../tui-rata" }
+tui = { path = "../../tui" }
 tui-core = { path = "../../tui-core" }
 session = { path = "../../session" }
 # M9-05: desktop TaskRegistry type (the `Runtime` bundle re-surfaces the handle
@@ -75,7 +75,7 @@ permission = { path = "../../permission" }
 # direct CLI deps.
 mcp = { path = "../../mcp" }
 plugin = { path = "../../plugin" }
-# Phase 8 (tui-rata command registry): the `/skills` + `/memory` startup
+# Phase 8 (tui command registry): the `/skills` + `/memory` startup
 # snapshots — the same on-disk walks the iocraft screens used, captured once
 # into `tui_rata::session::SessionInfo` before the TUI loop starts.
 skill-api = { path = "../../skill-api" }

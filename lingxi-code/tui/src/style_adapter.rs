@@ -1,4 +1,4 @@
-//! `StyleColor` → `ratatui::style::Color` adapter — the `tui-rata` color
+//! `StyleColor` → `ratatui::style::Color` adapter — the `tui` color
 //! boundary, mirroring `tui`'s `StyleColorIocraftExt`.
 //!
 //! `tui_core::render::StyleColor` is backend-neutral; this is the only place

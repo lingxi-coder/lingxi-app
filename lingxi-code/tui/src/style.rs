@@ -1,7 +1,7 @@
 //! Codex `style.rs` port (subset): the user-message / composer background
 //! blend. Source: `codex-rs/tui/src/style.rs` (`user_message_bg`,
 //! `user_message_style_for`, `user_message_style`) + `codex-rs/tui/src/color.rs`
-//! (`blend`, `is_light`). Only the pieces `tui-rata`'s composer needs are
+//! (`blend`, `is_light`). Only the pieces `tui`'s composer needs are
 //! ported — the codex ANSI-256/terminal-palette fallback (`best_color`) is out
 //! of scope here; the composer always renders a direct truecolor RGB.
 

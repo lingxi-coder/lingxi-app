@@ -131,7 +131,7 @@ tool-worktree = { path = "../../tools/worktree" }
 # the model uses) and surfaces it on `DesktopRuntime` for the CLI to thread into
 # the TUI `Runtime`. tui depends on `engine` (a lower crate), not engine-desktop,
 # so this edge is acyclic.
-tui-rata = { path = "../../tui-rata" }
+tui = { path = "../../tui" }
 tui-core = { path = "../../tui-core" }
 
 # `getClaudeTempDir` dir-name uses the REAL uid (1:1 TS `process.getuid?.()`).

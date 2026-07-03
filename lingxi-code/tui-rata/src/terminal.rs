@@ -280,15 +280,37 @@ where
             area.y = size.height - area.height;
         }
         if area != self.viewport_area {
-            // On startup the old viewport can still be empty: clear from the
-            // NEW viewport top so stale shell cells do not show through spaces.
-            let clear_from = if self.viewport_area.is_empty() {
-                area.as_position()
+            let old = self.viewport_area;
+            // The clear position matters on iTerm2: `clear_after_position` wipes
+            // to END of display, and the reverse-index history scroll that
+            // follows leaks any cleared-but-still-wanted composer row into
+            // scrollback as an orphaned frame (codex's bottom-anchored viewport
+            // sidesteps this by growing UP into scrollback; ours grows down).
+            // So clear only rows that actually become stale:
+            //   • pure growth (same top, bottom ≥ old bottom): nothing goes
+            //     stale — the composer redraw paints the new rows. No clear.
+            //   • shrink at a fixed top (bottom < old bottom): only the rows
+            //     BELOW the new viewport are exposed — clear from there down.
+            //   • anything else (move, startup-from-empty): clear from the
+            //     higher of the two tops, the conservative original behavior.
+            let same_top = !old.is_empty() && area.x == old.x && area.top() == old.top();
+            if same_top && area.bottom() >= old.bottom() {
+                // Pure growth: no destructive clear, just force a full repaint.
+                self.set_viewport_area(area);
+                self.invalidate_viewport();
             } else {
-                self.viewport_area.as_position()
-            };
-            self.clear_after_position(clear_from)?;
-            self.set_viewport_area(area);
+                let clear_from = if old.is_empty() {
+                    area.as_position()
+                } else if same_top {
+                    // Shrink: the composer above `area.bottom()` stays valid;
+                    // only the vacated rows below it need erasing.
+                    Position::new(0, area.bottom())
+                } else {
+                    old.as_position()
+                };
+                self.clear_after_position(clear_from)?;
+                self.set_viewport_area(area);
+            }
         }
         Ok(())
     }

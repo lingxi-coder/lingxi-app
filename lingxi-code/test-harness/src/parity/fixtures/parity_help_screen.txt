@@ -1,6 +1,7 @@
 Commands:
   /add-dir              Add a new working directory
   /agents               (removed) Ask Claude to create/manage subagents, or edit .claude/agents/
+  /autocompact          Configure the auto-compact window size
   /branch               Create a branch of the current conversation at this point
   /bridge               Connect this terminal for remote-control sessions
   /btw                  Ask a quick side question without interrupting the main conversation

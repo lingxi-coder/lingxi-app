@@ -3,8 +3,8 @@
     "plan": "M5-09",
     "spec_section": "\u00a73 M5-09 row + \u00a74.6 (Slash commands)",
     "_claude_code_version": "see CHANGELOG v0.6.0 baseline",
-    "_count_history": "100-name surface (2026-07-04 batch-8 added fork/goal/recap/reload-skills/skill-doctor/stop as implemented commands; prior 94-name surface from the 2026-06-20 slash parity #66/#67). implemented is target runtime status.",
-    "total_count_lock": 100,
+    "_count_history": "101-name surface (2026-07-04 batch-8 tail added the net-new headless `autocompact` as an implemented command; the same batch-8 pass added fork/goal/recap/reload-skills/skill-doctor/stop → 100; prior 94-name surface from the 2026-06-20 slash parity #66/#67). implemented is target runtime status.",
+    "total_count_lock": 101,
     "core_count_lock": 18,
     "unimplemented_count_lock": 47,
     "stub_literal_template": "{name}: not implemented in v0.6.0 (M5)",
@@ -47,6 +47,16 @@
       "claude_type": "stub",
       "rust_status": "faithful_stub",
       "target_status": "correct_by_design_stub",
+      "requires_tui": false
+    },
+    {
+      "name": "autocompact",
+      "is_core": false,
+      "implemented": true,
+      "description": "Configure the auto-compact window size",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
       "requires_tui": false
     },
     {

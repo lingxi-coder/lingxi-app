@@ -15,8 +15,8 @@
 //! LingXi-specific / internal commands without one. The 26 hidden/disabled
 //! commands ([`is_palette_hidden`]) are filtered out to match claude-code's
 //! `commands.filter(c => !c.isHidden && !$te(c))` help/palette filter, so the
-//! default total (no `DISABLE_*_COMMAND` env gates set) is 1 header + 74
-//! visible commands = 75 lines.
+//! default total (no `DISABLE_*_COMMAND` env gates set) is 1 header + 75
+//! visible commands = 76 lines.
 
 use crate::builtin_support::names::{
     core_description, is_command_env_disabled, is_palette_hidden, BUILTIN_COMMAND_NAMES,
@@ -84,19 +84,19 @@ mod tests {
     }
 
     #[test]
-    fn output_has_exactly_75_lines() {
-        // 1 header + 74 visible commands = 75 lines (each terminated by '\n').
+    fn output_has_exactly_76_lines() {
+        // 1 header + 75 visible commands = 76 lines (each terminated by '\n').
         // The 26 hidden/disabled commands (is_palette_hidden) are filtered out,
         // matching claude-code's `!isHidden && !$te` help/palette filter.
-        // (100 builtins − 26 hidden = 74 visible, with no DISABLE_* env set.)
+        // (101 builtins − 26 hidden = 75 visible, with no DISABLE_* env set.)
         // Serialize with the env-gate mutators (names::ENV_LOCK) so a concurrent
         // `DISABLE_*_COMMAND` mutation can't transiently drop a counted command.
         let _g = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
         let s = render_help_screen();
         let n = s.matches('\n').count();
         assert_eq!(
-            n, 75,
-            "expected 75 newlines (1 header + 74 visible commands), got {n}"
+            n, 76,
+            "expected 76 newlines (1 header + 75 visible commands), got {n}"
         );
     }
 

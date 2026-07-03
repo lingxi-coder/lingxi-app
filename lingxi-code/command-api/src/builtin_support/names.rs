@@ -18,19 +18,28 @@
 //! `skill-doctor`, `stop`), re-locking the total from 94 to **100**. The 18
 //! core count is unchanged (the new commands are wired via
 //! `command_core::register_core_batch_8`, not the core placeholder path).
+//!
+//! The follow-on batch-8 tail pass added the net-new headless `autocompact`
+//! command (the real `type:"local",supportsNonInteractive:!0` auto-compact
+//! window reporter — see `command_core::autocompact`), re-locking the total
+//! from 100 to **101**. Its stub-bucket siblings from the same triage
+//! (`powerup`, `scroll-speed` = interactive-only net-new; `install`,
+//! `sandbox-toggle` = interactive/host-bound already-in-surface stubs; `btw` =
+//! host-bound deferred) were kept as stubs / not added, so only the total moved.
 
 /// Every built-in slash command's runtime name (without leading `/`),
-/// ASCII-sorted. Locked at length **100** for v0.6.0.
+/// ASCII-sorted. Locked at length **101** for v0.6.0.
 ///
 /// Changing the count or membership requires bumping the parity fixture
 /// `crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json`
 /// (fixture filename retained for git-history continuity; the counts inside
 /// reflect the 94/47/18 lock per the 2026-06-20 slash-parity pass).
-pub const BUILTIN_COMMAND_NAMES: &[&str; 100] = &[
+pub const BUILTIN_COMMAND_NAMES: &[&str; 101] = &[
     "add-dir",
     "advisor",
     "agents",
     "ant-trace",
+    "autocompact",
     "autofix-pr",
     "backfill-sessions",
     "branch",
@@ -556,6 +565,10 @@ pub fn core_description(name: &str) -> &'static str {
         // (cp-01) Remaining visible builtins — real claude-code descriptions.
         "add-dir" => "Add a new working directory",
         "advisor" => "Configure the advisor model",
+        // Net-new headless auto-compact-window reporter (see
+        // `command_core::autocompact`). Verbatim from the 2.1.198 binary's
+        // headless `type:"local"` autocompact command object.
+        "autocompact" => "Configure the auto-compact window size",
         "branch" => "Create a branch of the current conversation at this point",
         "bridge" => "Connect this terminal for remote-control sessions",
         "btw" => "Ask a quick side question without interrupting the main conversation",
@@ -633,8 +646,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn total_count_locked_at_100() {
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 100);
+    fn total_count_locked_at_101() {
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 101);
     }
 
     // ── #63 DISABLE_*_COMMAND env gates ──────────────────────────────────────
@@ -909,7 +922,7 @@ mod tests {
         // subset of the locked name list and therefore cannot change the
         // total count, membership, or ordering that the parity fixture locks.
         assert!(INTENTIONALLY_DISABLED_COMMANDS.len() < BUILTIN_COMMAND_NAMES.len());
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 100);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 101);
     }
 
     // ========================================================================
@@ -1014,7 +1027,7 @@ mod tests {
             INTENTIONALLY_DISABLED_COMMANDS.len(),
             "23 + 3 == 26"
         );
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 100);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 101);
     }
 
     #[test]

@@ -3,14 +3,15 @@
 //! roots call. Built on the `command-api` runtime.
 //!
 //! After [`register_all_builtin_commands`] runs, the registry holds the locked
-//! 100-name surface; [`register_core_batch_1`] .. [`register_core_batch_8`]
+//! 101-name surface; [`register_core_batch_1`] .. [`register_core_batch_8`]
 //! then overwrite the implemented entries with their real handle/auth-bound
-//! handlers (batch 8 = `fork`/`goal`/`recap`/`reload-skills`/`skill-doctor`/
-//! `stop`). See spec §19.
+//! handlers (batch 8 = `autocompact`/`fork`/`goal`/`recap`/`reload-skills`/
+//! `skill-doctor`/`stop`). See spec §19.
 
 #![forbid(unsafe_code)]
 
 pub mod agents;
+pub mod autocompact;
 pub mod bundled;
 pub mod clear;
 pub mod commit;
@@ -60,6 +61,7 @@ pub mod version;
 mod core_placeholders;
 
 pub use agents::AgentsHandler;
+pub use autocompact::AutocompactHandler;
 pub use bundled::register_bundled_skills;
 pub use clear::ClearHandler;
 pub use commit::CommitHandler;

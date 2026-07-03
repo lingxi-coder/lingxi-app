@@ -5,7 +5,7 @@
 use command_api::CommandRegistry;
 use std::sync::Arc;
 
-/// Register all 100 built-in slash commands into `reg`.
+/// Register all 101 built-in slash commands into `reg`.
 ///
 /// The non-core names point at per-name instances of
 /// [`command_api::builtin_support::UnimplementedCommandHandler`] that return the locked
@@ -25,7 +25,7 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
         core_description, UnimplementedCommandHandler, BUILTIN_COMMAND_NAMES,
     };
 
-    // Pass 1: register all 100 with per-name unimplemented handler instances.
+    // Pass 1: register all 101 with per-name unimplemented handler instances.
     //
     // Each name needs its own handler **instance** because the handler
     // carries its own `name` field used to substitute the locked literal.
@@ -296,8 +296,13 @@ pub fn register_core_batch_7(reg: &mut CommandRegistry) {
     reg.register_builtin_handler(Arc::new(SkillsHandler::new()));
 }
 
-/// Overwrite the batch-8 entries (`fork`, `goal`, `recap`, `reload-skills`,
-/// `skill-doctor`, `stop`) with their real handlers.
+/// Overwrite the batch-8 entries (`autocompact`, `fork`, `goal`, `recap`,
+/// `reload-skills`, `skill-doctor`, `stop`) with their real handlers.
+///
+/// `autocompact` is the net-new (not previously in the locked name surface)
+/// headless read-only auto-compact-window reporter; it needs no handle/root and
+/// is wired here as a plain `Arc::new`. The other six are the 2026-07-04
+/// batch-8 commands.
 ///
 /// Call **after** [`register_all_builtin_commands`]. The function is
 /// idempotent — every name is overwritten in-place via `HashMap::insert`
@@ -334,10 +339,11 @@ pub fn register_core_batch_8(
     safe_mode: bool,
 ) {
     use crate::{
-        ForkHandler, GoalHandler, RecapHandler, ReloadSkillsHandler, SkillDoctorHandler,
-        StopHandler,
+        AutocompactHandler, ForkHandler, GoalHandler, RecapHandler, ReloadSkillsHandler,
+        SkillDoctorHandler, StopHandler,
     };
 
+    reg.register_builtin_handler(Arc::new(AutocompactHandler::new()));
     reg.register_builtin_handler(Arc::new(ForkHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(GoalHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(RecapHandler::new(handle.clone())));
@@ -423,10 +429,10 @@ mod registry_tests {
     use command_api::model::CommandResult;
 
     #[test]
-    fn register_all_registers_exactly_100_names() {
+    fn register_all_registers_exactly_101_names() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 100);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 101);
         for name in BUILTIN_COMMAND_NAMES {
             assert!(
                 reg.resolve(name).is_some(),

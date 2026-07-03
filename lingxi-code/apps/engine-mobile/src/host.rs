@@ -904,6 +904,10 @@ pub async fn build_mobile_inner(
         http: http.clone(),
         provider: tool_provider,
         default_model: orch_cfg.model.clone(),
+        // Mobile has no settings.json-backed WebSearch config provider (desktop
+        // injects `DesktopWebSearchConfigProvider`); WebSearch falls back to its
+        // built-in defaults here. `None` matches the tool-api test-support host.
+        web_search_config: None,
         worktree,
         subagent_spawner: None,
         agent_name_registry: None,
@@ -1039,7 +1043,8 @@ pub async fn build_mobile_inner(
         perms,
         output,
         memory,
-        cwd,
+        // `cwd` is reused below by the batch-8 registration, so clone here.
+        cwd.clone(),
     )
     // P0.2: attach the SAME `HookRegistry` the executor reads so `list_hooks`
     // reports the loaded settings hooks (the executor fires against it; this

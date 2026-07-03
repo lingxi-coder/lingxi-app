@@ -3,8 +3,8 @@
 //! `RegistrySlashDispatcher`, and verify behaviour against the default mock
 //! orchestrator.
 //!
-//! Batch-8 commands: `/fork`, `/goal`, `/recap`, `/reload-skills`,
-//! `/skill-doctor`, `/stop`.
+//! Batch-8 commands: `/autocompact`, `/fork`, `/goal`, `/recap`,
+//! `/reload-skills`, `/skill-doctor`, `/stop`.
 
 use command_api::CommandRegistry;
 use command_api::RegistrySlashDispatcher;
@@ -69,7 +69,7 @@ async fn handled(d: &RegistrySlashDispatcher, raw: &str) -> String {
 }
 
 #[test]
-fn all_6_batch_8_names_resolve() {
+fn all_7_batch_8_names_resolve() {
     let (d, _h, root) = fresh("resolve");
     // Access the underlying registry through a fresh build to assert resolution.
     let mut reg = CommandRegistry::new();
@@ -87,11 +87,34 @@ fn all_6_batch_8_names_resolve() {
         Vec::new(),
         false,
     );
-    for name in ["fork", "goal", "recap", "reload-skills", "skill-doctor", "stop"] {
+    for name in [
+        "autocompact",
+        "fork",
+        "goal",
+        "recap",
+        "reload-skills",
+        "skill-doctor",
+        "stop",
+    ] {
         assert!(reg.resolve(name).is_some(), "/{name} missing");
         assert!(reg.get_handler(name).is_some(), "/{name} handler missing");
     }
     drop(d);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn autocompact_with_no_env_reports_auto_window() {
+    // With no `LINGXI_AUTO_COMPACT_WINDOW` override the headless reporter shows
+    // the model-default ("auto") status block.
+    std::env::remove_var("LINGXI_AUTO_COMPACT_WINDOW");
+    let (d, _h, root) = fresh("autocompact");
+    let out = handled(&d, "/autocompact").await;
+    assert!(
+        out.starts_with("Auto-compact window: auto\n"),
+        "unexpected /autocompact output: {out}"
+    );
+    assert!(out.contains("The actual threshold is the minimum of this setting"));
     std::fs::remove_dir_all(root).ok();
 }
 

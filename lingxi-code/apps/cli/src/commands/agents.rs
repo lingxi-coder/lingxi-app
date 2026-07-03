@@ -166,12 +166,12 @@ pub async fn run(cli: &Cli) -> i32 {
             return crate::exit_codes::RUNTIME_ERROR;
         }
         let skip_set = crate::mode::read_skip_dangerous_prompt();
-        if tui::startup_bypass::should_show_bypass_dialog(true, skip_set) {
-            match tui::startup_bypass::mount_bypass_dialog().await {
-                Ok(tui::startup_bypass::BypassDialogOutcome::Accept) => {
+        if tui_rata::startup_bypass::should_show_bypass_dialog(true, skip_set) {
+            match tui_rata::startup_bypass::mount_bypass_dialog().await {
+                Ok(tui_rata::startup_bypass::BypassDialogOutcome::Accept) => {
                     crate::mode::persist_skip_dangerous_prompt();
                 }
-                Ok(tui::startup_bypass::BypassDialogOutcome::Decline) => {
+                Ok(tui_rata::startup_bypass::BypassDialogOutcome::Decline) => {
                     return crate::exit_codes::RUNTIME_ERROR;
                 }
                 Err(e) => {

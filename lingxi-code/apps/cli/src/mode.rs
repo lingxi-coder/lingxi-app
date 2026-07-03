@@ -135,9 +135,9 @@ pub async fn dispatch(
             let (bypass_mode, _) = crate::resolve_permission_mode(argv);
             let is_bypass = bypass_mode == permission::PermissionMode::BypassPermissions;
             let skip_set = read_skip_dangerous_prompt();
-            if tui::startup_bypass::should_show_bypass_dialog(is_bypass, skip_set) {
-                match tui::startup_bypass::mount_bypass_dialog().await {
-                    Ok(tui::startup_bypass::BypassDialogOutcome::Accept) => {
+            if tui_rata::startup_bypass::should_show_bypass_dialog(is_bypass, skip_set) {
+                match tui_rata::startup_bypass::mount_bypass_dialog().await {
+                    Ok(tui_rata::startup_bypass::BypassDialogOutcome::Accept) => {
                         // Persist so subsequent launches skip the prompt
                         // (`onConfirm` → `saveCurrentProjectConfig`). Best-effort.
                         persist_skip_dangerous_prompt();
@@ -150,7 +150,7 @@ pub async fn dispatch(
                         // but silently drops. The event name is registered and the
                         // emit lands once a pre-session sink exists.
                     }
-                    Ok(tui::startup_bypass::BypassDialogOutcome::Decline) => {
+                    Ok(tui_rata::startup_bypass::BypassDialogOutcome::Decline) => {
                         // User declined (or pressed Esc): exit 1 (TS `process.exit(1)`).
                         return exit_codes::RUNTIME_ERROR;
                     }
@@ -675,15 +675,15 @@ async fn trust_gate() -> TrustGateOutcome {
     }
     // `trust_gate_should_prompt` only returns true with `Some(config_path)`.
     let config_path = config_path.expect("prompt implies a config path");
-    match tui::startup_trust::mount_trust_dialog(&cwd).await {
-        Ok(tui::startup_trust::TrustDialogOutcome::Accept) => {
+    match tui_rata::startup_trust::mount_trust_dialog(&cwd).await {
+        Ok(tui_rata::startup_trust::TrustDialogOutcome::Accept) => {
             // "Yes, I trust this folder" → record acceptance via the shared
             // accept branch (`TrustDialog.tsx:162,174-177`): SESSION-ONLY
             // in-memory when `cwd == $HOME`, else persisted to disk best-effort.
             migrations::global_config::record_trust_accept(&config_path, &cwd);
             TrustGateOutcome::Proceed
         }
-        Ok(tui::startup_trust::TrustDialogOutcome::Decline) => TrustGateOutcome::Decline,
+        Ok(tui_rata::startup_trust::TrustDialogOutcome::Decline) => TrustGateOutcome::Decline,
         Err(e) => {
             eprintln!("lingxi-cli: trust dialog failed: {e}");
             TrustGateOutcome::Decline
@@ -849,7 +849,7 @@ mod tests {
     // so the gate DECISION is tested here via the store seam
     // (`trust_gate_should_prompt`, against a real `migrations::global_config`
     // temp config). The dialog's pure key→outcome map (Accept/Decline/Esc) is
-    // covered by `tui::startup_trust`'s own unit tests; `apps/cli` does not
+    // covered by `tui_rata::startup_trust`'s own unit tests; `apps/cli` does not
     // depend on `crossterm`, so the gate's branch logic is exercised here at
     // the predicate seam — mirroring how the bypass gate is covered (pure
     // predicate, thin I/O wrapper excluded).

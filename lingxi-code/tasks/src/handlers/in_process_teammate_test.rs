@@ -162,6 +162,9 @@ fn text_response(text: &str) -> llm_client::LlmResponse {
 #[derive(Default)]
 struct RecordingSink {
     statuses: StdMutex<Vec<(String, TaskStatus)>>,
+    /// Failure reasons received through the `set_failed` seam (cc 2.1.198:
+    /// the failed idle notification's `failureReason` to the lead).
+    failures: StdMutex<Vec<(String, String)>>,
 }
 #[async_trait]
 impl TaskStatusSink for RecordingSink {
@@ -171,10 +174,20 @@ impl TaskStatusSink for RecordingSink {
             .unwrap()
             .push((task_id.to_string(), status));
     }
+    async fn set_failed(&self, task_id: &str, error: &str) {
+        self.failures
+            .lock()
+            .unwrap()
+            .push((task_id.to_string(), error.to_string()));
+        self.set_status(task_id, TaskStatus::Failed).await;
+    }
 }
 impl RecordingSink {
     fn last_status(&self) -> Option<TaskStatus> {
         self.statuses.lock().unwrap().last().map(|(_, s)| *s)
+    }
+    fn failures(&self) -> Vec<(String, String)> {
+        self.failures.lock().unwrap().clone()
     }
 }
 
@@ -405,7 +418,8 @@ async fn build_context_without_default_model_leaves_model_raw() {
 // `with_default_model(resolve_user_specified_model(orch_cfg.model))` — the
 // RESOLVED main-loop id (Sonnet for an opusplan install). To stay FAITHFUL to
 // production these tests derive the parent the SAME way: feed
-// `resolve_user_specified_model("opusplan")` (= "claude-sonnet-4-6") as
+// `resolve_user_specified_model("opusplan")` (= "claude-sonnet-5" since the
+// 2.1.197 sonnet-family default flip, M1) as
 // `with_default_model`, not a hand-picked literal the wired path never emits.
 // These three together drive `resolve_agent_model`'s `getRuntimeMainLoopModel`
 // branch (model.ts:145-167), proving the wired path end-to-end: an
@@ -447,7 +461,7 @@ async fn build_context_opusplan_default_mode_returns_resolved_parent() {
     let _g = OpusEnvGuard::clear_providers();
     let parent = agent::model_resolution::resolve_user_specified_model("opusplan");
     assert_eq!(
-        parent, "claude-sonnet-4-6",
+        parent, "claude-sonnet-5",
         "opusplan resolves to Sonnet outside plan mode"
     );
     let handler = model_test_handler(Some(&parent))
@@ -460,7 +474,7 @@ async fn build_context_opusplan_default_mode_returns_resolved_parent() {
         .build_context(protocol::AgentId::new(), "lead", "", "", def)
         .await;
     assert!(
-        matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-sonnet-4-6"),
+        matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-sonnet-5"),
         "opusplan outside plan mode must keep the resolved parent (Sonnet), got {:?}",
         ctx.agent_definition.model
     );
@@ -635,6 +649,41 @@ async fn failed_turn_set_spools_failed_and_reports_terminal() {
         await_terminal(&sink).await,
         Some(TaskStatus::Failed),
         "Failed event reports terminal TaskStatus::Failed"
+    );
+}
+
+/// cc 2.1.198 (M9): a teammate dying on an API error reports "failed" WITH the
+/// failure reason through the `set_failed` seam — the reason the lead-facing
+/// `CoordinatorStatusSink` surfaces on the worker (binary @216293689: the
+/// in-process runner's catch sends `{idleReason:"failed",
+/// completedStatus:"failed", failureReason}` to the leader). Not a bare
+/// `set_status(Failed)` that would drop the error text.
+#[tokio::test]
+async fn failed_turn_set_reports_error_reason_through_set_failed() {
+    let api = ScriptedApiClient::new_error("rate limited: 529 overloaded");
+    let (_dir, fs, rt, handler, sink) = make_handler_with_sink(api);
+    let c = ctx(fs.clone(), rt.clone());
+
+    let h = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                agent_id: protocol::AgentId::new(),
+                name: "buddy".into(),
+                team_name: "alpha".into(),
+                description: String::new(),
+            },
+            c,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(await_terminal(&sink).await, Some(TaskStatus::Failed));
+    let failures = sink.failures();
+    assert_eq!(failures.len(), 1, "exactly one set_failed: {failures:?}");
+    assert_eq!(failures[0].0, h.task_id, "keyed on the teammate task id");
+    assert!(
+        failures[0].1.contains("rate limited: 529 overloaded"),
+        "the REAL error text reaches the sink (lead), not a sentinel: {failures:?}"
     );
 }
 

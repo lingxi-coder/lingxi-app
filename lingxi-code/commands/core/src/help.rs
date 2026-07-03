@@ -59,7 +59,10 @@ mod tests {
         match h.handle(&args).await {
             CommandResult::Done { display: Some(s) } => {
                 assert!(s.starts_with("Commands:\n"));
-                assert!(s.contains("Manage agent configurations"));
+                // (M4 cc2.1.198) /agents carries the removed-wizard description.
+                assert!(s.contains(
+                    "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/"
+                ));
                 // /x402 stays visible (claude-code ships it with no isHidden gate).
                 assert!(s.contains("/x402"));
                 // Hidden/disabled commands are filtered out of /help.

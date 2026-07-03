@@ -66,6 +66,15 @@ pub fn marketing_name_for_model(model_id: &str) -> Option<&'static str> {
     if canonical.contains("claude-opus-4") {
         return Some("Opus 4");
     }
+    // sonnet-5 before the sonnet-4-x arms (2.1.198 registry display_name
+    // "Sonnet 5"; mutually exclusive substrings).
+    if canonical.contains("claude-sonnet-5") {
+        return Some(if has_1m {
+            "Sonnet 5 (1M context)"
+        } else {
+            "Sonnet 5"
+        });
+    }
     if canonical.contains("claude-sonnet-4-6") {
         return Some(if has_1m {
             "Sonnet 4.6 (1M context)"
@@ -109,6 +118,9 @@ pub fn marketing_name_for_model(model_id: &str) -> Option<&'static str> {
 pub fn knowledge_cutoff_for_model(model_id: &str) -> Option<&'static str> {
     let canonical = model_id.to_ascii_lowercase();
     if canonical.contains("claude-fable-5") || canonical.contains("claude-mythos-5") {
+        Some("January 2026")
+    } else if canonical.contains("claude-sonnet-5") {
+        // 2.1.198 registry: claude-sonnet-5 knowledge_cutoff = "January 2026".
         Some("January 2026")
     } else if canonical.contains("claude-opus-4-8") || canonical.contains("claude-opus-4-7") {
         // TS lists `claude-opus-4-8` and `claude-opus-4-7` as separate arms
@@ -230,6 +242,11 @@ mod tests {
             marketing_name_for_model("claude-sonnet-4-5"),
             Some("Sonnet 4.5")
         );
+        assert_eq!(marketing_name_for_model("claude-sonnet-5"), Some("Sonnet 5"));
+        assert_eq!(
+            marketing_name_for_model("claude-sonnet-5[1m]"),
+            Some("Sonnet 5 (1M context)")
+        );
         assert_eq!(
             marketing_name_for_model("claude-haiku-4-5"),
             Some("Haiku 4.5")
@@ -258,6 +275,10 @@ mod tests {
         );
         assert_eq!(
             knowledge_cutoff_for_model("claude-opus-4-7"),
+            Some("January 2026")
+        );
+        assert_eq!(
+            knowledge_cutoff_for_model("claude-sonnet-5"),
             Some("January 2026")
         );
         assert_eq!(

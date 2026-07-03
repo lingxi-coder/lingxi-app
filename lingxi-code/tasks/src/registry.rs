@@ -324,6 +324,27 @@ impl TaskRegistry {
         })
     }
 
+    /// Record a `local_bash` task's child exit code (M8 cc2.1.198 "Task
+    /// panels: no stuck Running"): the worker's status sink reports the exit
+    /// code alongside the terminal status once the process ends; `output()`
+    /// projects it as `exit_code`/`done`. Non-bash variants are a benign
+    /// no-op (only bash children carry an OS exit code). `NotFound` for an
+    /// unknown id — the sink swallows it (racing teardown tolerance).
+    pub async fn set_bash_exit_code(
+        &self,
+        task_id: &str,
+        exit_code: i32,
+    ) -> Result<(), TaskError> {
+        let mut map = self.tasks.write().await;
+        let entry = map
+            .get_mut(task_id)
+            .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
+        if let TaskState::LocalBash(b) = entry {
+            b.exit_code = Some(exit_code);
+        }
+        Ok(())
+    }
+
     /// Test-only: force a `local_bash` task into a known status + exit code so
     /// `output()`'s `status`/`exit_code`/`done` projection can be exercised
     /// deterministically (`set_status` cannot set `exit_code`). Panics if the
@@ -885,6 +906,15 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
 /// in the same sandboxed output dir the registry hands the TUI. `mcp` drives
 /// [`MonitorMcpHandler`]'s catalog polls.
 ///
+/// `bash_status_sink` (M8 cc2.1.198 "Task panels: no stuck Running") bridges
+/// the bash worker's terminal status + exit code back into the registry.
+/// Pre-fix the handler kept its default `NoopStatusSink`, so a finished
+/// background bash task's stored `TaskStateBase.status` stayed `Running`
+/// forever — the stuck panel. The sink is the DEFERRED
+/// [`crate::registry_status_sink::RegistryStatusSink`] pattern: registered
+/// here (before the registry `Arc` exists) and bound by the composition root
+/// once it does — the same cycle-break the `LocalAgent` handler uses.
+///
 /// Call this *before* the registry is wrapped in an [`Arc`] — registration
 /// takes `&mut self`. The remaining five task types (agent/teammate/workflow/
 /// remote/dream) register once their production pools are wired (M9+).
@@ -893,15 +923,15 @@ pub fn register_self_contained_handlers(
     process: Arc<dyn ProcessRunner>,
     sandbox: Arc<dyn Sandbox>,
     mcp: Arc<mcp::McpRegistry>,
+    bash_status_sink: Arc<dyn crate::handlers::TaskStatusSink>,
 ) {
     let output_manager = reg.output_manager.clone();
     reg.register_handler(
         TaskType::LocalBash,
-        Arc::new(LocalBashHandler::new(
-            process,
-            sandbox,
-            output_manager.clone(),
-        )),
+        Arc::new(
+            LocalBashHandler::new(process, sandbox, output_manager.clone())
+                .with_status_sink(bash_status_sink),
+        ),
     );
     reg.register_handler(
         TaskType::MonitorMcp,

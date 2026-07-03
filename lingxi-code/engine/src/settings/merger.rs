@@ -40,6 +40,11 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         output_style: next.output_style.or(prev.output_style),
         telemetry_enabled: next.telemetry_enabled.or(prev.telemetry_enabled),
         model: next.model.or(prev.model),
+        // 2.1.198 AWS/GCP auth-refresh script keys — plain strings, scalar
+        // Override (later source wins), same as `model`/`outputStyle`.
+        aws_auth_refresh: next.aws_auth_refresh.or(prev.aws_auth_refresh),
+        aws_credential_export: next.aws_credential_export.or(prev.aws_credential_export),
+        gcp_auth_refresh: next.gcp_auth_refresh.or(prev.gcp_auth_refresh),
         providers: deep_merge_object(prev.providers, next.providers),
         routing: deep_merge_value_opt(prev.routing, next.routing),
     }

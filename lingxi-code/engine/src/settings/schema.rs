@@ -159,6 +159,31 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
+    /// Scalar field (later source wins). `awsAuthRefresh`: path to a script
+    /// that refreshes AWS authentication (2.1.198 settings schema: "Path to a
+    /// script that refreshes AWS authentication"). Consumed by the llm-client
+    /// AWS auth-refresh flow (`llm_client::aws_auth`, binary fn `ZBd`) when a
+    /// Bedrock-style request fails with an expired-STS auth error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_auth_refresh: Option<String>,
+
+    /// Scalar field (later source wins). `awsCredentialExport`: path to a
+    /// script that exports AWS credentials (2.1.198 settings schema: "Path to
+    /// a script that exports AWS credentials"; binary fn `t2d` parses its
+    /// stdout as STS JSON — `{Credentials:{AccessKeyId,SecretAccessKey,
+    /// SessionToken,Expiration}}` or the flat equivalent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_credential_export: Option<String>,
+
+    /// Scalar field (later source wins). `gcpAuthRefresh`: command to refresh
+    /// GCP authentication (2.1.198 settings schema: "Command to refresh GCP
+    /// authentication (e.g., gcloud auth application-default login)").
+    /// Schema-only today — the GCP refresh runtime (binary `zzr`/`Yzr`) is not
+    /// ported; the key is typed so it round-trips and is ACCESSIBLE when the
+    /// Vertex flow lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gcp_auth_refresh: Option<String>,
+
     /// Object-merge field (deep-merge). `LingXi` extension (claude-code has no
     /// such key): named LLM provider profiles. Each entry has the shape:
     /// `{ "type": "openai"|"openai-responses"|"anthropic"|"gemini"|"azure-openai"
@@ -369,6 +394,42 @@ mod tests {
         let json = r#"{"trustedDirectories": ["/foo"], "telemetryEnabled": true}"#;
         let parsed: SettingsJson = serde_json::from_str(json).unwrap();
         assert!(parsed.validate().is_ok());
+    }
+
+    #[test]
+    fn aws_gcp_auth_refresh_keys_parse_and_roundtrip() {
+        // 2.1.198 settings schema: awsAuthRefresh / awsCredentialExport /
+        // gcpAuthRefresh are plain string keys (script paths / commands).
+        let json = r#"{
+            "awsAuthRefresh": "aws sso login --profile myprofile",
+            "awsCredentialExport": "/usr/local/bin/export-aws-creds.sh",
+            "gcpAuthRefresh": "gcloud auth application-default login"
+        }"#;
+        let parsed: SettingsJson = serde_json::from_str(json).expect("parse");
+        assert_eq!(
+            parsed.aws_auth_refresh.as_deref(),
+            Some("aws sso login --profile myprofile")
+        );
+        assert_eq!(
+            parsed.aws_credential_export.as_deref(),
+            Some("/usr/local/bin/export-aws-creds.sh")
+        );
+        assert_eq!(
+            parsed.gcp_auth_refresh.as_deref(),
+            Some("gcloud auth application-default login")
+        );
+        // camelCase on the wire (claude-code emits camelCase; scalar-override
+        // merge — none of the three is in MERGE_STRATEGIES).
+        let back = serde_json::to_string(&parsed).expect("serialize");
+        assert!(back.contains("\"awsAuthRefresh\""));
+        assert!(back.contains("\"awsCredentialExport\""));
+        assert!(back.contains("\"gcpAuthRefresh\""));
+        for key in ["awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh"] {
+            assert!(
+                strategy_for(key).is_none(),
+                "{key} must be scalar-override (later source wins)"
+            );
+        }
     }
 
     #[test]

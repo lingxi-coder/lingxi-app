@@ -655,7 +655,17 @@ impl Task for InProcessTeammateHandler {
                     // Failed / Killed end the teammate; a per-turn-set Completed
                     // does not (terminal_status returns None for it), so the
                     // worker keeps pumping subsequent turn-sets.
-                    status_sink.set_status(&worker_task_id, status).await;
+                    //
+                    // A Failed carries its error through `set_failed` so the
+                    // lead-facing sink can surface the REASON, not a sentinel —
+                    // claude-code 2.1.198's failed idle notification to the
+                    // leader (`{idleReason:"failed", completedStatus:"failed",
+                    // failureReason}`, binary @216293689).
+                    if let SubagentEvent::Failed { error, .. } = &ev {
+                        status_sink.set_failed(&worker_task_id, error).await;
+                    } else {
+                        status_sink.set_status(&worker_task_id, status).await;
+                    }
                     break;
                 }
             }

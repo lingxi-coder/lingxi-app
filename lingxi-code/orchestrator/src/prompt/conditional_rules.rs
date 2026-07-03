@@ -10,9 +10,11 @@
 //! message (the `nested_memory` attachment, messages.ts:3700-3707) and never
 //! re-injected (the sent-set dedup, mirroring TS `loadedNestedMemoryPaths`).
 //!
-//! This module is the pure (no-orchestrator-state) core: [`base_dir`] derives a
+//! This module is the (no-orchestrator-state) core: [`base_dir`] derives a
 //! rule's match root, [`rule_matches_touched_file`] performs the gitignore-style
-//! glob test, and [`render_reminder`] formats a matched rule. The orchestrator
+//! glob test (with a cc 2.1.198 realpath symlink fallback in
+//! [`relative_path_for_match`] — the only disk access here), and
+//! [`render_reminder`] formats a matched rule. The orchestrator
 //! ([`crate::conversation::ConversationOrchestrator::conditional_rules_reminder_message`])
 //! owns the caching + sent-set and drives these helpers.
 #![forbid(unsafe_code)]
@@ -51,8 +53,8 @@ pub fn base_dir(rule_path: &Path, tier: LingxiMdTier, cwd: &Path) -> Option<Path
     }
 }
 
-/// Compute the path of `touched` relative to `base_dir`, applying claude-code's
-/// guards (claudemd.ts:1382-1393):
+/// Lexical relative-path core (no disk access): the path of `touched` relative
+/// to `base_dir` with claude-code's guards (claudemd.ts:1382-1393):
 ///
 /// - if `touched` is absolute → relativize against `base_dir`; else use it as-is
 /// - return `None` (no match) if the relative path is empty, starts with `..`
@@ -61,7 +63,7 @@ pub fn base_dir(rule_path: &Path, tier: LingxiMdTier, cwd: &Path) -> Option<Path
 /// The returned string uses forward slashes (gitignore semantics; also the only
 /// separator on the POSIX targets this ships on).
 #[must_use]
-fn relative_path_for_match(touched: &Path, base_dir: &Path) -> Option<String> {
+fn lexical_relative(touched: &Path, base_dir: &Path) -> Option<String> {
     let rel: PathBuf = if touched.is_absolute() {
         // `strip_prefix` is the lexical `relative(base, touched)` analog. When
         // `touched` is not under `base_dir` it fails → no match (TS would get a
@@ -81,6 +83,42 @@ fn relative_path_for_match(touched: &Path, base_dir: &Path) -> Option<String> {
         return None;
     }
     Some(rel_str)
+}
+
+/// Compute the path of `touched` relative to `base_dir` for glob matching,
+/// 1:1 with the binary conditional-rule filter `pqt` (claudemd.ts).
+///
+/// The primary computation is [`lexical_relative`] (a pure `path.relative`).
+/// The cc 2.1.198 fix adds a **symlink fallback** (binary: `if(isAbsolute(e) &&
+/// (!a||a.startsWith("..")||isAbsolute(a))){ let l=dirname(e),{resolvedPath:c}=
+/// jd(fs,l); if(c!==l) a=relative(i,join(c,basename(e))) }`): when `touched` is
+/// absolute AND the lexical relative failed (empty / `..`-escape / absolute),
+/// resolve the REALPATH of the file's directory (`jd` → `realpathSync`) and, only
+/// if it differs (`c!==l`, i.e. a symlink was resolved), recompute the relative
+/// path from the canonical directory. So a file reached through a symlinked path
+/// that resolves back under the rule's base dir still matches its canonical
+/// location. Like the binary, ONLY the touched file's directory is realpath'd —
+/// `base_dir` is assumed canonical (it derives from the realpath'd
+/// `getOriginalCwd`). A non-existent directory (canonicalize errors → `jd`
+/// returns the path unchanged) skips the fallback.
+#[must_use]
+fn relative_path_for_match(touched: &Path, base_dir: &Path) -> Option<String> {
+    if let Some(rel) = lexical_relative(touched, base_dir) {
+        return Some(rel);
+    }
+    // Lexical relativization failed. Symlink fallback (absolute paths only).
+    if !touched.is_absolute() {
+        return None;
+    }
+    let parent = touched.parent()?;
+    let name = touched.file_name()?;
+    // `jd(fs, dirname(e))` → realpathSync, falling back to the input on error.
+    let canonical_parent = std::fs::canonicalize(parent).ok()?;
+    // `if(c!==l)`: only recompute when a symlink was actually resolved.
+    if canonical_parent == parent {
+        return None;
+    }
+    lexical_relative(&canonical_parent.join(name), base_dir)
 }
 
 /// Test whether `touched` matches the conditional `rule`'s globs, 1:1 with the
@@ -280,6 +318,89 @@ mod tests {
             &r,
             Path::new("src/x.rs"),
             Path::new("/proj")
+        ));
+    }
+
+    /// cc 2.1.198 fix: a file reached through a SYMLINKED path whose canonical
+    /// location is under the rule's base dir MATCHES. Lexically `<T>/link/x.rs`
+    /// escapes the base `<T>/proj` (a `..`), but `realpath(dirname)` resolves it
+    /// to `<T>/proj/realsrc/x.rs` → `realsrc/x.rs` → matches glob `realsrc`.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_touched_file_matches_via_realpath_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Canonicalize the root so the base dir is canonical (as production's
+        // realpath'd getOriginalCwd is) — otherwise macOS /var→/private/var
+        // would make the resolved touched path escape the base.
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let base = root.join("proj");
+        let real_dir = base.join("realsrc");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::fs::write(real_dir.join("x.rs"), "fn main(){}").unwrap();
+        // A symlink OUTSIDE the base that points INTO it.
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+
+        let r = rule(
+            &base.join(".lingxi/rules/r.md").to_string_lossy(),
+            LingxiMdTier::Project,
+            Some(vec!["realsrc"]),
+        );
+        // Touched via the symlink: lexically `<root>/link/x.rs` is NOT under
+        // `<base>`, so only the realpath fallback can match it.
+        let touched_via_link = link.join("x.rs");
+        assert!(
+            rule_matches_touched_file(&r, &touched_via_link, &base),
+            "symlinked path resolving under the base must match its canonical location"
+        );
+        // Sanity: the canonical path matches too (lexical, no fallback needed).
+        assert!(rule_matches_touched_file(&r, &real_dir.join("x.rs"), &base));
+    }
+
+    /// A symlink resolving OUTSIDE the base dir still does NOT match — the fix
+    /// only rescues files whose canonical path is genuinely under the base.
+    #[cfg(unix)]
+    #[test]
+    fn symlink_resolving_outside_base_still_does_not_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let base = root.join("proj");
+        std::fs::create_dir_all(base.join("realsrc")).unwrap();
+        // Real dir OUTSIDE the base.
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("x.rs"), "x").unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let r = rule(
+            &base.join(".lingxi/rules/r.md").to_string_lossy(),
+            LingxiMdTier::Project,
+            Some(vec!["realsrc"]),
+        );
+        // Resolves to `<root>/outside/x.rs` → relative to base is a `..`-escape.
+        assert!(
+            !rule_matches_touched_file(&r, &link.join("x.rs"), &base),
+            "symlink resolving outside the base must not match"
+        );
+    }
+
+    /// The realpath fallback is a RESCUE only: a file whose lexical relative
+    /// already succeeds is never re-resolved (no disk access changes the match),
+    /// and a non-existent absolute path (canonicalize errors) simply fails.
+    #[test]
+    fn nonexistent_absolute_path_does_not_panic_and_does_not_match() {
+        let r = rule(
+            "/proj/.lingxi/rules/r.md",
+            LingxiMdTier::Project,
+            Some(vec!["src"]),
+        );
+        // Absolute, outside base, non-existent → lexical fails, canonicalize
+        // errors → no match (and no panic).
+        assert!(!rule_matches_touched_file(
+            &r,
+            Path::new("/nope/does/not/exist/x.rs"),
+            Path::new("/proj"),
         ));
     }
 

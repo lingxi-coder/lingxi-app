@@ -8,6 +8,7 @@
 
 pub mod anthropic;
 pub mod auth;
+pub mod aws_auth;
 pub mod catalog;
 #[allow(missing_docs)]
 pub mod client;
@@ -40,6 +41,10 @@ pub mod types;
 
 pub use anthropic::normalize_anthropic_usage;
 pub use auth::{ApiKeyAuthenticator, Authenticator, BearerAuthenticator, ChatGptAuthenticator};
+pub use aws_auth::{
+    AwsAuthProcess, AwsAuthRefresh, AwsAuthRefresher, AwsAuthSettings, AwsExportedCredentials,
+    ShellAwsAuthProcess,
+};
 pub use catalog::{builtin_presets, BuiltinCatalog};
 pub use client::{
     DefaultLlmClient, FileActivationPoll, LlmEventStream, PreparedLlmCall,

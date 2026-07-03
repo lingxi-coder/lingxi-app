@@ -42,6 +42,16 @@ pub const TITLE_ELLIPSIS: char = '…';
 /// claude-code's `enrichLog` shows `'(session)'` (`sessionStorage.ts:5052-5054`).
 pub const EMPTY_TITLE_FALLBACK: &str = "(session)";
 
+/// Fallback `/branch` default fork name when no meaningful prompt is found —
+/// the binary's `I2l`/`deriveFirstPrompt` empty branch returns
+/// `"Branched conversation"` (@217273303), distinct from the title path's
+/// `"(session)"`.
+pub const FORK_NAME_FALLBACK: &str = "Branched conversation";
+
+/// Max `char`s stored for a `/branch` default fork name — the binary's `I2l`
+/// `.slice(0,100)` (vs the title path's 200).
+pub const FORK_NAME_MAX_CHARS: usize = 100;
+
 /// `SKIP_FIRST_PROMPT_PATTERN` (`sessionStorage.ts:125-126`): leading lowercase
 /// XML-like tag (IDE context, hook output, task notifications, …) or a synthetic
 /// `[Request interrupted by user…]` marker.
@@ -62,6 +72,10 @@ static COMMAND_NAME_RE: Lazy<Regex> =
 static BASH_INPUT_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"<bash-input>([\s\S]*?)</bash-input>").expect("valid"));
 
+/// `/\s+/g` — the fork-name whitespace-run collapse in the binary's `I2l`
+/// (`.replace(/\s+/g," ")`).
+static WHITESPACE_RUN: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").expect("valid"));
+
 /// Returns the session title.
 ///
 /// 1. Selects the first *meaningful* user-message text via
@@ -77,6 +91,34 @@ pub fn extract_title(messages: &[JsonlMessage]) -> String {
     match first_meaningful_user_text(messages) {
         Some(text) if !text.is_empty() => text,
         _ => EMPTY_TITLE_FALLBACK.to_string(),
+    }
+}
+
+/// Derive the default `/branch` fork name from a conversation's messages — a
+/// 1:1 port of the binary's `I2l`/`deriveFirstPrompt` (@217273303): iterate
+/// messages, take the first meaningful USER prompt (skipping `isMeta` and —
+/// the 2.1.198 fix — `isCompactSummary`, so a session whose history begins
+/// with a compaction summary is NAMED from the first REAL prompt, not the
+/// summary), then `.replace(/\s+/g," ").trim().slice(0,100).trimEnd() ||
+/// "Branched conversation"`.
+///
+/// Shares [`first_meaningful_user_text`] (the `n9e` extractor: identical
+/// user/meta/compact-summary skip + `<command-name>` fallback + `<bash-input>`
+/// → `! cmd` + skip-XML rules) with [`extract_title`]; only the trailing
+/// whitespace-collapse, 100-char cap, and `"Branched conversation"` fallback
+/// differ from the title path's 200-cap + `"(session)"`.
+#[must_use]
+pub fn derive_fork_name(messages: &[JsonlMessage]) -> String {
+    // `n ??= t.commandFallback` is already folded into `first_meaningful_user_text`.
+    let raw = first_meaningful_user_text(messages).unwrap_or_default();
+    // I2l trailing normalize: `.replace(/\s+/g," ").trim().slice(0,100).trimEnd()`.
+    let collapsed = WHITESPACE_RUN.replace_all(&raw, " ");
+    let capped: String = collapsed.trim().chars().take(FORK_NAME_MAX_CHARS).collect();
+    let capped = capped.trim_end();
+    if capped.is_empty() {
+        FORK_NAME_FALLBACK.to_string()
+    } else {
+        capped.to_string()
     }
 }
 

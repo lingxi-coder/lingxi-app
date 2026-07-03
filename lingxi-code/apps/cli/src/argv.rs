@@ -36,7 +36,7 @@ fn parse_positive_budget_usd(value: &str) -> Result<f64, String> {
 #[allow(clippy::struct_excessive_bools, clippy::doc_markdown)]
 pub struct Argv {
     /// Top-level subcommand (mcp, auth, plugin, project, setup-token, agents,
-    /// install, update, doctor, auto-mode, ultrareview). Declared BEFORE the
+    /// install, update, doctor, auto-mode, ultrareview, gateway). Declared BEFORE the
     /// `prompt` positional so clap resolves a leading subcommand-name token as
     /// the subcommand (and an optional-value global flag like `-d`/`-r` before
     /// it can't swallow it) rather than as the chat `[prompt]`. `None` = the
@@ -209,12 +209,24 @@ pub struct Argv {
     pub verbose: bool,
 
     /// Minimal mode: skip hooks, LSP, plugin sync...Sets LINGXI_SIMPLE=1
-    // TODO(bare): wire into LINGXI_SIMPLE env + skip hooks/LSP/plugin behavior
+    ///
+    /// (M3 cc2.1.198) WIRED: `run_cli` exports `LINGXI_SIMPLE=1` (binary
+    /// `process.env.CLAUDE_CODE_SIMPLE="1"` on a pre-`--` `--bare` token) and
+    /// threads `CustomizationGates{bare}` through `resolve_desktop_config` into
+    /// `engine_desktop::build` (skips settings hooks, plugins incl. plugin LSP,
+    /// skill/custom-command dirs, custom agents; LINGXI.md unless `--add-dir`).
     #[arg(long = "bare")]
     pub bare: bool,
 
     /// Start with all customizations disabled — useful for troubleshooting
-    // TODO(safe-mode): wire into safe mode initialization (no plugins, hooks, etc.)
+    ///
+    /// (M3 cc2.1.198) WIRED: `run_cli` exports `LINGXI_SAFE_MODE=1` +
+    /// `LINGXI_DISABLE_LINGXI_MDS=1` (binary @223917313 `if(Ql())process.env.
+    /// CLAUDE_CODE_SAFE_MODE="1",process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS=
+    /// "1"`) and threads `CustomizationGates{safe_mode}` into `engine_desktop::
+    /// build` (disables settings hooks, plugins, skills/custom commands, custom
+    /// agents, discovered `.mcp.json` servers — `--mcp-config` servers survive,
+    /// binary `fQ`'s `L2()` — and the LINGXI.md hierarchy).
     #[arg(long = "safe-mode")]
     pub safe_mode: bool,
 
@@ -223,37 +235,80 @@ pub struct Argv {
     ///
     /// claude-code `--agents <json>` takes EXACTLY ONE value (a JSON object
     /// string parsed downstream), not a space-separated list.
-    // TODO(agents): parse the JSON + wire into agent configuration
+    ///
+    /// (M4 cc2.1.198) WIRED: threads raw into `DesktopConfig.cli_agents_json`;
+    /// `engine_desktop::build` parses it with the strict flag-record schema
+    /// (`agent::parse_agents_from_flag_json`, the `QXt` @223080769 port —
+    /// invalid JSON/definitions LOG and yield no agents, never abort) and
+    /// merges the result over dir-loaded agents (`flagSettings` precedence).
+    /// Ignored (warn) in safe mode; survives `--bare`.
     #[arg(long = "agents", value_name = "json")]
     pub agents: Option<String>,
 
     /// Agent for the current session. Overrides the 'agent' setting.
     ///
     /// claude-code `--agent <agent>` takes EXACTLY ONE value.
-    // TODO(agent): wire into agent configuration
+    ///
+    /// (M4 cc2.1.198) CARRIED: threads into `DesktopConfig.cli_agent`;
+    /// `engine_desktop::build` resolves it against the final agent catalog
+    /// (binary `dts`: exact agentType, else `…:{name}` FQN suffix) and logs
+    /// the byte-matched `Warning: agent "X" not found …` on a miss. RESIDUAL:
+    /// applying the hit (`xz` → `mainThreadAgentType`) needs a main-thread
+    /// agent runtime lingxi does not have yet.
     #[arg(long = "agent", value_name = "agent")]
     pub agent: Option<String>,
 
-    /// Directory to load plugins from
-    // TODO(plugin-dir): wire into plugin loading path
-    #[arg(long = "plugin-dir", value_name = "dir")]
-    pub plugin_dir: Option<PathBuf>,
+    /// Load a plugin from a directory or .zip for this session only
+    /// (repeatable: --plugin-dir A --plugin-dir B.zip)
+    ///
+    /// (M4 cc2.1.198) WIRED: repeatable (commander `.option(...)` with an
+    /// array default `[]`); each entry threads into
+    /// `DesktopConfig.cli_plugin_dirs` and loads through the inline-plugin
+    /// path (`EBm` port `plugin::discover_cli_plugin_dirs`): missing path =
+    /// warn + skip, `.zip` extracted (guarded) then loaded like a dir, loaded
+    /// plugins enable through the SAME manager path as marketplace installs.
+    /// Survives `--bare` (its help lists `--plugin-dir` as explicit context);
+    /// not safe mode.
+    #[arg(long = "plugin-dir", value_name = "path", action = clap::ArgAction::Append)]
+    pub plugin_dir: Vec<PathBuf>,
 
     /// Disable session persistence - sessions will not be saved to disk and cannot be resumed (only works with --print)
-    // TODO(no-session-persistence): wire into session-save path
+    ///
+    /// (M3 cc2.1.198) WIRED: non-print use hard-errors in `run_cli` (binary
+    /// @223929381 `if(a.sessionPersistence===!1&&!We)return Es("Error: --no-
+    /// session-persistence can only be used with --print mode.")`); the
+    /// accepted print case threads `DesktopConfig.session_persistence: false`
+    /// so `engine_desktop::build` wires NO session `JsonlWriter`.
     #[arg(long = "no-session-persistence")]
     pub no_session_persistence: bool,
 
     /// Resume a session linked to a PR by PR number/URL, or open interactive picker
-    // TODO(from-pr): wire into PR-linked session resume
+    ///
+    /// (M4 cc2.1.198) WIRED into the resume pickers: the binary hands the
+    /// picker `filterByPr: rt` (bare flag → `!0` = only PR-linked sessions;
+    /// a value is parsed by `wqc` — leading int, else a
+    /// `/(pull|pull-requests|-\/merge_requests)\/(\d+)/` URL — and filters
+    /// `prNumber === n`; an unparseable value applies NO narrowing). lingxi
+    /// routes `--from-pr` through the same `--resume` pickers with that
+    /// filter (`run::run_from_pr`). RESIDUAL: lingxi session metadata carries
+    /// no `prNumber` yet (session JSONL `pr-link` deferral), so a PR filter
+    /// currently matches zero sessions.
     // No `require_equals`: commander's `--from-pr [value]` consumes the next
     // SPACE-separated token as the value (`--from-pr 123`), so we must NOT force
     // the `--from-pr=123` form or `123` would be mis-parsed as the prompt.
     #[arg(long = "from-pr", value_name = "value", num_args = 0..=1, default_missing_value = "")]
     pub from_pr: Option<String>,
 
-    /// Effort level for the current session
-    // TODO(effort): wire into model/orchestrator effort configuration
+    /// Effort level for the current session (low, medium, high, xhigh, max)
+    ///
+    /// (M4 cc2.1.198) WIRED: `run_cli` normalizes via [`Argv::normalized_effort`]
+    /// (the binary's `--effort` argParser `u4i` @ the root option table:
+    /// trim+lowercase, alias `med`→`medium`, must be in `UR = ["low","medium",
+    /// "high","xhigh","max"]`; an unknown value writes `Warning: Unknown
+    /// --effort value '<raw>' — ignoring it and using the default effort.
+    /// Valid values: …` to stderr and IGNORES the flag). The valid level
+    /// threads into `DesktopConfig.initial_effort` → the main-loop requests'
+    /// `output_config.effort`.
     #[arg(long = "effort", value_name = "level")]
     pub effort: Option<String>,
 
@@ -302,7 +357,16 @@ pub struct Argv {
     /// VISIBLE in claude-code 2.1.191 with a fixed choices list and preset
     /// "true": bare `--prompt-suggestions` → "true"; an out-of-choices value
     /// (e.g. "banana") is HARD-REJECTED. The `value_parser` below mirrors that.
-    // TODO(prompt-suggestions): wire into prompt suggestion emission
+    ///
+    /// (M4 cc2.1.198) VALIDATED: the binary's argParser returns a BOOLEAN
+    /// (`!Hl(i)` — falsy tokens false/0/no/off → false, the rest true), and a
+    /// TRUTHY value outside `--print` + `--output-format=stream-json` is a
+    /// fatal `Es(...)` (see [`Argv::validate_prompt_suggestions_args`],
+    /// enforced in `run_cli`; verified live: exit 1). RESIDUAL: the actual
+    /// per-turn `prompt_suggestion` stream-json message needs the
+    /// binary's post-turn prediction side-call (`prompt_suggestion_generate`),
+    /// which lingxi's print pipeline does not have — accepted flag is carried
+    /// but no suggestion messages are emitted yet.
     #[arg(
         long = "prompt-suggestions",
         value_name = "value",
@@ -636,6 +700,40 @@ impl Argv {
         Ok(())
     }
 
+    /// Upfront `--bg`/`--background` × `--print`/`-p` reject (cc 2.1.198
+    /// changelog "rejected up front"). Byte-locked to the binary's bg
+    /// fast-path validator `pof` @218854391: `if(o.some((i)=>{…return
+    /// i==="--print"||i.startsWith("--print=")||a.includes("-p")||l==="-p"}))
+    /// return"--bg and --print conflict: …"` — the caller (`handleBgFlag`
+    /// `oof` @218839305 via `mee`) writes the string + `\n` to STDERR (no
+    /// `Error:` prefix) and sets `process.exitCode=1`. The `—` renders as
+    /// a real em dash. clap has already folded `--print=`/combined `-p` forms
+    /// into `self.print`, matching the binary's peeled-token scan.
+    pub fn validate_background_args(&self) -> Result<(), String> {
+        if self.background && self.print {
+            return Err(
+                "--bg and --print conflict: --print never starts the interactive session that `claude agents` attaches to, so the job would be unattachable. The prompt is the positional \u{2014} drop --print: `claude --bg '<task>'`."
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    /// `--no-session-persistence` requires `--print` (cc 2.1.198 main action
+    /// @223929381: `if(a.sessionPersistence===!1&&!We)return Es("Error: --no-
+    /// session-persistence can only be used with --print mode.")`; `Es` =
+    /// `console.error` + exit 1). The returned string EXCLUDES the `Error: `
+    /// prefix — the caller prints `Error: {msg}` like the sibling stream-json
+    /// gates.
+    pub fn validate_session_persistence_args(&self) -> Result<(), String> {
+        if self.no_session_persistence && !self.print {
+            return Err(
+                "--no-session-persistence can only be used with --print mode.".to_string(),
+            );
+        }
+        Ok(())
+    }
+
     /// Resolve the effective append-system-prompt from `--append-system-prompt` /
     /// `--append-system-prompt-file` (with file taking precedence when both are
     /// set). Returns `None` when neither flag is set.
@@ -647,6 +745,70 @@ impl Argv {
             }
         }
         self.append_system_prompt.clone()
+    }
+
+    /// (M4 cc2.1.198) The boolean value of `--prompt-suggestions` (the
+    /// binary's argParser returns `!Hl(i)`: falsy tokens `false`/`0`/`no`/
+    /// `off` → `false`, everything else in the choices list → `true`; bare
+    /// flag presets `"true"` → `true`). `None` when the flag is absent.
+    /// Out-of-choices values never reach here (clap's `value_parser`
+    /// hard-rejects them like commander's `.choices(...)`).
+    #[must_use]
+    pub fn prompt_suggestions_enabled(&self) -> Option<bool> {
+        self.prompt_suggestions
+            .as_deref()
+            .map(|v| !matches!(v, "false" | "0" | "no" | "off"))
+    }
+
+    /// (M4 cc2.1.198) A TRUTHY `--prompt-suggestions` requires `--print` +
+    /// `--output-format=stream-json` (binary main action: `if(a.
+    /// promptSuggestions&&(!We||M!=="stream-json"))return Es("Error: --prompt-
+    /// suggestions requires --print and --output-format=stream-json
+    /// (prompt_suggestion messages are only surfaced in stream-json
+    /// output).")`; verified live: stderr line + exit 1; `--prompt-suggestions
+    /// false` passes). The returned string EXCLUDES the `Error: ` prefix,
+    /// matching the sibling gates' caller convention.
+    pub fn validate_prompt_suggestions_args(&self) -> Result<(), String> {
+        if self.prompt_suggestions_enabled() == Some(true)
+            && !(self.print && self.is_stream_json())
+        {
+            return Err(
+                "--prompt-suggestions requires --print and --output-format=stream-json (prompt_suggestion messages are only surfaced in stream-json output)."
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    /// (M4 cc2.1.198) Normalize `--effort` exactly like the binary's argParser
+    /// (`u4i`/`Xat`: `e.trim().toLowerCase()`, alias map `c4i = {med:
+    /// "medium"}`, membership in `UR = ["low","medium","high","xhigh","max"]`).
+    /// Returns `(level, warning)`: a valid value yields the normalized level;
+    /// an unknown one yields `None` plus the byte-locked warning the binary
+    /// writes to stderr (`process.stderr.write(\`Warning: ${l}\n\`)`) before
+    /// continuing with the default effort. Absent flag → `(None, None)`.
+    #[must_use]
+    pub fn normalized_effort(&self) -> (Option<String>, Option<String>) {
+        const UR: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+        let Some(raw) = self.effort.as_deref() else {
+            return (None, None);
+        };
+        let mut t = raw.trim().to_lowercase();
+        // `c4i[t] ?? t` — the only alias in 2.1.198 is `med` → `medium`.
+        if t == "med" {
+            t = "medium".to_string();
+        }
+        if UR.contains(&t.as_str()) {
+            (Some(t), None)
+        } else {
+            (
+                None,
+                Some(format!(
+                    "Warning: Unknown --effort value '{raw}' \u{2014} ignoring it and using the default effort. Valid values: {}.",
+                    UR.join(", ")
+                )),
+            )
+        }
     }
 }
 

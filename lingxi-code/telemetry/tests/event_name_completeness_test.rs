@@ -65,7 +65,11 @@ fn registry_is_exactly_347_entries() {
     //   - D2: port-only tengu_cost_recorded (cost 10 → 9)
     //   - D3: session-resume consolidation (session 20 → 18)
     // 347 - 3 - 1 - 2 = 341.
-    assert_eq!(ALL_EVENT_NAMES.len(), 341);
+    // 2.1.198 M2: AWS auth-refresh trust-gate events added as their own
+    // global-tail block (oauth::AWS_AUTH_NAMES —
+    // tengu_awsAuthRefresh_missing_trust,
+    // tengu_awsCredentialExport_missing_trust): 341 + 2 = 343.
+    assert_eq!(ALL_EVENT_NAMES.len(), 343);
 }
 
 #[test]
@@ -286,6 +290,14 @@ fn category_ordering_preserved() {
         &ALL_EVENT_NAMES[338..341],
         &telemetry::tengu::coordinator::NAMES,
         "coordinator swarm tail block",
+    );
+    // AWS auth-refresh trust-gate block (2 events, 2.1.198 M2) appended after
+    // the coordinator block — tengu_awsAuthRefresh_missing_trust /
+    // tengu_awsCredentialExport_missing_trust. Positions 341..343.
+    assert_eq!(
+        &ALL_EVENT_NAMES[341..343],
+        telemetry::tengu::oauth::AWS_AUTH_NAMES,
+        "AWS auth-refresh trust-gate tail block",
     );
 }
 

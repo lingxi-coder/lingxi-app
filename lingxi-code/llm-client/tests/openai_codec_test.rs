@@ -569,18 +569,21 @@ fn stream_tool_fragment_without_index_defaults_to_slot_zero() {
 }
 
 #[test]
-fn reasoning_config_is_rejected_until_responses_api_exists() {
+fn reasoning_config_is_dropped_gracefully_on_chat_wire() {
+    // Chat-completions has no per-request reasoning-budget wire slot; the codec
+    // intentionally drops `request.reasoning` instead of erroring (reasoning on
+    // this wire is model-id-driven, e.g. deepseek-reasoner). See
+    // `providers/openai.rs::encode_request`.
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
     let mut request = LlmRequest::new("gpt-4o");
     request.reasoning = Some(llm_client::ReasoningConfig::Enabled {
         budget_tokens: 2048,
     });
 
-    let err = codec.encode_request(&request).unwrap_err();
+    let encoded = codec.encode_request(&request).expect("reasoning is dropped, not rejected");
 
-    assert!(
-        matches!(err, llm_client::LlmError::InvalidRequest { message } if message.contains("reasoning"))
-    );
+    assert!(encoded.body_json.get("reasoning").is_none());
+    assert!(encoded.body_json.get("reasoning_effort").is_none());
 }
 
 #[test]

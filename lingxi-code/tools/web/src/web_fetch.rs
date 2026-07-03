@@ -468,7 +468,7 @@ impl WebFetchTool {
             max_tokens: 8000,
             max_retries: 1,
             temperature: None,
-            thinking_budget: None,
+            thinking: None,
             stop_sequences: vec![],
             query_source: QuerySource::WebFetchApply,
             skip_system_prompt_prefix: true,

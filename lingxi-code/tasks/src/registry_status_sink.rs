@@ -57,6 +57,17 @@ impl TaskStatusSink for RegistryStatusSink {
         }
     }
 
+    async fn set_exit_code(&self, task_id: &str, exit_code: i32) {
+        // (M8 cc2.1.198) `local_bash` write-through: the worker reports the
+        // child's exit code just before its terminal `set_status`; without
+        // this the stored state kept `exit_code: None` and the panel/output
+        // projection could never show the real completion. Best-effort like
+        // `set_status`.
+        if let Some(reg) = self.registry.get() {
+            let _ = reg.set_exit_code(task_id, exit_code).await;
+        }
+    }
+
     async fn notify_rest(
         &self,
         task_id: &str,

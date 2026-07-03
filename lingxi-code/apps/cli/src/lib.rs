@@ -54,6 +54,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agents_notify;
+pub mod agents_registry;
 pub mod argv;
 mod bypass_env;
 pub mod commands;
@@ -293,6 +295,49 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     logging::init(parsed.debug_enabled(), interactive_tui);
     tracing::debug!(?parsed, "argv parsed");
 
+    // (M3 cc2.1.198) `--bg`/`--background` × `--print`/`-p` is rejected UP
+    // FRONT — before any mode/subcommand dispatch — matching the binary's bg
+    // fast path (`handleBgFlag` runs from the top-level dispatcher on any
+    // `--bg`/`--background` token and its `pof` validator rejects before a
+    // session dir is even minted). Bare message + `\n` on stderr (no `Error:`
+    // prefix), exit 1 (`process.exitCode=1`).
+    if let Err(msg) = parsed.validate_background_args() {
+        eprintln!("{msg}");
+        return exit_codes::ARGV_ERROR;
+    }
+
+    // (M4 cc2.1.198) `--effort` argParser warning. The binary validates INSIDE
+    // commander's argParser (`u4i` — so the warning prints during argv parse,
+    // before any dispatch) and continues with the flag ignored:
+    // `process.stderr.write(`Warning: ${l}\n`)`. Verified live: stderr
+    // `Warning: Unknown --effort value 'banana' — ignoring it and using the
+    // default effort. Valid values: low, medium, high, xhigh, max.`, run
+    // continues. The normalized level threads via `resolve_desktop_config`.
+    if let (_, Some(warning)) = parsed.normalized_effort() {
+        eprintln!("{warning}");
+    }
+
+    // (M3 cc2.1.198) `--bare` exports `LINGXI_SIMPLE=1` for this process +
+    // children (binary top dispatcher @224048363: `if((l===-1?t:t.slice(0,l))
+    // .includes("--bare"))process.env.CLAUDE_CODE_SIMPLE="1"` — pre-`--`
+    // tokens only, which clap's parse already honors). `xd()` also treats a
+    // pre-set truthy env as bare, mirrored in `resolve_desktop_config`.
+    if parsed.bare {
+        std::env::set_var("LINGXI_SIMPLE", "1");
+    }
+    // (M3 cc2.1.198) safe mode (`Ql()` = `--safe-mode` OR truthy env) exports
+    // `LINGXI_SAFE_MODE=1` + `LINGXI_DISABLE_LINGXI_MDS=1` (binary @223917313:
+    // `if(Ql())process.env.CLAUDE_CODE_SAFE_MODE="1",process.env.
+    // CLAUDE_CODE_DISABLE_CLAUDE_MDS="1"`); the latter is the orchestrator's
+    // existing LINGXI.md kill-switch (`orchestrator::prompt::memory_block`),
+    // so subagents/children inherit the disable too.
+    if parsed.safe_mode
+        || traits::env::is_env_truthy(std::env::var("LINGXI_SAFE_MODE").ok().as_deref())
+    {
+        std::env::set_var("LINGXI_SAFE_MODE", "1");
+        std::env::set_var("LINGXI_DISABLE_LINGXI_MDS", "1");
+    }
+
     // `--cwd <dir>` must apply BEFORE the subcommand dispatch, not just for
     // session modes: the subcommands resolve their target project from the LIVE
     // process cwd (mcp via `current_dir()` → project key + `<cwd>/.mcp.json`,
@@ -387,6 +432,15 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         return exit_codes::ARGV_ERROR;
     }
 
+    // (M4 cc2.1.198) A truthy `--prompt-suggestions` requires --print +
+    // --output-format=stream-json. Binary order: this `Es(...)` gate runs
+    // IMMEDIATELY BEFORE the include-partial-messages gate (same statement
+    // chain in the main action). Byte-exact message + exit 1 (verified live).
+    if let Err(msg) = parsed.validate_prompt_suggestions_args() {
+        eprintln!("Error: {msg}");
+        return exit_codes::ARGV_ERROR;
+    }
+
     // `--include-partial-messages` requires BOTH --print and
     // --output-format=stream-json (claude-code main.tsx:1848-1852). Byte-exact
     // error + exit 1 (ARGV_ERROR). Without this gate lingxi silently accepted
@@ -395,6 +449,14 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         eprintln!(
             "Error: --include-partial-messages requires --print and --output-format=stream-json."
         );
+        return exit_codes::ARGV_ERROR;
+    }
+
+    // (M3 cc2.1.198) `--no-session-persistence` requires `--print`. Binary
+    // order: this gate runs immediately AFTER the include-partial-messages
+    // gate (@223929381, next statement). Byte-exact message + exit 1.
+    if let Err(msg) = parsed.validate_session_persistence_args() {
+        eprintln!("Error: {msg}");
         return exit_codes::ARGV_ERROR;
     }
 
@@ -642,6 +704,15 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     //   (none) + --no-tui → M5-08 stdio picker (unchanged fallback)
     if parsed.resume.is_some() {
         return run::run_resume(&parsed, &runtime, sink.as_ref()).await;
+    }
+
+    // (M4 cc2.1.198) `--from-pr [value]` — the binary opens the SAME resume
+    // picker with `filterByPr: rt` (bare flag → only PR-linked sessions; a
+    // parseable PR number/URL → `prNumber === n`; an unparseable value applies
+    // no narrowing). `--resume` wins when both are given (its branch runs
+    // first in the binary's session-source resolution too).
+    if parsed.from_pr.is_some() {
+        return run::run_from_pr(&parsed, sink.as_ref()).await;
     }
 
     let chosen = mode::decide_mode(&parsed);

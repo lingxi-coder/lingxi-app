@@ -294,6 +294,14 @@ impl TaskRegistryHandle for TaskRegistry {
         Ok(state_to_record(&state))
     }
 
+    async fn set_exit_code(&self, id: &str, exit_code: i32) -> Result<(), TaskRegistryError> {
+        // (M8 cc2.1.198) `local_bash` worker exit-code write-through — see
+        // `TaskRegistry::set_bash_exit_code`.
+        self.set_bash_exit_code(id, exit_code)
+            .await
+            .map_err(task_err_to_registry_err)
+    }
+
     async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError> {
         self.kill(id).await.map_err(task_err_to_registry_err)?;
         // After kill, fetch the (now-killed) state for the record.

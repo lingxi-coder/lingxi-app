@@ -1633,20 +1633,30 @@ mod tests {
             ..Default::default()
         };
 
-        // Standard model: contextWindow=200000, maxOutputTokens=64000 for opus-4-8.
+        // opus-4-8 is natively 1M (2.1.198 registry native_1m:!0, M1b) —
+        // contextWindow=1_000_000 with NO suffix; maxOutputTokens=64000.
         let frame = stream
             .build_result_success_frame("hi", "end_turn", &cost, "claude-opus-4-8", "off", &[])
             .await;
         let mu = frame["modelUsage"].as_object().unwrap();
         let entry = &mu["claude-opus-4-8"];
         assert_eq!(
-            entry["contextWindow"], 200_000_u64,
-            "opus-4-8 default contextWindow"
+            entry["contextWindow"], 1_000_000_u64,
+            "opus-4-8 native-1M contextWindow"
         );
         assert_eq!(
             entry["maxOutputTokens"], 64_000_u64,
             "opus-4-8 maxOutputTokens"
         );
+
+        // A 200k model (opus-4-6 has NO native_1m) keeps the default window.
+        let frame200k = stream
+            .build_result_success_frame("hi", "end_turn", &cost, "claude-opus-4-6", "off", &[])
+            .await;
+        let mu200k = frame200k["modelUsage"].as_object().unwrap();
+        let entry200k = &mu200k["claude-opus-4-6"];
+        assert_eq!(entry200k["contextWindow"], 200_000_u64, "opus-4-6 default contextWindow");
+        assert_eq!(entry200k["maxOutputTokens"], 64_000_u64, "opus-4-6 maxOutputTokens");
 
         // 1M context model (model id carries [1m] suffix):
         // contextWindow=1_000_000, maxOutputTokens=64_000.
@@ -1810,7 +1820,8 @@ mod tests {
             "modelUsage keyed by model_id"
         );
         assert_eq!(
-            mu["claude-opus-4-8"]["contextWindow"], 200_000_u64,
+            // 2.1.198 registry (M1b): opus-4-8 carries native_1m → 1M window.
+            mu["claude-opus-4-8"]["contextWindow"], 1_000_000_u64,
             "contextWindow from catalog"
         );
         assert_eq!(

@@ -36,6 +36,7 @@ use crate::bottom_pane::screen_view::ScreenView;
 use crate::bottom_pane::theme_picker_view::ThemePickerView;
 use crate::bottom_pane::{BottomPane, BottomPaneOutcome, BottomPaneStatus, CommandAction};
 use crate::history_cell::message::AssistantTextCell;
+use crate::history_cell::message::ThinkingCell;
 use crate::renderable::Renderable;
 use crate::session::SessionInfo;
 use crate::transcript::Transcript;
@@ -251,6 +252,29 @@ impl ChatWidget {
                     self.transcript.flush_active();
                     self.transcript
                         .set_active(Box::new(AssistantTextCell::new(delta)));
+                }
+            }
+            TurnEvent::ThinkingDelta(delta) => {
+                // M5 cc2.1.198 thinking streaming: append to the active
+                // ThinkingCell (collapsed by default; Ctrl-O reveals the body),
+                // mirroring the TextDelta path. A non-thinking active cell is
+                // flushed first so a fresh collapsed thinking block opens; a
+                // following TextDelta likewise flushes this thinking cell and
+                // opens the assistant reply.
+                let appended = self
+                    .transcript
+                    .mutate_active(|cell| {
+                        if let Some(thinking) = cell.as_any_mut().downcast_mut::<ThinkingCell>() {
+                            thinking.append(&delta);
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if !appended {
+                    self.transcript.flush_active();
+                    self.transcript.set_active(Box::new(ThinkingCell::new(delta)));
                 }
             }
             TurnEvent::ToolUseStart { tool, .. } => {

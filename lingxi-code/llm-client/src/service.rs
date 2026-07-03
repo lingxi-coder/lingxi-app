@@ -29,7 +29,7 @@ use futures::stream::BoxStream;
 use protocol::{ContentBlock, ConversationMessage};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Mirror claude-code `getPromptCachingEnabled` (services/api/claude.ts:333).
 ///
@@ -81,13 +81,6 @@ fn reasoning_budget(reasoning: Option<crate::ReasoningConfig>) -> u32 {
     }
 }
 
-/// `true` when the named env var is truthy under the strict claude-code
-/// allowlist (`1`/`true`/`yes`/`on`). Used for the `LINGXI_DISABLE_THINKING`
-/// / `LINGXI_DISABLE_ADAPTIVE_THINKING` gates.
-fn is_thinking_env_disabled(name: &str) -> bool {
-    traits::env::is_env_truthy(std::env::var(name).ok().as_deref())
-}
-
 // ── Subscriber state ─────────────────────────────────────────────────────────
 
 /// Subscription flags — gates the 429 retry policy.
@@ -120,6 +113,14 @@ struct StreamState {
     request_id: String,
     /// Wall-clock start of the stream for `duration_ms`.
     started: Instant,
+    /// Streaming idle watchdog (cc 2.1.196 default-on). `Some(timeout)` when
+    /// the watchdog is enabled: each blocking frame read is bounded by this
+    /// duration and, on elapse, the stream yields a watchdog
+    /// [`LlmError::StreamInterrupted`] (detectable via
+    /// [`crate::model::stream_watchdog::is_stream_idle_timeout`]). `None`
+    /// disables it (`LINGXI_ENABLE_STREAM_WATCHDOG=0`). The deadline resets on
+    /// every received event because a fresh timeout wraps each frame fetch.
+    idle_timeout: Option<Duration>,
 }
 
 // ── Adapter state ─────────────────────────────────────────────────────────────
@@ -301,6 +302,26 @@ pub struct ApiService {
     /// subsequent success — so a retried-then-recovered 429 never plants a
     /// rejected snapshot (the prior per-attempt-write divergence, CLOSED).
     pending_429: Mutex<Option<Pending429>>,
+    /// Optional AWS auth-refresh driver (2.1.198 `ZBd`, `awsAuthRefresh`).
+    ///
+    /// When set, an AWS-auth failure (401/403) on the Bedrock provider runs
+    /// the client-side refresh flow and retries the request, bounded at
+    /// [`crate::aws_auth::AWS_AUTH_MAX_ATTEMPTS`] (`Ygf = 2`). `None` (the
+    /// default) keeps every error path unchanged. Provider-gated inside
+    /// [`crate::aws_auth::is_aws_auth_error`] — non-AWS providers never
+    /// reach the refresh.
+    aws_auth: Option<Arc<dyn crate::aws_auth::AwsAuthRefresh>>,
+    /// Monotonic guard timestamp (ms) for the rate-limit record path — the
+    /// binary's `Nha` (@210953364). A record whose timestamp is OLDER than
+    /// this is dropped so an out-of-order (parallel) response cannot overwrite
+    /// a newer rate-limit snapshot (2.1.196 flicker fix). `None` until the
+    /// first record.
+    last_rate_limit_record_ts_ms: Mutex<Option<u128>>,
+    /// Test-only override for the streaming idle-watchdog timeout. `Some(d)`
+    /// forces `d` (bypassing the env resolver whose floor is 5 min, which is
+    /// otherwise untestable); `None` (production) uses
+    /// [`crate::model::stream_watchdog::resolve_stream_idle_timeout`].
+    stream_idle_timeout_override: Option<Duration>,
     /// Conversation-session scoped OpenAI Responses WebSocket connection/cache.
     ///
     /// The adapter is used by one conversation runtime; mobile already enforces
@@ -481,8 +502,28 @@ impl ApiService {
             last_raw_utilization: Mutex::new(None),
             last_429_message: Mutex::new(None),
             pending_429: Mutex::new(None),
+            aws_auth: None,
+            last_rate_limit_record_ts_ms: Mutex::new(None),
+            stream_idle_timeout_override: None,
             responses_ws_session: tokio::sync::Mutex::new(ResponsesWebSocketSession::new()),
         }
+    }
+
+    /// Attach the AWS auth-refresh driver (2.1.198 `awsAuthRefresh` flow).
+    /// Builder-style; the default is `None` (no refresh, errors stay terminal).
+    #[must_use]
+    pub fn with_aws_auth(mut self, aws_auth: Arc<dyn crate::aws_auth::AwsAuthRefresh>) -> Self {
+        self.aws_auth = Some(aws_auth);
+        self
+    }
+
+    /// Test-only: force the streaming idle-watchdog timeout (the env floor of
+    /// 5 min is otherwise untestable). Builder-style; default `None`.
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_stream_idle_timeout_override(mut self, timeout: Option<Duration>) -> Self {
+        self.stream_idle_timeout_override = timeout;
+        self
     }
 
     /// Attach the live subscription slot (batch-5 Task 3). When present and
@@ -786,62 +827,17 @@ impl ApiService {
         // and claude.ts:1693. Computed AFTER max_tokens is known (the fixed-
         // budget cap clamps to max_tokens-1).
         {
-            use crate::model::thinking::{
-                model_sends_temperature, model_supports_adaptive_thinking, model_supports_thinking,
-                ThinkingConfig,
-            };
-            use crate::ReasoningConfig;
+            use crate::model::thinking::{model_sends_temperature, session_thinking_active};
 
-            let has_thinking = self.thinking != ThinkingConfig::Disabled
-                && !is_thinking_env_disabled("LINGXI_DISABLE_THINKING");
+            let has_thinking = session_thinking_active(self.thinking);
 
-            // The byte-faithful claude-code thinking shape (Adaptive default,
-            // canonical max-output budget cap) is Anthropic-specific. The
-            // OpenAI/Gemini codecs mistranslate `Adaptive` to a forced
-            // `effort="high"` / `thinkingBudget=0`, so it must NOT be applied to
-            // non-Claude models. We therefore branch on the model family.
-            let is_claude = crate::model::context_window::is_claude_family(model);
-
-            req.reasoning = if !has_thinking {
-                None
-            } else if is_claude {
-                // Claude path — unchanged from claude-code.
-                if model_supports_thinking(model) {
-                    if !is_thinking_env_disabled("LINGXI_DISABLE_ADAPTIVE_THINKING")
-                        && model_supports_adaptive_thinking(model)
-                    {
-                        Some(ReasoningConfig::Adaptive)
-                    } else {
-                        let mut budget =
-                            crate::model::context_window::max_thinking_tokens_for_model(model);
-                        if let ThinkingConfig::Enabled { budget_tokens } = self.thinking {
-                            budget = budget_tokens;
-                        }
-                        // budget_tokens must stay strictly below max_tokens.
-                        budget = budget.min(req.max_tokens.unwrap_or(u32::MAX).saturating_sub(1));
-                        Some(ReasoningConfig::Enabled {
-                            budget_tokens: budget,
-                        })
-                    }
-                } else {
-                    None
-                }
-            } else {
-                // Non-Claude: only honor an EXPLICIT fixed budget. The default
-                // (`Adaptive`, "let the model decide" — an Anthropic intent)
-                // sends no reasoning field, so the provider applies its own
-                // reasoning default instead of a forced high-effort / zero-budget.
-                match self.thinking {
-                    ThinkingConfig::Enabled { budget_tokens } => {
-                        let budget =
-                            budget_tokens.min(req.max_tokens.unwrap_or(u32::MAX).saturating_sub(1));
-                        Some(ReasoningConfig::Enabled {
-                            budget_tokens: budget,
-                        })
-                    }
-                    _ => None,
-                }
-            };
+            // The claude/non-claude branch, the env kill switches and the
+            // budget clamp live in `model::thinking::reasoning_for_request` —
+            // the SAME session-config resolution the compaction side-query
+            // path inherits (cc 2.1.198). Behavior is byte-identical to the
+            // previous inline block.
+            req.reasoning =
+                crate::model::thinking::reasoning_for_request(self.thinking, model, req.max_tokens);
 
             // temperature:1 ONLY when thinking is disabled AND the model is in the
             // `rhn` temperature-gate set (binary @205866168:
@@ -1141,10 +1137,46 @@ impl ApiService {
     ///
     /// Emits a `tracing::warn!` when the overage status indicates the account is
     /// at or near exhaustion (`overage_status == "rejected"` or `"allowed_warning"`).
+    /// Wall-clock milliseconds since the Unix epoch — the record timestamp for
+    /// the rate-limit monotonic guard (binary `Date.now()`).
+    fn now_ms() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    }
+
+    /// Monotonic rate-limit record guard — ports the binary's `Bha`/`Nha`
+    /// (@210953352): returns `true` (STALE ⇒ caller skips the snapshot update)
+    /// when `ts_ms` is OLDER than the last recorded timestamp; otherwise
+    /// records `ts_ms` and returns `false`. Prevents an out-of-order (older)
+    /// parallel response from overwriting a newer rate-limit snapshot — the
+    /// 2.1.196 flicker fix. Under normal monotonic wall-clock operation this
+    /// never drops, so production behaviour is unchanged.
+    fn rate_limit_record_stale(&self, ts_ms: u128) -> bool {
+        let mut guard = self.last_rate_limit_record_ts_ms.lock().unwrap();
+        match *guard {
+            Some(prev) if ts_ms < prev => true,
+            _ => {
+                *guard = Some(ts_ms);
+                false
+            }
+        }
+    }
+
     fn record_rate_limit_from_headers(
         &self,
         headers: &std::collections::BTreeMap<String, String>,
         client_request_id: &str,
+    ) {
+        self.record_rate_limit_from_headers_at(headers, client_request_id, Self::now_ms());
+    }
+
+    fn record_rate_limit_from_headers_at(
+        &self,
+        headers: &std::collections::BTreeMap<String, String>,
+        client_request_id: &str,
+        ts_ms: u128,
     ) {
         let hvec: Vec<(String, String)> = headers
             .iter()
@@ -1173,13 +1205,21 @@ impl ApiService {
                 }
                 None => None,
             };
+        // Monotonic guard (binary `Bha`/`Nha`): a response whose record
+        // timestamp is OLDER than the last recorded one is STALE — skip the
+        // rate-limit snapshot updates so an out-of-order parallel response can
+        // never flip the warning off (2.1.196 flicker fix). request-id capture
+        // above and the pending-429 bookkeeping below stay unconditional.
+        let stale = self.rate_limit_record_stale(ts_ms);
         // Task 2 (llm-client future-work batch 5): track the raw per-window
-        // snapshot on EVERY recorded headers pass — `rawUtilization =
-        // extractRawUtilization(headersToUse)` (claudeAiLimits.ts:476), NOT
+        // snapshot on EVERY recorded (non-stale) headers pass — `rawUtilization
+        // = extractRawUtilization(headersToUse)` (claudeAiLimits.ts:476), NOT
         // gated on `has_unified_headers()` like the limits snapshot below.
-        *self.last_raw_utilization.lock().unwrap() = Some(RawUtilization::from_headers(&hvec));
+        if !stale {
+            *self.last_raw_utilization.lock().unwrap() = Some(RawUtilization::from_headers(&hvec));
+        }
         let info = RateLimitInfo::from_headers(&hvec);
-        if info.has_unified_headers() {
+        if !stale && info.has_unified_headers() {
             // Warn when the account is near or at exhaustion.
             match info.overage_status.as_deref() {
                 Some("rejected") => {
@@ -1265,6 +1305,14 @@ impl ApiService {
     /// (the generic 429 surface applies) — TS only updates inside the gated
     /// branch.
     fn record_rate_limit_from_429(&self, headers: &std::collections::BTreeMap<String, String>) {
+        self.record_rate_limit_from_429_at(headers, Self::now_ms());
+    }
+
+    fn record_rate_limit_from_429_at(
+        &self,
+        headers: &std::collections::BTreeMap<String, String>,
+        ts_ms: u128,
+    ) {
         let hvec: Vec<(String, String)> = headers
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
@@ -1292,6 +1340,13 @@ impl ApiService {
         });
         *self.last_429_message.lock().unwrap() = composed.flatten();
 
+        // Monotonic guard (binary `Bha`/`Nha`): a stale (out-of-order) 429 must
+        // not stage a snapshot that could later PROMOTE over a newer response's
+        // state. The composed message above is per-attempt (most-recent-429)
+        // and stays unconditional; only the promotable staged slot is gated.
+        if self.rate_limit_record_stale(ts_ms) {
+            return;
+        }
         // Stage the snapshot whenever EITHER the limits gate passed OR raw
         // windows are present. A 429 that yields neither clears the slot.
         let staged = if info.is_some() || raw != RawUtilization::default() {
@@ -1426,6 +1481,8 @@ impl ApiService {
         // After a Fallback step, chain_idx advances to point at the next entry.
         // When chain_idx >= chain.len(), the chain is exhausted.
         let mut chain_idx: usize = 0;
+        // 2.1.198 `u`/`Ygf`: AWS-auth-triggered retries taken this drive.
+        let mut aws_auth_attempts: u32 = 0;
 
         loop {
             // prepare → inject headers → execute.
@@ -1546,6 +1603,31 @@ impl ApiService {
                             } else {
                                 decode_err.clone()
                             };
+
+                            // 2.1.198 `V_c`/`G_c`/`s_f` + `Ygf`: an AWS-auth
+                            // failure (401/403) on the Bedrock provider runs
+                            // the awsAuthRefresh flow (`ZBd`) and retries,
+                            // bounded at AWS_AUTH_MAX_ATTEMPTS (Ygf=2). The
+                            // binary clears the memoized credential resolver
+                            // (`xce()`) and lets the retry's credential
+                            // resolve run ZBd; lingxi resolves credentials
+                            // inside `prepare()`, so the flow runs inline
+                            // before the re-prepare. Once the bound is hit
+                            // the error falls through to the normal driver
+                            // (Authentication ⇒ Terminal — the binary's
+                            // `api_request_aws_auth_exhausted` throw).
+                            if let Some(aws) = &self.aws_auth {
+                                if aws_auth_attempts < crate::aws_auth::AWS_AUTH_MAX_ATTEMPTS
+                                    && crate::aws_auth::is_aws_auth_error(
+                                        &decode_err,
+                                        &prepared.route.resolved_route.provider_id,
+                                    )
+                                {
+                                    aws_auth_attempts += 1;
+                                    aws.refresh().await;
+                                    continue;
+                                }
+                            }
 
                             let step = next_step_with_backoff(
                                 &mut state,
@@ -1954,6 +2036,8 @@ impl ApiService {
             self.settings_max_retries,
         );
         let thinking_budget: u32 = reasoning_budget(req.reasoning);
+        // 2.1.198 `u`/`Ygf`: AWS-auth-triggered retries taken this drive.
+        let mut aws_auth_attempts: u32 = 0;
 
         loop {
             // Prepare so we can inject headers, then call execute_stream via
@@ -2037,6 +2121,22 @@ impl ApiService {
                             decode_err.clone()
                         };
 
+                        // 2.1.198 `V_c`/`G_c`/`s_f` + `Ygf` — stream connect
+                        // twin of the non-stream AWS auth-refresh hook (see
+                        // `drive_non_stream_seeded_with_chain`).
+                        if let Some(aws) = &self.aws_auth {
+                            if aws_auth_attempts < crate::aws_auth::AWS_AUTH_MAX_ATTEMPTS
+                                && crate::aws_auth::is_aws_auth_error(
+                                    &decode_err,
+                                    &prepared.route.resolved_route.provider_id,
+                                )
+                            {
+                                aws_auth_attempts += 1;
+                                aws.refresh().await;
+                                continue;
+                            }
+                        }
+
                         let step = next_step_with_backoff(
                             &mut state,
                             &ctl,
@@ -2090,6 +2190,12 @@ impl ApiService {
                     let stream_analytics = self.analytics.clone();
                     let stream_model = req.model.clone();
                     let stream_request_id = request_id.clone();
+                    // Streaming idle watchdog (cc 2.1.196 default-on): resolve
+                    // the per-event idle timeout from the env once at
+                    // stream-open. `None` when disabled.
+                    let stream_idle_timeout = self
+                        .stream_idle_timeout_override
+                        .or_else(crate::model::stream_watchdog::resolve_stream_idle_timeout);
 
                     // Assemble events via a manual unfold that drives next_frame + decode.
                     // We keep a queue of pre-decoded events and drain them first.
@@ -2103,6 +2209,7 @@ impl ApiService {
                         model: stream_model,
                         request_id: stream_request_id,
                         started: stream_started,
+                        idle_timeout: stream_idle_timeout,
                     };
 
                     let boxed: BoxStream<'static, Result<LlmEvent, LlmError>> =
@@ -2134,7 +2241,30 @@ impl ApiService {
                                 if s.finished {
                                     return None;
                                 }
-                                match s.frames.next_frame().await {
+                                // Watchdog: bound the blocking frame read by the
+                                // configured idle timeout (reset per event). On
+                                // elapse, abort the stream with a detectable
+                                // idle-timeout error (binary
+                                // `tengu_streaming_watchdog_retry` surface).
+                                let frame = match s.idle_timeout {
+                                    Some(timeout) => {
+                                        match tokio::time::timeout(
+                                            timeout,
+                                            s.frames.next_frame(),
+                                        )
+                                        .await
+                                        {
+                                            Ok(r) => r,
+                                            Err(_elapsed) => Err(
+                                                crate::model::stream_watchdog::idle_timeout_error(
+                                                    timeout,
+                                                ),
+                                            ),
+                                        }
+                                    }
+                                    None => s.frames.next_frame().await,
+                                };
+                                match frame {
                                     Ok(Some(frame)) => match s.decoder.decode_frame(frame) {
                                         Ok(events) => s.queue.extend(events),
                                         Err(e) => {

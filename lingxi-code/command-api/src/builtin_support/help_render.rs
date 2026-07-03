@@ -156,9 +156,10 @@ mod tests {
         let s = render_help_screen();
         let line = s.lines().find(|l| l.starts_with("  /agents ")).unwrap();
         // "/agents" = 7 chars; pad 13 spaces to col1=20; then 2 separator
-        // spaces; then "Manage agent configurations".
+        // spaces; then the (M4 cc2.1.198) removed-wizard description, verbatim
+        // from the binary's `name:"agents"` command object.
         let expected = format!(
-            "  /agents{}  Manage agent configurations",
+            "  /agents{}  (removed) Ask Claude to create/manage subagents, or edit .claude/agents/",
             " ".repeat(20 - 7)
         );
         assert_eq!(line, expected);

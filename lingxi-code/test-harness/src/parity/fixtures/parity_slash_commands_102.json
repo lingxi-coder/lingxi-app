@@ -34,7 +34,7 @@
       "name": "agents",
       "is_core": true,
       "implemented": true,
-      "description": "Manage agent configurations",
+      "description": "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/",
       "claude_type": "local",
       "rust_status": "implemented",
       "target_status": "implemented",

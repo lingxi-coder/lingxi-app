@@ -80,6 +80,15 @@ plugin = { path = "../../plugin" }
 # into `tui_rata::session::SessionInfo` before the TUI loop starts.
 skill-api = { path = "../../skill-api" }
 memory = { path = "../../memory" }
+# (M8 cc2.1.198) The standalone `agents` view fires the user's `Notification`
+# hook (`agent_needs_input`/`agent_completed`) directly — the view runs
+# WITHOUT an orchestrator, so it loads settings hooks and executes them via
+# the hooks crate (the same standalone loader engine-desktop's composition
+# root uses).
+hooks = { path = "../../hooks" }
+# (M8 cc2.1.198) Display-column clamp for the `Pon` job-label port
+# (`agents_notify::job_label`); same pin as tui-core.
+unicode-width = "=0.1.14"
 
 # clap 4.6+ requires edition2024; pin to a release compatible with Rust 1.82.
 clap = { version = "=4.5.20", features = ["derive", "env"] }
@@ -113,7 +122,9 @@ filetime = "0.2"
 # — unlike the workspace's `deny` — cannot be locally overridden). See
 # `apps/cli/src/bypass_env.rs`. Pinned to the same 0.27 series `platforms/posix`
 # already uses.
-nix = { version = "0.27", default-features = false, features = ["user"] }
+# `signal` adds the safe `kill(pid, 0)` wrapper for the agents live-session
+# registry's liveness probe (`agents_registry::process_alive`, M7 cc2.1.198).
+nix = { version = "0.27", default-features = false, features = ["user", "signal"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"

@@ -783,6 +783,53 @@ async fn schema_invalid_output_retried_then_captured() {
     );
 }
 
+/// cc 2.1.196 (M9): a schema-rejected StructuredOutput attempt does NOT
+/// render beside its retry — no duplicate recap. The result surface a
+/// workflow/Agent consumer renders is the terminal `Completed.result`
+/// (`PoolSubagentSpawner::spawn` ignores Message events): after a rejected
+/// attempt + a valid retry there is EXACTLY ONE Completed, its payload is the
+/// retry's, and the rejected payload appears nowhere in it.
+#[tokio::test]
+async fn schema_rejected_attempt_is_not_surfaced_beside_its_retry() {
+    let so = |input: serde_json::Value| llm_client::LlmResponse {
+        content: vec![llm_client::ContentBlock::ToolCall {
+            id: ToolUseId::new().to_string(),
+            name: "StructuredOutput".into(),
+            input,
+        }],
+        ..tool_use_response("StructuredOutput", Some("tool_use"))
+    };
+    let rejected = serde_json::json!({ "answer": "REJECTED-SENTINEL" });
+    let valid = serde_json::json!({ "answer": 7 });
+    let api = MockSubagentApiClient::new(vec![
+        Ok(so(rejected.clone())), // schema-rejected attempt
+        Ok(so(valid.clone())),    // its retry
+    ]);
+    let mut ctx = loop_ctx(api, Some(CountingInvoker::new()), 6);
+    ctx.schema = Some(
+        r#"{"type":"object","required":["answer"],"properties":{"answer":{"type":"integer"}}}"#
+            .to_string(),
+    );
+    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let evs = drain(out_rx).await;
+
+    // Exactly one terminal Completed (one_completed asserts uniqueness) whose
+    // payload is the RETRY's — the rejected attempt is suppressed from the
+    // surfaced result, not rendered beside it.
+    let result = one_completed(&evs);
+    assert_eq!(result, valid, "the surfaced recap is the valid retry only");
+    assert!(
+        !result.to_string().contains("REJECTED-SENTINEL"),
+        "rejected payload must not leak into the surfaced result: {result}"
+    );
+    assert!(
+        !evs.iter().any(|e| matches!(e, SubagentEvent::Failed { .. })),
+        "a recovered retry is not a failure; got: {evs:?}"
+    );
+}
+
 /// Repeated schema-invalid StructuredOutput calls exhaust the retry cap (5)
 /// and abort with the byte-exact retry-cap-exceeded message.
 #[tokio::test]
@@ -1604,6 +1651,284 @@ async fn persist_mode_user_exit_while_idle_surfaces_killed() {
             .any(|e| matches!(e, SubagentEvent::Killed { agent_id: aid } if *aid == agent_id)),
         "UserExit while idle yields Killed; got: {evs:?}"
     );
+}
+
+// ---- Wake-on-message (cc 2.1.198, M9) ---------------------------------
+
+/// `SubagentApiClient` whose FIRST round-trip hangs forever (a teammate
+/// "stuck" mid-request / in the client's internal retry backoff) and whose
+/// subsequent round-trips capture their `messages` then answer end_turn.
+struct StuckThenCapturingApiClient {
+    calls: AtomicUsize,
+    first_call_started: tokio::sync::Notify,
+    later_messages: Mutex<Vec<Vec<ConversationMessage>>>,
+}
+impl StuckThenCapturingApiClient {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            calls: AtomicUsize::new(0),
+            first_call_started: tokio::sync::Notify::new(),
+            later_messages: Mutex::new(Vec::new()),
+        })
+    }
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+#[async_trait]
+impl crate::api::SubagentApiClient for StuckThenCapturingApiClient {
+    async fn messages_create(
+        &self,
+        _model: &str,
+        _system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n == 0 {
+            // Stuck: never resolves. The runner's select must drop this
+            // future on the inbound UserMessage and re-issue.
+            self.first_call_started.notify_one();
+            std::future::pending::<()>().await;
+            unreachable!("the stuck first call must be dropped, not resolved")
+        }
+        self.later_messages.lock().unwrap().push(messages);
+        Ok(text_response("woke and answered", Some("end_turn")))
+    }
+}
+
+/// cc 2.1.198 (M9): messaging a stuck teammate wakes it to retry immediately.
+/// Binary mechanism: SendMessage emits the recipient task's `retryWake` signal
+/// after the mailbox write (`TDo` @215134403: `r.retryWake?.emit()`), which
+/// `subscribeRetryWake` (@216289770) threads into the API retry loop so the
+/// backoff sleep is interrupted and the queued message rides into the turn.
+/// Rust analog: a `UserMessage` racing the in-flight round-trip drops the
+/// stuck `api_call` future, appends the message to history, and re-issues the
+/// round-trip immediately — previously the message text was silently DROPPED.
+#[tokio::test]
+async fn persist_mode_message_wakes_stuck_round_trip_and_carries_the_text() {
+    let api = StuckThenCapturingApiClient::new();
+    let mut ctx = loop_ctx(api.clone(), None, 4);
+    ctx.persistent = true;
+
+    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+
+    // Wait until the first round-trip is in flight (stuck).
+    api.first_call_started.notified().await;
+
+    // Message the stuck teammate.
+    event_tx
+        .send(engine::Event::UserMessage {
+            message_id: MessageId::new(),
+            request_id: RequestId::new(),
+            content: "are you alive? try again".into(),
+        })
+        .await
+        .unwrap();
+
+    // The wake re-issues the round-trip immediately; the retry completes.
+    let mut out_rx = out_rx;
+    let completed = loop {
+        let ev = out_rx.recv().await.expect("the woken turn-set completes");
+        if matches!(ev, SubagentEvent::Completed { .. }) {
+            break ev;
+        }
+    };
+    let SubagentEvent::Completed { result, .. } = &completed else {
+        unreachable!()
+    };
+    assert_eq!(result["text"], "woke and answered");
+    assert_eq!(api.call_count(), 2, "stuck call dropped + immediate retry");
+
+    // The retried round-trip CARRIES the message (cc queues it via
+    // pendingUserMessages; here it rides on the re-issued history).
+    let later = api.later_messages.lock().unwrap().clone();
+    let retry_history = later.first().expect("retry captured");
+    let carried = retry_history.iter().any(|m| {
+        matches!(m, ConversationMessage::User { content, .. }
+            if content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. }
+                if text.contains("are you alive? try again"))))
+    });
+    assert!(
+        carried,
+        "the wake message must ride on the retried round-trip, not be dropped: {retry_history:?}"
+    );
+
+    // Cooperative shutdown of the parked (persistent) runner.
+    event_tx.send(engine::Event::UserExit).await.unwrap();
+    handle.await.unwrap();
+}
+
+// ---- Launcher message ≠ permission approval (cc 2.1.198, M10) ----------
+
+/// `ToolInvoker` that PARKS inside `invoke` — a pending permission prompt
+/// living in the permission gate below the invoker seam — until the test
+/// releases it, then resolves as the gate's DENY. Tracks whether the pending
+/// prompt was resolved and how many times the tool ran.
+struct PendingPermissionInvoker {
+    invoke_started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    calls: AtomicUsize,
+    resolved: std::sync::atomic::AtomicBool,
+}
+impl PendingPermissionInvoker {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            invoke_started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            calls: AtomicUsize::new(0),
+            resolved: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+}
+#[async_trait]
+impl traits::ToolInvoker for PendingPermissionInvoker {
+    async fn invoke(
+        &self,
+        _name: &str,
+        _input: serde_json::Value,
+        _ctx: traits::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, traits::tool_invoker::ToolInvokerError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.invoke_started.notify_one();
+        self.release.notified().await;
+        self.resolved.store(true, Ordering::SeqCst);
+        Err(traits::tool_invoker::ToolInvokerError::Internal(
+            "Permission to use SlowTool has been denied.".into(),
+        ))
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// `SubagentApiClient` whose FIRST round-trip returns one `SlowTool` tool_use
+/// and whose subsequent round-trips capture their `messages` then end the turn.
+struct ToolUseThenCapturingApiClient {
+    calls: AtomicUsize,
+    later_messages: Mutex<Vec<Vec<ConversationMessage>>>,
+}
+impl ToolUseThenCapturingApiClient {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            calls: AtomicUsize::new(0),
+            later_messages: Mutex::new(Vec::new()),
+        })
+    }
+}
+#[async_trait]
+impl crate::api::SubagentApiClient for ToolUseThenCapturingApiClient {
+    async fn messages_create(
+        &self,
+        _model: &str,
+        _system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n == 0 {
+            return Ok(tool_use_response("SlowTool", Some("tool_use")));
+        }
+        self.later_messages.lock().unwrap().push(messages);
+        Ok(text_response("done after direction", Some("end_turn")))
+    }
+}
+
+/// cc 2.1.198 (M10): "Fixed an issue where messages sent by the agent that
+/// launched a subagent could be treated as user approval" — a launcher/lead
+/// message to a running subagent is NEW TASK DIRECTION and must NEVER satisfy
+/// a pending permission request. Structurally, LingXi keeps the two channels
+/// separate: permission approval reaches a pending prompt only through the
+/// permission gate below the `ToolInvoker` seam, while a launcher message
+/// arrives as `engine::Event::UserMessage` on the runner's event channel and
+/// is appended to history as a user message. This test locks that separation:
+/// with a permission prompt PENDING inside `invoke`, an inbound launcher
+/// message (1) does not resolve/approve the prompt, (2) does not re-run the
+/// tool, and (3) rides into the next round-trip as a plain user message AFTER
+/// the gate's own deny result.
+#[tokio::test]
+async fn launcher_message_is_direction_not_approval_of_pending_permission() {
+    let api = ToolUseThenCapturingApiClient::new();
+    let invoker = PendingPermissionInvoker::new();
+    let mut ctx = loop_ctx(
+        api.clone(),
+        Some(invoker.clone() as Arc<dyn traits::ToolInvoker>),
+        4,
+    );
+    ctx.persistent = true;
+
+    let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+
+    // Wait until the tool call is in flight with its permission prompt pending.
+    invoker.invoke_started.notified().await;
+
+    // The launcher messages the running subagent (SendMessage → UserMessage).
+    event_tx
+        .send(engine::Event::UserMessage {
+            message_id: MessageId::new(),
+            request_id: RequestId::new(),
+            content: "switch to auditing the docs instead".into(),
+        })
+        .await
+        .unwrap();
+
+    // The message must NOT satisfy the pending permission: the prompt is still
+    // parked after the message has been delivered.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !invoker.resolved.load(Ordering::SeqCst),
+        "a launcher message must never resolve a pending permission request"
+    );
+
+    // Only the permission gate's own channel resolves the prompt — as a DENY.
+    invoker.release.notify_one();
+
+    // The turn-set completes: deny tool_result fed back, launcher message
+    // drained as task direction, final end_turn.
+    let mut out_rx = out_rx;
+    loop {
+        let ev = out_rx.recv().await.expect("the turn-set completes");
+        if matches!(ev, SubagentEvent::Completed { .. }) {
+            break;
+        }
+    }
+
+    // The tool ran exactly once — the message triggered no approval-driven
+    // (re-)execution.
+    assert_eq!(invoker.calls.load(Ordering::SeqCst), 1);
+
+    // The next round-trip's history carries the gate's DENY as the tool_result
+    // and the launcher message as a plain user TEXT message after it.
+    let later = api.later_messages.lock().unwrap().clone();
+    let hist = later.first().expect("second round-trip captured");
+    let deny_idx = hist
+        .iter()
+        .position(|m| {
+            matches!(m, ConversationMessage::User { content, .. }
+                if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { content, is_error, .. }
+                    if *is_error && content == "Error: Permission to use SlowTool has been denied.")))
+        })
+        .expect("the deny tool_result is in history");
+    let direction_idx = hist
+        .iter()
+        .position(|m| {
+            matches!(m, ConversationMessage::User { content, .. }
+                if content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. }
+                    if text.contains("switch to auditing the docs instead"))))
+        })
+        .expect("the launcher message rides as task direction");
+    assert!(
+        direction_idx > deny_idx,
+        "direction is appended after the deny result, never in its place"
+    );
+
+    // Cooperative shutdown of the parked (persistent) runner.
+    event_tx.send(engine::Event::UserExit).await.unwrap();
+    handle.await.unwrap();
 }
 
 // ── G4 (SubagentStart additionalContext) + G5 (skills preload) ──────────

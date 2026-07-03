@@ -748,6 +748,7 @@ dependencies = [
  "engine-desktop",
  "filetime",
  "futures",
+ "hooks",
  "libc",
  "llm-client",
  "mcp",
@@ -777,6 +778,7 @@ dependencies = [
  "traits",
  "tui",
  "tui-rata",
+ "unicode-width 0.1.14",
  "uuid",
 ]
 

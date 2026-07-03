@@ -825,7 +825,18 @@ async fn run_subagent_loop(
                 .effort
                 .as_ref()
                 .map(crate::definition::AgentEffort::to_wire);
+            // (M9 cc2.1.198 wake-on-message) Captured by the wake arm in the
+            // select below and appended to `history` HERE, before the next
+            // `api_call` is built, because the in-flight future immutably
+            // borrows `history` inside the select.
+            let mut wake_message: Option<String> = None;
             let response = loop {
+                // (M9) A wake message injected below rides into the next
+                // round-trip as a user turn (mirrors the persist-park path,
+                // which appends without emitting a Message event).
+                if let Some(content) = wake_message.take() {
+                    history.push(ConversationMessage::user(MessageId::new(), content));
+                }
                 let api_call = async {
                     // Provider routing (dual-LLM dual-PROVIDER): thread the
                     // per-spawn `model_profile` as the api client's `profile` so the
@@ -870,6 +881,19 @@ async fn run_subagent_loop(
                             Some(engine::Event::UserExit | engine::Event::UserInterrupt) => {
                                 let _ = out_tx.send(SubagentEvent::Killed { agent_id }).await;
                                 return;
+                            }
+                            // (M9 cc2.1.198 wake-on-message) messaging a stuck
+                            // persistent teammate wakes it: drop the in-flight
+                            // future, append the message to history (above), and
+                            // re-issue the round-trip NOW — previously this fell
+                            // into the catch-all below and silently DISCARDED the
+                            // text. Persistent (teammate) runners only; one-shot
+                            // subagents keep the legacy drop-and-retry semantics.
+                            Some(engine::Event::UserMessage { content, .. })
+                                if ctx.persistent =>
+                            {
+                                wake_message = Some(content);
+                                continue;
                             }
                             // Non-termination event: drop the in-flight API future
                             // and retry the round-trip on the next iteration.

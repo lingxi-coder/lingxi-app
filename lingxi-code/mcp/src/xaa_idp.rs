@@ -429,6 +429,8 @@ pub async fn acquire_idp_id_token(
         token_endpoint: oidc.token_endpoint.clone(),
         registration_endpoint: None,
         scopes_supported: None,
+        scope: None,
+        default_scope: None,
         revocation_endpoint: None,
         revocation_endpoint_auth_methods_supported: None,
         token_endpoint_auth_methods_supported: None,

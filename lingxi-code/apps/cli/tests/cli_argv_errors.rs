@@ -71,3 +71,122 @@ fn resume_without_value_no_tui_empty_dir_exits_0() {
             "No conversations found to resume.",
         ));
 }
+
+/// (M3 cc2.1.198) `--bg`/`--background` × `--print`/`-p` is rejected UP FRONT:
+/// one byte-locked line on stderr (no `Error:` prefix — the binary's
+/// `handleBgFlag` writes `${error}\n` directly), exit 1 (`process.exitCode=1`).
+/// Note the em dash. The reject fires before any runtime/session work, so no
+/// API key / config dir is needed.
+#[test]
+fn bg_with_print_rejected_up_front_exits_1() {
+    let locked = "--bg and --print conflict: --print never starts the interactive session that `claude agents` attaches to, so the job would be unattachable. The prompt is the positional \u{2014} drop --print: `claude --bg '<task>'`.";
+    for args in [
+        vec!["--bg", "--print", "task"],
+        vec!["--background", "-p", "task"],
+    ] {
+        Command::cargo_bin("lingxi-cli")
+            .unwrap()
+            .args(&args)
+            .assert()
+            .code(1)
+            .stderr(predicate::eq(format!("{locked}\n")));
+    }
+}
+
+/// (M3 cc2.1.198) `--no-session-persistence` outside `--print` hard-errors with
+/// the byte-locked line (`Es("Error: --no-session-persistence can only be used
+/// with --print mode.")`) and exit 1, before any turn runs.
+#[test]
+fn no_session_persistence_without_print_exits_1() {
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .env("ANTHROPIC_API_KEY", "sk-test-fake")
+        .args(["--no-session-persistence", "hi"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "Error: --no-session-persistence can only be used with --print mode.",
+        ));
+}
+
+/// (M4 cc2.1.198) A truthy `--prompt-suggestions` outside `--print` +
+/// `--output-format=stream-json` hard-errors with the byte-locked `Es(...)`
+/// line and exit 1 (verified live on the real 2.1.198 binary).
+#[test]
+fn prompt_suggestions_without_stream_json_exits_1() {
+    let locked = "Error: --prompt-suggestions requires --print and --output-format=stream-json (prompt_suggestion messages are only surfaced in stream-json output).";
+    // Same shape as the live probe against the real binary: the bare flag
+    // presets "true" (the following `-p` is dash-prefixed, so neither
+    // commander nor clap binds it as the optional value); text output trips
+    // the gate.
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .env("ANTHROPIC_API_KEY", "sk-test-fake")
+        .args(["--prompt-suggestions", "-p", "hi", "--output-format", "text"])
+        .assert()
+        .code(1)
+        .stderr(predicate::eq(format!("{locked}\n")));
+    // A FALSY value skips the gate entirely (binary argParser returns boolean
+    // false → `a.promptSuggestions && …` short-circuits); the run proceeds to
+    // the REPL and exits 0 on EOF.
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .env("ANTHROPIC_API_KEY", "sk-test-fake")
+        .args(["--prompt-suggestions", "false"])
+        .write_stdin("")
+        .assert()
+        .code(0);
+}
+
+/// (M4 cc2.1.198) `--prompt-suggestions` with an out-of-choices value renders
+/// commander's invalid-choice line (the existing `commander_error` InvalidValue
+/// translation) — byte-verified against the real binary:
+/// `error: option '--prompt-suggestions [value]' argument 'maybe' is invalid.
+/// Allowed choices are true, false, 1, 0, yes, no, on, off.`, exit 1.
+#[test]
+fn prompt_suggestions_invalid_choice_matches_commander() {
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .args(["--prompt-suggestions", "maybe", "hi"])
+        .assert()
+        .code(1)
+        .stderr(predicate::eq(
+            "error: option '--prompt-suggestions [value]' argument 'maybe' is invalid. Allowed choices are true, false, 1, 0, yes, no, on, off.\n",
+        ));
+}
+
+/// (M4 cc2.1.198) An unknown `--effort` value warns on stderr (byte-locked
+/// `u4i` warning, em dash included — verified live) and is IGNORED: the run
+/// continues (here into the REPL, exit 0 on EOF) instead of erroring.
+#[test]
+fn effort_unknown_value_warns_and_continues() {
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .env("ANTHROPIC_API_KEY", "sk-test-fake")
+        .args(["--effort", "banana"])
+        .write_stdin("")
+        .assert()
+        .code(0)
+        .stderr(predicate::str::contains(
+            "Warning: Unknown --effort value 'banana' \u{2014} ignoring it and using the default effort. Valid values: low, medium, high, xhigh, max.",
+        ));
+}
+
+/// (M4 cc2.1.198) `--from-pr <value>` routes to the resume picker with a PR
+/// filter. Under `--no-tui` with an empty project dir the stdio picker prints
+/// the locked empty-state line and exits 0 (the PR filter finds no PR-linked
+/// sessions — lingxi metadata carries no prNumber yet).
+#[test]
+fn from_pr_no_tui_empty_dir_exits_0() {
+    let tmp = tempfile::tempdir().unwrap();
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .env("ANTHROPIC_API_KEY", "sk-test-fake")
+        .env("LINGXI_CONFIG_DIR", tmp.path())
+        .args(["--from-pr", "123", "--no-tui"])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains(
+            "No conversations found to resume.",
+        ));
+}

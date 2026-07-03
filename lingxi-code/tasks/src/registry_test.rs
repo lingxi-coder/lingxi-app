@@ -1487,3 +1487,152 @@ async fn take_pending_skips_already_notified_and_non_terminal() {
     );
     assert!(registry.get(&pending).await.is_some(), "pending survives");
 }
+
+// ---- M8 cc2.1.198: "Task panels: no stuck Running after finish" -----------
+
+/// Minimal happy-path [`ProcessRunner`]: every `run()` succeeds with exit 0.
+struct ExitZeroRunner;
+
+#[async_trait]
+impl traits::ProcessRunner for ExitZeroRunner {
+    async fn run(
+        &self,
+        _cmd: &traits::SandboxedCommand,
+    ) -> Result<traits::ProcessOutput, traits::ProcessError> {
+        Ok(traits::ProcessOutput {
+            stdout: "done\n".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        })
+    }
+    async fn spawn_background(
+        &self,
+        _cmd: &traits::SandboxedCommand,
+    ) -> Result<traits::ProcessHandle, traits::ProcessError> {
+        Err(traits::ProcessError::Unsupported)
+    }
+    async fn kill(&self, _handle: &traits::ProcessHandle) -> Result<(), traits::ProcessError> {
+        Ok(())
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+}
+
+/// Pass-through [`traits::Sandbox`] stub (audited bypass tag, like the
+/// local_bash unit tests').
+struct PassSandbox;
+
+#[async_trait]
+impl traits::Sandbox for PassSandbox {
+    fn is_available(&self) -> bool {
+        true
+    }
+    fn backend(&self) -> traits::SandboxBackend {
+        traits::SandboxBackend::None
+    }
+    fn prepare(
+        &self,
+        cmd: traits::ProcessCommand,
+        _policy: &traits::SandboxPolicy,
+    ) -> Result<traits::SandboxedCommand, traits::SandboxError> {
+        Ok(traits::SandboxedCommand::__new_sandboxed(
+            cmd,
+            traits::SandboxedTag::BypassAuditedWithReason {
+                reason: "test".into(),
+            },
+        ))
+    }
+    fn bypass_with_audit(
+        &self,
+        cmd: traits::ProcessCommand,
+        reason: &str,
+    ) -> traits::SandboxedCommand {
+        traits::SandboxedCommand::__new_sandboxed(
+            cmd,
+            traits::SandboxedTag::BypassAuditedWithReason {
+                reason: reason.into(),
+            },
+        )
+    }
+    async fn probe_capability(&self) -> traits::SandboxCapability {
+        traits::SandboxCapability {
+            available: true,
+            reason: None,
+            features: traits::SandboxFeatures::default(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn finished_background_bash_task_does_not_stay_running() {
+    // (M8 cc2.1.198 "Task panels no longer get stuck showing Running after
+    // the task has finished") THE BUG: `register_self_contained_handlers`
+    // registered `LocalBashHandler` with its default `NoopStatusSink`, so the
+    // worker's terminal `set_status`/`set_exit_code` never reached the
+    // registry — the stored `TaskStateBase.status` stayed `Running` forever.
+    // Fixed by threading a deferred `RegistryStatusSink` through the
+    // registration (bound once the registry `Arc` exists, exactly like the
+    // LocalAgent sink at engine-desktop (5.46f)).
+    use crate::registry_status_sink::RegistryStatusSink;
+
+    let dir = tempdir().unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    let out_mgr = Arc::new(crate::output_manager::TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let mut registry = TaskRegistry::new(runtime, fs, out_mgr);
+    let bash_sink = Arc::new(RegistryStatusSink::new());
+    crate::registry::register_self_contained_handlers(
+        &mut registry,
+        Arc::new(ExitZeroRunner),
+        Arc::new(PassSandbox),
+        Arc::new(mcp::McpRegistry::new(Arc::new(
+            test_harness::mocks::MockMcpTransport::default(),
+        )
+            as Arc<dyn traits::McpTransport>)),
+        bash_sink.clone() as Arc<dyn crate::handlers::TaskStatusSink>,
+    );
+    let registry = Arc::new(registry);
+    bash_sink.bind(registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
+
+    let id = registry
+        .spawn(
+            TaskType::LocalBash,
+            TaskSpawnInput::LocalBash {
+                command: "true".into(),
+                timeout: None,
+            },
+            "background true".into(),
+        )
+        .await
+        .unwrap();
+
+    // The worker runs on the (real tokio-backed) mock runtime; poll until the
+    // registry-side status leaves `Running`.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let state = registry.get(&id).await.expect("task exists");
+        if state.base().status.is_terminal() {
+            assert_eq!(state.base().status, TaskStatus::Completed);
+            match state {
+                TaskState::LocalBash(b) => assert_eq!(
+                    b.exit_code,
+                    Some(0),
+                    "the worker's exit code writes through to the registry"
+                ),
+                other => panic!("expected a local_bash state, got {other:?}"),
+            }
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "task stuck Running after finish (status = {:?})",
+            state.base().status
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}

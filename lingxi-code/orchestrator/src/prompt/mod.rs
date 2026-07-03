@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod async_hook_response;
+pub mod bg_session;
 pub mod body_sections;
 pub mod conditional_rules;
 pub mod env_block;
@@ -163,6 +164,18 @@ pub fn assemble_system_prompt_with_style(
     if let Some(style) = output_style {
         push_section_separator(&mut s);
         s.push_str(&output_style_section(style));
+    }
+
+    // (M8 cc2.1.198) `# Background Session` (`_ff()` @219583413) — bg jobs
+    // only (`LINGXI_SESSION_KIND=bg` + `LINGXI_JOB_DIR`); carries the
+    // isolate-into-worktree instruction and the 2.1.198 auto commit / push /
+    // draft-PR shipping directive. Binary position: after output_style,
+    // before scratchpad/context_management. Interactive sessions get `None`
+    // → byte-identical prompt. Env-read inline, same idiom as the
+    // `LINGXI_FORK_SUBAGENT` read above.
+    if let Some(bg) = bg_session::from_env() {
+        push_section_separator(&mut s);
+        s.push_str(&bg);
     }
 
     // GAP-2: `# Context management` (iIm) — always, unconditional.

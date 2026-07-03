@@ -33,7 +33,8 @@ mod tests {
         // → 343 (config migrations +9) → 344 (permission flow +1) → 347 (coordinator swarm +3).
         // Strict-parity (2.1.195): −3 tengu_tool_todo_write_* (D1), −1 tengu_cost_recorded
         // (D2), −2 session-resume consolidation (D3) → 341.
-        assert_eq!(telemetry::tengu::ALL_EVENT_NAMES.len(), 341);
+        // cc 2.1.198 M2: +2 AWS auth-refresh trust-gate events → 343.
+        assert_eq!(telemetry::tengu::ALL_EVENT_NAMES.len(), 343);
     }
 
     #[test]
@@ -48,7 +49,8 @@ mod tests {
         // → 343 (config migrations +9) → 344 (permission flow +1) → 347 (coordinator swarm +3).
         // Strict-parity (2.1.195): −3 tengu_tool_todo_write_* (D1), −1 tengu_cost_recorded
         // (D2), −2 session-resume consolidation (D3) → 341.
-        assert_eq!(telemetry::tengu::ALL_EVENT_NAMES.len(), 341);
+        // cc 2.1.198 M2: +2 AWS auth-refresh trust-gate events → 343.
+        assert_eq!(telemetry::tengu::ALL_EVENT_NAMES.len(), 343);
     }
 
     #[test]

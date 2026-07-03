@@ -39,6 +39,9 @@ pub fn canonical(model: &str) -> String {
         "claude-opus-4-5",
         "claude-opus-4-1",
         "claude-opus-4-0",
+        // sonnet-5 before the sonnet-4-x arms (2.1.198 registry; mutually
+        // exclusive substrings — "claude-sonnet-4-5" does NOT contain it).
+        "claude-sonnet-5",
         "claude-sonnet-4-6",
         "claude-sonnet-4-5",
         "claude-sonnet-4-0",
@@ -92,13 +95,16 @@ pub fn model_supports_thinking(model: &str) -> bool {
 #[must_use]
 pub fn model_supports_adaptive_thinking(model: &str) -> bool {
     let c = canonical(model);
-    // Explicit TRUE set.
+    // Explicit TRUE set. 2.1.198 `Vit`: sonnet-5 resolves TRUE via the registry
+    // capability check `lB(n,"adaptive_thinking")` (its capabilities include
+    // "adaptive_thinking"); folded into the static TRUE set here.
     const ADAPTIVE: &[&str] = &[
         "claude-fable-5",
         "claude-mythos-5",
         "claude-opus-4-8",
         "claude-opus-4-7",
         "claude-opus-4-6",
+        "claude-sonnet-5",
         "claude-sonnet-4-6",
     ];
     if ADAPTIVE.contains(&c.as_str()) {
@@ -166,7 +172,7 @@ pub fn model_sends_temperature(model: &str) -> bool {
 ///
 /// `Default` is [`ThinkingConfig::Adaptive`] — claude-code's default for
 /// adaptive-capable models (`alwaysThinkingEnabled` true by default).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ThinkingConfig {
     /// Thinking is off — no `thinking` field, and `temperature:1` is sent.
     Disabled,
@@ -182,6 +188,81 @@ pub enum ThinkingConfig {
 impl Default for ThinkingConfig {
     fn default() -> Self {
         Self::Adaptive
+    }
+}
+
+/// `true` when the named env var is truthy under the strict claude-code
+/// allowlist (`1`/`true`/`yes`/`on`). Shared gate for
+/// `LINGXI_DISABLE_THINKING` / `LINGXI_DISABLE_ADAPTIVE_THINKING`.
+#[must_use]
+pub fn is_thinking_env_disabled(name: &str) -> bool {
+    traits::env::is_env_truthy(std::env::var(name).ok().as_deref())
+}
+
+/// Session-level "thinking is on" gate: the session [`ThinkingConfig`] is not
+/// `Disabled` AND the `LINGXI_DISABLE_THINKING` kill switch is off. Drives
+/// both the `reasoning` field (via [`reasoning_for_request`]) and the
+/// thinking-off `temperature:1` rule in `ApiService::build_request`.
+#[must_use]
+pub fn session_thinking_active(thinking: ThinkingConfig) -> bool {
+    thinking != ThinkingConfig::Disabled && !is_thinking_env_disabled("LINGXI_DISABLE_THINKING")
+}
+
+/// Resolve the SESSION [`ThinkingConfig`] into the per-request
+/// [`crate::ReasoningConfig`] for `model` — the exact logic
+/// `ApiService::build_request` applies to every main-loop AND subagent request
+/// (claude.ts:1596-1630), extracted so the compaction side-query path can
+/// inherit the SAME session thinking configuration (cc 2.1.198 "Subagents +
+/// compaction inherit extended thinking config"; binary: the summarizer call
+/// passes `thinkingConfig: mXt(r)` — the session `options.thinkingConfig` —
+/// @216945141/@216926189).
+///
+/// The byte-faithful claude-code thinking shape (Adaptive default, canonical
+/// max-output budget cap) is Anthropic-specific. The OpenAI/Gemini codecs
+/// mistranslate `Adaptive` to a forced `effort="high"` / `thinkingBudget=0`,
+/// so it must NOT be applied to non-Claude models: those only honor an
+/// EXPLICIT fixed budget (the provider applies its own reasoning default
+/// otherwise).
+#[must_use]
+pub fn reasoning_for_request(
+    thinking: ThinkingConfig,
+    model: &str,
+    max_tokens: Option<u32>,
+) -> Option<crate::ReasoningConfig> {
+    if !session_thinking_active(thinking) {
+        return None;
+    }
+    if crate::model::context_window::is_claude_family(model) {
+        // Claude path — unchanged from claude-code.
+        if !model_supports_thinking(model) {
+            return None;
+        }
+        if !is_thinking_env_disabled("LINGXI_DISABLE_ADAPTIVE_THINKING")
+            && model_supports_adaptive_thinking(model)
+        {
+            return Some(crate::ReasoningConfig::Adaptive);
+        }
+        let mut budget = crate::model::context_window::max_thinking_tokens_for_model(model);
+        if let ThinkingConfig::Enabled { budget_tokens } = thinking {
+            budget = budget_tokens;
+        }
+        // budget_tokens must stay strictly below max_tokens.
+        budget = budget.min(max_tokens.unwrap_or(u32::MAX).saturating_sub(1));
+        Some(crate::ReasoningConfig::Enabled {
+            budget_tokens: budget,
+        })
+    } else {
+        // Non-Claude: only honor an EXPLICIT fixed budget.
+        match thinking {
+            ThinkingConfig::Enabled { budget_tokens } => {
+                let budget =
+                    budget_tokens.min(max_tokens.unwrap_or(u32::MAX).saturating_sub(1));
+                Some(crate::ReasoningConfig::Enabled {
+                    budget_tokens: budget,
+                })
+            }
+            _ => None,
+        }
     }
 }
 
@@ -224,10 +305,28 @@ mod tests {
     }
 
     #[test]
+    fn sonnet_5_canonical_adaptive_and_no_temperature() {
+        // 2.1.198: canonical preserves claude-sonnet-5 (incl. dated ids), it is
+        // adaptive-thinking (registry capability), and it is NOT in the sIn
+        // temperature set (temperature omitted when thinking is off).
+        assert_eq!(canonical("claude-sonnet-5"), "claude-sonnet-5");
+        assert_eq!(canonical("claude-sonnet-5-20260203"), "claude-sonnet-5");
+        // Neighbor ids must NOT resolve to sonnet-5.
+        assert_eq!(canonical("claude-sonnet-4-5-20250929"), "claude-sonnet-4-5");
+        assert_eq!(canonical("claude-3-5-sonnet-20241022"), "claude-3-5-sonnet");
+        assert!(model_supports_adaptive_thinking("claude-sonnet-5"));
+        assert!(model_supports_thinking("claude-sonnet-5"));
+        assert!(!model_sends_temperature("claude-sonnet-5"));
+        // sonnet-4-6 keeps its (distinct) behavior: adaptive AND temperature.
+        assert!(model_sends_temperature("claude-sonnet-4-6"));
+    }
+
+    #[test]
     fn adaptive_thinking_exact_binary_list() {
         for m in [
             "claude-fable-5",
             "claude-mythos-5",
+            "claude-sonnet-5",
             "claude-opus-4-8-20260115",
             "claude-opus-4-7-20251201",
             "claude-opus-4-6-20260101",

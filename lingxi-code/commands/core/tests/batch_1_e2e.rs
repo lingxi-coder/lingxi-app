@@ -58,7 +58,10 @@ async fn help_dispatch() {
     match r {
         SlashDispatchResult::Handled { display } => {
             assert!(display.starts_with("Commands:\n"));
-            assert!(display.contains("Manage agent configurations"));
+            // (M4 cc2.1.198) /agents carries the removed-wizard description.
+            assert!(display.contains(
+                "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/"
+            ));
             // 69 newlines (header + 68 visible lines); the 26 hidden/disabled
             // commands are filtered out to match claude-code's /help.
             assert_eq!(display.matches('\n').count(), 69);

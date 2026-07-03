@@ -330,6 +330,159 @@ pub async fn discover_installed_plugins(
     out
 }
 
+/// (M4 cc2.1.198) Load the `--plugin-dir <path>` session-only plugins — the
+/// path arm of the binary's inline-plugin loader `EBm` (2.1.198):
+///
+/// * a missing path is a WARN + skip, never a boot failure
+///   (`C(\`Plugin path does not exist: ${l} (${errno}), skipping\`,
+///   {level:"warn"})`);
+/// * a `.zip` is extracted into a fresh per-session temp dir
+///   (`PXt()` = `join(os.tmpdir(), "claude-plugin-session-<hex>")`;
+///   `inline-{i}-{name}` child), then wrapper-dir–unwrapped (`Yor`: a single
+///   directory child holding the manifest dir becomes the plugin root);
+/// * the resulting directory loads exactly like an installed plugin
+///   (`zor` ≙ [`load_plugin_from_path`]); success logs
+///   `Loaded inline plugin from path: {name}`;
+/// * a summary `Loaded {n} session-only plugins from --plugin-dir` follows.
+pub async fn discover_cli_plugin_dirs(
+    paths: &[PathBuf],
+) -> Vec<(PluginId, PluginManifest, PathBuf)> {
+    let mut out = Vec::new();
+    for (i, raw) in paths.iter().enumerate() {
+        let path = match tokio::fs::canonicalize(raw).await {
+            Ok(p) => p,
+            // `Cd.stat(l)` failed → warn + `path-not-found` record, skip.
+            Err(e) => {
+                tracing::warn!(
+                    "Plugin path does not exist: {} ({}), skipping",
+                    raw.display(),
+                    e.raw_os_error()
+                        .map_or_else(|| "UNKNOWN".to_string(), errno_name)
+                );
+                continue;
+            }
+        };
+        let is_zip = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case("zip"));
+        let plugin_root = if is_zip {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("download")
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
+                .collect::<String>();
+            let dest = session_temp_dir().join(format!("inline-{i}-{stem}"));
+            let _ = tokio::fs::remove_dir_all(&dest).await;
+            if let Err(e) = tokio::fs::create_dir_all(&dest).await {
+                tracing::warn!("Failed to load session plugin from {}: {e}", raw.display());
+                continue;
+            }
+            let bytes = match tokio::fs::read(&path).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!("Failed to load session plugin from {}: {e}", raw.display());
+                    continue;
+                }
+            };
+            // Reuse the guarded zip extractor (`.mcpb` IS a zip; the same
+            // path-traversal / zip-bomb limits protect inline plugin zips).
+            if let Err(e) = crate::mcpb::unpack_mcpb(&bytes, &dest) {
+                tracing::warn!("Failed to load session plugin from {}: {e}", raw.display());
+                continue;
+            }
+            tracing::debug!("Extracted inline plugin zip to {}", dest.display());
+            // `Yor`: unwrap a single wrapper directory holding the manifest.
+            unwrap_zip_root(&dest).await
+        } else {
+            path
+        };
+        match load_plugin_from_path(&plugin_root).await {
+            Some((id, manifest)) => {
+                tracing::debug!("Loaded inline plugin from path: {}", manifest.name);
+                out.push((id, manifest, plugin_root));
+            }
+            None => {
+                tracing::warn!(
+                    "Failed to load session plugin from {}: no readable {}/plugin.json",
+                    raw.display(),
+                    branding::PLUGIN_MANIFEST_DIR
+                );
+            }
+        }
+    }
+    if !out.is_empty() {
+        tracing::debug!(
+            "Loaded {} session-only plugins from --plugin-dir",
+            out.len()
+        );
+    }
+    out
+}
+
+/// The per-process inline-plugin extraction dir (`PXt()` port: a temp-root
+/// session dir, created lazily and reused for every `--plugin-dir` zip).
+fn session_temp_dir() -> PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        std::env::temp_dir().join(format!("lingxi-plugin-session-{}", std::process::id()))
+    })
+    .clone()
+}
+
+/// `Yor` port: when the extracted zip root holds EXACTLY ONE entry, a
+/// directory that itself contains the plugin manifest dir, descend into it
+/// (zips often wrap the plugin in a single top-level folder).
+async fn unwrap_zip_root(root: &Path) -> PathBuf {
+    let Ok(mut entries) = tokio::fs::read_dir(root).await else {
+        return root.to_path_buf();
+    };
+    let mut only: Option<PathBuf> = None;
+    let mut count = 0usize;
+    while let Ok(Some(e)) = entries.next_entry().await {
+        count += 1;
+        if count > 1 {
+            return root.to_path_buf();
+        }
+        if e.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+            only = Some(e.path());
+        }
+    }
+    if let Some(inner) = only {
+        if tokio::fs::metadata(inner.join(branding::PLUGIN_MANIFEST_DIR))
+            .await
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
+        {
+            tracing::debug!(
+                "Inline plugin zip had wrapper directory; using {}",
+                inner.display()
+            );
+            return inner;
+        }
+    }
+    root.to_path_buf()
+}
+
+/// Best-effort errno → name mapping for the `path does not exist` warn line
+/// (the binary logs node's errno code, e.g. `ENOENT`).
+fn errno_name(code: i32) -> String {
+    match code {
+        2 => "ENOENT".to_string(),
+        13 => "EACCES".to_string(),
+        20 => "ENOTDIR".to_string(),
+        other => format!("errno {other}"),
+    }
+}
+
 /// Read + auto-detect a single plugin directory. Returns `None` when there is
 /// no readable manifest (the directory is not a plugin).
 ///

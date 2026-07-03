@@ -976,25 +976,56 @@ pub async fn run_stream_json_input_loop(
 /// Returns `(supportsEffort, supportedEffortLevels, supportsAdaptiveThinking,
 ///           supportsFastMode, supportsAutoMode)`.
 ///
-/// Known Anthropic models are hard-coded based on the golden capture
-/// (GROUND-TRUTH-init.md). Unknown models get all-false / empty defaults.
-fn model_capabilities(request_model: &str) -> (bool, Vec<&'static str>, bool, bool, bool) {
+/// Refreshed to the 2.1.198 registry truth. The binary's initialize models
+/// builder (print.ts @223434963) computes per-row: effort = `iw` (registry
+/// "effort" capability), levels = `UR = [low,medium,high,xhigh,max]` filtered
+/// by `BIe` ("max_effort") and `Zne` ("xhigh_effort", which additionally
+/// EXCLUDES opus-4-6/sonnet-4-6 by name), adaptive = `Vit`
+/// ("adaptive_thinking"), fast = `_h` (registry "fast_mode" or the
+/// opus-4-7/opus-4-8 pair, gated on firstParty via `lc()`), auto = `mTe`
+/// (true on firstParty for every non-legacy model). Capability sets come from
+/// the baked-in catalog (binary blob @207769000..207775500). Legacy Claude
+/// ids (claude-3-*, opus-4-0/4-1/4-5, sonnet-4-0/4-5, haiku-4-5) are the
+/// shared exclusion list in all four predicates → all-false. Unknown /
+/// non-Anthropic models keep all-false / empty defaults (multi-provider
+/// divergence: the binary's `RN(Fh(e))` non-1P fallback has no lingxi seam).
+fn model_capabilities(
+    request_model: &str,
+) -> (bool, Vec<&'static str>, bool, bool, bool) {
+    /// `UR` — the full effort ladder (binary: `UR=["low","medium","high",
+    /// "xhigh","max"]`).
+    const LEVELS_WITH_XHIGH: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+    /// `UR` minus `xhigh` (`Zne` excludes opus-4-6 / sonnet-4-6 by name).
+    const LEVELS_NO_XHIGH: &[&str] = &["low", "medium", "high", "max"];
+
+
     let rm = request_model.to_lowercase();
-    if rm.contains("opus") {
-        // claude-opus-4 / opus[1m]: supportsEffort + adaptiveThinking
-        (true, vec!["low", "medium", "high"], true, false, false)
-    } else if rm.contains("sonnet") {
-        // claude-sonnet-4: supportsEffort + fastMode + autoMode
-        (true, vec!["low", "medium", "high"], false, true, true)
-    } else if rm.contains("haiku") {
-        // claude-haiku-3-5: no special capabilities in the golden capture
-        (false, vec![], false, false, false)
-    } else if rm == "default" {
-        // The "default" pseudo-model routes to the system default.
-        (false, vec![], false, false, false)
-    } else {
-        (false, vec![], false, false, false)
+
+    // The "default" pseudo-model: the binary computes capabilities on the
+    // RESOLVED model (`r = R_()` for the Default row); lingxi's default
+    // resolves to claude-sonnet-5 (2.1.197/198, M1).
+    if rm == "default" {
+        return model_capabilities("claude-sonnet-5");
     }
+
+    // opus-4-7 / opus-4-8: full ladder incl. xhigh, adaptive thinking, and
+    // the ONLY two fast-mode models (`_h`: registry "fast_mode" / name pair).
+    if rm.contains("opus-4-7") || rm.contains("opus-4-8") {
+        return (true, LEVELS_WITH_XHIGH.to_vec(), true, true, true);
+    }
+    // sonnet-5 / fable-5 / mythos-5: full ladder + adaptive + auto, NO fast
+    // mode (their registry entries carry no "fast_mode"). NB the substring
+    // hazard is safe: "claude-sonnet-4-5" does NOT contain "sonnet-5".
+    if rm.contains("sonnet-5") || rm.contains("fable-5") || rm.contains("mythos-5") {
+        return (true, LEVELS_WITH_XHIGH.to_vec(), true, false, true);
+    }
+    // sonnet-4-6 / opus-4-6: effort WITHOUT xhigh (`Zne` name-excludes them;
+    // registry has "max_effort" but no "xhigh_effort"), adaptive, auto.
+    if rm.contains("sonnet-4-6") || rm.contains("opus-4-6") {
+        return (true, LEVELS_NO_XHIGH.to_vec(), true, false, true);
+    }
+    // Legacy Claude exclusions + unknown / non-Anthropic ids: all-false.
+    (false, vec![], false, false, false)
 }
 
 /// Drive a one-shot `--output-format json` / `--json` conversation.
@@ -1140,6 +1171,103 @@ pub async fn run_resume(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -
         ResumeRoute::IocraftScreen => run_resume_iocraft(argv, sink).await,
         ResumeRoute::StdioPicker => run_resume_stdio_picker(argv, sink).await,
     }
+}
+
+/// (M4 cc2.1.198) `--from-pr [value]` — resume a session linked to a PR.
+///
+/// The binary routes this through the SAME interactive resume picker as a
+/// bare `--resume`, passing `filterByPr: rt` (main action: `if(a.fromPr){
+/// if(a.fromPr===!0)rt=!0;else if(typeof a.fromPr==="string")rt=a.fromPr}` →
+/// picker props `{…, initialSearchQuery: gc, forkSession: a.forkSession,
+/// filterByPr: rt}`). There is NO by-id fast path: even `--from-pr 123` opens
+/// the picker filtered to `prNumber === 123`. So the route here is the picker
+/// split only (TTY → iocraft screen, `--no-tui`/non-TTY → stdio picker), with
+/// [`filter_rows_by_pr`] applied to the loaded rows by both pickers.
+pub async fn run_from_pr(argv: &Argv, sink: &dyn OutputSink) -> i32 {
+    if argv.no_tui || !crate::mode::is_full_tty() {
+        run_resume_stdio_picker(argv, sink).await
+    } else {
+        run_resume_iocraft(argv, sink).await
+    }
+}
+
+/// (M4 cc2.1.198) Port of the picker's `filterByPr` row filter (`ne = k.filter
+/// ((be)=>!be.isSidechain)` then `if(f===!0)…prNumber!==void 0; else if(typeof
+/// f==="number")…prNumber===f; else if(typeof f==="string"){let be=wqc(f);
+/// if(be!==null)…prNumber===be}`):
+///
+/// * `None` (no `--from-pr`) → rows unchanged;
+/// * bare flag (`""`) → only PR-linked sessions;
+/// * a value parsing to a PR number ([`parse_pr_value`]) → `prNumber === n`;
+/// * an unparseable value → NO narrowing (the binary applies no filter).
+///
+/// RESIDUAL: lingxi's [`SessionMetadata`] does not carry `prNumber` yet (the
+/// session JSONL `prNumbers/prUrls/prRepositories` envelope is deferred —
+/// `session/src/jsonl/reader.rs` "pr-link"), so every row counts as "no
+/// linked PR" and a PR filter yields the empty picker ("No conversations
+/// found to resume."). When the pr-link metadata lands, this helper is the
+/// single place to consult it.
+fn filter_rows_by_pr(rows: Vec<SessionMetadata>, from_pr: Option<&str>) -> Vec<SessionMetadata> {
+    let Some(raw) = from_pr else { return rows };
+    if raw.is_empty() {
+        // Bare `--from-pr`: keep only sessions with a linked PR — none yet.
+        return Vec::new();
+    }
+    match parse_pr_value(raw) {
+        // `prNumber === n` — no row carries a prNumber yet.
+        Some(_n) => Vec::new(),
+        // Unparseable value: the binary applies NO narrowing.
+        None => rows,
+    }
+}
+
+/// (M4 cc2.1.198) Port of `wqc` (2.1.198): `parseInt(e,10)` when `> 0`, else
+/// the PR-URL match `/(?:https?:\/\/)?[^/\s]+\/[^\s]+?\/(?:pull|
+/// pull-requests|-\/merge_requests)\/(\d+)/` (GitHub / Bitbucket / GitLab
+/// forms), else `None`.
+#[must_use]
+fn parse_pr_value(raw: &str) -> Option<u64> {
+    // JS `parseInt(e, 10)`: skip leading whitespace, optional sign, leading
+    // digits; trailing garbage ignored ("123abc" → 123). Must be > 0.
+    let t = raw.trim_start();
+    let (neg, digits_part) = match t.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, t.strip_prefix('+').unwrap_or(t)),
+    };
+    let digits: String = digits_part
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    if !digits.is_empty() && !neg {
+        if let Ok(n) = digits.parse::<u64>() {
+            if n > 0 {
+                return Some(n);
+            }
+        }
+    }
+    // URL forms. The JS regex needs a host token + at least one path segment
+    // before the marker (`[^/\s]+\/[^\s]+?\/`), then the marker + digits.
+    for marker in ["/pull/", "/pull-requests/", "/-/merge_requests/"] {
+        if let Some(idx) = raw.find(marker) {
+            let prefix = &raw[..idx];
+            let prefix = prefix
+                .strip_prefix("https://")
+                .or_else(|| prefix.strip_prefix("http://"))
+                .unwrap_or(prefix);
+            if prefix.contains('/') && !prefix.contains(char::is_whitespace) {
+                let digits: String = raw[idx + marker.len()..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                if !digits.is_empty() {
+                    if let Ok(n) = digits.parse::<u64>() {
+                        return Some(n);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// `--resume <uuid>` — the concrete-id path.
@@ -1333,11 +1461,13 @@ async fn seed_orchestrator_session(
 /// (cancel / EOF) print "Cancelled."; on `Err(EmptyDirectory)` print the
 /// M5-08 "No conversations found to resume." All return [`exit_codes::SUCCESS`]
 /// except a hard I/O failure (`RUNTIME_ERROR`).
-async fn run_resume_stdio_picker(_argv: &Argv, sink: &dyn OutputSink) -> i32 {
+async fn run_resume_stdio_picker(argv: &Argv, sink: &dyn OutputSink) -> i32 {
     use tokio::io::BufReader;
 
     let rows = match load_resume_rows().await {
-        Ok(rows) => rows,
+        // (M4 cc2.1.198) `--from-pr` narrows the picker rows (`filterByPr`);
+        // a no-flag `--resume` passes through unchanged.
+        Ok(rows) => filter_rows_by_pr(rows, argv.from_pr.as_deref()),
         Err(LoaderError::EmptyDirectory) => {
             sink.text("No conversations found to resume.\n").await;
             return exit_codes::SUCCESS;
@@ -1347,6 +1477,12 @@ async fn run_resume_stdio_picker(_argv: &Argv, sink: &dyn OutputSink) -> i32 {
             return exit_codes::RUNTIME_ERROR;
         }
     };
+    if rows.is_empty() {
+        // A PR filter over rows with no PR metadata yields the same locked
+        // empty-state line as an empty project dir.
+        sink.text("No conversations found to resume.\n").await;
+        return exit_codes::SUCCESS;
+    }
 
     let mut stdin = BufReader::new(tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
@@ -1369,9 +1505,12 @@ async fn run_resume_stdio_picker(_argv: &Argv, sink: &dyn OutputSink) -> i32 {
 /// `--resume` (no id) under a full TTY — open the iocraft Resume screen over
 /// the same M5-08 loader rows. After the TUI returns, read the chosen UUID:
 /// `Some(uuid)` → "Resumed session {uuid}"; `None` → "Cancelled."
-async fn run_resume_iocraft(_argv: &Argv, sink: &dyn OutputSink) -> i32 {
+async fn run_resume_iocraft(argv: &Argv, sink: &dyn OutputSink) -> i32 {
     let rows = match load_resume_rows().await {
-        Ok(rows) => rows,
+        // (M4 cc2.1.198) `--from-pr` narrows the picker rows (`filterByPr`);
+        // a no-flag `--resume` passes through unchanged. An emptied list
+        // renders the same empty-state Resume screen as an empty project dir.
+        Ok(rows) => filter_rows_by_pr(rows, argv.from_pr.as_deref()),
         Err(LoaderError::EmptyDirectory) => {
             // Render the empty-state screen so the user still sees the locked
             // "No conversations found to resume." line, then cancels out.
@@ -1867,6 +2006,67 @@ mod tests {
         assert!(payload.get("buildTime").is_some());
     }
 
+    /// The initialize-response capability golden, refreshed to the 2.1.198
+    /// registry (M1b). Each row mirrors the binary's per-model truth:
+    /// `iw`/`UR.filter(BIe,Zne)`/`Vit`/`_h`/`mTe` over the baked-in catalog
+    /// capabilities (binary blob @207769000; builder @223434963).
+    #[test]
+    fn model_capabilities_match_2_1_198_registry() {
+        let all = vec!["low", "medium", "high", "xhigh", "max"];
+        let no_xhigh = vec!["low", "medium", "high", "max"];
+
+        // opus-4-7 / opus-4-8: full ladder + adaptive + FAST + auto (the only
+        // two fast-mode models in the 2.1.198 registry).
+        for m in ["claude-opus-4-7", "claude-opus-4-8-20260115"] {
+            assert_eq!(
+                model_capabilities(m),
+                (true, all.clone(), true, true, true),
+                "{m}"
+            );
+        }
+        // sonnet-5 / fable-5 / mythos-5: full ladder + adaptive + auto, no fast.
+        for m in ["claude-sonnet-5", "claude-fable-5", "claude-mythos-5"] {
+            assert_eq!(
+                model_capabilities(m),
+                (true, all.clone(), true, false, true),
+                "{m}"
+            );
+        }
+        // sonnet-4-6 / opus-4-6: no xhigh (binary `Zne` excludes them by name).
+        for m in ["claude-sonnet-4-6", "claude-opus-4-6-20260101"] {
+            assert_eq!(
+                model_capabilities(m),
+                (true, no_xhigh.clone(), true, false, true),
+                "{m}"
+            );
+        }
+        // Legacy exclusion list shared by all four binary predicates.
+        for m in [
+            "claude-sonnet-4-5-20250929",
+            "claude-sonnet-4-20250514",
+            "claude-haiku-4-5",
+            "claude-opus-4-1",
+            "claude-opus-4-5",
+            "claude-3-5-sonnet-20241022",
+        ] {
+            assert_eq!(
+                model_capabilities(m),
+                (false, vec![], false, false, false),
+                "{m}"
+            );
+        }
+        // Unknown / non-Anthropic ids stay all-false (multi-provider divergence).
+        assert_eq!(
+            model_capabilities("gpt-4o"),
+            (false, vec![], false, false, false)
+        );
+        // "default" resolves to the session default model (claude-sonnet-5).
+        assert_eq!(
+            model_capabilities("default"),
+            model_capabilities("claude-sonnet-5")
+        );
+    }
+
     #[test]
     fn pure_rename_session_empty_title_errors() {
         let frame = req("rename_session", json!({"title": "   "}));
@@ -1904,5 +2104,68 @@ mod tests {
                 "{st} should ack with no payload"
             );
         }
+    }
+
+    // ── (M4 cc2.1.198) `--from-pr` — `wqc` + `filterByPr` ports ─────────────
+
+    /// `wqc` port: `parseInt(e,10) > 0`, else the pull/merge-request URL
+    /// capture, else `None`.
+    #[test]
+    fn parse_pr_value_matches_wqc() {
+        // Leading integer (JS parseInt semantics: trailing garbage ignored).
+        assert_eq!(parse_pr_value("123"), Some(123));
+        assert_eq!(parse_pr_value(" 42 "), Some(42));
+        assert_eq!(parse_pr_value("123abc"), Some(123));
+        // Zero / negative are NOT `> 0`; no URL match either.
+        assert_eq!(parse_pr_value("0"), None);
+        assert_eq!(parse_pr_value("-3"), None);
+        // GitHub / Bitbucket / GitLab URL forms (scheme optional).
+        assert_eq!(
+            parse_pr_value("https://github.com/foo/bar/pull/77"),
+            Some(77)
+        );
+        assert_eq!(parse_pr_value("github.com/foo/bar/pull/77"), Some(77));
+        assert_eq!(
+            parse_pr_value("https://bitbucket.org/w/r/pull-requests/9"),
+            Some(9)
+        );
+        assert_eq!(
+            parse_pr_value("https://gitlab.com/g/p/-/merge_requests/5"),
+            Some(5)
+        );
+        // The regex needs host + ≥1 path segment before the marker.
+        assert_eq!(parse_pr_value("host/pull/3"), None);
+        // Plain search terms don't parse.
+        assert_eq!(parse_pr_value("fix the login bug"), None);
+    }
+
+    /// `filterByPr` port over REAL loader rows: bare flag / a parsed PR number
+    /// filter on `prNumber`, which no lingxi row carries yet (session `pr-link`
+    /// deferral) → empty; an unparseable value applies NO narrowing.
+    #[tokio::test]
+    async fn filter_rows_by_pr_semantics() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let lingxi_home = temp.path().join("home");
+        let cwd_str = "/tmp/workproj".to_string();
+        let project_dir = make_project_dir(&lingxi_home, &cwd_str);
+        write_session(&project_dir, "some prompt", SystemTime::now());
+        let rows = load_resume_rows_from(&lingxi_home, std::path::Path::new(&cwd_str))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+
+        // No --from-pr → unchanged.
+        assert_eq!(filter_rows_by_pr(rows.clone(), None).len(), 1);
+        // Bare --from-pr → PR-linked only (none yet).
+        assert!(filter_rows_by_pr(rows.clone(), Some("")).is_empty());
+        // Parseable PR number/URL → prNumber === n (none yet).
+        assert!(filter_rows_by_pr(rows.clone(), Some("123")).is_empty());
+        assert!(filter_rows_by_pr(
+            rows.clone(),
+            Some("https://github.com/foo/bar/pull/9")
+        )
+        .is_empty());
+        // Unparseable value → no narrowing (binary behavior).
+        assert_eq!(filter_rows_by_pr(rows, Some("login bug")).len(), 1);
     }
 }

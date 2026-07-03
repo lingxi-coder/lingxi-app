@@ -834,9 +834,11 @@ mod tests {
 
         // (model, expected model-max-output-tokens) — binary YCe (v2.1.183):
         // opus-4-8 / fable-5 → 64k default; sonnet-4-6 → 32k default.
+        // 2.1.198 pIe: sonnet-5 → 64k default (adaptive via registry capability).
         for (model, expected_max) in [
             ("claude-opus-4-8", 64_000u32),
             ("claude-sonnet-4-6", 32_000),
+            ("claude-sonnet-5", 64_000),
             ("claude-fable-5", 64_000),
         ] {
             let req = adapter
@@ -882,6 +884,64 @@ mod tests {
             "haiku-4-5 → fixed budget clamped to max_tokens-1"
         );
         assert!(req.temperature.is_none(), "thinking on → no temperature");
+        clear_thinking_env();
+    }
+
+    /// cc 2.1.198 "Subagents + compaction inherit extended thinking config" —
+    /// the SUBAGENT seam half. `ProviderApiAdapter`'s `agent::SubagentApiClient`
+    /// impl delegates 1:1 to `ApiService::messages_create` / `stream`, which
+    /// route every request through the SAME `build_request` and thus the SAME
+    /// session `self.thinking` (binary: the child session's options carry
+    /// `thinkingConfig: sDi(n.options.thinkingConfig, …)` @215628753). Lock
+    /// that the subagent entry point issues a wire body whose `thinking`
+    /// field matches the session config exactly like the main loop's.
+    #[tokio::test]
+    async fn subagent_entry_point_inherits_session_thinking_config() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_thinking_env();
+        let model = "claude-sonnet-4-20250514";
+
+        // Default session config (Adaptive intent): the issued body carries the
+        // SAME thinking the shared main-loop builder computes for this model.
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport.clone());
+        let expected = match adapter
+            .build_request(model, None, None, vec![], vec![], false, None)
+            .expect("build_request")
+            .reasoning
+        {
+            Some(crate::ReasoningConfig::Adaptive) => serde_json::json!({"type": "adaptive"}),
+            Some(crate::ReasoningConfig::Enabled { budget_tokens }) => {
+                serde_json::json!({"type": "enabled", "budget_tokens": budget_tokens})
+            }
+            None => serde_json::Value::Null,
+        };
+        assert_ne!(expected, serde_json::Value::Null, "session thinking is ON by default");
+        adapter
+            .messages_create(model, None, None, vec![], vec![])
+            .await
+            .expect("messages_create");
+        let body = transport.seen.lock().unwrap()[0].body_json.clone();
+        assert_eq!(
+            body.get("thinking").cloned().unwrap_or(serde_json::Value::Null),
+            expected,
+            "subagent seam body inherits the session thinking config"
+        );
+
+        // Explicit session config (fixed budget): the subagent seam carries it too.
+        let transport2 = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter2 = make_adapter(transport2.clone())
+            .with_thinking(crate::model::thinking::ThinkingConfig::Enabled { budget_tokens: 2_048 });
+        adapter2
+            .messages_create(model, None, None, vec![], vec![])
+            .await
+            .expect("messages_create");
+        let body2 = transport2.seen.lock().unwrap()[0].body_json.clone();
+        assert_eq!(
+            body2["thinking"],
+            serde_json::json!({"type": "enabled", "budget_tokens": 2_048}),
+            "an explicit session budget rides on the subagent seam"
+        );
         clear_thinking_env();
     }
 
@@ -1868,6 +1928,70 @@ mod tests {
         assert_eq!(info.rate_limit_type.as_deref(), Some("seven_day"));
     }
 
+    // ── M12: rate-limit warning flicker (2.1.196 monotonic guard) ────────────
+
+    fn unified_headers(status: &str) -> BTreeMap<String, String> {
+        let mut h = BTreeMap::new();
+        h.insert(
+            "anthropic-ratelimit-unified-representative-claim".to_string(),
+            "seven_day".to_string(),
+        );
+        h.insert(
+            "anthropic-ratelimit-unified-status".to_string(),
+            status.to_string(),
+        );
+        h
+    }
+
+    /// The `Bha`/`Nha` monotonic guard: an out-of-order (older-timestamp)
+    /// response must NOT overwrite a newer at-limit snapshot, so the warning
+    /// cannot flicker off while still at the limit. A genuinely NEWER response
+    /// still updates.
+    #[test]
+    fn stale_parallel_response_does_not_flip_rate_limit_warning_off() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+
+        // t=1000: the account is at its weekly limit (rejected).
+        adapter.record_rate_limit_from_headers_at(&unified_headers("rejected"), "", 1000);
+        assert_eq!(
+            adapter.last_rate_limit_info().and_then(|i| i.status),
+            Some("rejected".to_string()),
+        );
+
+        // t=500: a STALE parallel response reporting 'allowed' arrives late —
+        // it must be DROPPED (no flicker): the warning stays 'rejected'.
+        adapter.record_rate_limit_from_headers_at(&unified_headers("allowed"), "", 500);
+        assert_eq!(
+            adapter.last_rate_limit_info().and_then(|i| i.status),
+            Some("rejected".to_string()),
+            "a stale (older-timestamp) response must not flip the warning off"
+        );
+
+        // t=2000: a genuinely NEWER 'allowed' response clears the limit.
+        adapter.record_rate_limit_from_headers_at(&unified_headers("allowed"), "", 2000);
+        assert_eq!(
+            adapter.last_rate_limit_info().and_then(|i| i.status),
+            Some("allowed".to_string()),
+            "a fresher response must update the snapshot"
+        );
+    }
+
+    /// The guard is inert under normal monotonic operation: equal-or-increasing
+    /// timestamps always record (the production path uses wall-clock `now_ms`).
+    #[test]
+    fn equal_or_increasing_timestamps_always_record() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        adapter.record_rate_limit_from_headers_at(&unified_headers("allowed"), "", 5000);
+        adapter.record_rate_limit_from_headers_at(&unified_headers("rejected"), "", 5000);
+        assert_eq!(
+            adapter.last_rate_limit_info().and_then(|i| i.status),
+            Some("rejected".to_string()),
+            "an equal-timestamp record is not stale and updates"
+        );
+    }
+
     // ── B6-T1: terminal-only 429 state promotion (pending slot) ──────────────
     //
     // claude-code updates the limits/raw module state ONLY in the terminal
@@ -2549,6 +2673,73 @@ mod tests {
             stream_transport.stream_call_count(),
             2,
             "must retry exactly once (429 → 200)"
+        );
+    }
+
+    // ── M12: streaming idle watchdog (cc 2.1.196 default-on) ─────────────────
+
+    /// A frame stream that NEVER produces a frame nor completes — models a
+    /// hung connection so the idle watchdog must fire.
+    struct HangingFrames;
+    impl crate::FrameStream for HangingFrames {
+        fn next_frame(
+            &mut self,
+        ) -> BoxFuture<'_, Result<Option<crate::RawStreamFrame>, LlmError>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// Transport that opens a 200 stream whose frames hang forever.
+    struct HangingStreamTransport;
+    impl Transport for HangingStreamTransport {
+        fn execute<'a>(
+            &'a self,
+            _request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
+            Box::pin(async move {
+                Err(LlmError::Transport {
+                    message: "execute not scripted".to_string(),
+                })
+            })
+        }
+        fn open_stream<'a>(
+            &'a self,
+            _request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+            Box::pin(async move {
+                Ok(StreamingResponse {
+                    status: 200,
+                    headers: BTreeMap::new(),
+                    frames: Box::new(HangingFrames),
+                })
+            })
+        }
+    }
+
+    /// The watchdog is ON by default and aborts a stream that produces no
+    /// event within the idle timeout, surfacing a detectable idle-timeout
+    /// error. `start_paused` auto-advances the mock clock to the deadline.
+    #[tokio::test(start_paused = true)]
+    async fn streaming_idle_watchdog_aborts_hung_stream() {
+        use futures::StreamExt;
+        let adapter = make_adapter(Arc::new(HangingStreamTransport) as Arc<dyn Transport>)
+            .with_stream_idle_timeout_override(Some(std::time::Duration::from_millis(50)));
+        let mut stream = adapter
+            .stream(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+            )
+            .await
+            .expect("connect-phase 200 opens the stream");
+        let first = stream.next().await.expect("the watchdog yields an error item");
+        let err = first.expect_err("a hung stream must abort with an idle-timeout error");
+        assert!(
+            crate::model::stream_watchdog::is_stream_idle_timeout(&err),
+            "expected a watchdog idle-timeout abort, got {err:?}"
         );
     }
 
@@ -3642,5 +3833,168 @@ mod tests {
             !names.contains(&"tengu_api_request_succeeded"),
             "succeeded must NOT fire on error; got {names:?}"
         );
+    }
+
+    // ── AWS auth refresh trigger (2.1.198 V_c/G_c/s_f + Ygf) ─────────────────
+
+    /// Counting stand-in for the `ZBd` driver — the drive loop only needs the
+    /// object-safe `AwsAuthRefresh` seam.
+    #[derive(Debug, Default)]
+    struct CountingAwsRefresh {
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    impl crate::aws_auth::AwsAuthRefresh for CountingAwsRefresh {
+        fn refresh(&self) -> BoxFuture<'_, bool> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { true })
+        }
+    }
+
+    /// Bedrock-provider adapter with the AWS auth-refresh seam attached.
+    fn make_bedrock_adapter_with_aws(
+        transport: Arc<dyn Transport>,
+        aws: Arc<CountingAwsRefresh>,
+    ) -> ApiService {
+        let client = Arc::new(
+            DefaultLlmClient::from_config(ClientConfig {
+                providers: vec![ProviderProfile {
+                    provider_id: ProviderId::BedrockClaude,
+                    profile_name: "bedrock".to_string(),
+                    base_url: "https://bedrock-runtime.us-east-1.amazonaws.com".to_string(),
+                    protocol: ProtocolFamily::BedrockClaude,
+                    // Auth None so prepare() succeeds without SigV4 material —
+                    // the refresh trigger keys off the RESPONSE error + the
+                    // route's provider_id, not the auth strategy.
+                    auth: AuthStrategy::None,
+                    credential: CredentialConfig::None,
+                    models: vec![ModelProfile {
+                        display_model: "model".to_string(),
+                        request_model: "model".to_string(),
+                        billing_model: "model".to_string(),
+                        aliases: Vec::new(),
+                        description: None,
+                        capabilities: Capabilities {
+                            streaming: true,
+                            tools: true,
+                            reasoning: true,
+                            ..Default::default()
+                        },
+                    }],
+                    pricing: PricingConfig::default(),
+                    signing: None,
+                    azure: None,
+                    supports_websockets: false,
+                    supports_websocket_compression: false,
+                    websocket_connect_timeout_ms: None,
+                }],
+            })
+            .expect("client"),
+        );
+        ApiService::new(
+            client,
+            transport,
+            SubscriberState::default(),
+            UserAgentEnv {
+                user_type: Some("external".to_string()),
+                entrypoint: Some("cli".to_string()),
+                ..Default::default()
+            },
+            "0.0.0",
+            None,
+            None,
+        )
+        .with_aws_auth(aws)
+    }
+
+    /// 401 `authentication_error` body (decodes to `LlmError::Authentication`
+    /// through the Bedrock codec's Anthropic-shape error decode) — the
+    /// expired-STS terminal the 2.1.198 trigger classifies via `V_c`.
+    fn expired_sts_response() -> ProviderResponse {
+        ProviderResponse::json(
+            401,
+            serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "authentication_error",
+                    "message": "The security token included in the request is expired"
+                }
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn aws_auth_error_refreshes_and_retries_once() {
+        // 401 (expired STS) then 200: the hook must run ZBd once and the retry
+        // must succeed — the 2.1.198 behavior replacing the "/login" dead end.
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(expired_sts_response()),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let aws = Arc::new(CountingAwsRefresh::default());
+        let adapter = make_bedrock_adapter_with_aws(transport.clone(), aws.clone());
+
+        let out = adapter
+            .messages_create("model", None, None, Vec::new(), Vec::new())
+            .await;
+        assert!(out.is_ok(), "retry after refresh must succeed: {out:?}");
+        assert_eq!(
+            aws.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "exactly one refresh"
+        );
+        assert_eq!(transport.seen_count(), 2, "original + one retry");
+    }
+
+    #[tokio::test]
+    async fn aws_auth_retries_bounded_at_ygf_two() {
+        // Every attempt 401s: the hook may fire at most AWS_AUTH_MAX_ATTEMPTS
+        // (Ygf=2) times, then the error goes terminal (the binary's
+        // `api_request_aws_auth_exhausted` throw).
+        let transport = FakeTransport::sequence(vec![FakeResponse::Ok(expired_sts_response())]);
+        let aws = Arc::new(CountingAwsRefresh::default());
+        let adapter = make_bedrock_adapter_with_aws(transport.clone(), aws.clone());
+
+        let out = adapter
+            .messages_create("model", None, None, Vec::new(), Vec::new())
+            .await;
+        assert!(
+            matches!(out, Err(LlmError::Authentication)),
+            "exhausted refresh budget surfaces the auth error: {out:?}"
+        );
+        assert_eq!(
+            aws.calls.load(std::sync::atomic::Ordering::SeqCst),
+            crate::aws_auth::AWS_AUTH_MAX_ATTEMPTS,
+            "refresh bounded at Ygf=2"
+        );
+        assert_eq!(transport.seen_count(), 3, "initial attempt + 2 refresh retries");
+    }
+
+    #[tokio::test]
+    async fn non_aws_provider_never_triggers_refresh() {
+        // Provider gate (multi-provider structure is sacrosanct): the SAME 401
+        // on the Anthropic first-party provider must NOT touch the refresher.
+        let transport = FakeTransport::sequence(vec![FakeResponse::Ok(expired_sts_response())]);
+        let aws = Arc::new(CountingAwsRefresh::default());
+        let adapter = make_adapter(transport.clone());
+        let adapter = adapter.with_aws_auth(aws.clone());
+
+        let out = adapter
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
+            .await;
+        assert!(matches!(out, Err(LlmError::Authentication)));
+        assert_eq!(
+            aws.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "refresh must never run for a non-AWS provider"
+        );
+        assert_eq!(transport.seen_count(), 1, "401 stays terminal, no retry");
     }
 }

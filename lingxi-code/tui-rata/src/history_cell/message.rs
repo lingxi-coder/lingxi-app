@@ -332,6 +332,13 @@ impl ThinkingCell {
     pub fn thinking(&self) -> &str {
         &self.thinking
     }
+
+    /// Append a streaming thinking delta (M5 cc2.1.198 thinking streaming —
+    /// mirrors [`AssistantTextCell::append`] so `TurnEvent::ThinkingDelta`
+    /// mutates the active thinking cell in place).
+    pub fn append(&mut self, delta: &str) {
+        self.thinking.push_str(delta);
+    }
 }
 
 impl StyledCell for ThinkingCell {

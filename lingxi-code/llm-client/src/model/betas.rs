@@ -548,7 +548,12 @@ mod tests {
         assert!(mid_conversation_system("claude-opus-4-8"));
         assert!(mid_conversation_system("claude-fable-5"));
         assert!(mid_conversation_system("claude-mythos-5"));
+        // 2.1.198 registry: claude-sonnet-5 carries the "mid_conv_system"
+        // capability → the beta rides. Contains-hazard lock: "claude-sonnet-5"
+        // must not trip the OLDER "sonnet-4-5"/"sonnet-4-6" excludes.
+        assert!(mid_conversation_system("claude-sonnet-5"));
         assert!(!mid_conversation_system("claude-sonnet-4-6"));
+        assert!(!mid_conversation_system("claude-sonnet-4-5"));
         assert!(!mid_conversation_system("claude-opus-4-7"));
         assert!(!mid_conversation_system("claude-3-5-sonnet"));
     }

@@ -239,6 +239,13 @@ pub fn first_party_name_to_canonical(name: &str) -> String {
     if name.contains("claude-opus-4") {
         return "claude-opus-4".into();
     }
+    // sonnet-5 BEFORE the sonnet-4-x arms (2.1.198 binary `Bka`:
+    // `includes("sonnet-5") → "claude-sonnet-5"` precedes the sonnet-4-6 /
+    // sonnet-4-5 catches; the substrings are mutually exclusive —
+    // "claude-sonnet-4-5" does NOT contain "sonnet-5").
+    if name.contains("claude-sonnet-5") {
+        return "claude-sonnet-5".into();
+    }
     if name.contains("claude-sonnet-4-6") {
         return "claude-sonnet-4-6".into();
     }
@@ -362,6 +369,10 @@ impl PricingCatalog {
     pub fn builtin_reference() -> Self {
         let mut c = Self::empty();
         // $3/$15 tier — Sonnet variants (COST_TIER_3_15, modelCost.ts:36-42).
+        // Sonnet 5 — standard $3/$15 sonnet rate class (2.1.198 registry; the
+        // $2/$10 intro pricing is billing-side only — the binary carries NO
+        // client-side promotional cost logic).
+        c.insert_anthropic("claude-sonnet-5", 3_000, 15_000, 3_750, 300);
         c.insert_anthropic("claude-sonnet-4-6", 3_000, 15_000, 3_750, 300);
         c.insert_anthropic("claude-sonnet-4-5", 3_000, 15_000, 3_750, 300);
         // claude-sonnet-4 ($3/$15) — modelCost.ts:113-114.
@@ -1421,5 +1432,58 @@ mod tests {
             first_party_name_to_canonical("claude-opus-4-20250514"),
             "claude-opus-4"
         );
+    }
+
+    // ----- Sonnet 5 (2.1.198) -----
+
+    #[test]
+    fn canonicalize_sonnet_5_before_sonnet_4_x() {
+        // 2.1.198 `Bka`: includes("sonnet-5") → "claude-sonnet-5" precedes the
+        // sonnet-4-6 catch. Dated / ARN forms resolve too.
+        assert_eq!(first_party_name_to_canonical("claude-sonnet-5"), "claude-sonnet-5");
+        assert_eq!(
+            first_party_name_to_canonical("claude-sonnet-5-20260203"),
+            "claude-sonnet-5"
+        );
+        assert_eq!(
+            first_party_name_to_canonical("us.anthropic.claude-sonnet-5"),
+            "claude-sonnet-5"
+        );
+        // Contains-hazard locks: neighbors must keep their own canonicals
+        // ("claude-sonnet-4-5" does NOT contain "sonnet-5", nor does
+        // "claude-3-5-sonnet").
+        assert_eq!(
+            first_party_name_to_canonical("claude-sonnet-4-5-20250929"),
+            "claude-sonnet-4-5"
+        );
+        assert_eq!(first_party_name_to_canonical("claude-sonnet-4-6"), "claude-sonnet-4-6");
+        assert_eq!(
+            first_party_name_to_canonical("claude-3-5-sonnet-20241022"),
+            "claude-3-5-sonnet"
+        );
+    }
+
+    #[test]
+    fn builtin_has_sonnet_5_standard_3_15() {
+        // Standard sonnet rate class (2.1.198): $3/$15, cache-write $3.75,
+        // cache-read $0.30, 1h cache-write $6. NO client-side promo pricing.
+        let c = PricingCatalog::builtin_reference();
+        for model_id in ["claude-sonnet-5", "claude-sonnet-5-20260203"] {
+            let mr = ModelRef {
+                provider: ProviderId::Anthropic,
+                model: model_id.into(),
+            };
+            let (p, res) = c.resolve(&mr).unwrap();
+            assert!(
+                matches!(res, PricingResolution::ExactModel { .. }),
+                "sonnet-5 must resolve exactly, got {res:?}"
+            );
+            assert_eq!(p.token_rates[&TokenClass::Input].nano_usd_per_token, 3_000);
+            assert_eq!(p.token_rates[&TokenClass::Output].nano_usd_per_token, 15_000);
+            assert_eq!(p.token_rates[&TokenClass::CacheWrite].nano_usd_per_token, 3_750);
+            assert_eq!(p.token_rates[&TokenClass::CacheRead].nano_usd_per_token, 300);
+            // 1h cache-write: yme sonnet tier → $6/Mtok.
+            assert_eq!(p.token_rates[&TokenClass::CacheWrite1h].nano_usd_per_token, 6_000);
+        }
     }
 }

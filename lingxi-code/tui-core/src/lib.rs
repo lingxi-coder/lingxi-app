@@ -8,8 +8,10 @@
 //! See `.omo/plans/2026-07-01-tui-iocraft-to-ratatui-migration.md`.
 #![forbid(unsafe_code)]
 
+pub mod active_turn;
 pub mod bash_runner;
 pub mod error;
+pub mod key_hint;
 pub mod message;
 pub mod message_render;
 pub mod multiagent;
@@ -17,6 +19,7 @@ pub mod orchestrator_bridge;
 pub mod permission_bridge;
 pub mod recent_models;
 pub mod render;
+pub mod retry_ux;
 pub mod telemetry;
 pub mod theme;
 pub mod theme_detect;

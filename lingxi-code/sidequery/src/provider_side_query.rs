@@ -11,10 +11,13 @@
 //! ## Field forwarding
 //!
 //! Forwards `model`, `system`, `messages`, `max_tokens`, `tools`, `temperature`,
-//! plus `tool_choice` and `stop_sequences`. `output_format` drives the
-//! structured-text decode (not a server-side `response_format`); `max_retries`
-//! and `thinking_budget` stay dropped (the model table is reasoning:false).
-//! Existing callers pass `None`/empty for the extras, so the wire is byte-identical.
+//! plus `tool_choice`, `stop_sequences` and (cc 2.1.198) `thinking` — a
+//! `Some` session [`llm_client::model::thinking::ThinkingConfig`] resolves
+//! through the SAME `reasoning_for_request` rules as the main loop, so the
+//! compaction fork call inherits the session's extended-thinking config.
+//! `output_format` drives the structured-text decode (not a server-side
+//! `response_format`); `max_retries` stays dropped. Existing callers pass
+//! `None`/empty for the extras, so their wire stays byte-identical.
 //!
 //! ## System forwarding fix
 //!
@@ -145,9 +148,11 @@ impl ProviderSideQueryClient {
 /// Build the minimal model table for side-query callers.
 ///
 /// Side queries use "claude-haiku-4-5" (memory selector) and
-/// "claude-opus-4-6" (compaction). All entries get the same capability set:
-/// streaming=false (side queries are always non-streaming), tools, vision,
-/// documents, no reasoning.
+/// "claude-opus-4-6" (compaction), plus the current session defaults
+/// (claude-sonnet-5 / claude-opus-4-8 / claude-fable-5) that compaction forks
+/// inherit. All entries get the same capability set: streaming=false (side
+/// queries are always non-streaming), tools, vision, documents, reasoning
+/// (the cc 2.1.198 thinking-inheritance seam).
 fn sidequery_model_table() -> Vec<ModelProfile> {
     fn model(display: &str, billing: &str, aliases: &[&str]) -> ModelProfile {
         ModelProfile {
@@ -161,7 +166,11 @@ fn sidequery_model_table() -> Vec<ModelProfile> {
                 tools: true,
                 vision: true,
                 documents: true,
-                reasoning: false,
+                // cc 2.1.198: the compaction fork call inherits the session
+                // extended-thinking config, so the side-query route must
+                // accept a `reasoning` field (requests without one are
+                // unaffected by this capability flag).
+                reasoning: true,
                 structured_output: false,
             },
         }
@@ -178,6 +187,13 @@ fn sidequery_model_table() -> Vec<ModelProfile> {
         // Compaction model (AutocompactConfig::default)
         model("claude-opus-4-6", "claude-opus-4-6", &[]),
         model("claude-opus-4-7", "claude-opus-4-7", &[]),
+        // Current-generation defaults (2.1.197/198, M1b): a compaction fork on
+        // the session default (claude-sonnet-5) — or an opus-4-8/fable-5
+        // session — must resolve here instead of dying with ModelUnavailable.
+        // All three support (adaptive) thinking; `reasoning: true` above.
+        model("claude-sonnet-5", "claude-sonnet-5", &[]),
+        model("claude-opus-4-8", "claude-opus-4-8", &[]),
+        model("claude-fable-5", "claude-fable-5", &[]),
         // Broad Sonnet/Opus/Haiku coverage for callers using any model string
         model("claude-sonnet-4-6", "claude-sonnet-4-6", &[]),
         model(
@@ -285,19 +301,33 @@ impl SideQueryClient for ProviderSideQueryClient {
         // Convert JSON tool declarations → llm_client::ToolDeclaration.
         let tools = convert_tool_declarations(request.tools)?;
 
+        // thinking (cc 2.1.198): a `Some` session config resolves through the
+        // SAME `reasoning_for_request` rules `ApiService::build_request`
+        // applies to every main-loop/subagent request (adaptive vs fixed
+        // budget, model predicates, env kill switches, max_tokens-1 clamp) —
+        // the compaction fork call therefore inherits the session's
+        // extended-thinking config. `None` (all utility callers) keeps the
+        // wire byte-identical to before (no `thinking` field).
+        let reasoning = request.thinking.and_then(|t| {
+            llm_client::model::thinking::reasoning_for_request(
+                t,
+                &request.model,
+                Some(request.max_tokens),
+            )
+        });
+
         let llm_req = LlmRequest {
             model: request.model,
             system,
             messages,
             tools,
             // output_format drives the structured text decode (NOT
-            // response_format); max_retries is a caller-side budget; thinking
-            // stays dropped (sidequery_model_table is reasoning:false, so
-            // forwarding a budget would only UnsupportedCapability-error).
+            // response_format); max_retries is a caller-side budget.
             tool_choice: convert_tool_choice(request.tool_choice.as_ref()),
             stop_sequences: request.stop_sequences,
             max_tokens: Some(request.max_tokens),
             temperature: request.temperature.map(f64::from),
+            reasoning,
             ..LlmRequest::default()
         };
 
@@ -566,7 +596,7 @@ mod tests {
             max_tokens: 1024,
             max_retries: 2,
             temperature: Some(0.0),
-            thinking_budget: None,
+            thinking: None,
             stop_sequences: vec![],
             query_source: QuerySource::MemorySelector,
             skip_system_prompt_prefix: false,
@@ -810,6 +840,100 @@ mod tests {
             "any→required"
         );
         assert_eq!(body["stop_sequences"][0].as_str(), Some("STOP"));
+    }
+
+    /// cc 2.1.198 "Subagents + compaction inherit extended thinking config" —
+    /// the COMPACTION seam half, wire level: a `Some` session thinking config
+    /// resolves through the SAME `reasoning_for_request` rules as a main-loop
+    /// request and lands as the request's `thinking` field.
+    #[tokio::test]
+    async fn session_thinking_config_rides_on_the_wire() {
+        let body = serde_json::json!({
+            "id": "msg_think", "model": "claude-opus-4-6",
+            "content": [{ "type": "text", "text": "ok" }],
+            "stop_reason": "end_turn", "usage": { "input_tokens": 1, "output_tokens": 1 }
+        }).to_string();
+        let transport = Arc::new(StubTransport::new(body));
+        let client = ProviderSideQueryClient::new("sk-test", None, transport.clone());
+        let mut r = req(None);
+        // opus-4-6 is in the adaptive-thinking set → the session Adaptive
+        // intent renders exactly like a main-loop turn: {"type":"adaptive"}.
+        r.model = "claude-opus-4-6".into();
+        r.thinking = Some(llm_client::model::thinking::ThinkingConfig::default());
+        client.query(r).await.expect("query ok");
+        let received = transport.received.lock().unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(received[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            body["thinking"],
+            serde_json::json!({ "type": "adaptive" }),
+            "the inherited session config renders like a main-loop request"
+        );
+    }
+
+    /// `thinking: None` (every utility caller) keeps the wire byte-identical
+    /// to before the cc 2.1.198 inheritance seam: no `thinking` field at all.
+    #[tokio::test]
+    async fn no_thinking_config_keeps_legacy_wire() {
+        let body = serde_json::json!({
+            "id": "msg_legacy", "model": "claude-haiku-4-5",
+            "content": [{ "type": "text", "text": "ok" }],
+            "stop_reason": "end_turn", "usage": { "input_tokens": 1, "output_tokens": 1 }
+        }).to_string();
+        let transport = Arc::new(StubTransport::new(body));
+        let client = ProviderSideQueryClient::new("sk-test", None, transport.clone());
+        client.query(req(None)).await.expect("query ok");
+        let received = transport.received.lock().unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(received[0].body.as_deref().unwrap()).unwrap();
+        assert!(
+            body.get("thinking").is_none(),
+            "legacy callers must not grow a thinking field: {body}"
+        );
+    }
+
+    /// M1b regression (found in M10): the model table MUST cover the current
+    /// session defaults — a production compaction fork on `claude-sonnet-5`
+    /// (the 2.1.197/198 default), `claude-opus-4-8` or `claude-fable-5` used
+    /// to die with `LlmError::ModelUnavailable` before any request was sent.
+    #[tokio::test]
+    async fn current_default_models_resolve_for_compaction_forks() {
+        for m in ["claude-sonnet-5", "claude-opus-4-8", "claude-fable-5"] {
+            let body = serde_json::json!({
+                "id": "msg_cur", "model": m,
+                "content": [{ "type": "text", "text": "SUMMARY" }],
+                "stop_reason": "end_turn",
+                "usage": { "input_tokens": 1, "output_tokens": 1 }
+            })
+            .to_string();
+            let transport = Arc::new(StubTransport::new(body));
+            let client = ProviderSideQueryClient::new("sk-test", None, transport.clone());
+            let mut r = req(None);
+            r.model = m.into();
+            r.query_source = QuerySource::Compaction;
+            // Compaction forks inherit the session thinking config (cc
+            // 2.1.198); all three models support (adaptive) thinking.
+            r.thinking = Some(llm_client::model::thinking::ThinkingConfig::default());
+
+            let resp = client
+                .query(r)
+                .await
+                .unwrap_or_else(|e| panic!("{m} must resolve, got {e:?}"));
+            assert_eq!(resp.text.as_deref(), Some("SUMMARY"), "{m}");
+
+            // The request reached the wire with the right model AND the
+            // adaptive thinking shape (all three are adaptive-thinking models).
+            let received = transport.received.lock().unwrap();
+            assert_eq!(received.len(), 1, "{m}");
+            let body: serde_json::Value =
+                serde_json::from_str(received[0].body.as_deref().unwrap()).unwrap();
+            assert_eq!(body["model"].as_str(), Some(m), "{m}");
+            assert_eq!(
+                body["thinking"],
+                serde_json::json!({ "type": "adaptive" }),
+                "{m}: session thinking must ride like a main-loop request"
+            );
+        }
     }
 
     #[tokio::test]

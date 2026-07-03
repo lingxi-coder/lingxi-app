@@ -14,7 +14,9 @@ base64 = "0.22"
 httpdate = "1"
 hmac = "0.12"
 sha2 = "0.10"
-tokio = { workspace = true, features = ["sync", "time", "net", "io-util", "macros", "rt-multi-thread"] }
+# "process" — `aws_auth::ShellAwsAuthProcess` runs the awsAuthRefresh /
+# awsCredentialExport scripts (2.1.198 ZBd/gIn/t2d port).
+tokio = { workspace = true, features = ["sync", "time", "net", "io-util", "macros", "rt-multi-thread", "process"] }
 traits = { path = "../traits" }
 protocol = { path = "../protocol" }
 async-trait = { workspace = true }

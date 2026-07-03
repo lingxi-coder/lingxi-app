@@ -160,6 +160,31 @@ pub async fn dispatch(
                     }
                 }
             }
+            // (M7 cc2.1.198) Register this interactive session in the
+            // cross-process live-session registry
+            // (`~/.lingxi/sessions/<pid>.json`) so `lingxi-cli agents --json`
+            // and the agents view can list it — the binary registers every
+            // process the same way (observed `sessions/<pid>.json` shape).
+            // Best-effort: a write failure never blocks the session; the
+            // record is unlinked when the TUI returns.
+            //
+            // (M8 cc2.1.198) Live status refreshes: the registration is
+            // shared (`Arc`) with the ratatui mount, whose channel forwarders
+            // rewrite `status`/`updatedAt`/`statusUpdatedAt` on idle ↔ busy ↔
+            // waiting transitions (binary `mvn`, fed by the REPL status
+            // effect @222989611).
+            let session_registration = {
+                let session_id =
+                    tui_build.runtime.orchestrator.current_session_id().await;
+                let name = std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+                Arc::new(crate::agents_registry::SessionRegistration::register(
+                    &crate::run::lingxi_home_dir(),
+                    Some(session_id.to_string()).as_deref(),
+                    name.as_deref(),
+                ))
+            };
             // FRESH launch: no replayed scrollback. `build_tui_runtime` with an
             // empty `resumed_messages` vec is byte-identical to the pre-refactor
             // inline assembly — `Runtime::with_resumed_messages([])` is a no-op
@@ -170,10 +195,17 @@ pub async fn dispatch(
             // channel, so it MUST branch before `build_tui_runtime` moves
             // `tui_build` into the iocraft runtime.
             if use_ratatui_backend() {
-                return run_ratatui(tui_build).await;
+                let code = run_ratatui(tui_build, Some(session_registration.clone())).await;
+                // Unlink NOW (idempotent with Drop): the status forwarders may
+                // still hold `Arc` clones inside detached tasks, and the
+                // record must not outlive the interactive session.
+                session_registration.deregister();
+                return code;
             }
             let tui_runtime = build_tui_runtime(tui_build, argv, Vec::new()).await;
-            mount_tui_runtime(tui_runtime).await
+            let code = mount_tui_runtime(tui_runtime).await;
+            session_registration.deregister();
+            code
         }
     }
 }
@@ -311,10 +343,25 @@ pub(crate) async fn mount_tui_runtime(tui_runtime: tui::session::Runtime) -> i32
 /// app, and each submit emits `TurnStarted` + spawns a streaming turn on the
 /// same channel. The blocking ratatui loop runs on a `spawn_blocking` thread;
 /// turns are spawned back onto the async runtime via the captured handle.
-async fn run_ratatui(tui_build: crate::init::TuiBuild) -> i32 {
+///
+/// (M8 cc2.1.198) `registration` — when `Some`, the bridge + permission
+/// channels are interposed with status forwarders that rewrite this session's
+/// `sessions/<pid>.json` record on state changes (binary `mvn` + the REPL
+/// status effect @222989611): `TurnStarted` → `busy`, `TurnEnded` → `idle`,
+/// a pending permission exchange → `waiting` with `waitingFor: "permission
+/// prompt"` (the binary's dialog-open reason), resolved exchange → `busy`.
+async fn run_ratatui(
+    tui_build: crate::init::TuiBuild,
+    registration: Option<Arc<crate::agents_registry::SessionRegistration>>,
+) -> i32 {
     let orchestrator: Arc<dyn OrchestratorHandle> = tui_build.runtime.orchestrator.clone();
-    let bridge_rx = tui_build.bridge_rx;
-    let permission_rx = tui_build.permission_rx;
+    let (bridge_rx, permission_rx) = match &registration {
+        Some(reg) => (
+            spawn_status_bridge_forwarder(tui_build.bridge_rx, reg.clone()),
+            spawn_status_permission_forwarder(tui_build.permission_rx, reg.clone()),
+        ),
+        None => (tui_build.bridge_rx, tui_build.permission_rx),
+    };
     let turn_tx = tui_build.turn_tx;
     // (B4 Task 5 parity) Thread the composition root's shared subscription
     // slot so the widget's rate-limit composer reads the live snapshot at
@@ -378,6 +425,78 @@ async fn run_ratatui(tui_build: crate::init::TuiBuild) -> i32 {
             exit_codes::RUNTIME_ERROR
         }
     }
+}
+
+/// (M8 cc2.1.198) Interpose the bridge channel: pass every [`tui::events::
+/// orchestrator_bridge::TurnEvent`] through unchanged while mirroring the
+/// turn lifecycle into the live-session registry record — `TurnStarted` →
+/// `busy`, `TurnEnded` → `idle` (binary status `Za`/`Cu`: busy while
+/// loading, idle at rest). Mid-turn stream events (text/tool deltas) carry
+/// no status change; the waiting → busy edge is owned by the permission
+/// forwarder (which observes the dialog's actual resolution). Detached task;
+/// ends when the source channel closes.
+fn spawn_status_bridge_forwarder(
+    mut src: tokio::sync::mpsc::UnboundedReceiver<tui::events::orchestrator_bridge::TurnEvent>,
+    reg: Arc<crate::agents_registry::SessionRegistration>,
+) -> tokio::sync::mpsc::UnboundedReceiver<tui::events::orchestrator_bridge::TurnEvent> {
+    use tui::events::orchestrator_bridge::TurnEvent;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(ev) = src.recv().await {
+            match &ev {
+                TurnEvent::TurnStarted => reg.update_status("busy", None),
+                TurnEvent::TurnEnded(_) => reg.update_status("idle", None),
+                // The bridge-level PermissionRequest variant (reserved M6-05
+                // wiring) also marks waiting when it fires; the live dialog
+                // path goes through the permission forwarder below.
+                TurnEvent::PermissionRequest { .. } => {
+                    reg.update_status("waiting", Some("permission prompt"));
+                }
+                _ => {}
+            }
+            if tx.send(ev).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// (M8 cc2.1.198) Interpose the permission channel: each
+/// [`tui::permission_bridge::PermissionExchange`] marks the session
+/// `waiting` / `"permission prompt"` (the binary's `Pb` reason for an open
+/// permission dialog @222989611) and has its one-shot responder wrapped so
+/// the RESOLUTION (user answered, or dialog dropped = cancel) flips the
+/// status back to `busy` — the turn is running again; `TurnEnded` later
+/// settles it to `idle`. The wrapped responder forwards the response (or the
+/// drop) to the original gate unchanged.
+fn spawn_status_permission_forwarder(
+    mut src: tokio::sync::mpsc::Receiver<tui::permission_bridge::PermissionExchange>,
+    reg: Arc<crate::agents_registry::SessionRegistration>,
+) -> tokio::sync::mpsc::Receiver<tui::permission_bridge::PermissionExchange> {
+    // Same capacity as the gate's channel (init.rs `channel(16)`).
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move {
+        while let Some(mut exchange) = src.recv().await {
+            reg.update_status("waiting", Some("permission prompt"));
+            let (wrapped_tx, wrapped_rx) = tokio::sync::oneshot::channel();
+            let original_tx = std::mem::replace(&mut exchange.resp_tx, wrapped_tx);
+            let reg = reg.clone();
+            tokio::spawn(async move {
+                let resolved = wrapped_rx.await;
+                reg.update_status("busy", None);
+                if let Ok(resp) = resolved {
+                    let _ = original_tx.send(resp);
+                }
+                // Err = the TUI dropped the responder (cancel); dropping
+                // `original_tx` here propagates exactly that to the gate.
+            });
+            if tx.send(exchange).await.is_err() {
+                break;
+            }
+        }
+    });
+    rx
 }
 
 /// Snapshot the orchestrator's MCP/hooks/agents/model listings into a
@@ -615,7 +734,7 @@ fn read_status_line_config() -> Option<tui::components::status_line_command::Sta
 /// settings — the `hasSkipDangerousModePermissionPrompt` user+local check
 /// (claude-code `settings.ts:882-889`; the flag/policy tiers have no Rust
 /// substrate). On any read failure the tier degrades to `false`.
-fn read_skip_dangerous_prompt() -> bool {
+pub(crate) fn read_skip_dangerous_prompt() -> bool {
     use migrations::settings_update::{read_settings_map, settings_path, SettingsSource};
     let (lingxi_home, project_dir) = settings_dirs();
     [SettingsSource::User, SettingsSource::Local]
@@ -636,7 +755,7 @@ fn read_skip_dangerous_prompt() -> bool {
 /// `settings.json` (`onConfirm` → save in claude-code). Best-effort: a write
 /// failure warns and is otherwise ignored (TS `updateSettingsForSource` never
 /// throws; the migration port follows the same warn-and-continue contract).
-fn persist_skip_dangerous_prompt() {
+pub(crate) fn persist_skip_dangerous_prompt() {
     use migrations::settings_update::{settings_path, update_settings, SettingsSource};
     let (lingxi_home, project_dir) = settings_dirs();
     let path = settings_path(SettingsSource::User, &lingxi_home, &project_dir);

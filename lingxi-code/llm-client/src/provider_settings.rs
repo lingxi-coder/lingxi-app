@@ -684,6 +684,9 @@ pub fn anthropic_model_profiles() -> Vec<ModelProfile> {
             true,
         ),
         model("claude-sonnet-4-6", "claude-sonnet-4-6", &[], true),
+        // Sonnet 5 — the 2.1.198 default first-party model (registry id
+        // "claude-sonnet-5"; alias table `sonnet.default` points here).
+        model("claude-sonnet-5", "claude-sonnet-5", &[], true),
         model(
             "claude-opus-4-20250514",
             "claude-opus-4",
@@ -1073,11 +1076,16 @@ mod tests {
         );
 
         assert_eq!(profile.profile_name, "anthropic");
-        assert_eq!(profile.models.len(), 12);
+        // 13 entries after claude-sonnet-5 joined the table (2.1.198).
+        assert_eq!(profile.models.len(), 13);
         assert!(profile
             .models
             .iter()
             .any(|m| m.display_model == "claude-opus-4-7"));
+        assert!(profile
+            .models
+            .iter()
+            .any(|m| m.display_model == "claude-sonnet-5"));
         assert!(profile.models.iter().all(|m| m.capabilities.reasoning));
     }
 

@@ -24,12 +24,17 @@ use traits::{ContextPressureBanner, CostSnapshot, OutputStream, TurnOutcome};
 ///
 /// Created in M6-03 as a TUI-local enum (not exposed on any orchestrator
 /// trait). The bridge translates `OutputStream` callbacks into this enum.
-/// Future expansion: `PermissionRequest` is wired in M6-05; `ThinkingDelta`
-/// in M7.
+/// `PermissionRequest` is wired in M6-05; `ThinkingDelta` in M5 (2.1.198
+/// live-streaming parity).
 #[derive(Debug, Clone)]
 pub enum TurnEvent {
     /// Streaming text chunk from the assistant.
     TextDelta(String),
+    /// A completed assistant thinking block (M5 live streaming). The
+    /// orchestrator's `emit_thinking` fires once per COMPLETED block (not
+    /// per-delta — see `traits::OutputStream::emit_thinking`), so one event
+    /// carries the whole reasoning text.
+    ThinkingDelta(String),
     /// A tool invocation is about to dispatch.
     ToolUseStart {
         /// Stable id (the model-supplied `tool_use_id`) — correlates with
@@ -163,6 +168,10 @@ impl BridgeOutputStream {
 impl OutputStream for BridgeOutputStream {
     async fn emit_text(&self, text: &str) {
         let _ = self.tx.send(TurnEvent::TextDelta(text.to_string()));
+    }
+
+    async fn emit_thinking(&self, thinking: &str, _signature: Option<&str>) {
+        let _ = self.tx.send(TurnEvent::ThinkingDelta(thinking.to_string()));
     }
 
     async fn emit_tool_call(
@@ -307,6 +316,15 @@ mod tests {
         bridge.emit_text("hello").await;
         let ev = rx.recv().await.unwrap();
         assert!(matches!(ev, TurnEvent::TextDelta(ref s) if s == "hello"));
+    }
+
+    #[tokio::test]
+    async fn emit_thinking_translates_to_thinking_delta() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        bridge.emit_thinking("let me reason", Some("sig-abc")).await;
+        let ev = rx.recv().await.unwrap();
+        assert!(matches!(ev, TurnEvent::ThinkingDelta(ref s) if s == "let me reason"));
     }
 
     #[tokio::test]

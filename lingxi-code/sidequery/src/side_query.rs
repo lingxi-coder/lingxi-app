@@ -37,8 +37,15 @@ pub struct SideQueryRequest {
     pub max_retries: u32,
     /// Sampling temperature; defaults to provider default when `None`.
     pub temperature: Option<f32>,
-    /// Optional thinking-tokens budget (Claude extended thinking).
-    pub thinking_budget: Option<u32>,
+    /// Session thinking configuration to INHERIT on this call (cc 2.1.198
+    /// "Subagents + compaction inherit extended thinking config"; binary: the
+    /// compaction summarizer passes `thinkingConfig: mXt(r)` — the session
+    /// `options.thinkingConfig` — @216945141). `None` = legacy: no `thinking`
+    /// field on the wire (utility side queries — memory selection, WebFetch
+    /// summarization — match the binary's explicit `{type:"disabled"}`
+    /// callers). Replaces the never-forwarded `thinking_budget` knob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<llm_client::model::thinking::ThinkingConfig>,
     /// Stop sequences.
     pub stop_sequences: Vec<String>,
     /// COGS tag — see [`QuerySource`].

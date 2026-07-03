@@ -201,7 +201,14 @@ async fn agents_dispatch() {
     }]);
     let r = d.dispatch("/agents").await;
     if let SlashDispatchResult::Handled { display } = r {
-        assert_eq!(display, "Agents (1):\n  r  x\n");
+        // cc 2.1.198 removed the interactive /agents wizard (M4): the command
+        // now emits static guidance regardless of registered agents. Byte-locked
+        // against agents.rs::agents_removed_message (`.lingxi/` = accepted
+        // branding divergence).
+        assert_eq!(
+            display,
+            "The /agents wizard has been removed.\n\nAsk Claude to create or update subagents for you (e.g. \"create a code-reviewer subagent that ...\"),\nor edit the files directly:\n  \u{2022} .lingxi/agents/       (this project)\n  \u{2022} ~/.lingxi/agents/     (all projects)\n\nDocs: https://code.claude.com/docs/en/sub-agents"
+        );
     } else {
         panic!("{r:?}");
     }

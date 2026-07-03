@@ -60,6 +60,11 @@ fn model_description(request_model: &str) -> Option<String> {
         Some("Most capable for complex work".to_string())
     } else if id.contains("haiku") {
         Some("Fastest for quick answers".to_string())
+    } else if id.contains("sonnet-5") {
+        // 2.1.198 picker: the Sonnet (5) row's blurb (`b2n`). Checked before
+        // the generic sonnet arm; "claude-sonnet-4-5" does NOT contain
+        // "sonnet-5" so older Sonnets keep the classic blurb.
+        Some("Efficient for routine tasks".to_string())
     } else if id.contains("sonnet") {
         Some("Best for everyday tasks".to_string())
     } else {

@@ -79,6 +79,13 @@ fn field_presence(layer: &SettingsJson) -> Vec<(&'static str, bool)> {
         ("outputStyle", layer.output_style.is_some()),
         ("telemetryEnabled", layer.telemetry_enabled.is_some()),
         ("model", layer.model.is_some()),
+        // 2.1.198 AWS/GCP auth-refresh script keys (scalar-override). The
+        // Project provenance of awsAuthRefresh feeds the workspace-trust gate
+        // (binary `mqe`: project/local-sourced command + trust unconfirmed ⇒
+        // refuse to execute).
+        ("awsAuthRefresh", layer.aws_auth_refresh.is_some()),
+        ("awsCredentialExport", layer.aws_credential_export.is_some()),
+        ("gcpAuthRefresh", layer.gcp_auth_refresh.is_some()),
         ("providers", layer.providers.is_some()),
         ("routing", layer.routing.is_some()),
     ]

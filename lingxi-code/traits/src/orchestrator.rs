@@ -365,7 +365,12 @@ pub fn is_curated_model(provider_id: &str, request_model: &str) -> bool {
     match provider_id {
         "anthropic" | "builtin" => matches!(
             request_model,
-            "claude-sonnet-4-6" | "claude-opus-4-8" | "claude-haiku-4-5" | "claude-fable-5"
+            // claude-sonnet-5: the 2.1.198 default first-party Sonnet.
+            "claude-sonnet-5"
+                | "claude-sonnet-4-6"
+                | "claude-opus-4-8"
+                | "claude-haiku-4-5"
+                | "claude-fable-5"
         ),
         "openai" => matches!(request_model, "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini"),
         "openai-chatgpt" => matches!(request_model, "gpt-5.3-codex" | "gpt-5-codex"),

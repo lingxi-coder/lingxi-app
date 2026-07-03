@@ -731,16 +731,163 @@ mod tests {
         );
     }
 
+    /// (M4 cc2.1.198) `--plugin-dir` is REPEATABLE (commander help: "Load a
+    /// plugin from a directory or .zip for this session only (repeatable:
+    /// --plugin-dir A --plugin-dir B.zip) (default: [])").
     #[test]
     fn plugin_dir_parses() {
         let a = Argv::from_iter(["lingxi-cli", "--plugin-dir", "/my/plugins", "hi"]).unwrap();
-        assert_eq!(a.plugin_dir, Some(PathBuf::from("/my/plugins")));
+        assert_eq!(a.plugin_dir, vec![PathBuf::from("/my/plugins")]);
+        // Repeatable — order preserved; zip paths are plain values here.
+        let b = Argv::from_iter([
+            "lingxi-cli",
+            "--plugin-dir",
+            "/a",
+            "--plugin-dir",
+            "/b.zip",
+            "hi",
+        ])
+        .unwrap();
+        assert_eq!(b.plugin_dir, vec![PathBuf::from("/a"), PathBuf::from("/b.zip")]);
+        // Default: empty list (commander `(default: [])`).
+        assert!(Argv::from_iter(["lingxi-cli", "hi"]).unwrap().plugin_dir.is_empty());
+    }
+
+    /// (M4 cc2.1.198) `--effort` argParser port (`u4i`/`Xat`): trim+lowercase,
+    /// `med`→`medium` alias, membership in UR; unknown value → `None` + the
+    /// byte-locked stderr warning (note the em dash), binary verified live.
+    #[test]
+    fn effort_normalizes_and_warns() {
+        // Valid levels normalize (trim + lowercase).
+        let a = Argv::from_iter(["lingxi-cli", "--effort", "  HIGH ", "hi"]).unwrap();
+        assert_eq!(a.normalized_effort(), (Some("high".to_string()), None));
+        // Alias `med` → `medium` (`c4i = {med:"medium"}`).
+        let b = Argv::from_iter(["lingxi-cli", "--effort", "med", "hi"]).unwrap();
+        assert_eq!(b.normalized_effort(), (Some("medium".to_string()), None));
+        // Unknown → ignored with the byte-locked warning.
+        let c = Argv::from_iter(["lingxi-cli", "--effort", "banana", "hi"]).unwrap();
+        let (level, warning) = c.normalized_effort();
+        assert_eq!(level, None);
+        assert_eq!(
+            warning.as_deref(),
+            Some("Warning: Unknown --effort value 'banana' \u{2014} ignoring it and using the default effort. Valid values: low, medium, high, xhigh, max.")
+        );
+        // Absent flag → no level, no warning.
+        let d = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
+        assert_eq!(d.normalized_effort(), (None, None));
+    }
+
+    /// (M4 cc2.1.198) `--prompt-suggestions` maps to a BOOLEAN like the
+    /// binary's argParser (`!Hl(i)`), and a truthy value outside
+    /// `--print` + `--output-format=stream-json` trips the byte-locked fatal
+    /// (verified live on the 2.1.198 binary: stderr line + exit 1;
+    /// `--prompt-suggestions false` passes in any mode).
+    #[test]
+    fn prompt_suggestions_gate_and_bool_mapping() {
+        let locked = "--prompt-suggestions requires --print and --output-format=stream-json (prompt_suggestion messages are only surfaced in stream-json output).";
+        // Bare flag → preset "true" → enabled → rejected without print/stream-json.
+        // (A following non-dash token would bind as the optional VALUE — same
+        // greediness as commander's `[value]` — so the prompt is omitted here.)
+        let a = Argv::from_iter(["lingxi-cli", "--prompt-suggestions"]).unwrap();
+        assert_eq!(a.prompt_suggestions_enabled(), Some(true));
+        assert_eq!(a.validate_prompt_suggestions_args().unwrap_err(), locked);
+        // Truthy token + print but text output → still rejected.
+        let b = Argv::from_iter(["lingxi-cli", "-p", "--prompt-suggestions", "yes", "hi"]).unwrap();
+        assert_eq!(b.validate_prompt_suggestions_args().unwrap_err(), locked);
+        // print + stream-json → accepted (prompt BEFORE the optional-value
+        // flag so it isn't bound as the flag's value).
+        let c = Argv::from_iter([
+            "lingxi-cli",
+            "hi",
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--prompt-suggestions",
+        ])
+        .unwrap();
+        assert!(c.validate_prompt_suggestions_args().is_ok());
+        // Falsy tokens map to false and pass anywhere (binary `a.promptSuggestions`
+        // is boolean false → the Es gate is skipped).
+        for tok in ["false", "0", "no", "off"] {
+            let d = Argv::from_iter(["lingxi-cli", "--prompt-suggestions", tok, "hi"]).unwrap();
+            assert_eq!(d.prompt_suggestions_enabled(), Some(false), "{tok}");
+            assert!(d.validate_prompt_suggestions_args().is_ok(), "{tok}");
+        }
+        // Absent → None, always passes.
+        let e = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
+        assert_eq!(e.prompt_suggestions_enabled(), None);
+        assert!(e.validate_prompt_suggestions_args().is_ok());
     }
 
     #[test]
     fn no_session_persistence_flag_parses() {
         let a = Argv::from_iter(["lingxi-cli", "--no-session-persistence", "hi"]).unwrap();
         assert!(a.no_session_persistence);
+    }
+
+    /// (M3 cc2.1.198) `--no-session-persistence` requires `--print`. Byte-locked
+    /// to the binary's main action @223929381 (`Es("Error: --no-session-
+    /// persistence can only be used with --print mode.")`); the method returns
+    /// the string sans `Error: ` prefix (the caller prints `Error: {msg}`).
+    #[test]
+    fn no_session_persistence_requires_print_mode() {
+        // Interactive (no --print) ⟶ byte-exact rejection.
+        let a = Argv::from_iter(["lingxi-cli", "--no-session-persistence", "hi"]).unwrap();
+        assert_eq!(
+            a.validate_session_persistence_args().unwrap_err(),
+            "--no-session-persistence can only be used with --print mode."
+        );
+        // With --print ⟶ accepted.
+        let b =
+            Argv::from_iter(["lingxi-cli", "--print", "--no-session-persistence", "hi"]).unwrap();
+        assert!(b.validate_session_persistence_args().is_ok());
+        // Flag absent ⟶ always fine, print or not.
+        let c = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
+        assert!(c.validate_session_persistence_args().is_ok());
+    }
+
+    /// (M3 cc2.1.198) `--bg`/`--background` × `--print`/`-p` rejected up front.
+    /// Message byte-locked to the bg fast-path validator `pof` @218854391
+    /// (stderr line, no `Error:` prefix, exit 1) — note the real em dash.
+    #[test]
+    fn background_with_print_rejected_up_front() {
+        let locked = "--bg and --print conflict: --print never starts the interactive session that `claude agents` attaches to, so the job would be unattachable. The prompt is the positional \u{2014} drop --print: `claude --bg '<task>'`.";
+        // Every spelling pair conflicts: long/alias × long/short.
+        for args in [
+            ["lingxi-cli", "--bg", "--print", "task"],
+            ["lingxi-cli", "--background", "--print", "task"],
+            ["lingxi-cli", "--bg", "-p", "task"],
+            ["lingxi-cli", "-p", "--background", "task"],
+        ] {
+            let a = Argv::from_iter(args).unwrap();
+            assert_eq!(
+                a.validate_background_args().unwrap_err(),
+                locked,
+                "{args:?} must trip the upfront reject"
+            );
+        }
+        // Either flag alone passes.
+        assert!(Argv::from_iter(["lingxi-cli", "--bg", "task"])
+            .unwrap()
+            .validate_background_args()
+            .is_ok());
+        assert!(Argv::from_iter(["lingxi-cli", "-p", "task"])
+            .unwrap()
+            .validate_background_args()
+            .is_ok());
+    }
+
+    /// (M3 cc2.1.198) `--safe-mode` / `--bare` parse-and-carry (the wiring is
+    /// exercised in `init.rs` / engine-desktop tests).
+    #[test]
+    fn safe_mode_and_bare_flags_parse() {
+        let a = Argv::from_iter(["lingxi-cli", "--safe-mode", "hi"]).unwrap();
+        assert!(a.safe_mode);
+        assert!(!a.bare);
+        let b = Argv::from_iter(["lingxi-cli", "--bare", "hi"]).unwrap();
+        assert!(b.bare);
+        assert!(!b.safe_mode);
     }
 
     #[test]

@@ -62,14 +62,48 @@ fn has_1m_context(model: &str) -> bool {
     model.to_lowercase().contains("[1m]")
 }
 
-/// `true` if the canonical model family supports 1M context (sonnet-4 family
-/// or opus-4-6), unless 1M context is disabled. Mirrors `modelSupports1M`.
+/// `true` if the canonical model family supports the 1M-context beta, unless
+/// 1M context is disabled. Mirrors `modelSupports1M` (2.1.198 binary `hG`
+/// @208698905: excludes claude-3-*/opus-4-0/4-1/4-5/haiku-4-5 via `QRn`, then
+/// `KL(canonical)?.context?.supports_1m_beta`). The 2.1.198 registry carries
+/// `supports_1m_beta:!0` on sonnet-4-0/4-5/4-6, sonnet-5, opus-4-6, opus-4-7,
+/// opus-4-8, fable-5 and mythos-5.
 fn model_supports_1m(model: &str) -> bool {
     if is_1m_context_disabled() {
         return false;
     }
     let canonical = canonical_name(model);
-    canonical.contains("claude-sonnet-4") || canonical.contains("opus-4-6")
+    canonical.contains("claude-sonnet-4")
+        || canonical.contains("claude-sonnet-5")
+        || canonical.contains("opus-4-6")
+        || canonical.contains("opus-4-7")
+        || canonical.contains("opus-4-8")
+        || canonical.contains("claude-fable-5")
+        || canonical.contains("claude-mythos-5")
+}
+
+/// `true` if the model's registry entry marks it natively 1M (2.1.198 binary
+/// `Hx` @208698511: `KL(canonical)?.context?.native_1m` on the first-party
+/// path — no beta header and no `[1m]` suffix required). The 2.1.198 registry
+/// gives `context:{window:1e6,native_1m:!0}` to `claude-sonnet-5` (plus
+/// `native_1m_3p:{bedrock,vertex,foundry}`), `claude-opus-4-7`,
+/// `claude-opus-4-8`, `claude-fable-5` and `claude-mythos-5`; `Hx` also
+/// special-cases `claude-mythos-preview` (the missing-registry-entry bail is
+/// `!n?.native_1m && t !== "claude-mythos-preview"`). opus-4-6 and the
+/// sonnet-4-x family have NO `native_1m` and stay beta/suffix-gated. Honors
+/// the same `CLAUDE_CODE_DISABLE_1M_CONTEXT` kill switch (`Aye()` guard
+/// inside `Hx`).
+fn model_native_1m(model: &str) -> bool {
+    if is_1m_context_disabled() {
+        return false;
+    }
+    let canonical = canonical_name(model);
+    canonical.contains("claude-sonnet-5")
+        || canonical.contains("opus-4-7")
+        || canonical.contains("opus-4-8")
+        || canonical.contains("claude-fable-5")
+        || canonical.contains("claude-mythos-5")
+        || canonical == "claude-mythos-preview"
 }
 
 /// Resolve a full model id to a shorter canonical family name.
@@ -100,6 +134,12 @@ fn canonical_name(model: &str) -> String {
     }
     if name.contains("claude-opus-4") {
         return "claude-opus-4".to_string();
+    }
+    // sonnet-5 before the sonnet-4-x catches (2.1.198 registry adds
+    // claude-sonnet-5; binary canonicalization checks `sonnet-5` first —
+    // note "claude-sonnet-4-5" does NOT contain "sonnet-5", see tests).
+    if name.contains("claude-sonnet-5") {
+        return "claude-sonnet-5".to_string();
     }
     if name.contains("claude-sonnet-4-6") {
         return "claude-sonnet-4-6".to_string();
@@ -182,6 +222,14 @@ pub fn context_window_for_model(model: &str, betas: &[String]) -> u64 {
         return 1_000_000;
     }
 
+    // Native 1M (2.1.198 binary `XHi`: `if(Hx(e))return 1e6` — after the
+    // suffix/beta checks, before the default). sonnet-5, opus-4-7, opus-4-8,
+    // fable-5 and mythos-5 are natively 1M (registry `native_1m:!0`), NOT
+    // beta-gated.
+    if model_native_1m(model) {
+        return 1_000_000;
+    }
+
     // Multi-provider fix: non-Claude models use their real catalog window
     // (models.dev `Limit.context`) instead of the Claude 200k default. Claude
     // ids bypass this so their byte-faithful behavior above is untouched.
@@ -213,11 +261,17 @@ fn model_max_output_tokens(model: &str) -> (u64, u64) {
     // Binary `YCe` (v2.1.183 getModelMaxOutputTokens): fable-5/mythos-5/opus-4-8/
     // opus-4-7/opus-4-6 → 64k/128k; sonnet-4-6 → 32k/128k; opus-4-5/sonnet-4-0/4-5/
     // haiku-4-5 → 32k/64k; opus-4-1/4-0 → 32k/32k; else → 32k/128k.
+    // 2.1.198 `pIe` adds `r==="claude-sonnet-5" → t=64000,n=128000` (between the
+    // fable-5/mythos-5 arm and opus-4-8) — sonnet-5 gets the 64k/128k tier.
     let (default_tokens, upper_limit) = if m.contains("opus-4-8")
         || m.contains("opus-4-7")
         || m.contains("fable-5")
         || m.contains("mythos-5")
     {
+        (64_000, 128_000)
+    } else if m.contains("sonnet-5") {
+        // "claude-sonnet-4-5" does NOT contain "sonnet-5" — canonical arms are
+        // mutually exclusive (locked by tests below).
         (64_000, 128_000)
     } else if m.contains("opus-4-6") {
         (64_000, 128_000)
@@ -345,6 +399,87 @@ mod tests {
     }
 
     #[test]
+    fn sonnet_5_is_natively_1m_and_64k_output() {
+        // 2.1.198 registry: claude-sonnet-5 context {window:1e6, native_1m:!0}
+        // — 1M WITHOUT any beta or [1m] suffix (binary XHi → Hx).
+        assert_eq!(context_window_for_model("claude-sonnet-5", &[]), 1_000_000);
+        // Dated / provider-shaped ids canonicalize to claude-sonnet-5 too.
+        assert_eq!(
+            context_window_for_model("us.anthropic.claude-sonnet-5", &[]),
+            1_000_000
+        );
+        // The explicit [1m] suffix still resolves (sonnet-5[1m] is a valid
+        // suffixed id in the 2.1.198 binary alongside sonnet-4-6[1m]).
+        assert_eq!(
+            context_window_for_model("claude-sonnet-5[1m]", &[]),
+            1_000_000
+        );
+        // The 1M beta also unlocks it (registry supports_1m_beta:!0) — same 1M.
+        let betas = vec![CONTEXT_1M_BETA_HEADER.to_string()];
+        assert_eq!(context_window_for_model("claude-sonnet-5", &betas), 1_000_000);
+        // 2.1.198 pIe: claude-sonnet-5 → default 64k (upper 128k).
+        assert_eq!(max_output_tokens_for_model("claude-sonnet-5"), 64_000);
+        assert_eq!(max_thinking_tokens_for_model("claude-sonnet-5"), 127_999);
+    }
+
+    #[test]
+    fn opus_4_7_opus_4_8_fable_5_are_natively_1m() {
+        // 2.1.198 registry (binary catalog blob @207769000..207775500):
+        // claude-opus-4-7, claude-opus-4-8, claude-fable-5 (and
+        // claude-mythos-5) all carry context:{window:1e6,native_1m:!0} —
+        // 1M with NO beta header and NO [1m] suffix, exactly like sonnet-5
+        // (binary `XHi` → `Hx`).
+        for model in [
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-fable-5",
+            "claude-mythos-5",
+            // Dated / provider-shaped ids canonicalize to the same entries.
+            "claude-opus-4-8-20260115",
+            "us.anthropic.claude-opus-4-7",
+            "us.anthropic.claude-fable-5",
+        ] {
+            assert_eq!(context_window_for_model(model, &[]), 1_000_000, "{model}");
+        }
+        // The 1M beta ALSO unlocks them (registry supports_1m_beta:!0) — same 1M.
+        let betas = vec![CONTEXT_1M_BETA_HEADER.to_string()];
+        assert_eq!(context_window_for_model("claude-opus-4-8", &betas), 1_000_000);
+        assert_eq!(context_window_for_model("claude-fable-5", &betas), 1_000_000);
+        // pIe max-output stays the 64k/128k tier (locked in
+        // max_output_tokens_canonical_table); the thinking ceiling rides 128k-1.
+        assert_eq!(max_thinking_tokens_for_model("claude-opus-4-7"), 127_999);
+        assert_eq!(max_thinking_tokens_for_model("claude-fable-5"), 127_999);
+        // NEIGHBOR LOCK: opus-4-6 has NO native_1m in the 2.1.198 registry —
+        // it stays beta/suffix-gated (200k bare, 1M only with the beta).
+        assert_eq!(context_window_for_model("claude-opus-4-6", &[]), 200_000);
+        assert_eq!(context_window_for_model("claude-opus-4-6", &betas), 1_000_000);
+        // `Hx` special case: claude-mythos-preview is native-1M despite having
+        // no registry entry (`t!=="claude-mythos-preview"` bail).
+        assert_eq!(
+            context_window_for_model("claude-mythos-preview", &[]),
+            1_000_000
+        );
+    }
+
+    #[test]
+    fn sonnet_5_canonicalization_never_bleeds_into_neighbors() {
+        // Contains-check hazard lock: neighbor ids must NOT hit the sonnet-5
+        // arms ("claude-sonnet-4-5" does not contain "sonnet-5"), and
+        // sonnet-5 must NOT hit the sonnet-4-x arms.
+        assert_eq!(canonical_name("claude-sonnet-5"), "claude-sonnet-5");
+        assert_eq!(canonical_name("claude-sonnet-4-5"), "claude-sonnet-4-5");
+        assert_eq!(canonical_name("claude-sonnet-4-6"), "claude-sonnet-4-6");
+        assert_eq!(canonical_name("claude-3-5-sonnet"), "claude-3-5-sonnet");
+        // Neighbors keep their own windows / outputs (sonnet-4-5 stays 200k/32k,
+        // sonnet-4-6 stays 200k/32k without the beta).
+        assert_eq!(context_window_for_model("claude-sonnet-4-5-20250929", &[]), 200_000);
+        assert_eq!(max_output_tokens_for_model("claude-sonnet-4-5-20250929"), 32_000);
+        assert_eq!(context_window_for_model("claude-sonnet-4-6", &[]), 200_000);
+        assert_eq!(max_output_tokens_for_model("claude-sonnet-4-6"), 32_000);
+        assert_eq!(max_output_tokens_for_model("claude-3-5-sonnet-20241022"), 8_192);
+    }
+
+    #[test]
     fn max_output_tokens_canonical_table() {
         assert_eq!(
             max_output_tokens_for_model("claude-opus-4-6-20260101"),
@@ -424,9 +559,11 @@ mod tests {
                 max_output_tokens: 999,
             },
         );
+        // (2.1.198: opus-4-8 is natively 1M — the point here is that the
+        // bogus registered 999 is IGNORED, not the specific window.)
         assert_eq!(
             context_window_for_model("claude-opus-4-8-20260115", &[]),
-            200_000
+            1_000_000
         );
         assert_eq!(
             max_output_tokens_for_model("claude-opus-4-8-20260115"),

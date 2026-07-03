@@ -243,6 +243,15 @@ pub trait TaskRegistryHandle: Send + Sync {
         Ok(())
     }
 
+    /// Record a `local_bash` task's child exit code once the process exits
+    /// (M8 cc2.1.198 "Task panels: no stuck Running"): the registry's
+    /// `output()` projection derives `exit_code`/`done` from it. Defaulted
+    /// no-op so existing mock handles compile unchanged (the frozen-trait
+    /// defaulted-method idiom).
+    async fn set_exit_code(&self, _id: &str, _exit_code: i32) -> Result<(), TaskRegistryError> {
+        Ok(())
+    }
+
     /// Arm a one-shot "came to rest" notification for a PERSISTENT, still-alive
     /// task — the read side of which is surfaced (without eviction) by
     /// [`take_pending_task_notifications`]. Called via the task status sink's

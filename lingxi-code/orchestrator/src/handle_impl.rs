@@ -595,6 +595,46 @@ fn resolve_editor() -> String {
 mod tests {
     use super::*;
 
+    /// cc 2.1.196 "/context shows 0 tokens on Bedrock" regression lock:
+    /// LingXi's `context_window_usage` sums the session's CUMULATIVE usage
+    /// (`SessionState::usage`) with no model-id / provider filter, so a
+    /// Bedrock-style model id (ARN / inference-profile form, which broke the
+    /// binary's per-model lookup) can never zero the count.
+    #[tokio::test]
+    async fn context_window_usage_is_model_id_agnostic_bedrock_regression() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        use std::sync::Arc;
+
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        {
+            let mut s = orch.session.lock().await;
+            // A Bedrock inference-profile model id — the shape that made the
+            // binary's model-matched usage lookup come up empty.
+            s.model = "us.anthropic.claude-sonnet-4-5-20250929-v1:0".to_string();
+            s.usage.add(&engine::token::Usage {
+                input_tokens: 1_200,
+                output_tokens: 345,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            });
+        }
+        let (used, max) = orch.context_window_usage().await;
+        assert_eq!(used, 1_545, "usage must come from session totals, not a model-id lookup");
+        assert_eq!(max, CONTEXT_WINDOW_MAX_TOKENS);
+    }
+
     #[test]
     fn resolve_editor_returns_non_empty() {
         // Smoke test: helper must always return *some* non-empty editor.

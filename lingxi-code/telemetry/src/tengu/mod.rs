@@ -108,7 +108,8 @@ pub const ALL_EVENT_NAMES: &[&str] = {
         + tool::FILE_READ_ANALYTICS_NAMES.len()
         + migration::NAMES.len()
         + permission::NAMES.len()
-        + coordinator::NAMES.len();
+        + coordinator::NAMES.len()
+        + oauth::AWS_AUTH_NAMES.len();
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;
@@ -217,6 +218,16 @@ pub const ALL_EVENT_NAMES: &[&str] = {
         let mut i = 0;
         while i < coordinator::NAMES.len() {
             out[idx] = coordinator::NAMES[i];
+            idx += 1;
+            i += 1;
+        }
+        // AWS auth-refresh trust-gate block (2.1.198:
+        // tengu_awsAuthRefresh_missing_trust /
+        // tengu_awsCredentialExport_missing_trust) — appended after the
+        // coordinator block. Positions 341..343.
+        let mut i = 0;
+        while i < oauth::AWS_AUTH_NAMES.len() {
+            out[idx] = oauth::AWS_AUTH_NAMES[i];
             idx += 1;
             i += 1;
         }

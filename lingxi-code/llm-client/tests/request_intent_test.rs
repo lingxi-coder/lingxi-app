@@ -150,18 +150,21 @@ fn gemini_encodes_tool_choice_variants() {
 }
 
 #[test]
-fn openai_rejects_unsupported_content_blocks() {
-    // Image, ImageUrl, and Document are now supported. Remaining reject: Reasoning.
+fn openai_skips_reasoning_blocks_instead_of_rejecting() {
+    // Image, ImageUrl, and Document are supported; Reasoning blocks (emitted
+    // into history by the stream decoder) are intentionally SKIPPED on
+    // re-encode — chat-completions has no assistant-reasoning input slot — so
+    // encoding succeeds and the block is simply omitted from the wire body.
+    // See `providers/openai.rs` (`ContentBlock::Reasoning` skip arm).
     let block = ContentBlock::Reasoning {
         text: "thought".to_string(),
         signature: None,
     };
     let request = request_with_block("gpt-4o", block);
-    let err = openai_codec().encode_request(&request).unwrap_err();
-    assert!(matches!(
-        err,
-        LlmError::InvalidRequest { .. } | LlmError::UnsupportedCapability { .. }
-    ));
+    let encoded = openai_codec()
+        .encode_request(&request)
+        .expect("reasoning block skipped");
+    assert!(!encoded.body_json.to_string().contains("thought"));
 }
 
 #[test]

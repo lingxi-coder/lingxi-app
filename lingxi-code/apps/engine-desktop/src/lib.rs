@@ -610,7 +610,9 @@ pub struct DesktopEngineConfig {
 impl Default for DesktopEngineConfig {
     fn default() -> Self {
         Self {
-            default_model: "claude-sonnet-4-20250514".to_string(),
+            // 2.1.198: Sonnet 5 is the default first-party model (alias table
+            // sonnet.default = "claude-sonnet-5").
+            default_model: "claude-sonnet-5".to_string(),
         }
     }
 }
@@ -1121,7 +1123,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     api_key: "sk-test".to_string(),
 ///     cwd: PathBuf::from("/tmp/project"),
 ///     lingxi_home: PathBuf::from("/tmp/home/.lingxi"),
-///     default_model: "claude-sonnet-4-20250514".to_string(),
+///     default_model: "claude-sonnet-5".to_string(),
 ///     fallback_model: None,
 ///     provider_profiles: Some(BTreeMap::new()),
 ///     routing: None,
@@ -1146,6 +1148,12 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     cli_mcp_servers: Vec::new(),
 ///     exclude_dynamic_system_prompt_sections: false,
 ///     setting_source_scope: (true, true),
+///     customization_gates: engine_desktop::CustomizationGates::default(),
+///     session_persistence: true,
+///     cli_agents_json: None,
+///     cli_agent: None,
+///     cli_plugin_dirs: Vec::new(),
+///     initial_effort: None,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -1315,6 +1323,148 @@ pub struct DesktopConfig {
     /// default, also the absent-flag case) ⟶ all tiers load, byte-identical to
     /// before this field.
     pub setting_source_scope: (bool, bool),
+    /// CLI `--safe-mode` / `--bare` customization gates (M3, cc 2.1.198).
+    /// Consumed at each registration site in `build()` (hooks / agents /
+    /// plugins / custom commands + skills); the CLI also gates the
+    /// memory-provider + discovered-MCP-path config fields it resolves itself.
+    /// `CustomizationGates::default()` (both false) ⟶ byte-identical to before
+    /// this field.
+    pub customization_gates: CustomizationGates,
+    /// CLI `--no-session-persistence` (print-mode only; the CLI validates the
+    /// cross-flag rule): `false` ⟶ `build()` wires NO session `JsonlWriter`, so
+    /// nothing is saved under `projects/` and the session cannot be resumed
+    /// (claude-code "Disable session persistence - sessions will not be saved
+    /// to disk and cannot be resumed"). `true` (the default) ⟶ unchanged.
+    pub session_persistence: bool,
+    /// (M4 cc2.1.198) CLI `--agents <json>` raw payload ("JSON object defining
+    /// custom agents"). `build()` parses it with the strict flag-record schema
+    /// (`agent::parse_agents_from_flag_json`, the `QXt` port) and merges the
+    /// result into the agent catalog with `flagSettings` precedence — flag
+    /// agents OVERRIDE same-named user/project dir agents (binary `XXt`
+    /// tier order `[built-in, plugin, userSettings, projectSettings,
+    /// flagSettings, policySettings]`, later wins). Ignored (warn) in safe
+    /// mode; SURVIVES bare (`Hc("agents",{explicitlyRequested:!0})`
+    /// @223080769). `None` (the default) ⟶ unchanged.
+    pub cli_agents_json: Option<String>,
+    /// (M4 cc2.1.198) CLI `--agent <agent>` ("Agent for the current session.
+    /// Overrides the 'agent' setting."). `build()` resolves it against the
+    /// final catalog with the `dts` lookup (exact `agentType`, else FQN
+    /// `…:{name}` suffix) and logs the binary's `Warning: agent "X" not
+    /// found …` line when absent. RESIDUAL seam: lingxi has no main-thread
+    /// agent runtime (`xz` → `mainThreadAgentType` re-skins the MAIN session's
+    /// system prompt/tools), so a resolved agent is not yet applied.
+    pub cli_agent: Option<String>,
+    /// (M4 cc2.1.198) CLI `--plugin-dir <path>` entries ("Load a plugin from a
+    /// directory or .zip for this session only", repeatable). Each entry feeds
+    /// the plugin bootstrap AFTER the marketplace-installed discovery, like the
+    /// binary's inline-plugin load (`EBm`): a missing path warns
+    /// (`Plugin path does not exist: … , skipping`) without failing boot; a
+    /// `.zip` is extracted to a temp dir (wrapper-dir detection like `Yor`)
+    /// before the normal dir load. Empty (the default) ⟶ none.
+    pub cli_plugin_dirs: Vec<std::path::PathBuf>,
+    /// (M4 cc2.1.198) CLI `--effort <level>` — the session's initial effort
+    /// level, already validated/normalized by the CLI (`u4i` argParser port:
+    /// trim+lowercase, `med`→`medium`, must be one of low/medium/high/xhigh/
+    /// max; an invalid value warned on stderr and arrives here as `None`).
+    /// `build()` threads it to the main-loop `ProviderApiAdapter` so every
+    /// main-session request carries `output_config.effort` (+ the
+    /// `effort-2025-11-24` beta the service adds when the body has effort).
+    /// `None` (the default) ⟶ requests unchanged (no effort field).
+    pub initial_effort: Option<String>,
+}
+
+/// `--safe-mode` / `--bare` reduced-mode customization gates (M3, cc 2.1.198).
+///
+/// Port of the binary's `Hc(feature, opts)` check (@209090235-ish minified:
+/// `function Hc(e,t){if(Ql()&&!K5d[e])return!0;if(xd()&&!t?.explicitlyRequested)
+/// return V5d[e];return!1}` with the two verdict maps
+/// `V5d`(bare)/`K5d`(safe-allowlist) @209090400), where `Ql()` = env
+/// `CLAUDE_CODE_SAFE_MODE` truthy OR argv `--safe-mode`, and `xd()` = env
+/// `CLAUDE_CODE_SIMPLE` truthy OR argv `--bare`. The per-feature helpers below
+/// bake in the map entries for exactly the features this composition root
+/// registers; each cites its map values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CustomizationGates {
+    /// `--safe-mode` (or env): "Start with all customizations (CLAUDE.md,
+    /// skills, plugins, hooks, MCP servers, custom commands and agents, …)
+    /// disabled — useful for troubleshooting a broken configuration."
+    pub safe_mode: bool,
+    /// `--bare` (or env): "Minimal mode: skip hooks, LSP, plugin sync, …,
+    /// and CLAUDE.md auto-discovery."
+    pub bare: bool,
+}
+
+impl CustomizationGates {
+    /// Settings-file hooks. Binary: bare disables outright (`V5d.hooks:!0`);
+    /// safe mode passes `Hc` (`K5d.hooks:!0`) but the hooks-config merge
+    /// collapses to the POLICY tier only (`UQr()` @209090550:
+    /// `if(e?.allowManagedHooksOnly===!0||Ql())return e?.hooks??{}`). lingxi
+    /// loads no policySettings hook tier (user + project only), so the safe-mode
+    /// "policy hooks still run" residue is the empty set here — both modes skip
+    /// the settings-hook loop.
+    #[must_use]
+    pub fn disables_settings_hooks(&self) -> bool {
+        self.safe_mode || self.bare
+    }
+
+    /// Plugin discovery + materialisation (`V5d.plugins:!0`,
+    /// `K5d.plugins:!1`; safe-mode log @211049652 "Skipping plugin hooks -
+    /// safe mode disables plugins"). Skipping the plugin bootstrap also skips
+    /// plugin LSP servers — lingxi's only LSP-server source — matching
+    /// `Hc("lspServers")` gating `initializeLspServerManager` (@213275452;
+    /// `V5d.lspServers:!0`, `K5d.lspServers:!1`).
+    #[must_use]
+    pub fn disables_plugins(&self) -> bool {
+        self.safe_mode || self.bare
+    }
+
+    /// Skill + custom-command dir discovery (`V5d.skills:!0`,
+    /// `K5d.skills:!1`; the user commands-dir loader `cWa` @213449557 bails on
+    /// `xd()||Hc("skills")`). RESIDUAL: in bare mode the binary still loads
+    /// skills from `--add-dir` roots (`aGe` @213453497 `if(xd())return …
+    /// o.map(S=>jht(join(S,".claude","skills")…))`) so `/skill-name` keeps
+    /// resolving; lingxi's registry loader has no add-dir root wiring yet, so
+    /// bare loads none (seam: `desktop_command_registry`'s skill-roots arg).
+    #[must_use]
+    pub fn disables_skills(&self) -> bool {
+        self.safe_mode || self.bare
+    }
+
+    /// Custom agent definitions from `agents/` dirs (`V5d.agents:!0`,
+    /// `K5d.agents:!1`). In the binary a `--agents` FLAG payload is an
+    /// explicit request that survives bare (`Hc("agents",{explicitlyRequested:
+    /// !0})` @223080769) but not safe mode ("--agents: ignored in safe mode");
+    /// lingxi's `--agents` flag is still parse-and-carry, so only the dir scan
+    /// is gated here.
+    #[must_use]
+    pub fn disables_custom_agents(&self) -> bool {
+        self.safe_mode || self.bare
+    }
+
+    /// Ambient (project/user `.mcp.json`) MCP discovery. SAFE MODE ONLY:
+    /// `fQ` @212967619 `if(Hc("mcpAutoDiscovered"))return{servers:L2(),…}` —
+    /// flag-supplied (`--mcp-config`) servers survive; `K5d.mcpAutoDiscovered:
+    /// !1` but `V5d.mcpAutoDiscovered:!1` too, i.e. bare does NOT disable
+    /// ambient MCP (its help text never lists MCP among the skips).
+    #[must_use]
+    pub fn disables_mcp_discovery(&self) -> bool {
+        self.safe_mode
+    }
+
+    /// CLAUDE/LINGXI.md memory hierarchy (`V5d.claudeMd:!0`, `K5d.claudeMd:
+    /// !1`). `explicitly_requested` mirrors `eue()` @209090235's
+    /// `{explicitlyRequested:cI().length>0}` — `cI()` is the `--add-dir` list
+    /// (`additionalDirectoriesForClaudeMd` @205673399) — so bare keeps the
+    /// hierarchy when `--add-dir` supplies CLAUDE.md dirs; safe mode never does
+    /// (and additionally exports `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`
+    /// @223917313).
+    #[must_use]
+    pub fn disables_claude_md(&self, explicitly_requested: bool) -> bool {
+        if self.safe_mode {
+            return true;
+        }
+        self.bare && !explicitly_requested
+    }
 }
 
 impl std::fmt::Debug for DesktopConfig {
@@ -1373,6 +1523,12 @@ impl std::fmt::Debug for DesktopConfig {
                 "exclude_dynamic_system_prompt_sections",
                 &self.exclude_dynamic_system_prompt_sections,
             )
+            .field("customization_gates", &self.customization_gates)
+            .field("session_persistence", &self.session_persistence)
+            .field("cli_agents_json", &self.cli_agents_json)
+            .field("cli_agent", &self.cli_agent)
+            .field("cli_plugin_dirs", &self.cli_plugin_dirs)
+            .field("initial_effort", &self.initial_effort)
             .finish()
     }
 }
@@ -1408,6 +1564,16 @@ impl Default for DesktopConfig {
             exclude_dynamic_system_prompt_sections: false,
             // Default: all setting tiers load (absent `--setting-sources`).
             setting_source_scope: (true, true),
+            // Default: no reduced mode (neither --safe-mode nor --bare).
+            customization_gates: CustomizationGates::default(),
+            // Default: persist the session JSONL (absent --no-session-persistence).
+            session_persistence: true,
+            // (M4 cc2.1.198) Defaults: no --agents payload, no --agent
+            // selection, no --plugin-dir entries, no --effort level.
+            cli_agents_json: None,
+            cli_agent: None,
+            cli_plugin_dirs: Vec::new(),
+            initial_effort: None,
         }
     }
 }
@@ -1427,6 +1593,7 @@ pub async fn desktop_command_registry(
     connect_writer: Arc<dyn command_core::ConnectCredentialWriter>,
     connect_copilot: Arc<dyn command_core::CopilotConnectDriver>,
     connect_chatgpt: Arc<dyn command_core::ChatGptConnectDriver>,
+    gates: CustomizationGates,
 ) -> CommandRegistry {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
@@ -1459,6 +1626,14 @@ pub async fn desktop_command_registry(
     // same-named custom command shadows a builtin (TS findCommand order).
     let home = dirs::home_dir().unwrap_or_else(|| lingxi_home.to_path_buf());
     let managed_dir = crate::settings_watch::managed_settings_dir();
+    // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom-command + skill
+    // dir discovery (`K5d.skills:!1` / `V5d.skills:!0`; the commands-dir
+    // loader `cWa` bails on `xd()||Hc("skills")`). Builtins above stay — only
+    // the on-disk customization layers are skipped, including the managed dir
+    // (the binary's `aGe` returns `[]` before reaching its managed root).
+    if gates.disables_skills() {
+        return reg;
+    }
     let registered = command_core::load_and_register_custom_commands(
         &mut reg,
         cwd,
@@ -1850,6 +2025,8 @@ fn anthropic_models_for(
         "claude-opus-4-5-20251101".to_string(),
         "claude-opus-4-1-20250805".to_string(),
         "claude-opus-4-20250514".to_string(),
+        // Sonnet 5 — the 2.1.198 default first-party model.
+        "claude-sonnet-5".to_string(),
         "claude-sonnet-4-6".to_string(),
         "claude-sonnet-4-5-20250929".to_string(),
         "claude-haiku-4-5".to_string(),
@@ -1905,6 +2082,38 @@ fn load_merged_output_style(project_dir: &std::path::Path) -> Option<String> {
     engine::settings::Settings::load(inputs)
         .ok()
         .and_then(|eff| eff.settings.output_style)
+}
+
+/// (M4 cc2.1.198) Merge the `--agents <json>` flag agents into the dir-loaded
+/// catalog. The flag payload is an EXPLICIT request: it survives `--bare` but
+/// not safe mode (binary @223080769 `if(r&&!Hc("agents",{explicitlyRequested:
+/// !0}))try{let g=Ba(r);if(g)m=QXt(g,"flagSettings")}catch(g){De(g)}else
+/// if(r)C("--agents: ignored in safe mode (user-supplied custom agents are
+/// disabled)",{level:"warn"})`). Merge precedence per `XXt`'s tier map
+/// `[built-in, plugin, userSettings, projectSettings, flagSettings,
+/// policySettings]` (later wins): a flag agent REPLACES a same-named
+/// user/project dir agent, else appends. Parse failures inside
+/// [`agent::parse_agents_from_flag_json`] log and contribute no agents —
+/// the flag never aborts boot.
+fn merge_cli_flag_agents(
+    agents: &mut Vec<agent::AgentDefinition>,
+    cli_agents_json: Option<&str>,
+    safe_mode: bool,
+) {
+    let Some(raw) = cli_agents_json else { return };
+    if safe_mode {
+        tracing::warn!(
+            "--agents: ignored in safe mode (user-supplied custom agents are disabled)"
+        );
+        return;
+    }
+    for a in agent::parse_agents_from_flag_json(raw) {
+        if let Some(slot) = agents.iter_mut().find(|e| e.agent_type == a.agent_type) {
+            *slot = a;
+        } else {
+            agents.push(a);
+        }
+    }
 }
 
 /// Read the merged `settings.enabledPlugins` allowlist (`plugin@marketplace` →
@@ -2479,6 +2688,36 @@ pub async fn build(
     let (default_model_id, default_model_profile) =
         traits::parse_model_ref(&cfg.default_model, &default_listings);
 
+    // (M10 cc2.1.198) LingXi multi-provider half of the Explore `GAe`/`obm`
+    // firstParty gate: `false` when the session's default model routes to a
+    // NON-Anthropic provider profile (OpenAI/Gemini/…) so the built-in Explore
+    // agent resolves to `inherit` (the opus cap never fires for a foreign
+    // provider — same behavior as the TS `fr() !== "firstParty"` branch). The
+    // env half (Bedrock/Vertex/Foundry) is checked inside
+    // `agent::model_resolution::resolve_builtin_explore_model`. Must be
+    // computed while `assembled.client_config.providers` is still owned.
+    let session_provider_first_party = {
+        let profile_name = default_model_profile.clone().or_else(|| {
+            model_providers
+                .get(&default_model_id)
+                .map(|(profile, _)| profile.clone())
+        });
+        match profile_name {
+            Some(name) => assembled
+                .client_config
+                .providers
+                .iter()
+                .find(|p| p.profile_name == name)
+                // Unknown profile name → the built-in Anthropic route.
+                .map_or(true, |p| {
+                    matches!(p.provider_id, llm_client::ProviderId::AnthropicFirstParty)
+                }),
+            // No configured profile serves the default model → the built-in
+            // Anthropic route (plain api-key / OAuth install).
+            None => true,
+        }
+    };
+
     let mut client = DefaultLlmClient::from_config(assembled.client_config)
         .map_err(|e| BuildError::ApiBase(format!("llm-client config: {e}")))?;
     // §6.1: ONE composite credential slot for ALL providers (anthropic api-key /
@@ -2613,6 +2852,56 @@ pub async fn build(
     )
     .with_subscription(subscription.clone())
     .with_request_metadata(request_metadata);
+    // M2 (2.1.198): attach the AWS auth-refresh driver (`ZBd`/`t2d`) when an
+    // `awsAuthRefresh` / `awsCredentialExport` command is configured. Resolves
+    // the merged settings value + its Project provenance (binary `mqe`: a
+    // project/local-sourced command is refused before workspace trust) and the
+    // workspace-trust state (`yd()`: `hasTrustDialogAccepted` parent-walk in
+    // the global config). With the driver attached, a Bedrock 401/403
+    // (expired STS) runs the refresh script and retries instead of
+    // dead-ending — bounded at Ygf=2 inside the drive loops.
+    let service_built = {
+        let env_vars: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+        let aws_settings = engine::settings::Settings::load(engine::settings::LoadInputs {
+            env: &env_vars,
+            project_dir: &cwd,
+            defaults: engine::settings::schema::SettingsJson::default(),
+        })
+        .ok()
+        .map(|eff| {
+            let from_project = |field: &str| {
+                eff.effective_for(field).is_some_and(|p| {
+                    p.contributors.last() == Some(&engine::settings::tracer::Source::Project)
+                })
+            };
+            llm_client::AwsAuthSettings {
+                aws_auth_refresh: eff.settings.aws_auth_refresh.clone(),
+                aws_auth_refresh_from_project: from_project("awsAuthRefresh"),
+                aws_credential_export: eff.settings.aws_credential_export.clone(),
+                aws_credential_export_from_project: from_project("awsCredentialExport"),
+                // No global config path ⇒ the CLI trust gate proceeds
+                // (mode.rs `trust_gate_should_prompt` — nothing to check
+                // against), so treat as trusted like the gate does.
+                workspace_trusted: match migrations::global_config::global_config_path() {
+                    Some(p) => migrations::global_config::check_has_trust_dialog_accepted(
+                        &p, &cwd,
+                    ),
+                    None => true,
+                },
+            }
+        })
+        .unwrap_or_default();
+        if aws_settings.aws_auth_refresh.is_some() || aws_settings.aws_credential_export.is_some()
+        {
+            service_built.with_aws_auth(Arc::new(llm_client::AwsAuthRefresher::new(
+                aws_settings,
+                Arc::new(llm_client::ShellAwsAuthProcess),
+                Some(analytics_bus.clone()),
+            )))
+        } else {
+            service_built
+        }
+    };
     // `--json-schema` structured output: FORCE the `StructuredOutput` tool so the
     // model returns its final result through it (1:1 with claude-code). Untouched
     // for every normal turn (`json_schema` is `None`).
@@ -2623,7 +2912,16 @@ pub async fn build(
     } else {
         service_built
     };
-    let provider_adapter = Arc::new(ProviderApiAdapter::new(Arc::new(service_built)));
+    // (M4 cc2.1.198) `--effort <level>` — the CLI-validated initial effort
+    // rides the MAIN loop's requests as `output_config.effort` (binary session
+    // state `thinkingConfig: SF(a.effort)`); `None` keeps bodies unchanged.
+    let provider_adapter = Arc::new(
+        ProviderApiAdapter::new(Arc::new(service_built)).with_initial_effort(
+            cfg.initial_effort
+                .clone()
+                .map(serde_json::Value::String),
+        ),
+    );
     let provider_adapter_handle = provider_adapter.clone();
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     // The SAME `ProviderApiAdapter` drives the streaming turn path: it impls both
@@ -2774,6 +3072,10 @@ pub async fn build(
         // model unchanged (default mode → byte-identical to before this seam).
         .with_permission_mode(cfg.permission_mode)
         .with_model_setting(cfg.default_model.clone())
+        // (M10 cc2.1.198) Explore `GAe` firstParty gate, multi-provider half:
+        // a non-Anthropic default profile behaves like the TS non-firstParty
+        // branch (Explore → inherit, never the opus cap).
+        .with_session_provider_first_party(session_provider_first_party)
         // G4/G5: stamp the session id + cwd on the `HookContext` the child runner
         // builds for the SubagentStart fire (the orchestrator's hook context is
         // session-scoped at runtime; the spawner uses a boot-stable session id —
@@ -2952,6 +3254,12 @@ pub async fn build(
     // user tier when `!include_user` and the project tier when `!include_project`
     // so e.g. `--setting-sources project` does NOT register user-level hooks.
     let (incl_user_settings, incl_project_settings) = cfg.setting_source_scope;
+    // (M3 cc2.1.198) `--safe-mode` / `--bare`: skip settings-file hooks. Bare
+    // disables hooks outright (binary `V5d.hooks:!0`); safe mode collapses the
+    // hooks-config merge to the POLICY tier only (`UQr()`: `if(e?.
+    // allowManagedHooksOnly===!0||Ql())return e?.hooks??{}`) — lingxi loads no
+    // policySettings hook tier, so both modes register zero settings hooks.
+    let skip_settings_hooks = cfg.customization_gates.disables_settings_hooks();
     for (path, source, included) in [
         (
             user_settings_path,
@@ -2964,7 +3272,7 @@ pub async fn build(
             incl_project_settings,
         ),
     ] {
-        if !included {
+        if !included || skip_settings_hooks {
             continue;
         }
         if let Ok(raw) = tokio::fs::read_to_string(&path).await {
@@ -3376,11 +3684,24 @@ pub async fn build(
     //       `cfg.lingxi_home/agents` (was `dirs::home_dir()/.lingxi/agents`).
     let project_agents_dir = cwd.join(branding::DOT_DIR).join("agents");
     let user_agents_dir = cfg.lingxi_home.join("agents");
-    let agents = agent::load_agents_from_dirs(&[
-        (user_agents_dir, agent::definition::AgentSource::UserDefined),
-        (project_agents_dir, agent::definition::AgentSource::Project),
-    ])
-    .await;
+    // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom agent definitions
+    // (`V5d.agents:!0`, `K5d.agents:!1`) — skip the dir scan, empty catalog.
+    let mut agents = if cfg.customization_gates.disables_custom_agents() {
+        Vec::new()
+    } else {
+        agent::load_agents_from_dirs(&[
+            (user_agents_dir, agent::definition::AgentSource::UserDefined),
+            (project_agents_dir, agent::definition::AgentSource::Project),
+        ])
+        .await
+    };
+    // (M4 cc2.1.198) `--agents <json>` flag agents — see
+    // [`merge_cli_flag_agents`].
+    merge_cli_flag_agents(
+        &mut agents,
+        cfg.cli_agents_json.as_deref(),
+        cfg.customization_gates.safe_mode,
+    );
     let agent_catalog = Arc::new(tokio::sync::RwLock::new(agents));
 
     // (5.4) Real compaction. Threshold 150_000 tokens (M3 design lock for the
@@ -3400,7 +3721,15 @@ pub async fn build(
         ));
     let forked_runner = Arc::new(
         sidequery::ForkedAgentRunner::new()
-            .with_side_query_client(side_query_client.clone(), orch_cfg.model.clone()),
+            .with_side_query_client(side_query_client.clone(), orch_cfg.model.clone())
+            // (M10 cc2.1.198) the compaction summary call INHERITS the session
+            // extended-thinking config (binary: `thinkingConfig: mXt(r)` on the
+            // summarizer `sEt` call @216945141). The session config is the same
+            // `ThinkingConfig::default()` (Adaptive intent) the main-loop
+            // `ApiService` holds — nothing overrides it at boot — and the
+            // model predicates + `LINGXI_DISABLE_THINKING` kill switches apply
+            // per request inside `reasoning_for_request`.
+            .with_session_thinking(llm_client::model::thinking::ThinkingConfig::default()),
     );
     let autocompactor =
         compaction::Autocompactor::with_forked_runner(forked_runner, cache_safe_slot.clone());
@@ -3460,11 +3789,20 @@ pub async fn build(
     // before the registry is shared. Both depend only on platform traits we
     // already build here; agent/teammate/workflow/remote/dream handlers register
     // once their production pools are wired (M9+).
+    //
+    // (M8 cc2.1.198 "Task panels: no stuck Running") The bash worker's
+    // terminal status + exit code now write THROUGH to the registry via a
+    // deferred `RegistryStatusSink` (bound at (5.46f) once the registry `Arc`
+    // exists — the same cycle-break as the LocalAgent sink). Pre-fix the
+    // handler defaulted to `NoopStatusSink`, so a finished background bash
+    // task's stored status stayed `Running` forever.
+    let bash_status_sink = Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
     tasks::registry::register_self_contained_handlers(
         &mut task_registry_inner,
         Arc::new(PosixProcess::new()),
         Arc::new(PosixSandbox::new()),
         mcp_registry.clone(),
+        bash_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>,
     );
 
     // (5.46) M10 (T13): construct the per-session coordinator subsystem — one
@@ -3716,6 +4054,11 @@ pub async fn build(
     //         now reach `task_registry`, so terminal + per-rest notifications
     //         surface through `take_pending_task_notifications`.
     local_agent_status_sink
+        .bind(task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
+    // (M8 cc2.1.198) Bind the deferred LocalBash sink too: the bash worker's
+    // terminal `set_status` / `set_exit_code` now reach `task_registry`, so a
+    // finished background command flips its panel row off `Running`.
+    bash_status_sink
         .bind(task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
 
     // (5.48) Cron: construct, load the single persisted tasks file, and start the
@@ -4323,19 +4666,20 @@ pub async fn build(
         Arc::new(PosixFileSystem::new(watch_cwd.clone())) as Arc<dyn traits::FileSystem>,
     ));
     let orch_builder = ConversationOrchestrator::new_with_streaming(
-        orch_cfg,
-        api_client,
-        streaming_api,
-        tools,
-        hooks,
-        perms,
-        output,
-        memory,
-        cwd,
-    )
+        orch_cfg, api_client, streaming_api, tools, hooks, perms, output, memory, cwd,
+    );
     // Gap #5: wire the production JSONL writer (constructed just above) so the
     // session is persisted + discoverable by the resume loader.
-    .with_jsonl_writer(main_jsonl_writer)
+    // (M3 cc2.1.198) `--no-session-persistence` ⟶ `cfg.session_persistence:
+    // false`: leave the orchestrator's `jsonl_writer` slot `None` (its persist
+    // paths are already `Option`-gated) so NO transcript is written under
+    // `projects/` and the session cannot be resumed.
+    let orch_builder = if cfg.session_persistence {
+        orch_builder.with_jsonl_writer(main_jsonl_writer)
+    } else {
+        orch_builder
+    };
+    let orch_builder = orch_builder
     // FIX A: hand the orchestrator the resolved claude-home so its hook payloads
     // carry a deterministically-computed `transcript_path`
     // (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
@@ -4520,6 +4864,7 @@ pub async fn build(
         connect_writer,
         connect_copilot.clone(),
         connect_chatgpt,
+        cfg.customization_gates,
     )
     .await;
     // SKILLEXEC.2: fill the shared command-registry slot the `Skill` tool's
@@ -4557,23 +4902,50 @@ pub async fn build(
     //       isolated LSP/skill/output-style/tool registry so `enable()` is
     //       non-panicking while only commands + hooks reach the engine's live
     //       registries.
-    {
-        let plugins_dir = std::env::var_os("LINGXI_PLUGIN_CACHE_DIR")
-            .map_or_else(|| cfg.lingxi_home.join("plugins"), std::path::PathBuf::from);
+    //       (M3 cc2.1.198) `--safe-mode` / `--bare` skip the AMBIENT bootstrap
+    //       (`K5d.plugins:!1` / `V5d.plugins:!0`; safe-mode log "Skipping
+    //       plugin hooks - safe mode disables plugins"). This also skips
+    //       plugin LSP servers — lingxi's only LSP-server source — matching
+    //       `Hc("lspServers")` gating `initializeLspServerManager`.
+    //       (M4 cc2.1.198) `--plugin-dir` session-only plugins are an EXPLICIT
+    //       request that survives `--bare` (its help text: "Explicitly provide
+    //       context via: … --plugin-dir") but not safe mode; they load AFTER
+    //       the marketplace-installed discovery through the SAME `pm.enable`
+    //       materialisation path (binary `EBm` → the shared plugin merge).
+    let ambient_plugins = !cfg.customization_gates.disables_plugins();
+    let inline_plugins = !cfg.cli_plugin_dirs.is_empty() && !cfg.customization_gates.safe_mode;
+    if ambient_plugins || inline_plugins {
+        let plugins_dir = std::env::var_os("LINGXI_PLUGIN_CACHE_DIR").map_or_else(
+            || cfg.lingxi_home.join("plugins"),
+            std::path::PathBuf::from,
+        );
         // Primary (faithful) path: resolve the `settings.enabledPlugins`
         // allowlist (`plugin@marketplace` → enabled) to versioned cache dirs
         // `cache/{marketplace}/{plugin}/{version}/`, exactly as
         // `loadAllPluginsCacheOnly` (`pluginLoader.ts:1888`) consumes a real
         // `~/.lingxi/plugins`. Read `enabledPlugins` from the user then project
         // settings (project wins), mirroring `getSettings_DEPRECATED()`.
-        let enabled = load_enabled_plugins(&cfg.lingxi_home, &cwd_for_plugins).await;
-        let mut discovered = plugin::discover_enabled_plugins(&plugins_dir, &enabled).await;
-        // Fallback: when no allowlist resolves anything (e.g. a flat directory
-        // of pre-fetched plugin dirs supplied directly, as with `--add-dir`),
-        // flat-walk for direct `.lingxi-plugin/plugin.json` children. This is
-        // NOT the real cache layout but keeps local/dev plugin dirs loadable.
-        if discovered.is_empty() {
-            discovered = plugin::discover_installed_plugins(&plugins_dir).await;
+        let mut discovered = if ambient_plugins {
+            let enabled = load_enabled_plugins(&cfg.lingxi_home, &cwd_for_plugins).await;
+            let mut d = plugin::discover_enabled_plugins(&plugins_dir, &enabled).await;
+            // Fallback: when no allowlist resolves anything (e.g. a flat
+            // directory of pre-fetched plugin dirs supplied directly, as with
+            // `--add-dir`), flat-walk for direct `.lingxi-plugin/plugin.json`
+            // children. This is NOT the real cache layout but keeps local/dev
+            // plugin dirs loadable.
+            if d.is_empty() {
+                d = plugin::discover_installed_plugins(&plugins_dir).await;
+            }
+            d
+        } else {
+            Vec::new()
+        };
+        // (M4 cc2.1.198) `--plugin-dir <path>` entries (dir or .zip), loaded
+        // like the binary's inline plugins (`EBm` path arm): a bad path warns
+        // and is skipped; loaded ones enable through the same manager path as
+        // marketplace-installed plugins below.
+        if inline_plugins {
+            discovered.extend(plugin::discover_cli_plugin_dirs(&cfg.cli_plugin_dirs).await);
         }
         if !discovered.is_empty() {
             // Live registries the manager materialises plugin components into:
@@ -4645,6 +5017,42 @@ pub async fn build(
                     );
                 }
             }
+        }
+    }
+
+    // (M4 cc2.1.198) `--agent <agent>` — resolve the session agent against the
+    // FINAL catalog (dir + `--agents` flag + plugin agents), the binary's `dts`
+    // lookup: exact `agentType` match, else FQN `…:{name}` suffix; a miss logs
+    // `Warning: agent "X" not found. Available agents: …. Using default
+    // behavior.` and the session proceeds with default behavior.
+    // RESIDUAL seam: the binary then applies the hit via `xz(h?.agentType)` →
+    // `mainThreadAgentType` (the MAIN session adopts the agent's system
+    // prompt / tools / hooks). lingxi has no main-thread-agent runtime yet, so
+    // a successful resolution is logged but not applied — porting
+    // `mainThreadAgentType` consumption is the follow-up seam. (Built-in agent
+    // defs live in the subagent spawner, not this catalog, so their names are
+    // absent from the miss warning's "Available agents" list — residual.)
+    if let Some(wanted) = cfg.cli_agent.as_deref() {
+        let cat = plugin_agent_catalog.read().await;
+        let hit = cat
+            .iter()
+            .find(|a| a.agent_type == wanted)
+            .or_else(|| {
+                let suffix = format!(":{wanted}");
+                cat.iter().find(|a| a.agent_type.ends_with(&suffix))
+            });
+        match hit {
+            Some(a) => tracing::debug!(
+                agent = %a.agent_type,
+                "--agent resolved (main-thread agent application is a pending seam)"
+            ),
+            None => tracing::warn!(
+                "Warning: agent \"{wanted}\" not found. Available agents: {}. Using default behavior.",
+                cat.iter()
+                    .map(|a| a.agent_type.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 
@@ -4947,12 +5355,106 @@ mod tests {
             Arc::new(W),
             Arc::new(C),
             Arc::new(G),
+            super::CustomizationGates::default(),
         )
         .await;
         assert!(
             reg.get_handler("connect").is_some(),
             "/connect not wired into desktop registry"
         );
+    }
+
+    /// (M3 cc2.1.198) `--safe-mode` / `--bare` skip custom-command + skill dir
+    /// discovery in [`super::desktop_command_registry`] (`K5d.skills:!1` /
+    /// `V5d.skills:!0`) while builtins stay registered; default gates keep
+    /// loading the same fixture.
+    #[tokio::test]
+    async fn safe_mode_and_bare_skip_custom_command_discovery() {
+        use async_trait::async_trait;
+        use command_core::{
+            ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
+            CopilotConnectStep,
+        };
+        use traits::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
+
+        struct MockAuth;
+        #[async_trait]
+        impl AuthHandle for MockAuth {
+            async fn login(&self) -> Result<LoginInfo, AuthError> {
+                Err(AuthError::Cancelled)
+            }
+            async fn logout(&self) -> Result<(), AuthError> {
+                Ok(())
+            }
+            async fn current_user(&self) -> Option<LoginInfo> {
+                None
+            }
+        }
+        struct W;
+        #[async_trait]
+        impl ConnectCredentialWriter for W {
+            async fn prompt_and_store_key(&self, _id: &str) -> Result<(), ConnectError> {
+                Ok(())
+            }
+        }
+        struct C;
+        #[async_trait]
+        impl CopilotConnectDriver for C {
+            async fn begin(&self, _domain: Option<&str>) -> Result<CopilotConnectStep, ConnectError> {
+                Ok(CopilotConnectStep {
+                    user_code: "X".into(),
+                    verification_uri: "u".into(),
+                })
+            }
+            async fn poll_to_completion(&self, _s: &CopilotConnectStep) -> Result<(), ConnectError> {
+                Ok(())
+            }
+        }
+        struct G;
+        #[async_trait]
+        impl ChatGptConnectDriver for G {
+            async fn connect(&self) -> Result<String, ConnectError> {
+                Ok("Connected chatgpt.".into())
+            }
+        }
+
+        // Project fixture: `<cwd>/.lingxi/commands/m3custom.md` — resolvable as
+        // `/m3custom` when customization discovery runs.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+        let cmds = cwd.join(".lingxi").join("commands");
+        std::fs::create_dir_all(&cmds).expect("mk commands");
+        std::fs::write(cmds.join("m3custom.md"), "M3 custom command body").expect("write cmd");
+
+        for (gates, want_custom) in [
+            (super::CustomizationGates::default(), true),
+            (super::CustomizationGates { safe_mode: true, bare: false }, false),
+            (super::CustomizationGates { safe_mode: false, bare: true }, false),
+        ] {
+            let handle: Arc<dyn OrchestratorHandle> =
+                Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
+            let auth: Arc<dyn AuthHandle> = Arc::new(MockAuth);
+            let reg = super::desktop_command_registry(
+                handle,
+                auth,
+                &cwd,
+                &cwd, // lingxi_home rooted in the sandbox too (no user leakage)
+                Arc::new(W),
+                Arc::new(C),
+                Arc::new(G),
+                gates,
+            )
+            .await;
+            assert_eq!(
+                reg.resolve("m3custom").is_some(),
+                want_custom,
+                "{gates:?}: custom command discovery gate"
+            );
+            assert!(
+                reg.get_handler("connect").is_some(),
+                "{gates:?}: builtins must stay registered"
+            );
+        }
     }
 
     /// (Plan 3c C1) The [`super::connect::EngineCredentialWriter`] persists the
@@ -5159,8 +5661,9 @@ mod tests {
         assert!(cfg.api_key.is_empty());
         assert_eq!(cfg.cwd, std::path::PathBuf::from("."));
         assert_eq!(cfg.lingxi_home, std::path::PathBuf::new());
-        // Mirrors `DesktopEngineConfig::default().default_model`.
-        assert_eq!(cfg.default_model, "claude-sonnet-4-20250514");
+        // Mirrors `DesktopEngineConfig::default().default_model` (2.1.198:
+        // Sonnet 5 is the default first-party model).
+        assert_eq!(cfg.default_model, "claude-sonnet-5");
         // Opus-fallback default: no fallback model unless argv supplies one.
         assert!(cfg.fallback_model.is_none());
         assert!(cfg.provider_profiles.is_none());
@@ -5239,6 +5742,50 @@ mod tests {
         );
     }
 
+    /// (M4 cc2.1.198) `--agents` flag agents merge with `flagSettings`
+    /// precedence (`XXt`: flag REPLACES a same-named user/project agent, else
+    /// appends) and are IGNORED in safe mode (warn — the `--agents: ignored in
+    /// safe mode` branch).
+    #[test]
+    fn merge_cli_flag_agents_precedence_and_safe_mode() {
+        fn dir_agent(name: &str) -> agent::AgentDefinition {
+            agent::parse_agent_from_json(
+                name,
+                &serde_json::json!({"description": "from dir", "prompt": "p"}),
+                agent::AgentSource::Project,
+            )
+            .expect("valid dir agent")
+        }
+        let raw = r#"{"reviewer": {"description": "from flag", "prompt": "p"},
+                      "extra": {"description": "new", "prompt": "p"}}"#;
+
+        // Normal: same-named `reviewer` replaced (source Flag), `extra` appended.
+        let mut agents = vec![dir_agent("reviewer"), dir_agent("keeper")];
+        super::merge_cli_flag_agents(&mut agents, Some(raw), false);
+        assert_eq!(agents.len(), 3);
+        let reviewer = agents.iter().find(|a| a.agent_type == "reviewer").unwrap();
+        assert_eq!(reviewer.when_to_use, "from flag");
+        assert_eq!(reviewer.source, agent::AgentSource::Flag);
+        assert!(agents.iter().any(|a| a.agent_type == "extra"));
+        assert!(agents.iter().any(|a| a.agent_type == "keeper"));
+
+        // Safe mode: the payload is ignored outright.
+        let mut safe = vec![dir_agent("reviewer")];
+        super::merge_cli_flag_agents(&mut safe, Some(raw), true);
+        assert_eq!(safe.len(), 1);
+        assert_eq!(safe[0].when_to_use, "from dir");
+
+        // No flag: untouched.
+        let mut none = vec![dir_agent("reviewer")];
+        super::merge_cli_flag_agents(&mut none, None, false);
+        assert_eq!(none.len(), 1);
+
+        // Invalid JSON: logged, no agents contributed, no abort.
+        let mut bad = vec![dir_agent("reviewer")];
+        super::merge_cli_flag_agents(&mut bad, Some("{nope"), false);
+        assert_eq!(bad.len(), 1);
+    }
+
     #[test]
     fn oauth_subscriber_flag_gating() {
         let inference = vec!["user:inference".to_string(), "user:profile".to_string()];
@@ -5305,6 +5852,12 @@ mod tests {
             cli_mcp_servers: Vec::new(),
             exclude_dynamic_system_prompt_sections: false,
             setting_source_scope: (true, true),
+            customization_gates: super::CustomizationGates::default(),
+            session_persistence: true,
+            cli_agents_json: None,
+            cli_agent: None,
+            cli_plugin_dirs: Vec::new(),
+            initial_effort: None,
         };
         (tmp, cfg)
     }
@@ -5947,6 +6500,108 @@ mod tests {
             hooks.iter().any(|h| h.event == "SessionStart"),
             "boot must load the SessionStart hook the lifecycle fire dispatches against: {hooks:?}"
         );
+    }
+
+    /// (M3 cc2.1.198) `CustomizationGates` — pure-logic lock of the binary's
+    /// `Hc(feature)` verdicts for the features this root registers (`V5d` =
+    /// bare map, `K5d` = safe-mode allowlist; see the struct docs).
+    #[test]
+    fn customization_gates_match_binary_maps() {
+        use super::CustomizationGates;
+        let off = CustomizationGates::default();
+        let safe = CustomizationGates { safe_mode: true, bare: false };
+        let bare = CustomizationGates { safe_mode: false, bare: true };
+
+        // Neither mode ⟶ nothing disabled (byte-identical to pre-M3 boot).
+        assert!(!off.disables_settings_hooks());
+        assert!(!off.disables_plugins());
+        assert!(!off.disables_skills());
+        assert!(!off.disables_custom_agents());
+        assert!(!off.disables_mcp_discovery());
+        assert!(!off.disables_claude_md(false));
+
+        // Safe mode disables all of them, claudeMd unconditionally (no
+        // explicit-request escape: "--agents: ignored in safe mode").
+        assert!(safe.disables_settings_hooks());
+        assert!(safe.disables_plugins());
+        assert!(safe.disables_skills());
+        assert!(safe.disables_custom_agents());
+        assert!(safe.disables_mcp_discovery());
+        assert!(safe.disables_claude_md(false));
+        assert!(safe.disables_claude_md(true), "safe mode ignores --add-dir");
+
+        // Bare: hooks/plugins/skills/agents disabled, but ambient MCP
+        // discovery is NOT (`V5d.mcpAutoDiscovered:!1`), and claudeMd is
+        // re-enabled by an explicit `--add-dir` request (`eue()`'s
+        // `explicitlyRequested:cI().length>0`).
+        assert!(bare.disables_settings_hooks());
+        assert!(bare.disables_plugins());
+        assert!(bare.disables_skills());
+        assert!(bare.disables_custom_agents());
+        assert!(!bare.disables_mcp_discovery());
+        assert!(bare.disables_claude_md(false));
+        assert!(!bare.disables_claude_md(true), "--add-dir re-enables in bare");
+    }
+
+    /// (M3 cc2.1.198) `--safe-mode` / `--bare` boot: the SAME project-settings
+    /// `SessionStart` hook fixture the positive test above proves LOADS must
+    /// NOT load when the gates are set (bare `V5d.hooks:!0`; safe mode's
+    /// `UQr()` keeps only the policySettings tier, which lingxi doesn't load).
+    #[tokio::test]
+    async fn safe_mode_and_bare_skip_settings_hooks_at_boot() {
+        use super::CustomizationGates;
+        use traits::OrchestratorHandle as _;
+
+        for gates in [
+            CustomizationGates { safe_mode: true, bare: false },
+            CustomizationGates { safe_mode: false, bare: true },
+        ] {
+            let (_tmp, mut cfg) = test_config(true);
+            cfg.customization_gates = gates;
+            let lingxi_dir = cfg.cwd.join(".lingxi");
+            std::fs::create_dir_all(&lingxi_dir).expect("mk .lingxi");
+            std::fs::write(
+                lingxi_dir.join("settings.json"),
+                r#"{ "hooks": { "SessionStart": [ { "hooks": [
+                    { "type": "command", "command": "true" }
+                ] } ] } }"#,
+            )
+            .expect("write settings.json");
+
+            let output: Arc<dyn traits::OutputStream> =
+                Arc::new(orchestrator::test_support::MockOutputStream::new());
+            let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+                Arc::new(RecordingPermissionSink::default());
+            let rt = build(cfg, output, perm_sink).await.expect("build");
+            let hooks = rt.orchestrator.list_hooks().await;
+            assert!(
+                !hooks.iter().any(|h| h.event == "SessionStart"),
+                "{gates:?} must skip settings-file hooks, got: {hooks:?}"
+            );
+        }
+    }
+
+    /// (M3 cc2.1.198) `--no-session-persistence` ⟶ `session_persistence:
+    /// false` leaves the orchestrator's `JsonlWriter` slot `None` (nothing is
+    /// saved under `projects/`, so the session can't be resumed); the default
+    /// (`true`) keeps the Gap-#5 production writer wired.
+    #[tokio::test]
+    async fn session_persistence_flag_gates_jsonl_writer() {
+        for (persist, want_writer) in [(true, true), (false, false)] {
+            let (_tmp, mut cfg) = test_config(true);
+            cfg.session_persistence = persist;
+            let output: Arc<dyn traits::OutputStream> =
+                Arc::new(orchestrator::test_support::MockOutputStream::new());
+            let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+                Arc::new(RecordingPermissionSink::default());
+            let rt = build(cfg, output, perm_sink).await.expect("build");
+            assert_eq!(
+                rt.orchestrator.has_jsonl_writer(),
+                want_writer,
+                "session_persistence={persist} must {}wire the JsonlWriter",
+                if want_writer { "" } else { "NOT " }
+            );
+        }
     }
 
     /// Instruction-load lifecycle: the boot path fires `InstructionsLoaded`

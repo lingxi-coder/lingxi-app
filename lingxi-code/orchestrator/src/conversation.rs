@@ -1252,6 +1252,14 @@ impl ConversationOrchestrator {
         self
     }
 
+    /// Whether a [`JsonlWriter`] has been wired via [`Self::with_jsonl_writer`].
+    /// (M3 cc2.1.198) Probe for the `--no-session-persistence` boot gate: the
+    /// composition root leaves the slot `None` so nothing persists to disk.
+    #[must_use]
+    pub fn has_jsonl_writer(&self) -> bool {
+        self.jsonl_writer.is_some()
+    }
+
     /// Attach the resolved claude-home (`$LINGXI_CONFIG_DIR ?? ~/.claude`) so
     /// hook payloads carry a deterministically-computed `transcript_path` even
     /// when no [`JsonlWriter`] is wired (the production case). Builder-style —
@@ -4651,7 +4659,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // `StreamingToolExecutor` user_interrupted path.
         user_cancel: Option<CancellationToken>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
-        use crate::streaming_loop::{pump_stream_with_executor, ExecutorPump};
+        use crate::streaming_loop::ExecutorPump;
         use protocol::ContentBlock;
 
         // Startup Responses WebSocket prewarm is strictly opportunistic. A real
@@ -5293,86 +5301,153 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // open stream is pumped as before.
             let pumped = match opened {
                 OpenOutcome::Recovered(pumped_from_recovery) => pumped_from_recovery,
-                OpenOutcome::Stream(stream) => match pump_stream_with_executor(
-                    stream,
-                    &self.output,
-                    ExecutorPump {
-                        executor: &mut exec,
-                        assistant_id,
-                        user_cancel: user_cancel.as_ref(),
-                    },
-                )
-                .await
-                {
-                    Ok(p) => p,
-                    Err(OrchestratorError::Streaming(
-                        ref e @ (LlmError::Overloaded { .. } | LlmError::ProviderInternal),
-                    )) if !is_env_truthy(
-                        std::env::var("LINGXI_DISABLE_NONSTREAMING_FALLBACK")
-                            .as_deref()
-                            .ok(),
-                    ) =>
-                    {
-                        // Seed: a streaming overload counts as 1 toward the consecutive
-                        // 529 budget (LlmError::Overloaded = 529).  Other in-band errors
-                        // (e.g. ProviderInternal) seed 0 — matching TS
-                        // `is529Error(streamingError) ? 1 : 0` (claude.ts:2559).
-                        let seed: u8 = u8::from(matches!(e, LlmError::Overloaded { .. }));
-
-                        // Re-snapshot history for the non-streaming call (the partial
-                        // stream never touched session.history, so it is still the same
-                        // snapshot we used for the stream — no reset needed).
-                        let (mut non_stream_snapshot, non_stream_model, non_stream_profile) = {
-                            let s = self.session.lock().await;
-                            (s.history.clone(), s.model.clone(), s.model_profile.clone())
-                        };
-                        // R-P1c/R-P1d: claude-code's `A6n` prepends the additional-
-                        // context meta message on EVERY `callModel`, including this
-                        // non-streaming fallback. Prepend it to the re-snapshot too.
-                        if let Some(ctx_msg) = self.additional_context_message().await {
-                            non_stream_snapshot.insert(0, ctx_msg);
-                        }
-                        let tools_for_fallback = wire_tools.clone();
-
-                        let resp = self
-                            .api
-                            .messages_create_seeded(
-                                &non_stream_model,
-                                non_stream_profile.as_deref(),
-                                system_prompt.as_deref(),
-                                non_stream_snapshot,
-                                tools_for_fallback,
-                                seed,
-                            )
-                            .await
-                            .map_err(OrchestratorError::ApiCall)?;
-
-                        // Convert LlmResponse → PumpedTurn so the rest of the streaming
-                        // turn loop can proceed identically.
-                        let pumped_from_fallback = llm_response_to_pumped_turn(&resp);
-
-                        // Emit text blocks from the non-streaming response to the output
-                        // stream, mirroring the batched path (turn_loop.rs step 4:
-                        // `orch.output.emit_text(text).await`).  In the normal streaming
-                        // path `pump_stream` calls `dispatch_event` → `emit_text` for each
-                        // `TextDelta`; the non-streaming path has no SSE events, so we
-                        // replicate the whole-body emit here.
-                        for blk in &pumped_from_fallback.assistant_blocks {
-                            if let ContentBlock::Text { text } = blk {
-                                self.output.emit_text(text).await;
+                OpenOutcome::Stream(first_stream) => {
+                // cc 2.1.198 mid-response transient retry (`query.ts` stream
+                // loop @219649648): on a transient network drop (ECONNRESET /
+                // connection closed / reset) OR a watchdog idle-timeout, re-open
+                // and re-pump the SAME streaming request with backoff — but ONLY
+                // while `!real_content_started` (binary `!Hr`). Because a
+                // `tool_use` block STARTING flips `real_content_started`, this
+                // guard also guarantees NO tool has been dispatched, so a
+                // non-idempotent tool is never re-run. The failed pump left
+                // `session.history` untouched and (by the guard) the executor
+                // clean, so the retry reuses `exec` and re-snapshots history.
+                let mut cur_stream = first_stream;
+                let mut mid_stream_retries: u32 = 0;
+                let pump_outcome: Result<crate::streaming_loop::PumpedTurn, OrchestratorError> =
+                    loop {
+                        match crate::streaming_loop::pump_stream_with_executor_tracked(
+                            cur_stream,
+                            &self.output,
+                            ExecutorPump {
+                                executor: &mut exec,
+                                assistant_id,
+                                user_cancel: user_cancel.as_ref(),
+                            },
+                        )
+                        .await
+                        {
+                            Ok(p) => break Ok(p),
+                            Err(f)
+                                if crate::streaming_loop::is_transient_mid_stream(&f.error)
+                                    && !f.real_content_started
+                                    && mid_stream_retries
+                                        < crate::streaming_loop::mid_stream_retry_cap(&f.error) =>
+                            {
+                                mid_stream_retries += 1;
+                                // Exponential backoff + jitter (binary `sle`).
+                                let base = llm_client::model::retry::scaled_base_delay_ms(
+                                    u8::try_from(mid_stream_retries - 1).unwrap_or(u8::MAX),
+                                    None,
+                                );
+                                tokio::time::sleep(llm_client::model::retry::jittered_delay(base))
+                                    .await;
+                                tracing::warn!(
+                                    attempt = mid_stream_retries,
+                                    "mid-response transient stream error — retrying streaming request"
+                                );
+                                // Re-snapshot history (+ additional context) for
+                                // the retry — same pattern as the 529 fallback.
+                                let (mut re_snapshot, re_model, re_profile) = {
+                                    let s = self.session.lock().await;
+                                    (s.history.clone(), s.model.clone(), s.model_profile.clone())
+                                };
+                                if let Some(ctx_msg) = self.additional_context_message().await {
+                                    re_snapshot.insert(0, ctx_msg);
+                                }
+                                match self
+                                    .streaming_api
+                                    .stream(
+                                        &re_model,
+                                        re_profile.as_deref(),
+                                        system_prompt.as_deref(),
+                                        re_snapshot,
+                                        wire_tools.clone(),
+                                    )
+                                    .await
+                                {
+                                    Ok(s) => {
+                                        cur_stream = s;
+                                        continue;
+                                    }
+                                    // Re-open failed: surface as the terminal
+                                    // pump error for the arms below.
+                                    Err(e) => break Err(OrchestratorError::Streaming(e)),
+                                }
                             }
+                            Err(f) => break Err(f.error),
                         }
+                    };
+                match pump_outcome {
+                Ok(p) => p,
+                Err(OrchestratorError::Streaming(
+                    ref e @ (LlmError::Overloaded { .. } | LlmError::ProviderInternal),
+                )) if !is_env_truthy(
+                    std::env::var("LINGXI_DISABLE_NONSTREAMING_FALLBACK")
+                        .as_deref()
+                        .ok(),
+                ) =>
+                {
+                    // Seed: a streaming overload counts as 1 toward the consecutive
+                    // 529 budget (LlmError::Overloaded = 529).  Other in-band errors
+                    // (e.g. ProviderInternal) seed 0 — matching TS
+                    // `is529Error(streamingError) ? 1 : 0` (claude.ts:2559).
+                    let seed: u8 = u8::from(matches!(e, LlmError::Overloaded { .. }));
 
-                        // claude-code `query.ts:733-740`: discard the partial
-                        // streaming attempt's executor (its tool_uses have stale ids
-                        // and would orphan against the fallback response) and replace
-                        // it with a fresh one. Dropping the old executor cancels any
-                        // in-flight tool futures it had started mid-stream. The fresh
-                        // executor's tools are registered from the FALLBACK response's
-                        // tool_uses by the post-stream drive loop below (this is the
-                        // ONLY path that still `add_tool`s after the stream — the
-                        // normal path registers mid-stream).
-                        exec = match &user_cancel {
+                    // Re-snapshot history for the non-streaming call (the partial
+                    // stream never touched session.history, so it is still the same
+                    // snapshot we used for the stream — no reset needed).
+                    let (mut non_stream_snapshot, non_stream_model, non_stream_profile) = {
+                        let s = self.session.lock().await;
+                        (s.history.clone(), s.model.clone(), s.model_profile.clone())
+                    };
+                    // R-P1c/R-P1d: claude-code's `A6n` prepends the additional-
+                    // context meta message on EVERY `callModel`, including this
+                    // non-streaming fallback. Prepend it to the re-snapshot too.
+                    if let Some(ctx_msg) = self.additional_context_message().await {
+                        non_stream_snapshot.insert(0, ctx_msg);
+                    }
+                    let tools_for_fallback = wire_tools.clone();
+
+                    let resp = self
+                        .api
+                        .messages_create_seeded(
+                            &non_stream_model,
+                            non_stream_profile.as_deref(),
+                            system_prompt.as_deref(),
+                            non_stream_snapshot,
+                            tools_for_fallback,
+                            seed,
+                        )
+                        .await
+                        .map_err(OrchestratorError::ApiCall)?;
+
+                    // Convert LlmResponse → PumpedTurn so the rest of the streaming
+                    // turn loop can proceed identically.
+                    let pumped_from_fallback = llm_response_to_pumped_turn(&resp);
+
+                    // Emit text blocks from the non-streaming response to the output
+                    // stream, mirroring the batched path (turn_loop.rs step 4:
+                    // `orch.output.emit_text(text).await`).  In the normal streaming
+                    // path `pump_stream` calls `dispatch_event` → `emit_text` for each
+                    // `TextDelta`; the non-streaming path has no SSE events, so we
+                    // replicate the whole-body emit here.
+                    for blk in &pumped_from_fallback.assistant_blocks {
+                        if let ContentBlock::Text { text } = blk {
+                            self.output.emit_text(text).await;
+                        }
+                    }
+
+                    // claude-code `query.ts:733-740`: discard the partial
+                    // streaming attempt's executor (its tool_uses have stale ids
+                    // and would orphan against the fallback response) and replace
+                    // it with a fresh one. Dropping the old executor cancels any
+                    // in-flight tool futures it had started mid-stream. The fresh
+                    // executor's tools are registered from the FALLBACK response's
+                    // tool_uses by the post-stream drive loop below (this is the
+                    // ONLY path that still `add_tool`s after the stream — the
+                    // normal path registers mid-stream).
+                    exec = match &user_cancel {
                         Some(token) => {
                             crate::streaming_executor::StreamingToolExecutor::new_with_user_cancel(
                                 self,
@@ -5381,40 +5456,41 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         }
                         None => crate::streaming_executor::StreamingToolExecutor::new(self),
                     };
-                        for tu in &pumped_from_fallback.tool_uses {
-                            exec.add_tool(
-                                tu.id.clone(),
-                                tu.name.clone(),
-                                tu.input.clone(),
-                                tu.provider_id.clone(),
-                                assistant_id,
-                            );
-                        }
+                    for tu in &pumped_from_fallback.tool_uses {
+                        exec.add_tool(
+                            tu.id.clone(),
+                            tu.name.clone(),
+                            tu.input.clone(),
+                            tu.provider_id.clone(),
+                            assistant_id,
+                        );
+                    }
 
-                        pumped_from_fallback
-                    }
-                    // #10: RateLimited/Overloaded/RepeatedOverloaded keep dedicated
-                    // downstream handling — propagate.
-                    Err(e) if crate::turn_loop::is_carveout_propagated(&e) => return Err(e),
-                    // #10: any other mid-stream model/runtime error (e.g. Transport)
-                    // ends the turn GRACEFULLY as `model_error` (faithful port of the
-                    // `query.ts` catch) rather than bubbling a hard error / phantom
-                    // interrupt. The assistant message for this turn is persisted only
-                    // AFTER a successful pump, so the errored pump left no orphaned
-                    // tool_use to repair (TS `yieldMissingToolResultBlocks` no-op here).
-                    Err(other) => {
-                        // Classify the typed mid-stream error (`Flp`/`KNn`) into the
-                        // api-error envelope; the message text stays verbatim.
-                        let env = classify_api_error(&other);
-                        let id =
-                            crate::turn_loop::surface_model_error(self, &other.to_string(), env)
-                                .await;
-                        let cost = self.snapshot_cost_real().await;
-                        self.output.emit_end_turn("model_error", &cost).await;
-                        final_message_id = id;
-                        break;
-                    }
-                },
+                    pumped_from_fallback
+                }
+                // #10: RateLimited/Overloaded/RepeatedOverloaded keep dedicated
+                // downstream handling — propagate.
+                Err(e) if crate::turn_loop::is_carveout_propagated(&e) => return Err(e),
+                // #10: any other mid-stream model/runtime error (e.g. Transport)
+                // ends the turn GRACEFULLY as `model_error` (faithful port of the
+                // `query.ts` catch) rather than bubbling a hard error / phantom
+                // interrupt. The assistant message for this turn is persisted only
+                // AFTER a successful pump, so the errored pump left no orphaned
+                // tool_use to repair (TS `yieldMissingToolResultBlocks` no-op here).
+                Err(other) => {
+                    // Classify the typed mid-stream error (`Flp`/`KNn`) into the
+                    // api-error envelope; the message text stays verbatim.
+                    let env = classify_api_error(&other);
+                    let id =
+                        crate::turn_loop::surface_model_error(self, &other.to_string(), env)
+                            .await;
+                    let cost = self.snapshot_cost_real().await;
+                    self.output.emit_end_turn("model_error", &cost).await;
+                    final_message_id = id;
+                    break;
+                }
+                }
+                }
             };
             // A3: accumulate this turn's output tokens (TS `getTurnOutputTokens()`).
             global_turn_tokens = global_turn_tokens.saturating_add(pumped.output_tokens);
@@ -7905,14 +7981,15 @@ mod turn_recovery_tests {
     }
 
     /// Seed a history far past the hard blocking limit. The default model
-    /// (`claude-opus-4-7`, 200k window) blocks around ~177k tokens; 2M chars ≈
-    /// 500k tokens (estimator is chars/4), comfortably over.
+    /// (`claude-opus-4-8`) is natively 1M as of 2.1.198 (M1b), so the
+    /// blocking limit sits just under 1M tokens; 8M chars ≈ 2M tokens
+    /// (estimator is chars/4), comfortably over.
     async fn seed_over_blocking_limit(orch: &ConversationOrchestrator) {
         let session = orch.session();
         let mut s = session.lock().await;
         s.history.push(ConversationMessage::user(
             MessageId::new(),
-            "x".repeat(2_000_000),
+            "x".repeat(8_000_000),
         ));
     }
 

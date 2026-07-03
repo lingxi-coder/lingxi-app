@@ -969,22 +969,42 @@ fn remove_server(name: &str, scope: Scope) -> Result<Option<PathBuf>, String> {
 // list / get
 // ──────────────────────────────────────────────────────────────────────────
 
+/// Byte-exact claude-code status for an unapproved `.mcp.json` server (binary
+/// `SSc = "\u23F8 Pending approval (run \`claude\` to approve)"`). Shown by
+/// `mcp list` / `mcp get` for pending project servers, which are NEVER
+/// health-checked or spawned (the binary skips `ySc` for the pending branch).
+const PENDING_APPROVAL: &str = "\u{23F8} Pending approval (run `claude` to approve)";
+
 /// Implement `mcp list`. Reads the merged server set across all three scopes
 /// and prints each as `<name>: <summary>`.
 ///
-/// NOTE: claude health-checks each server over the network and appends a status
-/// (`✔ Connected` / `✘ Failed to connect` / `! Needs authentication`). lingxi's
-/// `mcp` crate is client-side and a real probe would require live connections,
-/// so this prints the configured transport summary WITHOUT the network probe —
-/// the server inventory itself is byte-faithful.
+/// Unapproved (repo-self-approved) project `.mcp.json` servers in an untrusted
+/// workspace are shown as `\u23F8 Pending approval (run `claude` to approve)`
+/// and are NOT connected to — 1:1 with the binary `mcp list` (`$Tf`):
+/// `status: n.has(i) ? SSc : (await ySc(i,a)).status`, where the pending branch
+/// skips the health check (`ySc` = the spawn/connect probe).
+///
+/// NOTE: for APPROVED servers claude health-checks each over the network and
+/// appends a status (`✔ Connected` / `✘ Failed to connect` /
+/// `! Needs authentication`). lingxi's `mcp` crate is client-side and a real
+/// probe would require live connections, so this prints the configured transport
+/// summary WITHOUT the network probe — the server inventory itself is
+/// byte-faithful. (The pending-approval status, unlike a health check, is
+/// derived purely from config and so is surfaced exactly.)
 fn run_list() -> i32 {
     let servers = load_all_servers();
     if servers.is_empty() {
         println!("No MCP servers configured. Use `claude mcp add` to add a server.");
         return SUCCESS;
     }
+    let (_, pending) = project_server_approval();
     for cfg in &servers {
-        println!("{}: {}", cfg.name, transport_summary(&cfg.spec));
+        if is_pending_project_server(cfg, &pending) {
+            // Unapproved project server: Pending approval, never spawned.
+            println!("{}: {PENDING_APPROVAL}", cfg.name);
+        } else {
+            println!("{}: {}", cfg.name, transport_summary(&cfg.spec));
+        }
     }
     SUCCESS
 }
@@ -1001,8 +1021,20 @@ fn run_get(a: &GetArgs) -> i32 {
         return RUNTIME_ERROR;
     };
 
+    // A pending (unapproved) project `.mcp.json` server in an untrusted
+    // workspace is shown with the Pending-approval status and is NOT connected
+    // to — 1:1 with the binary `mcp get` (`qTf`): `i==="pending" ?
+    // {status:SSc} : … : await ySc(t,s)`, where the pending branch SKIPS the
+    // `ySc` health-check/spawn. The transport details are still printed (the
+    // binary keeps appending Type/URL/etc. after the Status line). Only PROJECT
+    // servers can be pending (user/local servers never require approval).
+    let is_pending = is_pending_project_server(cfg, &project_server_approval().1);
+
     println!("{}:", cfg.name);
     println!("  Scope: {}", scope_detail(cfg.scope));
+    if is_pending {
+        println!("  Status: {PENDING_APPROVAL}");
+    }
     match &cfg.spec {
         traits::McpTransportSpec::Stdio { command, args, env } => {
             println!("  Type: stdio");
@@ -1101,6 +1133,17 @@ fn local_server_names() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Whether a LOADED server is a pending (unapproved) project `.mcp.json` server
+/// — the only servers shown as `\u23F8 Pending approval` and never spawned by
+/// `mcp list` / `mcp get`. A server qualifies iff its effective (loaded) scope is
+/// `Project` AND its name is in the project pending set. The scope guard is
+/// SECURITY-RELEVANT: a same-named USER or LOCAL server (which take precedence in
+/// [`mcp::json_config::load_mcp_servers`] and never require approval) must NOT be
+/// mislabelled pending nor have its details hidden.
+fn is_pending_project_server(cfg: &mcp::connection::McpServerConfig, pending: &[String]) -> bool {
+    cfg.scope == ConfigScope::Project && pending.iter().any(|n| n == &cfg.name)
+}
+
 /// Partition the project `.mcp.json` servers into `(approved, pending)` using the
 /// per-project approval state in `~/.lingxi.json` `projects.<key>`: a server is
 /// approved iff it is NOT in `disabledMcpjsonServers` AND
@@ -1144,14 +1187,31 @@ fn project_server_approval() -> (Vec<String>, Vec<String>) {
     let mut approved = Vec::new();
     let mut pending = Vec::new();
     for name in all {
-        let is_approved = !disabled.contains(&name) && (enable_all || enabled.contains(&name));
-        if is_approved {
+        if project_server_is_approved(&name, enable_all, &enabled, &disabled) {
             approved.push(name);
         } else {
             pending.push(name);
         }
     }
     (approved, pending)
+}
+
+/// Pure approval predicate for a project `.mcp.json` server, 1:1 with claude's
+/// approval rule: approved iff NOT in `disabledMcpjsonServers` AND
+/// (`enableAllProjectMcpServers` is true OR in `enabledMcpjsonServers`).
+///
+/// After `mcp reset-project-choices` clears all three (empty `enabled`, empty
+/// `disabled`, `enable_all=false`), EVERY project server reverts to
+/// NOT-approved → pending (the trust-reset invariant). `disabled` always wins
+/// (an explicit rejection is not overridden by `enable_all`).
+fn project_server_is_approved(
+    name: &str,
+    enable_all: bool,
+    enabled: &[String],
+    disabled: &[String],
+) -> bool {
+    !disabled.iter().any(|d| d == name)
+        && (enable_all || enabled.iter().any(|e| e == name))
 }
 
 /// `mcp get`'s not-found message. Unlike `mcp remove` (which lists every
@@ -1537,5 +1597,100 @@ mod url_redaction_tests {
     fn non_url_input_falls_back_to_raw() {
         // No `://` ⟶ return the raw string unchanged (graceful fallback).
         assert_eq!(redact_url_for_display("not-a-url"), "not-a-url");
+    }
+}
+
+#[cfg(test)]
+mod pending_approval_tests {
+    use super::{is_pending_project_server, project_server_is_approved, PENDING_APPROVAL};
+    use mcp::connection::{ConfigScope, McpServerConfig};
+    use std::collections::HashMap;
+
+    fn stdio(name: &str, scope: ConfigScope) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            spec: traits::McpTransportSpec::Stdio {
+                command: "srv".into(),
+                args: vec![],
+                env: HashMap::new(),
+            },
+            scope,
+            disabled: false,
+        }
+    }
+
+    /// The status string is byte-exact with the binary `SSc` (U+23F8 pause glyph,
+    /// backtick-quoted `claude`).
+    #[test]
+    fn pending_approval_string_is_byte_exact() {
+        assert_eq!(
+            PENDING_APPROVAL,
+            "\u{23F8} Pending approval (run `claude` to approve)"
+        );
+        // The leading glyph is the PAUSE symbol, not e.g. a play/stop glyph.
+        assert!(PENDING_APPROVAL.starts_with('\u{23F8}'));
+    }
+
+    /// An unapproved PROJECT `.mcp.json` server (name in the pending set) is
+    /// pending — shown as Pending approval and never spawned.
+    #[test]
+    fn unapproved_project_server_is_pending() {
+        let cfg = stdio("repo-srv", ConfigScope::Project);
+        let pending = vec!["repo-srv".to_string()];
+        assert!(is_pending_project_server(&cfg, &pending));
+    }
+
+    /// An APPROVED project server (not in the pending set) is NOT pending — it
+    /// is listed/health-checked normally (lingxi shows its transport summary).
+    #[test]
+    fn approved_project_server_is_not_pending() {
+        let cfg = stdio("repo-srv", ConfigScope::Project);
+        let pending: Vec<String> = vec![]; // approved ⇒ absent from pending
+        assert!(!is_pending_project_server(&cfg, &pending));
+    }
+
+    /// A project server is approved when explicitly enabled OR when
+    /// `enableAllProjectMcpServers` is on; `disabledMcpjsonServers` always wins.
+    #[test]
+    fn approval_predicate_matches_claude_rule() {
+        // Explicitly enabled.
+        assert!(project_server_is_approved("s", false, &["s".into()], &[]));
+        // enable-all.
+        assert!(project_server_is_approved("s", true, &[], &[]));
+        // Disabled overrides enable-all (explicit rejection wins).
+        assert!(!project_server_is_approved("s", true, &["s".into()], &["s".into()]));
+        // Neither enabled nor enable-all ⇒ not approved.
+        assert!(!project_server_is_approved("s", false, &["other".into()], &[]));
+    }
+
+    /// TRUST-RESET: after `mcp reset-project-choices` clears every choice
+    /// (empty enabled, empty disabled, enable_all=false), a previously-approved
+    /// project server reverts to NOT-approved → pending, so `mcp list`/`get`
+    /// once again show it as Pending approval and never spawn it.
+    #[test]
+    fn reset_project_choices_reverts_approved_server_to_pending() {
+        // Before reset: enabled ⇒ approved.
+        assert!(project_server_is_approved("repo-srv", false, &["repo-srv".into()], &[]));
+        // After reset: all choices cleared ⇒ not approved (pending).
+        assert!(!project_server_is_approved("repo-srv", false, &[], &[]));
+        // And the loaded project server would now be flagged pending.
+        let cfg = stdio("repo-srv", ConfigScope::Project);
+        assert!(is_pending_project_server(&cfg, &["repo-srv".to_string()]));
+    }
+
+    /// SECURITY NEIGHBOR: a same-named USER or LOCAL server (which take
+    /// precedence in the loaded view and never require approval) must NOT be
+    /// mislabelled pending — even if a project `.mcp.json` server of that name
+    /// is pending, the overriding user/local server is fully shown.
+    #[test]
+    fn same_named_user_or_local_server_is_never_pending() {
+        let pending = vec!["srv".to_string()];
+        for scope in [ConfigScope::User, ConfigScope::Local] {
+            let cfg = stdio("srv", scope);
+            assert!(
+                !is_pending_project_server(&cfg, &pending),
+                "{scope:?} server must not be treated as pending"
+            );
+        }
     }
 }

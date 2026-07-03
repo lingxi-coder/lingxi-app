@@ -115,6 +115,13 @@ pub struct ForkedAgentRunner {
     /// Optional single-turn backend: `(client, model)`. `None` until a caller
     /// opts in via [`Self::with_side_query_client`], preserving the stub path.
     side_query: Option<(Arc<dyn SideQueryClient>, String)>,
+    /// Session thinking configuration this runner's forked calls INHERIT
+    /// (cc 2.1.198 "Subagents + compaction inherit extended thinking config"
+    /// — binary `mXt(r)` threads the session `options.thinkingConfig` into
+    /// the summarizer call @216945141). Wired by the composition root for the
+    /// COMPACTION runner via [`Self::with_session_thinking`]; `None` (default
+    /// — memory extraction, tests) keeps the legacy no-`thinking` wire.
+    session_thinking: Option<llm_client::model::thinking::ThinkingConfig>,
 }
 
 impl Default for ForkedAgentRunner {
@@ -128,7 +135,10 @@ impl ForkedAgentRunner {
     /// [`Self::with_side_query_client`] to opt into the real single-turn path.
     #[must_use]
     pub fn new() -> Self {
-        Self { side_query: None }
+        Self {
+            side_query: None,
+            session_thinking: None,
+        }
     }
 
     /// Wire a real single-turn forked path backed by `client`, calling `model`.
@@ -146,6 +156,19 @@ impl ForkedAgentRunner {
         model: String,
     ) -> Self {
         self.side_query = Some((client, model));
+        self
+    }
+
+    /// Inherit the SESSION thinking configuration on this runner's forked
+    /// calls (cc 2.1.198): the composition root passes the same session
+    /// `ThinkingConfig` the main-loop `ApiService` holds, so a compaction
+    /// summary request carries the same `thinking` shape as a main-loop turn.
+    #[must_use]
+    pub fn with_session_thinking(
+        mut self,
+        thinking: llm_client::model::thinking::ThinkingConfig,
+    ) -> Self {
+        self.session_thinking = Some(thinking);
         self
     }
 
@@ -209,7 +232,9 @@ impl ForkedAgentRunner {
             // Host owns retry policy for forked calls.
             max_retries: 0,
             temperature: None,
-            thinking_budget: None,
+            // cc 2.1.198: the forked (compaction) call inherits the session
+            // thinking config wired at the composition root; `None` = legacy.
+            thinking: self.session_thinking,
             stop_sequences: Vec::new(),
             query_source: req.query_source.clone(),
             // The prefix is already baked into `system_prompt`; any extra
@@ -384,6 +409,43 @@ mod tests {
             .map(ConversationMessage::text_content)
             .collect();
         assert_eq!(order, vec!["PREFIX-A", "PREFIX-B", "PROMPT-A"]);
+    }
+
+    /// cc 2.1.198 "Subagents + compaction inherit extended thinking config" —
+    /// the COMPACTION seam half, runner level: the session `ThinkingConfig`
+    /// wired at the composition root rides on every forked (compaction) call;
+    /// without the wiring the request stays `thinking: None` (legacy wire).
+    #[tokio::test]
+    async fn forked_call_carries_the_session_thinking_config() {
+        let client = Arc::new(MockClient {
+            seen: Mutex::new(None),
+            canned_text: "SUMMARY".into(),
+            canned_usage: Usage::default(),
+        });
+        let runner = ForkedAgentRunner::new()
+            .with_side_query_client(client.clone(), "claude-opus-4-6".into())
+            .with_session_thinking(llm_client::model::thinking::ThinkingConfig::default());
+        let req = request_with(vec![], vec![user_msg("PROMPT")], Some(512));
+        runner.run(req).await.expect("wired run succeeds");
+        let sent = client.seen.lock().unwrap().clone().expect("client called");
+        assert_eq!(
+            sent.thinking,
+            Some(llm_client::model::thinking::ThinkingConfig::Adaptive),
+            "the compaction fork inherits the session thinking config"
+        );
+
+        // Unwired runner (memory extraction, legacy) → thinking: None.
+        let client2 = Arc::new(MockClient {
+            seen: Mutex::new(None),
+            canned_text: "SUMMARY".into(),
+            canned_usage: Usage::default(),
+        });
+        let runner2 = ForkedAgentRunner::new()
+            .with_side_query_client(client2.clone(), "claude-opus-4-6".into());
+        let req2 = request_with(vec![], vec![user_msg("PROMPT")], Some(512));
+        runner2.run(req2).await.expect("wired run succeeds");
+        let sent2 = client2.seen.lock().unwrap().clone().expect("client called");
+        assert_eq!(sent2.thinking, None, "unwired runners keep the legacy wire");
     }
 
     #[tokio::test]

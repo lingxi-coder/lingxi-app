@@ -1349,18 +1349,23 @@ mod tests {
     }
 
     #[test]
-    fn layout_80x24_idle_status_line_plus_bordered_composer() {
+    fn layout_80x24_idle_status_line_plus_borderless_composer() {
         let mut app = test_app(Vec::new());
         assert_eq!(app.viewport_height(80), 4, "idle bottom viewport is 4 rows");
         let terminal = draw_viewport(&mut app);
         let rows = buffer_rows(&terminal);
         assert!(rows[0].contains("Enter: send"), "status row: {}", rows[0]);
         assert!(rows[0].contains("Esc: quit"), "status row: {}", rows[0]);
-        assert!(rows[1].starts_with('┌'), "composer top border: {}", rows[1]);
-        assert!(rows[2].starts_with("│> "), "prompt row: {}", rows[2]);
+        // Row 1 is the composer's top padding (no border glyph).
         assert!(
-            rows[3].starts_with('└'),
-            "composer bottom border: {}",
+            !rows[1].contains('┌'),
+            "composer top padding has no border: {}",
+            rows[1]
+        );
+        assert!(rows[2].starts_with('›'), "prompt row: {}", rows[2]);
+        assert!(
+            !rows[3].contains('└'),
+            "composer bottom padding has no border: {}",
             rows[3]
         );
         // The draw buffer covers EXACTLY the 4 viewport rows — rows below the
@@ -1379,8 +1384,8 @@ mod tests {
         typ(&mut app, "你好");
         let mut terminal = draw_viewport(&mut app);
         let pos = terminal.get_cursor_position().unwrap();
-        // x = border(1) + "> "(2) + two wide chars × 2 columns = 7; y = row 2.
-        assert_eq!((pos.x, pos.y), (7, 2));
+        // x = gutter inner.x(2) + two wide chars × 2 columns = 6; y = row 2.
+        assert_eq!((pos.x, pos.y), (6, 2));
     }
 
     #[test]
@@ -1610,9 +1615,11 @@ mod tests {
         assert_eq!(rows.len(), 4);
         assert_eq!(rows[0].chars().count(), 120, "rows span the full width");
         assert!(rows[0].contains("Enter: send"), "status row: {}", rows[0]);
-        assert!(rows[1].starts_with('┌') && rows[1].ends_with('┐'));
-        assert!(rows[2].starts_with("│> ") && rows[2].ends_with('│'));
-        assert!(rows[3].starts_with('└') && rows[3].ends_with('┘'));
+        // No border glyphs anywhere: rows 1 and 3 are padding, background-
+        // styled across the full width.
+        assert!(!rows[1].contains('┌') && !rows[1].contains('┐'));
+        assert!(rows[2].starts_with('›'));
+        assert!(!rows[3].contains('└') && !rows[3].contains('┘'));
     }
 
     #[test]
@@ -1642,10 +1649,11 @@ mod tests {
             .expect("running status row");
         assert!(text_row < status_row, "tail above the running status");
         // The pane stays pinned beneath the tail: its last three rows are the
-        // composer box, with no tail text bleeding into them.
-        assert!(rows[rows.len() - 3].starts_with('┌'));
-        assert!(rows[rows.len() - 2].starts_with("│> "));
-        assert!(rows[rows.len() - 1].starts_with('└'));
+        // composer (top padding, `›` prompt row, bottom padding), with no
+        // tail text bleeding into them.
+        assert!(!rows[rows.len() - 3].contains('┌'));
+        assert!(rows[rows.len() - 2].starts_with('›'));
+        assert!(!rows[rows.len() - 1].contains('└'));
         assert!(!rows[rows.len() - 2].contains("lorem"), "no overlap");
     }
 
@@ -1667,10 +1675,11 @@ mod tests {
         assert!(rows[1].contains("Complete"), "popup title: {}", rows[1]);
         assert!(rows[2].contains("› /help"), "first item: {}", rows[2]);
         assert!(rows[8].starts_with('└'), "popup bottom: {}", rows[8]);
-        // The composer box keeps the bottom rows — disjoint from the popup.
-        assert!(rows[9].starts_with('┌'), "composer top: {}", rows[9]);
-        assert!(rows[10].starts_with("│> /"), "prompt row: {}", rows[10]);
-        assert!(rows[11].starts_with('└'), "composer bottom: {}", rows[11]);
+        // The composer keeps the bottom rows — disjoint from the popup. Row 9
+        // is top padding (no border glyph).
+        assert!(!rows[9].contains('┌'), "composer top padding: {}", rows[9]);
+        assert!(rows[10].starts_with("› /"), "prompt row: {}", rows[10]);
+        assert!(!rows[11].contains('└'), "composer bottom padding: {}", rows[11]);
     }
 
     #[test]
@@ -1754,13 +1763,13 @@ mod tests {
         let rows = buffer_rows(&terminal);
         assert!(rows[2].contains("› /help"), "items visible: {}", rows[2]);
         assert!(
-            rows[10].starts_with("│> /"),
+            rows[10].starts_with("› /"),
             "composer beneath: {}",
             rows[10]
         );
-        // No row mixes popup content with composer content.
+        // No row mixes popup chrome with the composer row.
         assert!(
-            !rows.iter().any(|r| r.contains("› /") && r.contains("│> ")),
+            !rows[10].contains("Complete"),
             "popup and composer overlap:\n{}",
             rows.join("\n")
         );
@@ -1781,12 +1790,13 @@ mod tests {
             (38, 2),
             "cursor clamps to the last inner column"
         );
-        // The right border cell is intact — the cursor sits inside the box.
+        // The 1-column right margin is untouched by text — the cursor sits
+        // inside the inset textarea, not bleeding into the margin.
         let buf = terminal.last_frame_buffer();
         assert_eq!(
             buf.cell(Position::new(39, 2)).map(Cell::symbol),
-            Some("│"),
-            "composer border intact at the clamp edge"
+            Some(" "),
+            "right margin intact at the clamp edge"
         );
     }
 
@@ -1852,7 +1862,7 @@ mod tests {
         app.draw(&mut terminal).unwrap();
         let rows = buffer_rows(&terminal);
         assert!(rows[0].contains("Enter: send"), "status row: {}", rows[0]);
-        assert!(rows[2].starts_with("│> "), "prompt row: {}", rows[2]);
+        assert!(rows[2].starts_with('›'), "prompt row: {}", rows[2]);
     }
 
     #[test]
@@ -1920,6 +1930,6 @@ mod tests {
         app.draw(&mut terminal).unwrap();
         let rows = buffer_rows(&terminal);
         assert!(rows[0].contains("Enter: send"), "status row: {}", rows[0]);
-        assert!(rows[2].starts_with("│> "), "prompt row: {}", rows[2]);
+        assert!(rows[2].starts_with('›'), "prompt row: {}", rows[2]);
     }
 }

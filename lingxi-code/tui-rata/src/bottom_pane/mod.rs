@@ -1324,9 +1324,9 @@ mod tests {
         let mut pane = pane();
         typ(&mut pane, "你好");
         let area = Rect::new(0, 0, 80, pane.desired_height(80).max(4));
-        // x = border(1) + "> "(2) + two wide chars × 2 columns = 7; y = status
-        // row (1) + composer border (1) = 2.
-        assert_eq!(pane.cursor_pos(area), Some((7, 2)));
+        // x = gutter inner.x(2) + two wide chars × 2 columns = 6; y = status
+        // row (1) + composer top padding (1) = 2.
+        assert_eq!(pane.cursor_pos(area), Some((6, 2)));
     }
 
     #[test]
@@ -1343,20 +1343,21 @@ mod tests {
         let mut buf = Buffer::empty(area);
         pane.render(area, &mut buf);
         // Status row, then the composer scrolled so l7 (cursor row) is the
-        // bottom visible content row: l2..l7 fill the 6 content rows.
+        // bottom visible content row: l2..l7 fill the 6 content rows. The `›`
+        // gutter prompt is pinned to the top visible row (l2 here).
         assert!(buffer_row(&buf, 0).contains("Enter: send"));
         assert!(
-            buffer_row(&buf, 2).starts_with("│  l2"),
+            buffer_row(&buf, 2).starts_with("› l2"),
             "{}",
             buffer_row(&buf, 2)
         );
         assert!(
-            buffer_row(&buf, 7).starts_with("│  l7"),
+            buffer_row(&buf, 7).starts_with("  l7"),
             "{}",
             buffer_row(&buf, 7)
         );
         let (x, y) = pane.cursor_pos(area).expect("composer cursor");
-        assert_eq!((x, y), (5, 7), "cursor on the bottom visible content row");
+        assert_eq!((x, y), (4, 7), "cursor on the bottom visible content row");
     }
 
     #[test]
@@ -1371,12 +1372,15 @@ mod tests {
         assert!(buffer_row(&buf, 0).contains("Enter: send"), "status first");
         assert!(buffer_row(&buf, 1).starts_with("Queued messages:"));
         assert!(buffer_row(&buf, 2).starts_with("  ↳ queued draft"));
+        // Row 3 is the composer's top padding (no border glyph); the `›`
+        // gutter prompt renders on row 4, the first content row.
         assert!(
-            buffer_row(&buf, 3).starts_with('┌'),
-            "composer below preview"
+            buffer_row(&buf, 4).starts_with('›'),
+            "composer prompt below preview: {}",
+            buffer_row(&buf, 4)
         );
-        // Cursor moves down with the composer: border row is now y=3.
-        assert_eq!(pane.cursor_pos(area), Some((3, 4)));
+        // Cursor moves down with the composer: top padding row is now y=3.
+        assert_eq!(pane.cursor_pos(area), Some((2, 4)));
     }
 
     #[test]
@@ -1469,10 +1473,12 @@ mod tests {
             "banner row second: {}",
             buffer_row(&buf, 1)
         );
+        // Row 2 is the composer's top padding (no border glyph); the `›`
+        // gutter prompt renders on row 3, the first content row below it.
         assert!(
-            buffer_row(&buf, 2).starts_with('┌'),
-            "composer box below the banner: {}",
-            buffer_row(&buf, 2)
+            buffer_row(&buf, 3).starts_with('›'),
+            "composer prompt below the banner: {}",
+            buffer_row(&buf, 3)
         );
         // The composer cursor tracks the shifted composer zone.
         assert_eq!(pane.cursor_pos(area).map(|(_, y)| y), Some(3));
@@ -1531,25 +1537,26 @@ mod tests {
             "popup bottom border: {}",
             buffer_row(&buf, 8)
         );
-        // Rows 9..12: the composer box directly beneath — disjoint rows, no
-        // overlap between popup and composer content.
+        // Rows 9..12: the composer directly beneath — disjoint rows, no
+        // overlap between popup and composer content. Row 9 is top padding
+        // (no border glyph); the `›` gutter prompt renders on row 10.
         assert!(
-            buffer_row(&buf, 9).starts_with('┌'),
-            "composer top border: {}",
+            !buffer_row(&buf, 9).contains('┌'),
+            "composer top padding has no border: {}",
             buffer_row(&buf, 9)
         );
         assert!(
-            buffer_row(&buf, 10).starts_with("│> /"),
+            buffer_row(&buf, 10).starts_with("› /"),
             "prompt row: {}",
             buffer_row(&buf, 10)
         );
         assert!(
-            buffer_row(&buf, 11).starts_with('└'),
-            "composer bottom border: {}",
+            !buffer_row(&buf, 11).contains('└'),
+            "composer bottom padding has no border: {}",
             buffer_row(&buf, 11)
         );
         // The cursor sits on the composer's prompt row, after the "/".
-        assert_eq!(pane.cursor_pos(area), Some((4, 10)));
+        assert_eq!(pane.cursor_pos(area), Some((3, 10)));
     }
 
     // ===== Plan Phase 13 step 4: cursor containment =====
@@ -1574,6 +1581,6 @@ mod tests {
         // all: the cursor must be hidden, never parked outside the box.
         assert_eq!(pane.cursor_pos(Rect::new(0, 0, 80, 2)), None);
         // At the full idle height it is claimed inside the composer.
-        assert_eq!(pane.cursor_pos(Rect::new(0, 0, 80, 4)), Some((8, 2)));
+        assert_eq!(pane.cursor_pos(Rect::new(0, 0, 80, 4)), Some((7, 2)));
     }
 }

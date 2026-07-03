@@ -1757,7 +1757,7 @@ mod tests {
         );
         // The composer prompt still renders beneath the tail.
         assert!(
-            rows.iter().any(|row| row.starts_with("│> ")),
+            rows.iter().any(|row| row.starts_with('›')),
             "composer visible:\n{}",
             rows.join("\n")
         );
@@ -1915,7 +1915,7 @@ mod tests {
             rows[1]
         );
         assert!(
-            rows.iter().any(|r| r.starts_with("│> ")),
+            rows.iter().any(|r| r.starts_with('›')),
             "composer still visible:\n{}",
             rows.join("\n")
         );

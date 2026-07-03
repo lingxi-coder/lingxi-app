@@ -11,13 +11,14 @@
 //! when already on the first/last line — the standard CLI composer feel.
 //!
 //! Rendering lives in the separate [`ComposerView`] (the model above stays
-//! backend-neutral): a [`Renderable`] that draws the bordered `"> "` prompt box
-//! into `(Rect, &mut Buffer)` and reports the CJK-aware cursor position.
+//! backend-neutral): a [`Renderable`] that draws codex's borderless shape (a
+//! background-styled block with a bold `›` gutter prompt) into
+//! `(Rect, &mut Buffer)` and reports the CJK-aware cursor position.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Paragraph, Widget};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, Widget};
 
 use crate::renderable::Renderable;
 
@@ -441,10 +442,12 @@ impl Composer {
     }
 }
 
-/// The composer's [`Renderable`] view: a bordered box whose first content line
-/// carries the `"> "` prompt (wrapped lines align under it), scrolled so the
-/// cursor row stays visible. The cursor position is reported in DISPLAY
-/// columns (CJK/wide chars are 2 columns), clamped inside the box.
+/// The composer's [`Renderable`] view: codex's borderless shape (a
+/// background-styled block, no box glyphs) with a bold `›` prompt rendered
+/// into a 2-column left gutter on the textarea's first visible row, scrolled
+/// so the cursor row stays visible. The cursor position is reported in
+/// DISPLAY columns (CJK/wide chars are 2 columns), clamped inside the inset
+/// textarea.
 ///
 /// Extracted from the former `RataApp::render_viewport`'s composer zone (plan
 /// Phase 2): the view renders into `(Rect, &mut Buffer)`; only the terminal
@@ -452,7 +455,8 @@ impl Composer {
 /// [`crate::terminal::Frame`].
 pub struct ComposerView<'a> {
     composer: &'a Composer,
-    /// Session accent tint (`/color`): applied to the box border when set.
+    /// Session accent tint (`/color`): there is no border to tint since the
+    /// borderless-composer rework (Task 3) — it now tints the `›` prompt.
     accent: Option<ratatui::style::Color>,
 }
 
@@ -466,7 +470,8 @@ impl<'a> ComposerView<'a> {
         }
     }
 
-    /// Tint the composer box border with the session accent color (`/color`).
+    /// Tint the `›` gutter prompt with the session accent color (`/color`).
+    /// Previously tinted the box border; the border is gone (Task 3).
     #[must_use]
     pub fn with_accent(mut self, accent: Option<ratatui::style::Color>) -> Self {
         self.accent = accent;
@@ -481,40 +486,59 @@ impl<'a> ComposerView<'a> {
     }
 }
 
+/// Codex-shape composer inner rect: 1-row top/bottom padding, 2-column left
+/// gutter (the `›` prompt), 1-column right margin (codex `layout_areas`
+/// insets `tlbr(1, LIVE_PREFIX_COLS, 1, 1)` with `LIVE_PREFIX_COLS` = 2).
+fn inner_rect(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(2),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(3),
+        height: area.height.saturating_sub(2),
+    }
+}
+
 impl Renderable for ComposerView<'_> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        let mut block = Block::new().borders(Borders::ALL);
-        if let Some(accent) = self.accent {
-            block = block.border_style(ratatui::style::Style::default().fg(accent));
+        // Codex chat_composer render: a borderless background block…
+        let style = crate::style::user_message_style();
+        ratatui::widgets::Block::default().style(style).render(area, buf);
+        let inner = inner_rect(area);
+        if inner.width == 0 || inner.height == 0 {
+            return;
         }
-        let inner = block.inner(area);
-        block.render(area, buf);
-        // The first line carries the "> " prompt; wrapped lines align under it.
+        // …with a bold `›` in the 2-column gutter on the first textarea row.
+        // The `/color` accent used to tint the (now removed) border; it tints
+        // the prompt instead.
+        let prompt_style = match self.accent {
+            Some(accent) => ratatui::style::Style::default()
+                .fg(accent)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+            None => ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+        };
+        buf.set_span(area.x, inner.y, &Span::styled("›", prompt_style), 2);
         let body: Vec<Line> = self
             .composer
             .lines()
             .iter()
-            .enumerate()
-            .map(|(i, l)| {
-                let prefix = if i == 0 { "> " } else { "  " };
-                Line::from(format!("{prefix}{l}"))
-            })
+            .map(|l| Line::from(l.clone()))
             .collect();
         let first_row = self.first_visible_row(usize::from(inner.height));
         Paragraph::new(body)
+            .style(style)
             .scroll((u16::try_from(first_row).unwrap_or(0), 0))
             .render(inner, buf);
     }
 
-    /// Content lines clamped to [`MAX_VISIBLE_LINES`] plus the 2 border rows.
-    /// Width is unused: composer lines never soft-wrap (they scroll).
+    /// Content lines clamped to [`MAX_VISIBLE_LINES`] plus the 2 padding rows
+    /// (same arithmetic as the old border rows — pane height is unchanged).
     fn desired_height(&self, _width: u16) -> u16 {
         let content = self.composer.lines().len().clamp(1, MAX_VISIBLE_LINES);
         u16::try_from(content + 2).unwrap_or(u16::MAX)
     }
 
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-        let inner = Block::new().borders(Borders::ALL).inner(area);
+        let inner = inner_rect(area);
         // A degenerate inner rect (terminal too small for even one content
         // row) has nowhere the cursor could sit INSIDE the composer: claim
         // none so the terminal hides it instead of parking it outside the
@@ -533,7 +557,7 @@ impl Renderable for ComposerView<'_> {
             .map(|l| l.chars().take(ccol).collect())
             .unwrap_or_default();
         let disp_w = unicode_width::UnicodeWidthStr::width(before_cursor.as_str());
-        let cursor_x = inner.x + 2 + u16::try_from(disp_w).unwrap_or(0);
+        let cursor_x = inner.x + u16::try_from(disp_w).unwrap_or(0);
         Some((
             cursor_x.min(inner.x + inner.width.saturating_sub(1)),
             cursor_y.min(inner.y + inner.height.saturating_sub(1)),
@@ -813,7 +837,38 @@ mod tests {
     }
 
     #[test]
-    fn view_renders_bordered_prompt_box_with_continuation_alignment() {
+    fn composer_renders_codex_shape_gutter_prompt_no_borders() {
+        let c = typed("hi");
+        let area = Rect::new(0, 0, 40, 3);
+        let mut buf = Buffer::empty(area);
+        ComposerView::new(&c).render(area, &mut buf);
+        let row = |y: u16| -> String {
+            (0..40)
+                .map(|x| {
+                    buf.cell(ratatui::layout::Position::new(x, y))
+                        .unwrap()
+                        .symbol()
+                        .to_string()
+                })
+                .collect()
+        };
+        // Row 0 and row 2 are padding (no border glyphs anywhere).
+        assert!(!row(0).contains('┌') && !row(2).contains('└'));
+        // Row 1: gutter prompt + text at column 2.
+        assert!(row(1).starts_with("› hi"), "row1: {:?}", row(1));
+    }
+
+    #[test]
+    fn composer_cursor_sits_in_the_inset_textarea() {
+        let c = typed("ab");
+        let area = Rect::new(0, 0, 40, 3);
+        let pos = ComposerView::new(&c).cursor_pos(area);
+        // inner.x = 2 (gutter), + display width 2 = 4; row = 1 (below top padding).
+        assert_eq!(pos, Some((4, 1)));
+    }
+
+    #[test]
+    fn view_renders_codex_shape_with_gutter_prompt_pinned_to_the_top_row() {
         let mut c = typed("first");
         c.insert_newline();
         c.insert_str("second");
@@ -821,19 +876,23 @@ mod tests {
         let area = Rect::new(0, 0, 12, 4);
         let mut buf = Buffer::empty(area);
         view.render(area, &mut buf);
-        assert!(buffer_row(&buf, 0).starts_with('┌'));
-        assert!(buffer_row(&buf, 1).starts_with("│> first"));
-        assert!(buffer_row(&buf, 2).starts_with("│  second"));
-        assert!(buffer_row(&buf, 3).starts_with('└'));
+        // Row 0 and row 3 are padding: no border glyphs anywhere.
+        assert!(!buffer_row(&buf, 0).contains('┌'));
+        assert!(!buffer_row(&buf, 3).contains('└'));
+        // The `›` gutter prompt always sits on the top visible textarea row;
+        // wrapped/continuation lines no longer carry a "  " prefix — they
+        // start at the same `inner.x` gutter column as the prompted line.
+        assert!(buffer_row(&buf, 1).starts_with("› first"));
+        assert!(buffer_row(&buf, 2).starts_with("  second"));
     }
 
     #[test]
-    fn view_desired_height_is_content_plus_border_clamped_to_cap() {
+    fn view_desired_height_is_content_plus_padding_clamped_to_cap() {
         let mut c = typed("one");
         assert_eq!(
             ComposerView::new(&c).desired_height(80),
             3,
-            "1 line + border"
+            "1 line + top/bottom padding"
         );
         for _ in 0..9 {
             c.insert_newline();
@@ -846,10 +905,10 @@ mod tests {
     fn view_cursor_pos_uses_display_columns_for_cjk() {
         let c = typed("你好");
         let view = ComposerView::new(&c);
-        // x = border(1) + "> "(2) + two wide chars × 2 columns = 7; y = row 1.
-        assert_eq!(view.cursor_pos(Rect::new(0, 0, 20, 3)), Some((7, 1)));
+        // x = gutter inner.x(2) + two wide chars × 2 columns = 6; y = row 1.
+        assert_eq!(view.cursor_pos(Rect::new(0, 0, 20, 3)), Some((6, 1)));
         // An offset area shifts the reported cursor with it.
-        assert_eq!(view.cursor_pos(Rect::new(0, 5, 20, 3)), Some((7, 6)));
+        assert_eq!(view.cursor_pos(Rect::new(0, 5, 20, 3)), Some((6, 6)));
     }
 
     #[test]
@@ -865,10 +924,12 @@ mod tests {
         let area = Rect::new(0, 0, 10, 5);
         let mut buf = Buffer::empty(area);
         view.render(area, &mut buf);
-        assert!(buffer_row(&buf, 1).starts_with("│  l5"));
-        assert!(buffer_row(&buf, 3).starts_with("│  l7"));
+        // The `›` gutter prompt is pinned to the top visible row (l5 here),
+        // regardless of which logical line scrolled into view.
+        assert!(buffer_row(&buf, 1).starts_with("› l5"));
+        assert!(buffer_row(&buf, 3).starts_with("  l7"));
         let (x, y) = view.cursor_pos(area).expect("cursor");
-        assert_eq!((x, y), (5, 3), "cursor on the bottom visible row");
-        assert!(y < area.bottom() - 1, "cursor stays inside the border");
+        assert_eq!((x, y), (4, 3), "cursor on the bottom visible row");
+        assert!(y < area.bottom() - 1, "cursor stays inside the padding");
     }
 }

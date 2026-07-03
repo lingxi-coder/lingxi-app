@@ -146,11 +146,12 @@ fn m7_07_registers_no_new_telemetry_events() {
     // CronList +6) → 334 (FileRead analytics +4, W36/#13) → 343 (config migrations
     // +9) → 344 (permission flow +1) → 347 (coordinator swarm +3); strict-parity
     // (2.1.195) then −3 todo_write (D1) −1 cost_recorded (D2) −2 session-resume (D3) → 341.
+    // cc 2.1.198 M2: +2 AWS auth-refresh trust-gate events → 343.
     // the palette still mints nothing (the contains-check below is the real guard).
     assert_eq!(
         names.len(),
-        341,
-        "registry at 341 (347 − strict-parity removals)"
+        343,
+        "registry at 343 (347 − strict-parity removals + M2 AWS auth-refresh +2)"
     );
     assert!(
         !names.contains(&"tengu_tui_command_palette_opened"),

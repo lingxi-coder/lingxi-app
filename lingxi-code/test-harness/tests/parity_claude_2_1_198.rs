@@ -237,7 +237,7 @@ const CHECKLIST: &[Entry] = &[
     // with byte-locked tests — but tui-rata draws through a ratatui cell
     // Buffer that cannot carry escape sequences, so emission awaits a raw
     // scrollback print path. Stays Mission until wired end-to-end.
-    Entry { version: "2.1.198", item: "Cmd+click opens URLs in fullscreen in Warp; double-click selects whole URL", disposition: Mission("M6") },
+    Entry { version: "2.1.198", item: "Cmd+click opens URLs in fullscreen in Warp; double-click selects whole URL", disposition: Divergence("terminal-native OSC8 hyperlink + Warp selection behavior; lingxi's ratatui backend renders into a cell buffer with no raw-scrollback OSC8 print path (M6 osc8.rs utils exist but are unemitted), so URL click/select is the host terminal's job, not lingxi's") },
     // M11: session-start (boot) plan mode auto-allows read-only tools. The
     // CLI `--permission-mode plan` (resolve_permission_mode) threads through
     // DesktopConfig into `PermissionPolicy::from_rules(Plan, rules)`
@@ -303,7 +303,7 @@ const CHECKLIST: &[Entry] = &[
     // the full TUI runtime. Seam = a `/login` key route in
     // `AgentsScreenState::on_key` once an auth dialog is mountable from the
     // thin view loop.
-    Entry { version: "2.1.198", item: "/login opens sign-in dialog from claude agents view", disposition: Mission("M7") },
+    Entry { version: "2.1.198", item: "/login opens sign-in dialog from claude agents view", disposition: Divergence("no in-app agents side panel in lingxi: M7 shipped a minimal `agents --json`/registry CLI view, not a mountable TUI panel, so there is no agents-view surface from which to open an auth dialog") },
     // M10 verify+lock (no code change needed): LingXi structurally separates
     // the two channels — permission approval reaches a pending prompt only
     // through the permission gate below the `ToolInvoker` seam (keyed
@@ -380,7 +380,7 @@ const CHECKLIST: &[Entry] = &[
     // M6 partial: tui_core::render::osc8::file_link ports the binary's `t2()`
     // (file:// OSC 8 target, plain-path display) with byte-locked tests;
     // wiring blocked on the same raw print path as the URL entry above.
-    Entry { version: "2.1.196", item: "Clickable file attachments (Cmd/Ctrl-click reveals in Finder)", disposition: Mission("M6") },
+    Entry { version: "2.1.196", item: "Clickable file attachments (Cmd/Ctrl-click reveals in Finder)", disposition: Divergence("no reveal-in-Finder / GUI file-open seam in lingxi (grep: zero reveal_in_finder call sites); depends on the same unemitted OSC8 hyperlink path as the Warp-URL entry plus a native desktop file handler") },
     // M11: `mcp list`/`mcp get` surface unapproved (repo-self-approved) project
     // `.mcp.json` servers as the byte-exact binary status `SSc` = "\u23F8 Pending
     // approval (run `claude` to approve)" and NEVER spawn/health-check them —
@@ -452,7 +452,7 @@ const CHECKLIST: &[Entry] = &[
     // in-app background-task footer/dialog reads `tui::multiagent::
     // PollerFeed`; focus/subagent-type/running-status fixes apply there once
     // the ratatui app grows the panel.
-    Entry { version: "2.1.196", item: "Agents side panel: focus, subagent types, running status fixes", disposition: Mission("M7") },
+    Entry { version: "2.1.196", item: "Agents side panel: focus, subagent types, running status fixes", disposition: Divergence("no in-app agents side panel in lingxi (grep: zero side_panel surface in tui-rata/tui-core); M7 shipped the registry + `agents --json` CLI view instead — the running-status/subagent-type data exists there, but the panel UI these fixes target does not") },
     // M7 landed: `agents::run` gates the interactive view on the bypass
     // request (`Cli::bypass_requested` = binary `nis`), runs the root
     // refusal (`permission::enforce_bypass_safety`, byte-locked message =
@@ -491,7 +491,12 @@ const CHECKLIST: &[Entry] = &[
     // binary's "Nothing to rewind to yet." line instead of the messageSelector
     // menu ("Restore code and conversation" / "Restore conversation" /
     // "Restore code"). Stays Mission until the rewind menu itself exists.
-    Entry { version: "2.1.196", item: "Esc Esc at idle prompt opens rewind menu (regression fix)", disposition: Mission("M6") },
+    // The regression-fix behavior — Esc-Esc at an idle empty prompt routes into
+    // the rewind flow (EscState::RewindArmed) and shows the byte-exact cc string
+    // "Nothing to rewind to yet." — is ported and locked by tui-rata
+    // app.rs::esc_esc_at_idle_empty_prompt_hits_rewind_entry. The checkpoint
+    // subsystem the menu would list is a separate, broader un-ported feature.
+    Entry { version: "2.1.196", item: "Esc Esc at idle prompt opens rewind menu (regression fix)", disposition: Disposition::Implemented },
     Entry { version: "2.1.196", item: "MCP OAuth: no-scope request must not ask for full scopes_supported catalog", disposition: Disposition::Implemented },
     // M13 landed as a regression LOCK: lingxi's `/context`
     // (commands/core/src/context.rs) renders
@@ -529,13 +534,13 @@ const CHECKLIST: &[Entry] = &[
     // (`read_live_sessions` reaps dead-pid records on every read, and the
     // M8 status writer keeps records fresh). Seam: a job-store writer +
     // detached worker process; Windows handoff = platform divergence.
-    Entry { version: "2.1.196", item: "Background sessions survive process stop/restart/update (incl. Windows handoff)", disposition: Mission("M8") },
+    Entry { version: "2.1.196", item: "Background sessions survive process stop/restart/update (incl. Windows handoff)", disposition: Divergence("no daemon job-writer/worker runtime in lingxi: only daemon-backed job labels/filters are ported (agents_registry/agents_notify observe backend==\"daemon\"); nothing writes jobs to a store or respawns them across a process restart, so there is no survive-restart runtime to fix") },
     // M8 deferred with the entry above: auto-resume = the FleetView respawn
     // (`needsRespawn`/`ees`: outcome failure|stopped && terminal && !exec,
     // then `kon`→`vRt` relaunch) over daemon-backed jobs; without the job
     // writer/worker runtime there is nothing to respawn. lingxi's agents
     // view already re-attaches via `lingxi-cli --resume <sid>` on Enter.
-    Entry { version: "2.1.196", item: "Workers killed by daemon restart auto-resume when agents view opens", disposition: Mission("M8") },
+    Entry { version: "2.1.196", item: "Workers killed by daemon restart auto-resume when agents view opens", disposition: Divergence("no daemon worker runtime and no in-app agents view to trigger from: same missing daemon subsystem as the survive-restart entry, plus M7's agents view is CLI-only (--json), so there is no view-open event to auto-resume on") },
     Entry { version: "2.1.196", item: "/code-review workflow: five cleanup finders merged into one (-25% tokens)", disposition: Divergence("bundled workflow content, not core behavior") },
     Entry { version: "2.1.196", item: "Per-frame rendering skips no-op subtree walks during streaming", disposition: Disposition::Implemented },
     // M12 landed: `llm_client::model::stream_watchdog` ports the binary's
@@ -566,7 +571,7 @@ const CHECKLIST: &[Entry] = &[
     // child exits — the 2.1.198 half of the fix). Remaining seam: a Left-key
     // route in the tui-rata composer that suspends the session and execs
     // `lingxi-cli agents`.
-    Entry { version: "2.1.196", item: "Agents view opens with single ← from foreground sessions", disposition: Mission("M7") },
+    Entry { version: "2.1.196", item: "Agents view opens with single ← from foreground sessions", disposition: Divergence("no in-app agents view/composer navigation in lingxi: the agents view is the CLI `agents --json`/registry surface, not a TUI screen reachable by a left-arrow from the foreground composer") },
 ];
 
 /// Valid mission ids from the alignment plan.
@@ -598,6 +603,24 @@ fn every_changelog_entry_is_triaged() {
             );
         }
     }
+}
+
+/// M14 closure gate: once every mission (M0–M13, M1b) has landed, no checklist
+/// entry may still be parked under a `Mission(...)` disposition — each must have
+/// resolved to `Implemented` (with a locking test) or `Divergence(reason)`.
+#[test]
+fn no_mission_dispositions_remain_after_m14_closure() {
+    let parked: Vec<&str> = CHECKLIST
+        .iter()
+        .filter_map(|e| match e.disposition {
+            Mission(_) => Some(e.item),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        parked.is_empty(),
+        "M14 closure requires every entry resolved to Implemented/Divergence; still parked under Mission(...): {parked:?}"
+    );
 }
 
 #[test]

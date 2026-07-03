@@ -1147,6 +1147,10 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     setting_source_scope: (true, true),
 ///     customization_gates: engine_desktop::CustomizationGates::default(),
 ///     session_persistence: true,
+///     cli_agents_json: None,
+///     cli_agent: None,
+///     cli_plugin_dirs: Vec::new(),
+///     initial_effort: None,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));

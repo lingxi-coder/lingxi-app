@@ -80,6 +80,9 @@ pub enum TurnEvent {
     ContextPressure {
         /// `Some` shows the banner; `None` clears a previously-shown one.
         banner: Option<ContextPressureBanner>,
+        /// Context usage as a 0-1 fraction of the model's effective context
+        /// window (fed to the custom statusline's `context_window.used_percentage`).
+        used_fraction: f32,
     },
     /// An allowlisted terminal escape sequence a hook returned (#6 main-loop
     /// parity). `apply_event` stages it on `state.pending_terminal_sequence`;
@@ -233,8 +236,15 @@ impl OutputStream for BridgeOutputStream {
         });
     }
 
-    async fn emit_context_pressure(&self, banner: Option<ContextPressureBanner>) {
-        let _ = self.tx.send(TurnEvent::ContextPressure { banner });
+    async fn emit_context_pressure(
+        &self,
+        banner: Option<ContextPressureBanner>,
+        used_fraction: f32,
+    ) {
+        let _ = self.tx.send(TurnEvent::ContextPressure {
+            banner,
+            used_fraction,
+        });
     }
 
     async fn emit_terminal_sequence(&self, seq: &str) {
@@ -458,19 +468,26 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
         bridge
-            .emit_context_pressure(Some(traits::ContextPressureBanner {
-                text: "Context low (8% remaining) \u{00b7} Run /compact to compact & continue"
-                    .into(),
-                level: traits::ContextPressureLevel::Error,
-            }))
+            .emit_context_pressure(
+                Some(traits::ContextPressureBanner {
+                    text: "Context low (8% remaining) \u{00b7} Run /compact to compact & continue"
+                        .into(),
+                    level: traits::ContextPressureLevel::Error,
+                }),
+                0.92,
+            )
             .await;
         match rx.try_recv().expect("bridge must forward a TurnEvent") {
-            TurnEvent::ContextPressure { banner: Some(b) } => {
+            TurnEvent::ContextPressure {
+                banner: Some(b),
+                used_fraction,
+            } => {
                 assert_eq!(
                     b.text,
                     "Context low (8% remaining) \u{00b7} Run /compact to compact & continue"
                 );
                 assert_eq!(b.level, traits::ContextPressureLevel::Error);
+                assert!((used_fraction - 0.92).abs() < 1e-6);
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -480,10 +497,13 @@ mod tests {
     async fn emit_context_pressure_none_clears() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        bridge.emit_context_pressure(None).await;
+        bridge.emit_context_pressure(None, 0.0).await;
         assert!(matches!(
             rx.try_recv().expect("bridge must forward a TurnEvent"),
-            TurnEvent::ContextPressure { banner: None }
+            TurnEvent::ContextPressure {
+                banner: None,
+                ..
+            }
         ));
     }
 

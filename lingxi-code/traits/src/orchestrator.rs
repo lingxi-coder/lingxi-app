@@ -1084,7 +1084,18 @@ pub trait OutputStream: Send + Sync {
     /// (`PromptInput/Notifications.tsx:321`), which recomputes
     /// `calculateTokenWarningState` as `tokenUsage` grows. Default no-op so
     /// non-interactive sinks (print mode, tests) ignore it.
-    async fn emit_context_pressure(&self, _banner: Option<ContextPressureBanner>) {}
+    /// `used_fraction` is the current context usage as a 0-1 fraction of the
+    /// model's effective context window (claude-code
+    /// `calculateContextPercentages(currentUsage, contextWindowSize).used`),
+    /// carried alongside the (optional) banner so a consumer that wants the raw
+    /// percentage — the custom statusline's `context_window.used_percentage` —
+    /// gets it on every turn, not only when the warning banner is showing.
+    async fn emit_context_pressure(
+        &self,
+        _banner: Option<ContextPressureBanner>,
+        _used_fraction: f32,
+    ) {
+    }
 
     /// Push a raw-utilization snapshot.
     ///

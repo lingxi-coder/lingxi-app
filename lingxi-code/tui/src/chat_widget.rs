@@ -305,13 +305,19 @@ impl ChatWidget {
                 self.with_status_line(|s| s.data.cost = cost_str.clone());
                 self.cost = Some(cost_str);
             }
-            TurnEvent::ContextPressure { banner } => {
+            TurnEvent::ContextPressure {
+                banner,
+                used_fraction,
+            } => {
                 // (TokenWarning) The orchestrator-computed context-pressure
                 // banner renders as its own pane row next pass; `None` clears a
                 // previously-shown banner once the context drops below the
                 // warning threshold (claude-code's `<TokenWarning>` returning
                 // null).
                 self.bottom_pane.set_context_pressure(banner);
+                // Feed the live context usage into the statusline payload's
+                // `context_window.used_percentage` (0-1 fraction).
+                self.with_status_line(|s| s.data.context_pct = used_fraction);
             }
             TurnEvent::TerminalSequence { seq } => {
                 // #6: stage the validated terminal escape sequence; the app
@@ -2092,6 +2098,7 @@ mod tests {
                 text: "Context low (12% remaining)".to_string(),
                 level: traits::ContextPressureLevel::Warning,
             }),
+            used_fraction: 0.88,
         });
         assert_eq!(
             widget.bottom_pane().context_pressure().map(|b| b.level),
@@ -2112,9 +2119,37 @@ mod tests {
             rows.join("\n")
         );
         // `None` clears the banner and its row.
-        widget.apply_turn_event(TurnEvent::ContextPressure { banner: None });
+        widget.apply_turn_event(TurnEvent::ContextPressure {
+            banner: None,
+            used_fraction: 0.0,
+        });
         assert!(widget.bottom_pane().context_pressure().is_none());
         assert_eq!(widget.desired_height(width), idle_height);
+    }
+
+    #[test]
+    fn context_pressure_feeds_statusline_used_percentage() {
+        // The numeric `used_fraction` on a ContextPressure event reaches the
+        // statusline payload's `context_window.used_percentage` (× 100).
+        let mut widget = widget();
+        let slot = crate::status_line::new_slot(
+            tui_core::status_line_command::StatusLineConfig::from_settings_value(
+                &serde_json::json!({"type": "command", "command": "sl.sh"}),
+            ),
+        );
+        widget.set_status_line(slot.clone());
+        widget.apply_turn_event(TurnEvent::ContextPressure {
+            banner: None,
+            used_fraction: 0.375,
+        });
+        let (_, json) = crate::status_line::build_payload(&slot.lock().unwrap()).expect("payload");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // 0.375 fraction → 37.5% used.
+        assert!(
+            (v["context_window"]["used_percentage"].as_f64().unwrap() - 37.5).abs() < 1e-3,
+            "used_percentage: {}",
+            v["context_window"]["used_percentage"]
+        );
     }
 
     #[test]

@@ -1094,7 +1094,21 @@ pub(crate) async fn call_api_with_ptl_recovery(
             compaction::TokenWarningColor::Error => traits::ContextPressureLevel::Error,
         },
     });
-    orch.output.emit_context_pressure(banner).await;
+    // Context usage as a 0-1 fraction of the model's effective context window
+    // (claude-code `calculateContextPercentages(currentUsage, contextWindowSize)`),
+    // emitted every turn — even when no warning banner shows — so the custom
+    // statusline's `context_window.used_percentage` is always live. Reuses the
+    // SAME `estimate` the banner/auto-compact gate uses; `betas` is empty here
+    // to match the banner computation above.
+    let context_window = compaction::thresholds::effective_context_window_size(model, &[]);
+    let used_fraction = if context_window == 0 {
+        0.0
+    } else {
+        (estimate as f64 / context_window as f64) as f32
+    };
+    orch.output
+        .emit_context_pressure(banner, used_fraction)
+        .await;
 
     if warning.is_at_blocking_limit {
         tracing::warn!(

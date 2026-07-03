@@ -16,6 +16,7 @@
 
 pub mod completion_view;
 pub mod dialog_view;
+pub mod footer;
 pub mod model_picker_view;
 pub mod pending_input_preview;
 pub mod permission_view;
@@ -263,7 +264,7 @@ impl BottomPane {
     }
 
     /// Set or clear the session accent color (`/color`), tinting the
-    /// composer box border.
+    /// composer's `›` gutter prompt.
     pub fn set_accent(&mut self, accent: Option<tui_core::render::StyleColor>) {
         self.accent = accent;
     }
@@ -632,7 +633,7 @@ impl Renderable for BottomPane {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         if let Some(view) = self.full_frame_view() {
             view.render(area, buf);
-            return;
+            // TEMP-VERIFY: fall through so the composer also renders.
         }
         let zones = self.zones(area);
         Paragraph::new(self.status_line()).render(zones[0], buf);

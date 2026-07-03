@@ -365,8 +365,13 @@ async fn run_ratatui(tui_build: crate::init::TuiBuild) -> i32 {
     .await
     {
         Ok(Ok(())) => {
-            let session_id = summary_orch.current_session_id().await;
-            println!("\nSession {session_id} saved. Resume with: lingxi --resume {session_id}");
+            // Print the BARE uuid (not the `sess:`-prefixed SessionId Display):
+            // it matches the on-disk `<uuid>.jsonl` and what `--resume` resolves
+            // to (claude-code uses bare uuids for session ids end-to-end).
+            let session_uuid = summary_orch.current_session_id().await.as_uuid();
+            println!(
+                "\nSession {session_uuid} saved. Resume with: lingxi --resume {session_uuid}"
+            );
             exit_codes::SUCCESS
         }
         Ok(Err(e)) => {

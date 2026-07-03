@@ -1466,7 +1466,12 @@ pub(crate) fn lingxi_home_dir() -> PathBuf {
 
 /// Resolve the `--resume <ID>` argument into a concrete UUID.
 fn resolve_session_id(arg: &str) -> Result<uuid::Uuid, LoaderError> {
-    uuid::Uuid::parse_str(arg).map_err(|_| LoaderError::SessionNotFound {
+    // Accept both a bare `<uuid>` and the `sess:<uuid>` display form — the
+    // "Session … saved. Resume with: lingxi --resume <id>" hint prints the
+    // prefixed `SessionId` Display, so a user copying it verbatim must work.
+    // The on-disk JSONL is named by the bare uuid, so we normalize to that.
+    let body = arg.strip_prefix("sess:").unwrap_or(arg);
+    uuid::Uuid::parse_str(body).map_err(|_| LoaderError::SessionNotFound {
         arg: arg.to_string(),
     })
 }
@@ -1904,5 +1909,25 @@ mod tests {
                 "{st} should ack with no payload"
             );
         }
+    }
+
+    #[test]
+    fn resolve_session_id_accepts_both_bare_and_sess_prefixed() {
+        // The "Session … saved" hint prints the `sess:`-prefixed SessionId
+        // Display form; `--resume` must accept that verbatim as well as a bare
+        // uuid, and resolve both to the same on-disk id.
+        let uuid = "733fa772-2893-49b2-835d-d86d033daf54";
+        let bare = resolve_session_id(uuid).expect("bare uuid resolves");
+        let prefixed = resolve_session_id(&format!("sess:{uuid}")).expect("sess: prefix resolves");
+        assert_eq!(bare, prefixed);
+        assert_eq!(bare.to_string(), uuid);
+    }
+
+    #[test]
+    fn resolve_session_id_rejects_garbage() {
+        assert!(matches!(
+            resolve_session_id("not-a-uuid"),
+            Err(LoaderError::SessionNotFound { .. })
+        ));
     }
 }

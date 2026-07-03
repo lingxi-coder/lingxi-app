@@ -1,9 +1,0 @@
----
-source: tui/tests/coordinator_chrome.rs
-assertion_line: 18
-expression: "render_coordinator_status(&workers(), 1)"
----
-Agents
-  main
-> @alice: working
-  @bob: idle

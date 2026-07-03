@@ -1,7 +1,0 @@
----
-source: tui/tests/render_diff.rs
-assertion_line: 49
-expression: "structure(&render(\"a\\nb\\n\", \"a\\n\", Some(\"x.rs\"), ThemeName::Dark))"
----
-[C]1   [C]a
-[C]2 - [P]b

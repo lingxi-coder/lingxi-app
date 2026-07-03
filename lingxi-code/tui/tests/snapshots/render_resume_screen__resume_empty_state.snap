@@ -1,7 +1,0 @@
----
-source: crates/tui/tests/render_resume_screen.rs
-expression: "&frame"
----
-
- No conversations found to resume.
- Press Ctrl+C to exit and start a new conversation.

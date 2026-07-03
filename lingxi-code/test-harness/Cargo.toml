@@ -109,7 +109,6 @@ tokio-util = { workspace = true, features = ["rt"] }
 session = { path = "../session" }
 # Used by the M6-05 parity driver (parity_tui_permission_dialogs) to drive
 # `events::keymap::handle_key` end-to-end against the locked fixture. Dev-only.
-tui = { path = "../tui" }
 permission = { path = "../permission" }
 crossterm = { workspace = true }
 

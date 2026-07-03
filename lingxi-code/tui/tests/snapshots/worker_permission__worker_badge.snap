@@ -1,6 +1,0 @@
----
-source: tui/tests/worker_permission.rs
-assertion_line: 7
-expression: "render_worker_badge(\"alice\")"
----
-⏺ @alice

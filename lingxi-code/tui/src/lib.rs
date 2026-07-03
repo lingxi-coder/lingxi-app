@@ -1,89 +1,94 @@
-//! `lingxi-tui` — iocraft-based fullscreen TUI for the `LingXi` CLI.
+//! `tui` — Ratatui-based terminal UI runtime for LingXi.
 //!
-//! M6-01 ships the crate skeleton: terminal guard, event loop merge,
-//! placeholder root component, and the `run_tui_session` entry point.
-//! Components (`StatusLine`, `PromptInput`, `Scrollback`, message
-//! renderers, permission dialogs) land in M6-02..M6-05.
+//! The target backend of the iocraft → ratatui migration. It renders the
+//! backend-neutral model in `tui-core` (state, render model, theme, message
+//! types) and owns the terminal lifecycle + draw/event loop. It must NEVER
+//! depend on `iocraft`.
 //!
-//! M7-01 adds the `render` module: a full ANSI parser (16-color, 256-color,
-//! truecolor; cursor/erase skipped) and a `CommonMark` markdown renderer
-//! (`pulldown-cmark`), both producing the shared `render::StyledLine` model.
-//! See plan `docs/superpowers/plans/2026-05-29-m7-01-ansi-markdown.md`.
-//! See plan `docs/superpowers/plans/2026-05-28-m6-01-foundation.md`.
-
+//! The runtime terminal substrate is [`terminal`]: a codex-derived
+//! bottom-anchored inline terminal whose viewport is an absolute on-screen
+//! rect. Finalized history is inserted ABOVE the viewport into the terminal's
+//! native scrollback ([`terminal::Terminal::insert_history_lines`]); the
+//! bottom viewport (status + composer + overlays) is diff-redrawn in place.
+//!
+//! See `.omo/plans/2026-07-02-tui-rata-codex-ui-structure-parity.md`.
 #![forbid(unsafe_code)]
 
+pub mod agents_screen;
 pub mod app;
-pub mod bash_runner;
-pub mod commands;
-pub mod components;
-pub mod error;
-pub mod events;
-pub mod multiagent;
-pub mod permission_bridge;
+pub mod bottom_pane;
+pub mod chat_widget;
+pub mod color;
+pub mod command;
+pub mod composer;
+pub mod copy;
+pub mod export;
+pub mod files;
+pub mod history_cell;
+pub mod image_view;
+pub mod message;
 pub mod rate_limit_messages;
-pub mod recent_models;
 pub mod render;
-pub mod render_iocraft;
+pub mod resume;
 pub mod replay;
-pub mod root;
-pub mod screens;
-pub mod session;
-pub mod startup_bypass;
+pub mod permission_gate;
 pub mod startup_trust;
-pub mod state;
-pub mod streaming;
-pub mod telemetry;
-pub(crate) mod terminal;
-pub mod theme;
-pub(crate) mod theme_detect;
-pub mod theme_persist;
+pub mod startup_bypass;
+pub mod raw_screen;
+pub mod renderable;
+pub mod session;
+pub mod status_line;
+pub(crate) mod style;
+pub mod style_adapter;
+pub mod term_image;
+pub mod terminal;
+pub mod transcript;
+pub mod vim;
 
-pub use app::TuiApp;
-pub use error::TuiError;
-pub use events::orchestrator_bridge::{BridgeOutputStream, TurnEvent};
-pub use events::{OrchestratorOutputEvent, TuiEvent};
-pub use session::{run_tui_session, Runtime};
+use std::io::Stdout;
 
-/// (T3) Whether to use iocraft's INLINE render loop instead of the fullscreen
-/// alt-screen one. Default ON. Opt-out via `LINGXI_TUI_FULLSCREEN` (non-empty, not `"0"`).
+use ratatui::backend::CrosstermBackend;
+pub use terminal::TerminalSession;
+pub use tui_core::message::RenderedMessage;
+pub use tui_core::orchestrator_bridge::TurnEvent;
+
+/// The concrete runtime terminal: the bottom-anchored custom [`terminal`]
+/// over crossterm stdout. This replaced the earlier scaffold alias to
+/// `ratatui::Terminal` with `Viewport::Inline` (which ghost-stacked frames
+/// and required full terminal re-creation on every height change).
+pub type RataTerminal = terminal::Terminal<CrosstermBackend<Stdout>>;
+
+/// Standard ratatui terminal for standalone full-screen views — the M7
+/// `claude agents` view (`agents_screen`) owns the whole alternate screen for
+/// its lifetime and renders into a plain [`ratatui::Frame`], distinct from the
+/// chat app's bottom-anchored custom [`RataTerminal`]. Kept a separate type so
+/// the standalone screen (its own event loop, no `ChatWidget`/`BottomPane`) is
+/// not coupled to the custom terminal's inline-viewport machinery.
+pub type AgentsTerminal = ratatui::Terminal<CrosstermBackend<Stdout>>;
+
+/// Enter raw mode + the alternate screen and construct a standalone ratatui
+/// terminal for a full-screen view (M7 `claude agents`).
 ///
-/// Inline mode (`render_loop()` without `.fullscreen()`) keeps the UI in the
-/// normal terminal buffer — no alt-screen. The live transcript itself stays in
-/// the fixed TUI frame so the prompt/footer remain bottom-pinned; the old
-/// native-scrollback transcript commit path is opt-in via
-/// `LINGXI_TUI_NATIVE_SCROLLBACK=1`.
-/// Fullscreen enters the alt screen + draws at absolute positions.
-#[must_use]
-pub(crate) fn inline_render_mode() -> bool {
-    use std::sync::OnceLock;
-    static INLINE: OnceLock<bool> = OnceLock::new();
-    *INLINE.get_or_init(|| parse_inline_flag(std::env::var("LINGXI_TUI_FULLSCREEN").ok()))
+/// # Errors
+/// Returns any terminal IO error from enabling raw mode, switching screens, or
+/// constructing the backend.
+pub fn setup_terminal() -> std::io::Result<AgentsTerminal> {
+    crossterm::terminal::enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
+    ratatui::Terminal::new(CrosstermBackend::new(stdout))
 }
 
-/// Pure parse of the `LINGXI_TUI_FULLSCREEN` value and inverts it: inline mode is on
-/// UNLESS the fullscreen flag is present, non-empty, and not `"0"`.
-#[must_use]
-fn parse_inline_flag(fullscreen_val: Option<String>) -> bool {
-    let is_fullscreen = matches!(fullscreen_val, Some(s) if !s.is_empty() && s != "0");
-    !is_fullscreen
+/// Restore the terminal to its pre-view state (leave the alt screen, disable
+/// raw mode, show the cursor). Safe to call during unwind/exit.
+///
+/// # Errors
+/// Returns any terminal IO error from restoring screen/cursor state.
+pub fn restore_terminal(terminal: &mut AgentsTerminal) -> std::io::Result<()> {
+    crossterm::terminal::disable_raw_mode()?;
+    crossterm::execute!(
+        terminal.backend_mut(),
+        crossterm::terminal::LeaveAlternateScreen
+    )?;
+    terminal.show_cursor()
 }
-
-#[cfg(test)]
-mod inline_mode_tests {
-    use super::parse_inline_flag;
-
-    #[test]
-    fn inline_flag_truthiness() {
-        // If FULLSCREEN is truthy, inline is false
-        assert!(!parse_inline_flag(Some("1".into())));
-        assert!(!parse_inline_flag(Some("true".into())));
-        // If FULLSCREEN is false/empty/none, inline is true
-        assert!(parse_inline_flag(Some("0".into())));
-        assert!(parse_inline_flag(Some(String::new())));
-        assert!(parse_inline_flag(None));
-    }
-}
-
-// Re-export points are filled in by later tasks; the stubs above keep the
-// crate compiling task-by-task.

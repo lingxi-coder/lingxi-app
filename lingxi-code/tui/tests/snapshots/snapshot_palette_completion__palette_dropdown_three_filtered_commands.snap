@@ -1,8 +1,0 @@
----
-source: tui/tests/snapshot_palette_completion.rs
-assertion_line: 19
-expression: out
----
-/copy       Copy Claude's last response to clipboard (o…
-/color      Set the prompt bar color for this session
-/commit     Create a git commit

@@ -1,6 +1,0 @@
----
-source: tui/tests/coordinator_chrome.rs
-assertion_line: 23
-expression: "render_team_footer(&workers(), true).unwrap()"
----
-2 teammates · Enter to view

@@ -1,5 +1,0 @@
----
-source: tui/tests/render_placeholder.rs
-expression: line
----
-lingxi-tui v0.12.0

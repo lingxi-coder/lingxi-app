@@ -1,29 +1,22 @@
-//! Startup project-trust confirmation — pure state machine + render for the
-//! TTY-only `TrustDialog` (claude-code `components/TrustDialog/TrustDialog.tsx`,
-//! shown by `showSetupScreens` BEFORE the REPL/session when the cwd has not yet
-//! been trusted, i.e. `!checkHasTrustDialogAccepted()`).
+//! Startup project-trust confirmation — pure state machine + a minimal
+//! crossterm render for the TTY-only `TrustDialog` (claude-code
+//! `components/TrustDialog/TrustDialog.tsx`, shown by `showSetupScreens` BEFORE
+//! the REPL/session when the cwd has not yet been trusted). Ported from the
+//! iocraft `tui` crate verbatim (the dialog was already iocraft-free — pure
+//! crossterm); only the raw-mode/alt-screen guard changed to
+//! [`crate::raw_screen::RawAltGuard`].
 //!
-//! Pure: `handle_key` drives a two-option Select; the terminal mount loop is
-//! thin terminal I/O and (like `run_tui_session` / `mount_bypass_dialog`)
-//! cannot be driven headless. ALL decision logic lives in the pure, tested
-//! `handle_key` / `render_lines`.
-//!
-//! The trust STORE itself (`check_/mark_trust_dialog_accepted`,
-//! `global_config_path`) is owned by the CLI gate (`apps/cli/src/mode.rs`),
-//! which already depends on `migrations`; this module stays a pure terminal
-//! component (no `migrations` dep), mirroring how `startup_bypass` splits the
-//! predicate/store logic out of the `tui` crate.
+//! Pure: `handle_key` drives a two-option Select; the mount loop is thin
+//! terminal I/O and cannot be driven headless. ALL decision logic lives in the
+//! pure, tested `handle_key` / `render_lines`. The trust STORE
+//! (`check_/mark_trust_dialog_accepted`) is owned by the CLI gate.
 
 use crossterm::event::{Event, KeyCode, KeyEvent};
 use std::path::Path;
 
-/// The two dialog choices.
-///
-/// Select option order (`TrustDialog.tsx:227-233`) is ACCEPT-first
-/// ("Yes, I trust this folder" then "No, exit") — the OPPOSITE of
-/// `startup_bypass` (which is decline-first). The default highlight follows
-/// the TS Select's "first option highlighted" behaviour, so the default lands
-/// on [`TrustChoice::Accept`].
+/// The two dialog choices. Select order (`TrustDialog.tsx:227-233`) is
+/// ACCEPT-first ("Yes, I trust this folder" then "No, exit"), so the default
+/// highlight lands on [`TrustChoice::Accept`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustChoice {
     /// `Yes, I trust this folder`.
@@ -41,8 +34,6 @@ pub struct TrustDialogState {
 
 impl Default for TrustDialogState {
     fn default() -> Self {
-        // Accept-first highlight (matches the TS Select option order, which
-        // lists "Yes, I trust this folder" first — `TrustDialog.tsx:227-233`).
         Self {
             selected: TrustChoice::Accept,
         }
@@ -52,12 +43,9 @@ impl Default for TrustDialogState {
 /// Terminal outcome of the dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustDialogOutcome {
-    /// User accepted: persist `hasTrustDialogAccepted` + proceed
-    /// (`TrustDialog.tsx:177` → `saveCurrentProjectConfig`).
+    /// User accepted: persist `hasTrustDialogAccepted` + proceed.
     Accept,
-    /// User declined (or pressed Esc/cancel): exit 1
-    /// (`TrustDialog.tsx:158-160` `value === "exit"` → `gracefulShutdownSync(1)`,
-    /// and `onCancel={() => onChange("exit")}`).
+    /// User declined (or pressed Esc/cancel): exit 1.
     Decline,
 }
 
@@ -80,23 +68,13 @@ pub fn handle_key(state: &mut TrustDialogState, key: KeyEvent) -> Option<TrustDi
             TrustChoice::Accept => TrustDialogOutcome::Accept,
             TrustChoice::Decline => TrustDialogOutcome::Decline,
         }),
-        // Esc → `onCancel` → `onChange("exit")` → decline (`TrustDialog.tsx:240`).
         KeyCode::Esc => Some(TrustDialogOutcome::Decline),
         _ => None,
     }
 }
 
-/// The byte-exact display lines (title, cwd, body, link, options).
-///
-/// Transcribes `TrustDialog.tsx` faithfully:
-///   - `[0]` title       `:257` `title="Accessing workspace:"`
-///   - `[1]` cwd (bold)  `:207` `<Text bold>{getFsImplementation().cwd()}</Text>`
-///   - `[2]` body        `:208` "Quick safety check: …"
-///   - `[3]` body        `:209` "Claude Code'll be able to read, edit, and execute files here."
-///   - `[4]` link        `:220` security guide URL
-///   - `[5]` option      `:228` "Yes, I trust this folder" (Accept-first)
-///   - `[6]` option      `:231` "No, exit"
-///   - `[7]` footer      `:248` "Enter to confirm · Esc to cancel" (dimmed)
+/// The byte-exact display lines (title, cwd, body, link, options, footer).
+/// Transcribes `TrustDialog.tsx` faithfully.
 #[must_use]
 pub fn render_lines(cwd: &Path) -> Vec<String> {
     vec![
@@ -104,47 +82,26 @@ pub fn render_lines(cwd: &Path) -> Vec<String> {
         cwd.to_string_lossy().into_owned(),
         "Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.".to_string(),
         "LingXi'll be able to read, edit, and execute files here.".to_string(),
-        // TrustDialog.tsx:220 `<Link url=".../security">Security guide</Link>`.
-        // Terminals can't render Ink's clickable link, so surface the label +
-        // href (matching the REPL gate's `Security guide: {url}` rendering).
         "Security guide: https://code.claude.com/docs/en/security".to_string(),
         "Yes, I trust this folder".to_string(),
         "No, exit".to_string(),
-        // (TRUST-1) dimmed footer hint (TrustDialog.tsx:248). Rendered dim +
-        // after a spacer by `draw_dialog`.
         "Enter to confirm \u{00B7} Esc to cancel".to_string(),
     ]
 }
 
 /// Mount the project-trust confirmation dialog on a real TTY and block until
-/// the user accepts or declines.
-///
-/// Acquires the crate's [`crate::terminal::RawGuard`] (raw mode + alt screen +
-/// panic-safe restore), paints [`render_lines`] with the highlighted option,
-/// then loops on `crossterm::event::read()` feeding [`handle_key`] until it
-/// returns an outcome. The guard restores the terminal on EVERY return path
-/// (outcome OR error) via its `exit()` / `Drop`.
-///
-/// UNTESTABLE-HEADLESS CAVEAT: this is the one piece that can't be driven
-/// without a TTY (same caveat as `run_tui_session` / `mount_bypass_dialog`) —
-/// it is deliberately minimal and side-effect-only. ALL decision logic lives in
-/// the pure, fully-tested [`handle_key`] / [`render_lines`]; this wrapper only
-/// does terminal I/O.
+/// the user accepts or declines. Raw-mode + alt-screen guarded (panic-safe
+/// restore). The mount is `async` by contract (the CLI `.await`s it), but the
+/// body is synchronous crossterm terminal I/O.
 ///
 /// # Errors
-/// Returns the underlying `std::io::Error` if entering/leaving raw mode, a
-/// draw, or a `crossterm::event::read()` fails. The terminal is restored
-/// regardless.
-// `async` with no `.await`: the body is synchronous crossterm terminal I/O, but
-// the fn is `async` BY CONTRACT — the mount seam is `.await`-ed in the CLI
-// (`mode::dispatch`), mirroring `run_tui_session` / `mount_bypass_dialog`, so
-// the interactive entry points stay uniformly async. The lint is allowed.
+/// Returns the underlying `std::io::Error` from entering/leaving raw mode, a
+/// draw, or a `crossterm::event::read()`. The terminal is restored regardless.
 #[allow(clippy::unused_async)]
 pub async fn mount_trust_dialog(cwd: &Path) -> std::io::Result<TrustDialogOutcome> {
-    let guard = crate::terminal::RawGuard::enter()?;
+    let guard = crate::raw_screen::RawAltGuard::enter()?;
     let mut state = TrustDialogState::default();
 
-    // First paint, then re-paint after each navigation key.
     if let Err(e) = draw_dialog(state, cwd) {
         let _ = guard.exit();
         return Err(e);
@@ -161,7 +118,6 @@ pub async fn mount_trust_dialog(cwd: &Path) -> std::io::Result<TrustDialogOutcom
                     return Err(e);
                 }
             }
-            // Resize / focus / paste / mouse: re-paint defensively and keep going.
             Ok(_) => {
                 if let Err(e) = draw_dialog(state, cwd) {
                     let _ = guard.exit();
@@ -175,28 +131,20 @@ pub async fn mount_trust_dialog(cwd: &Path) -> std::io::Result<TrustDialogOutcom
         }
     };
 
-    // Voluntary restore so an IO error leaving the alt screen is surfaced
-    // rather than swallowed in `Drop`.
     guard.exit()?;
     Ok(outcome)
 }
 
-/// Clear the screen and paint the dialog with the selected option marked
-/// (`> ` prefix on the highlighted row). Minimal crossterm render — the exact
-/// text comes from the byte-locked [`render_lines`]. Takes `state` by value
-/// (it is `Copy` — one enum field).
+/// Clear the screen and paint the dialog, `❯ ` marking the highlighted option.
+/// Text comes from the byte-locked [`render_lines`].
 fn draw_dialog(state: TrustDialogState, cwd: &Path) -> std::io::Result<()> {
-    use crossterm::{
-        cursor::MoveTo,
-        execute,
-        terminal::{Clear, ClearType},
-    };
+    use crossterm::cursor::MoveTo;
+    use crossterm::style::{Attribute, SetAttribute};
+    use crossterm::terminal::{Clear, ClearType};
+    use crossterm::execute;
     use std::io::Write;
 
-    use crossterm::style::{Attribute, SetAttribute};
-
     let lines = render_lines(cwd);
-    // render_lines layout: [title, cwd, body1, body2, link, accept, decline, footer].
     let (body, accept, decline, footer) = (&lines[..5], &lines[5], &lines[6], &lines[7]);
 
     let mut out = std::io::stdout();
@@ -207,14 +155,12 @@ fn draw_dialog(state: TrustDialogState, cwd: &Path) -> std::io::Result<()> {
         write!(out, "{line}")?;
         row += 1;
     }
-    // Blank spacer row before the two options.
     row += 1;
     for (choice, label) in [
         (TrustChoice::Accept, accept),
         (TrustChoice::Decline, decline),
     ] {
         execute!(out, MoveTo(0, row))?;
-        // (TRUST-2) figures.pointer `❯ ` on the highlighted row (CustomSelect).
         let marker = if state.selected == choice {
             "\u{276F} "
         } else {
@@ -223,7 +169,6 @@ fn draw_dialog(state: TrustDialogState, cwd: &Path) -> std::io::Result<()> {
         write!(out, "{marker}{label}")?;
         row += 1;
     }
-    // (TRUST-1) dimmed footer hint after a spacer row.
     row += 1;
     execute!(out, MoveTo(0, row), SetAttribute(Attribute::Dim))?;
     write!(out, "{footer}")?;
@@ -243,11 +188,7 @@ mod tests {
 
     #[test]
     fn default_highlights_accept() {
-        // Select order is [Yes, I trust this folder] then [No, exit]; default
-        // highlight on the first (accept-first), matching the TS Select option
-        // order (`TrustDialog.tsx:227-233`).
-        let s = TrustDialogState::default();
-        assert_eq!(s.selected, TrustChoice::Accept);
+        assert_eq!(TrustDialogState::default().selected, TrustChoice::Accept);
     }
 
     #[test]
@@ -260,52 +201,29 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_accept_returns_accept() {
+    fn enter_returns_highlighted_choice() {
         let mut s = TrustDialogState::default();
-        assert_eq!(
-            handle_key(&mut s, key(KeyCode::Enter)),
-            Some(TrustDialogOutcome::Accept)
-        );
-    }
-
-    #[test]
-    fn enter_on_decline_returns_decline() {
-        let mut s = TrustDialogState {
-            selected: TrustChoice::Decline,
-        };
-        assert_eq!(
-            handle_key(&mut s, key(KeyCode::Enter)),
-            Some(TrustDialogOutcome::Decline)
-        );
+        assert_eq!(handle_key(&mut s, key(KeyCode::Enter)), Some(TrustDialogOutcome::Accept));
+        let mut d = TrustDialogState { selected: TrustChoice::Decline };
+        assert_eq!(handle_key(&mut d, key(KeyCode::Enter)), Some(TrustDialogOutcome::Decline));
     }
 
     #[test]
     fn esc_declines() {
         let mut s = TrustDialogState::default();
-        assert_eq!(
-            handle_key(&mut s, key(KeyCode::Esc)),
-            Some(TrustDialogOutcome::Decline)
-        );
+        assert_eq!(handle_key(&mut s, key(KeyCode::Esc)), Some(TrustDialogOutcome::Decline));
     }
 
     #[test]
     fn render_lines_are_byte_exact() {
-        let cwd = PathBuf::from("/home/me/project");
-        let lines = render_lines(&cwd);
+        let lines = render_lines(&PathBuf::from("/home/me/project"));
         assert_eq!(lines[0], "Accessing workspace:");
         assert_eq!(lines[1], "/home/me/project");
         assert_eq!(lines[2], "Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.");
-        assert_eq!(
-            lines[3],
-            "LingXi'll be able to read, edit, and execute files here."
-        );
-        assert_eq!(
-            lines[4],
-            "Security guide: https://code.claude.com/docs/en/security"
-        );
+        assert_eq!(lines[3], "LingXi'll be able to read, edit, and execute files here.");
+        assert_eq!(lines[4], "Security guide: https://code.claude.com/docs/en/security");
         assert_eq!(lines[5], "Yes, I trust this folder");
         assert_eq!(lines[6], "No, exit");
-        // (TRUST-1) dimmed footer hint.
         assert_eq!(lines[7], "Enter to confirm \u{00B7} Esc to cancel");
     }
 }

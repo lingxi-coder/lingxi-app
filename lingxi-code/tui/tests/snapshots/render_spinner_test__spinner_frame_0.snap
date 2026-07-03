@@ -1,5 +1,0 @@
----
-source: crates/tui/tests/render_spinner_test.rs
-expression: "format_spinner_line(0, 0)"
----
-· Crunching…

@@ -1,6 +1,0 @@
----
-source: tui/tests/render_task_rows.rs
-assertion_line: 44
-expression: "render_task_row(&row(\"monitor_mcp\", \"running\", \"watch fs\"))"
----
-watch fs (running)

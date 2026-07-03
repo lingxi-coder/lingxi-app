@@ -180,12 +180,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arrayvec"
-version = "0.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
-
-[[package]]
 name = "askama"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -777,7 +771,7 @@ dependencies = [
  "tracing-subscriber",
  "traits",
  "tui",
- "tui-rata",
+ "tui-core",
  "unicode-width 0.1.14",
  "uuid",
 ]
@@ -937,15 +931,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
-name = "convert_case"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
-dependencies = [
- "unicode-segmentation",
-]
-
-[[package]]
 name = "coordinator"
 version = "0.12.0"
 dependencies = [
@@ -1074,26 +1059,7 @@ dependencies = [
  "futures-core",
  "mio",
  "parking_lot",
- "rustix 0.38.44",
- "signal-hook",
- "signal-hook-mio",
- "winapi",
-]
-
-[[package]]
-name = "crossterm"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8b9f2e4c67f833b660cdb0a3523065869fb35570177239812ed4c905aeff87b"
-dependencies = [
- "bitflags 2.11.1",
- "crossterm_winapi",
- "derive_more",
- "document-features",
- "futures-core",
- "mio",
- "parking_lot",
- "rustix 1.1.4",
+ "rustix",
  "signal-hook",
  "signal-hook-mio",
  "winapi",
@@ -1184,28 +1150,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "derive_more"
-version = "2.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d751e9e49156b02b44f9c1815bcb94b984cdcc4396ecc32521c739452808b134"
-dependencies = [
- "derive_more-impl",
-]
-
-[[package]]
-name = "derive_more-impl"
-version = "2.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "799a97264921d8623a957f6c3b9011f3b5492f557bbb7a5a19b7fa6d06ba8dcb"
-dependencies = [
- "convert_case",
- "proc-macro2",
- "quote",
- "rustc_version",
- "syn",
-]
-
-[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1266,15 +1210,6 @@ name = "doc-comment"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "780955b8b195a21ab8e4ac6b60dd1dbdcec1dc6c51c0617964b08c81785e12c9"
-
-[[package]]
-name = "document-features"
-version = "0.2.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
-dependencies = [
- "litrs",
-]
 
 [[package]]
 name = "dyn-clone"
@@ -1397,6 +1332,7 @@ dependencies = [
  "tracing",
  "traits",
  "tui",
+ "tui-core",
  "workflow",
 ]
 
@@ -1725,15 +1661,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "generational-box"
-version = "0.5.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "557cf2cbacd0504c6bf8c29f52f8071e0de1d9783346713dc6121d7fa1e5d0e0"
-dependencies = [
- "parking_lot",
-]
-
-[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1857,12 +1784,6 @@ dependencies = [
  "memchr",
  "memmap2",
 ]
-
-[[package]]
-name = "grid"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be136d9dacc2a13cc70bb6c8f902b414fb2641f8db1314637c6b7933411a8f82"
 
 [[package]]
 name = "hashbrown"
@@ -2262,33 +2183,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "iocraft"
-version = "0.8.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec09d74eb53878be6a7bd49f0ecb0e68d7322963d0a4fbbade67465083f38dbd"
-dependencies = [
- "bitflags 2.11.1",
- "crossterm 0.29.0",
- "futures",
- "generational-box",
- "iocraft-macros",
- "regex",
- "taffy",
- "unicode-width 0.1.14",
-]
-
-[[package]]
-name = "iocraft-macros"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e8c51048da5618a10af1135e9e474700f19946f456c857ae0b12ebff2a91b4d"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "ios-framework"
 version = "0.9.0"
 dependencies = [
@@ -2482,18 +2376,6 @@ name = "linux-raw-sys"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
-
-[[package]]
-name = "linux-raw-sys"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
-
-[[package]]
-name = "litrs"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "llm-client"
@@ -3765,7 +3647,7 @@ dependencies = [
  "bitflags 2.11.1",
  "cassowary",
  "compact_str",
- "crossterm 0.28.1",
+ "crossterm",
  "indoc",
  "instability",
  "itertools",
@@ -3788,7 +3670,7 @@ dependencies = [
  "image 0.25.5",
  "rand 0.8.6",
  "ratatui",
- "rustix 0.38.44",
+ "rustix",
  "thiserror 1.0.69",
  "windows",
 ]
@@ -4005,15 +3887,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
 
 [[package]]
-name = "rustc_version"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
-dependencies = [
- "semver",
-]
-
-[[package]]
 name = "rusticata-macros"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4031,21 +3904,8 @@ dependencies = [
  "bitflags 2.11.1",
  "errno",
  "libc",
- "linux-raw-sys 0.4.15",
+ "linux-raw-sys",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "rustix"
-version = "1.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
-dependencies = [
- "bitflags 2.11.1",
- "errno",
- "libc",
- "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4636,15 +4496,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
-name = "slotmap"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdd58c3c93c3d278ca835519292445cb4b0d4dc59ccfdf7ceadaab3f8aeb4038"
-dependencies = [
- "version_check",
-]
-
-[[package]]
 name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4806,19 +4657,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "taffy"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cb893bff0f80ae17d3a57e030622a967b8dbc90e38284d9b4b1442e23873c94"
-dependencies = [
- "arrayvec",
- "grid",
- "num-traits",
- "serde",
- "slotmap",
-]
-
-[[package]]
 name = "tasks"
 version = "0.12.0"
 dependencies = [
@@ -4878,7 +4716,7 @@ dependencies = [
  "cfg-if",
  "fastrand",
  "once_cell",
- "rustix 0.38.44",
+ "rustix",
  "windows-sys 0.59.0",
 ]
 
@@ -4920,7 +4758,7 @@ dependencies = [
  "coordinator",
  "cost",
  "cron",
- "crossterm 0.28.1",
+ "crossterm",
  "engine",
  "filetime",
  "futures",
@@ -4968,7 +4806,6 @@ dependencies = [
  "tool-worktree",
  "tracing",
  "traits",
- "tui",
  "uuid",
 ]
 
@@ -5844,46 +5681,22 @@ dependencies = [
 name = "tui"
 version = "0.12.0"
 dependencies = [
- "assert_cmd",
  "async-trait",
- "branding",
- "chrono",
- "command-api",
- "command-core",
- "crossterm 0.28.1",
- "dirs",
- "engine",
- "futures",
- "ignore",
- "insta",
- "iocraft",
- "memory",
- "orchestrator",
+ "crossterm",
+ "image 0.25.5",
+ "llm-client",
  "permission",
- "predicates",
  "protocol",
- "pulldown-cmark",
- "rustix 0.38.44",
- "secret",
- "serde",
+ "ratatui",
+ "ratatui-image",
  "serde_json",
  "session",
- "similar",
- "skill-api",
- "syntect",
- "telemetry",
- "tempfile",
- "thiserror 2.0.18",
  "tokio",
- "tokio-stream",
  "tokio-util",
- "tool-web",
  "tracing",
  "traits",
  "tui-core",
- "unicode-segmentation",
  "unicode-width 0.1.14",
- "url",
  "uuid",
 ]
 
@@ -5892,14 +5705,14 @@ name = "tui-core"
 version = "0.12.0"
 dependencies = [
  "async-trait",
- "crossterm 0.28.1",
+ "crossterm",
  "dirs",
  "insta",
  "memory",
  "permission",
  "protocol",
  "pulldown-cmark",
- "rustix 0.38.44",
+ "rustix",
  "serde",
  "serde_json",
  "similar",
@@ -5910,25 +5723,6 @@ dependencies = [
  "tracing",
  "traits",
  "unicode-segmentation",
- "unicode-width 0.1.14",
-]
-
-[[package]]
-name = "tui-rata"
-version = "0.12.0"
-dependencies = [
- "crossterm 0.28.1",
- "image 0.25.5",
- "llm-client",
- "permission",
- "protocol",
- "ratatui",
- "ratatui-image",
- "serde_json",
- "tokio",
- "tokio-util",
- "traits",
- "tui-core",
  "unicode-width 0.1.14",
 ]
 
@@ -6419,7 +6213,7 @@ checksum = "b4ee928febd44d98f2f459a4a79bd4d928591333a494a10a868418ac1b39cf1f"
 dependencies = [
  "either",
  "home",
- "rustix 0.38.44",
+ "rustix",
  "winsafe",
 ]
 

@@ -1,6 +1,0 @@
----
-source: tui/tests/render_task_rows.rs
-assertion_line: 19
-expression: "render_task_row(&row(\"local_bash\", \"running\", \"cargo build\"))"
----
-cargo build (running)

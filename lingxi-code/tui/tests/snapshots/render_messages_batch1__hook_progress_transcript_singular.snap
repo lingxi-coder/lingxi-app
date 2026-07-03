@@ -1,6 +1,0 @@
----
-source: tui/tests/render_messages_batch1.rs
-assertion_line: 179
-expression: s
----
-  ⎿  1 PreToolUse hook ran

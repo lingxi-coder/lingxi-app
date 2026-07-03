@@ -1,6 +1,0 @@
----
-source: crates/tui/tests/render_history_search.rs
-assertion_line: 19
-expression: "render_row(\"\", false)"
----
-search prompts:

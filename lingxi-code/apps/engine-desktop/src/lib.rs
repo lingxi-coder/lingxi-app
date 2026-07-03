@@ -1230,7 +1230,7 @@ pub struct DesktopConfig {
     /// enforcement is on (the CLI default), so rules + the active mode +
     /// read-only auto-allow resolve first and only an unresolved `Ask` reaches
     /// the injected prompt. The interactive TUI injects a
-    /// `tui::TuiPermissionGate` here so an `Ask` surfaces as a dialog; `None`
+    /// `tui::permission_gate::TuiPermissionGate` here so an `Ask` surfaces as a dialog; `None`
     /// (the default + every headless/transport caller) keeps the prior
     /// selection, byte-identical.
     pub injected_permission_gate: Option<Arc<dyn PermissionGate>>,
@@ -1694,14 +1694,14 @@ pub async fn desktop_command_registry(
 /// construct an identical orchestrator. The CLI now derives a `DesktopConfig`
 /// from `Argv`/env and calls `build`.
 /// (`!` bash mode) Desktop implementation of the TUI's
-/// [`tui::bash_runner::BashRunner`] seam.
+/// [`tui_core::bash_runner::BashRunner`] seam.
 ///
 /// Runs a TUI `!command` through the SAME sandboxed [`tool_shell::BashTool`] the
 /// model's `Bash` tool uses — NEVER a raw `std::process`/`Command`. It holds a
 /// clone of the session [`BuiltinToolContext`] (which carries the live
 /// `sandbox_runner` + `sandbox_runtime` config + process runner), constructs a
 /// fresh `BashTool` per call, and maps the tool's result `data.{stdout,stderr}`
-/// into a [`tui::bash_runner::BashRunOutput`]. Because the command rides the same
+/// into a [`tui_core::bash_runner::BashRunOutput`]. Because the command rides the same
 /// `BashTool::call` path, it is wrapped by the same M2-04 sandbox decision matrix
 /// and `sandbox-runtime` runner as a model-issued Bash call. `BashTool`'s
 /// `check_permissions` is an allow-all gate, so a user-typed `!` runs sandboxed
@@ -1711,8 +1711,8 @@ struct DesktopBashRunner {
 }
 
 #[async_trait::async_trait]
-impl tui::bash_runner::BashRunner for DesktopBashRunner {
-    async fn run(&self, command: &str) -> tui::bash_runner::BashRunOutput {
+impl tui_core::bash_runner::BashRunner for DesktopBashRunner {
+    async fn run(&self, command: &str) -> tui_core::bash_runner::BashRunOutput {
         use tool_api::Tool as _;
         let tool = tool_shell::BashTool::new(self.ctx.clone());
         // Progress channel is required by the `Tool::call` signature but Bash
@@ -1739,14 +1739,14 @@ impl tui::bash_runner::BashRunner for DesktopBashRunner {
                         .unwrap_or_default()
                         .to_string()
                 };
-                tui::bash_runner::BashRunOutput {
+                tui_core::bash_runner::BashRunOutput {
                     stdout: field("stdout"),
                     stderr: field("stderr"),
                 }
             }
             // A spawn/IO/validation error surfaces as stderr text so the TUI
             // still renders a `UserBashOutput` row (no LLM turn, no raw spawn).
-            Err(e) => tui::bash_runner::BashRunOutput {
+            Err(e) => tui_core::bash_runner::BashRunOutput {
                 stdout: String::new(),
                 stderr: e.to_string(),
             },
@@ -1857,7 +1857,7 @@ pub struct DesktopRuntime {
     /// the model's `Bash` tool uses. The CLI threads it into the TUI `Runtime`
     /// (`Runtime::with_bash_runner`) so a typed `!ls` runs sandboxed and renders
     /// inline with no LLM turn — never a raw process.
-    pub bash_runner: Arc<dyn tui::bash_runner::BashRunner>,
+    pub bash_runner: Arc<dyn tui_core::bash_runner::BashRunner>,
     /// (`/connect` Copilot device-flow) The GitHub-Copilot OAuth device-flow
     /// driver (`EngineCopilotConnect` over `PosixHttp`). The CLI threads a clone
     /// into `tui::session::Runtime::with_copilot_connect_driver` so picking
@@ -3341,7 +3341,7 @@ pub async fn build(
     // still forwards to the remote client). An explicit env value still overrides.
     //
     // Inner-gate selection (the `(perms, adapter_gate)` match at :1836):
-    // - INTERACTIVE TUI sessions inject `tui::permission_bridge::TuiPermissionGate`
+    // - INTERACTIVE TUI sessions inject `tui::permission_gate::TuiPermissionGate`
     //   via `cfg.injected_permission_gate` (the `if let Some(injected)` arm), so an
     //   unresolved mutating `Ask` (a `DenyByDefault` tool with no matching rule)
     //   surfaces the permission dialog instead of silently resolving — wired by
@@ -4420,7 +4420,7 @@ pub async fn build(
     // runner BEFORE `tool_ctx` is moved into `register_desktop_tools` below. The
     // runner builds a `tool_shell::BashTool` over this exact context, so a typed
     // `!command` runs through the SAME sandbox path as a model-issued Bash call.
-    let bash_runner: Arc<dyn tui::bash_runner::BashRunner> = Arc::new(DesktopBashRunner {
+    let bash_runner: Arc<dyn tui_core::bash_runner::BashRunner> = Arc::new(DesktopBashRunner {
         ctx: tool_ctx.clone(),
     });
     let mut tools_inner = ToolRegistry::new();
